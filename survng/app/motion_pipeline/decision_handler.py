@@ -19,6 +19,7 @@ from ..object_motion import (
     temporal_object_motion_evidence,
 )
 from .context import Frame
+from .scene_evidence import scene_batches, scene_observation
 
 
 MotionDetectionProvider = Callable[[datetime], Any]
@@ -491,6 +492,7 @@ class MotionDecisionOutcome:
     # persisted but before its recorded job was admitted. Keep duplicate user
     # side effects suppressed while still allowing that event to own recovery.
     refinement_event_id: int | None = None
+    scene_activity_decision_id: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -506,6 +508,7 @@ class MotionDecisionOutcome:
             "cover_promoted": self.cover_promoted,
             "cover_promotion_reason": self.cover_promotion_reason,
             "refinement_event_id": self.refinement_event_id,
+            "scene_activity_decision_id": self.scene_activity_decision_id,
         }
 
 
@@ -527,8 +530,10 @@ class MotionDecisionHandler:
         spatial_alignment: dict[str, Any] | None = None,
         refinement_cover_promoter: RefinementCoverPromoter | None = None,
         route_admission_callback: Callable[[str, str, int], object] | None = None,
+        establishment_zone_policy: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.camera_id = camera_id
+        self.establishment_zone_policy = establishment_zone_policy
         self.events = events
         self.detection_provider = detection_provider
         self.initial_detection_provider = initial_detection_provider
@@ -635,6 +640,8 @@ class MotionDecisionHandler:
     ) -> MotionDecisionOutcome:
         detection_started = time.monotonic()
         detection_started_epoch = time.time()
+        if callable(self.establishment_zone_policy) and not isinstance(qualification.get("establishment_zone_policy"), dict):
+            qualification["establishment_zone_policy"] = self.establishment_zone_policy()
         cover_only = bool(qualification.get("cover_only")) and existing_event_id is not None
         revision_kwargs: dict[str, Any] = {}
         get_event = getattr(self.events, "get", None)
@@ -666,6 +673,10 @@ class MotionDecisionHandler:
             for detected in objects:
                 if not isinstance(detected, dict) or not detected.get("label"):
                     continue
+                if detected.get("snapshot_visible") is False:
+                    # Off-cover evidence owns its own timestamp/source. The
+                    # representative frame cannot fill in missing provenance.
+                    continue
                 detected.setdefault(
                     "frame_captured_at_epoch",
                     round(float(frame_captured_at_epoch), 6),
@@ -679,6 +690,28 @@ class MotionDecisionHandler:
             if event_at.tzinfo is None
             else event_at.astimezone(timezone.utc)
         )
+        observations = scene_batches(objects)
+        if not any(item.get("status") == "scene_observations" for item in objects):
+            observations = [
+                observation for detected in objects
+                if (observation := scene_observation(
+                    detected,
+                    captured_at_epoch=detected.get("frame_captured_at_epoch", (
+                        None if detected.get("snapshot_visible") is False else frame_captured_at_epoch
+                    )),
+                    frame_source=str(detected.get("frame_source") or frame_source),
+                    recording_path=str(detected.get("recording_path") or (
+                        "" if detected.get("snapshot_visible") is False else recording_path
+                    )),
+                    frame_timestamp_exact=bool(detected.get("frame_timestamp_exact", frame_timestamp_exact)),
+                )) is not None
+            ]
+            objects = [*objects, {"status": "scene_observations", "observations": observations}]
+        # Existing incidents acquire evidence even when this pass only changes
+        # the cover or produces no alert-qualified objects.
+        record_scene = getattr(self.events, "record_scene_observations", None)
+        if existing_event_id is not None and observations and callable(record_scene):
+            record_scene(int(existing_event_id), observations)
         workflow_ms = round(
             (time.monotonic() - detection_started) * 1000,
             3,
@@ -703,7 +736,7 @@ class MotionDecisionHandler:
             3,
         )
         if frame is None:
-            objects = [{"status": "no_recorded_frame"}]
+            objects = [{"status": "no_recorded_frame"}, *[item for item in objects if item.get("status") == "scene_observations"]]
         processing_timing = {
             "workflow_ms": workflow_ms,
             "decision_queue_wait_ms": qualification.get("decision_queue_wait_ms"),
@@ -711,6 +744,24 @@ class MotionDecisionHandler:
         }
 
         detection_completed = frame is not None and not detection_failure(objects)
+        acquisition = None
+        if (qualification.get("scene_discovery") or qualification.get("scene_confirmation")) and callable(
+            getattr(self.events, "acquire_scene_sample", None)
+        ):
+            from .scene_acquisition import acquire_detection_result
+            acquisition = acquire_detection_result(
+                self.events, self.camera_id, normalized_event_at, qualification,
+                frame, objects, provider_result, self.snapshot_writer,
+            )
+            for update in acquisition.get("context_updates") or []:
+                self._publish("incident_update", {**update, "reason":"scene_context_acquired"})
+            if acquisition["assessment"]["status"] != "supported":
+                return MotionDecisionOutcome(
+                    event_id=existing_event_id, snapshot_path=acquisition["snapshot_path"],
+                    object_detected=False, rejection_reason="scene_activity_" + acquisition["assessment"]["status"],
+                    processing_timing=processing_timing,
+                    scene_activity_decision_id=acquisition["decision_id"],
+                )
 
         if existing_event_id is not None and not detection_completed:
             # Refinement is additive. A transient decoder/detector failure must
@@ -833,6 +884,12 @@ class MotionDecisionHandler:
             )
             uncorrelated_eligible_objects -= len(eligible_objects)
             qualification["motion_correlation"] = correlation
+        scene_objects = [detected for detected in objects if detected.get("label")]
+        has_scene_evidence = bool(observations or scene_objects)
+        qualification["scene_evidence_present"] = has_scene_evidence
+        qualification["alert_eligible"] = bool(eligible_objects)
+        for detected in scene_objects:
+            detected["alert_eligible"] = detected in eligible_objects
         depth_attribution = _depth_attribution_summary(objects)
         verification_candidate = bool(qualification.get("suppression_verification_candidate"))
         if qualification.get("borderline_candidate"):
@@ -845,8 +902,8 @@ class MotionDecisionHandler:
             qualification["would_suppress"] = not bool(eligible_objects)
 
         check_evidence_cancellation()
-        snapshot_path = ""
-        if frame is not None:
+        snapshot_path = acquisition["snapshot_path"] if acquisition else ""
+        if frame is not None and acquisition is None:
             snapshot_at = (
                 datetime.fromtimestamp(float(frame_captured_at_epoch), timezone.utc)
                 if frame_captured_at_epoch is not None
@@ -854,7 +911,7 @@ class MotionDecisionHandler:
             )
             snapshot_path = self.snapshot_writer(frame, snapshot_at)
 
-        if cover_only or (require_eligible_object and not eligible_objects):
+        if cover_only or (require_eligible_object and not has_scene_evidence):
             rejection_reason = (
                 "object_not_motion_correlated"
                 if require_motion_correlation and uncorrelated_eligible_objects > 0
@@ -1111,13 +1168,14 @@ class MotionDecisionHandler:
         # but its box must never seed tracking against the representative frame.
         tracking_seed_objects = tuple(
             detected
-            for detected in eligible_objects
+            for detected in scene_objects
             if not snapshot_adoption_refused and detected.get("snapshot_visible") is not False
         )
         return MotionDecisionOutcome(
             event_id=event_id,
             snapshot_path=snapshot_path,
-            object_detected=bool(eligible_objects) if detection_completed else None,
+            object_detected=has_scene_evidence if detection_completed else None,
+            scene_activity_decision_id=acquisition["decision_id"] if acquisition else None,
             detected_objects=tracking_seed_objects,
             motion_correlation=correlation,
             refinement_pending=bool(
@@ -1252,6 +1310,7 @@ class MotionDecisionHandlerFactory:
         activity_attributor: ObjectActivityAttributor | None = None,
         spatial_alignment: dict[str, Any] | None = None,
         route_admission_callback: Callable[[str, str, int], object] | None = None,
+        establishment_zone_policy: Callable[[], dict[str, Any]] | None = None,
     ) -> MotionDecisionHandler:
         return MotionDecisionHandler(
             camera_id=camera_id,
@@ -1266,6 +1325,7 @@ class MotionDecisionHandlerFactory:
             face_candidate_sink=self.face_candidate_sink,
             spatial_alignment=spatial_alignment,
             route_admission_callback=route_admission_callback,
+            establishment_zone_policy=establishment_zone_policy,
             refinement_cover_promoter=getattr(
                 self.events,
                 "promote_refinement_cover",

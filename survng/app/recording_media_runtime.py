@@ -1259,7 +1259,9 @@ class RecordingMediaRuntime:
         )
         clip_dir.mkdir(parents=True, exist_ok=True)
         accel_mode = self._hardware_acceleration_mode()
-        return clip_dir / f'{event_id}-{safe_before}-{safe_after}-a3-{accel_mode}.mp4'
+        anchor = event.get('scene_clip_start_epoch')
+        suffix = f'-scene-{int(float(anchor) * 1000)}' if anchor is not None else ''
+        return clip_dir / f'{event_id}-{safe_before}-{safe_after}-a3-{accel_mode}{suffix}.mp4'
 
     def _ensure_event_clip(self, event: dict, *, before: float, after: float, source: str='main', active_manager: AppManager | None=None) -> Path:
         selected_manager = active_manager or self.manager

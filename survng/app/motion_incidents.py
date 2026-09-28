@@ -6,6 +6,7 @@ import copy
 from collections import deque
 import errno
 import hashlib
+import json
 import logging
 import queue
 import sqlite3
@@ -383,11 +384,13 @@ class _MemoryDetectionJobStore:
         expired = 0
         for job in self._jobs.values():
             checkpointed = isinstance(job["payload"].get("refined_outcome"), dict)
+            qualification = job["payload"].get("qualification")
+            discovery = isinstance(qualification, dict) and qualification.get("scene_discovery") is True
             cutoff = (
                 now - DETECTION_COMPLETION_JOB_MAXIMUM_AGE_SECONDS
                 if checkpointed
                 else event_cutoff
-                if job["payload"].get("existing_event_id") is not None
+                if job["payload"].get("existing_event_id") is not None or discovery
                 else probe_cutoff
             )
             if job["camera_id"] != camera_id or job["created_at_monotonic"] > cutoff:
@@ -510,10 +513,14 @@ class MotionIncidentService:
         prewarm_tracking: TrackingPrewarmer,
         image_reader: ImageReader,
         refinement_store: DetectionJobStore | None = None,
+        scene_analysis_enabled: TrackingEnabled | None = None,
+        resume_scene_analysis: Callable[[], bool] | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.decision_processor = decision_processor
         self.tracking_enabled = tracking_enabled
+        self.scene_analysis_enabled = scene_analysis_enabled or (lambda: False)
+        self.resume_scene_analysis = resume_scene_analysis
         self.has_trackable_objects = has_trackable_objects
         self.start_tracking = start_tracking
         self.prewarm_tracking = prewarm_tracking
@@ -719,6 +726,24 @@ class MotionIncidentService:
                 "error_type": error_type,
             }
 
+    def queue_scene_discovery(self, event_at: datetime) -> str:
+        """Durably schedule one whole-scene sample without blocking capture on inference."""
+        qualification = {
+            "scene_discovery": True,
+            "trigger_source": "scene_discovery",
+            "detection_intent_id": f"scene:{self.camera_id}:{event_at.timestamp():.6f}",
+        }
+        return self._queue_refinement(_RefinementJob(
+            topic="scene/discovery", message="Periodic scene observation",
+            event_at=event_at, qualification=qualification, existing_event_id=None,
+            require_eligible_object=False, require_motion_correlation=False,
+            callback=None, completion_context=None,
+            initial_outcome=MotionDecisionOutcome(
+                event_id=None, snapshot_path="", object_detected=None,
+                refinement_pending=True,
+            ),
+        ))
+
     def process(
         self,
         topic: str,
@@ -790,7 +815,7 @@ class MotionIncidentService:
         return outcome
 
     def _handoff(self, outcome: MotionDecisionOutcome, event_at: datetime) -> bool:
-        if outcome.event_id is None or not outcome.object_detected:
+        if outcome.event_id is None or (not outcome.object_detected and not self.scene_analysis_enabled()):
             return False
 
         with self._handoff_lock:
@@ -799,7 +824,7 @@ class MotionIncidentService:
                 return True
             try:
                 detected_objects = list(outcome.detected_objects)
-                if not self.has_trackable_objects(detected_objects):
+                if not self.scene_analysis_enabled() and not self.has_trackable_objects(detected_objects):
                     return False
                 initial_frame = None
                 if outcome.snapshot_path:
@@ -937,6 +962,64 @@ class MotionIncidentService:
                     self._refinement_callbacks.pop(job_id, None)
                     self._refinement_progress.pop(job_id, None)
 
+    def _run_scene_candidate(self) -> bool:
+        """Verify a retained acquisition without inventing an event to own work."""
+        claim = getattr(self.refinement_store, "claim_scene_candidate", None)
+        if not callable(claim) or self._security_work_pending.is_set():
+            return False
+        job = claim(self.camera_id, lease_owner=self._lease_owner)
+        if job is None:
+            return False
+        owner = {"lease_owner": self._lease_owner, "lease_token": job["lease_token"]}
+        try:
+            seed = self.refinement_store.scene_sample(job["seed_sample_ids"][0])
+            if seed is None:
+                raise LookupError("candidate acquisition unavailable")
+            qualification = {
+                "scene_confirmation": True, "trigger_source": "scene_confirmation",
+                "scene_candidate_id": job["id"], "scene_candidate_lease_owner": self._lease_owner,
+                "scene_candidate_lease_token": job["lease_token"],
+                "scene_seed_sample_ids": job["seed_sample_ids"],
+                "scene_confirmation_window": {"start_epoch": job["start_epoch"], "end_epoch": job["end_epoch"]},
+                "detection_intent_id": "scene-confirmation:" + job["id"] + ":" + str(job["lease_generation"]),
+            }
+            event_at = datetime.fromtimestamp(seed["captured_epoch"], timezone.utc)
+            admitted = self.refinement_store.scene_candidate_admission(job["id"], job["lease_generation"])
+            if admitted:
+                outcome = MotionDecisionOutcome(
+                    event_id=admitted["id"],
+                    snapshot_path=str(self.refinement_store._snapshot_path_for_retention(admitted["snapshot_path"])) if admitted["snapshot_path"] else "",
+                    object_detected=True,
+                    detected_objects=tuple(o for o in json.loads(admitted["objects_json"] or "[]") if o.get("label")),
+                    scene_activity_decision_id=admitted["decision_id"],
+                )
+                event_at = datetime.fromisoformat(admitted["created_at"].replace("Z", "+00:00"))
+            else:
+                with cancellable_evidence_work(lambda: bool(self._refinement_stop and self._refinement_stop.is_set())):
+                    outcome = self.decision_processor.refine(
+                        "scene/confirmation", "Verification of observed activity", event_at,
+                        qualification, existing_event_id=None,
+                        require_eligible_object=False, require_motion_correlation=False,
+                    )
+            decision_id = outcome.scene_activity_decision_id
+            if not decision_id:
+                raise RuntimeError("verification did not persist an activity decision")
+            decision = self.refinement_store.scene_activity_decision(decision_id)
+            if decision["verdict"] in {"pending", "incomplete"}:
+                self.refinement_store.defer_scene_candidate(job["id"], reason=decision["reason"], **owner)
+            else:
+                if outcome.event_id is not None and not self._handoff(outcome, event_at):
+                    self.refinement_store.defer_scene_candidate(job["id"], reason="tracking_handoff_pending", **owner)
+                else:
+                    self.refinement_store.finish_scene_candidate(job["id"], decision_id=decision_id, **owner)
+            self._record_timing(outcome, kind="refine")
+        except EvidenceWorkPreempted:
+            self.refinement_store.defer_scene_candidate(job["id"], reason="verification_preempted", **owner)
+        except Exception as error:
+            self.refinement_store.defer_scene_candidate(job["id"], reason="verification_failed:" + type(error).__name__, **owner)
+            LOGGER.exception("scene verification failed for %s candidate %s", self.camera_id, job["id"])
+        return True
+
     def _run_cover_requirement(self) -> bool:
         claim = getattr(self.refinement_store, "claim_cover_requirement", None)
         if not callable(claim):
@@ -1001,12 +1084,30 @@ class MotionIncidentService:
     def _run_refinements_until_error(self) -> None:
         last_prune = 0.0
         last_stale_expiry = 0.0
+        last_scene_recovery = 0.0
+        last_scene_recovery_log = float("-inf")
         while True:
             stop = self._refinement_stop
             if stop is None or stop.is_set():
                 return
             prune = getattr(self.refinement_store, "prune_detection_jobs", None)
             now = time.monotonic()
+            if self.resume_scene_analysis is not None and now - last_scene_recovery >= 1.0:
+                last_scene_recovery = now
+                try:
+                    self.resume_scene_analysis()
+                except Exception as error:
+                    with self._status_lock:
+                        self._refinement_failures += 1
+                        self._last_refinement_failure = {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "stage": "scene_analysis_recovery",
+                            "error": redact_secret_text(error)[:500],
+                            "error_type": type(error).__name__,
+                        }
+                    if now - last_scene_recovery_log >= 60:
+                        last_scene_recovery_log = now
+                        LOGGER.exception("scene analysis recovery failed for %s", self.camera_id)
             if callable(prune) and now - last_prune >= 60.0:
                 last_prune = now
                 try:
@@ -1057,6 +1158,8 @@ class MotionIncidentService:
                 ),
             )
             if claimed is None:
+                if self._run_scene_candidate():
+                    continue
                 # The event owns cover completion independently of terminal
                 # security jobs. Poll its durable requirements only after
                 # ordinary refinement has had first access to this worker.

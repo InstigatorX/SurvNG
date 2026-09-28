@@ -222,6 +222,40 @@ def seed_capture_frame(
 
 
 class CameraWorkerTest(unittest.TestCase):
+    def test_scene_discovery_cadence_uses_hot_policy_without_running_inference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main"), Path(tmpdir))
+            config = worker.motion_object_detector.detector.config
+            config.scene_discovery_enabled = True
+            config.scene_discovery_interval_seconds = 300.0
+            image = np.zeros((8, 8, 3), dtype=np.uint8)
+
+            def observe(at):
+                worker._capture_frame(CapturedFrame(
+                    source="live", image=image, captured_at_epoch=at,
+                    captured_at_monotonic=at, captured_at_iso="2026-01-01T00:00:00+00:00",
+                    width=8, height=8, sequence=int(at),
+                ))
+
+            with patch.object(worker._stream_alignment, "is_pending", return_value=False), \
+                    patch.object(worker.motion_incidents, "queue_scene_discovery") as queue, \
+                    patch.object(worker.motion_object_detector, "remember_scene_frame",
+                                 wraps=worker.motion_object_detector.remember_scene_frame) as retain, \
+                    patch.object(worker.motion_runtime, "submit_frame"):
+                queue.side_effect = lambda _at: self.assertEqual(retain.call_count, queue.call_count)
+                observe(100)
+                observe(110)
+                self.assertEqual(queue.call_count, 1)
+                config.scene_discovery_interval_seconds = 10.0
+                observe(111)
+                self.assertEqual(queue.call_count, 2)
+                config.scene_discovery_enabled = False
+                observe(200)
+                self.assertEqual(queue.call_count, 2)
+                self.assertEqual(worker.motion_object_detector.detector.calls, 0)
+                self.assertEqual(retain.call_count, 2)
+                self.assertEqual(retain.call_args.args[0].captured_at_epoch, 111)
+
     def test_scene_context_policy_uses_camera_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(

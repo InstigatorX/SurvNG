@@ -342,7 +342,7 @@ class AppManager:
         self.activity_events = ActivityEventBus(self._publish_activity_transition)
         try:
             self.incidents = IncidentLifecycle(
-                self._publish_incident_notification, self.database_dir / "incident_notifications.json",
+                self.events, self._publish_incident_notification,
             )
             self.inference = InferenceLifecycle(
                 config=config.detector,
@@ -1566,8 +1566,10 @@ class AppManager:
             )
 
     def incident_notification_allowed(self, payload: dict) -> bool:
-        if not self.config.integration_notifications.enabled:
+        if not self.config.integration_notifications.enabled or payload.get("historical"):
             return False
+        if payload.get("schema_version") == 3:
+            return any(self._scene_alert_enabled(decision, payload) for decision in payload.get("alert_decisions", []))
         camera = next((camera for camera in self.config.cameras if camera.id == payload.get("camera_id")), None)
         if camera is not None and not camera.incident_notifications_enabled:
             return False
@@ -1584,6 +1586,10 @@ class AppManager:
         settings = {zone.name: zone.notifications_enabled for zone in camera.zones} if camera else {}
         zones = payload.get("zones") or []
         result = {**payload, "notifications_enabled": self.config.integration_notifications.enabled and (camera is None or camera.incident_notifications_enabled) and (not zones or any(settings.get(zone, True) for zone in zones))}
+        if payload.get("schema_version") == 3:
+            result["notifications_enabled"] = self.incident_notification_allowed(payload)
+        if camera is not None or payload.get("camera_id"):
+            result["camera_name"] = camera.name if camera else payload["camera_id"]
         base_url = self.config.integration_notifications.base_url
         incident_id = str(payload.get("incident_id") or "")
         if incident_id:
@@ -1601,16 +1607,24 @@ class AppManager:
         return result
 
     def _publish_incident_notification(self, payload: dict) -> None:
-        if not self.config.integration_notifications.enabled:
-            return
         payload = self.incident_notification_payload(payload)
-        camera = next((camera for camera in self.config.cameras if camera.id == payload.get("camera_id")), None)
-        if camera is not None and not camera.incident_notifications_enabled:
-            return
         self.state_events.publish("incident_lifecycle", payload)
         if (self.incident_notification_allowed(payload) and payload["notifications_enabled"]
                 and self.config.mqtt.enabled and self.config.mqtt.incident_events_enabled):
-            self.mqtt.publish("events/incidents", payload, retain=False)
+            if not self.mqtt.publish("events/incidents", payload, retain=False, confirm=True):
+                raise RuntimeError("incident notification transport has not acknowledged delivery")
+
+    def _scene_alert_enabled(self, decision: dict, payload: dict) -> bool:
+        event = next((e for e in payload.get("events", []) if e.get("id") == decision.get("event_id")), {})
+        camera = next((c for c in self.config.cameras if c.id == event.get("camera_id", payload.get("camera_id"))), None)
+        if camera is not None and not camera.incident_notifications_enabled:
+            return False
+        rules = {zone.name: zone.notifications_enabled for zone in camera.zones} if camera else {}
+        for subject in decision.get("objects", []):
+            zones = subject.get("zones") or []
+            if subject.get("eligible") and (not zones or any(rules.get(zone, True) for zone in zones)):
+                return True
+        return not self.config.integration_notifications.exclude_motion and not decision.get("objects")
 
     def _refresh_incident_notification(self, camera_id: str, event_id: int, *, allow_new: bool = False) -> None:
         event = self.events.get(event_id) if event_id else None
@@ -1653,6 +1667,7 @@ class AppManager:
                 })
             event["faces"] = faces
             event = apply_event_identity(event)
+            self.events.update_scene_identities(event_id, faces, routes=self.config.detector.tracking.camera_transition_routes)
             self.incidents.track_incident(
                 event,
                 camera.name if camera is not None else camera_id,

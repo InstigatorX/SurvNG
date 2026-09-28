@@ -553,6 +553,9 @@ class EventStoreJobsMixin:
             # Older active/cooldown observations predate durable linkage. The
             # state reason guarantees they belong to an already-created event;
             # attach them to the nearest preceding event for the same camera.
+            # Match the timestamp expression used below: a plain ISO-text
+            # index cannot bound this historical join on large databases.
+            conn.execute("create index if not exists idx_event_camera_epoch on events(camera_id,julianday(created_at),id)")
             conn.execute(
                 """
                 update motion_audits as audit
@@ -560,6 +563,7 @@ class EventStoreJobsMixin:
                     select event.id from events as event
                     where event.camera_id = audit.camera_id
                       and julianday(event.created_at) <= julianday(audit.created_at)
+                      and julianday(event.created_at) >= julianday(audit.created_at) - 301.0 / 86400.0
                       and (julianday(audit.created_at) - julianday(event.created_at)) * 86400.0 <= 300.0
                     order by julianday(event.created_at) desc, event.id desc
                     limit 1
@@ -571,6 +575,7 @@ class EventStoreJobsMixin:
                     select 1 from events as event
                     where event.camera_id = audit.camera_id
                       and julianday(event.created_at) <= julianday(audit.created_at)
+                      and julianday(event.created_at) >= julianday(audit.created_at) - 301.0 / 86400.0
                       and (julianday(audit.created_at) - julianday(event.created_at)) * 86400.0 <= 300.0
                 )
                 """
@@ -790,20 +795,20 @@ class EventStoreJobsMixin:
             now - DETECTION_COMPLETION_JOB_MAXIMUM_AGE_SECONDS,
             timezone.utc,
         ).isoformat()
+        # Scene samples are retained evidence work. A routine recorded
+        # refinement can outlast the shorter freshness window for probes.
         cursor = conn.execute(
             "update detection_jobs set state = 'failed', lease_expires_at = null, "
             "lease_owner = '', last_error = case when "
             "json_type(payload_json, '$.refined_outcome') = 'object' "
             "then 'expired_refinement_completion' else 'stale_refinement' end, updated_at = ? "
-            "where camera_id = ? and (case when "
+            "where camera_id = ? and state in ('queued', 'running') and (case when "
             "json_type(payload_json, '$.refined_outcome') = 'object' then created_at <= ? "
-            "else (("
-            "json_extract(payload_json, '$.existing_event_id') is null "
-            "and created_at <= ?) or ("
-            "json_extract(payload_json, '$.existing_event_id') is not null "
-            "and created_at <= ?)) end) and (state = 'queued' "
+            "when json_extract(payload_json, '$.existing_event_id') is not null "
+            "or json_extract(payload_json, '$.qualification.scene_discovery') = 1 "
+            "then created_at <= ? else created_at <= ? end) and (state = 'queued' "
             "or (state = 'running' and lease_expires_at <= ?))",
-            (now_iso, camera_id, completion_cutoff, probe_cutoff, event_cutoff, now),
+            (now_iso, camera_id, completion_cutoff, event_cutoff, probe_cutoff, now),
         )
         return max(0, int(cursor.rowcount))
 

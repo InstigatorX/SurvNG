@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import json
 import threading
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
 import numpy as np
@@ -43,6 +45,7 @@ class ObjectTrackingLifecycle:
         lifecycle_lock: threading.RLock,
         cover_frame_provider: TrackingCoverFrameProvider | None = None,
         snapshot_writer: TrackingSnapshotWriter | None = None,
+        scene_job_store: Any | None = None,
     ) -> None:
         self.camera = camera
         self.frame_provider = frame_provider
@@ -53,6 +56,8 @@ class ObjectTrackingLifecycle:
         self.lifecycle_lock = lifecycle_lock
         self.cover_frame_provider = cover_frame_provider
         self.snapshot_writer = snapshot_writer
+        self.scene_job_store = scene_job_store
+        self._scene_lease_owner = uuid.uuid4().hex
         self._session = self.create(factory)
 
     def current(self) -> ObjectTrackingSession:
@@ -96,6 +101,8 @@ class ObjectTrackingLifecycle:
 
     def has_trackable_objects(self, objects: list[dict[str, Any]]) -> bool:
         with self.lifecycle_lock:
+            if self.scene_job_store is not None:
+                return bool(self._session.config.enabled)
             return bool(self._trackable_objects(self._session, objects))
 
     def start_incident(
@@ -109,9 +116,54 @@ class ObjectTrackingLifecycle:
         with self.lifecycle_lock:
             session = self._session
             trackable = self._trackable_objects(session, objects)
+            if self.scene_job_store is not None and session.config.enabled:
+                start, end = (
+                    session.window_provider(event_id, event_at)
+                    if session.window_provider is not None
+                    else (event_at.timestamp(), event_at.timestamp() + session.config.max_session_seconds)
+                )
+                # The scene quiet boundary outlives an individual tracking
+                # compute chunk. Subsequent activity extends this same job.
+                end = max(end, event_at.timestamp() + 45.0)
+                job = self.scene_job_store.enqueue_scene_tracking(event_id, start, end)
+                if job is None:
+                    return False
+                self.resume_pending_scene()
+                return True
             if not trackable:
                 return None
             return session.start(event_id, event_at, trackable, initial_frame)
+
+    def resume_pending_scene(self) -> bool:
+        """Resume one durable camera episode on the existing tracking worker."""
+        if self.scene_job_store is None:
+            return False
+        with self.lifecycle_lock:
+            session = self._session
+            if not self.accepting() or not session.config.enabled or session.running():
+                return False
+            job = self.scene_job_store.claim_scene_tracking(self.camera.id, self._scene_lease_owner)
+            if job is None:
+                return False
+            try:
+                resume_tracks = None
+                if callable(getattr(self.scene_job_store, "scene_track_resume", None)):
+                    resume_tracks = self.scene_job_store.scene_track_resume(int(job["event_id"]))
+                started = session.start(
+                    int(job["event_id"]), datetime.fromtimestamp(job["event_epoch"], timezone.utc),
+                    [], None, recorded_window=(job["start_epoch"], job["end_epoch"]),
+                    resume_after=job["cursor_epoch"],
+                    scene_analysis_job={"episode_id": job["episode_id"], "lease_owner": self._scene_lease_owner,
+                                        "analyzed_through_epoch":job.get("analyzed_epoch"),
+                                        "association_after_epoch":max((g["end_epoch"] for g in json.loads(job.get("coverage_gaps_json","[]"))),default=None)},
+                    scene_track_resume=resume_tracks,
+                )
+            except Exception as error:
+                self.scene_job_store.release_scene_tracking(job["episode_id"], self._scene_lease_owner, type(error).__name__)
+                raise
+            if not started:
+                self.scene_job_store.release_scene_tracking(job["episode_id"], self._scene_lease_owner, "tracking_start_deferred")
+            return started
 
     def sync_accepting(self) -> None:
         with self.lifecycle_lock:
@@ -191,7 +243,6 @@ class ObjectTrackingLifecycle:
             for item in objects
             if (
                 item.get("label")
-                and item.get("incident_eligible") is not False
                 and session.config.tracks_label(item.get("label"))
             )
         ]

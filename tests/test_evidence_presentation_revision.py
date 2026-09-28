@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 from survng.app.appearance_routes import AppearanceRouteDependencies, create_appearance_router
 from survng.app.image_cache import LocalImageCache
-from survng.app.incident_payload import IncidentPayloadBuilder
+from survng.app.incident_payload import canonical_incident_payload
 from survng.app.incident_presenter import (
     _event_row, _incident_row, _incident_list_payload, _recording_grid_incident_payload,
 )
@@ -31,15 +31,16 @@ def test_public_compact_and_notification_evidence_keeps_revision():
     assert summary["evidence_revision"] == summary["events"][0]["evidence_revision"] == 12
     assert summary["objects"][0]["snapshot_visible"] is False
     assert _recording_grid_incident_payload(summary)["evidence_revision"] == 12
-    notification = IncidentPayloadBuilder._incident_payload({
-        "events": {7: raw}, "camera_id": "gate", "camera_name": "Gate",
-    }, "complete")
+    notification = canonical_incident_payload({
+        **summary, "scene_objects": [{"label": "person", "certainty": "possible"}],
+        "alert_decisions": [{"eligible": False}],
+    })
     assert notification["snapshot_url"].endswith("/7/snapshot.jpg?v=12")
     assert notification["evidence_revision"] == 12
-    # Provisional detections remain visible in the incident UI, but notification
-    # payloads wait for refined evidence before claiming an object.
-    assert notification["objects"] == []
-    assert notification["has_objects"] is False
+    # Observation membership is independent of whether evidence can alert yet.
+    assert notification["objects"][0]["label"] == "person"
+    assert notification["has_objects"] is True
+    assert notification["alert_decisions"][0]["eligible"] is False
 
 
 def _routes(tmp_path):

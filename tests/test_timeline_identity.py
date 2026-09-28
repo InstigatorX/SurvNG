@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+from survng.app.incident_presenter import _event_row, _incident_row
 from survng.app.recording_routes import RecordingRouteDependencies, create_recording_router
 
 
@@ -13,6 +14,11 @@ class _Recorder:
 
 
 class _Events:
+    def scene_incident(self, *, event_id):
+        assert event_id == 7
+        return {**_incident_row("gate", [_event_row(event) for event in self.for_camera_range()]),
+                "id": "scene-gate", "incident_id": "scene-gate"}
+
     def for_camera_range(self, *_args, **_kwargs):
         return [{
             "id": 7,
@@ -88,6 +94,7 @@ def test_recording_day_incident_preserves_projected_identity():
 
     assert len(payload["incidents"]) == 1
     incident = payload["incidents"][0]
+    assert incident["incident_id"] == "scene-gate"
     assert incident["identities"][0]["name"] == "Steve"
     assert incident["identities"][0]["status"] == "confirmed"
     assert incident["primary_identity"]["name"] == "Steve"

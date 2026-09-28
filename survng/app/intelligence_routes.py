@@ -27,9 +27,8 @@ from .cross_camera_trace import build_cross_camera_trace, prioritize_trace_candi
 from .calibration import apply_calibration_changes, build_calibration_report, calibration_configuration_fingerprint, calibration_setting_value
 from .camera_intelligence import aggregate_camera_intelligence, compare_camera_intelligence_results, select_balanced_samples
 from .config import AppConfig, CameraConfig, camera_by_id
-from .incident_presenter import _event_row, _incident_rows
 from .incident_queries import IncidentQueryService, _filter_incident_summaries, _motion_audit_row
-from .incident_utils import DEFAULT_INCIDENT_GAP_SECONDS, event_snapshot_path, snapshot_media_type
+from .incident_utils import event_snapshot_path, snapshot_media_type
 from .manager import AppManager, validate_motion_pipeline_configuration
 from .motion_ai_review import aggregate_motion_ai_review
 from .motion_pipeline import guided_fusion_settings, identify_analysis_preset, resolve_motion_pipeline_graphs
@@ -445,18 +444,15 @@ class IntelligenceService:
         audits, _total = active_manager.events.motion_audits(limit=record_limit, camera_id=camera.id)
         recent_audits = [audit for audit in audits if not audit.get('created_at') or str(audit.get('created_at')) >= cutoff_iso]
         end_iso = datetime.now(timezone.utc).isoformat()
-        if hasattr(active_manager.events, 'recent_for_camera_range'):
-            event_rows = active_manager.events.recent_for_camera_range(camera.id, cutoff_iso, end_iso, limit=max(500, record_limit * 8))
-        elif hasattr(active_manager.events, 'for_camera_range'):
-            event_rows = list(reversed(active_manager.events.for_camera_range(camera.id, cutoff_iso, end_iso, limit=max(500, record_limit * 8))))
-        else:
-            event_rows = []
-        incident_summaries = _incident_rows([_event_row(row) for row in event_rows], DEFAULT_INCIDENT_GAP_SECONDS)[:record_limit]
+        incident_summaries = active_manager.events.list_scene_incidents(
+            camera_id=camera.id, start_at=cutoff_iso, end_at=end_iso, limit=record_limit,
+        )
         incidents = self.deps.incident_queries.with_faces(active_manager, self.deps.incident_queries.hydrate(active_manager, incident_summaries)) if incident_summaries else []
         candidates: list[dict[str, Any]] = []
         incident_event_ids: set[int] = set()
         for incident in incidents:
-            event_id = int(incident.get('representative_event_id') or 0)
+            local_events = [event for event in incident.get('events', []) if event.get('camera_id') == camera.id]
+            event_id = next((int(event['id']) for event in local_events if event.get('id') == incident.get('representative_event_id')), int(local_events[-1]['id']) if local_events else 0)
             if event_id <= 0:
                 continue
             incident_event_ids.update((int(event.get('id') or 0) for event in incident.get('events') or []))
@@ -1308,15 +1304,14 @@ class IntelligenceService:
         for event in incident.get('events') or []:
             objects, qualification, tracking = self._assistant_event_objects(event)
             events.append({'id': event.get('id'), 'created_at': event.get('created_at'), 'kind': event.get('kind'), 'topic': event.get('topic'), 'trigger_source': event.get('trigger_source'), 'objects': objects, 'motion_qualification': qualification, 'object_tracking': tracking, 'recording_available': bool(event.get('recording_path')), 'faces': event.get('faces') or []})
-        return {'incident_id': incident.get('id'), 'representative_event_id': incident.get('representative_event_id'), 'camera_id': incident.get('camera_id'), 'start_at': incident.get('start_at'), 'end_at': incident.get('end_at'), 'duration_seconds': incident.get('duration_seconds'), 'event_count': incident.get('event_count'), 'trigger_source': incident.get('trigger_source'), 'labels': incident.get('labels') or [], 'zones': incident.get('zones') or [], 'motion_observations': [{key: observation.get(key) for key in ('id', 'created_at', 'category', 'reason', 'score', 'threshold', 'object_detected', 'trigger_count', 'interpretation')} for observation in incident.get('motion_observations') or [] if isinstance(observation, dict)], 'events': events}
+        return {'incident_id': incident.get('id'), 'camera_ids': incident.get('camera_ids') or [incident.get('camera_id')], 'scene_objects': incident.get('scene_objects') or [], 'episodes': incident.get('episodes') or [], 'coverage': incident.get('coverage'), 'alert_decisions': incident.get('alert_decisions') or [], 'summary': incident.get('summary'), 'representative_event_id': incident.get('representative_event_id'), 'camera_id': incident.get('camera_id'), 'start_at': incident.get('start_at'), 'end_at': incident.get('end_at'), 'duration_seconds': incident.get('duration_seconds'), 'event_count': incident.get('event_count'), 'trigger_source': incident.get('trigger_source'), 'labels': incident.get('labels') or [], 'zones': incident.get('zones') or [], 'motion_observations': [{key: observation.get(key) for key in ('id', 'created_at', 'category', 'reason', 'score', 'threshold', 'object_detected', 'trigger_count', 'interpretation')} for observation in incident.get('motion_observations') or [] if isinstance(observation, dict)], 'events': events}
 
     def _assistant_incident_evidence(self, incident: dict[str, Any], evidence_event_id: int | None=None) -> AssistantEvidence:
         payload = self._assistant_incident_payload(incident)
         event_ids = [str(event.get('id')) for event in incident.get('events') or [] if event.get('id')]
-        query = quote(','.join(event_ids), safe=',')
         event_id = evidence_event_id or int(incident.get('representative_event_id') or (event_ids[0] if event_ids else 0))
         image_event_id = int(incident.get('representative_event_id') or event_id)
-        return AssistantEvidence(evidence_id=f'E-incident-{event_id}', kind='incident', title=f'{incident.get('camera_id')} · {incident.get('start_at')}', summary=f'{len(payload['events'])} event(s); labels: {(', '.join(payload['labels']) if payload['labels'] else 'motion only')}.', data=payload, href=f'/incidents?event_ids={query}', image_url=f'/api/events/{image_event_id}/thumbnail.jpg?width=960&quality=82' if image_event_id > 0 else '')
+        return AssistantEvidence(evidence_id=f'E-incident-{event_id}', kind='incident', title=f'{incident.get('camera_id')} · {incident.get('start_at')}', summary=f'{len(payload['events'])} event(s); labels: {(', '.join(payload['labels']) if payload['labels'] else 'motion only')}.', data=payload, href=f'/incidents/{quote(str(incident.get("incident_id") or incident.get("id")), safe="")}', image_url=f'/api/events/{image_event_id}/thumbnail.jpg?width=960&quality=82' if image_event_id > 0 else '')
 
     def _assistant_inspect_incident(self, event_id: int, active_manager: AppManager) -> AssistantEvidence | None:
         incident = self.deps.incident_queries.resolve_event(active_manager, event_id)
@@ -1528,6 +1523,18 @@ class IntelligenceService:
             return AssistantAnswer(answer=strip_assistant_citation_markers(evidence.summary), citations=[evidence.evidence_id], suggestions=list(evidence.data.get('suggestions') or [])[:4])
         return AssistantAnswer(answer='I started the requested export. It will appear here when the MP4 is ready, and you can leave this panel open while it runs.', citations=[evidence.evidence_id], suggestions=[])
 
+    @staticmethod
+    def _canonical_incidents_in_range(active_manager: AppManager, start: datetime, end: datetime, camera_id: str = "") -> list[dict]:
+        incidents = []
+        while True:
+            page = active_manager.events.list_scene_incidents(
+                start_at=start.isoformat(), end_at=end.isoformat(), camera_id=camera_id,
+                limit=500, offset=len(incidents),
+            )
+            incidents.extend(page)
+            if len(page) < 500:
+                return incidents
+
     def _assistant_search_incidents(self, call: AssistantToolCall, time_zone: str, active_manager: AppManager) -> list[AssistantEvidence]:
         try:
             selected_zone = ZoneInfo(time_zone)
@@ -1539,15 +1546,14 @@ class IntelligenceService:
         if end <= start:
             start, end = (end, start)
         start = max(start, end - timedelta(days=31))
-        rows = [_event_row(row) for row in active_manager.events.between_compact(start.isoformat(), end.isoformat())]
-        summaries = _filter_incident_summaries(_incident_rows(rows, DEFAULT_INCIDENT_GAP_SECONDS), call.event_type, call.camera_id, call.object_label, call.zone)
+        summaries = _filter_incident_summaries(self._canonical_incidents_in_range(active_manager, start, end, call.camera_id), call.event_type, '', call.object_label, call.zone)
         candidate_summaries = summaries[:min(250, max(call.limit * 8, call.limit))]
         hydrated = self.deps.incident_queries.with_faces(active_manager, self.deps.incident_queries.hydrate(active_manager, candidate_summaries))
         filtered: list[dict[str, Any]] = []
         wanted_face = call.face_name.strip().lower()
         for incident in hydrated:
             payload = self._assistant_incident_payload(incident)
-            detections = [obj for event in payload['events'] for obj in event['objects'] if obj.get('incident_eligible') is not False]
+            detections = payload['scene_objects']
             if call.minimum_confidence is not None and (not any((float(obj.get('confidence') or 0) >= call.minimum_confidence for obj in detections))):
                 continue
             if wanted_face:
@@ -1606,8 +1612,7 @@ class IntelligenceService:
         if end <= start:
             start, end = (end, start)
         start = max(start, end - timedelta(days=31))
-        rows = [_event_row(row) for row in active_manager.events.between_compact(start.isoformat(), end.isoformat())]
-        summaries = _filter_incident_summaries(_incident_rows(rows, DEFAULT_INCIDENT_GAP_SECONDS), 'object', call.camera_id, call.object_label, call.zone)
+        summaries = _filter_incident_summaries(self._canonical_incidents_in_range(active_manager, start, end, call.camera_id), 'object', '', call.object_label, call.zone)
 
         def counts(values: list[str]) -> dict[str, int]:
             result: dict[str, int] = {}
@@ -1616,9 +1621,9 @@ class IntelligenceService:
                     result[value] = result.get(value, 0) + 1
             return dict(sorted(result.items(), key=lambda item: (-item[1], item[0])))
         duration_minutes = max(0, round((end - start).total_seconds() / 60))
-        camera_ids = {str(item.get('camera_id') or '') for item in summaries}
+        camera_ids = {str(camera_id) for item in summaries for camera_id in item.get('camera_ids') or [item.get('camera_id') or '']}
         recent = [{'event_id': int(item.get('representative_event_id') or 0), 'camera_id': str(item.get('camera_id') or ''), 'started_at': item.get('start_at'), 'labels': list(item.get('labels') or []), 'zones': list(item.get('zones') or []), 'trigger_source': item.get('trigger_source') or 'camera'} for item in summaries[:8]]
-        return AssistantEvidence(evidence_id='E-activity', kind='recent_activity_summary', title='Recent activity', summary=f'{len(summaries)} incidents across {len(camera_ids - {''})} cameras during the last {duration_minutes} minutes.', data={'start_at': start.isoformat(), 'end_at': end.isoformat(), 'duration_minutes': duration_minutes, 'incident_count': len(summaries), 'object_incident_count': len(summaries), 'camera_counts': counts([str(item.get('camera_id') or '') for item in summaries]), 'object_label_counts': counts([str(label) for item in summaries for label in item.get('labels') or []]), 'zone_counts': counts([str(zone) for item in summaries for zone in item.get('zones') or []]), 'trigger_counts': counts([str(item.get('trigger_source') or 'camera') for item in summaries]), 'recent_notable_incidents': recent, 'filters': {'camera_id': call.camera_id, 'event_type': 'object', 'object_label': call.object_label, 'zone': call.zone}}, href='/incidents')
+        return AssistantEvidence(evidence_id='E-activity', kind='recent_activity_summary', title='Recent activity', summary=f'{len(summaries)} incidents across {len(camera_ids - {''})} cameras during the last {duration_minutes} minutes.', data={'start_at': start.isoformat(), 'end_at': end.isoformat(), 'duration_minutes': duration_minutes, 'incident_count': len(summaries), 'object_incident_count': len(summaries), 'camera_counts': counts([str(camera_id) for item in summaries for camera_id in item.get('camera_ids') or [item.get('camera_id') or '']]), 'object_label_counts': counts([str(label) for item in summaries for label in item.get('labels') or []]), 'zone_counts': counts([str(zone) for item in summaries for zone in item.get('zones') or []]), 'trigger_counts': counts([str(item.get('trigger_source') or 'camera') for item in summaries]), 'recent_notable_incidents': recent, 'filters': {'camera_id': call.camera_id, 'event_type': 'object', 'object_label': call.object_label, 'zone': call.zone}}, href='/incidents')
 
     def _assistant_activity_followups(self, evidence: AssistantEvidence) -> list[str]:
         data = evidence.data

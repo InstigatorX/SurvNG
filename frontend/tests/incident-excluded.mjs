@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { chromium } from "playwright";
-const root = new URL("../../survng/static/", import.meta.url);
+const root = process.env.SURVNG_FRONTEND_BUILD ? new URL(`file://${process.env.SURVNG_FRONTEND_BUILD.replace(/\/$/, "")}/`) : new URL("../../survng/static/", import.meta.url);
 const server = createServer(async (req, res) => {
   try {
     const path = new URL(req.url, "http://localhost").pathname;
@@ -48,15 +48,16 @@ try {
   });
   await page.goto(`http://127.0.0.1:${server.address().port}/survng/incidents`);
   const detections = page.locator(".incident-summary-objects .inspector-detection");
-  const excludedBox = page.locator(".object-box.excluded").first();
-  await page.getByText("outside incident zone", { exact: true }).waitFor();
+  const excludedBox = page.locator(".object-box").filter({ hasText: "car" }).first();
+  await detections.filter({ hasText: "car" }).waitFor();
+  assert.equal(await page.getByText("outside incident zone", { exact: true }).count(), 0);
   assert.equal(await detections.count(), 2);
   assert.equal(await page.getByRole("button", { name: /show excluded/i }).count(), 0);
   await excludedBox.waitFor();
   assert.match(await excludedBox.textContent(), /car/);
   assert.doesNotMatch(await page.locator(".incident-inspector").textContent(), /excluded/i);
   assert.doesNotMatch(await excludedBox.textContent(), /excluded/i);
-  assert.equal(await excludedBox.evaluate(el => getComputedStyle(el).borderTopStyle), "dashed");
+  assert.equal(await excludedBox.evaluate(el => getComputedStyle(el).borderTopStyle), "solid");
   // Entries keep their original indexes for object selection/search.
   await excludedBox.click();
   assert.equal(await excludedBox.getAttribute("aria-pressed"), "true");

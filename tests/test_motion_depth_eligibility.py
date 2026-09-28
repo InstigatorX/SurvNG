@@ -75,7 +75,7 @@ class MotionDepthEligibilityTest(unittest.TestCase):
             selected, objects, samples, {"detection_enrichment_ms": 0.0}, time.monotonic(),
             refinement_pending=False, event_epoch=event_at.timestamp(),
         )
-        enriched = {item["label"]: item for item in result.objects}
+        enriched = {item["label"]: item for item in result.objects if item.get("label")}
         self.assertTrue(enriched["person"]["incident_eligible"])
         self.assertFalse(enriched["car"]["incident_eligible"])
         self.assertFalse(enriched["car"]["temporal_eligible"])
@@ -92,7 +92,8 @@ class MotionDepthEligibilityTest(unittest.TestCase):
             event_callback=publish,
         )
         outcome = handler.handle("manual", "test", event_at, {}, require_eligible_object=True)
-        self.assertEqual([item["label"] for item in outcome.detected_objects], ["person"])
+        self.assertEqual({item["label"] for item in outcome.detected_objects}, {"person", "car", "dog"})
+        self.assertEqual([item["label"] for item in outcome.detected_objects if item["alert_eligible"]], ["person"])
         payload = next(call.args[1] for call in publish.call_args_list if call.args[0] == "object")
         self.assertEqual([item["label"] for item in payload["incident_objects"]], ["person"])
         stored = json.loads(events.add_event.call_args.kwargs["objects_json"])

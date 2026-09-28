@@ -12,9 +12,7 @@ import json
 import math
 
 from .incident_utils import (
-    DEFAULT_INCIDENT_GAP_SECONDS,
     event_epoch,
-    incident_event_groups,
     stable_incident_id,
     stable_incident_key,
 )
@@ -77,7 +75,6 @@ def _event_row(row: dict) -> dict:
         item for item in objects
         if item.get("label")
         and positive_confidence(item)
-        and item.get("incident_eligible") is not False
     ]
     tracked_objects = (
         [item for item in tracking_entry.get("tracks", []) if isinstance(item, dict)]
@@ -121,7 +118,7 @@ def _best_incident_event(events: list[dict]) -> dict:
         for item in objects:
             if not isinstance(item, dict):
                 continue
-            if not item.get("label") or item.get("incident_eligible") is False:
+            if not item.get("label"):
                 continue
             try:
                 confidence = float(item.get("confidence") or 0)
@@ -166,13 +163,6 @@ def _best_incident_event(events: list[dict]) -> dict:
         )
 
     return max(candidates, key=score)
-
-
-def _incident_rows(rows: list[dict], gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS) -> list[dict]:
-    return [
-        _incident_row(camera_id, events)
-        for camera_id, events in incident_event_groups(rows, gap_seconds)
-    ]
 
 
 def _incident_event_payload(event: dict) -> dict:
@@ -332,6 +322,8 @@ def _recording_grid_incident_payload(incident: dict) -> dict:
             "representative_event_id",
             "camera_id",
             "snapshot_path",
+            "snapshot_url",
+            "snapshot_observation_id",
             "evidence_revision",
             "cover_requirement",
             "start_epoch",

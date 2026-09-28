@@ -1,0 +1,16 @@
+.observations-page { max-width: 1440px; margin: 0 auto; padding: 20px; }
+.observations-page header, .observations-filters, .observations-page nav { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.observations-page header { justify-content: space-between; }
+.observations-filters { margin: 20px 0; }
+.observations-filters label { display: grid; gap: 4px; }
+.observations-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; align-items: start; }
+.observations-layout.has-detail { grid-template-columns: minmax(240px, 1fr) minmax(300px, 1fr); }
+.observations-list, .observation-evidence-list { list-style: none; padding: 0; display: grid; gap: 10px; }
+.observations-list > li, .observation-detail { padding: 12px; border: 1px solid var(--border-color, #38404b); border-radius: 8px; }
+.observations-list > li > button { display: grid; gap: 6px; width: 100%; text-align: left; white-space: normal; }
+.observations-list > li > a { display: inline-block; margin-top: 8px; }
+.observation-detail { display: grid; gap: 12px; min-width: 0; }
+.observation-detail p, .observation-detail h2 { margin: 0; }
+.observation-detail summary { cursor: pointer; }
+.observation-evidence-list button { white-space: normal; text-align: left; }
+@media (max-width: 760px) { .observations-page { padding: 12px; } .observations-layout.has-detail { grid-template-columns: minmax(0, 1fr); } }

@@ -1,7 +1,7 @@
 import json
 
 from survng.app.incident_presenter import _event_row, _incident_list_payload, _incident_row
-from survng.app.mqtt import MqttService
+from survng.app.incident_payload import canonical_incident_payload
 
 
 def _row(event_id: int = 7) -> dict:
@@ -41,14 +41,8 @@ def test_api_incident_preserves_event_and_aggregated_semantic_provenance() -> No
 
 def test_mqtt_incident_exposes_semantics_without_creating_classes() -> None:
     event = _row()
-    pending = {
-        "camera_id": "gate",
-        "camera_name": "Gate",
-        "base_path": "",
-        "events": {7: event},
-    }
-
-    payload = MqttService._incident_payload(pending, "open")
+    pending = _incident_row("gate", [_event_row(event)])
+    payload = canonical_incident_payload(pending)
 
     assert payload["has_objects"] is False
     assert payload["classes"] == []

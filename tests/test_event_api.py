@@ -1072,6 +1072,7 @@ class EventApiSerializationTest(unittest.TestCase):
             }],
         })
         events = SimpleNamespace(
+            list_scene_incidents=lambda **_kwargs: [],
             motion_audits=lambda **_kwargs: ([{"id": 1, "camera_id": "gate"}], 1),
             create_motion_ai_review=lambda camera_id, count: {
                 "id": 17,
@@ -1436,9 +1437,13 @@ class EventApiSerializationTest(unittest.TestCase):
                 "created_at": "2026-07-28T14:00:00+00:00",
             },
         ]
-        fake_manager = SimpleNamespace(
-            events=SimpleNamespace(recent_compact=lambda *_args, **_kwargs: rows)
-        )
+        from survng.app.events import EventStore
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = EventStore(Path(temporary.name))
+        for row in reversed(rows):
+            store.add_event(row["camera_id"],row["kind"],created_at=row["created_at"],objects_json=row["objects_json"])
+        fake_manager = SimpleNamespace(events=store)
 
         with patch.object(main, "manager", fake_manager):
             first, first_has_more, _ = main.INCIDENT_QUERIES.recent_filtered_summaries(
@@ -1560,6 +1565,7 @@ class EventApiSerializationTest(unittest.TestCase):
         fake_manager = SimpleNamespace(
             storage_dir=Path("/tmp"),
             events=SimpleNamespace(
+                scene_incident=lambda event_id: next((_incident_row(row["camera_id"], [_event_row(row)]) for row in rows if row["id"] == event_id), None),
                 get_many=lambda event_ids: [row for row in rows if row["id"] in event_ids],
                 motion_audits_for_related_events=lambda _event_ids: [],
             ),
@@ -1579,7 +1585,7 @@ class EventApiSerializationTest(unittest.TestCase):
             {"id": 1, "camera_id": "gate", "kind": "motion", "objects_json": "[]", "created_at": "2026-07-30T14:00:00+00:00"},
             {"id": 2, "camera_id": "foyer", "kind": "motion", "objects_json": "[]", "created_at": "2026-07-30T14:00:01+00:00"},
         ]
-        fake_manager = SimpleNamespace(events=SimpleNamespace(get_many=lambda _event_ids: rows))
+        fake_manager = SimpleNamespace(events=SimpleNamespace(scene_incident=lambda event_id: next((_incident_row(row["camera_id"], [_event_row(row)]) for row in rows if row["id"] == event_id), None)))
 
         with patch.object(main, "manager", fake_manager), self.assertRaises(HTTPException) as invalid:
             main.incident_detail("1,2")

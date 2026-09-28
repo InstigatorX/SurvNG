@@ -658,6 +658,7 @@ class ObjectTrackingConfig(BaseModel):
     lost_timeout_seconds: float = Field(default=3.0, ge=0.5, le=15.0)
     min_confirmations: int = Field(default=2, ge=1, le=10)
     low_confidence_threshold: float = Field(default=0.25, ge=0.01, le=0.95)
+    confirmation_confidence_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
     match_iou_threshold: float = Field(default=0.20, ge=0.05, le=0.90)
     match_center_distance_ratio: float = Field(default=0.65, ge=0.1, le=2.0)
     max_active_cameras: int = Field(default=2, ge=1, le=16)
@@ -810,6 +811,8 @@ class DetectorConfig(BaseModel):
     face_max_references: int = Field(default=20, ge=1, le=200)
     confidence_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
     event_candidate_confidence_threshold: float = Field(default=0.25, ge=0.01, le=0.95)
+    scene_discovery_enabled: bool = True
+    scene_discovery_interval_seconds: float = Field(default=10.0, ge=5.0, le=300.0)
     nms_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
     event_confirmation_frames: int = Field(default=2, ge=1, le=5)
     event_class_confirmation_frames: dict[str, int] = Field(default_factory=dict)

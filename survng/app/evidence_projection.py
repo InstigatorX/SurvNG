@@ -72,7 +72,8 @@ class EvidenceProjection:
     def _semantic_current(self, semantic: Any, event: dict, now: float) -> bool:
         if not semantic.config.enabled:
             return True
-        if not semantic_event_searchable(event):
+        searchable = getattr(semantic, "semantic_searchable", semantic_event_searchable)
+        if not searchable(event):
             # Removing searchable evidence does not require an available model.
             # The index checks the authoritative event revision in its transaction.
             semantic.index.delete_event(int(event["id"]), expected_event=event)

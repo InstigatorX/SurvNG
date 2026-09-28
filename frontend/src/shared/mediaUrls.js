@@ -18,7 +18,14 @@ export function eventSnapshotDownloadUrl(event) {
 }
 
 export function eventThumbnailUrl(event, width = 720, quality = 82, options = {}) {
-  if (event?.snapshot_url) return appUrl(event.snapshot_url);
+  if (event?.snapshot_url) {
+    if (!event.snapshot_observation_id) return appUrl(event.snapshot_url);
+    const params = new URLSearchParams({
+      width: String(Math.max(160, Math.min(2560, Math.round(Number(width) || 720)))),
+      quality: String(Math.max(50, Math.min(95, Math.round(Number(quality) || 82)))),
+    });
+    return appUrl(`${event.snapshot_url}${event.snapshot_url.includes("?") ? "&" : "?"}${params}`);
+  }
   const eventId = Number(event?.representative_event_id || event?.id);
   if (!Number.isFinite(eventId)) return "";
   const params = new URLSearchParams({

@@ -244,7 +244,7 @@ class PersonVisitStore:
             for obj in objects:
                 if isinstance(obj, dict) and isinstance(obj.get("object_tracking"), dict):
                     summaries.extend(obj["object_tracking"].get("tracks") or [])
-            people = [obj for obj in objects if isinstance(obj, dict) and obj.get("label") in ("person", "pedestrian") and obj.get("incident_eligible") is not False]
+            people = [obj for obj in objects if isinstance(obj, dict) and obj.get("label") in ("person", "pedestrian")]
             for index, track in enumerate(summaries or (people if not tracks else [])):
                 if not isinstance(track, dict) or track.get("label") not in ("person", "pedestrian"):
                     continue
@@ -257,7 +257,7 @@ class PersonVisitStore:
                 if last < first:
                     continue
                 tracks[key] = {"id": f"track:{event['id']}:{key}", "event_id": event["id"], "track_id": key, "camera_id": event["camera_id"], "start": first, "end": last, "vector": None, "model": "", "quality": 0, "observation_count": 0, "threshold": 1, "person_id": None, "person_name": "", "face_id": None, "geometry_revision": hashlib.sha256(json.dumps(track, sort_keys=True).encode()).hexdigest()}
-            person_count = sum(1 for obj in objects if isinstance(obj, dict) and obj.get("label") in ("person", "pedestrian") and obj.get("incident_eligible") is not False) if isinstance(objects, list) else 0
+            person_count = len(people)
             for face in faces:
                 # Historical face track IDs are independent of body track IDs.
                 # Attach only when the event has exactly one of each, otherwise

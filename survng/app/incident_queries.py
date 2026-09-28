@@ -13,7 +13,10 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Body
+from fastapi.responses import FileResponse
+from .event_store.scenes import SceneConflict
+from .incident_utils import snapshot_media_type
 
 from .audit_ai import motion_audit_interpretation
 from .cross_camera_trace import build_cross_camera_trace
@@ -21,11 +24,9 @@ from .incident_presenter import (
     _event_row,
     _incident_list_payload,
     _incident_row,
-    _incident_rows,
 )
 from .incident_utils import (
     DEFAULT_INCIDENT_GAP_SECONDS,
-    event_epoch,
     event_snapshot_path,
 )
 from .identity_projection import apply_incident_identities
@@ -75,7 +76,7 @@ def _filter_incident_summaries(
 ) -> list[dict[str, Any]]:
     filtered = _filter_incidents_by_event_type(summaries, event_type)
     if camera_id:
-        filtered = [item for item in filtered if item.get("camera_id") == camera_id]
+        filtered = [item for item in filtered if camera_id in item.get("camera_ids", [item.get("camera_id")])]
     if object_label:
         filtered = [item for item in filtered if object_label in item.get("labels", [])]
     if zone:
@@ -109,34 +110,8 @@ def _filter_incidents_by_person(
     ]
 
 
-def _incident_page_boundary_is_closed(
-    incidents: list[dict[str, Any]],
-    needed: int,
-    oldest_event: dict[str, Any],
-    gap_seconds: int,
-) -> bool:
-    """Whether older event pages can no longer alter the requested incidents.
-
-    Events are fetched newest first while incident groups are ordered by their
-    first event.  The final incident needed for a page is safe only after the
-    scan passes its grouping gap: an older event at or within that gap could
-    still belong to the incident and move its start time.
-    """
-    if len(incidents) < needed:
-        return False
-    try:
-        start_epoch = float(incidents[needed - 1].get("start_epoch") or 0)
-    except (TypeError, ValueError):
-        start_epoch = event_epoch({"created_at": incidents[needed - 1].get("start_at")})
-    return (
-        math.isfinite(start_epoch)
-        and start_epoch > 0
-        and event_epoch(oldest_event) < start_epoch - gap_seconds
-    )
-
-
 class IncidentQueryService:
-    """Read, group, hydrate, and present incidents for one manager generation."""
+    """Read, hydrate, and present canonical incidents for one manager generation."""
 
     @staticmethod
     def events(manager: AppManager, limit: int = 100) -> list[dict[str, Any]]:
@@ -153,28 +128,7 @@ class IncidentQueryService:
     def recent_summaries(
         manager: AppManager, limit: int, gap_seconds: int
     ) -> list[dict[str, Any]]:
-        batch_size = max(500, min(5000, limit * 8))
-        compact_rows: list[dict[str, Any]] = []
-        before_created_at: str | None = None
-        before_id: int | None = None
-
-        while True:
-            batch = manager.events.recent_compact(
-                batch_size, before_created_at, before_id
-            )
-            if not batch:
-                return _incident_rows(compact_rows, gap_seconds)[:limit]
-            compact_rows.extend(_event_row(row) for row in batch)
-            summaries = _incident_rows(compact_rows, gap_seconds)
-            if len(batch) < batch_size:
-                return summaries[:limit]
-            oldest = batch[-1]
-            if _incident_page_boundary_is_closed(
-                summaries, limit, oldest, gap_seconds
-            ):
-                return summaries[:limit]
-            before_created_at = str(oldest["created_at"])
-            before_id = int(oldest["id"])
+        return manager.events.list_scene_incidents(limit=limit)
 
     @staticmethod
     def recent_filtered_summaries(
@@ -188,75 +142,18 @@ class IncidentQueryService:
         object_label: str = "",
         zone: str = "",
     ) -> tuple[list[dict[str, Any]], bool, list[dict[str, Any]]]:
-        desired = offset + limit + 1
-        compact_rows: list[dict[str, Any]] = []
-        before_created_at: str | None = None
-        before_id: int | None = None
-        batch_size = max(500, min(5000, desired * 16))
-
-        while True:
-            batch = manager.events.recent_compact(
-                batch_size, before_created_at, before_id, camera_id
-            )
-            if not batch:
-                summaries = _incident_rows(compact_rows, gap_seconds)
-                filtered = _filter_incident_summaries(
-                    summaries, event_type, camera_id, object_label, zone
-                )
-                return filtered[offset : offset + limit], False, summaries
-            compact_rows.extend(_event_row(row) for row in batch)
-            summaries = _incident_rows(compact_rows, gap_seconds)
-            filtered = _filter_incident_summaries(
-                summaries, event_type, camera_id, object_label, zone
-            )
-            if len(batch) < batch_size:
-                return (
-                    filtered[offset : offset + limit],
-                    len(filtered) >= desired,
-                    summaries,
-                )
-            oldest = batch[-1]
-            if _incident_page_boundary_is_closed(
-                filtered, desired, oldest, gap_seconds
-            ):
-                return filtered[offset : offset + limit], True, summaries
-            before_created_at = str(oldest["created_at"])
-            before_id = int(oldest["id"])
+        page = manager.events.list_scene_incident_cards(limit=limit+1, offset=offset,
+            event_type=event_type, camera_id=camera_id, object_label=object_label, zone=zone)
+        # Facets are scalar metadata; unmatched frame histories are never hydrated.
+        facets = manager.events.scene_incident_facets()
+        return page[:limit], len(page)>limit, [facets]
 
     @staticmethod
     def hydrate(
         manager: AppManager, summaries: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        event_ids = [
-            int(event["id"])
-            for summary in summaries
-            for event in summary.get("events", [])
-            if str(event.get("id", "")).isdigit()
-        ]
-        full_events = {
-            int(event["id"]): _event_row(event)
-            for event in manager.events.get_many(event_ids)
-        }
-        observations_by_event: dict[int, list[dict[str, Any]]] = {}
-        for audit in manager.events.motion_audits_for_related_events(event_ids):
-            related_event_id = int(audit.get("related_event_id") or 0)
-            observations_by_event.setdefault(related_event_id, []).append(
-                _motion_audit_row(audit, manager.storage_dir, manager.media_storage)
-            )
-        for event_id, event in full_events.items():
-            event["motion_observations"] = observations_by_event.get(event_id, [])
-        hydrated: list[dict[str, Any]] = []
-        for summary in summaries:
-            events = [
-                full_events[int(event["id"])]
-                for event in summary.get("events", [])
-                if int(event.get("id") or 0) in full_events
-            ]
-            if events:
-                hydrated.append(
-                    _incident_row(str(summary.get("camera_id") or ""), events)
-                )
-        return hydrated
+        # Membership and retained observations are already hydrated by the store.
+        return summaries
 
     @staticmethod
     def with_faces(
@@ -403,9 +300,9 @@ class IncidentQueryService:
         facets = {
             "camera_ids": sorted(
                 {
-                    str(item.get("camera_id") or "")
+                    str(camera)
                     for item in scanned
-                    if item.get("camera_id")
+                    for camera in item.get("camera_ids", [item.get("camera_id")]) if camera
                 }
             ),
             "labels": sorted(
@@ -461,19 +358,13 @@ class IncidentQueryService:
                 detail="event_ids must contain 1 to 200 positive integers",
             )
 
-        rows = manager.events.get_many(requested_ids)
-        if {int(row["id"]) for row in rows} != set(requested_ids):
+        incidents = [manager.events.scene_incident(event_id=event_id) for event_id in requested_ids]
+        if any(item is None for item in incidents):
             raise HTTPException(status_code=404, detail="incident events were not found")
-        bounded_gap = max(5, min(gap_seconds, 300))
-        summaries = _incident_rows([_event_row(row) for row in rows], bounded_gap)
-        if len(summaries) != 1:
-            raise HTTPException(
-                status_code=422, detail="event_ids do not identify one incident"
-            )
-        hydrated = self.with_faces(manager, self.hydrate(manager, summaries))
-        if not hydrated:
-            raise HTTPException(status_code=404, detail="incident was not found")
-        return hydrated[0]
+        ids = {item["id"] for item in incidents}
+        if len(ids) != 1:
+            raise HTTPException(status_code=422, detail={"message": "events belong to multiple incidents", "incident_ids": sorted(ids)})
+        return self.with_faces(manager, [incidents[0]])[0]
 
     @staticmethod
     def search(
@@ -506,79 +397,34 @@ class IncidentQueryService:
             day = selected_date.isoformat()
         day_start = datetime.combine(selected_date, datetime.min.time(), selected_zone)
         day_end = day_start + timedelta(days=1)
-        bounded_gap = max(5, min(gap_seconds, 300))
-        query_start = day_start.astimezone(timezone.utc) - timedelta(seconds=bounded_gap)
-        query_end = day_end.astimezone(timezone.utc) + timedelta(seconds=bounded_gap)
-        compact_rows = [
-            _event_row(row)
-            for row in manager.events.between_compact(
-                query_start.isoformat(), query_end.isoformat(), camera_id
-            )
-        ]
-        # Result rows may be camera-constrained, but facets intentionally retain
-        # the full day's choices so changing the camera selector does not make
-        # other cameras/labels/zones disappear from the filter UI.
-        facet_rows = compact_rows
-        if camera_id:
-            facet_rows = [
-                _event_row(row)
-                for row in manager.events.between_compact(
-                    query_start.isoformat(), query_end.isoformat()
-                )
-            ]
-        day_start_epoch = day_start.timestamp()
-        day_end_epoch = day_end.timestamp()
-        day_incidents = [
-            incident
-            for incident in _incident_rows(compact_rows, gap_seconds=bounded_gap)
-            if incident["last_epoch"] >= day_start_epoch
-            and incident["start_epoch"] < day_end_epoch
-        ]
-        facet_incidents = [
-            incident
-            for incident in _incident_rows(facet_rows, gap_seconds=bounded_gap)
-            if incident["last_epoch"] >= day_start_epoch
-            and incident["start_epoch"] < day_end_epoch
-        ]
-        facets = {
-            "camera_ids": sorted(
-                {
-                    str(item.get("camera_id") or "")
-                    for item in facet_incidents
-                    if item.get("camera_id")
-                }
-            ),
-            "labels": sorted(
-                {
-                    str(label)
-                    for item in facet_incidents
-                    for label in item.get("labels", [])
-                    if label
-                }
-            ),
-            "zones": sorted(
-                {
-                    str(item_zone)
-                    for item in facet_incidents
-                    for item_zone in item.get("zones", [])
-                    if item_zone
-                }
-            ),
-        }
-        filtered = _filter_incident_summaries(
-            day_incidents, event_type, camera_id, object_label, zone
-        )
+        bounds = {"start_epoch":day_start.timestamp(), "end_epoch":day_end.timestamp()}
+        facets = manager.events.scene_incident_facets(**bounds)
+        filters = {**bounds, "event_type":event_type, "camera_id":camera_id, "object_label":object_label, "zone":zone}
         selected_person_id = max(0, int(person_id))
-        if selected_person_id:
-            filtered = _filter_incidents_by_person(
-                manager, filtered, selected_person_id
-            )
         bounded_limit = max(1, min(limit, 100))
         bounded_offset = max(0, offset)
-        page_summaries = filtered[bounded_offset : bounded_offset + bounded_limit]
+        if selected_person_id:
+            # Face evidence may be supplied by a separate store. Scan bounded
+            # ID-only pages and hydrate only the selected matching incidents.
+            selected = []
+            total = cursor = 0
+            while True:
+                batch = manager.events.list_scene_incidents(**filters,limit=100,offset=cursor,summary_only=True)
+                matches = _filter_incidents_by_person(manager,batch,selected_person_id)
+                for match in matches:
+                    if bounded_offset<=total<bounded_offset+bounded_limit:
+                        selected.append(match["id"])
+                    total += 1
+                if len(batch)<100:
+                    break
+                cursor += len(batch)
+            page_summaries = [manager.events.scene_incident(incident_id) for incident_id in selected]
+        else:
+            total = manager.events.count_scene_incidents(**filters)
+            page_summaries = manager.events.list_scene_incident_cards(**filters,limit=bounded_limit,offset=bounded_offset)
         return {
             "items": [_incident_list_payload(item) for item in page_summaries],
-            "total": len(filtered),
+            "total": total,
             "limit": bounded_limit,
             "offset": bounded_offset,
             "day": day,
@@ -591,62 +437,17 @@ class IncidentQueryService:
     def resolve_event(
         self, manager: AppManager, event_id: int
     ) -> dict[str, Any] | None:
-        row = manager.events.get(event_id)
-        if row is None:
-            return None
-        try:
-            anchor = datetime.fromisoformat(
-                str(row["created_at"]).replace("Z", "+00:00")
-            )
-        except (KeyError, TypeError, ValueError):
-            return None
-        if anchor.tzinfo is None:
-            anchor = anchor.replace(tzinfo=timezone.utc)
-        rows = [
-            _event_row(candidate)
-            for candidate in manager.events.for_camera_range(
-                str(row.get("camera_id") or ""),
-                (anchor - timedelta(minutes=15)).isoformat(),
-                (anchor + timedelta(minutes=15)).isoformat(),
-                limit=2000,
-            )
-        ]
-        for summary in _incident_rows(rows, DEFAULT_INCIDENT_GAP_SECONDS):
-            if any(
-                int(event.get("id") or 0) == event_id
-                for event in summary.get("events") or []
-            ):
-                hydrated = self.with_faces(manager, self.hydrate(manager, [summary]))
-                return hydrated[0] if hydrated else summary
-        return None
+        incident = manager.events.scene_incident(event_id=event_id)
+        return self.with_faces(manager, [incident])[0] if incident else None
 
     def notification_detail(self, manager: AppManager, incident_id: str) -> dict[str, Any]:
-        match = re.fullmatch(r"incident-(.+)-([1-9][0-9]*)", incident_id)
-        if not match:
+        detail = manager.events.scene_incident(incident_id)
+        if detail is None:
             raise HTTPException(status_code=404, detail="incident was not found")
-        camera_id, anchor_id = match.group(1), int(match.group(2))
-        notification = manager.incidents.get(incident_id)
-        if notification:
-            rows = [row for row in manager.events.get_many(notification["event_ids"])
-                    if row.get("camera_id") == camera_id]
-            if not rows:
-                raise HTTPException(status_code=404, detail="incident was not found")
-            summaries = [_incident_row(camera_id, [_event_row(row) for row in rows])]
-            hydrated = self.with_faces(manager, self.hydrate(manager, summaries))
-            detail = hydrated[0] if hydrated else None
-        else:
-            detail = self.resolve_event(manager, anchor_id)
-        if detail is None or detail.get("camera_id") != camera_id:
-            raise HTTPException(status_code=404, detail="incident was not found")
-        camera = next((camera for camera in manager.config.cameras if camera.id == camera_id), None)
-        # The notification journal is bounded. Old links still resolve from
-        # stored evidence, without inventing a lifecycle state after eviction.
-        return {
-            "incident": detail,
-            "notification": notification,
-            "camera_name": camera.name if camera else camera_id,
-            "incident_id": incident_id,
-        }
+        detail = self.with_faces(manager, [detail])[0]
+        camera = next((camera for camera in manager.config.cameras if camera.id == detail.get("camera_id")), None)
+        return {"incident": detail, "notification": manager.incidents.get(incident_id),
+                "camera_name": camera.name if camera else detail.get("camera_id"), "incident_id": detail["id"]}
 
     def cross_camera_trace(
         self,
@@ -745,9 +546,12 @@ def create_incident_query_router(
 
     @router.get("/api/incidents/detail")
     def incident_detail(
-        event_ids: str,
+        event_ids: str = "",
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
+        incident_id: str = "",
     ) -> dict[str, Any]:
+        if incident_id:
+            return canonical_incident(incident_id)
         return with_manager(
             lambda active: service.detail(active, event_ids, gap_seconds)
         )
@@ -814,6 +618,96 @@ def create_incident_query_router(
                 limit=limit,
             )
         )
+
+    @router.get("/api/observations")
+    def observation_reviews(start_at: str = "", end_at: str = "", camera_id: str = "", status: str = "", limit: int = 25, offset: int = 0):
+        if status not in {"", "pending", "not_established", "incomplete", "established"}:
+            raise HTTPException(status_code=422, detail="unknown observation status")
+        try:
+            end = datetime.fromisoformat(end_at.replace("Z", "+00:00")) if end_at else datetime.now(timezone.utc)
+            start = datetime.fromisoformat(start_at.replace("Z", "+00:00")) if start_at else end - timedelta(days=1)
+            if start.tzinfo is None or end.tzinfo is None or not 0 < (end-start).total_seconds() <= 31*86400:
+                raise ValueError("invalid window")
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="a timezone-aware observation window of at most 31 days is required") from error
+        return with_manager(lambda active: active.events.scene_observation_reviews(
+            start_epoch=start.timestamp(), end_epoch=end.timestamp(), camera_id=camera_id,
+            status=status, limit=limit, offset=offset))
+
+    @router.get("/api/observations/{sample_id}/snapshot")
+    def observation_sample_snapshot(sample_id: str):
+        def resolve(active):
+            sample = active.events.scene_sample(sample_id)
+            if sample is None or not sample.get("snapshot_path"):
+                raise HTTPException(status_code=404, detail="supporting image unavailable")
+            try:
+                path = event_snapshot_path(active.storage_dir, sample, active.media_storage)
+            except (FileNotFoundError, PermissionError):
+                raise HTTPException(status_code=404, detail="supporting image expired")
+            return FileResponse(path, media_type=snapshot_media_type(path), headers={"Cache-Control":"private, no-cache"})
+        return with_manager(resolve)
+
+    @router.get("/api/observations/{record_id}")
+    def observation_review(record_id: str):
+        result = with_manager(lambda active: active.events.scene_observation_review(record_id))
+        if result is None:
+            raise HTTPException(status_code=404, detail="observation review was not found")
+        return result
+
+    @router.get("/api/incidents/observations/{observation_id}/snapshot")
+    def observation_snapshot(observation_id: str, width: int = 0, quality: int = 82):
+        def resolve(active):
+            observation = active.events.scene_observation(observation_id)
+            if observation is None:
+                observation = active.events.scene_acquired_observation(observation_id)
+            if observation is None or not observation.get("snapshot_path"):
+                raise HTTPException(status_code=404, detail="supporting image unavailable")
+            try:
+                path = event_snapshot_path(active.storage_dir, observation, active.media_storage)
+            except (FileNotFoundError, PermissionError):
+                raise HTTPException(status_code=404, detail="supporting image expired")
+            if width:
+                import cv2
+                from .appearance_routes import _jpeg_thumbnail
+                safe_width, safe_quality = max(160,min(2560,width)), max(50,min(95,quality))
+                stat = path.stat()
+                identity = f"{path}:{stat.st_mtime_ns}:{stat.st_size}:{safe_width}:{safe_quality}"
+                def build():
+                    frame = cv2.imread(str(path))
+                    if frame is None:
+                        raise HTTPException(status_code=404, detail="supporting image unavailable")
+                    return _jpeg_thumbnail(frame, safe_width, safe_quality)
+                cached = active.image_cache.get_or_create("observations", identity, build)
+                return FileResponse(cached, media_type="image/jpeg", headers={"Cache-Control":"private, no-cache"})
+            return FileResponse(path, media_type=snapshot_media_type(path), headers={"Cache-Control": "private, no-cache"})
+        return with_manager(resolve)
+
+    @router.get("/api/incidents/{incident_id}")
+    def canonical_incident(incident_id: str):
+        def resolve(active):
+            incident = active.events.scene_incident(incident_id)
+            if incident is None:
+                raise HTTPException(status_code=404, detail="incident was not found")
+            return service.with_faces(active, [incident])[0]
+        return with_manager(resolve)
+
+    @router.post("/api/incidents/{incident_id}/corrections")
+    def correct_incident(incident_id: str, correction: dict[str, Any] = Body(...)):
+        revision = correction.get("expected_revision")
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+            raise HTTPException(status_code=422, detail="expected_revision is required")
+        def correct(active):
+            try:
+                result = active.events.correct_scene_incident(incident_id, revision, correction)
+            except SceneConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except (ValueError, TypeError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            active.state_events.publish("incident_updated", {"incident_id": result["id"], "revision": result["revision"]})
+            return service.with_faces(active, [result])[0]
+        return with_manager(correct)
 
     return IncidentQueryRouteBundle(
         router=router,

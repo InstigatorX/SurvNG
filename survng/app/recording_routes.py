@@ -20,7 +20,7 @@ from starlette.background import BackgroundTask
 from .incident_presenter import (
     _event_row,
     _incident_list_payload,
-    _incident_rows,
+    _incident_row,
     _recording_event_row,
     _recording_grid_incident_payload,
 )
@@ -139,7 +139,38 @@ def _identity_hydrated_recording_incidents(
     *,
     include_identities: bool = True,
 ) -> list[dict]:
-    incidents = _incident_rows(public_events)
+    # Resolve whole canonical incidents, then project their camera segments for
+    # the recording lanes. The lane keeps the canonical ID for navigation.
+    canonical = {}
+    seen_events = set()
+    requested_cameras = {str(event.get("camera_id") or "") for event in public_events}
+    for event in public_events:
+        event_id = int(event["id"])
+        if event_id in seen_events:
+            continue
+        incident = active_manager.events.scene_incident(event_id=event_id)
+        if incident is None or incident.get("state") == "unconfirmed":
+            continue
+        canonical[incident["id"]] = incident
+        seen_events.update(int(item["id"]) for item in incident.get("events", []))
+    incidents = []
+    for incident in canonical.values():
+        for camera_id in requested_cameras:
+            events = [event for event in incident.get("events", []) if event.get("camera_id") == camera_id]
+            if not events:
+                continue
+            local = {**incident, **_incident_row(camera_id, events)}
+            local.update(id=incident["id"], incident_id=incident["incident_id"],
+                         canonical_start_at=incident["start_at"], canonical_end_at=incident["end_at"])
+            episodes = [episode for episode in incident.get("episodes", []) if episode["camera_id"] == camera_id]
+            if episodes:
+                local["start_at"] = min(episode["start_at"] for episode in episodes)
+                local["end_at"] = max(episode["end_at"] for episode in episodes)
+                local["start_epoch"] = event_epoch({"created_at": local["start_at"]})
+                local["last_epoch"] = event_epoch({"created_at": local["end_at"]})
+                local["duration_seconds"] = local["last_epoch"] - local["start_epoch"]
+            incidents.append(local)
+    incidents.sort(key=lambda item: item["start_epoch"], reverse=True)
     if not include_identities:
         return incidents
     face_store = getattr(active_manager, "faces", None)
@@ -1196,6 +1227,23 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         )
         return deps.recording_file_response(media_path, "video/iso.segment")
 
+    def episode_clip_window(active_manager, enriched, episode_id, start_epoch, end_epoch):
+        if episode_id is None and start_epoch is None and end_epoch is None:
+            return None
+        if not episode_id or start_epoch is None or end_epoch is None:
+            raise HTTPException(status_code=400, detail="episode and both clip bounds are required")
+        episode = active_manager.events.scene_episode_for_event(int(enriched["id"]), episode_id)
+        if episode is None:
+            raise HTTPException(status_code=404, detail="event does not belong to this episode")
+        if (not math.isfinite(start_epoch) or not math.isfinite(end_epoch)
+                or not 0 < end_epoch - start_epoch <= 3600
+                or start_epoch < episode["start_epoch"] - .001
+                or end_epoch > max(episode["end_epoch"], episode["start_epoch"] + 1) + .001):
+            raise HTTPException(status_code=400, detail="invalid episode clip bounds")
+        enriched["created_at"] = datetime.fromtimestamp(start_epoch, timezone.utc).isoformat()
+        enriched["scene_clip_start_epoch"] = start_epoch
+        return 0.0, end_epoch - start_epoch
+
     @router.get("/api/events/{event_id}/clip.mp4")
     @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def event_clip(
@@ -1203,13 +1251,18 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         before: float | None = None,
         after: float | None = None,
         source: str = "main",
+        episode_id: str | None = None,
+        start_epoch: float | None = None,
+        end_epoch: float | None = None,
     ) -> FileResponse:
         active_manager = deps.get_manager()
         event = active_manager.events.get(event_id)
         if event is None:
             raise HTTPException(status_code=404, detail="event not found")
         enriched = _event_row(event)
-        before_seconds, after_seconds = deps.event_clip_window(
+        before_seconds, after_seconds = episode_clip_window(
+            active_manager, enriched, episode_id, start_epoch, end_epoch
+        ) or deps.event_clip_window(
             active_manager,
             before,
             after,
@@ -1234,6 +1287,9 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         before: float | None = None,
         after: float | None = None,
         source: str = "main",
+        episode_id: str | None = None,
+        start_epoch: float | None = None,
+        end_epoch: float | None = None,
     ) -> Response:
         active_manager = deps.get_manager()
         event = active_manager.events.get(event_id)
@@ -1243,7 +1299,9 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         camera_id = str(enriched.get("camera_id") or "")
         if not camera_id:
             raise HTTPException(status_code=400, detail="event is missing camera")
-        before_seconds, after_seconds = deps.event_clip_window(
+        before_seconds, after_seconds = episode_clip_window(
+            active_manager, enriched, episode_id, start_epoch, end_epoch
+        ) or deps.event_clip_window(
             active_manager,
             before,
             after,

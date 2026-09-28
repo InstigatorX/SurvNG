@@ -106,16 +106,19 @@ def test_delayed_refinement_cannot_overwrite_concurrent_cover(tmp_path):
 
 def test_duplicate_cover_refresh_does_not_publish_another_notification():
     from survng.app.incident_lifecycle import IncidentLifecycle
+    from tests.test_incident_lifecycle import Scenes, scene
     published = Mock()
-    lifecycle = IncidentLifecycle(published)
-    event = {"id": 1, "camera_id": "gate", "created_at": datetime.now(timezone.utc).isoformat(),
-             "snapshot_path": "cover.webp", "objects_json": "[]", "evidence_revision": 2}
+    store = Scenes(scene())
+    lifecycle = IncidentLifecycle(store, published)
     lifecycle.start()
     try:
-        lifecycle.track_incident(event, "Gate")
-        lifecycle.track_incident(dict(event), "Gate", allow_new=False)
+        lifecycle.track_incident({"id": 80913}, "Gate", allow_new=False)
+        lifecycle.track_incident({"id": 80913}, "Gate", allow_new=False)
         assert published.call_count == 1
-        lifecycle.track_incident({**event, "evidence_revision": 3}, "Gate", allow_new=False)
+        updated = scene(2)
+        store.pending.append(dict(incident_id="scene-1", revision=2, payload=updated))
+        lifecycle.track_incident({"id": 80913}, "Gate", allow_new=False)
+        lifecycle.run_once()
         assert published.call_count == 2
     finally:
         lifecycle.close()

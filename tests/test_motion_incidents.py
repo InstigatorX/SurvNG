@@ -1530,6 +1530,26 @@ def test_unrefined_jobs_still_expire_at_original_deadline(recovery_store, existi
     assert _recovery_row(recovery_store, job_id)["last_error"] == "stale_refinement"
 
 
+def test_discovery_survives_a_normal_refinement_ahead_in_the_queue(recovery_store):
+    job = _recovery_job(existing_event_id=None)
+    job.qualification['scene_discovery'] = True
+    job_id = _enqueue_recovery(recovery_store, job)
+    _age_recovery_job(recovery_store, job_id, 30)
+    assert recovery_store.expire_stale_detection_jobs(
+        'gate', maximum_age_seconds=20, event_maximum_age_seconds=60,
+    ) == 0
+    claimed = recovery_store.claim_detection_job(
+        'gate', lease_owner='discovery', maximum_age_seconds=20, event_maximum_age_seconds=60,
+    )
+    assert claimed['id'] == job_id
+    assert claimed['attempts'] == 1
+    _age_recovery_job(recovery_store, job_id, 61, expired_lease=True)
+    assert recovery_store.expire_stale_detection_jobs(
+        'gate', maximum_age_seconds=20, event_maximum_age_seconds=60,
+    ) == 1
+    assert _recovery_row(recovery_store, job_id)['last_error'] == 'stale_refinement'
+
+
 def test_terminal_cleanup_keeps_pending_local_progress(recovery_store):
     expired = _recovery_job("expired", checkpointed=True)
     pending = _recovery_job("pending", checkpointed=True)

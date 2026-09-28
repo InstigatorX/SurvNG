@@ -5,6 +5,9 @@ import { appUrl, fetch } from "../shared/api.js";
 import { formatDateTime } from "../shared/format.js";
 import { IncidentClipLayer } from "./IncidentCard.jsx";
 import "./incident-detail.css";
+import { IncidentScenePanel } from "./IncidentScenePanel.jsx";
+import { canonicalIncidentHref } from "../incidentScene.mjs";
+import { useIncidentPlayback } from "./useIncidentPlayback.js";
 
 function EvidenceImage({ eventId, revision, label, onClick, src }) {
   const [failed, setFailed] = useState(false);
@@ -36,9 +39,7 @@ export function IncidentDetailPage({ incidentId, timeZone }) {
   const [error, setError] = useState("");
   const [missing, setMissing] = useState(false);
   const [retry, setRetry] = useState(0);
-  const [playbackIncident, setPlaybackIncident] = useState(null);
   const [selectedFrame, setSelectedFrame] = useState(null);
-  const [playbackKey, setPlaybackKey] = useState(0);
   useEffect(() => {
     let alive = true;
     let busy = false;
@@ -73,7 +74,8 @@ export function IncidentDetailPage({ incidentId, timeZone }) {
   }, [incidentId, retry]);
   const incident = data?.incident;
   const notification = data?.notification;
-  const ongoing = ["new", "updated"].includes(notification?.state);
+  const scenePlayback = useIncidentPlayback(incident);
+  const ongoing = ["active", "new", "updated"].includes(notification?.state || incident?.state);
   const events = useMemo(() => [...(incident?.events || [])].sort((a, b) => new Date(a.created_at) - new Date(b.created_at)), [incident?.events]);
   const representative = events.some((event) => Number(event.id) === Number(notification?.representative_event_id))
     ? notification.representative_event_id : incident?.representative_event_id;
@@ -82,7 +84,7 @@ export function IncidentDetailPage({ incidentId, timeZone }) {
     return events.flatMap((event) => incidentEvidenceFrames(event).map((frame) => {
       const src = frame.kind === "snapshot"
         ? `/api/events/${event.id}/thumbnail.jpg?width=1280&quality=85&revision=${encodeURIComponent(notification?.revision || incident?.end_at || 0)}`
-        : `/api/cameras/${encodeURIComponent(incident.camera_id)}/recordings/preview.jpg?epoch=${encodeURIComponent(frame.epoch)}&source=main&width=1280&exact=true`;
+        : `/api/cameras/${encodeURIComponent(event.camera_id || incident.camera_id)}/recordings/preview.jpg?epoch=${encodeURIComponent(frame.epoch)}&source=main&width=1280&exact=true`;
       return { ...frame, src, label: `${frame.label} · ${formatDateTime(new Date(frame.epoch * 1000).toISOString(), timeZone)}` };
     })).filter((frame) => {
       if (seen.has(frame.src)) return false;
@@ -94,7 +96,7 @@ export function IncidentDetailPage({ incidentId, timeZone }) {
   const people = notification?.people || (incident?.identities || []).map((item) => item.name).filter(Boolean);
   const zones = notification?.zones || incident?.zones || [];
   const subject = [...people, ...labels.filter((label) => !people.length || label !== "person")].join(", ") || "Motion";
-  const summary = notification?.summary || `${subject.charAt(0).toUpperCase()}${subject.slice(1)} detected at ${data?.camera_name || "this camera"}.`;
+  const summary = incident?.summary || notification?.summary || `${subject.charAt(0).toUpperCase()}${subject.slice(1)} detected at ${data?.camera_name || "this camera"}.`;
   const revision = notification?.revision || incident?.end_at;
   const status = ongoing ? "Ongoing" : notification?.state === "complete" ? "Completed" : "Recorded";
   const showTime = (value) => value ? formatDateTime(value, timeZone) : "";
@@ -110,14 +112,15 @@ export function IncidentDetailPage({ incidentId, timeZone }) {
             <p><time dateTime={notification?.started_at || incident.start_at}>{showTime(notification?.started_at || incident.start_at)}</time>{zones.length ? ` · ${zones.join(", ")}` : ""}</p>
           </section>
           <section className="incident-detail-media" aria-label="Incident evidence">
-            {playbackIncident ? <div className="incident-detail-player"><IncidentClipLayer key={playbackKey} event={playbackIncident} active /><button className="incident-detail-close-player" onClick={() => setPlaybackIncident(null)} aria-label="Close playback"><X size={20} /></button></div>
+            {scenePlayback.clip ? <div className="incident-detail-player"><IncidentClipLayer key={scenePlayback.selection.key} event={scenePlayback.clip} active onEnded={scenePlayback.ended} /><button className="incident-detail-close-player" onClick={scenePlayback.stop} aria-label="Close playback"><X size={20} /></button></div>
               : <EvidenceImage eventId={representative} revision={revision} label={`Incident at ${data.camera_name}`} />}
           </section>
           <div className="incident-detail-actions">
-            <button className="primary" disabled={!representative} onClick={() => { setSelectedFrame(null); setPlaybackIncident(incident); setPlaybackKey((value) => value + 1); }}><Play size={20} />{playbackIncident ? "Replay incident" : "Play incident"}</button>
+            <button className="primary" disabled={!scenePlayback.episodes.some((episode) => episode.clip)} onClick={() => { setSelectedFrame(null); scenePlayback.playAll(); }}><Play size={20} />{scenePlayback.clip ? "Replay incident" : "Play incident"}</button>
             {ongoing ? <a href={appUrl(`/?camera=${encodeURIComponent(incident.camera_id)}`)}><Camera size={20} />Live view</a> : null}
           </div>
-          <p className="incident-detail-hint">Playback includes the recording just before detection, when available.</p>
+          <p className="incident-detail-hint">Playback follows camera episodes in chronological order. Missing footage is shown as unavailable.</p>
+          <section className="incident-detail-section"><IncidentScenePanel key={incident.incident_id || incident.id} incident={incident} timeZone={timeZone} cameraNameById={new Map([[incident.camera_id, data.camera_name]])} onChanged={(detail) => setData((current) => ({ ...current, incident: detail }))} onSelectEpisode={scenePlayback.select} onPlayScene={scenePlayback.playAll} activeEpisodeId={scenePlayback.episode?.episode_id} onNextEpisode={scenePlayback.hasNext ? scenePlayback.nextEpisode : null} onStopPlayback={scenePlayback.stop} /></section>
           <section className="incident-detail-section"><h2>Evidence</h2><div className="incident-detail-frames">
             {evidenceFrames.map((frame, index) => <EvidenceImage key={frame.src} src={frame.src} revision={revision} label={frame.label} onClick={() => setSelectedFrame({ frames: evidenceFrames, index })} />)}
           </div>{!evidenceFrames.length ? <p>No evidence images are available.</p> : <p className="incident-detail-hint">Tap an image to open it. Frames from expired recordings may be unavailable.</p>}</section>
@@ -128,7 +131,7 @@ export function IncidentDetailPage({ incidentId, timeZone }) {
             {notification?.completed_at ? <li><time dateTime={notification.completed_at}>{showTime(notification.completed_at)}</time><strong>Incident completed</strong></li> : null}
             {!events.length ? <li>Detection details are unavailable.</li> : null}
           </ol></section>
-          <footer className="incident-detail-footer"><a href={appUrl(`/incidents?event_ids=${representative}`)}>Open full investigation</a></footer>
+          <footer className="incident-detail-footer"><a href={appUrl(canonicalIncidentHref(incident))}>Open full investigation</a></footer>
         </>}
   </div></main>;
 }

@@ -429,7 +429,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             "adaptive/visual_backup",
             "backup",
             datetime(2026, 8, 15, 19, 8, 37, tzinfo=timezone.utc),
-            {"features": {"motion_regions": [[0.5, 0.4, 0.8, 0.8]]}},
+            {"cover_only": True, "features": {"motion_regions": [[0.5, 0.4, 0.8, 0.8]]}},
             existing_event_id=42,
             require_eligible_object=True,
             require_motion_correlation=True,
@@ -479,7 +479,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
                 "adaptive/visual_backup",
                 "backup",
                 datetime.fromtimestamp(1000.0, timezone.utc),
-                {"features": {"motion_regions": []}},
+                {"cover_only": True, "features": {"motion_regions": []}},
                 existing_event_id=42,
                 require_eligible_object=True,
                 require_motion_correlation=True,
@@ -668,7 +668,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         )
 
         assert outcome.event_id == 42
-        assert outcome.object_detected is False
+        assert outcome.object_detected is True
         assert outcome.object_activity is not None
         assert outcome.object_activity["scene_context"] == 1
         stored = json.loads(events.payload["objects_json"])
@@ -837,12 +837,13 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             require_motion_correlation=True,
         )
 
-        self.assertIsNone(outcome.event_id)
-        self.assertFalse(outcome.object_detected)
-        self.assertEqual(outcome.rejection_reason, "object_not_motion_correlated")
+        self.assertEqual(outcome.event_id, 42)
+        self.assertFalse(outcome.detected_objects[0]["alert_eligible"])
+        self.assertTrue(outcome.object_detected)
+        self.assertEqual(outcome.rejection_reason, "")
         self.assertEqual(outcome.motion_correlation["eligible_object_count"], 1)
         self.assertEqual(outcome.motion_correlation["correlated_object_count"], 0)
-        self.assertIsNone(events.payload)
+        self.assertIsNotNone(events.payload)
 
     def test_ema_rescue_accepts_spatially_correlated_object(self) -> None:
         events = RecordingEventStore()
@@ -953,8 +954,9 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             require_motion_correlation=True,
         )
 
-        self.assertIsNone(outcome.event_id)
-        self.assertEqual(outcome.rejection_reason, "object_not_motion_correlated")
+        self.assertEqual(outcome.event_id, 42)
+        self.assertFalse(outcome.detected_objects[0]["alert_eligible"])
+        self.assertEqual(outcome.rejection_reason, "")
 
     def test_ema_rescue_rejects_spatially_overlapping_stationary_object(self) -> None:
         events = RecordingEventStore()
@@ -989,8 +991,9 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             require_motion_correlation=True,
         )
 
-        self.assertIsNone(outcome.event_id)
-        self.assertEqual(outcome.rejection_reason, "object_not_motion_correlated")
+        self.assertEqual(outcome.event_id, 42)
+        self.assertFalse(outcome.detected_objects[0]["alert_eligible"])
+        self.assertEqual(outcome.rejection_reason, "")
         self.assertEqual(outcome.motion_correlation["stationary_spatial_rejection_count"], 1)
 
     def test_ema_rescue_accepts_spatial_object_with_substantial_reversal_path(self) -> None:
@@ -1102,8 +1105,9 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             require_motion_correlation=True,
         )
 
-        self.assertIsNone(outcome.event_id)
-        self.assertEqual(outcome.rejection_reason, "object_not_motion_correlated")
+        self.assertEqual(outcome.event_id, 42)
+        self.assertFalse(outcome.detected_objects[0]["alert_eligible"])
+        self.assertEqual(outcome.rejection_reason, "")
 
     def test_ema_rescue_accepts_temporally_moving_object_outside_latest_region(self) -> None:
         events = RecordingEventStore()
@@ -1177,9 +1181,10 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             require_motion_correlation=True,
         )
 
-        self.assertIsNone(outcome.event_id)
-        self.assertFalse(outcome.object_detected)
-        self.assertEqual(outcome.detected_objects, ())
+        self.assertEqual(outcome.event_id, 42)
+        self.assertFalse(outcome.detected_objects[0]["alert_eligible"])
+        self.assertTrue(outcome.object_detected)
+        self.assertEqual(len(outcome.detected_objects), 1)
 
     def test_semantic_rescue_cannot_override_missing_qualifying_confirmation(self) -> None:
         events = RecordingEventStore()
@@ -1220,9 +1225,10 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             require_motion_correlation=True,
         )
 
-        self.assertIsNone(outcome.event_id)
-        self.assertFalse(outcome.object_detected)
-        self.assertEqual(outcome.rejection_reason, "no_eligible_object")
+        self.assertEqual(outcome.event_id, 42)
+        self.assertFalse(outcome.detected_objects[0]["alert_eligible"])
+        self.assertTrue(outcome.object_detected)
+        self.assertEqual(outcome.rejection_reason, "")
 
     def test_low_confidence_stable_appearance_is_not_rescued_when_alignment_is_untrusted(self) -> None:
         events = RecordingEventStore()
@@ -1263,8 +1269,9 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             require_motion_correlation=True,
         )
 
-        self.assertIsNone(outcome.event_id)
-        self.assertEqual(outcome.rejection_reason, "no_eligible_object")
+        self.assertEqual(outcome.event_id, 42)
+        self.assertFalse(outcome.detected_objects[0]["alert_eligible"])
+        self.assertEqual(outcome.rejection_reason, "")
 
     def test_ema_rescue_scales_temporal_movement_for_distant_object(self) -> None:
         events = RecordingEventStore()

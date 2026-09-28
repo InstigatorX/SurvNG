@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 from fastapi import HTTPException
 
 from survng.app import main
-from survng.app.incident_presenter import _recording_grid_incident_payload
+from survng.app.incident_presenter import _event_row, _incident_row, _recording_grid_incident_payload
 from survng.app.recording_routes import (
     MediaExportBatchRequest,
     MediaExportMetadataRequest,
@@ -264,7 +264,13 @@ class RecordingApiTest(unittest.TestCase):
         manager = SimpleNamespace(
             camera=lambda _camera_id: object(),
             recorder=recorder,
-            events=SimpleNamespace(for_camera_range=lambda *_args, **_kwargs: events),
+            events=SimpleNamespace(
+                for_camera_range=lambda *_args, **_kwargs: events,
+                scene_incident=lambda **_kwargs: {
+                    **_incident_row("gate", [_event_row(event) for event in events]),
+                    "id": "scene-1", "incident_id": "scene-1",
+                },
+            ),
         )
 
         with patch.object(main, "manager", manager):

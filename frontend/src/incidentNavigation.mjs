@@ -121,6 +121,7 @@ export function createIncidentPageCache(loader) {
 }
 
 export function incidentDetailQuery(incident) {
+  if (incident?.incident_id && incident?.revision != null) return new URLSearchParams({ incident_id: incident.incident_id }).toString();
   const eventIds = (incident?.events || [])
     .map((event) => Number(event?.id))
     .filter((eventId) => Number.isInteger(eventId) && eventId > 0);
@@ -189,7 +190,7 @@ export function incidentEvidenceFrames(event) {
   if (!epoch) return [];
   const objects = Array.isArray(event?.objects) ? event.objects : [];
   const primary = objects
-    .filter((object) => object?.label && object?.incident_eligible !== false)
+    .filter((object) => object?.label)
     .sort((left, right) => Number(right.temporal_peak_confidence || right.confidence || 0) - Number(left.temporal_peak_confidence || left.confidence || 0))[0];
   const hasPeakOffset = Number.isFinite(Number(primary?.temporal_peak_confidence_offset_seconds));
   const detectionOffset = Number(primary?.temporal_peak_confidence_offset_seconds ?? primary?.temporal_sample_offset_seconds);
@@ -218,6 +219,17 @@ export function incidentIndexForEvent(incidents, event) {
     sameEventId(incident?.id, event.id)
     || (incident?.events || []).some((child) => sameEventId(child?.id, event.id))
   ));
+}
+
+export function incidentFocusStep({ index, count, page, pageCount, direction }) {
+  const step = direction < 0 ? -1 : 1;
+  if (!Number.isInteger(index) || index < 0 || !Number.isInteger(count) || count <= 0) return null;
+  const nextIndex = index + step;
+  if (nextIndex >= 0 && nextIndex < count) return { index: nextIndex };
+  if (!Number.isInteger(page) || !Number.isInteger(pageCount)) return null;
+  const nextPage = page + step;
+  if (nextPage < 0 || nextPage >= pageCount) return null;
+  return { page: nextPage, edge: step > 0 ? "start" : "end" };
 }
 
 export function adjacentIncident(incidents, event, direction) {

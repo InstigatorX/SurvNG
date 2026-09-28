@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import sqlite3
 import threading
@@ -89,6 +90,17 @@ class DeferredAppearanceBackfill:
             connection.execute(
                 "create index if not exists idx_appearance_backfill_ready on appearance_backfill_jobs(state, available_at)"
             )
+            columns = {row[1] for row in connection.execute("pragma table_info(appearance_backfill_jobs)")}
+            if "scene_backfill_version" not in columns:
+                connection.execute("alter table appearance_backfill_jobs add column scene_backfill_version integer not null default 1")
+                if connection.execute("select 1 from sqlite_master where type='table' and name='scene_observations'").fetchone():
+                    now = datetime.now(timezone.utc).isoformat()
+                    connection.execute(
+                        "insert into appearance_backfill_jobs(event_id,camera_id,state,available_at,created_at,updated_at) "
+                        "select event_id,camera_id,'queued',0,?,? from scene_observations where snapshot_path!='' group by event_id "
+                        "on conflict(event_id) do update set state='queued',attempts=0,reason='scene observation backfill'",
+                        (now, now),
+                    )
             connection.execute(
                 """
                 delete from appearance_backfill_jobs
@@ -149,6 +161,9 @@ class DeferredAppearanceBackfill:
                 """,
                 (int(event_id), str(camera_id), available_at, now, now),
             )
+            if callable(getattr(self.event_store, "scene_search_observations", None)):
+                connection.execute("update appearance_backfill_jobs set state='queued',attempts=0,available_at=? "
+                                   "where event_id=? and state in ('completed','skipped')", (available_at, int(event_id)))
         self._wake.set()
         return True
 
@@ -232,6 +247,8 @@ class DeferredAppearanceBackfill:
         *,
         on_inference_attempt: Callable[[], None] | None = None,
     ) -> tuple[str, int, str]:
+        if callable(getattr(self.event_store, "scene_search_observations", None)):
+            return self._process_scene_event(event_id, on_inference_attempt=on_inference_attempt)
         if self.index.has_event(event_id):
             return ("skipped", 0, "multi-frame appearance evidence already exists")
         event = self.event_store.get(int(event_id))
@@ -259,7 +276,6 @@ class DeferredAppearanceBackfill:
         for position, detected in enumerate(objects):
             if (
                 not isinstance(detected, dict)
-                or detected.get("incident_eligible") is False
                 or detected.get("snapshot_visible") is False
             ):
                 continue
@@ -334,6 +350,81 @@ class DeferredAppearanceBackfill:
         if indexed <= 0 and self.index.has_event(event_id):
             return ("skipped", 0, "appearance evidence was indexed concurrently")
         return ("completed", indexed, f"indexed {indexed} snapshot appearance vector(s)")
+
+    def _process_scene_event(self, event_id: int, *, on_inference_attempt=None) -> tuple[str, int, str]:
+        """Index one retained view per subject, without excluding non-alerting people."""
+        if self.event_store.get(event_id) is None:
+            return ("failed", 0, "event no longer exists")
+        covered, tracked = self.index.scene_coverage(event_id)
+        subjects = {}
+        after_id = ""
+        while True:
+            rows = self.event_store.scene_search_observations(event_id=event_id, after_id=after_id, limit=100)
+            for observation in rows:
+                item = json.loads(observation["payload_json"])
+                label = str(item.get("label") or "").lower()
+                if (observation["object_id"] in covered or item.get("snapshot_visible") is False
+                        or not self.config.reid_enabled_for_label(label)):
+                    continue
+                if item.get("track_id") is not None and (label, int(item["track_id"])) in tracked:
+                    continue
+                previous = subjects.get(observation["object_id"])
+                if previous is None or float(item.get("confidence") or 0) > float(previous[1].get("confidence") or 0):
+                    subjects[observation["object_id"]] = (observation, item)
+            if len(rows) < 100:
+                break
+            after_id = rows[-1]["id"]
+        records = []
+        unavailable = 0
+        for object_id, (observation, item) in subjects.items():
+            label = str(item["label"]).lower()
+            try:
+                path = event_snapshot_path(self.storage_dir, observation, self.media_storage)
+            except (FileNotFoundError, PermissionError):
+                unavailable += 1
+                continue
+            frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
+            if frame is None:
+                unavailable += 1
+                continue
+            box = item.get("box") or item.get("bbox")
+            try:
+                x1, y1, x2, y2 = ([float(box[key]) for key in ("x1", "y1", "x2", "y2")]
+                                  if isinstance(box, dict) else [float(value) for value in box])
+                height, width = frame.shape[:2]
+                source_width = max(1, int(item.get("detection_frame_width") or width))
+                source_height = max(1, int(item.get("detection_frame_height") or height))
+                x1, y1 = max(0, int(x1 * width / source_width)), max(0, int(y1 * height / source_height))
+                x2, y2 = min(width, int(x2 * width / source_width)), min(height, int(y2 * height / source_height))
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            if min(x2 - x1, y2 - y1) < 8 or (x2 - x1) * (y2 - y1) < self.config.deferred_reid_min_crop_pixels:
+                continue
+            if not self.encoder.supports_label(label):
+                return ("deferred", 0, f"{label} ReID model is not ready")
+            identity = self.encoder.model_identity_for_label(label)
+            if identity is None:
+                return ("deferred", 0, f"{label} ReID model identity is not ready")
+            if on_inference_attempt is not None:
+                on_inference_attempt()
+            try:
+                embedding = self.encoder.embed_for_label(label, frame[y1:y2, x1:x2])
+            except InferenceUnavailable as exc:
+                return ("deferred", 0, str(exc))
+            # An internal subject key in the reserved high range is distinct
+            # from tracker IDs; the explicit scene/observation references carry provenance.
+            track_id = (1 << 62) | (int.from_bytes(hashlib.sha256(object_id.encode()).digest()[:8], "big") & ((1 << 62) - 1))
+            captured = datetime.fromtimestamp(float(observation["captured_epoch"]), timezone.utc).isoformat()
+            records.append({**identity, "embedding": embedding, "label": label, "track_id": track_id,
+                            "observation_count": 1, "quality": min(1., max(0., float(item.get("snapshot_quality_score") or .5))),
+                            "match_threshold": min(1., float(identity["match_threshold"]) + .04),
+                            "first_seen": captured, "last_seen": captured, "created_at": captured,
+                            "source": "scene_observation", "observation_id": observation["id"], "scene_object_id": object_id})
+        if not records:
+            return ("failed", 0, "retained observation images unavailable") if unavailable else ("skipped", 0, "no missing supported subject crops")
+        indexed = self.index.append_event(event_id, str(next(iter(subjects.values()))[0]["camera_id"]), records)
+        return ("failed" if unavailable else "completed", indexed,
+                f"indexed {indexed} retained subject vector(s); {unavailable} unavailable image(s)")
 
     def _run(self) -> None:
         interval = max(0.5, 60.0 / max(1, self.config.deferred_reid_rate_per_minute))

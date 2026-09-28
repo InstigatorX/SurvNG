@@ -113,9 +113,19 @@ def create_semantic_router(deps: SemanticRouteDependencies) -> SemanticRouteBund
         exclude_event_id: int | None = None,
     ) -> list[dict[str, Any]]:
         best_by_event: dict[int, Any] = {}
+        canonical_by_event: dict[int, dict] = {}
+        seen_incidents: set[str] = set()
+        scene_resolver = getattr(active_manager.events, "scene_incident", None)
         for hit in hits:
             if exclude_event_id is not None and hit.event_id == exclude_event_id:
                 continue
+            incident = scene_resolver(event_id=hit.event_id) if callable(scene_resolver) else None
+            if incident:
+                incident_id = str(incident["incident_id"])
+                if incident_id in seen_incidents:
+                    continue
+                seen_incidents.add(incident_id)
+                canonical_by_event[hit.event_id] = incident
             best_by_event.setdefault(hit.event_id, hit)
             if len(best_by_event) >= maximum:
                 break
@@ -186,6 +196,7 @@ def create_semantic_router(deps: SemanticRouteDependencies) -> SemanticRouteBund
             if event is None:
                 continue
             thumbnail_url = f"{base_path}/api/events/{event_id}/thumbnail.jpg?width=320&quality=82&object_focus=true&aspect_w=16&aspect_h=11"
+            snapshot_url = f"{base_path}/api/events/{event_id}/snapshot.jpg"
             bbox = hit.bbox
             if bbox and len(bbox) == 4:
                 try:
@@ -196,7 +207,15 @@ def create_semantic_router(deps: SemanticRouteDependencies) -> SemanticRouteBund
                     )
                 except (TypeError, ValueError, OverflowError):
                     pass
+            observation_id = str(getattr(hit, "observation_id", "") or "")
+            if observation_id:
+                from urllib.parse import quote
+                snapshot_url = f"{base_path}/api/incidents/observations/{quote(observation_id, safe='')}/snapshot"
+                thumbnail_url = snapshot_url
+            canonical = canonical_by_event.get(event_id)
             results.append({
+                "incident_id": canonical["incident_id"] if canonical else None,
+                "establishment": canonical.get("establishment") if canonical else None,
                 "score": round(hit.score, 6),
                 "rank_score": round(
                     hit.rank_score if hit.rank_score is not None else hit.score,
@@ -209,9 +228,10 @@ def create_semantic_router(deps: SemanticRouteDependencies) -> SemanticRouteBund
                     "source_key": hit.source_key,
                     "object_label": hit.object_label,
                     "bbox": hit.bbox,
+                    "observation_id": observation_id or None,
                 },
                 "event": event,
-                "snapshot_url": f"{base_path}/api/events/{event_id}/snapshot.jpg",
+                "snapshot_url": snapshot_url,
                 "thumbnail_url": thumbnail_url,
             })
         return results

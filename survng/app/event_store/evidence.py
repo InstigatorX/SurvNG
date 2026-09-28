@@ -81,6 +81,7 @@ class EventStoreEvidenceMixin:
         conn.execute("update events set evidence_revision=1 where id=?", (event_id,))
         row = conn.execute("select * from events where id=?", (event_id,)).fetchone()
         objects = _objects(row["objects_json"])
+        self._scene_ingest(conn, row)
         # Initial callbacks are best effort too. The projection obligation is
         # durable even if the process stops immediately after event admission.
         self._evidence_outbox(conn, row, "evidence_updated", reason="incident_admitted")
@@ -121,6 +122,11 @@ class EventStoreEvidenceMixin:
         changed = (before["snapshot_path"] or "") != (row["snapshot_path"] or "") or (
             self._presentation_evidence(before_objects) != self._presentation_evidence(after_objects)
         )
+        if reason == "tracking_updated":
+            self._scene_ingest(conn, row, notify=False)
+            tracking = next((item.get("object_tracking") for item in after_objects if item.get("status") == "object_tracking"), {})
+            self._checkpoint_scene_tracking(conn, event_id, tracking)
+        self._scene_ingest(conn, row, force_revision=changed or reason == "tracking_updated")
         if changed:
             conn.execute("update events set evidence_revision=evidence_revision+1 where id=?", (event_id,))
             row = conn.execute("select * from events where id=?", (event_id,)).fetchone()

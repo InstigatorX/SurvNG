@@ -62,6 +62,7 @@ class SemanticEvidence:
     object_label: str = ""
     bbox: tuple[int, int, int, int] | None = None
     evidence_revision: int = 0
+    observation_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ class SemanticSearchHit:
     rank_score: float | None = None
     match_strength: str = "visual_similarity"
     component_scores: Mapping[str, float] | None = None
+    observation_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -163,10 +165,8 @@ def semantic_event_objects(event: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def semantic_event_searchable(event: dict[str, Any]) -> bool:
-    """One eligibility policy for live work, backfill and durable reconciliation."""
-    return bool(event.get("snapshot_path")) and any(
-        item.get("incident_eligible") is not False for item in semantic_event_objects(event)
-    )
+    """Search observed evidence independently of recording and alert decisions."""
+    return bool(event.get("snapshot_path")) and bool(semantic_event_objects(event))
 
 
 def semantic_object_bbox(item: dict[str, Any]) -> tuple[float, float, float, float] | None:
@@ -352,6 +352,8 @@ class SemanticIndex:
                 connection.execute(
                     "alter table semantic_embeddings add column evidence_revision integer not null default 0"
                 )
+            if "observation_id" not in columns:
+                connection.execute("alter table semantic_embeddings add column observation_id text not null default ''")
             connection.execute(
                 """
                 create index if not exists idx_semantic_generation_time
@@ -364,6 +366,15 @@ class SemanticIndex:
                 """
                 create index if not exists idx_semantic_event
                 on semantic_embeddings(event_id)
+                """
+            )
+            # Point lookups by observation must not scan a model generation.
+            connection.execute(
+                """
+                create index if not exists idx_semantic_observation
+                on semantic_embeddings(
+                    observation_id, image_path, model_fingerprint, preprocessing_fingerprint
+                )
                 """
             )
             connection.execute("""
@@ -385,6 +396,7 @@ class SemanticIndex:
         expected_event: dict[str, Any] | None = None,
         reconcile_sources: dict[str, set[str]] | None = None,
         projection_receipt: dict[str, Any] | None = None,
+        expected_observation: dict[str, Any] | None = None,
     ) -> int:
         records = list(evidence)
         if projection_receipt is not None and expected_event is None:
@@ -406,6 +418,7 @@ class SemanticIndex:
                 identity.preprocessing_fingerprint, identity.dimensions,
                 np.ascontiguousarray(vector, dtype=np.float16).tobytes(), now,
                 int(record.evidence_revision),
+                str(record.observation_id),
             ))
         with self._lock, self._connect() as connection:
             connection.execute("begin immediate")
@@ -414,14 +427,19 @@ class SemanticIndex:
                 # outbox notification. In-memory tokens alone cannot see it.
                 if not self._event_matches(connection, expected_event):
                     return 0
+            if expected_observation is not None:
+                row = connection.execute("select snapshot_path,payload_json from scene_observations where id=?",
+                                         (expected_observation["id"],)).fetchone()
+                if row is None or any(row[key] != expected_observation[key] for key in ("snapshot_path", "payload_json")):
+                    return 0
             connection.executemany(
                 """
                 insert into semantic_embeddings (
                     event_id, camera_id, captured_at, source_kind, source_key,
                     image_path, object_label, bbox_json, implementation,
                     model_fingerprint, preprocessing_fingerprint, embedding_size,
-                    embedding_blob, created_at, evidence_revision
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    embedding_blob, created_at, evidence_revision, observation_id
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(
                     event_id, source_kind, source_key,
                     model_fingerprint, preprocessing_fingerprint
@@ -434,7 +452,8 @@ class SemanticIndex:
                     embedding_size=excluded.embedding_size,
                     embedding_blob=excluded.embedding_blob,
                     created_at=excluded.created_at,
-                    evidence_revision=excluded.evidence_revision
+                    evidence_revision=excluded.evidence_revision,
+                    observation_id=excluded.observation_id
                 """,
                 prepared,
             )
@@ -451,7 +470,7 @@ class SemanticIndex:
                     connection.execute(
                         "delete from semantic_embeddings where event_id = ? "
                         "and model_fingerprint = ? and preprocessing_fingerprint = ? "
-                        f"and source_kind = ?{clause}", parameters,
+                        f"and source_kind = ? and observation_id=''{clause}", parameters,
                     )
             if projection_receipt is not None:
                 connection.execute(
@@ -536,15 +555,36 @@ class SemanticIndex:
         parameters.append(self.MAX_CANDIDATE_ROWS)
         with self._connect() as connection:
             columns = {row[1] for row in connection.execute("pragma table_info(events)")}
+            has_scene_observations = connection.execute(
+                "select 1 from sqlite_master where type='table' and name='scene_observations'"
+            ).fetchone() is not None
+            effective_label = "object_label"
+            if has_scene_observations:
+                effective_label = ("coalesce((select s.label_override from scene_observations o "
+                                   "join scene_objects s on s.id=o.object_id where "
+                                   "o.id=semantic_embeddings.observation_id),object_label)")
+                clauses = [clause.replace("object_label in", f"{effective_label} in") for clause in clauses]
+                # A retained observation supersedes the identical cover crop,
+                # including its corrected label, without duplicating a hit.
+                clauses.append("not(observation_id='' and source_kind='object_crop' and exists("
+                               "select 1 from semantic_embeddings observed where observed.observation_id<>'' "
+                               "and observed.event_id=semantic_embeddings.event_id "
+                               "and observed.image_path=semantic_embeddings.image_path "
+                               "and observed.bbox_json=semantic_embeddings.bbox_json "
+                               "and observed.model_fingerprint=semantic_embeddings.model_fingerprint "
+                               "and observed.preprocessing_fingerprint=semantic_embeddings.preprocessing_fingerprint))")
             if "evidence_revision" in columns and "snapshot_path" in columns:
                 # Retain prior embeddings until replacement succeeds, but never
                 # present their scores/crops as evidence for the current image.
-                clauses.append("exists(select 1 from events e where e.id=semantic_embeddings.event_id "
-                               "and e.evidence_revision=semantic_embeddings.evidence_revision "
-                               "and e.snapshot_path=semantic_embeddings.image_path)")
+                current = ("(observation_id='' and exists(select 1 from events e where e.id=semantic_embeddings.event_id "
+                           "and e.evidence_revision=semantic_embeddings.evidence_revision "
+                           "and e.snapshot_path=semantic_embeddings.image_path))")
+                retained = ("(observation_id<>'' and exists(select 1 from scene_observations o "
+                            "where o.id=semantic_embeddings.observation_id and o.snapshot_path=semantic_embeddings.image_path))")
+                clauses.append(f"({current} or {retained})" if has_scene_observations else current)
             rows = connection.execute(
                 f"""
-                select * from semantic_embeddings
+                select *, {effective_label} as search_object_label from semantic_embeddings
                 where {' and '.join(clauses)}
                 order by captured_at desc, id desc
                 limit ?
@@ -629,10 +669,11 @@ class SemanticIndex:
                 event_id=event_id, camera_id=str(row["camera_id"]),
                 captured_at=str(row["captured_at"]), source_kind=str(row["source_kind"]),
                 source_key=str(row["source_key"]), image_path=str(row["image_path"]),
-                object_label=str(row["object_label"]), bbox=bbox, score=score,
+                object_label=str(row["search_object_label"]), bbox=bbox, score=score,
                 rank_score=rank_score,
                 match_strength=match_strength,
                 component_scores=component_scores,
+                observation_id=str(row["observation_id"]),
             ))
             seen_event_ids.add(event_id)
             if len(hits) >= max(1, min(int(limit), 500)):
@@ -680,11 +721,11 @@ class SemanticIndex:
                     event_id, camera_id, captured_at, source_kind, source_key,
                     image_path, object_label, bbox_json, implementation,
                     model_fingerprint, preprocessing_fingerprint, embedding_size,
-                    embedding_blob, created_at, evidence_revision
+                    embedding_blob, created_at, evidence_revision, observation_id
                 )
                 select event_id, camera_id, captured_at, source_kind, source_key,
                     image_path, object_label, bbox_json, ?, ?, ?, ?,
-                    embedding_blob, ?, evidence_revision
+                    embedding_blob, ?, evidence_revision, observation_id
                 from semantic_embeddings
                 where model_fingerprint = ? and preprocessing_fingerprint = ?
                 on conflict(
@@ -710,7 +751,7 @@ class SemanticIndex:
                 """
                 select 1 from semantic_embeddings
                 where event_id = ? and model_fingerprint = ?
-                    and preprocessing_fingerprint = ? limit 1
+                    and preprocessing_fingerprint = ? and observation_id='' limit 1
                 """,
                 (int(event_id), identity.model_fingerprint, identity.preprocessing_fingerprint),
             ).fetchone()
@@ -750,6 +791,7 @@ class SemanticIndex:
                 select source_key from semantic_embeddings
                 where event_id = ? and model_fingerprint = ?
                     and preprocessing_fingerprint = ? and source_kind = ?
+                    and observation_id=''
                     {current_evidence}
                 """,
                 parameters,
@@ -785,11 +827,32 @@ class SemanticIndex:
                 if not self._event_matches(connection, expected_event):
                     return 0
             cursor = connection.execute(
-                "delete from semantic_embeddings where event_id = ?",
+                "delete from semantic_embeddings where event_id = ?" + (" and observation_id=''" if expected_event is not None else ""),
                 (int(event_id),),
             )
             connection.execute("delete from semantic_projection_receipts where event_id=?", (int(event_id),))
         return max(0, int(cursor.rowcount or 0))
+
+    def observation_indexed(self, observation: dict[str, Any], identity: SemanticModelIdentity) -> bool:
+        with self._connect() as connection:
+            return connection.execute(
+                "select 1 from semantic_embeddings where observation_id=? and image_path=? "
+                "and model_fingerprint=? and preprocessing_fingerprint=? limit 1",
+                (observation["id"], observation["snapshot_path"], identity.model_fingerprint, identity.preprocessing_fingerprint),
+            ).fetchone() is not None
+
+    def indexed_observation_keys(self, event_id: int, identity: SemanticModelIdentity) -> set[tuple[str, str]]:
+        """Observation/image pairs already stored for this event and model generation."""
+        if event_id <= 0:
+            return set()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "select observation_id, image_path from semantic_embeddings "
+                "where event_id=? and model_fingerprint=? and preprocessing_fingerprint=? "
+                "and observation_id!=''",
+                (int(event_id), identity.model_fingerprint, identity.preprocessing_fingerprint),
+            ).fetchall()
+        return {(str(row["observation_id"]), str(row["image_path"])) for row in rows}
 
     def indexed_event_ids(self) -> set[int]:
         """Return event IDs with any semantic evidence, across model generations."""
@@ -1553,7 +1616,9 @@ class SemanticSearchService(DisabledSemanticSearch):
                 if self._stop.is_set():
                     return
                 event_id = int(event.get("id") or 0)
-                if not semantic_event_searchable(event):
+                has_scene = getattr(event_store, "scene_has_search_observation", None)
+                scene_present = has_scene(event_id) if callable(has_scene) else next(self._scene_observations(event_id), None) is not None
+                if not semantic_event_searchable(event) and not scene_present:
                     if event_id > 0 and event_id in indexed_event_ids:
                         # Resolve current evidence before acting on a historical snapshot.
                         self.index_event(event)
@@ -1607,6 +1672,9 @@ class SemanticSearchService(DisabledSemanticSearch):
         with self._event_revision_lock:
             return self._queue_event_revision(self._revision_event(event))
 
+    def semantic_searchable(self, event: dict[str, Any]) -> bool:
+        return semantic_event_searchable(event) or next(self._scene_observations(int(event.get("id") or 0)), None) is not None
+
     def _queue_event_revision(self, event: dict[str, Any]) -> bool:
         if not event.get("id"):
             return False
@@ -1614,7 +1682,8 @@ class SemanticSearchService(DisabledSemanticSearch):
             # A negative correction is complete without an encoder. Queued
             # work checks the same policy again before any image/model work.
             self.index.delete_event(int(event["id"]), expected_event=event)
-            return True
+            if not next(self._scene_observations(int(event["id"])), None):
+                return True
         if self.encoder is None:
             return False
         revision = event["_semantic_revision"]
@@ -1649,6 +1718,8 @@ class SemanticSearchService(DisabledSemanticSearch):
         if encoder is None:
             return False
         event_id = int(event.get("id") or 0)
+        if self.config.index_object_crops and self._scene_projection_missing(event_id, encoder.identity):
+            return False
         objects = semantic_event_objects(event)
         if not semantic_event_searchable(event):
             return not self.index.event_indexed(event_id, encoder.identity)
@@ -1693,7 +1764,121 @@ class SemanticSearchService(DisabledSemanticSearch):
                 if isinstance(revision, _SemanticEventRevision):
                     revision.pending = False
 
+    def _scene_projection_missing(self, event_id: int, identity) -> bool:
+        """True when an indexable observation has no embedding for this generation.
+
+        Already indexed events are decided from ids and paths. Payloads are read
+        only for observations that are not in the index yet.
+        """
+        media = getattr(self._event_store, "scene_observation_media", None)
+        payloads = getattr(self._event_store, "scene_observation_payloads", None)
+        indexed = self.index.indexed_observation_keys(event_id, identity)
+        if not callable(media) or not callable(payloads):
+            return any(
+                (str(observation["id"]), str(observation.get("snapshot_path") or "")) not in indexed
+                for observation in self._scene_observations(event_id)
+            )
+        missing = [
+            str(row["id"]) for row in media(event_id)
+            if (str(row["id"]), str(row.get("snapshot_path") or "")) not in indexed
+        ]
+        if not missing:
+            return False
+        for observation in payloads(missing):
+            if self._indexable_scene_observation(observation):
+                return True
+        return False
+
+    @staticmethod
+    def _indexable_scene_observation(observation: dict[str, Any]) -> bool:
+        try:
+            item = json.loads(observation["payload_json"])
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            isinstance(item, dict) and item.get("label") and observation.get("snapshot_path")
+            and item.get("snapshot_visible") is not False and semantic_object_bbox(item) is not None
+        )
+
+    def _scene_observations(self, event_id: int):
+        getter = getattr(self._event_store, "scene_search_observations", None)
+        if not callable(getter) or not self.config.index_object_crops:
+            return
+        after_id = ""
+        while True:
+            rows = getter(event_id=event_id, after_id=after_id, limit=100)
+            for observation in rows:
+                try:
+                    item = json.loads(observation["payload_json"])
+                except (TypeError, ValueError):
+                    continue
+                if (isinstance(item, dict) and item.get("label") and observation.get("snapshot_path")
+                        and item.get("snapshot_visible") is not False and semantic_object_bbox(item) is not None):
+                    yield observation
+            if len(rows) < 100:
+                return
+            after_id = str(rows[-1]["id"])
+
+    def _index_scene_observations(self, event_id: int) -> int:
+        """Retain independently addressable crops within the existing worker budget."""
+        encoder = self.encoder
+        if encoder is None:
+            return 0
+        identity = encoder.identity
+        written = 0
+        indexed = self.index.indexed_observation_keys(event_id, identity)
+        for observation in self._scene_observations(event_id):
+            if self._stop.is_set():
+                break
+            identity_key = (str(observation["id"]), str(observation.get("snapshot_path") or ""))
+            if identity_key in indexed:
+                continue
+            indexed.add(identity_key)
+            item = json.loads(observation["payload_json"])
+            event = {"snapshot_path": observation["snapshot_path"], "objects": [item]}
+            try:
+                # Load only retained evidence. A missing frame never produces
+                # a vector or a successful projection receipt.
+                path = event_snapshot_path(self._storage_dir, event, self._media_storage)
+            except (FileNotFoundError, PermissionError):
+                self._skipped_missing += 1
+                continue
+            frame = cv2.imread(str(path))
+            if frame is None:
+                self._skipped_missing += 1
+                continue
+            height, width = frame.shape[:2]
+            x1, y1, x2, y2 = semantic_object_bbox(item)
+            source_width = positive_dimension(item.get("detection_frame_width"), width)
+            source_height = positive_dimension(item.get("detection_frame_height"), height)
+            box = (max(0, round(x1 * width / source_width)), max(0, round(y1 * height / source_height)),
+                   min(width, round(x2 * width / source_width)), min(height, round(y2 * height / source_height)))
+            if box[2] <= box[0] or box[3] <= box[1]:
+                continue
+            evidence = SemanticEvidence(
+                event_id, str(observation["camera_id"]),
+                datetime.fromtimestamp(float(observation["captured_epoch"]), timezone.utc).isoformat(),
+                "object_crop", f"scene:{observation['id']}", str(observation["snapshot_path"]),
+                str(item["label"]), box, observation_id=str(observation["id"]),
+            )
+            with self._encoder_lock:
+                if self.encoder is not encoder:
+                    break
+                embeddings = encoder.encode_images([frame[box[1]:box[3], box[0]:box[2]]])
+            count = self.index.upsert([evidence], embeddings, identity, expected_observation=observation)
+            written += count
+            self._indexed += count
+            # Historical scene evidence shares the configured pacing and the
+            # one semantic worker, never spawning unbounded inference work.
+            if self._stop.wait(self.config.backfill_pause_seconds):
+                break
+        return written
+
     def index_event(self, event: dict[str, Any]) -> int:
+        written = self._index_current_event(event)
+        return written + self._index_scene_observations(int(event.get("id") or 0))
+
+    def _index_current_event(self, event: dict[str, Any]) -> int:
         """Synchronously index one event for tooling and the worker loop.
 
         New evidence is generation-isolated and idempotent. Encoder use is

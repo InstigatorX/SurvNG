@@ -1414,7 +1414,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
   }, []);
 
   useEffect(() => {
-    if (!liveIncidentGalleryReady) return undefined;
+    if (mobileLiveView) return undefined;
     let cancelled = false;
     function feedQuery(page) {
       const query = new URLSearchParams({
@@ -1460,7 +1460,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
     return () => {
       cancelled = true;
     };
-  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPage, incidentsPerPage, incidentRefreshToken, liveIncidentGalleryReady]);
+  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPage, incidentsPerPage, incidentRefreshToken, mobileLiveView]);
 
   useEffect(() => {
     if (!focusedSummary || !focusedDetailQuery || incidentDetails[focusedDetailQuery]) return;

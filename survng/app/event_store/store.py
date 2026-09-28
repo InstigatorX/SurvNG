@@ -19,11 +19,21 @@ from .jobs import EventStoreJobsMixin
 from .evidence import EventStoreEvidenceMixin, EventSnapshotChangedError
 from .motion_intelligence import EventStoreMotionIntelligenceMixin
 from .tracking import EventStoreTrackingMixin
+from .scenes import EventStoreSceneMixin
+from .scene_acquisition import EventStoreSceneAcquisitionMixin
+from .scene_admission import EventStoreSceneAdmissionMixin
+from .scene_review import EventStoreSceneReviewMixin
+from .scene_tracking import EventStoreSceneTrackingMixin
 
 LOGGER = logging.getLogger(__name__)
 
 
 class EventStore(
+    EventStoreSceneReviewMixin,
+    EventStoreSceneAdmissionMixin,
+    EventStoreSceneAcquisitionMixin,
+    EventStoreSceneMixin,
+    EventStoreSceneTrackingMixin,
     EventStoreEvidenceMixin,
     EventStoreJobsMixin,
     EventStoreCalibrationMixin,
@@ -74,6 +84,14 @@ class EventStore(
         self._last_detection_job_prune_monotonic = 0.0
         self._init_db()
         self._init_evidence_db()
+        self._init_scene_acquisition_db()
+        self._init_scene_db()
+        while not self.backfill_existing_scene_acquisitions(batch_size=1000)["complete"]:
+            pass
+        while not self.migrate_scene_establishment(batch_size=100)["complete"]:
+            pass
+        with self._connect() as conn:
+            self._init_scene_tracking_schema(conn)
         self._recover_snapshot_deletion_claims()
         self._init_jobs_db()
         self._migrate_legacy_jobs()
@@ -91,7 +109,9 @@ class EventStore(
         """Return continuous segments still referenced by incident history."""
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                "SELECT DISTINCT recording_path FROM events WHERE recording_path != ''"
+                "SELECT recording_path FROM events WHERE recording_path != '' "
+                "UNION SELECT recording_path FROM scene_observations WHERE recording_path != '' "
+                "UNION SELECT recording_path FROM acquired_observations WHERE recording_path != ''"
             ).fetchall()
         protected: set[str] = set()
         for row in rows:
@@ -1404,7 +1424,8 @@ class EventStore(
                        row_number() over (
                            partition by snapshot_path order by created_at desc, id desc
                        ) as snapshot_rank
-                from events where snapshot_path != ''
+                from (select id,camera_id,snapshot_path,snapshot_size_bytes,created_at from events where snapshot_path != ''
+                      union all select 0,camera_id,snapshot_path,snapshot_size_bytes,created_at from scene_snapshot_assets)
             )
         """
         with self._connect() as conn:
@@ -1487,11 +1508,19 @@ class EventStore(
     ) -> None:
         if not paths:
             return
+        self._expire_acquired_snapshots(conn, paths)
         for path in paths:
+            conn.execute("insert or ignore into scene_expired_snapshots values(?)",(path,))
+            scene_ids = [row[0] for row in conn.execute(
+                "select distinct p.incident_id from scene_observations o join scene_episodes p on p.id=o.episode_id where o.snapshot_path=?", (path,))]
+            conn.execute("update scene_observations set snapshot_path='' where snapshot_path=?", (path,))
+            conn.execute("delete from scene_snapshot_assets where snapshot_path=?", (path,))
             before_rows = conn.execute("select * from events where snapshot_path=?", (path,)).fetchall()
             conn.execute("update events set snapshot_path='',snapshot_size_bytes=0 where snapshot_path=?", (path,))
             for before in before_rows:
                 self._finish_evidence_commit(conn, int(before["id"]), before, reason="snapshot_expired")
+            for incident_id in scene_ids:
+                self._scene_changed(conn, incident_id, notify=False)
         conn.executemany(
             "update motion_audits set snapshot_path = '' where snapshot_path = ?",
             ((path,) for path in paths),
@@ -1539,7 +1568,8 @@ class EventStore(
                        row_number() over (
                            partition by snapshot_path order by created_at desc, id desc
                        ) as snapshot_rank
-                from events where snapshot_path != ''
+                from (select id,camera_id,snapshot_path,snapshot_size_bytes,created_at from events where snapshot_path != ''
+                      union all select 0,camera_id,snapshot_path,snapshot_size_bytes,created_at from scene_snapshot_assets)
             )
         """
         with self._lock, self._connect() as conn:
@@ -1631,11 +1661,14 @@ class EventStore(
             referenced = bool(conn.execute(
                 """
                 select exists(select 1 from events where snapshot_path = ?)
+                    or exists(select 1 from scene_observations where snapshot_path = ?)
+                    or exists(select 1 from acquired_observations where snapshot_path = ?)
+                    or exists(select 1 from acquired_samples where snapshot_path = ?)
                     or exists(select 1 from motion_audits where snapshot_path = ?)
                     or exists(select 1 from event_cover_requirements where state='pending'
                         and deadline_epoch > unixepoch() and json_extract(payload_json, '$.snapshot_path') = ?)
                 """,
-                (portable, portable, portable),
+                (portable, portable, portable, portable, portable, portable),
             ).fetchone()[0])
             if not referenced:
                 has_faces = conn.execute(
@@ -1679,6 +1712,8 @@ class EventStore(
             ).fetchone()
             if row is None:
                 return None
+            if not self._scene_tracking_lease_valid(conn, event_id, tracking):
+                return dict(row)
             try:
                 objects = json.loads(str(row["objects_json"] or "[]"))
             except (TypeError, ValueError):
@@ -1722,6 +1757,27 @@ class EventStore(
             # tracking metadata so eligibility and evidence stay consistent.
             for index, fields in tracking_motion_promotions(objects, tracking).items():
                 objects[index].update(fields)
+            zone_policy = tracking.get("establishment_zone_policy") if isinstance(tracking, dict) else None
+            if isinstance(zone_policy, dict):
+                tracking = {key: value for key, value in tracking.items() if key != "establishment_zone_policy"}
+                stamped = False
+                for item in objects:
+                    if not isinstance(item, dict) or item.get("status") != "motion_qualification":
+                        continue
+                    stamped = True
+                    qualification = item.get("motion_qualification")
+                    if not isinstance(qualification, dict):
+                        qualification = {}
+                        item["motion_qualification"] = qualification
+                    # A snapshot taken when the event was established stays with
+                    # that episode. Tracking fills one in only when it is absent.
+                    if not isinstance(qualification.get("establishment_zone_policy"), dict):
+                        qualification["establishment_zone_policy"] = zone_policy
+                if not stamped:
+                    objects.append({
+                        "status": "motion_qualification",
+                        "motion_qualification": {"establishment_zone_policy": zone_policy},
+                    })
             objects.append({"status": "object_tracking", "object_tracking": tracking})
             objects_json = json.dumps(objects, separators=(",", ":"))
             conn.execute(

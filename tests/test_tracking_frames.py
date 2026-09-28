@@ -455,6 +455,49 @@ def test_recorder_epoch_rollover_is_a_tracking_continuity_boundary() -> None:
     assert batch.interruption == "recorder_epoch_changed"
 
 
+def test_abutting_segments_stay_in_one_tracking_batch() -> None:
+    recorder = Mock()
+    recorder.ffmpeg_path = "/usr/bin/ffmpeg"
+    recorder.timestamp_health.return_value = {
+        ("gate", "main"): {"last_rollover_at": "1970-01-01T00:16:40+00:00"}
+    }
+    recorder.recording_rows_between.return_value = [
+        {"start_epoch": 990.0, "end_epoch": 1000.0, "path": "/no/such/a.mp4"},
+        {"start_epoch": 1000.0, "end_epoch": 1010.0, "path": "/no/such/b.mp4"},
+    ]
+    service = _service(recorder=recorder, sample_fps=2.0)
+    frame = np.zeros((10, 20, 3), dtype=np.uint8)
+    service.remember(frame, 999.5, source="live")
+    service.remember(frame, 1000.5, source="live")
+
+    batch = service.read_recorded_frames(999.0, 1002.0, 2.0, 640)
+
+    assert batch.interruption is None
+    assert [sample[0] for sample in batch] == [999.5, 1000.5]
+    assert any(call.args[2] == 1002.0 for call in recorder.recording_rows_between.call_args_list)
+
+
+def test_discontinuous_segment_still_interrupts_tracking() -> None:
+    recorder = Mock()
+    recorder.ffmpeg_path = "/usr/bin/ffmpeg"
+    recorder.timestamp_health.return_value = {
+        ("gate", "main"): {"last_rollover_at": "1970-01-01T00:16:40+00:00"}
+    }
+    recorder.recording_rows_between.return_value = [
+        {"start_epoch": 990.0, "end_epoch": 1000.0, "path": "/no/such/a.mp4"},
+        {"start_epoch": 1003.0, "end_epoch": 1013.0, "path": "/no/such/b.mp4"},
+    ]
+    service = _service(recorder=recorder, sample_fps=2.0)
+    frame = np.zeros((10, 20, 3), dtype=np.uint8)
+    service.remember(frame, 999.5, source="live")
+    service.remember(frame, 1000.5, source="live")
+
+    batch = service.read_recorded_frames(999.0, 1005.0, 2.0, 640)
+
+    assert batch.interruption == "recorder_epoch_changed"
+    assert [sample[0] for sample in batch] == [999.5]
+
+
 def test_tracking_batch_uses_maintained_index_without_filesystem_discovery() -> None:
     recorder = Mock()
     recorder.ffmpeg_path = "/usr/bin/ffmpeg"

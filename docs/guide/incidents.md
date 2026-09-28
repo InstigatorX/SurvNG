@@ -1,8 +1,19 @@
 # Incidents
 
-**Incidents** answers: what important activity did SurvNG keep?
+**Incidents** answers: what happened, who or what was present, and which camera views belong together?
 
-An incident is more than a motion blink. It is a stretch of activity with evidence you can inspect — usually a picture, object labels when detection is on, and links into recorded video.
+An incident contains a complete inventory of observed objects across its camera episodes. Objects remain included when they are stationary, in an Ignore zone, uncertain, or absent from the cover image. Notification rules control alerts separately. Turning notifications off for an incident zone does not stop that zone from creating an incident.
+
+A detector observation does not, by itself, establish an incident. Periodic
+discovery first retains observations, then checks surrounding recorded frames for
+physical activity. Zones then decide whether that activity can open or prolong
+an incident. Activity that is only inside an enabled Ignore zone does not.
+Activity in an eligible zone on the same camera does, and the incident still
+contains the rest of that camera episode, including ignored objects. A camera
+or motion notice needs a detection in an eligible zone when Ignore zones or
+required incident zones are configured; the notice alone is not enough. The
+incident explains which evidence established it, separately from why an alert
+was sent.
 
 ![Incidents workspace with evidence viewer](images/incidents-workspace.png)
 
@@ -18,7 +29,9 @@ Use filters to narrow the list:
 Open an incident to see:
 
 - The representative snapshot
-- Labels and confidence SurvNG assigned
+- All observed objects, their visible intervals, and supporting evidence
+- Camera episodes and analysis coverage
+- Corrections for labels, object associations, and incident boundaries
 - Related activity nearby in time
 - Actions to jump into Timeline at the same moment
 
@@ -68,6 +81,17 @@ monocular estimates; use them as scene context rather than precise measurements.
 
 ## What is not an incident
 
+**Observations**, linked from incident review, keeps candidates awaiting confirmation,
+activity that could not be established, and incomplete analysis. Movement that
+stays in an Ignore zone is retained there without becoming an incident, and it
+does not keep an otherwise finished incident open. Missing video or
+busy inference capacity means the result is unresolved. Low-confidence detections
+remain available here and in any incident whose scene contains them.
+
+Some historical records have no retained evidence that establishes activity.
+Their old links still open the preserved record with that limitation explained;
+they are no longer listed as established incidents.
+
 **Motion Audit** (in Admin) stores diagnostic samples that did **not** become incidents. Use it when tuning sensitivity — not as your daily event list.
 
 ## Related
@@ -76,3 +100,20 @@ monocular estimates; use them as scene context rather than precise measurements.
 - [Timeline & exports](timeline.md)
 - [AI assistant](assistant.md)
 - [People](people.md)
+
+## Scene history and corrections
+
+The observed-object inventory stays the same while you select different frames.
+Possible detections are labelled uncertain; detector confidence is available in
+evidence details. “No supporting image” or incomplete coverage does not mean an
+object was absent. Historical incidents contain the observations that were still
+retained at migration time.
+
+An administrator can correct an object label, associate observations of the same
+object, separate a mistaken association, or merge/split camera episodes. Changes
+preserve original observations and old incident links. If evidence changes while
+you are editing, refresh before retrying the correction.
+
+Periodic discovery looks for activity even without a camera notice. It samples
+within the configured inference capacity; unchanged scene objects do not create
+an endless sequence of incidents.

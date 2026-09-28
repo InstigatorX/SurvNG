@@ -1,4 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { IncidentScenePanel } from "../incidents/IncidentScenePanel.jsx";
+import { useIncidentPlayback } from "../incidents/useIncidentPlayback.js";
+import { incidentEpisodeMediaUrl } from "../incidentScene.mjs";
 import { createPortal } from "react-dom";
 import {
   Activity,
@@ -47,6 +50,10 @@ export function eventEpoch(event) {
 
 export function incidentClipWindow(event, before, after) {
   const anchor = eventEpoch(event);
+  if (event?.scene_clip_window && Number.isFinite(anchor)) {
+    if (event.scene_clip_window.episode_id) return { before: 0, after: event.scene_clip_window.end - event.scene_clip_window.start };
+    return { before: Math.max(0, anchor - event.scene_clip_window.start), after: Math.max(0, event.scene_clip_window.end - anchor) };
+  }
   const recorded = recordedIncidentWindow(event, before, after);
   if (recorded && Number.isFinite(anchor)) return { before: Math.max(0, anchor - recorded.start), after: Math.max(0, recorded.end - anchor) };
   const children = event?.events || [];
@@ -62,9 +69,11 @@ export function incidentClipWindow(event, before, after) {
 }
 
 export function incidentLabels(incident) {
-  const labels = Array.isArray(incident.labels)
+  const labels = Array.isArray(incident.scene_objects)
+    ? incident.scene_objects.map((object) => object.label)
+    : Array.isArray(incident.labels)
     ? incident.labels
-    : eventObjects(incident).filter((object) => object.incident_eligible !== false).map((object) => object.label).filter(Boolean);
+    : eventObjects(incident).map((object) => object.label).filter(Boolean);
   return Array.from(new Set(labels.filter(Boolean)));
 }
 
@@ -108,13 +117,13 @@ export function IncidentSourceDot({ trigger, className = "", onClick = null, ari
 
 export function hasDetectedObjects(event) {
   if (typeof event.has_objects === "boolean") return event.has_objects;
-  return eventObjects(event).some((object) => object.label && object.incident_eligible !== false) || incidentLabels(event).length > 0;
+  return eventObjects(event).some((object) => object.label) || incidentLabels(event).length > 0;
 }
 
 export function incidentZones(incident) {
   const zones = Array.isArray(incident.zones)
     ? incident.zones
-    : eventObjects(incident).filter((object) => object.incident_eligible !== false).flatMap((object) => object.zones || []);
+    : eventObjects(incident).flatMap((object) => object.zones || []);
   return Array.from(new Set(zones.filter(Boolean)));
 }
 
@@ -127,13 +136,13 @@ export function visualSearchObjects(event) {
   ));
 }
 
-export function objectBoxes(event, incidentEligibleOnly = false) {
+export function objectBoxes(event) {
   return visualSearchObjects(event)
     .map((object, objectIndex) => ({ object, objectIndex, box: object?.box }))
-    .filter(({ object, box }) => (!incidentEligibleOnly || object.incident_eligible !== false) && box && [box.x1, box.y1, box.x2, box.y2].every((value) => Number.isFinite(Number(value))))
+    .filter(({ box }) => box && [box.x1, box.y1, box.x2, box.y2].every((value) => Number.isFinite(Number(value))))
     .map(({ object, objectIndex, box }) => ({
       objectIndex,
-      excluded: object.incident_eligible === false,
+      uncertain: object.certainty === "uncertain" || object.certainty === "possible",
       trackId: Number.isInteger(Number(object.track_id)) ? Number(object.track_id) : null,
       label: object.label,
       confidence: object.confidence,
@@ -149,8 +158,8 @@ export function objectBoxes(event, incidentEligibleOnly = false) {
     .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
 }
 
-export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, objectFocusMode = null, objectFocusZoom = 1, objectFocusAspect = { width: 16, height: 9 }, objectFocusControls = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, selectedObjectIndex = null, onSelectObject = null, onRequestFullResolution, onImageSize, children }) {
-  const boxes = objectBoxes(event, incidentEligibleOnly);
+export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, objectFocusMode = null, objectFocusZoom = 1, objectFocusAspect = { width: 16, height: 9 }, objectFocusControls = true, showAnnotations = true, showTracking = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, zones = null, zonesVisible = false, selectedObjectIndex = null, onSelectObject = null, onRequestFullResolution, onImageSize, children }) {
+  const boxes = objectBoxes(event);
   const tracks = storedObjectTracks(event);
   const boxCoordinateSize = incidentDetectionFrameSize(event);
   const trackCoordinateSize = incidentTrackingFrameSize(event);
@@ -165,6 +174,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
   const [loadedImageKey, setLoadedImageKey] = useState("");
   const [frameSize, setFrameSize] = useState(null);
   const [objectFocused, setObjectFocused] = useState(focusMode === "auto");
+  const zoneShapes = (Array.isArray(zones) ? zones : []).filter((zone) => zone?.enabled !== false && (zone.points || []).length >= 3);
   const [progressiveState, setProgressiveState] = useState({ key: "", base: false, intermediate: false, full: false });
   const progressiveReady = progressiveState.key === progressiveImageKey ? progressiveState : { base: false, intermediate: false, full: false };
   const devicePixelRatio = Math.max(1, Math.min(4, Number(window.devicePixelRatio) || 1));
@@ -178,7 +188,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
     : frameSize;
   const hasFocusableObjects = focusMode !== "off" && boxes.length > 0;
   const preferFocused = focusMode === "auto" || (focusMode === "button" && !objectFocusControls);
-  const useServerObjectCrop = Boolean(thumbnail && hasFocusableObjects && (objectFocused || preferFocused));
+  const useServerObjectCrop = Boolean(thumbnail && !event?.snapshot_observation_id && hasFocusableObjects && (objectFocused || preferFocused));
   const renderedImage = useMemo(() => {
     // The server has already framed focused snapshots. Keep the whole crop
     // visible (especially in tall Mosaic cells) and map overlays to it.
@@ -197,7 +207,6 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
   const thumbnailSrc = useServerObjectCrop
     ? eventThumbnailUrl(event, focusThumbnailWidth, focusThumbnailQuality, {
       objectFocus: true,
-      incidentEligibleOnly,
       zoom: focusZoom,
       aspectWidth: focusAspect?.width,
       aspectHeight: focusAspect?.height,
@@ -393,7 +402,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
                 return (
                   <button
                     type="button"
-                    className={`object-box selectable${selected ? " selected" : ""}${box.excluded ? " excluded" : ""}`}
+                    className={`object-box selectable${selected ? " selected" : ""}${box.uncertain ? " uncertain" : ""}`}
                     key={`${box.label}-${box.objectIndex}-${box.x1}-${box.y1}`}
                     style={{ left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px` }}
                     onClick={(clickEvent) => {
@@ -414,7 +423,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
               }
               return (
                 <span
-                  className={`object-box${box.excluded ? " excluded" : ""}`}
+                  className={`object-box${box.uncertain ? " uncertain" : ""}`}
                   key={`${box.label}-${index}-${box.x1}-${box.y1}`}
                   style={{ left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px` }}
                 >
@@ -444,6 +453,19 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
               </span>
             ))}
           </div>
+        ) : null}
+        {imageReady && zonesVisible && renderedImage && renderingFrameSize && zoneShapes.length ? (
+          <svg className="snapshot-zone-layer" viewBox={`0 0 ${renderingFrameSize.width} ${renderingFrameSize.height}`} preserveAspectRatio="none" aria-hidden="true">
+            {zoneShapes.map((zone) => {
+              const points = zone.points.map((point) => `${renderedImage.x + Number(point.x) * renderedImage.width},${renderedImage.y + Number(point.y) * renderedImage.height}`).join(" ");
+              const color = zone.color || (zone.behavior === "ignore" ? "#f59e0b" : "#22c55e");
+              const anchor = zone.points[0];
+              return <g key={zone.name}>
+                <polygon points={points} fill={`${color}33`} stroke={color} strokeWidth="2" vectorEffect="non-scaling-stroke" />
+                <text x={renderedImage.x + Number(anchor.x) * renderedImage.width} y={renderedImage.y + Number(anchor.y) * renderedImage.height} fill="#fff" fontSize="12" fontWeight="700">{zone.name}</text>
+              </g>;
+            })}
+          </svg>
         ) : null}
       </div>
       {showFocusButton ? (
@@ -871,7 +893,10 @@ export function DebugDetectionOverlay({
   return <canvas ref={canvasRef} className="event-detection-canvas" aria-hidden="true" />;
 }
 
-export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh }) {
+export function EventOverlay({ event: sourceEvent, events, timeZone, onClose, onSelect, onRefresh }) {
+  const [correctedScene, setCorrectedScene] = useState(null);
+  const event = correctedScene?.id === sourceEvent.id && Number(correctedScene.revision) >= Number(sourceEvent.revision || 0) ? correctedScene : sourceEvent;
+  const scenePlayback = useIncidentPlayback(event);
   const modalRef = useModalFocus(onClose);
   const clipVideoRef = useRef(null);
   const mediaRef = useRef(null);
@@ -902,9 +927,12 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
   const [manualDetection, setManualDetection] = useState(null);
   const [manualLoading, setManualLoading] = useState(false);
   const [manualError, setManualError] = useState("");
+  useEffect(() => {
+    if (scenePlayback.selection) { setManualDetection(null); setTrackingComparisonEngine(null); setTrackingVisible(false); }
+  }, [scenePlayback.selection]);
   const trackingSource = incidentTrackingSource(event);
   const incidentTrackingEvent = trackingSource && trackingSource !== event ? trackingSource : null;
-  const viewerEvent = incidentTrackingEvent ? {
+  const viewerEvent = scenePlayback.clip || (event.episodes?.length ? scenePlayback.episodes[0]?.clip : null) || (incidentTrackingEvent ? {
     ...incidentTrackingEvent,
     start_epoch: event.start_epoch,
     last_epoch: event.last_epoch,
@@ -912,7 +940,7 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
     end_at: event.end_at,
     event_count: event.event_count,
     events: event.events || [],
-  } : event;
+  } : event);
   const displayedEvent = manualDetection ? { ...viewerEvent, objects: manualDetection.objects || [] } : viewerEvent;
   const comparisonTracking = trackingComparisonEngine ? trackingComparison?.engines?.[trackingComparisonEngine] : null;
   const trackingEvent = comparisonTracking
@@ -961,10 +989,11 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
       setPlayback(prefersNativeMobilePlayback()
         ? { url: info.downloadUrl, mimeType: "video/mp4" }
         : { url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
+      if (scenePlayback.selection) setVideoActive(true);
     }
     loadClipSettings();
     return () => { cancelled = true; };
-  }, [viewerEvent.id, viewerEvent.representative_event_id, viewerEvent.start_epoch, viewerEvent.last_epoch]);
+  }, [viewerEvent.id, viewerEvent.representative_event_id, viewerEvent.start_epoch, viewerEvent.last_epoch, scenePlayback.selection?.key]);
 
   useEffect(() => {
     let cancelled = false;
@@ -982,6 +1011,7 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
   }, [event.camera_id]);
 
   function playEventClip() {
+    if (event.episodes?.length && !scenePlayback.selection) { scenePlayback.playAll(); return; }
     if (!clipInfo || clipError) return;
     setVideoActive(true);
     const video = clipVideoRef.current;
@@ -1444,7 +1474,6 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
             onRequestFullResolution={() => setFullSnapshotRequested(true)}
             showAnnotations
             showTracking={trackingVisible && !manualDetection}
-            incidentEligibleOnly
             onImageSize={setMediaSize}
           />
           {videoActive && clipInfo && playback && !clipError ? (
@@ -1475,6 +1504,7 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
                   setVideoActive(false);
                   setClipError("No recording window found");
                 }}
+                onEnded={scenePlayback.ended}
                 onClick={(event) => event.stopPropagation()}
               /> : <ShakaVideo
                 key={playback.key || playback.url}
@@ -1518,6 +1548,7 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
                     setClipError("No recording window found");
                   }
                 }}
+                onEnded={scenePlayback.ended}
                 onClick={(event) => event.stopPropagation()}
               />}
               <DebugDetectionOverlay
@@ -1553,6 +1584,7 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
           ) : null}
         </div>
         <div className="event-detail-body">
+          <IncidentScenePanel key={event.incident_id || event.id} incident={event} timeZone={timeZone} onChanged={(detail) => { setCorrectedScene(detail); onRefresh?.(); }} onSelectEpisode={scenePlayback.select} onPlayScene={scenePlayback.playAll} activeEpisodeId={scenePlayback.episode?.episode_id} onNextEpisode={scenePlayback.hasNext ? scenePlayback.nextEpisode : null} onStopPlayback={scenePlayback.stop} />
           <details
             className="event-analysis-details"
             open={analysisToolsOpen}
@@ -1725,8 +1757,8 @@ export async function loadIncidentClipInfo(event, isCancelled = () => false, pre
   const safeAfter = Number.isFinite(after) ? after : 5;
   const window = incidentClipWindow(event, safeBefore, safeAfter);
   const anchorEpoch = eventEpoch(event);
-  const requestedWindowStartEpoch = Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null;
-  const streamUrl = eventStreamUrl(eventId, window.before, window.after);
+  const requestedWindowStartEpoch = event?.scene_clip_window?.episode_id ? event.scene_clip_window.start : Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null;
+  const streamUrl = incidentEpisodeMediaUrl(eventStreamUrl(eventId, window.before, window.after), event);
   const timelineStartEpoch = !preferNativeMp4 && Number.isFinite(requestedWindowStartEpoch)
     ? await eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch)
     : requestedWindowStartEpoch;
@@ -1735,7 +1767,7 @@ export async function loadIncidentClipInfo(event, isCancelled = () => false, pre
   const initialPlaybackOffset = 0;
   return {
     streamUrl,
-    downloadUrl: eventClipUrl(eventId, window.before, window.after),
+    downloadUrl: incidentEpisodeMediaUrl(eventClipUrl(eventId, window.before, window.after), event),
     before: window.before,
     after: window.after,
     duration: window.before + window.after,

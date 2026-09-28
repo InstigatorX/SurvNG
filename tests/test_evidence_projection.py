@@ -118,17 +118,36 @@ def test_disabled_and_no_object_events_do_not_wait_for_model():
     semantic.queue_event.assert_not_called()
 
 
-def test_no_admitted_objects_clear_old_vectors_without_waiting_for_model():
+def test_no_observed_objects_clear_old_cover_vectors_without_waiting_for_model():
     worker, events, semantic, _, _ = setup_projection()
-    events.event["objects"] = [{"label": "car", "incident_eligible": False}]
-    assert worker.run_once() == 1
-    semantic.index.delete_event.assert_called_once_with(7, expected_event=events.event)
-    semantic.queue_event.assert_not_called()
-    worker, events, semantic, subscriber, notification = setup_projection()
     events.event["objects"] = []
     assert worker.run_once() == 1
     semantic.index.delete_event.assert_called_once_with(7, expected_event=events.event)
     semantic.queue_event.assert_not_called()
+
+
+def test_non_alerting_object_is_indexed_before_projection_is_acknowledged():
+    worker, events, semantic, _, _ = setup_projection()
+    events.event["objects"] = [{"label": "car", "confidence": .75, "incident_eligible": False}]
+    assert worker.run_once() == 0
+    semantic.index.delete_event.assert_not_called()
+    semantic.queue_event.assert_called_once_with(events.event)
+    assert events.rows
+    semantic.projection_current.return_value = True
+    assert worker.run_once() == 1
+    assert not events.rows
+
+
+def test_retained_observation_requires_indexing_even_when_current_cover_is_empty():
+    worker, events, semantic, _, _ = setup_projection()
+    events.event["objects"] = []
+    semantic.semantic_searchable = Mock(return_value=True)
+    assert worker.run_once() == 0
+    semantic.semantic_searchable.assert_called_once_with(events.event)
+    semantic.index.delete_event.assert_not_called()
+    semantic.queue_event.assert_called_once_with(events.event)
+    semantic.projection_current.return_value = True
+    assert worker.run_once() == 1
 
 
 def test_changed_event_during_projection_waits_for_its_new_revision():

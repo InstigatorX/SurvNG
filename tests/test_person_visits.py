@@ -203,3 +203,33 @@ def test_replaced_face_evidence_invalidates_old_review_revision(stores):
         db.execute("update face_observations set box_json=? where person_id=7", (json.dumps({"x1": 1, "y1": 1, "x2": 30, "y2": 30}),))
     with pytest.raises(ValueError, match="Evidence changed"):
         visits.decide(nodes[0]["id"], nodes[1]["id"], nodes[0]["revision"], nodes[1]["revision"], "accept", 9990, 10100, config())
+
+
+def test_people_outside_alert_zone_are_retained_as_sightings(stores):
+    events, _, _, visits = stores
+    event = events.add_event(
+        "gate", "motion", created_at=datetime.fromtimestamp(10000, timezone.utc).isoformat(),
+        objects_json=json.dumps([
+            {"label": "person", "confidence": .94, "incident_eligible": True},
+            {"label": "person", "confidence": .75, "incident_eligible": False},
+        ]),
+    )
+    with visits._connect() as db:
+        sightings, _ = visits._read(db, 9990, 10010)
+    assert len(sightings) == 2
+    assert {item["event_id"] for item in sightings} == {event["id"]}
+
+
+def test_excluded_person_still_makes_face_assignment_ambiguous(stores):
+    events, _, _, visits = stores
+    event_id = seed(stores, "gate", 10000, person=7, people_count=2)
+    with events._connect() as db:
+        db.execute("update events set objects_json=? where id=?", (json.dumps([
+            {"label": "person", "incident_eligible": True},
+            {"label": "person", "incident_eligible": False},
+        ]), event_id))
+    with visits._connect() as db:
+        sightings, _ = visits._read(db, 9990, 10010)
+    body = next(item for item in sightings if item["track_id"] == 1)
+    assert body["person_id"] is None
+    assert any(item["id"].startswith("face:") and item["person_id"] == 7 for item in sightings)

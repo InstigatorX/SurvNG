@@ -67,35 +67,6 @@ def event_epoch(event: dict[str, Any]) -> float:
     return parsed.timestamp()
 
 
-def incident_event_groups(
-    rows: list[dict[str, Any]],
-    gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
-) -> list[tuple[str, list[dict[str, Any]]]]:
-    by_camera: dict[str, list[dict[str, Any]]] = {}
-    for event in rows:
-        by_camera.setdefault(str(event.get("camera_id") or ""), []).append(event)
-
-    groups: list[tuple[str, list[dict[str, Any]]]] = []
-    for camera_id, camera_events in by_camera.items():
-        ordered = sorted(camera_events, key=event_epoch)
-        current: list[dict[str, Any]] = []
-        current_end = 0.0
-        for event in ordered:
-            created_epoch = event_epoch(event)
-            if current and created_epoch - current_end > gap_seconds:
-                groups.append((camera_id, current))
-                current = []
-            current.append(event)
-            current_end = created_epoch
-        if current:
-            groups.append((camera_id, current))
-
-    # An incident remains anchored to when it began.  Later activity can extend
-    # its duration, but must not move an older incident ahead of a newer one.
-    groups.sort(key=lambda item: event_epoch(item[1][0]), reverse=True)
-    return groups
-
-
 def portable_media_path(storage_dir: Path, path_value: object) -> str:
     """Return a storage-root-relative database value when it can be verified safely."""
     raw_path = str(path_value or "").strip()

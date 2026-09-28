@@ -197,104 +197,32 @@ class MqttServiceTest(unittest.TestCase):
             ("detection", "gate", True),
         ])
 
-    def test_incident_lifecycle_uses_stable_id_and_non_retained_topic(self) -> None:
+    def test_canonical_incident_is_published_without_regrouping_or_filtering(self) -> None:
         service = self.service()
-        service.track_incident({
-            "id": 41,
-            "camera_id": "front-door",
-            "created_at": "2026-07-17T12:00:00+00:00",
-            "snapshot_path": "/storage/front-door.jpg",
-            "objects_json": json.dumps([{
-                "label": "person",
-                "confidence": 0.82,
-                "zones": ["Porch"],
-                "incident_eligible": True,
-            }]),
-        }, "Front Door", "/survng")
-        service.track_incident({
-            "id": 42,
-            "camera_id": "front-door",
-            "created_at": "2026-07-17T12:00:10+00:00",
-            "snapshot_path": "/storage/front-door-2.jpg",
-            "objects_json": json.dumps([{
-                "label": "person",
-                "confidence": 0.91,
-                "zones": ["Porch", "Walkway"],
-                "incident_eligible": True,
-            }, {
-                "label": "dog",
-                "confidence": 0.73,
-                "zones": ["Walkway"],
-                "incident_eligible": True,
-            }]),
-        }, "Front Door", "/survng")
-        service.flush_incidents()
-
-        publications = [
-            (topic, json.loads(payload), retained)
-            for topic, payload, _qos, retained in service.client.published
-            if topic == "survng/events/incidents"
-        ]
-        self.assertEqual([payload["state"] for _, payload, _ in publications], ["new", "updated", "complete"])
-        self.assertEqual({payload["incident_id"] for _, payload, _ in publications}, {"incident-front-door-41"})
-        complete = publications[-1][1]
-        self.assertEqual(complete["event_ids"], [41, 42])
-        self.assertEqual(complete["event_count"], 2)
-        self.assertEqual(complete["classes"], ["dog", "person"])
-        self.assertEqual(complete["zones"], ["Porch", "Walkway"])
-        self.assertEqual(complete["representative_event_id"], 42)
-        self.assertEqual(complete["snapshot_url"], "/survng/api/events/42/snapshot.jpg?v=0")
-        self.assertTrue(all(retained is False for _, _, retained in publications))
-
-    def test_incident_depth_summary_uses_true_median(self) -> None:
-        service = self.service()
-        for event_id, distance in enumerate((1.0, 100.0, 2.0), start=41):
-            service.track_incident({
-                "id": event_id,
-                "camera_id": "front-door",
-                "created_at": f"2026-07-17T12:00:{event_id - 41:02d}+00:00",
-                "objects_json": json.dumps([{
-                    "label": "person",
-                    "confidence": 0.9,
-                    "incident_eligible": True,
-                    "depth_stats": {"median_m": distance},
-                }]),
-            }, "Front Door")
-        service.flush_incidents()
-
-        complete = json.loads(service.client.published[-1][1])
-        self.assertEqual(complete["objects"][0]["median_distance_m"], 2.0)
-
-    def test_incident_events_can_be_disabled(self) -> None:
-        service = self.service()
-        service.config.incident_events_enabled = False
-        service.track_incident({
-            "id": 41,
-            "camera_id": "front-door",
-            "created_at": "2026-07-17T12:00:00+00:00",
-        }, "Front Door")
-
-        self.assertEqual(service.client.published, [])
-
-    def test_manual_update_only_changes_an_incident_that_is_still_pending(self) -> None:
-        service = self.service()
-        event = {
-            "id": 41,
-            "camera_id": "front-door",
-            "created_at": "2026-07-17T12:00:00+00:00",
-            "objects_json": "[]",
+        payload = {
+            "schema_version": 3, "incident_id": "scene-1", "revision": 4,
+            "state": "active", "camera_ids": ["gate", "drive"],
+            "objects": [{"label": "person", "confidence": .75, "incident_eligible": False}],
+            "alert_decisions": [{"eligible": True}],
         }
-        service.track_incident(event, "Front Door")
-        service.track_incident({
-            **event,
-            "objects_json": json.dumps([{"label": "car", "confidence": 0.9}]),
-        }, "Front Door", allow_new=False)
-        service.flush_incidents()
-        complete = json.loads(service.client.published[-1][1])
-        self.assertEqual(complete["classes"], ["car"])
+        service.publish("events/incidents", payload, retain=False)
+        topic, encoded, _qos, retained = service.client.published[-1]
+        self.assertEqual(topic, "survng/events/incidents")
+        self.assertEqual(json.loads(encoded), payload)
+        self.assertFalse(retained)
+        self.assertFalse(hasattr(service, "track_incident"))
 
-        service.track_incident(event, "Front Door", allow_new=False)
-        self.assertEqual(len(service.client.published), 3)
+    def test_confirmed_publication_reports_delivery_failure_for_outbox_retry(self) -> None:
+        service = self.service()
+        info = Mock(rc=0)
+        info.is_published.return_value = False
+        service.client.publish = Mock(return_value=info)
+        self.assertFalse(service.publish("events/incidents", {"revision": 1}, confirm=True))
+        info.wait_for_publish.assert_called_once_with(timeout=5.0)
+        info.is_published.return_value = True
+        self.assertTrue(service.publish("events/incidents", {"revision": 1}, confirm=True))
+        service.connected = False
+        self.assertFalse(service.publish("events/incidents", {"revision": 1}, confirm=True))
 
     def test_retained_commands_are_rejected_without_replaying_state(self) -> None:
         callback = Mock(return_value=True)
@@ -384,18 +312,18 @@ class MqttServiceTest(unittest.TestCase):
         client.loop_stop.assert_called_once_with()
         self.assertIsNone(service.client)
 
-    def test_incident_flush_failure_does_not_skip_client_shutdown(self) -> None:
+    def test_transport_shutdown_does_not_complete_incidents(self) -> None:
         service = self.service()
         client = service.client
         client.disconnect = Mock()
         client.loop_stop = Mock()
-        service.flush_incidents = Mock(side_effect=RuntimeError("bad incident"))
 
         service.stop()
 
         client.disconnect.assert_called_once_with()
         client.loop_stop.assert_called_once_with()
         self.assertIsNone(service.client)
+        self.assertFalse(any(topic.endswith("/events/incidents") for topic, *_ in client.published))
 
     def test_command_worker_is_daemonized_as_a_shutdown_safeguard(self) -> None:
         service = MqttService(

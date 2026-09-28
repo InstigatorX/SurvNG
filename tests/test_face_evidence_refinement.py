@@ -112,7 +112,9 @@ def test_evidence_does_not_change_returned_event_objects(evidence):
             selected, event_objects, samples, timing, 9., refinement_pending=False,
             event_epoch=100., face_sampler=sampler, face_deadline=20.,
         )
-    assert result.objects == event_objects
-    assert all(item["label"] == "person" for item in result.objects)
+    assert [item for item in result.objects if item.get("label")] == event_objects
+    assert all(item["label"] == "person" for item in result.objects if item.get("label"))
+    acquired = next(item["observations"] for item in result.objects if item.get("status") == "scene_observations")
+    assert any(item["label"] == "face" for item in acquired)
     assert result.face_candidates
     assert all(item.frame is None for item in samples[1:])

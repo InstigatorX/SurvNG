@@ -467,12 +467,10 @@ class AssistantApiTest(unittest.TestCase):
             end_at="2026-08-02T21:00:00+00:00",
         )
         active_manager = SimpleNamespace(
-            events=SimpleNamespace(between_compact=lambda _start, _end: [])
+            events=SimpleNamespace(list_scene_incidents=lambda **_kwargs: summaries)
         )
 
-        with patch(
-            "survng.app.intelligence_routes._incident_rows", return_value=summaries
-        ):
+        with patch.object(active_manager.events, "list_scene_incidents", return_value=summaries):
             evidence = main._intelligence_route_bundle.service._assistant_recent_activity_summary(
                 call, "America/New_York", active_manager
             )
@@ -937,7 +935,7 @@ class AssistantApiTest(unittest.TestCase):
             "context": {"incident_event_id": 42},
         })
         manager = SimpleNamespace(
-            events=SimpleNamespace(between_compact=lambda *_args: [{"id": 43}]),
+            events=SimpleNamespace(list_scene_incidents=lambda **_kwargs: [match]),
         )
         with (
             patch.object(
@@ -947,9 +945,7 @@ class AssistantApiTest(unittest.TestCase):
                     anchor if event_id == 42 else match if event_id == 43 else None
                 ),
             ),
-            patch(
-                "survng.app.cross_camera_trace._incident_rows", return_value=[match]
-            ),
+            patch.object(manager.events, "list_scene_incidents", return_value=[match]),
             patch.object(main.INCIDENT_QUERIES, "hydrate", return_value=[match]),
             patch.object(main.INCIDENT_QUERIES, "with_faces", return_value=[match]),
         ):
@@ -993,7 +989,7 @@ class AssistantApiTest(unittest.TestCase):
         anchor = incident(42, "gate", "2026-08-01T12:00:00+00:00", "car")
         match = incident(43, "upper-garage", "2026-08-01T12:04:00+00:00", "truck")
         manager = SimpleNamespace(
-            events=SimpleNamespace(between_compact=lambda *_args: [{"id": 43}]),
+            events=SimpleNamespace(list_scene_incidents=lambda **_kwargs: [match]),
             appearance_index=SimpleNamespace(matches=lambda *_args, **_kwargs: [{
                 "event_id": 43,
                 "camera_id": "upper-garage",
@@ -1010,9 +1006,7 @@ class AssistantApiTest(unittest.TestCase):
         })
         with (
             patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=anchor),
-            patch(
-                "survng.app.cross_camera_trace._incident_rows", return_value=[match]
-            ),
+            patch.object(manager.events, "list_scene_incidents", return_value=[match]),
             patch.object(main.INCIDENT_QUERIES, "hydrate", return_value=[match]),
             patch.object(main.INCIDENT_QUERIES, "with_faces", return_value=[match]),
         ):

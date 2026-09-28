@@ -7,6 +7,8 @@ import inspect
 import logging
 import threading
 import time
+import uuid
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import numpy as np
@@ -14,6 +16,9 @@ import numpy as np
 from ..config import CameraConfig, ObjectTrackingConfig
 from ..detector import detection_failure
 from ..domain_events import TrackingCompleted
+from ..motion_pipeline.scene_evidence import scene_observation
+from ..scene_activity_evidence import scene_sample_records
+from ..scene_zone_admission import establishment_zone_policy
 from ..security import redact_secret_text
 from ..video_frames import DecodedVideoFrame, VideoFrameReference
 from ..visual_quality import image_quality
@@ -110,6 +115,7 @@ class _PendingCatchupBatch:
     covered_through: float
     interruption: str | None
     empty_prefix: bool
+    resume_epoch: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +213,8 @@ class ObjectTrackingSession:
         self._seed_assignments: list[dict[str, Any]] = []
         self._processing_started_at = 0.0
         self._processing_metrics: dict[str, int | float] = {}
+        self._scene_coverage_gaps = []
+        self._scene_boundary_epoch = None
         self._coverage_gap_count = 0
         self._maximum_coverage_gap_seconds = 0.0
         self._coverage_interruption: str | None = None
@@ -215,6 +223,13 @@ class ObjectTrackingSession:
         self._cover_baseline: _TrackingCoverCandidate | None = None
         self._cover_candidate: _TrackingCoverCandidate | None = None
         self._cover_promotion: dict[str, Any] | None = None
+        self._pending_scene_observations: list[dict[str, Any]] = []
+        self._pending_scene_samples: dict[str, dict[str, Any]] = {}
+        self._activity_previous_sample = None
+        self._scene_analysis_job: dict[str, Any] | None = None
+        self._scene_run_key = uuid.uuid4().hex
+        self._archived_replay_tracks: list[dict[str, Any]] = []
+        self._replay_run_index = 0
 
     @staticmethod
     def _idle_status() -> dict[str, Any]:
@@ -294,15 +309,44 @@ class ObjectTrackingSession:
         apply_depth_zone_filters(self.camera, enriched)
         return enriched
 
+    def _commit_tracking(self, event_id, payload, tracked_objects):
+        """Attach the current zone snapshot when this event does not have one.
+
+        Tracking must not prolong an episode with ignore-only activity. The
+        store keeps a snapshot already recorded for the event, so this does not
+        replace the zones under which that incident was established.
+        """
+        require = self.camera.require_incident_zone
+        if require is None:
+            require = bool(getattr(getattr(self.detector, "config", None), "require_incident_zone", True))
+        stamped = dict(payload)
+        detector_config = getattr(self.detector, "config", None)
+        stamped["establishment_zone_policy"] = establishment_zone_policy(
+            self.camera,
+            require_incident_zone=bool(require),
+            confidence_threshold=getattr(detector_config, "confidence_threshold", None),
+            class_confidence_thresholds=getattr(detector_config, "event_class_confidence_thresholds", None),
+        )
+        return self.update_event(event_id, stamped, tracked_objects)
+
     def start(
         self,
         event_id: int,
         event_at: datetime,
         initial_objects: list[dict[str, Any]],
         initial_frame: np.ndarray | None = None,
+        *, recorded_window: tuple[float, float] | None = None,
+        resume_after: float | None = None,
+        scene_analysis_job: dict[str, Any] | None = None,
+        scene_track_resume: dict[str, Any] | None = None,
     ) -> bool:
         with self._transition_lock:
-            return self._start_session(event_id, event_at, initial_objects, initial_frame)
+            return self._start_session(
+                event_id, event_at, initial_objects, initial_frame,
+                recorded_window=recorded_window, resume_after=resume_after,
+                scene_analysis_job=scene_analysis_job,
+                scene_track_resume=scene_track_resume,
+            )
 
     def _start_session(
         self,
@@ -310,21 +354,27 @@ class ObjectTrackingSession:
         event_at: datetime,
         initial_objects: list[dict[str, Any]],
         initial_frame: np.ndarray | None,
+        *, recorded_window: tuple[float, float] | None = None,
+        resume_after: float | None = None,
+        scene_analysis_job: dict[str, Any] | None = None,
+        scene_track_resume: dict[str, Any] | None = None,
     ) -> bool:
         initial_objects = [
             item
             for item in initial_objects
             if self.config.tracks_label(item.get("label"))
         ]
-        if not self.config.enabled or not any(
-            item.get("label") and item.get("incident_eligible") is not False
+        if not self.config.enabled or (recorded_window is None and not any(
+            item.get("label")
             for item in initial_objects
-        ):
+        )):
             return False
         with self._lock:
             if not self._accepting:
                 return False
             if self._thread is not None and self._thread.is_alive():
+                if recorded_window is not None:
+                    return False
                 if self._event_id == event_id:
                     self._deadline = max(self._deadline, time.monotonic() + self.config.max_session_seconds)
                     return True
@@ -372,6 +422,10 @@ class ObjectTrackingSession:
                     [dict(item) for item in initial_objects],
                     initial_frame.copy() if initial_frame is not None else None,
                     self._stop,
+                    recorded_window,
+                    resume_after,
+                    scene_analysis_job,
+                    scene_track_resume,
                 ),
                 name=f"object-tracking-{self.camera.id}",
                 daemon=False,
@@ -792,7 +846,13 @@ class ObjectTrackingSession:
         initial_objects: list[dict[str, Any]],
         initial_frame: np.ndarray | None,
         stop: threading.Event,
+        requested_window: tuple[float, float] | None = None,
+        resume_after: float | None = None,
+        scene_analysis_job: dict[str, Any] | None = None,
+        scene_track_resume: dict[str, Any] | None = None,
     ) -> None:
+        self._scene_analysis_job = scene_analysis_job
+        self._scene_run_key = uuid.uuid4().hex
         wait_started = time.monotonic()
         acquired = self.limiter.acquire(blocking=False)
         if not acquired and self.config.capacity_wait_seconds > 0:
@@ -842,9 +902,12 @@ class ObjectTrackingSession:
                 "capacity_wait_limit_seconds": self.config.capacity_wait_seconds,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "tracks": [],
+                "coverage_incomplete": True,
+                "coverage_interruption": "tracking_capacity",
+                "scene_analysis_job": self._scene_analysis_job,
             }
             try:
-                self.update_event(event_id, skipped, None)
+                self._commit_tracking(event_id, skipped, None)
             except Exception as exc:
                 self._set_status(last_error=str(exc))
                 LOGGER.exception(
@@ -865,10 +928,13 @@ class ObjectTrackingSession:
         tracker: ObjectTrackerBackend | None = None
         frames_processed = 0
         try:
-            self._recorded_window = None
+            self._recorded_window = requested_window
+            self._pending_scene_observations = []
+            self._pending_scene_samples = {}
+            self._activity_previous_sample = None
             self._analyzed_from = None
             self._seed_assignments = []
-            if self.window_provider is not None and self.catchup_frame_provider is not None and initial_frame is not None:
+            if requested_window is None and self.window_provider is not None and self.catchup_frame_provider is not None and initial_frame is not None:
                 requested_start, requested_end = self.window_provider(event_id, event_at)
                 if not (np.isfinite(requested_start) and np.isfinite(requested_end)
                         and requested_start <= event_at.timestamp() <= requested_end
@@ -896,6 +962,10 @@ class ObjectTrackingSession:
             self._frame_width = 0
             self._frame_height = 0
             self._catchup_frames_processed = 0
+            self._scene_coverage_gaps = []
+            self._archived_replay_tracks = []
+            self._replay_run_index = 0
+            self._scene_boundary_epoch = (self._scene_analysis_job or {}).get("association_after_epoch")
             self._coverage_gap_count = 0
             self._maximum_coverage_gap_seconds = 0.0
             self._coverage_interruption = None
@@ -913,7 +983,7 @@ class ObjectTrackingSession:
             tracker = self.tracker_registry.create(
                 self.config.implementation,
                 self.config,
-                float(self.detector.config.confidence_threshold),
+                self.config.confirmation_confidence_threshold,
             )
             if initial_frame is not None:
                 self._frame_height = int(initial_frame.shape[0])
@@ -939,7 +1009,7 @@ class ObjectTrackingSession:
             seed_epoch = event_at.timestamp() + (
                 float(np.median(seed_offsets)) if seed_offsets else 0.0
             )
-            if self._recorded_window:
+            if self._recorded_window and requested_window is None:
                 self._recorded_window = (
                     min(self._recorded_window[0], seed_epoch),
                     max(self._recorded_window[1], seed_epoch + 1.0 / self.config.sample_fps),
@@ -948,8 +1018,13 @@ class ObjectTrackingSession:
             # Start empty in the lead-in: future snapshot boxes are never
             # projected backward. Insert the confirmed snapshot at its own time.
             captured_at = self._recorded_window[0] - 1.0 / self.config.sample_fps if self._recorded_window else seed_epoch
-            seed_pending = self._recorded_window is not None
-            self._last_analyzed_epoch = None if seed_pending else captured_at
+            if resume_after is not None:
+                captured_at = max(captured_at, float(resume_after))
+            self._restore_scene_tracks(tracker, scene_track_resume, captured_at)
+            seed_pending = bool(self._recorded_window is not None and initial_objects and captured_at < seed_epoch)
+            self._last_analyzed_epoch = resume_after if requested_window is not None else None if seed_pending else captured_at
+            if self._scene_analysis_job and "analyzed_through_epoch" in self._scene_analysis_job:
+                self._last_analyzed_epoch=self._scene_analysis_job["analyzed_through_epoch"]
             initial_tracked = []
             primary_track_ids: set[int] = set()
 
@@ -971,7 +1046,7 @@ class ObjectTrackingSession:
                     self._consider_cover_candidate(initial_frame, seed_epoch, seeded, primary_track_ids)
                 seed_pending = False
 
-            if not seed_pending:
+            if not seed_pending and requested_window is None:
                 apply_seed()
                 initial_tracked = self._seed_assignments
                 self._analyzed_from = seed_epoch
@@ -994,6 +1069,7 @@ class ObjectTrackingSession:
                 if item.get("track_id") is not None
             }
             consecutive_failures = 0
+            alert_confirmations: dict[tuple[int, str], int] = {}
 
             def interval() -> float:
                 return 1.0 / max(0.01, self._effective_sample_fps)
@@ -1014,11 +1090,12 @@ class ObjectTrackingSession:
                     self._frame_width = source_width
                     self._frame_height = source_height
                 detection_started = time.monotonic()
+                acquisition_floor = float(getattr(self.detector.config, "event_candidate_confidence_threshold", .25))
                 try:
                     objects = _detect_tracking_objects(
                         self.detector,
                         frame,
-                        self.config.low_confidence_threshold,
+                        min(self.config.low_confidence_threshold, acquisition_floor),
                     )
                 finally:
                     self._processing_metrics["detection_ms"] += (time.monotonic() - detection_started) * 1000
@@ -1032,6 +1109,26 @@ class ObjectTrackingSession:
                         raise RuntimeError(f"tracking detector failed repeatedly: {failure}")
                     return False
                 consecutive_failures = 0
+                frame_observations: dict[str, dict[str, Any]] = {}
+                for detected in objects:
+                    detected["detection_frame_width"] = source_width
+                    detected["detection_frame_height"] = source_height
+                    detected["scene_confirmation_threshold"] = self.config.confirmation_confidence_threshold
+                    observation = scene_observation(
+                        {**detected, "temporal_candidate_threshold": acquisition_floor}, captured_at_epoch=sample_epoch,
+                        frame_source="recorded_main" if frame_reference is not None else "tracking",
+                        recording_path=str(frame_reference.source_path) if frame_reference is not None else "",
+                        frame_timestamp_exact=bool(frame_reference is not None and frame_reference.exact),
+                        offset_seconds=sample_epoch - event_at.timestamp(),
+                    )
+                    if observation is not None:
+                        observation["snapshot_visible"] = False
+                        if self._scene_boundary_epoch is not None:
+                            observation["association_after_epoch"] = self._scene_boundary_epoch
+                        observation["alert_eligible"] = False
+                        observation["alert_reasons"] = ["temporal_unconfirmed"]
+                        detected["observation_key"] = observation["observation_key"]
+                        frame_observations[observation["observation_key"]] = observation
                 objects = [
                     item
                     for item in objects
@@ -1044,12 +1141,20 @@ class ObjectTrackingSession:
                     source_height,
                     float(self.detector.config.confidence_threshold),
                     bool(getattr(self.detector.config, "require_incident_zone", True)),
+                    dict(getattr(self.detector.config, "event_class_confidence_thresholds", {}) or {}),
                 )
                 objects = self._enrich_tracking_depth(
                     frame,
                     objects,
                     frame_offset_s=sample_epoch - event_at.timestamp(),
                 )
+                for detected in objects:
+                    observation = frame_observations.get(str(detected.get("observation_key") or ""))
+                    if observation is not None:
+                        for key in ("zones", "spatial_zones", "zone_admission_reason", "depth_filtered",
+                                    "confidence_threshold", "confidence_eligible", "zone_eligible", "depth_stats"):
+                            if key in detected:
+                                observation[key] = detected[key]
                 self._annotate_appearances(
                     frame,
                     objects,
@@ -1067,6 +1172,53 @@ class ObjectTrackingSession:
                 )
                 tracking_started = time.monotonic()
                 tracked = tracker.update(objects, sample_epoch)
+                for detected in tracked:
+                    observation = frame_observations.get(str(detected.get("observation_key") or ""))
+                    if observation is not None:
+                        observation["scene_track_key"] = f"tracking:{event_id}:{self._scene_run_key}:{detected['track_id']}"
+                        observation["track_id"] = detected["track_id"]
+                        observation["track_state"] = detected.get("track_state")
+                        label = str(detected.get("label") or "").lower()
+                        key = (int(detected["track_id"]), label)
+                        alert_confirmations[key] = alert_confirmations.get(key, 0) + int(
+                            detected.get("confidence_eligible") is True
+                        )
+                        required = int((getattr(self.detector.config, "event_class_confirmation_frames", {}) or {}).get(
+                            label, getattr(self.detector.config, "event_confirmation_frames", 2),
+                        ))
+                        confirmed = detected.get("track_state") == "confirmed" and alert_confirmations[key] >= required
+                        policy_allowed = detected.get("incident_eligible") is not False
+                        observation["alert_eligible"] = bool(confirmed and policy_allowed and label != "face")
+                        observation["alert_reasons"] = (
+                            [] if observation["alert_eligible"] else
+                            [str(detected.get("zone_admission_reason") or "alert_policy")]
+                            if not policy_allowed else ["temporal_unconfirmed"]
+                        )
+                        observation["alert_confirmation_observations"] = alert_confirmations[key]
+                # Physical evidence and object/alert associations have separate
+                # ownership. Keep only one prior image; persist the measurements
+                # and both frame references, never infer activity from a new ID.
+                source = "recorded_main" if frame_reference is not None else "tracking"
+                current_sample = SimpleNamespace(
+                    offset=sample_epoch, frame=frame.copy(), objects=list(frame_observations.values()),
+                    recording_path=str(frame_reference.source_path) if frame_reference is not None else "",
+                    requested_offset=sample_epoch, exact_timestamp=bool(frame_reference and frame_reference.exact),
+                    source=source,
+                )
+                previous_sample = self._activity_previous_sample
+                measured = [previous_sample, current_sample] if previous_sample is not None and previous_sample.source == source else [current_sample]
+                measured_observations = [o for sample in measured for o in sample.objects]
+                measured_samples = scene_sample_records(measured, measured_observations, 0.0, self.camera.id, source=source)
+                for sample in measured_samples:
+                    self._pending_scene_samples[sample["id"]] = sample
+                # Accumulate slow physical change against the same source
+                # image instead of resetting the baseline at every high-rate
+                # frame. Bound retained comparison age to the witness policy.
+                if (previous_sample is None or previous_sample.source != source
+                        or sample_epoch-previous_sample.offset >= 10
+                        or any(s["metadata"].get("activity_witnesses") for s in measured_samples)):
+                    self._activity_previous_sample = current_sample
+                self._pending_scene_observations.extend(frame_observations.values())
                 self._processing_metrics["tracker_update_ms"] += (time.monotonic() - tracking_started) * 1000
                 latest_tracked_objects = tracked
                 summaries = tracker.summaries(sample_epoch)
@@ -1117,6 +1269,9 @@ class ObjectTrackingSession:
                     now_monotonic,
                     important_transition=important_transition,
                 )
+                # Keep an unusually busy frame stream from accumulating a
+                # large ledger batch behind a long configured persist interval.
+                persist_due = persist_due or len(self._pending_scene_observations) >= 512
                 self._set_status(
                     enabled=True,
                     active=True,
@@ -1148,12 +1303,42 @@ class ObjectTrackingSession:
             # Refuse gaps that would expire the object without analyzed evidence.
             continuity_interval = self.config.lost_timeout_seconds
 
+            def advance_scene_gap(resume_epoch: float, reason: str, *, gap_end: float | None = None) -> None:
+                nonlocal captured_at, tracker, seed_pending, primary_track_ids
+                nonlocal stable_frames, track_states, latest_tracked_objects
+                sample_interval = 1.0 / max(0.1, self.config.sample_fps)
+                # The next 10-second file, or a file that is not readable yet,
+                # is a pause when the clock does not skip a sample. Keep the
+                # tracker and this run. A real hole still starts a new tracker.
+                if resume_epoch - captured_at <= sample_interval + 1e-6:
+                    captured_at = max(captured_at, resume_epoch)
+                    return
+                start=max(captured_at,self._recorded_window[0])
+                end=gap_end if gap_end is not None else resume_epoch
+                self._scene_coverage_gaps.append({"start_epoch":start,"end_epoch":end,"reason":reason,
+                    "start_at":datetime.fromtimestamp(start,timezone.utc).isoformat(),
+                    "end_at":datetime.fromtimestamp(end,timezone.utc).isoformat()})
+                self._coverage_gap_count += 1
+                self._maximum_coverage_gap_seconds=max(self._maximum_coverage_gap_seconds,max(0,end-start))
+                captured_at=resume_epoch
+                self._scene_boundary_epoch=resume_epoch
+                self._archive_replay_tracks(tracker, captured_at)
+                self._scene_run_key=uuid.uuid4().hex
+                tracker=self.tracker_registry.create(self.config.implementation,self.config,self.config.confirmation_confidence_threshold)
+                seed_pending=False
+                primary_track_ids=set()
+                stable_frames=0
+                track_states={}
+                latest_tracked_objects=[]
+                alert_confirmations.clear()
+                self._persist(event_id,tracker,captured_at,None,frames_processed,"active")
+
             def process_catchup_until(target_epoch: float) -> bool:
                 """Consume a bounded batch, retaining unprocessed samples on deferral."""
                 nonlocal captured_at, last_persisted_at, pending_batch, seed_pending
                 nonlocal catchup_deferred, catchup_gap
                 catchup_gap = 0.0
-                if self.catchup_frame_provider is None or initial_frame is None:
+                if self.catchup_frame_provider is None or (initial_frame is None and requested_window is None):
                     return False
                 if pending_batch is None:
                     catchup_interval = 1.0 / self.config.sample_fps
@@ -1171,7 +1356,7 @@ class ObjectTrackingSession:
                     try:
                         batch = self.catchup_frame_provider(
                             catchup_start, batch_end, self.config.sample_fps,
-                            min(1280, int(initial_frame.shape[1])),
+                            min(1280, int(initial_frame.shape[1])) if initial_frame is not None else 1280,
                             **cursor_kwargs,
                         )
                         samples = iter(batch)
@@ -1197,6 +1382,7 @@ class ObjectTrackingSession:
                             covered_through=batch.covered_through if typed_batch else captured_at,
                             interruption=batch.interruption if typed_batch else None,
                             empty_prefix=typed_batch and not batch.frames,
+                            resume_epoch=batch.resume_epoch if typed_batch else None,
                         )
                         self._processing_metrics["frames_buffered"] += len(frames)
                     finally:
@@ -1212,11 +1398,12 @@ class ObjectTrackingSession:
                         pending_batch.frames.popleft()
                         continue
                     if sample_epoch - captured_at > continuity_interval + 1e-6:
-                        catchup_gap = sample_epoch - captured_at
-                        # Missing media may become readable. Requery from the
-                        # last successful cursor instead of retaining a gap.
-                        pending_batch = None
-                        break
+                        if self._scene_analysis_job:
+                            advance_scene_gap(sample_epoch-1.0/self.config.sample_fps,"missing_recording",gap_end=sample_epoch)
+                        else:
+                            catchup_gap = sample_epoch - captured_at
+                            pending_batch = None
+                            break
                     if seed_pending and sample_epoch >= seed_epoch:
                         apply_seed()
                         captured_at = seed_epoch
@@ -1253,7 +1440,21 @@ class ObjectTrackingSession:
                         pending_batch.interruption and not catchup_deferred and not catchup_gap
                         and (pending_batch.empty_prefix or captured_at >= pending_batch.covered_through - 1e-6)
                     ):
-                        self._record_coverage_interruption(pending_batch.interruption)
+                        if (self._scene_analysis_job and pending_batch.resume_epoch is not None
+                                and not stop.is_set() and time.monotonic()<self._deadline
+                                and captured_at < pending_batch.resume_epoch <= pending_batch.end_epoch):
+                            advance_scene_gap(pending_batch.resume_epoch,pending_batch.interruption)
+                            advanced=True
+                        else:
+                            self._record_coverage_interruption(pending_batch.interruption)
+                    if (self._scene_analysis_job and not advanced and not pending_batch.frames
+                            and not stop.is_set() and time.monotonic()<self._deadline
+                            and not pending_batch.interruption and pending_batch.end_epoch < time.time()-15
+                            and pending_batch.end_epoch > captured_at):
+                        # Finalized historical media is unavailable. Account for
+                        # this bounded interval, then inspect the following one.
+                        advance_scene_gap(pending_batch.end_epoch,"missing_recording")
+                        advanced=True
                     if not pending_batch.frames:
                         pending_batch = None
                 if advanced and last_persisted_at == persisted_before_batch:
@@ -1295,7 +1496,7 @@ class ObjectTrackingSession:
                     break
                 target_epoch = min(time.time(), media_end)
                 advanced = False
-                has_recorded_provider = self.catchup_frame_provider is not None and initial_frame is not None
+                has_recorded_provider = self.catchup_frame_provider is not None and (initial_frame is not None or requested_window is not None)
                 if has_recorded_provider and pending_live is None:
                     advanced = process_catchup_until(target_epoch)
                 # Provider/decoder work may outlast the cooperative budget or
@@ -1357,7 +1558,7 @@ class ObjectTrackingSession:
                             # with a point read, without decoding that backlog.
                             continuity = self.catchup_frame_provider(
                                 sample_epoch, sample_epoch, self.config.sample_fps,
-                                min(1280, int(initial_frame.shape[1])),
+                                min(1280, int(initial_frame.shape[1])) if initial_frame is not None else 1280,
                                 after_epoch=captured_at,
                             )
                             if isinstance(continuity, TrackingFrameBatch) and continuity.interruption:
@@ -1441,6 +1642,7 @@ class ObjectTrackingSession:
         finally:
             # Release retained images before admitting a queued replacement.
             pending_batch = None
+            self._activity_previous_sample = None
             self._finish_worker_and_start_pending(release_limiter=True)
 
     def _finish_worker_and_start_pending(self, *, release_limiter: bool) -> None:
@@ -1483,6 +1685,85 @@ class ObjectTrackingSession:
             if self._processing_started_at else 0.0,
         }
 
+    def _tagged_replay_tracks(self, summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Keep each analysis run's identities distinct after a tracker reset."""
+        run = self._replay_run_index
+        if run <= 0:
+            return [dict(item) for item in summaries]
+        offset = run * 100_000
+        tagged: list[dict[str, Any]] = []
+        for item in summaries:
+            copy = dict(item)
+            track_id = copy.get("track_id")
+            if track_id is not None:
+                copy["track_id"] = int(track_id) + offset
+            tagged.append(copy)
+        return tagged
+
+    def _archive_replay_tracks(self, tracker: ObjectTrackerBackend | None, captured_at: float) -> None:
+        if tracker is not None:
+            self._archived_replay_tracks.extend(
+                self._tagged_replay_tracks(tracker.summaries(captured_at))
+            )
+        self._replay_run_index += 1
+
+    def _scene_track_resume(
+        self,
+        tracker: ObjectTrackerBackend | None,
+        captured_at: float,
+    ) -> dict[str, Any]:
+        snapshot = getattr(tracker, "resume_snapshot", None)
+        tracks = snapshot(captured_at) if callable(snapshot) else []
+        return {"scene_run_key": self._scene_run_key, "tracks": tracks}
+
+    def _restore_scene_tracks(
+        self,
+        tracker: ObjectTrackerBackend,
+        resume: dict[str, Any] | None,
+        captured_at: float,
+    ) -> None:
+        """Seed a reclaimed job with the last confirmed ids, boxes, and appearance."""
+        if not isinstance(resume, dict):
+            return
+        saved = resume.get("tracks")
+        if not isinstance(saved, list) or not saved:
+            return
+        seeds: list[dict[str, Any]] = []
+        for item in saved:
+            if not isinstance(item, dict):
+                continue
+            box = item.get("box")
+            if not isinstance(box, dict):
+                continue
+            try:
+                track_id = int(item.get("track_id"))
+                last_seen = float(item.get("last_seen"))
+            except (TypeError, ValueError):
+                continue
+            if track_id <= 0 or captured_at - last_seen > self.config.lost_timeout_seconds + 1e-6:
+                continue
+            seed: dict[str, Any] = {
+                "label": item.get("label"),
+                "confidence": 0.99,
+                "box": dict(box),
+                "_tracking_track_id": track_id,
+                "_tracking_first_seen_at": last_seen,
+            }
+            appearance = item.get("appearance")
+            if isinstance(appearance, list) and appearance:
+                seed["_tracking_embedding"] = np.asarray(appearance, dtype=np.float32)
+            seeds.append(seed)
+        if not seeds:
+            return
+        run_key = resume.get("scene_run_key")
+        if isinstance(run_key, str) and run_key:
+            self._scene_run_key = run_key
+        tracker.update(seeds, captured_at, confirm_new=True)
+
+    def _replay_tracks(self, tracker: ObjectTrackerBackend | None, captured_at: float) -> list[dict[str, Any]]:
+        current = tracker.summaries(captured_at) if tracker is not None else []
+        return [*self._archived_replay_tracks, *self._tagged_replay_tracks(current)]
+
     def _persist(
         self,
         event_id: int,
@@ -1493,7 +1774,7 @@ class ObjectTrackingSession:
         state: str,
         capacity_wait_seconds: float | None = None,
     ) -> None:
-        tracks = tracker.summaries(captured_at)
+        tracks = self._replay_tracks(tracker, captured_at)
         diagnostics_method = getattr(tracker, "diagnostics", None)
         tracker_diagnostics = (
             diagnostics_method() if callable(diagnostics_method) else {}
@@ -1507,6 +1788,9 @@ class ObjectTrackingSession:
                 label = str(track.get("label") or "unknown")
                 recoveries_by_label[label] = recoveries_by_label.get(label, 0) + recoveries
         payload = {
+            "scene_observations": list(self._pending_scene_observations),
+            "scene_samples": list(self._pending_scene_samples.values()),
+            "scene_analysis_job": self._scene_analysis_job,
             "implementation": self.config.implementation,
             "state": state,
             "sample_fps": self.config.sample_fps,
@@ -1526,6 +1810,8 @@ class ObjectTrackingSession:
             "processing": self._processing_snapshot(),
             **self._window_snapshot(),
             "coverage_gap_count": self._coverage_gap_count,
+            "coverage_gaps": list(self._scene_coverage_gaps),
+            "scene_cursor_epoch": captured_at if self._scene_analysis_job else None,
             "maximum_coverage_gap_seconds": round(
                 self._maximum_coverage_gap_seconds,
                 3,
@@ -1540,8 +1826,9 @@ class ObjectTrackingSession:
             # Keep queue/processing time from extending the replay clip.
             "updated_at": datetime.fromtimestamp(captured_at, timezone.utc).isoformat(),
             "persisted_at": datetime.now(timezone.utc).isoformat(),
-            "analyzed_through": datetime.fromtimestamp(captured_at, timezone.utc).isoformat()
+            "analyzed_through": datetime.fromtimestamp(self._last_analyzed_epoch, timezone.utc).isoformat()
             if self._last_analyzed_epoch is not None else None,
+            "scene_track_resume": self._scene_track_resume(tracker, captured_at),
             "tracks": tracks,
             "reid_diagnostics": {
                 **tracker_diagnostics,
@@ -1570,8 +1857,10 @@ class ObjectTrackingSession:
         if self._frame_width > 0 and self._frame_height > 0:
             payload["frame_width"] = self._frame_width
             payload["frame_height"] = self._frame_height
-        if self.update_event(event_id, payload, tracked_objects) is None:
+        if self._commit_tracking(event_id, payload, tracked_objects) is None:
             raise RuntimeError(f"tracking event {event_id} no longer exists")
+        self._pending_scene_observations.clear()
+        self._pending_scene_samples.clear()
         if state in {"complete", "interrupted"}:
             self._index_track_appearances(event_id, tracker)
         self._set_status(
@@ -1676,6 +1965,11 @@ class ObjectTrackingSession:
         payload = {
             "implementation": self.config.implementation,
             "state": "failed",
+            "scene_observations": list(self._pending_scene_observations),
+            "scene_samples": list(self._pending_scene_samples.values()),
+            "coverage_incomplete": True,
+            "coverage_interruption": "tracking_failed",
+            "scene_analysis_job": self._scene_analysis_job,
             "sample_fps": self.config.sample_fps,
             "effective_sample_fps": self._effective_sample_fps,
             "capacity_wait_seconds": round(
@@ -1690,10 +1984,11 @@ class ObjectTrackingSession:
             **self._window_snapshot(),
             "updated_at": datetime.fromtimestamp(captured_at, timezone.utc).isoformat(),
             "error": redact_secret_text(error)[:240],
-            "tracks": tracker.summaries(captured_at) if tracker is not None else [],
+            "tracks": self._replay_tracks(tracker, captured_at),
         }
         try:
-            self.update_event(event_id, payload, None)
+            self._commit_tracking(event_id, payload, None)
+            self._pending_scene_observations.clear()
         except Exception:
             LOGGER.exception(
                 "failed to persist tracking failure for %s event %d",

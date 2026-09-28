@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { trackingCoverageLabel, containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt, withoutIsolatedTrackSpikes } from "../src/objectTrackReplay.mjs";
+import { trackingCoverageLabel, containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentReplayTracking, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt, withoutIsolatedTrackSpikes } from "../src/objectTrackReplay.mjs";
 
 const tracks = storedObjectTracks({ object_tracking: { tracks: [{
   track_id: 7,
@@ -137,3 +137,18 @@ assert.equal(trackingCoverageAt({...windowTracking, state: "interrupted"}, 115),
 assert.equal(trackingCoverageAt({}, 115), null); // Legacy stored sessions retain their existing presentation.
 assert.equal(trackFrameAt({boxHistory:[[100,0,0,10,10]], trajectory:[]}, 101, {holdSeconds:5, observationsOnly:true}), null);
 assert.equal(incidentTrackingSource({object_tracking: {state:"active", tracks:[]}})?.object_tracking.state, "active");
+const replay = incidentReplayTracking(
+  { id: 8, object_tracking: { state: "complete", tracks: [], frame_width: 640, frame_height: 360, sample_fps: 3 } },
+  { scene_objects: [{ label: "person", observations: [
+    { scene_track_key: "tracking:8:run:1", label: "person", captured_at_epoch: 10, detection_frame_width: 1280, detection_frame_height: 720, box: { x1: 1, y1: 2, x2: 30, y2: 40 } },
+    { scene_track_key: "tracking:8:run:1", label: "person", captured_at_epoch: 11, detection_frame_width: 1280, detection_frame_height: 720, box: { x1: 4, y1: 5, x2: 34, y2: 44 } },
+    { scene_track_key: "tracking:8:run:1", label: "person", captured_at_epoch: 10.2, detection_frame_width: 640, detection_frame_height: 360, box: { x1: 1, y1: 1, x2: 8, y2: 8 } },
+    { label: "person", captured_at_epoch: 12, detection_frame_width: 1280, detection_frame_height: 720, box: { x1: 9, y1: 9, x2: 20, y2: 20 } },
+  ] }] },
+);
+assert.equal(storedObjectTracks(replay).length, 1);
+assert.deepEqual(replay.object_tracking.tracks[0].box_history, [[10, 1, 2, 30, 40], [11, 4, 5, 34, 44]]);
+assert.equal(replay.object_tracking.frame_width, 1280);
+assert.equal(replay.object_tracking.state, "complete");
+const stored = { id: 9, object_tracking: { state: "complete", tracks: [{ track_id: 4, label: "car", box: { x1: 1, y1: 1, x2: 5, y2: 6 }, box_history: [[1, 1, 1, 5, 6]] }] } };
+assert.equal(incidentReplayTracking(stored, { scene_objects: [{ observations: [{ scene_track_key: "9:tracking:9:run:1", label: "person", captured_at_epoch: 2, detection_frame_width: 100, detection_frame_height: 100, box: { x1: 0, y1: 0, x2: 2, y2: 2 } }] }] }), stored);

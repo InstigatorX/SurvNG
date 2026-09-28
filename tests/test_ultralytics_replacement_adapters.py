@@ -111,12 +111,14 @@ class TestNativeReplacementAdapters:
     def test_confirmation_filter_and_exact_threshold(self, engine):
         tracker = make(engine)
         ignored = det(); ignored["incident_eligible"] = False
-        assert tracker.update([ignored], 10, confirm_new=True) == []
+        observed = tracker.update([ignored], 10, confirm_new=True)
+        assert len(observed) == 1
+        assert observed[0]["incident_eligible"] is False
         value = det(); value["confidence"] = 0.7
         tracker.update([value], 10.333, confirm_new=True)
         assert tracker.update([value], 10.667)
 
-    def test_ineligible_low_confidence_continues_but_cannot_start(self, engine):
+    def test_alert_ineligible_detections_continue_and_create_scene_tracks(self, engine):
         tracker = make(engine)
         first = tracker.update([det()], 10, confirm_new=True)
         low = det(); low.update(confidence=0.4, incident_eligible=False)
@@ -124,7 +126,8 @@ class TestNativeReplacementAdapters:
         assert continued[0]["track_id"] == first[0]["track_id"]
         high = det("car", x=150); high["incident_eligible"] = False
         tracker.update([high], 10.667)
-        assert all(item["label"] != "car" for item in tracker.summaries(10.667))
+        tracker.update([high], 11.0)
+        assert any(item["label"] == "car" for item in tracker.summaries(11.0))
 
     def test_seed_time_and_minimum_confirmations(self, engine):
         tracker = build_builtin_object_tracker_registry().create(engine, ObjectTrackingConfig(

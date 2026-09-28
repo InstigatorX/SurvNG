@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import threading
+import tempfile
+import json
+from pathlib import Path
+from survng.app.events import EventStore
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -18,105 +22,30 @@ from survng.app.manager_access import ManagerAccessCoordinator
 
 
 class IncidentQueryRouterTest(unittest.TestCase):
-    def test_recent_feed_scans_past_grouping_boundary_before_paging(self) -> None:
-        def row(event_id: int, camera_id: str, second: int) -> dict:
-            return {
-                "id": event_id,
-                "camera_id": camera_id,
-                "kind": "motion",
-                "objects_json": "[]",
-                "created_at": (
-                    datetime(2026, 7, 30, tzinfo=timezone.utc)
-                    + timedelta(seconds=second)
-                ).isoformat(),
-            }
+    def test_recent_feed_pages_canonical_membership(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EventStore(Path(tmp))
+            first = store.add_event("older", "motion", created_at="2026-07-30T00:00:00+00:00")
+            newer = store.add_event("newer", "motion", created_at="2026-07-30T00:00:10+00:00")
+            store.add_event("older", "motion", created_at="2026-07-30T00:00:20+00:00")
+            manager = SimpleNamespace(events=store)
+            page, more, scanned = IncidentQueryService.recent_filtered_summaries(manager, limit=1, offset=0, gap_seconds=5, event_type="all")
+            self.assertEqual(page[0]["event_ids"], [newer["id"]])
+            self.assertTrue(more)
+            self.assertEqual(scanned[0]["camera_ids"], ["newer", "older"])
+            self.assertEqual(store.scene_incident(event_id=first["id"])["event_count"], 2)
 
-        # The older incident remains active more recently than the newer one.
-        # Its first 499 events fill the initial compact page, while the event
-        # that establishes its true start is immediately across the page
-        # boundary. The scan must continue because it has not crossed the
-        # 45-second grouping gap.
-        older_events = [
-            row(1000 - offset, "older", 9999 - offset)
-            for offset in range(499)
-        ]
-        newer_incident = row(1001, "newer", 9998)
-        first_batch = [older_events[0], newer_incident, *older_events[1:]]
-        final_older_event = row(501, "older", 9500)
-        calls: list[tuple[int, int | None]] = []
-
-        def recent_compact(limit: int, _before_created_at=None, before_id=None, *_args):
-            calls.append((limit, before_id))
-            if before_id is None:
-                return first_batch
-            if before_id == 502:
-                return [final_older_event]
-            return []
-
-        manager = SimpleNamespace(
-            events=SimpleNamespace(recent_compact=recent_compact)
-        )
-
-        page, has_more, scanned = IncidentQueryService.recent_filtered_summaries(
-            manager,
-            limit=1,
-            offset=0,
-            gap_seconds=45,
-            event_type="all",
-        )
-
-        self.assertEqual([item["camera_id"] for item in page], ["newer"])
-        self.assertTrue(has_more)
-        self.assertEqual([item["camera_id"] for item in scanned], ["newer", "older"])
-        self.assertEqual(scanned[1]["id"], "incident-older-501")
-        self.assertEqual(scanned[1]["event_count"], 500)
-        self.assertEqual(len(calls), 2)
-
-    def test_search_keeps_full_day_facets_when_results_are_camera_filtered(self) -> None:
-        rows = [
-            {
-                "id": 1,
-                "camera_id": "gate",
-                "kind": "object",
-                "created_at": "2026-01-01T12:00:00+00:00",
-                "snapshot_path": "gate.jpg",
-                "recording_path": "",
-                "objects_json": '[{"label":"person","confidence":0.9,"zones":["front"]}]',
-            },
-            {
-                "id": 2,
-                "camera_id": "garage",
-                "kind": "object",
-                "created_at": "2026-01-01T12:01:00+00:00",
-                "snapshot_path": "garage.jpg",
-                "recording_path": "",
-                "objects_json": '[{"label":"vehicle","confidence":0.9,"zones":["drive"]}]',
-            },
-        ]
-        calls: list[str] = []
-
-        def between_compact(_start: str, _end: str, camera_id: str = ""):
-            calls.append(camera_id)
-            return [row for row in rows if not camera_id or row["camera_id"] == camera_id]
-
-        manager = SimpleNamespace(
-            events=SimpleNamespace(between_compact=between_compact),
-            faces=SimpleNamespace(for_event_ids=lambda _ids: []),
-        )
-
-        result = IncidentQueryService.search(
-            manager,
-            day="2026-01-01",
-            time_zone="UTC",
-            camera_id="gate",
-            event_type="all",
-        )
-
-        self.assertEqual([item["camera_id"] for item in result["items"]], ["gate"])
-        self.assertEqual(result["facets"]["camera_ids"], ["garage", "gate"])
-        self.assertEqual(result["facets"]["labels"], ["person", "vehicle"])
-        self.assertEqual(result["facets"]["zones"], ["drive", "front"])
-        self.assertEqual(calls, ["gate", ""])
+    def test_search_keeps_full_day_facets_when_results_are_camera_filtered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EventStore(Path(tmp))
+            for camera, label, zone in (("gate", "person", "front"), ("garage", "vehicle", "drive")):
+                store.add_event(camera, "object", created_at="2026-01-01T12:00:00+00:00", objects_json=json.dumps([{"label":label,"confidence":.9,"zones":[zone]}]))
+            manager = SimpleNamespace(events=store, faces=SimpleNamespace(for_event_ids=lambda _ids: []))
+            result = IncidentQueryService.search(manager, day="2026-01-01", time_zone="UTC", camera_id="gate", event_type="all")
+            self.assertEqual([item["camera_id"] for item in result["items"]], ["gate"])
+            self.assertEqual(result["facets"]["camera_ids"], ["garage", "gate"])
+            self.assertEqual(result["facets"]["labels"], ["person", "vehicle"])
+            self.assertEqual(result["facets"]["zones"], ["drive", "front"])
 
     def test_confirmed_identity_wins_over_automatic_duplicate(self) -> None:
         identities = identity_summaries([
@@ -276,32 +205,30 @@ if __name__ == "__main__":
 
 
 class NotificationIncidentTest(unittest.TestCase):
-    def test_historical_link_resolves_by_original_event_and_checks_camera(self):
-        service = IncidentQueryService()
-        service.resolve_event = Mock(return_value={"camera_id": "front-door", "id": "incident-front-door-41"})
-        manager = SimpleNamespace(incidents=SimpleNamespace(get=lambda _key: None),
-                                  config=SimpleNamespace(cameras=[SimpleNamespace(id="front-door", name="Front Door")]))
-        result = service.notification_detail(manager, "incident-front-door-41")
-        self.assertEqual(result["camera_name"], "Front Door")
-        self.assertIsNone(result["notification"])
-        service.resolve_event.assert_called_once_with(manager, 41)
-        for key in ("invalid", "incident-garage-41", "incident-front-door-0"):
-            with self.assertRaises(HTTPException) as error:
-                service.notification_detail(manager, key)
-            self.assertEqual(error.exception.status_code, 404)
+    def test_historical_link_resolves_alias_and_rejects_unknown_camera(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EventStore(Path(tmp))
+            event = store.add_event("front-door", "motion")
+            service = IncidentQueryService()
+            manager = SimpleNamespace(events=store, faces=SimpleNamespace(for_event_ids=lambda _ids: []),
+                incidents=SimpleNamespace(get=lambda _key: None),
+                config=SimpleNamespace(cameras=[SimpleNamespace(id="front-door", name="Front Door")]))
+            result = service.notification_detail(manager, f"incident-front-door-{event['id']}")
+            self.assertEqual(result["camera_name"], "Front Door")
+            self.assertEqual(result["incident_id"], store.scene_incident(event_id=event["id"])["id"])
+            for key in ("invalid", f"incident-garage-{event['id']}", "incident-front-door-0"):
+                with self.assertRaises(HTTPException) as error:
+                    service.notification_detail(manager, key)
+                self.assertEqual(error.exception.status_code, 404)
 
-    def test_journal_membership_survives_partial_evidence_retention(self):
-        service = IncidentQueryService()
-        service.hydrate = Mock(side_effect=lambda _manager, items: items)
-        service.with_faces = Mock(side_effect=lambda _manager, items: items)
-        notification = {"incident_id": "incident-gate-41", "event_ids": [41, 42], "state": "complete"}
-        manager = SimpleNamespace(
-            incidents=SimpleNamespace(get=lambda _key: notification),
-            events=SimpleNamespace(get_many=lambda _ids: [{"id": 42, "camera_id": "gate",
-                "kind": "object", "objects_json": "[]", "created_at": "2026-09-13T01:00:00+00:00"}]),
-            config=SimpleNamespace(cameras=[]),
-        )
-        result = service.notification_detail(manager, "incident-gate-41")
-        self.assertEqual(result["incident_id"], "incident-gate-41")
-        self.assertEqual(result["incident"]["events"][0]["id"], 42)
-        self.assertEqual(result["notification"]["state"], "complete")
+    def test_membership_survives_partial_event_retention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EventStore(Path(tmp))
+            first = store.add_event("gate", "motion", created_at="2026-09-13T01:00:00+00:00")
+            second = store.add_event("gate", "motion", created_at="2026-09-13T01:00:10+00:00")
+            original = store.scene_incident(event_id=first["id"])["id"]
+            with store._connect() as conn:
+                conn.execute("delete from events where id=?", (first["id"],))
+            result = store.scene_incident(f"incident-gate-{first['id']}")
+            self.assertEqual(result["id"], original)
+            self.assertEqual(result["event_ids"], [second["id"]])

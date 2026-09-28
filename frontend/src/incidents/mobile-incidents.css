@@ -21,10 +21,24 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px 10px;
 }
-.mobile-incidents .incident-filter-selects label {
+.mobile-incidents .incident-filter-selects label,
+.mobile-incidents .incident-day-field {
   display: grid;
   gap: 3px;
   min-width: 0;
+}
+
+.mobile-incidents .incident-day-step {
+  width: 44px;
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.mobile-incidents .incident-day-stepper input[type="date"] {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: none;
 }
 .mobile-incidents .incident-filter-selects :is(select, input) {
   width: 100%;

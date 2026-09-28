@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentImageRenderRect, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentFocusStep, incidentImageRenderRect, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -15,6 +15,12 @@ assert.equal(adjacentIncident(incidents, { id: 101 }, 1), incidents[1]);
 assert.equal(adjacentIncident(incidents, { id: 201 }, -1), incidents[0]);
 assert.equal(adjacentIncident(incidents, { id: 301 }, 1), incidents[0]);
 assert.equal(adjacentIncident([incidents[0]], incidents[0], 1), null);
+assert.deepEqual(incidentFocusStep({ index: 1, count: 3, page: 0, pageCount: 2, direction: 1 }), { index: 2 });
+assert.deepEqual(incidentFocusStep({ index: 2, count: 3, page: 0, pageCount: 2, direction: 1 }), { page: 1, edge: "start" });
+assert.deepEqual(incidentFocusStep({ index: 0, count: 3, page: 1, pageCount: 2, direction: -1 }), { page: 0, edge: "end" });
+assert.equal(incidentFocusStep({ index: 2, count: 3, page: 1, pageCount: 2, direction: 1 }), null);
+assert.equal(incidentFocusStep({ index: 0, count: 3, page: 0, pageCount: 2, direction: -1 }), null);
+assert.equal(incidentFocusStep({ index: -1, count: 3, page: 0, pageCount: 2, direction: 1 }), null);
 assert.equal(incidentArrowNavigationAllowed({ closest: () => null }), true);
 assert.equal(incidentArrowNavigationAllowed({ closest: () => ({ tagName: "VIDEO" }) }), false);
 assert.equal(incidentSelectionHref("https://example.test/survng/incidents?day=2026-08-16", 42, "/survng"), "/survng/incidents?day=2026-08-16&event_ids=42");

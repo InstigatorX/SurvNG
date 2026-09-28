@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tests._isolated_runtime import _ROOT
 
 from survng.app.main import (
     app,
@@ -17,7 +19,7 @@ from survng.app.main import (
 
 class FrontendRouteTest(unittest.TestCase):
     def test_imported_application_uses_isolated_test_runtime(self) -> None:
-        self.assertIn("survng-pytest-", str(manager.database_dir))
+        self.assertEqual(Path(manager.database_dir), _ROOT / "database")
 
     def test_recording_subpages_serve_the_recordings_application(self) -> None:
         for page in (recordings_page, recording_search_page, recording_exports_page):

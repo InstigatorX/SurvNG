@@ -124,6 +124,20 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
         self.assertEqual([item["observations"] for item in summaries], [2, 2])
         self.assertTrue(all(item["state"] == "confirmed" for item in summaries))
 
+    def test_resume_seed_keeps_track_id_and_appearance(self) -> None:
+        tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
+        seed = detection("car", 0.9, (10, 10, 40, 40))
+        seed["_tracking_track_id"] = 7
+        seed["_tracking_embedding"] = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+        seeded = tracker.update([seed], 10.0, confirm_new=True)
+        self.assertEqual(seeded[0]["track_id"], 7)
+        snapshot = tracker.resume_snapshot(10.0)
+        self.assertEqual(snapshot[0]["track_id"], 7)
+        self.assertEqual(snapshot[0]["label"], "car")
+        self.assertEqual(snapshot[0]["appearance"], [1.0, 0.0, 0.0])
+        nxt = tracker.update([detection("person", 0.9, (80, 10, 100, 40))], 10.2, confirm_new=True)
+        self.assertEqual(nxt[0]["track_id"], 8)
+
     def test_depth_history_includes_seed_and_later_observations(self) -> None:
         tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
         initial = detection("person", 0.9, (10, 10, 40, 80))
@@ -317,15 +331,16 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
             sorted(sample[0] for sample in summary["box_history"]),
         )
 
-    def test_ignored_zone_detection_cannot_start_new_track(self) -> None:
+    def test_ignored_alert_zone_detection_still_starts_scene_track(self) -> None:
         tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
         ignored = detection("person", 0.9, (10, 10, 40, 80))
         ignored["incident_eligible"] = False
 
         tracked = tracker.update([ignored], 50.0)
 
-        self.assertEqual(tracked, [])
-        self.assertEqual(tracker.summaries(50.0), [])
+        self.assertEqual(len(tracked), 1)
+        self.assertEqual(tracked[0]["track_state"], "tentative")
+        self.assertFalse(tracked[0]["incident_eligible"])
 
     def test_bounds_total_tracks_for_noisy_detector_output(self) -> None:
         config = self.config.model_copy(update={"max_tracks_per_session": 2})
@@ -904,6 +919,37 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         self.assertEqual(
             persisted["reid_diagnostics"]["association_counts"],
             {"geometry": 6},
+        )
+
+    def test_recording_gap_keeps_tracks_from_the_previous_tracker(self) -> None:
+        persisted: dict = {}
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(),
+            detector=SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7)),
+            frame_provider=lambda: None,
+            update_event=lambda _event_id, tracking, _tracked: persisted.update(tracking) or {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+        first = SimpleNamespace(summaries=lambda _captured_at: [{
+            "track_id": 1, "label": "person", "reid_matches": 0,
+            "box": {"x1": 1, "y1": 2, "x2": 3, "y2": 4},
+        }])
+        session._archive_replay_tracks(first, 12.0)
+        session._persist(
+            7,
+            SimpleNamespace(summaries=lambda _captured_at: [{
+                "track_id": 1, "label": "car", "reid_matches": 0,
+            }]),
+            20.0,
+            None,
+            4,
+            "complete",
+        )
+        self.assertEqual(
+            [(track["track_id"], track["label"]) for track in persisted["tracks"]],
+            [(1, "person"), (100001, "car")],
         )
 
     def test_lazy_annotation_defers_inference_and_records_label_telemetry(self) -> None:
@@ -2179,7 +2225,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
 
 
 class ObjectTrackingPersistenceTest(unittest.TestCase):
-    def test_promoted_cover_updates_visible_track_boxes_and_removes_old_snapshot(self) -> None:
+    def test_promoted_cover_updates_visible_track_boxes_and_preserves_prior_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = Path(tmpdir)
             snapshot_dir = storage / "snapshots" / "gate"
@@ -2229,7 +2275,7 @@ class ObjectTrackingPersistenceTest(unittest.TestCase):
             self.assertEqual(objects[0]["snapshot_source"], "object_tracking")
             self.assertTrue(objects[0]["snapshot_visible"])
             self.assertFalse(objects[1]["snapshot_visible"])
-            self.assertFalse(old_snapshot.exists())
+            self.assertTrue(old_snapshot.exists())
             self.assertTrue(new_snapshot.exists())
 
     def test_replaces_tracking_metadata_and_assigns_initial_track_id(self) -> None:

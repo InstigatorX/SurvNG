@@ -264,7 +264,6 @@ class _UltralyticsObjectTrackerAdapter:
             (detection, parsed)
             for detection in detections
             if self.config.tracks_label(detection.get("label"))
-            and (self._preserve_continuation_detections or detection.get("incident_eligible") is not False)
             and (parsed := _box(detection.get("box"))) is not None
         ]
         usable = sorted(usable, key=lambda item: _confidence(item[0]), reverse=True)[
@@ -273,12 +272,8 @@ class _UltralyticsObjectTrackerAdapter:
         tracker_input = self._results(usable, confirm_new=confirm_new)
         features = self._features(usable) if self.config.appearance_reid_enabled else None
         if self._preserve_continuation_detections:
-            # Gate only native new-track initialization, after association. Low
-            # confidence/ineligible rows remain available to maintain IDs.
-            self._tracker._eligible_new_indices = {
-                index for index, (detection, _) in enumerate(usable)
-                if detection.get("incident_eligible") is not False
-            }
+            # Scene tracks are independent of notification-zone admission.
+            self._tracker._eligible_new_indices = set(range(len(usable)))
         output = self._tracker.update(tracker_input, img=None, feats=features)
         for native in self._tracker.tracked_stracks:
             if native.frame_id == self._tracker.frame_id:

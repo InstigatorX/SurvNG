@@ -58,7 +58,7 @@ class CrossCameraTraceTests(unittest.TestCase):
         )
         manager = SimpleNamespace(
             events=SimpleNamespace(
-                between_compact=lambda *_args: [{"id": 43}],
+                list_scene_incidents=lambda **_kwargs: [match],
             ),
             appearance_index=None,
         )
@@ -66,7 +66,7 @@ class CrossCameraTraceTests(unittest.TestCase):
         def resolve_event(_manager, event_id: int):
             return anchor if event_id == 42 else match
 
-        with patch("survng.app.cross_camera_trace._incident_rows", return_value=[match]):
+        with patch.object(manager.events, "list_scene_incidents", return_value=[match]):
             payload = build_cross_camera_trace(
                 manager,
                 resolve_event=resolve_event,
@@ -95,11 +95,11 @@ class CrossCameraTraceTests(unittest.TestCase):
         )
         match = _incident(43, "front-door", "2026-08-01T12:03:00+00:00")
         manager = SimpleNamespace(
-            events=SimpleNamespace(between_compact=lambda *_args: [{"id": 43}]),
+            events=SimpleNamespace(list_scene_incidents=lambda **_kwargs: [match]),
             appearance_index=None,
         )
 
-        with patch("survng.app.cross_camera_trace._incident_rows", return_value=[match]):
+        with patch.object(manager.events, "list_scene_incidents", return_value=[match]):
             payload = build_cross_camera_trace(
                 manager,
                 resolve_event=lambda _manager, event_id: anchor if event_id == 42 else match,
@@ -116,7 +116,7 @@ class CrossCameraTraceTests(unittest.TestCase):
         anchor = _incident(42, "gate", "2026-08-01T12:00:00+00:00", label="car")
         match = _incident(43, "upper-garage", "2026-08-01T12:04:00+00:00", label="truck")
         manager = SimpleNamespace(
-            events=SimpleNamespace(between_compact=lambda *_args: [{"id": 43}]),
+            events=SimpleNamespace(list_scene_incidents=lambda **_kwargs: [match]),
             appearance_index=SimpleNamespace(
                 matches=lambda *_args, **_kwargs: [{
                     "event_id": 43,
@@ -130,7 +130,7 @@ class CrossCameraTraceTests(unittest.TestCase):
             ),
         )
 
-        with patch("survng.app.cross_camera_trace._incident_rows", return_value=[match]):
+        with patch.object(manager.events, "list_scene_incidents", return_value=[match]):
             payload = build_cross_camera_trace(
                 manager,
                 resolve_event=lambda _manager, event_id: anchor if event_id == 42 else match,

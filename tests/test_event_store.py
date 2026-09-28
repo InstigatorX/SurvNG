@@ -136,6 +136,42 @@ class EventStoreTest(unittest.TestCase):
                 ).fetchone()
             self.assertEqual((row["state"], row["last_error"]), ("failed", "stale_refinement"))
 
+    def test_completed_detection_jobs_are_outside_expiry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            store.enqueue_detection_job(
+                job_id="done", camera_id="gate", dedupe_key="episode:done",
+                payload={"event_at": "2026-08-22T19:00:00+00:00"},
+            )
+            store.enqueue_detection_job(
+                job_id="stale", camera_id="gate", dedupe_key="episode:stale",
+                payload={"event_at": "2026-08-22T19:00:00+00:00"},
+            )
+            with store._connect_jobs() as connection:
+                connection.execute(
+                    "update detection_jobs set state='completed', created_at=? where id='done'",
+                    ("2026-08-22T19:00:00+00:00",),
+                )
+                connection.execute(
+                    "update detection_jobs set created_at=? where id='stale'",
+                    ("2026-08-22T19:00:00+00:00",),
+                )
+                plan = connection.execute(
+                    "explain query plan select id from detection_jobs "
+                    "where camera_id=? and state in ('queued', 'running')",
+                    ("gate",),
+                ).fetchall()
+            detail = " ".join(str(row[-1]) for row in plan)
+            self.assertIn("idx_detection_jobs_claim", detail)
+            self.assertIn("state", detail)
+            self.assertEqual(store.expire_stale_detection_jobs("gate", maximum_age_seconds=1.0), 1)
+            with store._connect_jobs() as connection:
+                states = {
+                    row["id"]: row["state"]
+                    for row in connection.execute("select id, state from detection_jobs")
+                }
+            self.assertEqual(states, {"done": "completed", "stale": "failed"})
+
     def test_stale_expired_lease_does_not_block_fresh_detection_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
@@ -1359,7 +1395,7 @@ class EventStoreTest(unittest.TestCase):
                 if item.get("status") == "cover_promotion"
             )
             self.assertTrue(promotion["admission_preserved"])
-            self.assertFalse(old.exists())
+            self.assertTrue(old.exists(), "prior scene evidence survives a cover change")
 
     def test_refinement_cover_declines_ambiguous_same_label_subjects(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2737,7 +2773,7 @@ class EventStoreTest(unittest.TestCase):
             store = EventStore(Path(tmpdir))
             event = self._motion_demoted_event(store)
             before = store.get(event["id"])
-            self.assertFalse(_event_row(dict(before))["has_objects"])
+            self.assertTrue(_event_row(dict(before))["has_objects"])
 
             updated = store.update_object_tracking(
                 event["id"],
@@ -2787,9 +2823,8 @@ class EventStoreTest(unittest.TestCase):
                 int(updated["evidence_revision"]),
                 int(before["evidence_revision"]),
             )
-            # A confirmed track still contributes its label, but the demoted
-            # object must not become qualifying incident evidence.
-            self.assertFalse(_event_row(dict(updated))["has_objects"])
+            # Stationary evidence remains in the scene without changing alert policy.
+            self.assertTrue(_event_row(dict(updated))["has_objects"])
 
 
 if __name__ == "__main__":

@@ -9,8 +9,6 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .assistant_investigation import correlate_incident_timeline
-from .incident_presenter import _event_row, _incident_rows
-from .incident_utils import DEFAULT_INCIDENT_GAP_SECONDS
 from .manager import AppManager
 
 LOGGER = logging.getLogger(__name__)
@@ -163,11 +161,9 @@ def build_cross_camera_trace(
         for item in appearance_matches
         if item.get("visually_similar")
     }
-    rows = [
-        _event_row(row)
-        for row in manager.events.between_compact(start.isoformat(), end.isoformat())
-    ]
-    summaries = _incident_rows(rows, DEFAULT_INCIDENT_GAP_SECONDS)
+    summaries = manager.events.list_scene_incidents(
+        start_at=start.isoformat(), end_at=end.isoformat(), limit=500,
+    )
     anchor_labels = {
         str(label).strip().lower()
         for label in (anchor or {}).get("labels") or []

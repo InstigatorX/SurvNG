@@ -341,7 +341,7 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager.config.mqtt.enabled = True
         manager.config.mqtt.incident_events_enabled = True
         manager._publish_incident_notification(payload)
-        manager.mqtt.publish.assert_called_once_with("events/incidents", {**payload, "notifications_enabled": True, "incident_path": "/incidents/incident-gate-41", "event_url": f"{manager.config.base_path}/incidents/incident-gate-41"}, retain=False)
+        manager.mqtt.publish.assert_called_once_with("events/incidents", {**payload, "notifications_enabled": True, "incident_path": "/incidents/incident-gate-41", "event_url": f"{manager.config.base_path}/incidents/incident-gate-41"}, retain=False, confirm=True)
 
     def test_notification_link_stays_stable_when_representative_changes(self):
         manager = manager_with_mocks()
@@ -380,7 +380,7 @@ class ManagerLifecycleTest(unittest.TestCase):
                 manager._publish_incident_notification({"camera_id": "gate", "state": state, **evidence})
                 self.assertEqual(manager.mqtt.publish.called, allowed)
 
-    def test_global_notification_switch_gates_both_transports(self):
+    def test_global_notification_switch_preserves_scene_updates(self):
         manager = manager_with_mocks()
         manager.config.mqtt.enabled = True
         manager.config.mqtt.incident_events_enabled = True
@@ -393,10 +393,10 @@ class ManagerLifecycleTest(unittest.TestCase):
                 self.assertEqual(manager.incident_notification_allowed(payload), enabled)
                 self.assertEqual(manager.incident_notification_payload(payload)["notifications_enabled"], enabled)
                 manager._publish_incident_notification(payload)
-                self.assertEqual(manager.state_events.publish.called, enabled)
+                self.assertTrue(manager.state_events.publish.called)
                 self.assertEqual(manager.mqtt.publish.called, enabled)
 
-    def test_camera_notification_switch_gates_both_transports(self):
+    def test_camera_notification_switch_preserves_scene_updates(self):
         manager = manager_with_mocks()
         manager.config.mqtt.enabled = True
         manager.config.mqtt.incident_events_enabled = True
@@ -409,7 +409,7 @@ class ManagerLifecycleTest(unittest.TestCase):
                 payload = {"camera_id": camera.id, "state": state, "classes": ["person"]}
                 self.assertEqual(manager.incident_notification_allowed(payload), enabled)
                 manager._publish_incident_notification(payload)
-                self.assertEqual(manager.state_events.publish.called, enabled)
+                self.assertTrue(manager.state_events.publish.called)
                 self.assertEqual(manager.mqtt.publish.called, enabled)
 
     def test_zone_policy_gates_mqtt_but_preserves_native_incidents(self):

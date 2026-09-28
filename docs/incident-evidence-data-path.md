@@ -1,392 +1,240 @@
 # Incident evidence data path
 
-SurvNG deliberately separates **fast detection**, **incident admission**,
-**causal motion correlation**, and **representative-image selection**. They use
-some of the same frames, but they answer different questions and must not be
-treated as one decision.
-
-This document is the authoritative contract for the image and object-evidence
-path after a camera notice or qualified EMA episode requests object detection.
-For the upstream trigger rules, see [Motion triggers and
-validation](adaptive-motion.md). For arbitrary recording-frame extraction, see
-[Recording frame API](recording-frame-api.md).
-
-## End-to-end flow
-
-```text
-ONVIF/manual notice or qualified EMA episode
-  -> generation-tagged episode admission
-  -> durable detection/refinement work
-  -> immediate fresh live-frame check
-       source: live capture, usually the configured substream
-       purpose: low-latency provisional evidence
-  -> provisional incident when trigger policy permits it
-  -> delayed main-recording temporal analysis
-       source: finalized high-resolution main recordings
-       purpose: label confirmation, activity, zones, correlation, faces,
-                and representative-frame selection
-  -> one of:
-       create incident
-       refine the existing provisional incident
-       preserve existing evidence when refinement is unavailable
-       reject the refined object as non-causal
-  -> independently select/promote the best compatible incident cover
-  -> optionally promote a later identity-verified tracking cover
-```
-
-The live check reduces time to first inference. The recorded pass supplies the
-stronger evidence. A fast negative, missing frame, stale frame, or invalid frame
-never cancels the recorded pass.
-
-## Why the live/substream frame is used
-
-At the live edge, the applicable main recording segment may still be open and
-cannot yet be decoded reliably. The live capture frame is already available in
-memory, so SurvNG can run an initial inference without waiting for segment
-finalization.
-
-The source is the camera's live capture:
-
-1. `live_stream_url`, normally the lower-resolution substream, when configured.
-2. `stream_url`, the main stream, when there is no separate live stream.
-
-This frame is accepted for the fast path only when its provenance is valid and
-its receipt timestamp is no more than one second old (with a small future-clock
-tolerance). Camera generation, capture generation, and frame sequence prevent a
-frame from an old camera runtime from becoming current evidence.
-
-The fast frame is tagged with:
-
-- `frame_source=live_fast_path`
-- `provisional_detection=true`
-- capture receipt time and frame age
-- camera and capture generation
-- frame sequence
-- whether live/main geometry is trusted
-- `frame_timestamp_exact=false`
-
-Receipt time establishes freshness; it is not a decoded camera PTS. The image
-can therefore be useful immediately without claiming exact recording time.
-
-## Main-recording refinement
-
-The refinement worker analyzes finalized main-stream recordings around the
-event. Its default sampling stages are:
-
-| Stage | Requested offsets from the event |
-| --- | --- |
-| Initial temporal window | -1.0, -0.5, 0.0, +0.5, +1.0 seconds |
-| Early bridge 1 | +1.5, +2.0, +2.5, +3.0 seconds |
-| Early bridge 2 | +3.5, +4.0, +4.5 seconds |
-| Delayed discovery 1 | +8.0, +8.5 seconds |
-| Delayed discovery 2 | +12.0, +12.5 seconds |
-
-Operators can tighten `detector.event_refinement_stages` and
-`detector.event_refinement_retry_seconds` when detector occupancy matters more
-than the widest delayed-discovery window. Later stages are used only as needed.
-They allow an object that was distant, occluded, or not yet in view at the
-trigger instant to be discovered without holding the initial response open.
-
-Within a stage, SurvNG stops requesting additional detector inferences once the
-configured confirmation count is already met. That early exit keeps the live →
-recorded paradigm while reducing how long refinement holds the shared
-accelerator.
-
-SurvNG associates detections across distinct timestamps, votes on labels, uses
-median confidence rather than the highest outlier, and applies the configured
-global or per-class confirmation count. Every frame counted toward confirmation
-must independently meet the applicable class confidence threshold; a weak
-association alone does not confirm an object. The selected frame is chosen from
-the confirmed temporal evidence, not simply the first or highest-confidence
-frame. If that representative clips or poorly shows the subject, SurvNG may
-inspect a bounded later stage for a better cover.
-
-Recorded results carry:
-
-- the actual selected frame time when the decoder can establish it;
-- `frame_source=recorded_main`;
-- whether the timestamp is exact;
-- the recording path and detection-frame dimensions;
-- temporal, quality, and activity evidence for each object.
-
-Snapshot filenames and stored object provenance use the selected frame's actual
-time, not merely the trigger time. Exact timestamps remain distinct from
-estimated timestamps.
-
-## Optional depth enrichment
-
-When `detector.depth.enabled` and a resolvable model path are configured, the
-isolated inference worker runs monocular depth on the selected recorded frame
-and adds bounded distance statistics to each object. A configured
-`detector.depth.max_incident_distance_m`, or a matching zone's
-`min_depth_m`/`max_depth_m`, can make a recorded object ineligible. Depth does
-not replace the trigger, object detector, temporal confirmation, or spatial-zone
-checks.
-
-`store_heatmap` optionally persists a small encoded heatmap with the incident;
-otherwise only object distance statistics are retained. Motion-attribution
-**depth shadow** results are separate, decision-scoped diagnostics. Shadow mode
-reports what depth would have changed but deliberately does not change
-admission.
-
-## Four independent decisions
-
-### 1. Trigger and work admission
-
-The per-camera episode controller decides whether an ONVIF/manual/EMA
-observation creates or joins a detection request. It owns episode identity,
-deduplication, reservation, cooldown, and lifecycle generation. Camera + EMA
-Backup treats the camera notice as primary and merges credible EMA evidence
-without silently losing an admitted request.
-
-Episode and intent IDs include a process-unique controller incarnation as well
-as camera, lifecycle generation, and episode sequence. The full intent ID is the
-durable refinement key and event idempotency key. A restart may repeat a local
-generation or sequence number, but it cannot collide with historical work.
-Exact redelivery of one intent coalesces; a different occurrence presenting the
-same durable identity raises a terminal error rather than returning an old job
-or incident.
-
-The fast EMA check carries the qualifying frame's epoch, capture sequence,
-capture generation, and camera lifecycle generation. It selects that exact
-bounded-ring frame, or a nearby frame from the same generations, instead of
-asking for whatever substream image happens to be newest after queueing. If the
-token is stale or unavailable, the fast result remains nonterminal and durable
-main-recording refinement still runs.
-
-Accepted EMA below the normal rescue score enters a longer persistence lane
-instead of becoming a permanent drop. A confirmed upstream object on a
-configured camera route, or measured ONVIF semantic degradation, shortens that
-extra persistence. Route windows are bounded and directional. Matching remains
-non-consuming while evidence is evaluated; a watch is consumed only after its
-route-specific trigger is durably admitted, and that consumption is persisted
-across restarts. Only a newly confirmed downstream incident opens the next leg.
-Watches authorize analysis, not admission, and therefore cannot propagate a
-false incident by themselves.
-
-### 2. Object and incident admission
-
-Confidence, temporal confirmation, configured zones, stationary-scene context,
-and the selected motion mode decide whether an object is incident eligible.
-The substream is not allowed to bypass these policies merely because it was
-available first.
-
-For cameras with incident/ignore zones, a live-frame object cannot receive
-zone-based provisional eligibility when live/main geometry is untrusted. It is
-retained as provisional evidence while the main-recording pass makes the
-geometry-dependent decision.
-
-### 3. Causal motion correlation
-
-EMA and object detection answer different questions: EMA identifies changed
-image regions; object detection identifies semantic objects. For EMA backup and
-other policies that require correlation, a main-stream object must credibly
-explain the motion through aligned overlap or temporal movement.
-
-New temporal evidence uses one shared estimator for initial admission, activity
-attribution, scene-context stability, and tracking promotion. Timestamped centers
-are normalized to frame dimensions and deduplicated by timestamp. Version 2
-retains the original observations and rejects an isolated point only when it is
-far from both neighboring observations relative to their separation, and no
-other distinct observation supports its location. Endpoint rejection checks
-the timestamped local trend so irregularly sampled steady movement remains
-intact. Filtering uses the original observations in one pass; rejected points
-cannot cause cascading rejection. There is no bin-count switch or time-bin
-aggregation to erase short supported excursions.
-
-Sparse evidence cannot reliably distinguish a localization error from a real
-brief transit. A lone unsupported excursion may be rejected, while a repeated
-localization error may look like supported movement.
-
-Admission uses filtered endpoint displacement or maximum filtered excursion
-(including out-and-back travel). Accumulated path length is diagnostic only:
-more observations of bounded jitter cannot turn it into meaningful travel.
-Repeated small loops below the excursion threshold no longer qualify through
-accumulation alone. Existing confidence, zone, and identity gates still apply.
-
-The versioned `temporal_motion` object records raw and filtered measurements,
-duration, sample count, and number of isolated points rejected. Version 1
-estimates from the earlier bin-median filter remain readable. Original
-aggregate fields remain available for comparison. Legacy records without this
-object retain their original aggregate-path interpretation; historical incidents
-are not silently reclassified. Tracking promotion records the same estimator in
-`tracking_motion_promotion.motion_estimate`.
-
-When substream and main-stream crops/FOV differ and no calibration is trusted,
-SurvNG does not pretend their coordinates align. A real object may therefore be
-semantically valid yet fail `object_not_motion_correlated`. That rejection must
-not erase an already valid camera-primary incident.
-
-### 4. Representative cover selection
-
-Cover selection is presentation, not admission. A cover can improve after an
-incident already exists without changing why the incident was admitted.
-
-SurvNG has three bounded cover opportunities:
-
-1. the immediate live frame, which may become the provisional cover;
-2. the representative temporally confirmed main frame;
-3. a later identity-verified tracking frame.
-
-The second step can promote a main frame even when that object does not explain
-an untrusted EMA region, but only when it is safely compatible with the already
-admitted subject.
-
-## Guarded main-cover promotion
-
-Main-cover promotion is intentionally conservative. It requires:
-
-- an existing incident containing exactly one admitted provisional subject;
-- exactly one temporally confirmed main-stream candidate with the same label;
-- no ambiguity from a second candidate of that same label;
-- a selected main frame within 15 seconds of the provisional frame;
-- a larger frame and at least 1.5 times as many subject pixels;
-- enough clearance that the subject is not clipped at the image edge;
-- eligible confidence and zone evidence on the main candidate.
-
-Other object classes may be present. Auxiliary face detections do not create
-same-label ambiguity. Label and time compatibility are not identity proof; a
-scene with multiple same-label candidates is left unchanged so tracked identity
-can make the later, stronger decision.
-
-Promotion atomically changes only presentation data:
-
-- event snapshot and associated recording path;
-- the visible object's display box and detection-frame dimensions;
-- snapshot source, selected timestamp, exactness, and quality metadata.
-
-It preserves the original incident confidence and eligibility and records a
-`cover_promotion` status with `admission_preserved=true`. The displaced snapshot
-is deleted only after confirming that no other database row references it.
-
-Cover-promotion failure is nonterminal. It cannot retry or fail completed
-security work, and it cannot create a second incident or duplicate MQTT object
-notification. A successful promotion sends an internal `incident_update` so
-connected incident lists refresh and semantic indexing sees the new evidence.
-
-## When a substream cover can legitimately remain
-
-A live/substream cover remains when no safe, materially better replacement is
-available. Common reasons include:
-
-- the main segment has not become readable or refinement failed;
-- main detection did not reach temporal confirmation;
-- no same-label main candidate exists;
-- multiple same-label candidates make identity ambiguous;
-- the main candidate is too far from the provisional time;
-- the main image or subject is not materially larger/better;
-- the candidate is clipped near an edge;
-- confidence or zone policy rejects the main candidate.
-
-An unavailable/error refinement is additive: SurvNG preserves known-good
-provisional evidence instead of replacing it with an empty image or status-only
-payload. Existing incidents are not retroactively reprocessed when this policy
-changes.
-
-## Snapshot and annotation geometry
-
-Object boxes are stored with the dimensions of the frame on which inference ran.
-When a cover is promoted, its display box and `detection_frame_width` /
-`detection_frame_height` are replaced together. The UI must map the box against
-those stored dimensions, not against the trigger stream or a derivative image.
-
-The displayed incident image may be a WebP/JPEG encoding of a decoded video
-frame. It is not necessarily the camera's snapshot JPEG or an encoded I-frame.
-Responsive preview derivatives affect transport/display only; zoom must promote
-to the original stored evidence image.
-
-## Durable and optional work
-
-Disabling detection cancels active refinement waits and owned frame decoders.
-Cancelled jobs return to the durable queue without consuming a failure attempt;
-normal age limits still apply when detection resumes. If worker cleanup times
-out, detection remains disabled and runtime status reports
-`detection_cleanup_required`. Retrying the control operation completes cleanup
-before detection can restart. Timeout diagnostics identify the remaining worker
-and, for active refinement, its job, processing stage, and elapsed time.
-
-Delayed object discovery is mandatory security work and is stored in the local
-detection-job ledger before optional tracking prewarm. It survives process
-restart and is retried according to its lease/attempt policy. Cover promotion,
-face enrichment, and tracking presentation are optional enrichment: their
-failure cannot discard or downgrade admitted evidence.
-
-Tracking starts after recorded confirmation finishes, or immediately from live
-evidence when refinement cannot run. Handoff is idempotent per event, so later
-refinement cannot start a duplicate tracking session.
-
-## Operator-visible diagnostics
-
-Relevant stored fields and statuses include:
-
-- `live_fast_path`, `recorded_main`, and exact/estimated timestamp metadata;
-- `provisional_detection` and `refinement_pending`;
-- object-detection phase timings and decision queue wait;
-- temporal confirmation, activity attribution, and motion correlation;
-- `refinement_unavailable_preserved`;
-- `object_not_motion_correlated`;
-- `cover_promotion` and its reason;
-- motion-audit `cover_promotion.promoted/reason` for EMA backup attempts.
-
-These distinctions are intentional. A message saying that the main object did
-not correlate with EMA does not mean the main image was unusable as a cover, and
-a substream cover does not mean SurvNG skipped main-stream refinement.
-
-## Implementation map
-
-| Responsibility | Implementation |
-| --- | --- |
-| Timestamped live-frame provenance | `survng/app/camera.py`, `TimestampedLiveFrame` in `survng/app/motion_pipeline/object_detection.py` |
-| Fast live inference and freshness/geometry gates | `RecordedMotionObjectDetector.detect_initial()` |
-| Recorded temporal sampling and representative selection | `RecordedMotionObjectDetector.detect()` / `_detect()` |
-| Admission, activity, correlation, snapshot writes | `MotionDecisionHandler` in `survng/app/motion_pipeline/decision_handler.py` |
-| Durable delayed-refinement orchestration | `MotionIncidentService` in `survng/app/motion_incidents.py` |
-| Guarded atomic main-cover promotion | `EventStore.promote_refinement_cover()` in `survng/app/events.py` |
-| Tracking-based cover verification/promotion | `survng/app/object_tracking.py` |
-| Live client refresh without duplicate notification | `survng/app/manager.py` |
-| EMA audit outcome | `survng/app/motion_decisions.py` |
-
-## Durable cover recovery on v1.2
-
-New provisional incidents own an `event_cover_requirements` row in the event
-SQLite database. Admission creates the event, its first `evidence_revision`,
-and the recovery obligation in one transaction. Existing events receive revision
-zero during migration; migration does not schedule historical recovery.
-
-A requirement starts pending, becomes satisfied after a compatible main-recording
-or tracking cover is adopted, or becomes exhausted. Recovery has a five-minute
-deadline, at most three attempts, a 15-second initial delay and retry delay, and a
-60-second worker lease. Each attempt requests at most 20 seconds of recorded
-sampling, progressing through the existing +4/+8/+12-second stages when available.
-An already running inference completes within its existing request timeout;
-cooperative cancellation is checked between requests and while waiting for
-capacity. The lease and deadline are checked again before cover adoption.
-
-The per-camera refiner claims cover work only after ordinary detection jobs.
-New security work preempts recovery without charging an attempt or extending the
-deadline. Cover inference uses optional device admission, so security work from
-other cameras also takes precedence. The security job freshness window stays at
-60 seconds. Recovery only updates presentation evidence for the existing incident;
-it does not readmit the incident, start tracking, or send another original object
-notification. Ambiguous subjects and unavailable recordings leave the prior cover
-in place. The last three attempt summaries provide bounded diagnostics.
-
-Delayed refinement, tracking, and manual detection writers check the event revision
-before changing evidence. Snapshot references, matching annotations, revision
-increments, cover settlement, and downstream outbox entries commit atomically.
-A restarted projection worker replays those entries to refresh semantic search,
-existing incident notifications, and the browser. Delivery is at least once:
-publication checkpoints and same-revision coalescing avoid routine duplicates,
-but a crash between external delivery and its checkpoint can replay an update.
-Replay cannot create a new incident notification group.
-
-Semantic search retains old embeddings until replacements encode successfully.
-Queries exclude embeddings whose revision or image path differs from the current
-event. A full queue or unavailable encoder therefore delays current search coverage
-without deleting the recoverable old index. The outbox remains pending until the
-current projection is applied. Browser and notification image URLs carry the
-revision; stale numeric revisions receive HTTP 409, and current-image aliases
-require cache revalidation.
-
-Recovery uses v1.2's existing FFmpeg recordings and decode budget. It adds no
-GStreamer collectors, main-stream ring buffers, or face-history ledger.
+An incident is a durable episode of observed activity, potentially spanning
+multiple cameras. Scene membership, evidence certainty, and notification policy
+are independent. An object outside an alert zone remains part of the scene.
+
+## Acquisition and evidence
+
+Camera and motion notices request detection. Periodic scene discovery also
+requests one full-scene frame every ten seconds per detection-enabled camera
+(`detector.scene_discovery_enabled`, `detector.scene_discovery_interval_seconds`).
+Discovery uses the existing durable refinement worker and inference limits.
+Scheduled capture frames are copied into a bounded four-frame buffer before
+their jobs are queued. Workers analyze the matching retained frame without
+waiting for recording finalization; its actual capture time and generation
+remain attached to the observations. Evicted frames and jobs resumed after
+restart use recorded evidence. Discovery uses the existing 60-second evidence
+job window rather than the 20-second probe window, so an ordinary recorded
+refinement ahead of it does not expire its queued sample prematurely.
+Acquisition is independent of events. Every discovery result is retained in the
+acquisition ledger, including successful empty samples and failed attempts.
+Objects do not establish activity merely by appearing in a detector's output.
+Candidates that can still establish an incident enter a durable confirmation
+queue without requiring an incident. A discovery frame whose boxes are all
+outside the establishing zones stays in the ledger and does not schedule that
+recorded pass. Failed analysis still requests confirmation.
+Unchanged observations enrich an existing episode without extending its
+activity clock or reopening it.
+
+Confirmation samples the recorded main stream, keeping each original image's
+own time, resolution and geometry. Initially it requests ten seconds before
+discovery and five seconds after, including the preceding discovery instant when
+available within the bounded window. It waits for recording availability and retries within a
+five-minute processing deadline. Overlapping work coalesces into windows of at
+most 40 seconds, with at most eight frames per pass. These are processing limits;
+they do not define when physical activity ended. Configured playback pre/post-roll
+and subsequent recorded analysis remain separate.
+
+The activity evaluator requires localized image change against a sufficiently
+stable surrounding image, or an independently admitted camera/motion notice.
+Label churn, repeated boxes, confidence and alert zones are not physical activity
+evidence. Measurements retain their source sample and observation references and
+policy version. Tracking accumulates slow image change against a bounded baseline;
+associating observations alone never advances the activity clock. This is sampled
+evidence, not a guarantee of detecting every action or eliminating every false positive.
+
+Zones decide which of that physical evidence can establish or prolong an incident.
+They do not remove observations from an incident that eligible activity already
+established. The establishment policy is separate from alert eligibility:
+`notifications_enabled` and confidence thresholds are not part of it, and
+`alert_eligible` is not the gate. The snapshot records zone name, enabled state,
+behavior, polygon, object classes, and depth band, plus `require_incident_zone`.
+Replay uses that snapshot. Later zone edits do not rewrite a decision already
+recorded for an episode, and historical import does not apply today's zones.
+
+An enabled Ignore zone wins where it overlaps an incident zone, including by
+object class and by a depth band on an Ignore zone. A depth band on an incident
+zone does not reject objects outside that band. With no restricting zones, or
+when incident zones are not required, the rest of the frame can still establish
+activity. When an Ignore zone exists, or incident zones are required, activity
+solely in an Ignore zone or outside every incident zone does not create an
+incident and does not move the episode's activity clock. A mix of those two
+is recorded as `ineligible_zone` rather than described as ignore-only. The configured
+inactivity grace still closes the episode. Ignored observations remain in the
+acquisition ledger and, once an episode exists, inside that episode's window.
+
+A camera or motion notice is not spatial evidence. Under a restricting snapshot
+it establishes activity only when a retained box on the same camera is in an
+eligible zone (`verified_camera_notice`). A notice with no such box, and measured
+motion that names no observation, cannot satisfy the restriction
+(`insufficient_spatial_evidence`). A notice also cannot override a physical
+witness that was measured and found ineligible. Cross-camera association uses the
+same rule: the camera being admitted needs its own zone-eligible activity.
+Decisions recorded before this policy remain as recorded.
+
+Live detection stores the snapshot on the event. Tracking supplies the camera's
+current snapshot only when the event does not already have one, and does not
+keep that snapshot inside the tracking blob. A later ignore-only measurement
+does not replace a supported decision or advance last activity. The stored
+decision keeps the physical assessment and the zone interpretation
+(`establishment_zones_v1` when a snapshot was applied).
+
+The candidate acquisition floor is independent of alert confidence and defaults
+to 0.25. Every usable acquired observation is retained before temporal consensus,
+zone interpretation, or cover selection. Recorded temporal samples and tracking
+frames carry camera/frame time, dimensions, confidence, geometry, source media,
+and a session-scoped association key. Object certainty uses
+`detector.tracking.confirmation_confidence_threshold` (default 0.45), independently
+of alert confidence. Candidates outside alert zones and
+stationary candidates are retained. Uncertain candidates remain uncertain.
+
+Live frames retain receipt-time provenance and are not represented as exact
+recorded timestamps. Recorded observations retain their actual frame time when
+available. A missing or failed analysis pass cannot erase preceding observations.
+Off-cover boxes never inherit the cover's image reference or coordinate plane.
+
+## Durable model
+
+The event database owns:
+
+- `acquired_samples`, `acquired_observations` and their associations: source
+  evidence before incident establishment, including failed and empty samples.
+  Analyses with different observations of the same capture retain separate
+  sample identities; replay of the same analysis remains idempotent. Activity
+  verification counts distinct camera/capture timestamps, not analysis variants.
+  Projection preserves each observation's original timestamp and geometry rather
+  than substituting the enclosing capture's timestamp. Older persisted sample
+  IDs remain readable, with later observations retained as additional analyses.
+- `scene_activity_measurements` and `scene_activity_decisions`: append-only
+  physical evidence and versioned establishment decisions. A zone-aware decision
+  records the physical assessment separately from the zone interpretation and
+  the observations that supported or failed establishment.
+- `scene_candidate_jobs`, `scene_candidate_seeds`, `scene_candidate_admissions`:
+  bounded confirmation work, indexed seed ownership and atomic admission per
+  generation. Replayed jobs recover the committed event before inference or
+  alerts; late coalesced seeds create a new generation of the same work item.
+- `scene_incidents`: stable IDs, revisions, activity interval and lifecycle.
+- `scene_episodes`: camera intervals, inactivity boundaries and analysis coverage.
+- `scene_event_membership`: legacy event associations to authoritative episodes.
+- `scene_objects` and `scene_observations`: object associations and retained model
+  evidence, independent of current event covers.
+- `scene_alert_decisions`: notification significance, separate from membership.
+- `scene_corrections` and `scene_aliases`: operator history and preserved links.
+- `scene_analysis_jobs`: leased, resumable recorded-analysis windows and cursors.
+- `scene_notification_outbox`: durable revision snapshots awaiting delivery.
+
+Object association uses supported track continuity or unambiguous nearby geometry.
+Ambiguous associations remain separate possible objects. Operator corrections
+can label objects, associate/separate observations, and merge/split incidents.
+Corrections require the expected revision and execute atomically. Splitting an
+association across episodes gives the resulting incidents independent subjects.
+Original model labels remain on observations. Overlapping episode windows
+retain their own associations to a shared source observation; merging those
+episodes coalesces supported subjects without removing either episode’s evidence. Different sightings without
+concurrent visibility or corrected identity are marked as uncertain continuity;
+summaries count sightings rather than asserting a number of unique people.
+
+The initial camera inactivity grace is 45 seconds. Repeated stationary discovery
+does not reset it. Measured activity extends a recorded-analysis job; processing
+budget limits produce resumable chunks rather than new incidents. Capacity or
+recording failures retain cursors and report incomplete analysis. Readable
+footage after a known discontinuity is analyzed with a new track context. Missing
+historical intervals are recorded as gaps; the processing cursor is separate
+from the last frame actually analyzed, including after restart. Jobs resume on
+the existing refinement worker’s maintenance pass when tracking capacity becomes
+available, including when the live camera is offline but recordings remain.
+
+Confirmed identity evidence can connect temporally compatible moving subjects
+across cameras, using configured camera transition windows or a 45-second
+fallback. Both sides require recorded physical activity associated with the
+person, and the camera being admitted must have zone-eligible activity.
+Detector-box movement alone cannot connect them. An ignore-only camera does not
+become a bridge. Appearance-only matches remain possible relationships. Operator split
+boundaries prevent automatic reconnection.
+
+## Presentation and consumers
+
+`GET /api/incidents/{incident_id}` and
+`GET /api/incidents/detail?incident_id=...` return the canonical incident.
+Legacy `event_ids` links resolve full persisted membership. Multiple supplied
+IDs that belong to different incidents return their canonical IDs in a 422
+response rather than inventing a new grouping. Filtering and pagination select
+incidents without changing their membership. Camera/object/zone/type filters and
+pagination run in SQLite before full incident history is hydrated. Facets read
+scalar metadata rather than loading every unmatched incident.
+
+The `scene_objects` inventory covers the complete episode history. Top-level
+`objects` and current event images remain source-frame presentation fields for
+compatible image overlays; they do not define the scene inventory. A scene
+object has supporting observations and visibility times. A selected cover is
+only a view of the evidence. Activity describes observed position/zone changes
+and the last retained sighting; it does not infer disappearance from missing footage.
+
+Playback advances chronologically through camera episodes in 15-minute chunks.
+The existing event MP4/HLS routes accept `episode_id`, `start_epoch`, and
+`end_epoch`; the server verifies episode membership and bounds and uses a distinct
+cache identity per chunk. Empty pre/post-roll remains inside the playback window.
+
+`GET /api/incidents/observations/{observation_id}/snapshot` serves the retained
+supporting image with its own source geometry. Missing or expired images return
+404 while observation metadata remains inspectable. Retention clears evidence
+references and advances the scene revision; cover replacement does not delete
+another object's supporting image.
+
+Incident detail includes an establishment explanation, separate from its alert
+explanation. Observed objects and activity start collapsed. Larger retained
+analyzed images can become the representative image; their own detections supply
+the overlays. An additional main-stream image never inherits another frame's boxes.
+Source dimensions and capture time remain visible in evidence details.
+
+The Observations workspace uses `GET /api/observations` with a bounded day/window,
+camera/status filters and pagination, plus `GET /api/observations/{record_id}`.
+Pending, unsupported and incomplete acquisitions stay accessible without appearing
+as newly established incidents. Capacity exhaustion or missing video is unresolved
+coverage, never a finding that nothing happened. Observation thumbnails use cached
+resizing; opening the original preserves its native resolution.
+
+`POST /api/incidents/{incident_id}/corrections` accepts `expected_revision` and
+one of `label`, `associate`, `separate`, `merge`, or `split`. Merge also requires
+expected revisions for its source incidents. Conflicts return 409. The existing
+API security boundary requires admin scope for these mutations.
+
+Search, assistant investigation, recording views and notifications resolve the
+same canonical scene. Semantic and appearance indexes can reference retained
+observations independently of current covers. Image/model unavailability remains
+explicit; metadata membership does not claim a vector exists for every object.
+
+Notification schema 3 carries the complete object roster and separate alert
+decisions. It contains representative evidence per object; full frame history is
+available from canonical detail. The incident lifecycle publishes database
+outbox revisions and acknowledges only after successful delivery. MQTT is a
+transport; it no longer constructs incidents. Consumers deduplicate by incident
+ID and revision. A crash after delivery but before acknowledgment may replay a
+revision. Historical identity enrichment does not emit a new alert.
+
+## Migration, retention and rollout
+
+Startup imports retained event evidence in bounded transactions, including
+previously excluded objects and retained legacy track histories. Track-level
+confidence is explicitly identified as a summary when original per-frame scores
+were not retained. A versioned, silent upgrade also repairs earlier partial imports.
+Migration is resumable and emits no historical
+notifications. Legacy coverage is marked historical because discarded frames
+cannot be reconstructed. Historical semantic/appearance work follows the
+existing worker budgets; migration does not bulk-reanalyze video.
+
+Existing discovery-created incidents without retained establishment evidence are
+marked unconfirmed and removed from the ordinary incident feed. Their IDs, links,
+inventory and correction history remain available. Reclassification records an
+auditable correction and creates a completed historical review record in
+Observations; it schedules no video work and does not reconstruct object membership.
+
+The schema additions preserve event records and old links. Deploy with a database
+backup and validate migrations on a copy before service cutover. The previous
+application can still read its event tables for rollback; preserve the new scene
+tables so a later cutover does not lose operator corrections.
+
+“All objects” means all retained detector observations in analyzed evidence.
+Sampling, unavailable recordings and detector uncertainty remain visible; SurvNG
+does not claim to recognize every physical object.

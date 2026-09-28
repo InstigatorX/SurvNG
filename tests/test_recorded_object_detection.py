@@ -837,7 +837,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertIsNone(samples[0].frame)
         self.assertIsNone(samples[2].frame)
 
-    def test_per_class_confidence_sets_inference_floor_and_object_eligibility(self) -> None:
+    def test_per_class_alert_confidence_does_not_change_scene_acquisition_floor(self) -> None:
         class Detector:
             config = SimpleNamespace(
                 confidence_threshold=0.45,
@@ -869,7 +869,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
 
         objects = backend._detect_objects(np.zeros((20, 30, 3), dtype=np.uint8))
 
-        self.assertEqual(detector.requested_threshold, 0.3)
+        self.assertEqual(detector.requested_threshold, 0.25)
         self.assertFalse(objects[0]["incident_eligible"])
         self.assertEqual(objects[0]["confidence_threshold"], 0.7)
         self.assertEqual(objects[0]["detection_frame_width"], 30)
@@ -1416,7 +1416,8 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertTrue(result.refinement_pending)
         self.assertEqual(requested_offsets, [])
         self.assertIs(result.frame, frame)
-        self.assertEqual(result.objects, [])
+        self.assertEqual(result.objects[0]["status"], "scene_observations")
+        self.assertEqual(result.objects[0]["observations"], [])
         self.assertEqual(
             set(result.timings_ms),
             {

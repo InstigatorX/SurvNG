@@ -6,8 +6,8 @@ import re
 import subprocess
 import threading
 import time
-from collections import Counter
-from dataclasses import dataclass, field
+from collections import Counter, deque
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from statistics import median
@@ -21,14 +21,17 @@ from ..evidence_work import (
     evidence_wait_timeout, report_evidence_stage, run_evidence_process,
 )
 from ..config import CameraConfig
+from ..scene_activity_evidence import scene_sample_records as _scene_sample_records
+from ..detector import detection_failure
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..ffmpeg_hw import recorded_frame_hw_args
 from ..object_motion import ObjectMotionEstimate, estimate_object_motion
 from ..recording_media import mp4_video_dimensions
 from ..visual_quality import VisualQuality, image_quality
-from ..zones import apply_depth_zone_filters, apply_detection_zones, detection_threshold
+from ..zones import apply_depth_zone_filters, apply_detection_zones
 from .context import Frame
 from .recorded_decode_budget import RecordedDecodeBudget, refinement_frame_count
+from .scene_evidence import scene_observation
 
 
 LOGGER = logging.getLogger(__name__)
@@ -111,6 +114,22 @@ def resolve_recorded_refinement_plan(
     camera_id: str | None = None,
 ) -> tuple[tuple[tuple[float, ...], ...], float, float, float, float]:
     """Resolve recorded refinement stages and occupancy budgets."""
+    if isinstance(qualification, dict) and qualification.get("scene_confirmation"):
+        epoch = event_at.timestamp() if event_at is not None else 0.0
+        window = qualification.get("scene_confirmation_window") or {}
+        start = float(window.get("start_epoch", epoch-1.0))
+        end = float(window.get("end_epoch", epoch+1.0))
+        if not (math.isfinite(start) and math.isfinite(end) and start < end):
+            raise ValueError("invalid scene confirmation window")
+        # Endpoints preserve context; near-trigger samples recover brief acts.
+        # Work remains bounded even when a caller requests a wider interval.
+        absolute = {start+(end-start)*i/4 for i in range(5)}
+        absolute.update(t for t in (epoch-.5,epoch,epoch+.5) if start <= t <= end)
+        return (tuple(round(t-epoch,6) for t in sorted(absolute)),), 8.0, .25, .25, 0.0
+    if isinstance(qualification, dict) and qualification.get("scene_discovery"):
+        # Periodic discovery shares the normal decode/inference budgets, but
+        # samples one complete frame rather than doing a cover-selection pass.
+        return ((0.0,),), 2.0, 0.0, 0.25, 0.0
     stages = _coerce_refinement_stages(
         getattr(config, "event_refinement_stages", None)
     ) or RECORDED_EVENT_FRAME_STAGES
@@ -192,6 +211,8 @@ class _RecordedDetectionSample:
     exact_timestamp: bool = False
 
 
+
+
 @dataclass(frozen=True)
 class RecordedDetectionResult:
     """Recorded evidence plus truthful phase timings for one sampling pass."""
@@ -205,6 +226,7 @@ class RecordedDetectionResult:
     frame_captured_at_epoch: float | None = None
     frame_source: str = ""
     frame_timestamp_exact: bool = False
+    review_image: dict[str, Any] | None = None
 
     def __iter__(self):
         # Preserve the historical three-value provider contract for callers
@@ -915,6 +937,9 @@ def _temporal_consensus(
             ),
             "semantic_max_confidence": round(track.peak_confidence, 4),
             "temporal_sample_offset_seconds": observation_sample.offset,
+            "offset_seconds": observation_sample.offset,
+            "recording_path": observation_sample.recording_path,
+            "frame_timestamp_exact": observation_sample.exact_timestamp,
             "temporal_requested_sample_offset_seconds": (
                 observation_sample.requested_offset
                 if observation_sample.requested_offset is not None
@@ -1289,6 +1314,8 @@ class RecordedMotionObjectDetector:
         self.timestamped_evidence_frame_provider = timestamped_evidence_frame_provider
         self._camera_stop_requested = stop_requested
         self.decode_budget = decode_budget
+        self._scene_frames: deque[TimestampedLiveFrame] = deque(maxlen=4)
+        self._scene_frames_lock = threading.Lock()
         # Compatibility-only: refinement depth no longer publishes rolling
         # motion evidence, so callers may keep passing this legacy argument.
         _ = motion_evidence
@@ -1296,11 +1323,26 @@ class RecordedMotionObjectDetector:
     def stop_requested(self) -> bool:
         return self._camera_stop_requested() or evidence_cancelled()
 
+    def remember_scene_frame(self, sample: TimestampedLiveFrame) -> None:
+        """Keep only scheduled discovery frames while their durable jobs wait.
+
+        Capture owns the image; take a copy before another capture callback can
+        reuse it. Evicted frames and jobs replayed after restart use recordings.
+        """
+        retained = replace(sample, frame=sample.frame.copy())
+        with self._scene_frames_lock:
+            self._scene_frames.append(retained)
+
     def detect(
         self,
         event_at: datetime,
         qualification: dict[str, Any] | None = None,
     ) -> RecordedDetectionResult:
+        confirming_scene = bool(qualification and qualification.get("scene_confirmation"))
+        if qualification and qualification.get("scene_discovery") and not confirming_scene:
+            live = self._live_discovery_result(event_at)
+            if live is not None:
+                return live
         (
             stages,
             retry_seconds,
@@ -1342,17 +1384,85 @@ class RecordedMotionObjectDetector:
                 or RECORDED_EVENT_FRAME_STAGES
             )
         )
-        return self._detect(
+        result = self._detect(
             event_at,
             stages=stages,
             retry_seconds=retry_seconds,
             settle_seconds=settle_seconds,
             retry_interval_seconds=retry_interval_seconds,
             representative_timeout_seconds=representative_timeout_seconds,
-            allow_representative_refinement=True,
+            allow_representative_refinement=not confirming_scene,
             refinement_pending=False,
             route_dense=route_dense,
             minimum_last_offset_seconds=minimum_last_offset,
+            preserve_confirmation_counts=bool(qualification and qualification.get("scene_discovery")),
+            scene_confirmation=confirming_scene,
+        )
+        if confirming_scene and not any(item.get("samples") is not None for item in result.objects if item.get("status")=="scene_observations"):
+            result=replace(result,objects=[*result.objects,{"status":"scene_observations","observations":[],
+                           "samples":_scene_sample_records([],[],event_at.timestamp(),self.camera.id,_flatten_refinement_stages(stages)),
+                           "coverage":{"state":"incomplete","sampled_frames":0}}])
+        return result
+
+    def _live_discovery_result(self, event_at: datetime) -> RecordedDetectionResult | None:
+        """Sample fresh capture through shared inference without waiting for segment closure.
+
+        Delayed/replayed jobs must still read their original recorded interval;
+        a current image is not evidence of an old scene.
+        """
+        started = time.monotonic()
+        with self._scene_frames_lock:
+            sample = next((frame for frame in reversed(self._scene_frames)
+                           if abs(frame.captured_at_epoch - event_at.timestamp()) <= 1e-6), None)
+        retained = sample is not None
+        if sample is None:
+            sample = self.timestamped_live_frame_provider() if self.timestamped_live_frame_provider else None
+        if not isinstance(sample, TimestampedLiveFrame):
+            return None
+        captured = float(sample.captured_at_epoch)
+        age = time.time() - captured
+        if not (
+            sample.source == "live" and sample.sequence > 0
+            and sample.camera_generation > 0 and sample.capture_generation > 0
+            and math.isfinite(captured) and math.isfinite(sample.captured_at_monotonic)
+            and age >= -FAST_LIVE_FRAME_FUTURE_TOLERANCE_SECONDS
+            and (retained or age <= FAST_LIVE_FRAME_MAX_AGE_SECONDS)
+            and abs(captured - event_at.timestamp()) <= RECORDED_LIVE_FALLBACK_EVENT_TOLERANCE_SECONDS
+        ):
+            return None
+        timing = {"detector_request_ms": 0.0, "detection_enrichment_ms": 0.0}
+        objects = self._detect_objects(sample.frame, timing=timing, enrich_faces=False, workload="refinement")
+        zone_geometry_required = any(
+            zone.enabled and zone.behavior in {"incident", "ignore"} and len(zone.points) >= 3
+            for zone in self.camera.zones
+        )
+        for detected in objects:
+            if not detected.get("label"):
+                continue
+            detected.update({
+                "frame_source": "live_discovery", "frame_captured_at_epoch": captured,
+                "frame_sequence": sample.sequence, "camera_generation": sample.camera_generation,
+                "capture_generation": sample.capture_generation,
+                "frame_geometry_trusted": sample.geometry_trusted,
+            })
+            if zone_geometry_required and not sample.geometry_trusted:
+                detected["incident_eligible"] = False
+                detected["fast_geometry_untrusted"] = True
+        observations = [observation for detected in objects
+                        if (observation := scene_observation(
+                            detected, captured_at_epoch=captured, frame_source="live_discovery",
+                        )) is not None]
+        # Use the same confirmation policy as recorded discovery. One acquired
+        # observation belongs to the scene even when it cannot justify an alert.
+        _, presented = _temporal_consensus(
+            [_RecordedDetectionSample(captured - event_at.timestamp(), sample.frame, objects, "")],
+            int(getattr(self.detector.config, "event_confirmation_frames", 2)),
+            dict(getattr(self.detector.config, "event_class_confirmation_frames", {}) or {}),
+        )
+        return self._result(
+            sample.frame, presented, "", timing, started, refinement_pending=False,
+            frame_captured_at_epoch=captured, frame_source="live_discovery",
+            scene_observations=observations,
         )
 
     def detect_initial(
@@ -1526,6 +1636,8 @@ class RecordedMotionObjectDetector:
         retry_interval_seconds: float = RECORDED_EVENT_RETRY_INTERVAL_SECONDS,
         representative_timeout_seconds: float = RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS,
         minimum_last_offset_seconds: float | None = None,
+        preserve_confirmation_counts: bool = False,
+        scene_confirmation: bool = False,
     ) -> RecordedDetectionResult:
         workflow_started = time.monotonic()
         timing = {
@@ -1641,6 +1753,8 @@ class RecordedMotionObjectDetector:
                 planned_offsets=planned_offsets,
                 prefetched_rows=prefetched_rows,
                 minimum_last_offset_seconds=minimum_last_offset_seconds,
+                preserve_confirmation_counts=preserve_confirmation_counts,
+                scene_confirmation=scene_confirmation,
             )
         finally:
             if memory_lease is not None:
@@ -1709,6 +1823,8 @@ class RecordedMotionObjectDetector:
         retry_interval_seconds: float = RECORDED_EVENT_RETRY_INTERVAL_SECONDS,
         representative_timeout_seconds: float = RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS,
         minimum_last_offset_seconds: float | None = None,
+        preserve_confirmation_counts: bool = False,
+        scene_confirmation: bool = False,
     ) -> RecordedDetectionResult:
         refinement_deadline: float | None = None
         samples_by_offset: dict[float, _RecordedDetectionSample] = {}
@@ -1725,17 +1841,18 @@ class RecordedMotionObjectDetector:
             return list(unique.values())
 
         samples: list[_RecordedDetectionSample] = []
+        confirmation_limit = 5 if preserve_confirmation_counts else len(planned_offsets)
         default_required = max(
             1,
             min(
-                len(planned_offsets),
+                confirmation_limit,
                 int(getattr(self.detector.config, "event_confirmation_frames", 2)),
             ),
         )
         class_confirmations = {
             str(label).strip().lower(): max(
                 1,
-                min(len(planned_offsets), int(confirmations)),
+                min(confirmation_limit, int(confirmations)),
             )
             for label, confirmations in dict(
                 getattr(self.detector.config, "event_class_confirmation_frames", {}) or {}
@@ -1800,6 +1917,7 @@ class RecordedMotionObjectDetector:
                 continue
             adaptive_stage = bool(
                 stage_index == 0
+                and not scene_confirmation
                 and getattr(
                     self.detector.config,
                     "recorded_adaptive_sampling",
@@ -1929,7 +2047,7 @@ class RecordedMotionObjectDetector:
                                 samples_by_source_frame[source_key] = sample
                         samples_by_offset[sample_offset] = sample
                         samples = ordered_samples()
-                        if (minimum_last_offset_seconds is None or any(
+                        if not scene_confirmation and (minimum_last_offset_seconds is None or any(
                             item.requested_offset is not None
                             and item.requested_offset >= minimum_last_offset_seconds
                             for item in samples
@@ -2045,6 +2163,7 @@ class RecordedMotionObjectDetector:
                             event_epoch=event_epoch,
                             face_sampler=sampler,
                             face_deadline=deadline,
+                            confirmation_offsets=planned_offsets if scene_confirmation else None,
                         )
                 if (
                     adaptive_stage
@@ -2097,8 +2216,13 @@ class RecordedMotionObjectDetector:
                 event_epoch=event_epoch,
                 face_sampler=sampler,
                 face_deadline=deadline,
+                confirmation_offsets=planned_offsets if scene_confirmation else None,
             )
 
+        if scene_confirmation:
+            return self._result(None,[{"status":"no_recorded_frame"}],"",timing,workflow_started,
+                                refinement_pending=False, scene_samples=_scene_sample_records(
+                                    [], [], event_epoch, self.camera.id, planned_offsets))
         return self._live_fallback_result(event_epoch, timing, workflow_started, refinement_pending)
 
     def _live_fallback_result(
@@ -2198,10 +2322,35 @@ class RecordedMotionObjectDetector:
         event_epoch: float,
         face_sampler: _EventRecordedSampler | None = None,
         face_deadline: float | None = None,
+        confirmation_offsets: tuple[float, ...] | None = None,
     ) -> RecordedDetectionResult:
         frame = selected.frame
         if frame is None:
             raise ValueError("selected recorded frame was released too early")
+        # Acquire the whole sampled scene before presentation enrichment can
+        # replace the selected sample with a cover-oriented object projection.
+        observations: list[dict[str, Any]] = []
+        for track in _collect_temporal_evidence(samples):
+            first_index = min(track.observations)
+            first = scene_observation(
+                track.observations[first_index],
+                captured_at_epoch=event_epoch + samples[first_index].offset,
+                frame_source="recorded_main",
+                recording_path=samples[first_index].recording_path,
+            )
+            track_key = f"recorded:{first['observation_key']}" if first else None
+            for index, detected in track.observations.items():
+                sample = samples[index]
+                observation = scene_observation(
+                    detected, captured_at_epoch=event_epoch + sample.offset,
+                    frame_source="recorded_main", recording_path=sample.recording_path,
+                    offset_seconds=sample.offset,
+                    frame_timestamp_exact=sample.exact_timestamp,
+                    scene_track_key=track_key,
+                )
+                if observation is not None:
+                    observation["snapshot_visible"] = sample is selected
+                    observations.append(observation)
         # Dedicated face enrichment runs only after consensus. Collect
         # face_candidates afterward so persistence sees those faces.
         if any(item.get("temporal_consensus") is True for item in objects):
@@ -2215,8 +2364,40 @@ class RecordedMotionObjectDetector:
             selected.objects = list(objects)
             if face_sampler is not None:
                 self._refine_face_evidence(samples, face_sampler, event_epoch, face_deadline, timing)
+        # Optional face enrichment can discover more objects or decode extra
+        # frames. Those observations join the same ledger. Off-cover objects
+        # in the selected presentation projection already have their own
+        # source observations above and must not be attributed to this frame.
+        acquired_keys = {item["observation_key"] for item in observations}
+        for sample in samples:
+            for detected in sample.objects:
+                if detected.get("snapshot_visible") is False:
+                    continue
+                observation = scene_observation(
+                    detected, captured_at_epoch=event_epoch + sample.offset,
+                    frame_source="recorded_main", recording_path=sample.recording_path,
+                    offset_seconds=sample.offset, frame_timestamp_exact=sample.exact_timestamp,
+                )
+                if observation is not None and observation["observation_key"] not in acquired_keys:
+                    observation["snapshot_visible"] = sample is selected
+                    observations.append(observation)
+                    acquired_keys.add(observation["observation_key"])
         face_candidates = self._face_candidates(samples)
+        for detected in objects:
+            if detected.get("label"):
+                detected["frame_captured_at_epoch"] = event_epoch + float(
+                    detected.get("temporal_sample_offset_seconds", selected.offset)
+                )
+                detected["frame_source"] = "recorded_main"
+        scene_samples = _scene_sample_records(samples,observations,event_epoch,
+            str(getattr(getattr(self,"camera",None),"id","")),confirmation_offsets)
         self._release_nonselected_frames(samples, selected)
+        review_image = ({"role":"additional_review","source":"recorded_main",
+                         "captured_at_epoch":event_epoch+selected.offset,
+                         "width":int(frame.shape[1]),"height":int(frame.shape[0]),
+                         "analyzed_frame":True,"frame_timestamp_exact":selected.exact_timestamp,
+                         "recording_path":selected.recording_path}
+                        if confirmation_offsets is not None else None)
         return self._result(
             frame,
             objects,
@@ -2228,6 +2409,9 @@ class RecordedMotionObjectDetector:
             frame_captured_at_epoch=event_epoch + selected.offset,
             frame_source="recorded_main",
             frame_timestamp_exact=selected.exact_timestamp,
+            scene_observations=observations,
+            scene_samples=scene_samples,
+            review_image=review_image,
         )
 
     def _refine_face_evidence(
@@ -2362,12 +2546,34 @@ class RecordedMotionObjectDetector:
         frame_captured_at_epoch: float | None = None,
         frame_source: str = "",
         frame_timestamp_exact: bool = False,
+        scene_observations: list[dict[str, Any]] | None = None,
+        scene_samples: list[dict[str, Any]] | None = None,
+        review_image: dict[str, Any] | None = None,
     ) -> RecordedDetectionResult:
         normalized = {key: round(max(0.0, value), 3) for key, value in timing.items()}
         normalized["workflow_ms"] = round(
             max(0.0, (time.monotonic() - workflow_started) * 1000.0),
             3,
         )
+        if scene_observations is None:
+            scene_observations = [
+                observation for detected in objects
+                if (observation := scene_observation(
+                    detected, captured_at_epoch=frame_captured_at_epoch,
+                    frame_source=frame_source, recording_path=recording_path,
+                    frame_timestamp_exact=frame_timestamp_exact,
+                )) is not None
+            ]
+        # This batch is a ledger input, not an additional displayed object.
+        if frame is not None or scene_observations or scene_samples:
+            objects = [*objects, {
+                "status": "scene_observations", "observations": scene_observations,
+                **({"samples":scene_samples} if scene_samples is not None else {}),
+                **({"review_image":review_image} if review_image is not None else {}),
+                "coverage": {"sampled_frames": int(timing.get("recording_samples_decoded", 0))
+                             or int(frame is not None),
+                             "state": "pending" if refinement_pending else "sampled"},
+            }]
         return RecordedDetectionResult(
             frame=frame,
             objects=objects,
@@ -2378,6 +2584,7 @@ class RecordedMotionObjectDetector:
             frame_captured_at_epoch=frame_captured_at_epoch,
             frame_source=frame_source,
             frame_timestamp_exact=frame_timestamp_exact,
+            review_image=review_image,
         )
 
     def _detect_objects(
@@ -2400,19 +2607,11 @@ class RecordedMotionObjectDetector:
             )
             or {}
         )
-        threshold = detection_threshold(
-            self.camera,
-            configured_threshold,
-            class_thresholds,
-        )
-        candidate_threshold = min(
-            threshold,
-            float(getattr(
-                self.detector.config,
-                "event_candidate_confidence_threshold",
-                threshold,
-            )),
-        )
+        # Alert confidence and zones may change without changing what the
+        # scene acquisition model observes.
+        candidate_threshold = float(getattr(
+            self.detector.config, "event_candidate_confidence_threshold", 0.25,
+        ))
         detector_started = time.monotonic()
         detector_method = getattr(
             self.detector,
@@ -2441,6 +2640,10 @@ class RecordedMotionObjectDetector:
             if isinstance(detected, dict) and detected.get("label"):
                 detected["detection_frame_width"] = int(frame_width)
                 detected["detection_frame_height"] = int(frame_height)
+                detected["scene_confirmation_threshold"] = float(getattr(
+                    getattr(self.detector.config, "tracking", None),
+                    "confirmation_confidence_threshold", 0.45,
+                ))
                 if str(detected.get("label") or "").strip().lower() == "face":
                     box = _box(detected)
                     if box is not None:

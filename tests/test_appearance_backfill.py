@@ -211,7 +211,7 @@ class DeferredAppearanceBackfillTest(unittest.TestCase):
                     },
                     {
                         "label": "car",
-                        "incident_eligible": True,
+                        "incident_eligible": False,
                         "box": {"x1": 20, "y1": 10, "x2": 180, "y2": 90},
                         "detection_frame_width": 200,
                         "detection_frame_height": 100,

@@ -1,4 +1,5 @@
 export const WORKSPACES = Object.freeze([
+  Object.freeze({ id: "observations", label: "Observations", path: "/observations", paths: ["/observations"], legacyRoutes: {} }),
   Object.freeze({ id: "live", label: "Live", path: "/", paths: ["/"], legacyRoutes: { "/live": "/" } }),
   Object.freeze({ id: "incidents", label: "Incidents", path: "/incidents", paths: ["/incidents"], legacyRoutes: {} }),
   Object.freeze({ id: "timeline", label: "Timeline", path: "/timeline", paths: ["/timeline"], legacyRoutes: { "/recordings": "/timeline" } }),

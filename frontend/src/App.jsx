@@ -34,6 +34,7 @@ function lazyExport(importer, exportName) {
 
 const LivePage = lazyExport(() => import("./live/LivePage.jsx"), "LivePage");
 const IncidentDetailPage = lazyExport(() => import("./incidents/IncidentDetailPage.jsx"), "IncidentDetailPage");
+const ObservationsPage = lazyExport(() => import("./incidents/ObservationsPage.jsx"), "ObservationsPage");
 const IncidentsPage = lazyExport(() => import("./incidents/IncidentsPage.jsx"), "IncidentsPage");
 const ExportCenterPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "ExportCenterPage");
 const RecordingsPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "RecordingsPage");
@@ -124,7 +125,9 @@ function App() {
               ? <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
               : workspacePage === "search"
                 ? <SemanticSearchPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
-                : workspacePage === "incidents"
+                : workspacePage === "observations"
+                  ? <ObservationsPage timeZone={timeZone} />
+                  : workspacePage === "incidents"
                   ? <IncidentsPage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
                   : workspacePage === "people"
                     ? <FacesPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />

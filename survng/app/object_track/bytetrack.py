@@ -194,7 +194,7 @@ class ByteTrackObjectTracker:
         self._associate(low, captured_at, unmatched_tracks, assignments)
 
         for index, detection, box in high:
-            if index in assignments or detection.get("incident_eligible") is False:
+            if index in assignments:
                 continue
             if len(self._tracks) + len(self._completed) >= self.config.max_tracks_per_session:
                 break
@@ -208,8 +208,16 @@ class ByteTrackObjectTracker:
                 )
             except (TypeError, ValueError):
                 first_seen = captured_at
+            track_id = self._next_track_id
+            if confirm_new:
+                try:
+                    requested = int(detection.get("_tracking_track_id"))
+                except (TypeError, ValueError):
+                    requested = 0
+                if requested > 0 and requested not in self._tracks and requested not in self._completed:
+                    track_id = requested
             track = ObjectTrack(
-                track_id=self._next_track_id,
+                track_id=track_id,
                 label=str(detection["label"]),
                 box=box,
                 first_seen=first_seen,
@@ -243,7 +251,7 @@ class ByteTrackObjectTracker:
                 track.entity_id = track.track_id
             self._tracks[track.track_id] = track
             assignments[index] = track.track_id
-            self._next_track_id += 1
+            self._next_track_id = max(self._next_track_id, track.track_id + 1)
             self._association_counts["new_track"] += 1
 
         for track_id in unmatched_tracks:
@@ -591,6 +599,35 @@ class ByteTrackObjectTracker:
             if track.confirmed
         ]
         return sorted([*completed, *active], key=lambda item: int(item["track_id"]))
+
+    def resume_snapshot(self, captured_at: float) -> list[dict[str, Any]]:
+        """Confirmed tracks a later job claim can seed without minting new ids."""
+        records: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for track in [*self._tracks.values(), *self._completed.values()]:
+            if not track.confirmed or track.track_id in seen:
+                continue
+            if captured_at - track.last_seen > self.config.lost_timeout_seconds:
+                continue
+            seen.add(track.track_id)
+            item: dict[str, Any] = {
+                "track_id": int(track.track_id),
+                "label": track.label,
+                "box": {
+                    "x1": round(float(track.box[0]), 1),
+                    "y1": round(float(track.box[1]), 1),
+                    "x2": round(float(track.box[2]), 1),
+                    "y2": round(float(track.box[3]), 1),
+                },
+                "last_seen": float(track.last_seen),
+            }
+            appearance = getattr(track, "appearance", None)
+            if appearance is not None:
+                values = [round(float(value), 5) for value in list(appearance)]
+                if values and len(values) <= 4096:
+                    item["appearance"] = values
+            records.append(item)
+        return records
 
     def appearance_records(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []

@@ -10,8 +10,8 @@ import {
   Rows3,
 } from "lucide-react";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
-import { incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
-import { incidentDetailQuery, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryPageSize, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
+import { incidentReplayTracking, incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
+import { incidentDetailQuery, incidentFocusStep, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryPageSize, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
 import { APP_BASE_PATH, appUrl, incidentRecordingContext, fetch } from "../shared/api.js";
 import { INCIDENT_REFRESH_FALLBACK_MS } from "../shared/constants.js";
@@ -22,6 +22,7 @@ import { useAppEvents } from "../shared/events.js";
 import { usePollingData, useIncidentDetails } from "../shared/polling.js";
 import { IncidentListItem, EventOverlay } from "../shared/evidence.jsx";
 import { IncidentCard, IncidentInspector } from "./IncidentCard.jsx";
+import { useIncidentPlayback } from "./useIncidentPlayback.js";
 import "./mobile-incidents.css";
 import { FaceReviewDialog } from "../people/FacesPage.jsx";
 
@@ -69,16 +70,17 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const [linkedIncidentEventId, setLinkedIncidentEventId] = useState(null);
   const [linkedIncidentError, setLinkedIncidentError] = useState("");
   const [linkedIncidentLoading, setLinkedIncidentLoading] = useState(() => (
-    Boolean(typeof window !== "undefined" && new URLSearchParams(window.location.search).get("event_ids"))
+    Boolean(typeof window !== "undefined" && (new URLSearchParams(window.location.search).get("event_ids") || new URLSearchParams(window.location.search).get("incident_id")))
   ));
   const linkedIncidentBootRef = useRef(
-    typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("event_ids") : null,
+    typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("event_ids") || new URLSearchParams(window.location.search).get("incident_id")) : null,
   );
   const [selectedFace, setSelectedFace] = useState(null);
   const [facePeople, setFacePeople] = useState([]);
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
   const [incidentPage, setIncidentPage] = useState(0);
   const incidentRailListRef = useRef(null);
+  const incidentPageEdgeRef = useRef(null);
   const incidentGalleryToggleRef = useRef(null);
   const [galleryExpanded, setGalleryExpanded] = useState(false);
   const [storedGalleryPageSize, setStoredGalleryPageSize] = useStoredState("survng.incidentGalleryPageSize.v1", 25);
@@ -87,7 +89,6 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const retainedGallerySelectionRef = useRef(null);
   const galleryPageAnchorRef = useRef(null);
   const incidentPagingRef = useRef(null);
-  const [incidentRailSize, setIncidentRailSize] = useState({ width: 0, height: 0 });
   const [desktopAnalysisMode, setDesktopAnalysisMode] = useStoredState("survng.incidentDesktopAnalysis.v1", "clean");
   const [desktopDepthLayer, setDesktopDepthLayer] = useStoredState("survng.incidentDesktopDepthLayer.v1", "both");
   const [desktopAnalysisStats, setDesktopAnalysisStats] = useState(null);
@@ -97,12 +98,12 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const [relatedPreviewEventId, setRelatedPreviewEventId] = useState(null);
   const [relatedPreviewLoadingEventId, setRelatedPreviewLoadingEventId] = useState(null);
   const [selectedVisualObject, setSelectedVisualObject] = useState(null);
+  const [observationPreviewRequest, setObservationPreviewRequest] = useState(null);
   const [findSimilarObject, setFindSimilarObject] = useState(null);
   const [tabletInspectorOpen, setTabletInspectorOpen] = useState(false);
   const tabletInspectorToggleRef = useRef(null);
   const relatedPreviewRequestRef = useRef(0);
   const mobileView = isMobileViewport();
-  const incidentRailReady = mobileView || (incidentRailSize.width > 0 && incidentRailSize.height > 0);
   const incidentsPerPage = mobileView ? 12 : incidentPageSize;
   const cameraNameById = useMemo(() => new Map(cameras.map((camera) => [camera.id, camera.name || camera.id])), [cameras]);
   const incidentCameraOptions = incidentFacets.camera_ids || [];
@@ -150,6 +151,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const relatedAnchorEvent = incidentTrackingSource(focusedEvent, focusedIncident) || focusedEvent;
   const relatedAnchorEventId = Number(relatedAnchorEvent?.representative_event_id || relatedAnchorEvent?.id) || null;
   const displayedIncident = relatedPreviewIncident || focusedIncident;
+  const scenePlayback = useIncidentPlayback(displayedIncident);
   const displayedEvent = relatedPreviewIncident
     ? (
       (relatedPreviewIncident.events || []).find((event) => Number(event.id) === Number(relatedPreviewEventId))
@@ -161,9 +163,11 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
       || (focusedIncident?.events || []).find((event) => Number(event.id) === Number(focusedIncident.representative_event_id))
       || focusedIncident
     );
-  const findSimilarEvent = focusedEvent;
-  const findSimilarEventId = relatedAnchorEventId;
-  const visualFindSimilarEventId = Number(focusedEvent?.representative_event_id || focusedEvent?.id) || null;
+  const findSimilarEvent = (focusedIncident?.events || []).find((event) => Number(event.id) === Number(findSimilarObject?.eventId)) || focusedEvent;
+  const findSimilarEventId = findSimilarObject?.eventId
+    ? Number(incidentTrackingSource(findSimilarEvent, focusedIncident)?.id || findSimilarEvent.id)
+    : relatedAnchorEventId;
+  const visualFindSimilarEventId = Number(findSimilarEvent?.representative_event_id || findSimilarEvent?.id) || null;
   const focusedSnapshotEvent = displayedEvent;
   const focusedSnapshotEventId = Number(focusedSnapshotEvent?.representative_event_id || focusedSnapshotEvent?.id);
   const focusedLoadedImageSize = Number(focusedImageSize?.eventId) === focusedSnapshotEventId ? focusedImageSize : null;
@@ -200,7 +204,9 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     if (mobileView || !focusedEvent || relatedPreviewIncident || linkedIncidentBootRef.current) return;
     const eventId = Number(focusedEvent.representative_event_id || focusedEvent.id);
     if (!Number.isInteger(eventId) || eventId <= 0) return;
-    const nextHref = incidentSelectionHref(
+    const nextHref = focusedIncident?.incident_id && focusedIncident?.revision != null
+      ? (() => { const url = new URL(window.location.href); url.searchParams.set("incident_id", focusedIncident.incident_id); url.searchParams.delete("event_ids"); return `${url.pathname}${url.search}${url.hash}`; })()
+      : incidentSelectionHref(
       `${window.location.pathname}${window.location.search}${window.location.hash}`,
       eventId,
       APP_BASE_PATH,
@@ -209,24 +215,25 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     if (nextHref && nextHref !== currentHref) {
       window.history.replaceState(window.history.state, "", nextHref);
     }
-  }, [focusedEvent?.id, focusedEvent?.representative_event_id, mobileView, relatedPreviewIncident]);
+  }, [focusedIncident?.incident_id, focusedEvent?.id, focusedEvent?.representative_event_id, mobileView, relatedPreviewIncident]);
 
   useEffect(() => {
-    const eventIds = linkedIncidentBootRef.current
-      || new URLSearchParams(window.location.search).get("event_ids");
-    if (!eventIds) {
+    const params = new URLSearchParams(window.location.search);
+    const canonicalId = params.get("incident_id");
+    const eventIds = canonicalId ? null : (linkedIncidentBootRef.current || params.get("event_ids"));
+    if (!eventIds && !canonicalId) {
       setLinkedIncidentLoading(false);
       return undefined;
     }
     let cancelled = false;
     setLinkedIncidentLoading(true);
     setLinkedIncidentError("");
-    const query = new URLSearchParams({ event_ids: eventIds, gap_seconds: "45" });
+    const query = new URLSearchParams(canonicalId ? { incident_id: canonicalId } : { event_ids: eventIds, gap_seconds: "45" });
     fetch(`/api/incidents/detail?${query}`)
       .then((response) => response.ok ? response.json() : Promise.reject(new Error("Linked incident unavailable")))
       .then((detail) => {
         if (cancelled) return;
-        const requestedEventId = Number(String(eventIds).split(",")[0]);
+        const requestedEventId = eventIds ? Number(String(eventIds).split(",")[0]) : Number(detail.representative_event_id);
         if (mobileView) {
           setSelectedEvent(detail);
           linkedIncidentBootRef.current = null;
@@ -281,7 +288,6 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
         setIncidentPageSize(pageSize);
       }
       galleryPageAnchorRef.current = null;
-      setIncidentRailSize({ width, height });
     }
     function scheduleResize() {
       window.clearTimeout(resizeTimer);
@@ -486,7 +492,6 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   }, []);
 
   useEffect(() => {
-    if (!incidentRailReady) return undefined;
     let cancelled = false;
     async function loadIncidentPage() {
       const query = new URLSearchParams({
@@ -521,7 +526,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
         setIncidentTotal(Number(payload.total || 0));
         setIncidentFacets(payload.facets || { camera_ids: [], labels: [], zones: [] });
         setIncidentLoadError("");
-        if (!mobileView && items.length) {
+        if (!mobileView && items.length && !incidentPageEdgeRef.current) {
           setExpandedIncidentId((current) => current || items[0].id);
         }
       } catch (error) {
@@ -538,7 +543,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     return () => {
       cancelled = true;
     };
-  }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentPage, incidentsPerPage, incidentRefreshToken, incidentRailReady]);
+  }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentPage, incidentsPerPage, incidentRefreshToken]);
 
   useEffect(() => {
     retainedGallerySelectionRef.current = null;
@@ -560,6 +565,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     setRelatedPreviewEventId(null);
     setRelatedPreviewLoadingEventId(null);
     setSelectedVisualObject(null);
+    setObservationPreviewRequest(null);
     setFindSimilarObject(null);
     setTabletInspectorOpen(false);
   }, [focusedIncident?.id, linkedIncidentDetail?.id, linkedIncidentEventId]);
@@ -580,7 +586,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
 
   useEffect(() => {
     if (desktopAnalysisMode !== "tracks") return;
-    const trackingEvent = incidentTrackingSource(displayedEvent, displayedIncident);
+    const trackingEvent = incidentReplayTracking(displayedEvent, displayedIncident);
     if (!storedObjectTracks(trackingEvent).length) setDesktopAnalysisMode("clean");
   }, [desktopAnalysisMode, displayedEvent, displayedIncident, setDesktopAnalysisMode]);
 
@@ -649,11 +655,17 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     if (incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
   }
 
-  function changeIncidentPage(page) {
+  function changeIncidentPage(page, { scroll = true } = {}) {
     retainedGallerySelectionRef.current = null;
     galleryPageAnchorRef.current = null;
     setIncidentPage(page);
-    if (incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
+    if (scroll && incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
+  }
+
+  function alignIncidentList(edge) {
+    const rail = incidentRailListRef.current;
+    if (!rail) return;
+    rail.scrollTop = edge === "end" ? Math.max(0, rail.scrollHeight - rail.clientHeight) : 0;
   }
 
   function toggleIncident(incidentId) {
@@ -675,10 +687,41 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     : -1;
 
   function moveFocus(direction) {
-    if (!visibleIncidents.length) return;
-    const nextIndex = Math.max(0, Math.min(visibleIncidents.length - 1, focusedIndex + direction));
-    setExpandedIncidentId(visibleIncidents[nextIndex].id);
+    const step = incidentFocusStep({
+      index: focusedIndex,
+      count: visibleIncidents.length,
+      page: clampedIncidentPage,
+      pageCount: incidentPageCount,
+      direction,
+    });
+    if (!step) return;
+    if (step.index != null) {
+      setExpandedIncidentId(visibleIncidents[step.index].id);
+      return;
+    }
+    if (incidentPageEdgeRef.current || (!semanticIncidentActive && incidentLoading)) return;
+    incidentPageEdgeRef.current = step.edge;
+    changeIncidentPage(step.page, { scroll: false });
   }
+
+  useEffect(() => {
+    const edge = incidentPageEdgeRef.current;
+    if (!edge) return undefined;
+    if (!semanticIncidentActive && incidentLoading) return undefined;
+    if (!semanticIncidentActive) {
+      const loadedOffset = Number(new URLSearchParams(incidentLoadedQueryRef.current).get("offset")) || 0;
+      if (loadedOffset !== incidentPage * incidentsPerPage) return undefined;
+    }
+    if (!visibleIncidents.length) {
+      incidentPageEdgeRef.current = null;
+      return undefined;
+    }
+    incidentPageEdgeRef.current = null;
+    const target = edge === "end" ? visibleIncidents[visibleIncidents.length - 1] : visibleIncidents[0];
+    setExpandedIncidentId(target.id);
+    const frame = window.requestAnimationFrame(() => alignIncidentList(edge));
+    return () => window.cancelAnimationFrame(frame);
+  }, [incidentLoading, incidentPage, incidentsPerPage, semanticIncidentActive, visibleIncidents]);
 
   function selectDesktopAnalysisMode(mode) {
     setDesktopAnalysisMode(mode);
@@ -723,18 +766,34 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     function onIncidentArrow(event) {
       const target = event.target;
       if (target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName))) return;
-      if (event.key === "ArrowLeft" && focusedIndex > 0) {
-        event.preventDefault();
-        moveFocus(-1);
-      }
-      if (event.key === "ArrowRight" && focusedIndex >= 0 && focusedIndex < visibleIncidents.length - 1) {
-        event.preventDefault();
-        moveFocus(1);
-      }
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      const direction = event.key === "ArrowLeft" ? -1 : 1;
+      if (!incidentFocusStep({ index: focusedIndex, count: visibleIncidents.length, page: clampedIncidentPage, pageCount: incidentPageCount, direction })) return;
+      event.preventDefault();
+      moveFocus(direction);
     }
     window.addEventListener("keydown", onIncidentArrow);
     return () => window.removeEventListener("keydown", onIncidentArrow);
-  }, [mobileView, selectedEvent, galleryExpanded, focusedIndex, visibleIncidents]);
+  }, [mobileView, selectedEvent, galleryExpanded, focusedIndex, visibleIncidents, clampedIncidentPage, incidentPageCount, incidentLoading, semanticIncidentActive]);
+
+  function shiftIncidentDay(days) {
+    const next = addDaysToDateKey(incidentDay || today, days);
+    if (next <= today) setIncidentDay(next);
+  }
+
+  function incidentDayControl({ caption = false } = {}) {
+    const day = incidentDay || today;
+    return (
+      <div className="incident-day-field">
+        {caption ? <span>Day</span> : null}
+        <div className="incident-day-stepper">
+          <button type="button" className="incident-day-step" onClick={() => shiftIncidentDay(-1)} aria-label="Previous day" title="Previous day"><ChevronLeft size={16} /></button>
+          <input type="date" value={day} max={today} onChange={(event) => setIncidentDay(event.target.value || today)} aria-label="Incident day" />
+          <button type="button" className="incident-day-step" onClick={() => shiftIncidentDay(1)} disabled={day >= today} aria-label="Next day" title="Next day"><ChevronRight size={16} /></button>
+        </div>
+      </div>
+    );
+  }
 
   const semanticIncidentControl = (
     <div className={`incident-semantic-search ${semanticIncidentActive ? "active" : ""} ${semanticIncidentError ? "error" : ""}`}>
@@ -758,7 +817,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                 <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}>Objects</button>
                 <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion</button>
               </div>
-              <label className="incident-day-field"><input type="date" value={incidentDay} max={today} onChange={(event) => setIncidentDay(event.target.value || today)} aria-label="Incident day" /></label>
+              {incidentDayControl()}
               <div className="incident-filter-selects desktop">
                 <label><select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)} aria-label="Incident camera"><option value="all">All cameras</option>{incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}</select></label>
                 <label><select value={incidentObjectFilter} onChange={(event) => setIncidentObjectFilter(event.target.value)} aria-label="Incident object"><option value="all">All objects</option>{incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}</select></label>
@@ -825,23 +884,26 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                 </div>
                 {focusedIncident ? (
                   <>
-                    <button type="button" className="incident-focus-arrow previous" onClick={() => moveFocus(-1)} disabled={focusedIndex <= 0} title="Previous incident" aria-label="Previous incident"><ChevronLeft size={26} /></button>
-                    <button type="button" className="incident-focus-arrow next" onClick={() => moveFocus(1)} disabled={focusedIndex < 0 || focusedIndex >= visibleIncidents.length - 1} title="Next incident" aria-label="Next incident"><ChevronRight size={26} /></button>
+                    <button type="button" className="incident-focus-arrow previous" onClick={() => moveFocus(-1)} disabled={!incidentFocusStep({ index: focusedIndex, count: visibleIncidents.length, page: clampedIncidentPage, pageCount: incidentPageCount, direction: -1 })} title="Previous incident" aria-label="Previous incident"><ChevronLeft size={26} /></button>
+                    <button type="button" className="incident-focus-arrow next" onClick={() => moveFocus(1)} disabled={!incidentFocusStep({ index: focusedIndex, count: visibleIncidents.length, page: clampedIncidentPage, pageCount: incidentPageCount, direction: 1 })} title="Next incident" aria-label="Next incident"><ChevronRight size={26} /></button>
                   </>
                 ) : null}
                 {displayedIncident ? (
                   <IncidentCard
                     key={`${focusedIncident?.id || "none"}:${displayedIncident.id || displayedIncident.representative_event_id}`}
                     incident={displayedIncident}
+                    scenePlayback={scenePlayback}
                     timeZone={timeZone}
                     expanded
                     thumbnailAnnotations={thumbnailAnnotations}
                     thumbnailObjectFocus={thumbnailObjectFocus}
                     thumbnailObjectFocusZoom={thumbnailObjectFocusZoom}
                     desktopWorkspace
+                    zones={(appConfig?.cameras || []).find((camera) => camera.id === displayedIncident.camera_id)?.zones}
                     analysisMode={desktopAnalysisMode}
                     depthLayer={desktopDepthLayer}
                     replayRequest={desktopReplayRequest}
+                    observationPreviewRequest={relatedPreviewIncident ? null : observationPreviewRequest}
                     selectedObjectIndex={relatedPreviewIncident ? null : (selectedVisualObject?.objectIndex ?? findSimilarObject?.objectIndex ?? null)}
                     onSelectObject={relatedPreviewIncident ? null : ((selection) => {
                       setSelectedVisualObject(selection);
@@ -873,6 +935,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
             <IncidentInspector
               open={tabletInspectorOpen}
               incident={displayedIncident}
+              scenePlayback={scenePlayback}
               faceEvent={displayedEvent}
               searchEvent={findSimilarEvent}
               anchorEventId={findSimilarEventId}
@@ -890,7 +953,15 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
               selectedObjectIndex={selectedVisualObject?.objectIndex ?? null}
               findSimilarObjectIndex={findSimilarObject?.objectIndex ?? null}
               onSelectObject={setSelectedVisualObject}
+              onSelectObservation={(observation) => { if (observation.event_id) setObservationPreviewRequest({ eventId: observation.event_id }); }}
+              onSceneChanged={(detail) => {
+                incidentDetailCacheRef.current.clear();
+                setIncidentDetails((current) => ({ ...current, [incidentDetailQuery(detail)]: detail }));
+                setLinkedIncidentDetail(detail); setExpandedIncidentId(detail.id);
+                setIncidentRefreshToken((value) => value + 1);
+              }}
               onFindSimilar={(selection) => {
+                if (selection?.eventId) setObservationPreviewRequest({ eventId: selection.eventId });
                 // Find similar runs only from an explicit Find similar control.
                 setFindSimilarObject(selection);
                 if (selection) {
@@ -927,10 +998,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
         {mobileFiltersOpen ? <div id="mobile-incident-filters" className="event-filter incident-filter-panel" aria-label="Incident filters">
           <div className="incident-filter-selects">
             <label><span>Activity</span><select value={eventFilter} aria-label="Incident type" onChange={(event) => { resetSemanticIncidentSearch(); setEventFilter(event.target.value); }}><option value="object">Objects</option><option value="motion">Motion</option></select></label>
-            <label>
-              <span>Day</span>
-              <input type="date" value={incidentDay} max={today} onChange={(event) => setIncidentDay(event.target.value || today)} aria-label="Incident day" />
-            </label>
+            {incidentDayControl({ caption: true })}
             <label>
               <span>Camera</span>
               <select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)} aria-label="Incident camera">

@@ -61,6 +61,29 @@ def test_factory_creation_and_prewarm_keep_frame_dependencies_injected() -> None
     assert callable(factory.create.call_args.kwargs["catchup_frame_provider"])
 
 
+def test_resume_pending_scene_seeds_the_saved_track() -> None:
+    session = _session()
+    session.running.return_value = False
+    session.start.return_value = True
+    lifecycle, _factory, _frame_provider, _history = _lifecycle(session)
+    saved = {"scene_run_key": "same-run", "tracks": [{"track_id": 4, "label": "car"}]}
+    lifecycle.scene_job_store = Mock()
+    lifecycle.scene_job_store.claim_scene_tracking.return_value = {
+        "event_id": 8,
+        "event_epoch": 1000.0,
+        "start_epoch": 1000.0,
+        "end_epoch": 1002.0,
+        "cursor_epoch": 1000.5,
+        "episode_id": "episode-1",
+        "analyzed_epoch": 1000.5,
+        "coverage_gaps_json": "[]",
+    }
+    lifecycle.scene_job_store.scene_track_resume.return_value = saved
+
+    assert lifecycle.resume_pending_scene() is True
+    assert session.start.call_args.kwargs["scene_track_resume"] is saved
+
+
 def test_accepting_state_is_evaluated_when_session_is_resumed() -> None:
     state = [False]
     initial = _session()
@@ -160,7 +183,8 @@ def test_incident_handoff_filters_objects_and_starts_current_session_atomically(
     initial.start.assert_called_once_with(
         42,
         event_at,
-        [{"label": "person", "incident_eligible": True}],
+        [{"label": "person", "incident_eligible": False},
+         {"label": "person", "incident_eligible": True}],
         frame,
     )
 

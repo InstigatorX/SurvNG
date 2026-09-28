@@ -212,6 +212,64 @@ class CameraFrameTimeline:
                     return
                 self.frames.append((captured_at, stored))
 
+    def _segments_abut(self, epoch: float, sample_fps: float) -> bool:
+        """True when the next indexed main file starts where the previous one ended."""
+        interval = 1.0 / max(0.1, float(sample_fps))
+        try:
+            rows = self.recorder.recording_rows_between(
+                self.camera.id,
+                epoch - interval,
+                epoch + interval,
+                source="main",
+                discover_missing=False,
+            )
+        except (TypeError, ValueError, AttributeError):
+            return False
+        spans: list[tuple[float, float]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                start = float(row.get("start_epoch") or 0.0)
+                end = float(row.get("end_epoch") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if end > start:
+                spans.append((start, end))
+        for left_start, left_end in spans:
+            if abs(left_end - epoch) > interval:
+                continue
+            for right_start, right_end in spans:
+                if right_end <= left_end:
+                    continue
+                gap = right_start - left_end
+                if -interval <= gap <= interval:
+                    return True
+        return False
+
+    def _continuity_boundary(
+        self,
+        continuity_start: float,
+        end_epoch: float,
+        sample_fps: float,
+    ) -> _TimelineBoundary | None:
+        """The next break in media time. An abutting 10-second file is not one."""
+        with self._lock:
+            candidates = [
+                item
+                for item in sorted(self._boundaries, key=lambda candidate: candidate.captured_at)
+                if continuity_start < item.captured_at <= end_epoch
+                and (item.source == "live" or item.reason == "recorder_epoch_changed")
+            ]
+        for item in candidates:
+            if (
+                item.reason == "recorder_epoch_changed"
+                and self._segments_abut(item.captured_at, sample_fps)
+            ):
+                continue
+            return item
+        return None
+
     def _refresh_recorder_boundary(self) -> None:
         """Reflect a recorder timestamp epoch change in this camera's timeline."""
         timestamp_health = getattr(self.recorder, "timestamp_health", None)
@@ -248,28 +306,12 @@ class CameraFrameTimeline:
         if end_epoch <= continuity_start or frame_width <= 0:
             return TrackingFrameBatch((), continuity_start)
         self._refresh_recorder_boundary()
-        with self._lock:
-            boundary = next(
-                (
-                    item
-                    for item in sorted(
-                        self._boundaries,
-                        key=lambda candidate: candidate.captured_at,
-                    )
-                    if (
-                        continuity_start < item.captured_at <= end_epoch
-                        and (
-                            item.source == "live"
-                            or item.reason == "recorder_epoch_changed"
-                        )
-                    )
-                ),
-                None,
-            )
+        boundary = self._continuity_boundary(continuity_start, end_epoch, sample_fps)
         readable_end = boundary.captured_at if boundary is not None else end_epoch
         if readable_end < start_epoch or (boundary is not None and readable_end == start_epoch):
             return TrackingFrameBatch(
                 (), continuity_start, boundary.reason if boundary is not None else None,
+                boundary.captured_at if boundary is not None else None,
             )
         rows = sorted(
             self.recorder.recording_rows_between(
@@ -381,6 +423,7 @@ class CameraFrameTimeline:
             tuple(frames),
             covered_through,
             boundary.reason if boundary is not None else None,
+            boundary.captured_at if boundary is not None else None,
         )
 
     def recorded_frames(

@@ -71,6 +71,9 @@ class AppearanceIndex:
                 connection.execute(
                     "alter table appearance_embeddings add column source text not null default 'tracking_multiframe'"
                 )
+            for name in ("observation_id", "scene_object_id"):
+                if name not in columns:
+                    connection.execute(f"alter table appearance_embeddings add column {name} text not null default ''")
             connection.execute(
                 "create index if not exists idx_appearance_event on appearance_embeddings(event_id)"
             )
@@ -132,6 +135,8 @@ class AppearanceIndex:
                 str(record.get("last_seen") or ""),
                 str(record.get("source") or "tracking_multiframe"),
                 str(record.get("created_at") or record.get("last_seen") or ""),
+                str(record.get("observation_id") or ""),
+                str(record.get("scene_object_id") or ""),
             ))
         return prepared
 
@@ -147,7 +152,7 @@ class AppearanceIndex:
             return 0
         with self._lock, self._connect() as connection:
             connection.execute(
-                "delete from appearance_embeddings where event_id = ?",
+                "delete from appearance_embeddings where event_id = ? and observation_id=''",
                 (int(event_id),),
             )
             connection.executemany(
@@ -156,8 +161,8 @@ class AppearanceIndex:
                     event_id, camera_id, track_id, label, model_kind,
                     model_fingerprint, embedding_size, embedding_blob,
                     match_threshold, observation_count, quality,
-                    first_seen, last_seen, source, created_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    first_seen, last_seen, source, created_at, observation_id, scene_object_id
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 prepared,
             )
@@ -181,8 +186,8 @@ class AppearanceIndex:
                     event_id, camera_id, track_id, label, model_kind,
                     model_fingerprint, embedding_size, embedding_blob,
                     match_threshold, observation_count, quality,
-                    first_seen, last_seen, source, created_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    first_seen, last_seen, source, created_at, observation_id, scene_object_id
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 prepared,
             )
@@ -195,6 +200,12 @@ class AppearanceIndex:
                 (int(event_id),),
             ).fetchone()
         return row is not None
+
+    def scene_coverage(self, event_id: int) -> tuple[set[str], set[tuple[str, int]]]:
+        with self._connect() as connection:
+            rows = connection.execute("select scene_object_id,label,track_id from appearance_embeddings where event_id=?", (event_id,)).fetchall()
+        return ({str(row["scene_object_id"]) for row in rows if row["scene_object_id"]},
+                {(str(row["label"]), int(row["track_id"])) for row in rows if not row["scene_object_id"]})
 
     @staticmethod
     def _vector(row: sqlite3.Row) -> np.ndarray | None:

@@ -112,22 +112,10 @@ class MqttLifecycle:
     ) -> None:
         self._current().remove_zone_discovery(camera_id, zones, model_classes)
 
-    def track_incident(
-        self,
-        event: dict[str, Any],
-        camera_name: str,
-        base_path: str = "",
-        allow_new: bool = True,
-    ) -> None:
-        self._current().track_incident(
-            event,
-            camera_name,
-            base_path,
-            allow_new=allow_new,
-        )
-
-    def publish(self, suffix: str, payload: dict[str, Any], retain: bool = False) -> None:
-        self._current().publish(suffix, payload, retain=retain)
+    def publish(self, suffix: str, payload: dict[str, Any], retain: bool = False, *, confirm: bool = False) -> bool:
+        if confirm:
+            return self._current().publish(suffix, payload, retain=retain, confirm=True)
+        return self._current().publish(suffix, payload, retain=retain)
 
     def publish_zone_objects(
         self,

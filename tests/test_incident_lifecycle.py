@@ -1,136 +1,137 @@
-"""Native incident lifecycle and transport-independent recovery."""
+"""Canonical incident revisions are the sole notification membership source."""
+from copy import deepcopy
 from unittest.mock import Mock
 
-from survng.app.incident_lifecycle import IncidentLifecycle
+from survng.app.incident_lifecycle import CanonicalIncidentLifecycle, IncidentLifecycle
 
 
-def evidence(event_id=41, **changes):
-    return {"id": event_id, "camera_id": "gate", "created_at": "2026-09-12T12:00:00+00:00",
-            "snapshot_path": "snapshots/gate.jpg",
-            "objects": [{"label": "person", "confidence": 0.9, "zones": ["porch"]}], **changes}
+def scene(revision=1):
+    return {
+        "id": "scene-1", "incident_id": "scene-1", "revision": revision,
+        "state": "active", "camera_id": "gate", "camera_ids": ["gate", "drive"],
+        "start_at": "2026-09-12T12:00:00+00:00", "end_at": "2026-09-12T12:00:20+00:00",
+        "summary": "Two people observed across Gate and Drive.",
+        "scene_objects": [
+            {"id": "person-1", "label": "person", "confidence": .94},
+            {"id": "person-2", "label": "person", "confidence": .75,
+             "incident_eligible": False, "zone_admission_reason": "outside_incident_zone"},
+        ],
+        "episodes": [{"camera_id": "gate"}, {"camera_id": "drive"}],
+        "events": [{"id": 80913}, {"id": 80914}],
+        "alert_decisions": [{"event_id": 80913, "eligible": True}],
+    }
 
 
-def test_native_lifecycle_and_late_identity_without_mqtt(tmp_path):
+class Scenes:
+    def __init__(self, *snapshots):
+        self.pending = [dict(incident_id=item["incident_id"], revision=item["revision"], payload=deepcopy(item))
+                        for item in snapshots]
+        self.current = deepcopy(snapshots[-1]) if snapshots else scene()
+        self.acknowledged = []
+
+    def scene_pending_notifications(self):
+        return deepcopy(self.pending)
+
+    def settle_scene_incidents(self):
+        pass
+
+    def acknowledge_scene_notification(self, incident_id, revision):
+        self.acknowledged.append((incident_id, revision))
+        self.pending = [item for item in self.pending if (item["incident_id"], item["revision"]) != (incident_id, revision)]
+
+    def list_scene_incidents(self):
+        return [deepcopy(self.current)]
+
+    def scene_incident(self, incident_id=None, event_id=None):
+        return deepcopy(self.current) if incident_id == self.current["incident_id"] else None
+
+
+def test_canonical_payload_contains_every_subject_and_camera():
+    store = Scenes(scene())
     published = []
-    lifecycle = IncidentLifecycle(published.append, tmp_path / "incidents.json")
-    lifecycle.start()
-    try:
-        lifecycle.track_incident(evidence(), "Gate", "/survng")
-        lifecycle.track_incident(evidence(snapshot_path="snapshots/better.jpg"), "Gate", "/survng", allow_new=False)
-        key = published[0]["incident_id"]
-        lifecycle._groups[key]["settle_at"] = 0
-        lifecycle._settle(key)
-        lifecycle.track_incident(evidence(identities=[{"identity_id": 1, "name": "Alex", "confidence": 0.95}]),
-                                 "Gate", "/survng", allow_new=False)
-        assert [item["state"] for item in published] == ["new", "updated", "complete", "complete"]
-        assert [item["revision"] for item in published] == [1, 2, 3, 4]
-        assert len({item["incident_id"] for item in published}) == 1
-        assert published[-1]["summary"] == "Alex detected at Gate."
-        assert published[-1]["people"] == ["Alex"]
-        assert published[-1]["completed_at"] == published[-2]["completed_at"]
-        assert "image" in published[1]["changed_fields"]
-        assert published[0]["objects"][0]["observation_count"] == 1
-    finally:
-        lifecycle.close()
+    lifecycle = IncidentLifecycle(store, published.append)
+    assert isinstance(lifecycle, CanonicalIncidentLifecycle)
+    assert lifecycle.run_once() == 1
+    payload = published[0]
+    assert payload["schema_version"] == 3
+    assert [item["confidence"] for item in payload["objects"]] == [.94, .75]
+    assert payload["camera_ids"] == ["gate", "drive"]
+    assert payload["event_ids"] == [80913, 80914]
+    assert payload["summary"] == store.current["summary"]
+    assert payload["alert_decisions"] == store.current["alert_decisions"]
+    assert store.acknowledged == [("scene-1", 1)]
 
 
-def test_restart_retains_revisions_and_does_not_complete_on_shutdown(tmp_path):
-    path = tmp_path / "incidents.json"
-    lifecycle = IncidentLifecycle(Mock(), path)
-    lifecycle.start()
-    lifecycle.track_incident(evidence(), "Gate")
-    lifecycle.close()
+def test_replay_publishes_snapshot_revision_without_substituting_latest_state():
+    first, latest = scene(1), scene(2)
+    latest["scene_objects"].append({"id": "car-1", "label": "car"})
+    store = Scenes(first, latest)
     published = []
-    restored = IncidentLifecycle(published.append, path)
-    assert restored.snapshot()[0]["state"] == "new"
-    assert restored.snapshot()[0]["revision"] == 1
+    assert IncidentLifecycle(store, published.append).run_once() == 2
+    assert [item["revision"] for item in published] == [1, 2]
+    assert [len(item["objects"]) for item in published] == [2, 3]
+
+
+def test_publication_failure_stops_ordered_replay_and_retries_after_restart():
+    store = Scenes(scene(1), scene(2))
+    failed = IncidentLifecycle(store, Mock(side_effect=RuntimeError("offline")))
+    assert failed.run_once() == 0
+    assert not store.acknowledged
+    failed.close()
+    published = []
+    restored = IncidentLifecycle(store, published.append)
     restored.start()
     try:
-        key = restored.snapshot()[0]["incident_id"]
-        restored._groups[key]["settle_at"] = 0
-        restored._settle(key)
-        assert published[0]["state"] == "complete"
-        assert published[0]["revision"] == 2
+        assert [item["revision"] for item in published] == [1, 2]
+        assert not store.pending
     finally:
         restored.close()
 
 
-def test_refinement_does_not_extend_settlement_or_open_unknown_incident():
-    lifecycle = IncidentLifecycle(Mock())
-    lifecycle.start()
-    try:
-        lifecycle.track_incident(evidence(), "Gate", allow_new=False)
-        assert not lifecycle.snapshot()
-        lifecycle.track_incident(evidence(), "Gate")
-        key = lifecycle.snapshot()[0]["incident_id"]
-        deadline = lifecycle._groups[key]["settle_at"]
-        lifecycle.track_incident({**evidence(), "evidence_revision": 2}, "Gate", allow_new=False)
-        assert lifecycle._groups[key]["settle_at"] == deadline
-        lifecycle._settle(key)  # An obsolete timer may race with an extension.
-        assert lifecycle.snapshot()[0]["state"] == "updated"
-    finally:
-        lifecycle.close()
-
-
-def test_recovery_snapshot_is_detached_from_live_state():
-    lifecycle = IncidentLifecycle(Mock())
-    lifecycle.start()
-    try:
-        lifecycle.track_incident(evidence(), "Gate")
-        snapshot = lifecycle.snapshot()
-        snapshot[0]["objects"].clear()
-        assert lifecycle.snapshot()[0]["objects"]
-    finally:
-        lifecycle.close()
-
-
-def test_gap_completes_old_incident_and_preserves_old_refinement_identity():
+def test_acknowledgement_failure_permits_at_least_once_delivery():
+    store = Scenes(scene())
+    acknowledge = store.acknowledge_scene_notification
+    store.acknowledge_scene_notification = Mock(side_effect=RuntimeError("db unavailable"))
     published = []
-    lifecycle = IncidentLifecycle(published.append)
-    lifecycle.start()
-    try:
-        lifecycle.track_incident(evidence(), "Gate")
-        lifecycle.track_incident(evidence(42, created_at="2026-09-12T12:02:00+00:00"), "Gate")
-        assert [item["state"] for item in published] == ["new", "complete", "new"]
-        lifecycle.track_incident(evidence(identities=[{"identity_id": 2, "name": "Sam"}]), "Gate", allow_new=False)
-        assert published[-1]["incident_id"] == published[0]["incident_id"]
-        assert published[-1]["state"] == "complete"
-        assert lifecycle.snapshot()[0]["incident_id"] != lifecycle.snapshot()[1]["incident_id"]
-    finally:
-        lifecycle.close()
+    lifecycle = IncidentLifecycle(store, published.append)
+    assert lifecycle.run_once() == 0
+    assert len(store.pending) == 1
+    store.acknowledge_scene_notification = acknowledge
+    assert lifecycle.run_once() == 1
+    assert [(item["incident_id"], item["revision"]) for item in published] == [("scene-1", 1)] * 2
 
 
-def test_missing_image_is_explicit_and_close_cancels_timers():
-    lifecycle = IncidentLifecycle(Mock())
-    lifecycle.start()
-    lifecycle.track_incident(evidence(snapshot_path=""), "Gate")
-    payload = lifecycle.snapshot()[0]
-    assert payload["snapshot_url"] is None
-    assert payload["image_available"] is False
-    lifecycle.close()
-    assert not lifecycle._timers
-    lifecycle.track_incident(evidence(42), "Gate")
-    assert len(lifecycle.snapshot()) == 1
+def test_invalid_snapshot_revision_is_not_published_or_acknowledged():
+    store = Scenes(scene())
+    store.pending[0]["payload"]["revision"] = 2
+    publish = Mock()
+    assert IncidentLifecycle(store, publish).run_once() == 0
+    publish.assert_not_called()
+    assert not store.acknowledged
 
 
-def test_provisional_person_does_not_alert_and_refined_mower_stays_motion():
+def test_reads_return_detached_canonical_state_without_notifying():
+    store = Scenes()
+    publish = Mock()
+    lifecycle = IncidentLifecycle(store, publish)
+    returned = lifecycle.snapshot()[0]
+    returned["objects"].clear()
+    assert len(lifecycle.get("scene-1")["objects"]) == 2
+    assert lifecycle.get("missing") is None
+    publish.assert_not_called()
+
+
+def test_wakeup_never_changes_membership_or_completes_incident_on_close():
+    store = Scenes()
     published = []
-    lifecycle = IncidentLifecycle(published.append)
+    lifecycle = IncidentLifecycle(store, published.append)
     lifecycle.start()
     try:
-        lifecycle.track_incident(evidence(objects=[{
-            "label": "person", "confidence": .7495, "incident_eligible": True,
-            "provisional_detection": True,
-        }]), "Gate")
-        assert published[-1]["classes"] == []
-        lifecycle.track_incident(evidence(objects=[{
-            "label": "robot_lawnmower", "confidence": .959, "incident_eligible": False,
-            "zone_admission_reason": "ignored_zone",
-        }]), "Gate", allow_new=False)
-        assert published[-1]["summary"] == "Motion detected at Gate."
-        lifecycle.track_incident(evidence(), "Gate", allow_new=False)
-        assert published[-1]["classes"] == ["person"]
-        lifecycle.track_incident(evidence(objects=[]), "Gate", allow_new=False)
-        assert published[-1]["classes"] == []
+        lifecycle.track_incident({"id": 999, "camera_id": "new-camera"}, "New Camera", allow_new=True)
+        assert lifecycle.snapshot()[0]["event_ids"] == [80913, 80914]
+        assert not published
     finally:
         lifecycle.close()
+    assert store.current["state"] == "active"
+    lifecycle.track_incident({"id": 1000}, allow_new=False)
+    assert not published

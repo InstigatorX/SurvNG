@@ -5,7 +5,7 @@ import subprocess
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -13,6 +13,7 @@ import numpy as np
 import cv2
 
 from .activity_events import ActivityEventBus
+from .scene_zone_admission import establishment_zone_policy
 from .camera_capture import (
     CaptureBackend,
     CameraCaptureService,
@@ -347,6 +348,7 @@ class CameraWorker:
         self.camera = camera
         self.storage_dir = storage_dir
         self.motion_config = motion_config or MotionQualificationConfig()
+        self._last_scene_discovery_at = float("-inf")
         self.motion_pipeline = motion_pipeline
         self.motion_observation_pipeline = motion_observation_pipeline
         self.motion_fusion_pipeline = motion_fusion_pipeline
@@ -416,9 +418,27 @@ class CameraWorker:
                 frame,
                 event_at,
             ),
+            scene_job_store=(motion_decision_handler_factory.events if callable(getattr(
+                type(motion_decision_handler_factory.events), "enqueue_scene_tracking", None,
+            )) else None),
         )
+        detector_factory = motion_object_detector_factory
+
+        def establishment_zones() -> dict[str, Any]:
+            config = getattr(getattr(detector_factory, "detector", None), "config", None)
+            require = self.camera.require_incident_zone
+            if require is None:
+                require = True if config is None else bool(getattr(config, "require_incident_zone", True))
+            return establishment_zone_policy(
+                self.camera,
+                require_incident_zone=require,
+                confidence_threshold=None if config is None else getattr(config, "confidence_threshold", None),
+                class_confidence_thresholds=None if config is None else getattr(config, "event_class_confidence_thresholds", None),
+            )
+
         self.motion_decision_handler = motion_decision_handler_factory.create(
             camera_id=camera.id,
+            establishment_zone_policy=establishment_zones,
             detection_provider=lambda event_at, qualification=None: self._recorded_motion_frame(
                 event_at, qualification=qualification
             ),
@@ -459,6 +479,11 @@ class CameraWorker:
             camera_id=camera.id,
             decision_processor=self.motion_decision_handler,
             tracking_enabled=self.tracking_lifecycle.enabled,
+            scene_analysis_enabled=lambda: (
+                self.tracking_lifecycle.scene_job_store is not None
+                and self.tracking_lifecycle.enabled()
+            ),
+            resume_scene_analysis=self.tracking_lifecycle.resume_pending_scene,
             has_trackable_objects=self.tracking_lifecycle.has_trackable_objects,
             start_tracking=self.tracking_lifecycle.start_incident,
             prewarm_tracking=self.tracking_lifecycle.prewarm,
@@ -1071,6 +1096,27 @@ class CameraWorker:
                     frame.captured_at_epoch,
                     source="live",
                 )
+                detector_config = self.motion_object_detector.detector.config
+                discovery_interval = float(getattr(
+                    detector_config, "scene_discovery_interval_seconds", 10.0,
+                ))
+                if (
+                    bool(getattr(detector_config, "scene_discovery_enabled", True))
+                    and frame.captured_at_monotonic >= self._last_scene_discovery_at + discovery_interval
+                ):
+                    self._last_scene_discovery_at = frame.captured_at_monotonic
+                    height, width = frame.image.shape[:2]
+                    self.motion_object_detector.remember_scene_frame(TimestampedLiveFrame(
+                        frame=frame.image, captured_at_epoch=frame.captured_at_epoch,
+                        captured_at_monotonic=frame.captured_at_monotonic,
+                        sequence=frame.sequence, camera_generation=lifecycle_generation,
+                        capture_generation=frame.generation, source=frame.source,
+                        geometry_trusted=bool(self._effective_spatial_alignment.get("reliable", False)),
+                        width=width, height=height,
+                    ))
+                    self.motion_incidents.queue_scene_discovery(
+                        datetime.fromtimestamp(frame.captured_at_epoch, timezone.utc)
+                    )
             elif frame.source == "main":
                 self._remember_tracking_frame(
                     frame.image,

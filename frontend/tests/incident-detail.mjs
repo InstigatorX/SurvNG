@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { chromium } from "playwright";
-const root = new URL("../../survng/static/", import.meta.url);
+const root = process.env.SURVNG_FRONTEND_BUILD ? new URL(`file://${process.env.SURVNG_FRONTEND_BUILD.replace(/\/$/, "")}/`) : new URL("../../survng/static/", import.meta.url);
 const server = createServer(async (req, res) => {
   try {
     const path = new URL(req.url, "http://localhost").pathname;
@@ -23,7 +23,7 @@ try {
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     let status = 200, imageFailure = false;
-    const detail = { camera_name: "Front Door", notification: { state: "updated", revision: 2, summary: "Alex detected at Front Door.", people: ["Alex"], zones: ["Porch"], representative_event_id: 42, started_at: "2026-09-13T01:00:00Z" }, incident: { id: "incident-front-door-41", camera_id: "front-door", representative_event_id: 42, created_at: "2026-09-13T01:00:10Z", start_epoch: 1789261200, last_epoch: 1789261210, events: [{ id: 42, created_at: "2026-09-13T01:00:10Z", labels: ["person"] }, { id: 41, created_at: "2026-09-13T01:00:00Z", labels: [] }] } };
+    const detail = { camera_name: "Front Door", notification: { state: "active", revision: 2, summary: "Alex detected at Front Door.", people: ["Alex"], zones: ["Porch"], representative_event_id: 42, started_at: "2026-09-13T01:00:00Z" }, incident: { id: "incident-front-door-41", camera_id: "front-door", representative_event_id: 42, created_at: "2026-09-13T01:00:10Z", start_epoch: 1789261200, last_epoch: 1789261210, events: [{ id: 42, created_at: "2026-09-13T01:00:10Z", labels: ["person"] }, { id: 41, created_at: "2026-09-13T01:00:00Z", labels: [] }] } };
     await page.route("**/api/**", (route) => {
       const path = new URL(route.request().url()).pathname;
       if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });

@@ -22,6 +22,7 @@ class TrackingFrameBatch:
     frames: tuple[tuple[float, np.ndarray] | DecodedVideoFrame, ...]
     covered_through: float
     interruption: str | None = None
+    resume_epoch: float | None = None
 
     def __iter__(self) -> Iterator[tuple[float, np.ndarray] | DecodedVideoFrame]:
         return iter(self.frames)

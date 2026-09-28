@@ -9,12 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .config import MqttConfig
-from .incident_utils import (
-    DEFAULT_INCIDENT_GAP_SECONDS,
-    event_epoch,
-)
 from .security import redact_secret_text
-from .incident_payload import IncidentPayloadBuilder
 
 LOGGER = logging.getLogger(__name__)
 MQTT_COMMAND_QUEUE_SIZE = 64
@@ -23,7 +18,7 @@ MQTT_COMMAND_MAX_PAYLOAD_BYTES = 4096
 MQTT_SERVER_MONITOR_STOP_TIMEOUT_SECONDS = 5.0
 
 
-class MqttService(IncidentPayloadBuilder):
+class MqttService:
     def __init__(
         self,
         config: MqttConfig,
@@ -58,9 +53,6 @@ class MqttService(IncidentPayloadBuilder):
         ] = queue.Queue(maxsize=MQTT_COMMAND_QUEUE_SIZE)
         self._command_stop = threading.Event()
         self._command_thread: threading.Thread | None = None
-        self._incident_lock = threading.RLock()
-        self._pending_incidents: dict[str, dict[str, Any]] = {}
-        self._accept_incidents = True
         self._server_lifecycle = "starting"
         self._server_monitor_stop = threading.Event()
         self._server_monitor_thread: threading.Thread | None = None
@@ -73,7 +65,6 @@ class MqttService(IncidentPayloadBuilder):
 
     def start(self, *, raise_on_failure: bool = False) -> None:
         with self._lifecycle_lock:
-            self._accept_incidents = True
             if not self.config.enabled or not self.config.host.strip() or self.client is not None:
                 return
             client: Any = None
@@ -143,17 +134,7 @@ class MqttService(IncidentPayloadBuilder):
     ) -> None:
         with self._lifecycle_lock:
             client = self.client
-            self._accept_incidents = False
             was_connected = bool(client is not None and self.connected)
-            if was_connected:
-                try:
-                    self.flush_incidents()
-                except Exception:
-                    LOGGER.exception("failed to flush pending MQTT incidents")
-            try:
-                self._cancel_incident_timers()
-            except Exception:
-                LOGGER.exception("failed to cancel pending MQTT incident timers")
             if client is not None:
                 if was_connected:
                     self.set_server_lifecycle(lifecycle, refresh_status=False)
@@ -343,13 +324,13 @@ class MqttService(IncidentPayloadBuilder):
                 return
             self._apply_control(*command)
 
-    def publish(self, suffix: str, payload: dict[str, Any], retain: bool = False) -> None:
-        self.publish_topic(f"{self.prefix}/{suffix.strip('/')}", payload, retain=retain)
+    def publish(self, suffix: str, payload: dict[str, Any], retain: bool = False, *, confirm: bool = False) -> bool:
+        return self.publish_topic(f"{self.prefix}/{suffix.strip('/')}", payload, retain=retain, confirm=confirm)
 
-    def publish_topic(self, topic: str, payload: dict[str, Any], retain: bool = False) -> None:
+    def publish_topic(self, topic: str, payload: dict[str, Any], retain: bool = False, *, confirm: bool = False) -> bool:
         client = self.client
         if client is None or not self.connected:
-            return
+            return False
         try:
             info = client.publish(
                 topic,
@@ -358,8 +339,13 @@ class MqttService(IncidentPayloadBuilder):
                 retain=retain,
             )
             if info.rc == 0:
+                if confirm:
+                    info.wait_for_publish(timeout=5.0)
+                    if not info.is_published():
+                        raise TimeoutError("MQTT publication confirmation timed out")
                 with self._lock:
                     self.messages_published += 1
+                return True
             else:
                 with self._lock:
                     self.publish_failures += 1
@@ -369,6 +355,7 @@ class MqttService(IncidentPayloadBuilder):
                 self.publish_failures += 1
             self.last_error = redact_secret_text(exc)
             LOGGER.warning("MQTT publish failed for %s: %s", topic, self.last_error)
+        return False
 
     def remove_retained_topic(self, topic: str) -> None:
         client = self.client
@@ -793,108 +780,7 @@ class MqttService(IncidentPayloadBuilder):
             retain=True,
         )
 
-    def track_incident(
-        self,
-        event: dict[str, Any],
-        camera_name: str,
-        base_path: str = "",
-        allow_new: bool = True,
-    ) -> None:
-        if not self.config.enabled or not self.config.incident_events_enabled or not self._accept_incidents:
-            return
-        camera_id = str(event.get("camera_id") or "")
-        event_id = int(event.get("id") or 0)
-        if not camera_id or event_id <= 0 or not event.get("created_at"):
-            return
-
-        publish_payloads: list[dict[str, Any]] = []
-        with self._incident_lock:
-            pending = self._pending_incidents.get(camera_id)
-            if not allow_new and (pending is None or event_id not in pending["events"]):
-                return
-            if pending and event_epoch(event) - float(pending["last_epoch"]) > DEFAULT_INCIDENT_GAP_SECONDS:
-                timer = pending.get("timer")
-                if timer is not None:
-                    timer.cancel()
-                publish_payloads.append(self._incident_payload(pending, "complete"))
-                self._pending_incidents.pop(camera_id, None)
-                pending = None
-
-            state = "updated"
-            if pending is None:
-                if not allow_new:
-                    return
-                pending = {
-                    "camera_id": camera_id,
-                    "camera_name": camera_name or camera_id,
-                    "base_path": base_path,
-                    "events": {},
-                    "last_epoch": event_epoch(event),
-                    "generation": 0,
-                    "timer": None,
-                }
-                self._pending_incidents[camera_id] = pending
-                state = "new"
-            pending["camera_name"] = camera_name or camera_id
-            pending["base_path"] = base_path
-            pending["events"][event_id] = dict(event)
-            pending["last_epoch"] = max(float(pending["last_epoch"]), event_epoch(event))
-            pending["generation"] += 1
-            timer = pending.get("timer")
-            if timer is not None:
-                timer.cancel()
-            timer = threading.Timer(
-                DEFAULT_INCIDENT_GAP_SECONDS,
-                self._settle_incident,
-                args=(camera_id, int(pending["generation"])),
-            )
-            timer.daemon = True
-            pending["timer"] = timer
-            timer.start()
-            publish_payloads.append(self._incident_payload(pending, state))
-
-        for payload in publish_payloads:
-            self.publish("events/incidents", payload, retain=False)
-
-    def _settle_incident(self, camera_id: str, generation: int) -> None:
-        payload: dict[str, Any] | None = None
-        with self._incident_lock:
-            pending = self._pending_incidents.get(camera_id)
-            if pending is None or int(pending["generation"]) != generation:
-                return
-            if not self.connected:
-                timer = threading.Timer(5.0, self._settle_incident, args=(camera_id, generation))
-                timer.daemon = True
-                pending["timer"] = timer
-                timer.start()
-                return
-            self._pending_incidents.pop(camera_id, None)
-            payload = self._incident_payload(pending, "complete")
-        self.publish("events/incidents", payload, retain=False)
-
-    def flush_incidents(self) -> None:
-        with self._incident_lock:
-            pending_incidents = list(self._pending_incidents.values())
-            self._pending_incidents.clear()
-            for pending in pending_incidents:
-                timer = pending.get("timer")
-                if timer is not None:
-                    timer.cancel()
-        for pending in pending_incidents:
-            self.publish("events/incidents", self._incident_payload(pending, "complete"), retain=False)
-
-    def _cancel_incident_timers(self) -> None:
-        with self._incident_lock:
-            pending_incidents = list(self._pending_incidents.values())
-            self._pending_incidents.clear()
-        for pending in pending_incidents:
-            timer = pending.get("timer")
-            if timer is not None:
-                timer.cancel()
-
     def status(self) -> dict[str, Any]:
-        with self._incident_lock:
-            pending_incidents = len(self._pending_incidents)
         with self._lock:
             server_state = dict(self._server_state_payload)
         return {
@@ -919,7 +805,7 @@ class MqttService(IncidentPayloadBuilder):
             ),
             "incident_events_enabled": self.config.incident_events_enabled,
             "incident_topic": f"{self.prefix}/events/incidents",
-            "pending_incidents": pending_incidents,
+            "pending_incidents": 0,  # Canonical store owns the notification outbox.
             "server_status_enabled": self.config.server_status_enabled,
             "server_state_topic": f"{self.prefix}/server/state",
             "server_metrics_topic": f"{self.prefix}/server/metrics",

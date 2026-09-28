@@ -74,7 +74,6 @@ def apply_event_identity(event: dict[str, Any]) -> dict[str, Any]:
         for item in objects
         if isinstance(item, dict)
         and str(item.get("label") or "").strip().lower() in PERSON_LABELS
-        and item.get("incident_eligible") is not False
     ]
     if len(identities) == 1:
         event["primary_identity"] = dict(identities[0])

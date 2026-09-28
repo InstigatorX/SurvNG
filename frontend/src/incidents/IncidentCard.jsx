@@ -8,6 +8,7 @@ import {
   Grid2X2,
   Images,
   Layers,
+  Pentagon,
   ListTree,
   Play,
   Search,
@@ -15,8 +16,8 @@ import {
   X,
 } from "lucide-react";
 import { crossCameraMatchCameraLabel, crossCameraMatchLabel, crossCameraTracePath } from "../crossCameraTrace.mjs";
-import { cameraReportsForIncident } from "../cameraSemantics.mjs";
-import { incidentTrackingSource, trackingCoverageLabel, storedObjectTracks } from "../objectTrackReplay.mjs";
+import { incidentReplayTracking, incidentTrackingSource, trackingCoverageLabel, storedObjectTracks } from "../objectTrackReplay.mjs";
+import { incidentSceneObjects, observedObjectSummaries } from "../incidentScene.mjs";
 import { incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentTriggerLabel, showIncidentCardAnnotations } from "../incidentNavigation.mjs";
 import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../relatedIncidents.mjs";
 import {
@@ -45,7 +46,6 @@ import {
   hasDetectedObjects,
   incidentClipWindow,
   incidentLabels,
-  incidentZones,
   loadIncidentClipInfo,
 } from "../shared/evidence.jsx";
 
@@ -187,7 +187,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
   );
 }
 
-export function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, showExcluded = true, analysisMode = "clean", depthLayer = "both", replayRequest = 0, selectedObjectIndex = null, onSelectObject = null, onReturnToSelected = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
+export function IncidentCard({ incident, scenePlayback, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, zones = null, analysisMode = "clean", depthLayer = "both", replayRequest = 0, observationPreviewRequest = null, selectedObjectIndex = null, onSelectObject = null, onReturnToSelected = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
   const rawEvents = incident.events || [];
   const motionObservations = incident.motion_observations || [];
   const showSubEvents = rawEvents.length > 1 || motionObservations.length > 0;
@@ -203,6 +203,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
   const [subEventsOpen, setSubEventsOpen] = useState(false);
   const [inlineVideoActive, setInlineVideoActive] = useState(false);
   const [snapshotZoom, setSnapshotZoom] = useState({ scale: 1, x: 0, y: 0 });
+  const [zonesVisible, setZonesVisible] = useState(false);
   const previewRef = useRef(null);
   const snapshotZoomRef = useRef(snapshotZoom);
   const panGestureRef = useRef({ pointerId: null, startX: 0, startY: 0, panX: 0, panY: 0, moved: false });
@@ -217,7 +218,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
         created_at: new Date(frame.epoch * 1000).toISOString(),
       },
     };
-    const snapshotUrl = `/api/cameras/${encodeURIComponent(incident.camera_id)}/recordings/preview.jpg?epoch=${encodeURIComponent(frame.epoch)}&source=main&width=1280&exact=true`;
+    const snapshotUrl = `/api/cameras/${encodeURIComponent(evidenceSource.camera_id || incident.camera_id)}/recordings/preview.jpg?epoch=${encodeURIComponent(frame.epoch)}&source=main&width=1280&exact=true`;
     return {
       ...frame,
       event: {
@@ -230,15 +231,18 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
       },
     };
   }), [evidenceFrames, evidenceSource, incident.camera_id]);
-  const preview = selectedEvidence?.event || selectedPreview || incident;
+  const preview = scenePlayback?.clip || selectedEvidence?.event || selectedPreview || incident;
+  const videoActive = Boolean(scenePlayback?.clip) || inlineVideoActive;
   const mosaicEvents = useMemo(() => incidentMosaicEvents(incident), [incident]);
   const mosaic = useMemo(() => incidentMosaicPage(mosaicEvents, mosaicPageIndex), [mosaicEvents, mosaicPageIndex]);
   const canShowMosaic = desktopWorkspace && expanded && mosaicEvents.length > 1;
   const canShowEvidence = desktopWorkspace && expanded && evidenceItems.length > 0;
+  const zoneShapes = (Array.isArray(zones) ? zones : []).filter((zone) => zone?.enabled !== false && (zone.points || []).length >= 3);
   const activeWorkspaceView = workspaceView === "mosaic" && !canShowMosaic
     ? "focus"
     : workspaceView === "evidence" && !canShowEvidence ? "focus" : workspaceView;
-  const trackingPreview = incidentTrackingSource(preview, incident) || preview;
+  const showZoneToggle = desktopWorkspace && expanded && activeWorkspaceView === "focus" && zoneShapes.length > 0;
+  const trackingPreview = incidentReplayTracking(scenePlayback?.clip || preview, incident) || preview;
   const labels = incidentLabels(incident);
   const eventCount = incident.event_count || rawEvents.length || 1;
   const observationCount = Number(incident.motion_observation_count || motionObservations.length || 0);
@@ -272,6 +276,16 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
   }, [incident.id]);
 
   useEffect(() => {
+    if (!observationPreviewRequest) return;
+    const source = rawEvents.find((event) => Number(event.id) === Number(observationPreviewRequest.eventId));
+    if (source) { setSelectedPreview(source); setSelectedEvidence(null); setInlineVideoActive(false); setWorkspaceView("focus"); }
+  }, [observationPreviewRequest]);
+
+  useEffect(() => {
+    if (scenePlayback?.selection) { setWorkspaceView("focus"); setSelectedEvidence(null); }
+  }, [scenePlayback?.selection]);
+
+  useEffect(() => {
     try { window.sessionStorage.setItem("survng.incidentWorkspaceView.v1", workspaceView); } catch { /* Session preference is optional. */ }
   }, [workspaceView]);
 
@@ -283,7 +297,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
   useEffect(() => {
     const previousRequest = replayRequestRef.current;
     replayRequestRef.current = replayRequest;
-    if (expanded && replayRequest > previousRequest) setInlineVideoActive(true);
+    if (expanded && replayRequest > previousRequest) { if (scenePlayback) scenePlayback.playAll(); else setInlineVideoActive(true); }
   }, [expanded, replayRequest]);
 
   useEffect(() => {
@@ -307,7 +321,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
       return;
     }
     if (desktopWorkspace && expanded && snapshotZoomRef.current.scale > 1) return;
-    if (expanded) setInlineVideoActive(true);
+    if (expanded) { if (scenePlayback) scenePlayback.playAll(); else setInlineVideoActive(true); }
     else toggle();
   }
 
@@ -454,7 +468,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
                   onClick={(clickEvent) => { clickEvent.stopPropagation(); selectMosaicEvent(event); }}
                   aria-label={`Focus event at ${formatTimeOnly(event.created_at || incident.created_at, timeZone)}`}
                 >
-                  <SnapshotImage event={event} alt="incident event snapshot" className="incident-mosaic-snapshot" progressive thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusAspect={null} objectFocusControls={false} showAnnotations showTracking={false} incidentEligibleOnly={!showExcluded}>
+                  <SnapshotImage event={event} alt="incident event snapshot" className="incident-mosaic-snapshot" progressive thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusAspect={null} objectFocusControls={false} showAnnotations showTracking={false}>
                     <IncidentSourceDot trigger={eventTrigger} className="incident-mosaic-source" />
                     <div className="incident-mosaic-hud">
                       <time>{formatTimeOnly(event.created_at || incident.created_at, timeZone)}</time>
@@ -476,7 +490,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
           <div className={`incident-evidence incident-evidence-${evidenceItems.length}`} role="group" aria-label="Incident evidence frames">
             {evidenceItems.map((item) => (
               <button type="button" className="incident-evidence-tile" key={item.key} onClick={(event) => { event.stopPropagation(); selectEvidenceItem(item); }} aria-label={`Focus ${item.label.toLowerCase()} frame`}>
-                <SnapshotImage event={item.event} alt={`${item.label} evidence frame`} className="incident-evidence-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusAspect={null} objectFocusControls={false} showAnnotations={item.kind === "snapshot"} showTracking={false} incidentEligibleOnly={item.kind === "snapshot" && !showExcluded}>
+                <SnapshotImage event={item.event} alt={`${item.label} evidence frame`} className="incident-evidence-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusAspect={null} objectFocusControls={false} showAnnotations={item.kind === "snapshot"} showTracking={false}>
                   <div className="incident-evidence-hud">
                     <strong>{item.label}</strong>
                     <time>{formatTimeOnly(item.event.created_at, timeZone)}</time>
@@ -497,7 +511,8 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
             objectFocusAspect={(!desktopWorkspace || !expanded) ? { width: 16, height: 10 } : null}
             showAnnotations={desktopWorkspace && expanded ? true : showIncidentCardAnnotations(expanded, thumbnailAnnotations)}
             showTracking={false}
-            incidentEligibleOnly={!showExcluded}
+            zones={desktopWorkspace && expanded ? zones : null}
+            zonesVisible={zonesVisible}
             thumbnail={!desktopWorkspace || !expanded}
             selectedObjectIndex={desktopWorkspace && expanded ? selectedObjectIndex : null}
             onSelectObject={desktopWorkspace && expanded && onSelectObject ? onSelectObject : null}
@@ -518,13 +533,14 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
               </div>
             ) : null}
             <IncidentClipLayer
-              event={incident}
+              key={scenePlayback?.selection?.key || "preview"}
+              event={scenePlayback?.clip || incident}
               trackingEvent={trackingPreview}
-              active={expanded && inlineVideoActive}
+              active={expanded && videoActive}
               analysisMode={analysisMode}
               depthLayer={depthLayer}
               onAnalysisStats={onAnalysisStats}
-              onEnded={() => setInlineVideoActive(false)}
+              onEnded={() => { if (scenePlayback?.clip) scenePlayback.ended(); else setInlineVideoActive(false); }}
             />
             {desktopWorkspace
               ? (!expanded ? <IncidentSourceDot trigger={triggerLabel} className="event-count" ariaLabel={`${triggerTitle}. ${countText}`} title={`${triggerTitle} · ${countText}`} /> : null)
@@ -532,16 +548,17 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
           </SnapshotImage>
         )}
         {!expanded ? <button type="button" className="incident-card-open media-surface-action" onClick={toggle} aria-label={`Open ${incident.camera_id} incident at ${timeText}`} /> : null}
-        {expanded && activeWorkspaceView === "focus" && !inlineVideoActive && snapshotZoom.scale <= 1 ? (
-          <button type="button" className="incident-preview-media-action media-surface-action" onClick={openPreview} aria-label="Play selected event video" />
+        {expanded && activeWorkspaceView === "focus" && !videoActive && snapshotZoom.scale <= 1 ? (
+          <button type="button" className="incident-preview-media-action media-surface-action" onClick={openPreview} aria-label={scenePlayback ? "Play whole incident video" : "Play selected event video"} />
         ) : null}
-        {canShowMosaic || canShowEvidence || onReturnToSelected ? (
+        {canShowMosaic || canShowEvidence || onReturnToSelected || showZoneToggle ? (
           <div className="incident-workspace-chrome" onClick={(event) => event.stopPropagation()}>
-            {canShowMosaic || canShowEvidence ? (
+            {canShowMosaic || canShowEvidence || showZoneToggle ? (
               <div className="incident-workspace-view-toggle" role="group" aria-label="Incident image layout">
-                <button type="button" className={activeWorkspaceView === "focus" ? "active" : ""} onClick={() => selectWorkspaceView("focus")} aria-pressed={activeWorkspaceView === "focus"} title="Focus selected event"><Crop size={14} /><span>Focus</span></button>
+                {canShowMosaic || canShowEvidence ? <button type="button" className={activeWorkspaceView === "focus" ? "active" : ""} onClick={() => selectWorkspaceView("focus")} aria-pressed={activeWorkspaceView === "focus"} title="Focus selected event"><Crop size={14} /><span>Focus</span></button> : null}
                 {canShowMosaic ? <button type="button" className={activeWorkspaceView === "mosaic" ? "active" : ""} onClick={() => selectWorkspaceView("mosaic")} aria-pressed={activeWorkspaceView === "mosaic"} title="Show all incident events"><Grid2X2 size={14} /><span>Mosaic</span></button> : null}
                 {canShowEvidence ? <button type="button" className={activeWorkspaceView === "evidence" ? "active" : ""} onClick={() => selectWorkspaceView("evidence")} aria-pressed={activeWorkspaceView === "evidence"} title="Compare trigger, detection, selected, and tracking frames"><Images size={14} /><span>Evidence</span></button> : null}
+                {showZoneToggle ? <button type="button" className={zonesVisible ? "active" : ""} aria-pressed={zonesVisible} title={zonesVisible ? "Hide zones" : "Show zones"} aria-label={zonesVisible ? "Hide zones" : "Show zones"} onClick={() => setZonesVisible((current) => !current)}><Pentagon size={14} /><span>Zones</span></button> : null}
               </div>
             ) : null}
             {onReturnToSelected ? (
@@ -969,7 +986,7 @@ export function CrossCameraTracePanel({
   );
 }
 
-export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, visualAnchorEventId = anchorEventId, appearanceAnchorEventId = anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, showExcluded = true, analysisMode = "clean", depthLayer = "both", analysisStats, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onDepthLayerChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
+export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, visualAnchorEventId = anchorEventId, appearanceAnchorEventId = anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", depthLayer = "both", analysisStats, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onDepthLayerChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
   const inspectorRef = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -998,21 +1015,19 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
   const inspectedEvent = faceEvent || incident;
   const findSimilarSourceEvent = searchEvent || inspectedEvent;
   const searchableObjects = visualSearchObjects(findSimilarSourceEvent);
-  const objects = searchableObjects.filter((object) => showExcluded || object.incident_eligible !== false);
+  const objects = searchableObjects;
   const findSimilarActive = isValidObjectIndex(findSimilarObjectIndex);
   const selectedSearchObject = findSimilarActive
     ? searchableObjects[Number(findSimilarObjectIndex)]
     : (isValidObjectIndex(selectedObjectIndex) ? searchableObjects[Number(selectedObjectIndex)] : null);
   const selectedTrackId = resolveObjectTrackId(selectedSearchObject, findSimilarSourceEvent);
-  const incidentTracking = incidentTrackingSource(inspectedEvent, incident)?.object_tracking;
+  const incidentTracking = incidentReplayTracking(inspectedEvent, incident)?.object_tracking;
   const objectTracks = incidentTracking?.tracks || [];
   const trackingWindowSeconds = Number(incidentTracking?.window_end_epoch) - Number(incidentTracking?.window_start_epoch);
   const analyzedSeconds = incidentTracking?.analyzed_through
     ? Date.parse(incidentTracking.analyzed_through) / 1000 - Number(incidentTracking.window_start_epoch) : 0;
 
   const faces = faceEvent?.faces || [];
-  const zones = incidentZones(inspectedEvent);
-  const cameraReports = cameraReportsForIncident(incident);
   const eventId = Number(inspectedEvent.representative_event_id || inspectedEvent.id);
   const findSimilarAnchorId = Number(
     anchorEventId
@@ -1029,7 +1044,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
   // open-focus effect (requestAnimationFrame) when Find similar / Details opens.
   const clipWindow = incidentClipWindow(incident, before, after);
   const clipUrl = Number.isFinite(eventId) ? eventClipUrl(eventId, clipWindow.before, clipWindow.after) : "";
-  const startFindSimilar = onFindSimilar || onSelectObject;
+  const observedObjects = incidentSceneObjects(incident);
 
   return (
     <aside ref={inspectorRef} id="incident-inspector" className={`incident-inspector${open ? " open" : ""}`} role={open ? "dialog" : undefined} aria-modal={open ? "true" : undefined} aria-labelledby={open ? "incident-inspector-title" : undefined}>
@@ -1037,73 +1052,11 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
         <div><strong id="incident-inspector-title">{cameraNameById.get(incident.camera_id) || incident.camera_id}</strong><time>{formatDateTime(inspectedEvent.created_at || incident.created_at, timeZone)}</time></div>
         {onClose ? <button type="button" className="incident-inspector-close" onClick={onClose} aria-label="Close incident details"><X size={17} /></button> : null}
       </div>
-      <section className="incident-current-summary">
-        <h3>Current incident</h3>
-        <div className="incident-detection-heading">
-          <h4>Model detections</h4>
-        </div>
-        <div className="incident-summary-objects">
-          {objects.length ? objects.map((object) => {
-            const objectIndex = searchableObjects.indexOf(object);
-            const selected = isValidObjectIndex(selectedObjectIndex) && Number(selectedObjectIndex) === objectIndex;
-            const searching = isValidObjectIndex(findSimilarObjectIndex) && Number(findSimilarObjectIndex) === objectIndex;
-            const qualifyingObservations = Number(object.temporal_incident_observations);
-            const requiredObservations = Number(object.temporal_required_observations);
-            const peakConfidence = Number(object.temporal_peak_confidence);
-            const hasConfirmationSummary = Number.isFinite(qualifyingObservations)
-              && Number.isFinite(requiredObservations)
-              && requiredObservations > 0;
-            return (
-              <div className={`inspector-detection summary${selected || searching ? " selected" : ""}`} key={`${object.label}-${objectIndex}`}>
-                <div>
-                  <strong>{object.label}</strong>
-                  <span>{Math.round(Number(object.confidence || 0) * 100)}% cover</span>
-                </div>
-                {object.incident_eligible === false ? <small className="incident-exclusion-reason">{(object.incident_ineligible_reasons?.length
-                  ? object.incident_ineligible_reasons
-                  : [object.zone_admission_reason || object.activity_admission_reason || "Not eligible for this incident"])
-                  .map((reason) => String(reason).replaceAll("_", " ")).join("; ")}</small> : null}
-                {hasConfirmationSummary ? <small>{qualifyingObservations}/{requiredObservations} qualifying detection{requiredObservations === 1 ? "" : "s"}{Number.isFinite(peakConfidence) ? ` · peak ${Math.round(peakConfidence * 100)}%` : ""}</small> : null}
-                {startFindSimilar ? (
-                  <button
-                    type="button"
-                    className={searching ? "active" : ""}
-                    onClick={() => startFindSimilar({
-                      objectIndex,
-                      trackId: Number.isInteger(Number(object.track_id)) ? Number(object.track_id) : null,
-                      label: object.label,
-                    })}
-                    title="Find visually similar incidents"
-                    aria-pressed={searching}
-                  >
-                    <Search size={13} /> Find similar
-                  </button>
-                ) : null}
-              </div>
-            );
-          }) : <p>No eligible object detections.</p>}
-        </div>
-        {cameraReports.length ? (
-          <div className="incident-camera-reports">
-            <h4>Camera reported</h4>
-            <small>Camera claims are separate from model detections.</small>
-            {cameraReports.map((report, index) => (
-              <div className="incident-camera-report" key={`${report.eventId || "event"}-${report.eventAt}-${report.topic}-${index}`}>
-                <div>
-                  <strong>{report.reportedClass || report.category}</strong>
-                  <span>{report.topic}</span>
-                </div>
-                {report.eventAt ? <time>Camera event · {formatTimeOnly(report.eventAt, timeZone)}</time> : null}
-                {report.candidateModelClasses.length ? <small>Possible model classes: {report.candidateModelClasses.join(", ")}</small> : null}
-              </div>
-            ))}
-          </div>
-        ) : null}
-        <dl>
-          <div><dt>Trigger</dt><dd>{incidentTriggerLabel(inspectedEvent)}</dd></div>
-          <div><dt>Duration</dt><dd>{formatDuration(incident.duration_seconds || 0)}</dd></div>
-          <div><dt>Zones</dt><dd>{zones.length ? zones.join(", ") : "None"}</dd></div>
-        </dl>
+      <section className="incident-observed-objects" aria-label="Observed objects">
+        <h3>Observed objects</h3>
+        {observedObjects.length ? <ul>{observedObjectSummaries(observedObjects).map((detection) => (
+          <li key={detection.label}><span>{detection.label}</span><span>{Math.round(detection.confidence * 100)}%</span></li>
+        ))}</ul> : <p>No object observations are available.</p>}
       </section>
       <section className="incident-replay-analysis">
         <h3>Replay analysis</h3>

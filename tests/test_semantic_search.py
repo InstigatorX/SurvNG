@@ -49,6 +49,17 @@ class SemanticIndexTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_observation_lookup_uses_the_observation_index(self) -> None:
+        with self.index._connect() as connection:
+            plan = connection.execute(
+                "explain query plan select 1 from semantic_embeddings "
+                "where observation_id=? and image_path=? and model_fingerprint=? "
+                "and preprocessing_fingerprint=? limit 1",
+                ("observation", "snapshot.jpg", "model-a", "prep-a"),
+            ).fetchall()
+        detail = " ".join(str(row[-1]) for row in plan)
+        self.assertIn("idx_semantic_observation", detail)
+
     def test_semantic_text_inputs_maps_multiple_manifest_inputs(self) -> None:
         tokens = {
             "input_ids": np.asarray([[1, 2]], dtype=np.int64),

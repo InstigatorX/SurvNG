@@ -55,6 +55,111 @@ export function containedFrameTransform(containerSize, sourceSize) {
   };
 }
 
+function observationEpoch(observation) {
+  const direct = finiteNumber(observation?.captured_at_epoch);
+  if (direct !== null) return direct;
+  const parsed = Date.parse(String(observation?.captured_at || ""));
+  return Number.isFinite(parsed) ? parsed / 1000 : null;
+}
+
+function sceneReplayTracks(incident) {
+  const groups = new Map();
+  for (const subject of incident?.scene_objects || []) {
+    for (const observation of subject?.observations || []) {
+      const key = String(observation?.scene_track_key || "");
+      // Stored keys are "tracking:{event}:{run}:{id}". The database column
+      // prefixes the event id, so either form has tracking as its own field.
+      if (!key.split(":").includes("tracking")) continue;
+      const epoch = observationEpoch(observation);
+      const box = observation?.box || {};
+      const coordinates = [box.x1, box.y1, box.x2, box.y2].map(finiteNumber);
+      const width = finiteNumber(observation?.detection_frame_width);
+      const height = finiteNumber(observation?.detection_frame_height);
+      if (
+        epoch === null
+        || width === null
+        || height === null
+        || width <= 0
+        || height <= 0
+        || coordinates.some((value) => value === null)
+        || coordinates[2] <= coordinates[0]
+        || coordinates[3] <= coordinates[1]
+      ) continue;
+      let group = groups.get(key);
+      if (!group) {
+        group = { label: observation.label || subject?.label || "object", samples: [] };
+        groups.set(key, group);
+      }
+      group.samples.push({ epoch, coordinates, width, height });
+    }
+  }
+  const prepared = [];
+  const sizeCounts = new Map();
+  for (const group of groups.values()) {
+    const localCounts = new Map();
+    for (const sample of group.samples) {
+      const sizeKey = `${sample.width}x${sample.height}`;
+      localCounts.set(sizeKey, (localCounts.get(sizeKey) || 0) + 1);
+      sizeCounts.set(sizeKey, (sizeCounts.get(sizeKey) || 0) + 1);
+    }
+    const sizeKey = [...localCounts.entries()].sort((left, right) => right[1] - left[1])[0][0];
+    const [width, height] = sizeKey.split("x").map(Number);
+    const history = [];
+    for (const sample of group.samples.filter((item) => item.width === width && item.height === height).sort((left, right) => left.epoch - right.epoch)) {
+      const point = [sample.epoch, ...sample.coordinates];
+      if (history.length && history[history.length - 1][0] === sample.epoch) history[history.length - 1] = point;
+      else history.push(point);
+    }
+    if (history.length) prepared.push({ label: group.label, width, height, history });
+  }
+  if (!prepared.length) return { tracks: [], width: 0, height: 0 };
+  const [width, height] = [...sizeCounts.entries()].sort((left, right) => right[1] - left[1])[0][0].split("x").map(Number);
+  const tracks = prepared.filter((track) => track.width === width && track.height === height).map((track, index) => {
+    const last = track.history[track.history.length - 1];
+    return {
+      track_id: index + 1,
+      label: track.label,
+      state: "confirmed",
+      box: { x1: last[1], y1: last[2], x2: last[3], y2: last[4] },
+      box_history: track.history,
+      trajectory: track.history.map((sample) => [sample[0], (sample[1] + sample[3]) / 2, (sample[2] + sample[4]) / 2]),
+    };
+  });
+  return { tracks, width, height };
+}
+
+export function incidentReplayTracking(event, incident = null) {
+  const source = incidentTrackingSource(event, incident);
+  if (storedObjectTracks(source).length) return source;
+  const events = event?.events?.length ? event.events : incident?.events || [];
+  const withTracks = events.find((candidate) => storedObjectTracks(candidate).length);
+  if (withTracks) return withTracks;
+  const scene = incident?.scene_objects ? incident : event?.scene_objects ? event : null;
+  const built = sceneReplayTracks(scene);
+  if (!built.tracks.length) return source;
+  const base = source?.object_tracking && typeof source.object_tracking === "object" ? source.object_tracking : {};
+  const epochs = built.tracks.flatMap((track) => track.box_history.map((sample) => sample[0]));
+  const start = Math.min(...epochs);
+  const end = Math.max(...epochs);
+  const windowStart = finiteNumber(base.window_start_epoch);
+  const windowEnd = finiteNumber(base.window_end_epoch);
+  return {
+    ...(source || event || incident || {}),
+    object_tracking: {
+      ...base,
+      state: base.state || "complete",
+      frame_width: built.width,
+      frame_height: built.height,
+      sample_fps: finiteNumber(base.sample_fps) || 3,
+      tracks: built.tracks,
+      window_start_epoch: windowStart === null ? start : Math.min(windowStart, start),
+      window_end_epoch: windowEnd === null ? end : Math.max(windowEnd, end),
+      analyzed_from: new Date(start * 1000).toISOString(),
+      analyzed_through: new Date(end * 1000).toISOString(),
+    },
+  };
+}
+
 export function incidentTrackingSource(event, incident = null) {
   if (event?.object_tracking?.tracks?.length || event?.object_tracking?.state) return event;
   const incidentEvents = event?.events?.length ? event.events : incident?.events || [];

@@ -102,7 +102,11 @@ def test_manual_correction_invalidates_search_and_updates_clients(manual_detecti
         SemanticEvidence(event["id"], "gate", event["created_at"], "object_crop", "person:0", event["snapshot_path"], "person"),
     ], [[1, 0, 0]], identity)
     search = SemanticSearchService(manager.config.semantic_search, index, tmp_path, {})
-    search.encoder = SimpleNamespace(identity=identity)
+    search._storage_dir = tmp_path
+    search.encoder = SimpleNamespace(
+        identity=identity,
+        encode_images=lambda images: np.array([[0., 1., 0.] for _ in images], dtype=np.float32),
+    )
     search.refresh_event = Mock(wraps=search.refresh_event)
     manager.semantic_search = search
     manager.state_events = Mock()
@@ -125,10 +129,20 @@ def test_manual_correction_invalidates_search_and_updates_clients(manual_detecti
     manager.mqtt.publish.assert_not_called()
     manager.mqtt.track_incident.assert_not_called()
     manager._refresh_incident_notification.assert_called_once_with("gate", event["id"])
-    assert search._queue.empty()
-    # Replaying the correction cannot recreate deleted semantic evidence.
+    if objects:
+        # Suppressing an alert leaves the observed car searchable. Its new crop
+        # replaces the stale current-cover person vector after queued inference.
+        assert not search._queue.empty()
+        _, _, queued = search._queue.get_nowait()
+        assert search.index_event(queued) == 2
+        hits = index.search([0, 1, 0], identity, object_labels=["car"])
+        assert len(hits) == 1 and hits[0].event_id == event["id"]
+        assert index.search([1, 0, 0], identity, object_labels=["person"]) == []
+    else:
+        assert search._queue.empty()
+        assert index.search([1, 0, 0], identity) == []
+    # Replaying the same correction does not encode a second revision.
     assert search.index_event(persisted) == 0
-    assert index.search([1, 0, 0], identity) == []
 
 
 def test_manual_positive_detection_keeps_object_notification(manual_detection):

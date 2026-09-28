@@ -200,13 +200,13 @@ class UltralyticsDeepOCSortObjectTrackerTest(unittest.TestCase):
 
         self.assertNotEqual(second[0]["track_id"], first[0]["track_id"])
 
-    def test_ignored_detection_does_not_create_a_track(self) -> None:
+    def test_ignored_alert_detection_still_creates_scene_track(self) -> None:
         tracker = UltralyticsDeepOCSortObjectTracker(self.config(), 0.7)
         ignored = detection("person", 0.9, (10, 10, 40, 80))
         ignored["incident_eligible"] = False
 
-        self.assertEqual(tracker.update([ignored], 10.0, confirm_new=True), [])
-        self.assertEqual(tracker.summaries(10.0), [])
+        self.assertEqual(len(tracker.update([ignored], 10.0, confirm_new=True)), 1)
+        self.assertEqual(len(tracker.summaries(10.0)), 1)
 
     def test_concurrent_tracker_instances_have_independent_id_counters(self) -> None:
         first_tracker = UltralyticsDeepOCSortObjectTracker(self.config(), 0.7)

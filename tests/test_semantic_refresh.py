@@ -237,7 +237,7 @@ def test_missing_image_does_not_become_a_completed_skip(tmp_path):
 def test_negative_correction_has_one_policy_across_index_entrypoints(tmp_path, operation):
     service, event, _ = _revision_service(tmp_path)
     assert service.index_event(event) == 2
-    event['objects'] = [{**event['objects'][0], 'incident_eligible': False}]
+    event['objects'] = []
     event['evidence_revision'] = 2
     with sqlite3.connect(tmp_path / 'revision.sqlite3') as conn:
         conn.execute('update events set evidence_revision=2 where id=1')
@@ -254,7 +254,7 @@ def test_negative_correction_has_one_policy_across_index_entrypoints(tmp_path, o
     assert service.index_event(event) == 0
     assert not service.index.event_indexed(1, service.encoder.identity)
     service.encoder.fail = False
-    event['objects'] = [{**event['objects'][0], 'incident_eligible': True}]
+    event['objects'] = [{'label': 'person', 'confidence': .9, 'box': {'x1': 1, 'y1': 1, 'x2': 19, 'y2': 19}}]
     event['evidence_revision'] = 3
     with sqlite3.connect(tmp_path / 'revision.sqlite3') as conn:
         conn.execute('update events set evidence_revision=3 where id=1')
@@ -267,7 +267,7 @@ def test_negative_deletion_blocks_unnotified_inflight_positive_commit(tmp_path):
     assert service.queue_event(event)
     _, _, queued = service._queue.get_nowait()
     def delete_during_encoding():
-        event['objects'] = [{**event['objects'][0], 'incident_eligible': False}]
+        event['objects'] = []
         event['evidence_revision'] = 2
         with sqlite3.connect(tmp_path / 'revision.sqlite3') as conn:
             conn.execute('update events set evidence_revision=2 where id=1')
@@ -278,3 +278,12 @@ def test_negative_deletion_blocks_unnotified_inflight_positive_commit(tmp_path):
     assert not service.index.event_indexed(1, service.encoder.identity)
     assert service.queue_event(event)
     assert service._queue.empty()
+
+
+@pytest.mark.parametrize('provisional', [False, True])
+def test_scene_observation_remains_searchable_when_alert_policy_excludes_it(tmp_path, provisional):
+    service, event, _ = _revision_service(tmp_path)
+    event['objects'][0].update(incident_eligible=False, provisional_detection=provisional)
+    assert service.index_event(event) == 2
+    assert service.projection_current(event)
+    assert service.index.event_indexed(1, service.encoder.identity)
