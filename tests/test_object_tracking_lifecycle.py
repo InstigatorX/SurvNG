@@ -189,6 +189,17 @@ def test_incident_handoff_filters_objects_and_starts_current_session_atomically(
     )
 
 
+def test_unestablished_event_is_not_a_declined_tracking_session() -> None:
+    session = _session()
+    session.window_provider = None
+    lifecycle, _factory, _frame_provider, _history = _lifecycle(session)
+    lifecycle.scene_job_store = Mock()
+    lifecycle.scene_job_store.enqueue_scene_tracking.return_value = None
+
+    assert lifecycle.start_incident(42, datetime.now(timezone.utc), [{"label": "person"}], None) is None
+    session.start.assert_not_called()
+
+
 def test_read_only_sample_rate_does_not_wait_for_camera_lifecycle_lock() -> None:
     initial = _session(fps=3.0)
     lifecycle, _factory, _frame_provider, _history = _lifecycle(initial)

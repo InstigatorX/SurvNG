@@ -126,8 +126,11 @@ class ObjectTrackingLifecycle:
                 # compute chunk. Subsequent activity extends this same job.
                 end = max(end, event_at.timestamp() + 45.0)
                 job = self.scene_job_store.enqueue_scene_tracking(event_id, start, end)
+                # No scene membership means the event was not established.
+                # None matches the other "nothing to track" path so this is
+                # not reported as a declined tracking session.
                 if job is None:
-                    return False
+                    return None
                 self.resume_pending_scene()
                 return True
             if not trackable:
