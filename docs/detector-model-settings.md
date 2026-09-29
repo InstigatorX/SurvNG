@@ -17,6 +17,10 @@ properties, errors, and warnings. `detector.model_output_format` defaults to
 The `e2e` choices mean final detections, including embedded-NMS exports. SurvNG
 does not apply NMS again to those outputs. Its NMS threshold affects raw outputs
 only; filtering already performed inside an export cannot be undone at runtime.
+`detector.box_voting_enabled` defaults off. When on, each surviving raw-YOLO box
+is the confidence-weighted average of the same-class boxes NMS would have
+suppressed, snapped to integer pixels. The published confidence stays the
+highest score in that cluster. Different classes do not vote on each other.
 
 `detector.model_input_layout` defaults to `auto`, with `NCHW` and `NHWC` overrides
 for OpenVINO. Saving either override rebuilds the object detector workers and

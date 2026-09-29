@@ -792,6 +792,7 @@ DOCKER_DEFAULT = {
         "cache_dir": "/data/openvino-cache",
         "confidence_threshold": 0.45,
         "nms_threshold": 0.45,
+        "box_voting_enabled": False,
         "event_confirmation_frames": 2,
         "event_class_confirmation_frames": {},
         "event_class_confidence_thresholds": {},
