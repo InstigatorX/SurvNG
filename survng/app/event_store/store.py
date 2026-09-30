@@ -1184,7 +1184,6 @@ class EventStore(
                 existing_width <= 0
                 or existing_height <= 0
                 or not math.isfinite(existing_captured_at)
-                or abs(float(captured_at) - existing_captured_at) > 15.0
             ):
                 return decline("source_time_or_geometry_incompatible")
             existing_subject_pixels = (
@@ -1195,17 +1194,40 @@ class EventStore(
                 (candidate_box[2] - candidate_box[0])
                 * (candidate_box[3] - candidate_box[1])
             )
+            existing_clearance = min(
+                existing_box[0] / existing_width,
+                existing_box[1] / existing_height,
+                (existing_width - existing_box[2]) / existing_width,
+                (existing_height - existing_box[3]) / existing_height,
+            )
+            # A subject already inside the frame is a same-moment refinement.
+            # A subject cut off by the frame can be replaced by a later view.
+            if existing_clearance >= 0.01 and abs(float(captured_at) - existing_captured_at) > 15.0:
+                return decline("source_time_or_geometry_incompatible")
+            if existing_clearance < 0.01 and float(captured_at) + 0.05 < existing_captured_at:
+                return decline("source_time_or_geometry_incompatible")
             candidate_clearance = min(
                 candidate_box[0] / frame_width,
                 candidate_box[1] / frame_height,
                 (frame_width - candidate_box[2]) / frame_width,
                 (frame_height - candidate_box[3]) / frame_height,
             )
-            if (
-                frame_width * frame_height <= existing_width * existing_height
-                or candidate_subject_pixels < max(64.0, existing_subject_pixels * 1.5)
-                or candidate_clearance < 0.005
-            ):
+            # A subject already fully in frame must be a larger, sharper main-stream
+            # view from the same moment. A subject cut off by the frame can be
+            # replaced later by any fully framed view with more subject pixels.
+            opening_subject_clipped = existing_clearance < 0.01
+            if opening_subject_clipped:
+                insufficient = (
+                    candidate_subject_pixels <= existing_subject_pixels
+                    or candidate_clearance < 0.01
+                )
+            else:
+                insufficient = (
+                    frame_width * frame_height <= existing_width * existing_height
+                    or candidate_subject_pixels < max(64.0, existing_subject_pixels * 1.5)
+                    or candidate_clearance < 0.005
+                )
+            if insufficient:
                 return decline("insufficient_resolution_or_subject_quality")
 
             for item in objects:

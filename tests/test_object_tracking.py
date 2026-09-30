@@ -875,6 +875,96 @@ class ObjectTrackingSessionTest(unittest.TestCase):
 
         promoter.assert_not_called()
 
+    def test_tracking_promotes_fully_framed_subject_with_more_pixels_over_clipped_cover(self) -> None:
+        promoted: dict = {}
+
+        class Detector:
+            config = SimpleNamespace(confidence_threshold=0.7)
+
+            @staticmethod
+            def detect(_frame, confidence_threshold=None):
+                del confidence_threshold
+                return [detection("person", 0.9, (20, 20, 55, 55))]
+
+        def promote(_event_id: int, **values: object) -> dict:
+            promoted.update(values)
+            return {"id": 7}
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="lower-garage", name="Lower Garage", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(),
+            detector=Detector(),
+            frame_provider=lambda: None,
+            update_event=lambda *_args: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+            cover_frame_provider=lambda _captured_at, _width, _reference: np.full(
+                (100, 100, 3), 127, dtype=np.uint8
+            ),
+            snapshot_writer=lambda _frame, _event_at: "snapshots/lower-garage/framed.webp",
+            cover_promoter=promote,
+        )
+        session._frame_width = 100
+        session._frame_height = 100
+        # 30x30 box on the edge: 900 subject pixels, 9% of the frame. The
+        # 1.5x area rule would require 13.5%. The replacement is 35x35.
+        clipped = {**detection("person", 0.77, (0, 40, 30, 70)), "track_id": 4}
+        framed = {**detection("person", 0.86, (20, 20, 55, 55)), "track_id": 4}
+        frame = np.full((100, 100, 3), 127, dtype=np.uint8)
+        reference = VideoFrameReference(
+            source_path=Path("segment.mp4"),
+            seek_offset_seconds=40.0,
+            pts=123,
+            pts_seconds=0.0,
+            time_base_num=1,
+            time_base_den=90000,
+            captured_at=140.0,
+        )
+
+        session._consider_cover_candidate(frame, 100.0, [clipped], {4})
+        session._consider_cover_candidate(frame, 140.0, [framed], {4}, reference)
+        session._promote_cover_candidate(7)
+
+        self.assertEqual(promoted["snapshot_path"], "snapshots/lower-garage/framed.webp")
+        self.assertEqual(promoted["captured_at"], 140.0)
+        self.assertTrue(session._cover_promotion["cover_promoted"])
+
+    def test_tracking_keeps_area_rule_for_an_already_framed_subject(self) -> None:
+        promoter = Mock()
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(),
+            detector=SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7)),
+            frame_provider=lambda: None,
+            update_event=lambda *_args: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+            cover_frame_provider=lambda *_args: np.zeros((100, 100, 3), dtype=np.uint8),
+            snapshot_writer=lambda _frame, _event_at: "snapshots/gate/better.webp",
+            cover_promoter=promoter,
+        )
+        session._frame_width = 100
+        session._frame_height = 100
+        framed = {**detection("car", 0.9, (20, 20, 40, 50)), "track_id": 4}
+        # 702 pixels versus 600, but only 7% of the frame against a 9% bar.
+        slightly_larger = {**detection("car", 0.92, (20, 20, 46, 47)), "track_id": 4}
+        frame = np.full((100, 100, 3), 127, dtype=np.uint8)
+        reference = VideoFrameReference(
+            source_path=Path("segment.mp4"),
+            seek_offset_seconds=4.0,
+            pts=123,
+            pts_seconds=0.0,
+            time_base_num=1,
+            time_base_den=90000,
+            captured_at=104.0,
+        )
+
+        session._consider_cover_candidate(frame, 100.0, [framed], {4})
+        session._consider_cover_candidate(frame, 104.0, [slightly_larger], {4}, reference)
+        session._promote_cover_candidate(7)
+
+        promoter.assert_not_called()
+
     def test_reid_recovery_telemetry_accumulates_across_sessions(self) -> None:
         persisted: dict = {}
 

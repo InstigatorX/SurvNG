@@ -92,6 +92,28 @@ def _adaptive_tracking_fps(
     return config.sample_fps, next_stable_frames
 
 
+def _cover_replaces_baseline(
+    *,
+    baseline_fully_framed: bool,
+    baseline_area: float,
+    baseline_pixels: float,
+    candidate_area: float,
+    candidate_pixels: float,
+    candidate_clearance: float,
+) -> bool:
+    """Decide whether a tracked frame is a better picture than the current cover.
+
+    A subject cut off by the frame can be replaced by a later fully framed view
+    with more subject pixels. A subject already fully in frame must occupy
+    substantially more of the picture.
+    """
+    if candidate_clearance < 0.01:
+        return False
+    if baseline_fully_framed:
+        return candidate_area >= max(baseline_area * 1.5, baseline_area + 0.0025)
+    return candidate_pixels > baseline_pixels
+
+
 def _tracking_persistence_due(
     interval_seconds: float,
     last_persisted_at: float,
@@ -572,9 +594,18 @@ class ObjectTrackingSession:
             or self.snapshot_writer is None
             or self.cover_promoter is None
             or candidate.captured_at < baseline.captured_at + 0.25
-            or not candidate.fully_framed
-            or candidate.subject_area_ratio
-            < max(baseline.subject_area_ratio * 1.5, baseline.subject_area_ratio + 0.0025)
+            or not _cover_replaces_baseline(
+                baseline_fully_framed=baseline.fully_framed,
+                baseline_area=baseline.subject_area_ratio,
+                baseline_pixels=(
+                    baseline.subject_area_ratio * self._frame_width * self._frame_height
+                ),
+                candidate_area=candidate.subject_area_ratio,
+                candidate_pixels=(
+                    candidate.subject_area_ratio * self._frame_width * self._frame_height
+                ),
+                candidate_clearance=candidate.edge_clearance_ratio,
+            )
             or candidate.quality_score < max(0.12, baseline.quality_score * 0.55)
         ):
             return
@@ -690,10 +721,20 @@ class ObjectTrackingSession:
         crop_y2 = max(0, min(frame_height, int(np.ceil(primary_box[3]))))
         verified_crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
         final_quality = image_quality(verified_crop).score if verified_crop.size else 0.0
+        final_pixels = (
+            (primary_box[2] - primary_box[0]) * (primary_box[3] - primary_box[1])
+        )
         if (
-            final_clearance < 0.01
-            or final_area
-            < max(baseline.subject_area_ratio * 1.5, baseline.subject_area_ratio + 0.0025)
+            not _cover_replaces_baseline(
+                baseline_fully_framed=baseline.fully_framed,
+                baseline_area=baseline.subject_area_ratio,
+                baseline_pixels=(
+                    baseline.subject_area_ratio * frame_width * frame_height
+                ),
+                candidate_area=final_area,
+                candidate_pixels=final_pixels,
+                candidate_clearance=final_clearance,
+            )
             or final_quality < max(0.12, baseline.quality_score * 0.55)
         ):
             self._cover_promotion.update({

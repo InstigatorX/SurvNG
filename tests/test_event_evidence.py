@@ -104,6 +104,55 @@ def test_cover_promotion_preserves_confidence_and_clears_stale_mask(tmp_path):
     assert store.cover_requirement(event["id"])["state"] == "satisfied"
 
 
+def _clipped_event(store):
+    subject = provisional(
+        box={"x1": 0, "y1": 300, "x2": 165, "y2": 354},
+        detection_frame_width=1280,
+        detection_frame_height=720,
+    )
+    return store.add_event(
+        camera_id="gate", kind="motion", snapshot_path="live.webp",
+        objects_json=json.dumps([subject]),
+    )
+
+
+def test_clipped_opening_subject_can_be_replaced_by_a_later_fully_framed_view(tmp_path):
+    store = EventStore(tmp_path)
+    event = _clipped_event(store)
+    candidate = {"label": "person", "confidence": .86, "temporal_consensus": True,
+                 "frame_source": "recorded_main",
+                 "box": {"x1": 2408, "y1": 342, "x2": 2488, "y2": 660}}
+    updated = promote(store, event["id"], captured_at=1090., frame_width=3840, frame_height=2160,
+                      cover_objects=[candidate])
+    assert updated is not None
+    person = json.loads(updated["objects_json"])[0]
+    assert person["box"] == candidate["box"]
+    assert person["snapshot_visible"] is True
+    assert person["detection_frame_width"] == 3840
+
+
+def test_fully_framed_opening_subject_keeps_the_fifteen_second_window(tmp_path):
+    store = EventStore(tmp_path)
+    event = add(store)
+    assert promote(store, event["id"], captured_at=1060.) is None
+    assert store.get(event["id"])["snapshot_path"] == "live.webp"
+    assert store.get(event["id"])["evidence_revision"] == 1
+
+
+def test_clipped_opening_subject_rejects_a_smaller_or_still_clipped_view(tmp_path):
+    store = EventStore(tmp_path)
+    event = _clipped_event(store)
+    smaller = {"label": "person", "confidence": .9, "temporal_consensus": True,
+               "box": {"x1": 400, "y1": 200, "x2": 430, "y2": 280}}
+    assert promote(store, event["id"], captured_at=1090., frame_width=1280, frame_height=720,
+                   cover_objects=[smaller]) is None
+    still_clipped = {"label": "person", "confidence": .9, "temporal_consensus": True,
+                     "box": {"x1": 1000, "y1": 600, "x2": 1270, "y2": 720}}
+    assert promote(store, event["id"], captured_at=1090., frame_width=1280, frame_height=720,
+                   cover_objects=[still_clipped]) is None
+    assert store.get(event["id"])["evidence_revision"] == 1
+
+
 @pytest.mark.parametrize("visible", [False, True])
 def test_off_frame_geometry_and_temporal_identity_ambiguity_cannot_promote(tmp_path, visible):
     store = EventStore(tmp_path)
