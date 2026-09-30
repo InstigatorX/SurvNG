@@ -5,6 +5,7 @@ from unittest.mock import Mock
 import survng.app.system_routes as system_routes
 from survng.app.config import AppConfig
 from survng.app.state_events import StateEventBroker
+from survng.app.motion_pipeline import build_builtin_motion_registry
 from survng.app.system_routes import SystemRouteDependencies, create_system_router
 
 
@@ -30,6 +31,7 @@ def stream_handler(manager, telemetry, get_manager=None, config=None):
         event_clip_window=Mock(),
         recording_cache_status=Mock(),
         model_evaluation=Mock(),
+        motion_pipeline_registry=build_builtin_motion_registry(),
     )
     return create_system_router(dependencies).handlers["application_event_stream"]
 

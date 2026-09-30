@@ -97,6 +97,7 @@ class OperationalTelemetryCollector:
             application_rss_bytes=int(process_memory.get("rss_bytes") or 0),
             worker_rss_bytes=int(worker_memory.get("total_rss_bytes") or 0),
             inference_ms=_finite_float(system_runtime.get("inference_ms")),
+            detection_fps=_finite_float(detector_runtime.get("detection_fps")),
             **system_deltas,
         )
         cameras: list[CameraTelemetryBucket] = []
