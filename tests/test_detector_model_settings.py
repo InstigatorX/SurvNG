@@ -60,8 +60,10 @@ def export_test_model(tmp_path: Path, precision="f32", layout="NCHW", compressed
     shape = [1, 3, 32, 32] if layout == "NCHW" else [1, 32, 32, 3]
     parameter = ops.parameter(shape, getattr(ov.Type, precision))
     # Confidence follows normalized image intensity, so this tests preprocessing
-    # through actual inference, as well as preserving duplicate final detections.
-    boxes = np.array([[[4, 4, 24, 24, 0, 0], [4, 4, 24, 24, 0, 0]]], dtype=dtype)
+    # through actual inference. The second box overlaps the first at IoU 0.80:
+    # high enough that NMS at 0.45 would merge them, and below the 0.90
+    # same-class duplicate guard.
+    boxes = np.array([[[4, 4, 24, 24, 0, 0], [4, 4, 20, 24, 0, 0]]], dtype=dtype)
     score_mask = np.zeros_like(boxes)
     score_mask[:, :, 4] = 1
     intensity = ops.reduce_mean(parameter, ops.constant([0, 1, 2, 3]), False)
@@ -93,9 +95,10 @@ def test_real_openvino_precision_and_final_detections(tmp_path, precision, layou
         assert "f16" in status["model_settings"]["constant_precisions"]
     assert status["warmup_error"] == ""
     detections = detector.detect(np.full((32, 32, 3), 255, dtype=np.uint8))
-    assert len(detections) == 2  # Applying NMS twice would remove one.
+    assert len(detections) == 2  # NMS at 0.45 would remove one; IoU stays below 0.90.
     assert detections[0]["confidence"] == 1.0
     assert detections[0]["box"] == {"x1": 4, "y1": 4, "x2": 24, "y2": 24}
+    assert detections[1]["box"] == {"x1": 4, "y1": 4, "x2": 20, "y2": 24}
 
 
 def test_invalid_layout_disables_detector_with_status_error(tmp_path):

@@ -19,6 +19,7 @@ from .detector_model_settings import ModelSettingsError, read_model_metadata, re
 LOGGER = logging.getLogger(__name__)
 DETECTION_FAILURE_STATUSES = frozenset({"detector_unavailable", "inference_error"})
 YOLO_END_TO_END_MAX_DETECTIONS = 1000
+YOLO_END_TO_END_DUPLICATE_IOU = 0.90
 
 
 def _class_aware_nms(
@@ -67,6 +68,107 @@ def _class_aware_nms(
             for local_index in np.asarray(indexes).reshape(-1).tolist()
         )
     return sorted(selected, key=lambda index: scores[index], reverse=True)
+
+
+def _detection_box_iou(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> float:
+    """Return IoU for two detector object boxes, or zero for invalid boxes."""
+    left_box = left.get("box")
+    right_box = right.get("box")
+    if not isinstance(left_box, dict) or not isinstance(right_box, dict):
+        return 0.0
+
+    try:
+        left_x1 = float(left_box["x1"])
+        left_y1 = float(left_box["y1"])
+        left_x2 = float(left_box["x2"])
+        left_y2 = float(left_box["y2"])
+        right_x1 = float(right_box["x1"])
+        right_y1 = float(right_box["y1"])
+        right_x2 = float(right_box["x2"])
+        right_y2 = float(right_box["y2"])
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+
+    values = [
+        left_x1,
+        left_y1,
+        left_x2,
+        left_y2,
+        right_x1,
+        right_y1,
+        right_x2,
+        right_y2,
+    ]
+    if not np.all(np.isfinite(values)):
+        return 0.0
+
+    left_area = max(0.0, left_x2 - left_x1) * max(0.0, left_y2 - left_y1)
+    right_area = max(0.0, right_x2 - right_x1) * max(0.0, right_y2 - right_y1)
+    if left_area <= 0.0 or right_area <= 0.0:
+        return 0.0
+
+    intersection = (
+        max(0.0, min(left_x2, right_x2) - max(left_x1, right_x1))
+        * max(0.0, min(left_y2, right_y2) - max(left_y1, right_y1))
+    )
+    union = left_area + right_area - intersection
+
+    return intersection / union if union > 0.0 else 0.0
+
+
+def _suppress_e2e_near_duplicates(
+    objects: list[dict[str, Any]],
+    iou_threshold: float = YOLO_END_TO_END_DUPLICATE_IOU,
+) -> list[dict[str, Any]]:
+    """Suppress only near-identical same-class E2E detections.
+
+    End-to-end models are expected to have already performed their normal
+    detector NMS. This is deliberately conservative and only removes
+    pathological near-duplicates while retaining the highest-confidence box.
+    """
+    if len(objects) < 2:
+        return objects
+
+    def confidence(index: int) -> float:
+        try:
+            value = float(objects[index].get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        return value if np.isfinite(value) else 0.0
+
+    ranked = sorted(
+        range(len(objects)),
+        key=lambda index: (-confidence(index), index),
+    )
+
+    kept: list[int] = []
+
+    for index in ranked:
+        candidate = objects[index]
+        candidate_label = str(candidate.get("label") or "")
+
+        duplicate = any(
+            candidate_label == str(objects[kept_index].get("label") or "")
+            and _detection_box_iou(candidate, objects[kept_index]) >= iou_threshold
+            for kept_index in kept
+        )
+
+        if not duplicate:
+            kept.append(index)
+
+    suppressed = len(objects) - len(kept)
+    if suppressed:
+        LOGGER.debug(
+            "Suppressed %d near-duplicate end-to-end detection(s) at IoU >= %.2f",
+            suppressed,
+            iou_threshold,
+        )
+
+    # Preserve original detector ordering for downstream callers.
+    return [objects[index] for index in sorted(kept)]
 
 
 def detection_failure(objects: list[dict[str, Any]]) -> str:
@@ -1100,7 +1202,7 @@ class OpenVinoDetector:
                 "confidence": round(confidence, 4),
                 "box": {"x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2)},
             })
-        return objects
+        return _suppress_e2e_near_duplicates(objects)
 
     def _parse_yolo_output(
         self,

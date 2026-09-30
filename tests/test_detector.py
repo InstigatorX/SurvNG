@@ -49,6 +49,95 @@ class OpenVinoDetectorTest(unittest.TestCase):
         detector.output_layer = detector.output_layers[0]
         self.assertEqual(detector._detect_output_format(), "yolo-e2e")
 
+    def test_yolo_e2e_suppresses_near_duplicate_same_class_boxes(self) -> None:
+        detector = make_detector(["person", "car"])
+        metadata = {
+            "image_width": 640.0,
+            "image_height": 640.0,
+            "scale": 1.0,
+            "pad_x": 0.0,
+            "pad_y": 0.0,
+        }
+        output = np.array([[
+            [100.0, 100.0, 200.0, 300.0, 0.90, 0.0],
+            [102.0, 102.0, 198.0, 298.0, 0.82, 0.0],
+            [400.0, 100.0, 500.0, 300.0, 0.88, 0.0],
+        ]], dtype=np.float32)
+
+        objects = detector._parse_yolo_e2e_output(output, metadata)
+
+        self.assertEqual(len(objects), 2)
+        self.assertEqual(
+            [item["confidence"] for item in objects],
+            [0.9, 0.88],
+        )
+        self.assertEqual(
+            objects[0]["box"],
+            {"x1": 100, "y1": 100, "x2": 200, "y2": 300},
+        )
+
+    def test_yolo_e2e_preserves_overlapping_different_classes(self) -> None:
+        detector = make_detector(["person", "car"])
+        metadata = {
+            "image_width": 640.0,
+            "image_height": 640.0,
+            "scale": 1.0,
+            "pad_x": 0.0,
+            "pad_y": 0.0,
+        }
+        output = np.array([[
+            [100.0, 100.0, 200.0, 300.0, 0.90, 0.0],
+            [100.0, 100.0, 200.0, 300.0, 0.85, 1.0],
+        ]], dtype=np.float32)
+
+        objects = detector._parse_yolo_e2e_output(output, metadata)
+
+        self.assertEqual(
+            [item["label"] for item in objects],
+            ["person", "car"],
+        )
+
+    def test_yolo_e2e_preserves_distinct_same_class_boxes(self) -> None:
+        detector = make_detector(["person"])
+        metadata = {
+            "image_width": 640.0,
+            "image_height": 640.0,
+            "scale": 1.0,
+            "pad_x": 0.0,
+            "pad_y": 0.0,
+        }
+        output = np.array([[
+            [100.0, 100.0, 200.0, 300.0, 0.90, 0.0],
+            [150.0, 100.0, 250.0, 300.0, 0.88, 0.0],
+        ]], dtype=np.float32)
+
+        objects = detector._parse_yolo_e2e_output(output, metadata)
+
+        self.assertEqual(len(objects), 2)
+
+    def test_yolo_e2e_keeps_higher_confidence_duplicate_in_original_order(self) -> None:
+        detector = make_detector(["person"])
+        metadata = {
+            "image_width": 640.0,
+            "image_height": 640.0,
+            "scale": 1.0,
+            "pad_x": 0.0,
+            "pad_y": 0.0,
+        }
+        output = np.array([[
+            [400.0, 100.0, 500.0, 300.0, 0.70, 0.0],
+            [102.0, 102.0, 198.0, 298.0, 0.82, 0.0],
+            [100.0, 100.0, 200.0, 300.0, 0.90, 0.0],
+        ]], dtype=np.float32)
+
+        objects = detector._parse_yolo_e2e_output(output, metadata)
+
+        self.assertEqual([item["confidence"] for item in objects], [0.7, 0.9])
+        self.assertEqual(
+            objects[1]["box"],
+            {"x1": 100, "y1": 100, "x2": 200, "y2": 300},
+        )
+
     def test_failed_inference_releases_active_counter_and_records_failure(self) -> None:
         detector = make_detector()
         detector.enabled = True
