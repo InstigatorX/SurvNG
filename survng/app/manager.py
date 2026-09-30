@@ -333,6 +333,12 @@ class AppManager:
                 ffmpeg_path=config.ffmpeg_path,
                 rtsp_transport=config.capture_rtsp_transport,
                 frame_transport=config.capture_frame_transport,
+                # Live capture stays on the software bgr24 path. QSV on this
+                # process shares the one render node with recorded evidence
+                # frames and replaces their full-size snapshots with the
+                # substream. hardware_acceleration still applies to those
+                # recorded frames.
+                hardware_acceleration="off",
                 frame_rate=lambda: max(
                     self.config.motion_qualification.sample_fps,
                     self.config.detector.tracking.sample_fps,

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
 import threading
 import time
 from collections import deque
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -23,6 +25,7 @@ from survng.app.camera_capture import (
     _decode_capture_bmp,
     _parse_showinfo_geometry,
 )
+from survng.app.ffmpeg_hw import CaptureDecodePlan
 
 
 class FakeHandle:
@@ -665,6 +668,29 @@ def test_live_recovers_after_relay_restart_without_a_persistent_consumer() -> No
     assert status["open_timeout_escalations"] >= 1
 
 
+def test_status_reports_decode_plan_outside_numeric_stats() -> None:
+    frame = np.zeros((2, 2, 3), dtype=np.uint8)
+    backend = FakeBackend([[frame]])
+
+    def open_with_plan(handle, source_url, cancelled, *, open_timeout_ms=None):
+        del source_url, cancelled, open_timeout_ms
+        handle.decode_plan = "cpu"
+        handle.opened = True
+        return True
+
+    backend.open = open_with_plan
+    service = _service(backend)
+
+    assert service.start()
+    _wait_until(lambda: service.status()["capture_stats"]["live"]["frames_received"] >= 1)
+    status = service.status()
+    service.request_stop()
+    assert service.wait_stopped(1.0) == {}
+
+    assert status["decode_plan"] == {"live": "cpu", "main": ""}
+    assert "decode_plan" not in status["capture_stats"]["live"]
+
+
 def test_ffmpeg_backend_uses_configured_transport_and_policy_rate() -> None:
     backend = FfmpegCaptureBackend(
         CaptureOpenLimiter(1),
@@ -692,6 +718,48 @@ def test_ffmpeg_backend_uses_configured_transport_and_policy_rate() -> None:
     assert "0.200000" in capture_filter
     assert command[command.index("-fps_mode") + 1] == "vfr"
     assert command[-3:] == ["-f", "rawvideo", "pipe:1"]
+    assert "-hwaccel" not in command
+    assert "hwdownload" not in capture_filter
+
+
+def test_qsv_capture_command_downloads_after_select() -> None:
+    backend = FfmpegCaptureBackend(
+        CaptureOpenLimiter(1),
+        FfmpegCaptureOptions(frame_rate=lambda: 5.0),
+    )
+    plan = CaptureDecodePlan(
+        "qsv",
+        (
+            "-qsv_device",
+            "/dev/dri/renderD128",
+            "-hwaccel",
+            "qsv",
+            "-hwaccel_output_format",
+            "qsv",
+        ),
+        ("hwdownload", "format=nv12"),
+    )
+
+    command = backend._command("rtsp://camera/live", plan)
+
+    input_at = command.index("-i")
+    device_at = command.index("-qsv_device")
+    assert command[device_at:input_at] == [
+        "-qsv_device",
+        "/dev/dri/renderD128",
+        "-hwaccel",
+        "qsv",
+        "-hwaccel_output_format",
+        "qsv",
+    ]
+    video_filter = command[command.index("-vf") + 1]
+    assert video_filter.index("select=") < video_filter.index("hwdownload,format=nv12")
+    assert video_filter.index("hwdownload,format=nv12") < video_filter.index("format=bgr24")
+    assert video_filter.index("format=bgr24") < video_filter.index(
+        "showinfo@capture=checksum=0"
+    )
+    assert command[-3:] == ["-f", "rawvideo", "pipe:1"]
+    assert "-hwaccel" not in command[input_at:]
 
 
 def test_ffmpeg_backend_bmp_transport_remains_available() -> None:
@@ -1138,6 +1206,197 @@ def test_ffmpeg_raw_capture_returns_bgr_frames(tmp_path) -> None:
     finally:
         if opened:
             handle.close()
+
+
+def _encode_capture_fixture(path) -> bool:
+    if shutil.which("ffmpeg") is None:
+        return False
+    encoded = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:size=32x24:rate=10:duration=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=False,
+    )
+    return encoded.returncode == 0
+
+
+def test_qsv_capture_falls_back_to_cpu_when_device_open_fails(tmp_path, caplog) -> None:
+    video = tmp_path / "sample.mp4"
+    if not _encode_capture_fixture(video):
+        pytest.skip("ffmpeg could not encode the capture fixture")
+    backend = FfmpegCaptureBackend(
+        CaptureOpenLimiter(1),
+        FfmpegCaptureOptions(
+            frame_rate=lambda: 5.0,
+            read_timeout_ms=3000,
+            hardware_acceleration="qsv",
+        ),
+    )
+    handle = backend.create_handle()
+    assert isinstance(handle, FfmpegCaptureHandle)
+    caplog.set_level(logging.WARNING, logger="survng.app.camera_capture")
+    try:
+        with (
+            patch("survng.app.ffmpeg_hw.render_device_available", return_value=True),
+            patch(
+                "survng.app.ffmpeg_hw.ffmpeg_hwaccels",
+                return_value=frozenset({"qsv"}),
+            ),
+            patch(
+                "survng.app.ffmpeg_hw.dri_render_device",
+                return_value="/dev/dri/renderD999",
+            ),
+        ):
+            opened = backend.open(
+                handle,
+                str(video),
+                lambda: False,
+                open_timeout_ms=8000,
+            )
+        assert opened
+        assert handle.decode_plan == "cpu"
+        ok, frame = handle.read()
+        assert ok and frame is not None
+        assert frame.shape == (24, 32, 3)
+        assert frame.flags.c_contiguous
+    finally:
+        handle.close()
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and "decode plan qsv" in record.getMessage()
+    ]
+    assert warnings
+    assert "cpu" in warnings[0]
+
+
+def test_auto_capture_without_render_node_stays_on_cpu(tmp_path) -> None:
+    video = tmp_path / "sample.mp4"
+    if not _encode_capture_fixture(video):
+        pytest.skip("ffmpeg could not encode the capture fixture")
+    backend = FfmpegCaptureBackend(
+        CaptureOpenLimiter(1),
+        FfmpegCaptureOptions(
+            frame_rate=lambda: 5.0,
+            read_timeout_ms=3000,
+            hardware_acceleration="auto",
+        ),
+    )
+    handle = backend.create_handle()
+    assert isinstance(handle, FfmpegCaptureHandle)
+    try:
+        with (
+            patch("survng.app.ffmpeg_hw.render_device_available", return_value=False),
+            patch("survng.app.ffmpeg_hw.ffmpeg_hwaccels") as probe,
+        ):
+            opened = backend.open(
+                handle,
+                str(video),
+                lambda: False,
+                open_timeout_ms=8000,
+            )
+            plans = backend._decode_plans()
+            command = backend._command(str(video), plans[0])
+        probe.assert_not_called()
+        assert opened
+        assert handle.decode_plan == "cpu"
+        assert [plan.name for plan in plans] == ["cpu"]
+        assert "-hwaccel" not in command
+        assert "hwdownload" not in command[command.index("-vf") + 1]
+    finally:
+        handle.close()
+
+
+def test_replaced_decoder_drops_stderr_from_the_previous_process() -> None:
+    handle = FfmpegCaptureHandle(read_timeout_ms=1000, frame_transport="rawvideo")
+    read_fd, write_fd = os.pipe()
+    stderr = os.fdopen(read_fd, "rb", buffering=0)
+    handle._process = type(
+        "Process",
+        (),
+        {"stderr": stderr, "stdout": None, "poll": lambda self: None},
+    )()
+    handle._stream_generation = 7
+    reader = threading.Thread(target=handle._drain_stderr)
+    reader.start()
+    try:
+        os.write(write_fd, _showinfo_line(0, 2, 2))
+        assert handle._geometries.get(timeout=1) == (2, 2)
+        handle._reset_stream_state()
+        os.write(write_fd, _showinfo_line(0, 8, 8))
+        deadline = time.monotonic() + 1
+        while reader.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        os.close(write_fd)
+        reader.join(timeout=1)
+        stderr.close()
+
+    assert not reader.is_alive()
+    assert handle._geometries.empty()
+    assert handle._next_showinfo_index == 0
+    assert handle._open_phase == "connecting"
+    assert handle._stream_generation == 8
+
+
+def test_capture_start_discards_bytes_from_the_previous_decoder() -> None:
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is not installed")
+    handle = FfmpegCaptureHandle(read_timeout_ms=5000, frame_transport="rawvideo")
+    handle._prefetched = np.zeros((8, 8, 3), dtype=np.uint8)
+    handle._buffer.extend(b"stale")
+    handle._note_showinfo_line(_showinfo_line(4, 8, 8))
+    handle._transport_failure = "old failure"
+    handle._transport_failed.set()
+    handle.start(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-nostats",
+            "-loglevel",
+            "info",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:size=2x2:rate=5:duration=0.4",
+            "-vf",
+            "format=bgr24,showinfo@capture=checksum=0",
+            "-fps_mode",
+            "vfr",
+            "-pix_fmt",
+            "bgr24",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ],
+        decode_plan="cpu",
+    )
+    try:
+        ok, frame = handle.read()
+        assert ok and frame is not None
+        assert frame.shape == (2, 2, 3)
+        assert int(frame[:, :, 0].mean()) > int(frame[:, :, 2].mean())
+        assert handle.decode_plan == "cpu"
+        assert handle._transport_failure == ""
+        assert not handle._transport_failed.is_set()
+        assert handle._next_showinfo_index >= 1
+    finally:
+        handle.close()
 
 
 def test_ffmpeg_raw_capture_reads_when_showinfo_runs_ahead(tmp_path) -> None:

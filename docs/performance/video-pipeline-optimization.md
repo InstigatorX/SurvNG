@@ -5,6 +5,7 @@ Phase 0 was skipped. Recording stream-copy and go2rtc/WebRTC are unchanged.
 | Phase | Change | CPU | p95 latency | Copies | RSS | Result |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | Raw BGR instead of BMP on the live capture pipe (FFmpeg 8.1.2) | Lower at 720p | Read p95 lower at 720p | One pipe fill into the NumPy frame | Similar | Keep |
+| 2 | Hardware decode on the one live capture process, then the Phase 1 software path | Not measured | Not measured | Same bgr24 pipe after hwdownload | Not measured | Revert the live wiring. QSV stays on recorded evidence frames |
 
 ## Phase 1 — raw BGR transport
 
@@ -55,3 +56,37 @@ Payload bytes match: both paths deliver the same BGR arrays. At 720p, FFmpeg CPU
 ### Recommendation
 
 Keep for the FFmpeg 8.1.2 runtime. Roll back with `capture_frame_transport` set to `bmp` if a camera cannot tolerate the stderr framing. Further capture CPU gains still depend on avoiding software decode.
+
+## Phase 2 — hardware decode on the live capture process
+
+### Current state
+
+Phase 1 still decodes the live/substream in software inside the one persistent `FfmpegCaptureBackend` process, then writes bgr24. Recorded-frame decode is a separate FFmpeg invocation and is unchanged: `auto` and `off` stay on CPU there.
+
+### Change
+
+Live capture reads the existing `hardware_acceleration` setting (`auto`, `qsv`, `vaapi`, `off`). `auto` tries Intel QSV, then VAAPI, then the Phase 1 software command. An explicit mode tries that device and then software. `off` is software only.
+
+A plan is used only when a real `/dev/dri/renderD*` node exists and `ffmpeg -hwaccels` lists that method. The default render-node path is not treated as present. The hwaccel list is cached per FFmpeg binary. The probe runs outside that cache lock. `off`, and every mode when no render node exists, do not probe FFmpeg.
+
+The hardware filter is `select`, then `hwdownload,format=nv12`, then `format=bgr24`, then the existing rawvideo `showinfo` line. Device arguments are input options, before `-i`. Downstream frames stay caller-owned bgr24. There is still one FFmpeg process per source: a failed plan is closed before the next plan starts, inside the same open, so reconnect backoff is not the hardware fallback.
+
+The capture backend is created when the manager starts. It does not receive `hardware_acceleration`. That setting remains on the recorded-evidence decoder. The live command is the Phase 1 software command, including when the configured mode is `qsv`.
+
+### Risks
+
+- If `select` cannot run on hardware frames, that plan exits and the open continues with software decode.
+- `hwdownload` plus the nv12-to-bgr24 conversion can erase the decode savings. That was not measured here.
+- A hardware plan that hangs until the open timeout delays the software attempt by that timeout. A plan that exits is closed immediately and the next plan starts.
+
+### Tests
+
+Plan order, the skipped probe when no render node exists, and the QSV command shape are unit-tested. A real FFmpeg 8.1.2 file open with QSV pointed at a missing device falls back to software and reports `decode_plan=cpu`. `auto` with no render node stays on the Phase 1 command.
+
+### Benchmark
+
+This machine has no `/dev/dri` render node, so hardware decode and the hwdownload copy were not timed. With `auto`, the command that actually runs is the Phase 1 software command. Do not treat that as a GPU result.
+
+### Recommendation
+
+Do not put this on the persistent live capture process. On a host whose `hardware_acceleration` is `qsv`, those live processes hold the render node that recorded evidence frames also use, and the incident picture falls back to the substream. The manager leaves live capture on the Phase 1 software command. `hardware_acceleration=qsv` still applies to recorded evidence frames.

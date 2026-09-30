@@ -807,6 +807,21 @@ class ManagerLifecycleTest(unittest.TestCase):
             self.assertEqual(shutdown.call_count, 2)
             self.assertTrue(manager._closed)
 
+    def test_live_capture_stays_software_when_evidence_decode_uses_qsv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = AppManager(AppConfig(
+                storage_dir=tmpdir,
+                hardware_acceleration="qsv",
+            ))
+            try:
+                self.assertEqual(
+                    manager.capture_backend.options.hardware_acceleration,
+                    "off",
+                )
+                self.assertEqual(manager.recorder.hardware_acceleration, "qsv")
+            finally:
+                manager.stop_all()
+
     def test_real_empty_manager_starts_and_stops_all_background_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = AppManager(AppConfig(storage_dir=tmpdir))
