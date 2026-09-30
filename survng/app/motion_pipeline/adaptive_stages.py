@@ -1396,12 +1396,26 @@ class IlluminationChangeFilterStage:
     def _unit(value: float) -> float:
         return min(1.0, max(0.0, value))
 
+    @staticmethod
+    def _cached_gray(color: np.ndarray, cached: np.ndarray | None) -> np.ndarray:
+        """Use the analysis gray when it is the unblurred conversion of this frame."""
+        if (
+            cached is not None
+            and cached.ndim == 2
+            and cached.dtype == np.uint8
+            and cached.shape == color.shape[:2]
+        ):
+            return cached
+        return cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
+
     @classmethod
     def _pair_evidence(
         cls,
         previous: np.ndarray,
         current: np.ndarray,
         mask: np.ndarray,
+        previous_gray: np.ndarray | None = None,
+        current_gray: np.ndarray | None = None,
     ) -> dict[str, float] | None:
         if (
             previous.ndim != 3
@@ -1443,8 +1457,8 @@ class IlluminationChangeFilterStage:
         )
         polarity_score = cls._unit((polarity - 0.55) / 0.35)
 
-        previous_gray = cv2.cvtColor(previous, cv2.COLOR_BGR2GRAY)
-        current_gray = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
+        previous_gray = cls._cached_gray(previous, previous_gray)
+        current_gray = cls._cached_gray(current, current_gray)
         previous_x = cv2.Sobel(previous_gray, cv2.CV_32F, 1, 0, ksize=3)
         previous_y = cv2.Sobel(previous_gray, cv2.CV_32F, 0, 1, ksize=3)
         current_x = cv2.Sobel(current_gray, cv2.CV_32F, 1, 0, ksize=3)
@@ -1497,14 +1511,22 @@ class IlluminationChangeFilterStage:
             return context
 
         frames = context.frame_history
+        luminance = context.luminance_frame_history
         masks = context.motion_mask_history
         evidence: list[dict[str, float]] = []
         evaluate = context.scoring.accepted
+        aligned_gray = len(luminance) == len(frames)
         if evaluate:
             for index, (previous, current) in enumerate(zip(frames, frames[1:])):
                 if index >= len(masks):
                     break
-                pair = self._pair_evidence(previous, current, masks[index])
+                pair = self._pair_evidence(
+                    previous,
+                    current,
+                    masks[index],
+                    luminance[index] if aligned_gray else None,
+                    luminance[index + 1] if aligned_gray else None,
+                )
                 if pair is not None:
                     evidence.append(pair)
 

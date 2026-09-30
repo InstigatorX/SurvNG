@@ -169,6 +169,56 @@ def test_frame_sampling_keeps_compact_gray_and_color_buffers() -> None:
     assert telemetry["derived_frame_count"] == 3
     assert telemetry["derived_frame_bytes"] == 90 * 320 * 5
     assert telemetry["preprocess_count"] == 1
+    assert telemetry["identity_color_reuse_count"] == 0
+
+
+def test_analysis_sized_frozen_frame_reuses_its_color_buffer() -> None:
+    service = _service(_hooks())
+    frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    frame.setflags(write=False)
+
+    prepared = service._preprocess_frame(frame, 100.0)
+
+    assert prepared is not None
+    assert service.color_frames[-1][1] is frame
+    assert service.evidence_frames[-1].image is frame
+    assert np.array_equal(service.frames[-1][1], np.zeros((180, 320), dtype=np.uint8))
+    telemetry = service.telemetry_snapshot()
+    assert telemetry["identity_color_reuse_count"] == 1
+    assert telemetry["identity_color_reuse_bytes"] == 180 * 320 * 3
+    assert telemetry["derived_frame_count"] == 2
+    assert telemetry["derived_frame_bytes"] == 180 * 320 * 2
+
+
+def test_analysis_sized_writeable_frame_still_copies_color() -> None:
+    service = _service(_hooks())
+    frame = np.zeros((180, 320, 3), dtype=np.uint8)
+
+    service._preprocess_frame(frame, 100.0)
+
+    assert service.color_frames[-1][1] is not frame
+    assert frame.flags.writeable
+    telemetry = service.telemetry_snapshot()
+    assert telemetry["identity_color_reuse_count"] == 0
+    assert telemetry["derived_frame_bytes"] == 180 * 320 * 5
+
+
+def test_continuous_qualification_reuses_cached_gray() -> None:
+    rejected = MotionQualificationResult(False, 0.1, 0.48, "low_score", 2, {})
+    run_pipeline = Mock(return_value=rejected)
+    service = _service(_hooks(run_pipeline=run_pipeline, trigger_mode="camera"))
+    first = np.zeros((180, 320, 3), dtype=np.uint8)
+    second = first.copy()
+    first_gray = np.zeros((180, 320), dtype=np.uint8)
+    second_gray = first_gray.copy()
+    with service.frame_lock:
+        service.color_frames.extend([(99.8, first), (100.0, second)])
+        service.frames.extend([(99.8, first_gray), (100.0, second_gray)])
+
+    service.analyze_continuous(100.0)
+
+    assert run_pipeline.call_args.kwargs["luminance_frames"][0] is first_gray
+    assert run_pipeline.call_args.kwargs["luminance_frames"][1] is second_gray
 
 
 def test_evidence_frame_selection_is_nearest_and_generation_bounded() -> None:

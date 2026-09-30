@@ -232,6 +232,8 @@ class MotionAnalysisService:
             "preprocess_max_ms": 0.0,
             "derived_frame_count": 0,
             "derived_frame_bytes": 0,
+            "identity_color_reuse_count": 0,
+            "identity_color_reuse_bytes": 0,
             "capture_to_analysis_count": 0,
             "capture_to_analysis_total_ms": 0.0,
             "capture_to_analysis_last_ms": 0.0,
@@ -502,11 +504,26 @@ class MotionAnalysisService:
             scale = min(1.0, frame_width / max(1, width, height))
             target_width = max(1, round(width * scale))
             target_height = max(1, round(height * scale))
-            resized = cv2.resize(
-                frame,
-                (target_width, target_height),
-                interpolation=cv2.INTER_AREA,
+            # Live capture is software bgr24, and submit_frame already keeps a
+            # private frozen copy because detection and tracking share the
+            # original. A same-size resize is a second color copy. Reuse the
+            # frozen buffer. A larger frame still downscales here.
+            reuse_color = (
+                target_width == width
+                and target_height == height
+                and frame.ndim == 3
+                and frame.shape[2] == 3
+                and frame.flags.owndata
+                and not frame.flags.writeable
             )
+            if reuse_color:
+                resized = frame
+            else:
+                resized = cv2.resize(
+                    frame,
+                    (target_width, target_height),
+                    interpolation=cv2.INTER_AREA,
+                )
             gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
             processed = (
                 preprocess_motion_frame(gray)
@@ -524,12 +541,17 @@ class MotionAnalysisService:
         with self._telemetry_lock:
             self._record_timing_locked("preprocess", preprocess_ms)
             self._telemetry["frames_sampled"] += 1
-            self._telemetry["derived_frame_count"] += 2 + int(processed is not None)
+            self._telemetry["derived_frame_count"] += (
+                int(not reuse_color) + 1 + int(processed is not None)
+            )
             self._telemetry["derived_frame_bytes"] += int(
-                resized.nbytes
+                (0 if reuse_color else resized.nbytes)
                 + gray.nbytes
                 + (processed.nbytes if processed is not None else 0)
             )
+            if reuse_color:
+                self._telemetry["identity_color_reuse_count"] += 1
+                self._telemetry["identity_color_reuse_bytes"] += int(resized.nbytes)
         with self.frame_lock:
             self.frames.append((frame_epoch, gray))
             self.color_frames.append((frame_epoch, resized))
@@ -1054,6 +1076,19 @@ class MotionAnalysisService:
             else:
                 for frame in cached_processed:
                     frame.setflags(write=False)
+            gray_by_timestamp = dict(self.frames)
+            luminance_frames: list[np.ndarray] = []
+            if samples and samples[0][1].ndim == 3:
+                for timestamp, color in samples:
+                    gray = gray_by_timestamp.get(timestamp)
+                    if (
+                        gray is None
+                        or gray.ndim != 2
+                        or gray.shape != color.shape[:2]
+                    ):
+                        luminance_frames = []
+                        break
+                    luminance_frames.append(gray)
         if len(samples) < 2:
             return
         if cached_processed:
@@ -1080,6 +1115,7 @@ class MotionAnalysisService:
                         if cached_processed
                         else ""
                     ),
+                    luminance_frames=luminance_frames or None,
                 )
         except Exception as error:
             LOGGER.warning(

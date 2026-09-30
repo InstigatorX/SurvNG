@@ -635,6 +635,7 @@ class MotionQualificationService:
         processed_frames: list[np.ndarray] | None = None,
         processed_frame_implementation: str = "",
         clone_runtime: bool = True,
+        luminance_frames: list[np.ndarray] | None = None,
     ) -> MotionQualificationResult:
         if (
             processed_frames is not None
@@ -645,6 +646,14 @@ class MotionQualificationService:
             raise ValueError(
                 "processed_frames must contain one derivative for each source frame"
             )
+        if luminance_frames is not None and (
+            len(luminance_frames) != len(frames)
+            or any(
+                gray.ndim != 2 or gray.shape != color.shape[:2]
+                for gray, color in zip(luminance_frames, frames)
+            )
+        ):
+            luminance_frames = None
         mode, _resolved_sensitivity, frame_width = self.settings()
         if isolated:
             with self.analysis_lock:
@@ -658,6 +667,7 @@ class MotionQualificationService:
             captured_at=captured_at,
             original_frame=frames[-1] if frames else None,
             frame_history=tuple(frames),
+            luminance_frame_history=tuple(luminance_frames or ()),
             frame_timestamps=tuple(frame_timestamps or ()),
             processed_frame_history=tuple(processed_frames or ()),
             processed_frame=(processed_frames[-1] if processed_frames else None),
