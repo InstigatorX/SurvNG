@@ -18,7 +18,7 @@ import {
 import { crossCameraMatchCameraLabel, crossCameraMatchLabel, crossCameraTracePath } from "../crossCameraTrace.mjs";
 import { incidentReplayTracking, incidentTrackingSource, trackingCoverageLabel, storedObjectTracks } from "../objectTrackReplay.mjs";
 import { incidentSceneObjects, observedObjectSummaries } from "../incidentScene.mjs";
-import { incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentTriggerLabel, showIncidentCardAnnotations } from "../incidentNavigation.mjs";
+import { incidentEvidenceTimeline, incidentMosaicEvents, incidentMosaicPage, incidentTriggerLabel, showIncidentCardAnnotations } from "../incidentNavigation.mjs";
 import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../relatedIncidents.mjs";
 import {
   appearanceCapableLabel,
@@ -187,6 +187,81 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
   );
 }
 
+function evidenceSpanLabel(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 1) return "";
+  if (seconds < 60) return `+${Math.round(seconds)}s`;
+  return `+${formatDuration(seconds)}`;
+}
+
+function EvidenceTimeline({ incident, hero, timeline, timeZone, stripRef, onSelect, onKeyDown, onPlay, playLabel }) {
+  const frames = timeline.frames;
+  const motionCount = timeline.motionMarks.length;
+  const summary = motionCount
+    ? `${frames.length} event ${frames.length === 1 ? "image" : "images"}, ${motionCount} motion ${motionCount === 1 ? "update" : "updates"}`
+    : `${frames.length} event ${frames.length === 1 ? "image" : "images"}`;
+  const eventCountLabel = `${frames.length} ${frames.length === 1 ? "event" : "events"}`;
+  const spanLabel = evidenceSpanLabel(timeline.durationSeconds);
+  const heroEvent = hero?.event || incident;
+  const heroLabels = incidentLabels(heroEvent);
+  const heroTime = formatTimeOnly(heroEvent.created_at || hero?.epoch || incident.created_at, timeZone);
+  return (
+    <div className="incident-evidence" role="group" aria-label={`Incident evidence timeline, ${summary}`}>
+      <div className="incident-evidence-hero">
+        <SnapshotImage event={heroEvent} alt="Selected evidence frame" objectFocusMode="off" objectFocusControls={false} showAnnotations showTracking={false}>
+          <div className="incident-snapshot-hud">
+            <div className="incident-snapshot-main">
+              <strong>{incident.camera_id}</strong>
+              <time>{heroTime}</time>
+            </div>
+            <div className="pill-row compact incident-labels">
+              <IncidentObjectBadges labels={heroLabels} />
+            </div>
+          </div>
+        </SnapshotImage>
+        <button type="button" className="incident-preview-media-action media-surface-action" onClick={onPlay} aria-label={playLabel} />
+      </div>
+      <div className="incident-evidence-rail">
+        <div className="incident-evidence-strip" ref={stripRef} onKeyDown={onKeyDown}>
+          {frames.map((frame) => {
+            const selected = frame.key === hero?.key;
+            const time = formatTimeOnly(frame.event.created_at || frame.epoch || incident.created_at, timeZone);
+            const labels = incidentLabels(frame.event);
+            const labelText = labels.length ? labels.join(", ") : "motion";
+            return (
+              <button
+                type="button"
+                key={frame.key}
+                data-evidence-key={frame.key}
+                className={`incident-evidence-thumb${selected ? " selected" : ""}`}
+                aria-current={selected ? "true" : undefined}
+                aria-pressed={selected}
+                aria-label={`Show ${labelText} at ${time}`}
+                onClick={(clickEvent) => { clickEvent.stopPropagation(); onSelect(frame); }}
+              >
+                <SnapshotImage event={frame.event} alt="" thumbnail objectFocusMode="off" objectFocusControls={false} showAnnotations={false} showTracking={false} />
+                <time dateTime={frame.event.created_at || undefined}>{time}</time>
+                <span>{labelText}</span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="incident-evidence-ruler">
+          <time>{timeline.startEpoch ? formatTimeOnly(timeline.startEpoch, timeZone) : ""}</time>
+          <div className="incident-evidence-ruler-track" aria-hidden="true">
+            {frames.map((frame) => (
+              <i key={frame.key} className={`incident-evidence-tick${frame.key === hero?.key ? " selected" : ""}`} style={{ left: `${frame.position * 100}%` }} />
+            ))}
+            {timeline.motionMarks.map((mark) => (
+              <i key={mark.key} className="incident-evidence-tick motion" style={{ left: `${mark.position * 100}%` }} title={mark.label} />
+            ))}
+          </div>
+          <span>{spanLabel ? `${eventCountLabel} · ${spanLabel}` : eventCountLabel}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function IncidentCard({ incident, scenePlayback, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, zones = null, analysisMode = "clean", depthLayer = "both", replayRequest = 0, observationPreviewRequest = null, selectedObjectIndex = null, onSelectObject = null, onReturnToSelected = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
   const rawEvents = incident.events || [];
   const motionObservations = incident.motion_observations || [];
@@ -198,45 +273,33 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
       return ["mosaic", "evidence"].includes(stored) ? stored : "focus";
     } catch { return "focus"; }
   });
-  const [selectedEvidence, setSelectedEvidence] = useState(null);
   const [mosaicPageIndex, setMosaicPageIndex] = useState(0);
   const [subEventsOpen, setSubEventsOpen] = useState(false);
   const [inlineVideoActive, setInlineVideoActive] = useState(false);
   const [snapshotZoom, setSnapshotZoom] = useState({ scale: 1, x: 0, y: 0 });
   const [zonesVisible, setZonesVisible] = useState(false);
   const previewRef = useRef(null);
+  const evidenceStripRef = useRef(null);
   const snapshotZoomRef = useRef(snapshotZoom);
   const panGestureRef = useRef({ pointerId: null, startX: 0, startY: 0, panX: 0, panY: 0, moved: false });
   const replayRequestRef = useRef(replayRequest);
-  const evidenceSource = selectedPreview || incident;
-  const evidenceFrames = useMemo(() => incidentEvidenceFrames(evidenceSource), [evidenceSource]);
-  const evidenceItems = useMemo(() => evidenceFrames.map((frame) => {
-    if (frame.kind === "snapshot") return {
-      ...frame,
-      event: {
-        ...evidenceSource,
-        created_at: new Date(frame.epoch * 1000).toISOString(),
-      },
-    };
-    const snapshotUrl = `/api/cameras/${encodeURIComponent(evidenceSource.camera_id || incident.camera_id)}/recordings/preview.jpg?epoch=${encodeURIComponent(frame.epoch)}&source=main&width=1280&exact=true`;
-    return {
-      ...frame,
-      event: {
-        ...evidenceSource,
-        snapshot_path: "recording-evidence",
-        snapshot_url: snapshotUrl,
-        created_at: new Date(frame.epoch * 1000).toISOString(),
-        objects: [],
-        object_tracking: null,
-      },
-    };
-  }), [evidenceFrames, evidenceSource, incident.camera_id]);
-  const preview = scenePlayback?.clip || selectedEvidence?.event || selectedPreview || incident;
+  const evidenceTimeline = useMemo(() => incidentEvidenceTimeline(incident), [incident]);
+  const evidenceHero = useMemo(() => {
+    const frames = evidenceTimeline.frames;
+    const explicit = selectedPreview?.id == null
+      ? null
+      : frames.find((frame) => String(frame.event?.id) === String(selectedPreview.id));
+    const representative = incident.representative_event_id == null
+      ? null
+      : frames.find((frame) => String(frame.event?.id) === String(incident.representative_event_id));
+    return explicit || representative || frames[0] || null;
+  }, [evidenceTimeline, incident.representative_event_id, selectedPreview]);
+  const preview = scenePlayback?.clip || selectedPreview || incident;
   const videoActive = Boolean(scenePlayback?.clip) || inlineVideoActive;
   const mosaicEvents = useMemo(() => incidentMosaicEvents(incident), [incident]);
   const mosaic = useMemo(() => incidentMosaicPage(mosaicEvents, mosaicPageIndex), [mosaicEvents, mosaicPageIndex]);
   const canShowMosaic = desktopWorkspace && expanded && mosaicEvents.length > 1;
-  const canShowEvidence = desktopWorkspace && expanded && evidenceItems.length > 0;
+  const canShowEvidence = desktopWorkspace && expanded && evidenceTimeline.frames.length > 0;
   const zoneShapes = (Array.isArray(zones) ? zones : []).filter((zone) => zone?.enabled !== false && (zone.points || []).length >= 3);
   const activeWorkspaceView = workspaceView === "mosaic" && !canShowMosaic
     ? "focus"
@@ -268,7 +331,6 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
 
   useEffect(() => {
     setSelectedPreview(null);
-    setSelectedEvidence(null);
     setMosaicPageIndex(0);
     setSubEventsOpen(false);
     setInlineVideoActive(false);
@@ -278,16 +340,28 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
   useEffect(() => {
     if (!observationPreviewRequest) return;
     const source = rawEvents.find((event) => Number(event.id) === Number(observationPreviewRequest.eventId));
-    if (source) { setSelectedPreview(source); setSelectedEvidence(null); setInlineVideoActive(false); setWorkspaceView("focus"); }
+    if (source) { setSelectedPreview(source); setInlineVideoActive(false); setWorkspaceView("focus"); }
   }, [observationPreviewRequest]);
 
   useEffect(() => {
-    if (scenePlayback?.selection) { setWorkspaceView("focus"); setSelectedEvidence(null); }
+    if (scenePlayback?.selection) setWorkspaceView("focus");
   }, [scenePlayback?.selection]);
 
   useEffect(() => {
     try { window.sessionStorage.setItem("survng.incidentWorkspaceView.v1", workspaceView); } catch { /* Session preference is optional. */ }
   }, [workspaceView]);
+
+  useEffect(() => {
+    if (activeWorkspaceView !== "evidence") return;
+    const strip = evidenceStripRef.current;
+    const selected = strip?.querySelector("[aria-current='true']");
+    if (!strip || !selected) return;
+    const stripBox = strip.getBoundingClientRect();
+    const itemBox = selected.getBoundingClientRect();
+    if (itemBox.left < stripBox.left || itemBox.right > stripBox.right) {
+      selected.scrollIntoView({ inline: "center", block: "nearest" });
+    }
+  }, [activeWorkspaceView, evidenceHero?.key]);
 
   useEffect(() => {
     setInlineVideoActive(false);
@@ -422,15 +496,25 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
 
   function selectMosaicEvent(event) {
     setSelectedPreview(event);
-    setSelectedEvidence(null);
     setInlineVideoActive(false);
     setWorkspaceView("focus");
   }
 
-  function selectEvidenceItem(item) {
-    setSelectedEvidence(item);
+  function selectEvidenceFrame(frame) {
+    setSelectedPreview(frame.event);
     setInlineVideoActive(false);
-    setWorkspaceView("focus");
+  }
+
+  function onEvidenceKeyDown(keyEvent) {
+    if (keyEvent.key !== "ArrowLeft" && keyEvent.key !== "ArrowRight") return;
+    const frames = evidenceTimeline.frames;
+    const index = frames.findIndex((frame) => frame.key === evidenceHero?.key);
+    const next = frames[index + (keyEvent.key === "ArrowRight" ? 1 : -1)];
+    if (!next) return;
+    keyEvent.preventDefault();
+    keyEvent.stopPropagation();
+    selectEvidenceFrame(next);
+    evidenceStripRef.current?.querySelector(`[data-evidence-key="${CSS.escape(next.key)}"]`)?.focus();
   }
 
   return (
@@ -487,19 +571,17 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
             ) : null}
           </div>
         ) : activeWorkspaceView === "evidence" ? (
-          <div className={`incident-evidence incident-evidence-${evidenceItems.length}`} role="group" aria-label="Incident evidence frames">
-            {evidenceItems.map((item) => (
-              <button type="button" className="incident-evidence-tile" key={item.key} onClick={(event) => { event.stopPropagation(); selectEvidenceItem(item); }} aria-label={`Focus ${item.label.toLowerCase()} frame`}>
-                <SnapshotImage event={item.event} alt={`${item.label} evidence frame`} className="incident-evidence-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusAspect={null} objectFocusControls={false} showAnnotations={item.kind === "snapshot"} showTracking={false}>
-                  <div className="incident-evidence-hud">
-                    <strong>{item.label}</strong>
-                    <time>{formatTimeOnly(item.event.created_at, timeZone)}</time>
-                    {item.confidence > 0 ? <span>{Math.round(item.confidence * 100)}%</span> : null}
-                  </div>
-                </SnapshotImage>
-              </button>
-            ))}
-          </div>
+          <EvidenceTimeline
+            incident={incident}
+            hero={evidenceHero}
+            timeline={evidenceTimeline}
+            timeZone={timeZone}
+            stripRef={evidenceStripRef}
+            onSelect={selectEvidenceFrame}
+            onKeyDown={onEvidenceKeyDown}
+            onPlay={openPreview}
+            playLabel={scenePlayback ? "Play whole incident video" : "Play selected event video"}
+          />
         ) : (
           <SnapshotImage
             event={preview}
@@ -557,7 +639,7 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
               <div className="incident-workspace-view-toggle" role="group" aria-label="Incident image layout">
                 {canShowMosaic || canShowEvidence ? <button type="button" className={activeWorkspaceView === "focus" ? "active" : ""} onClick={() => selectWorkspaceView("focus")} aria-pressed={activeWorkspaceView === "focus"} title="Focus selected event"><Crop size={14} /><span>Focus</span></button> : null}
                 {canShowMosaic ? <button type="button" className={activeWorkspaceView === "mosaic" ? "active" : ""} onClick={() => selectWorkspaceView("mosaic")} aria-pressed={activeWorkspaceView === "mosaic"} title="Show all incident events"><Grid2X2 size={14} /><span>Mosaic</span></button> : null}
-                {canShowEvidence ? <button type="button" className={activeWorkspaceView === "evidence" ? "active" : ""} onClick={() => selectWorkspaceView("evidence")} aria-pressed={activeWorkspaceView === "evidence"} title="Compare trigger, detection, selected, and tracking frames"><Images size={14} /><span>Evidence</span></button> : null}
+                {canShowEvidence ? <button type="button" className={activeWorkspaceView === "evidence" ? "active" : ""} onClick={() => selectWorkspaceView("evidence")} aria-pressed={activeWorkspaceView === "evidence"} title="Show every event image on a timeline"><Images size={14} /><span>Evidence</span></button> : null}
                 {showZoneToggle ? <button type="button" className={zonesVisible ? "active" : ""} aria-pressed={zonesVisible} title={zonesVisible ? "Hide zones" : "Show zones"} aria-label={zonesVisible ? "Hide zones" : "Show zones"} onClick={() => setZonesVisible((current) => !current)}><Pentagon size={14} /><span>Zones</span></button> : null}
               </div>
             ) : null}
@@ -569,7 +651,7 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
           </div>
         ) : null}
       </div>
-      {expanded && showSubEvents ? (
+      {expanded && showSubEvents && activeWorkspaceView !== "evidence" ? (
         <div className="incident-meta">
           <div className="incident-detail" onClick={(event) => event.stopPropagation()}>
             <button
@@ -598,7 +680,7 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
                   const eventLabelText = eventLabels.length ? eventLabels.join(", ") : "motion";
                   const isActive = (preview.id || incident.id) === event.id && (preview.created_at || incident.created_at) === event.created_at;
                   return (
-                    <button type="button" key={`${event.id || "event"}-${index}`} className={isActive ? "active" : ""} onClick={() => { setSelectedPreview(event); setSelectedEvidence(null); setInlineVideoActive(false); }}>
+                    <button type="button" key={`${event.id || "event"}-${index}`} className={isActive ? "active" : ""} onClick={() => { setSelectedPreview(event); setInlineVideoActive(false); }}>
                       <span>{formatTimeOnly(event.created_at || incident.created_at, timeZone)}</span>
                       <strong>{eventLabelText}</strong>
                     </button>

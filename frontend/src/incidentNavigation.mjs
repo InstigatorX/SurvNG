@@ -185,6 +185,61 @@ function largestTrackFrame(tracking) {
   return best;
 }
 
+function positiveEpoch(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
+}
+
+export function incidentEvidenceTimeline(incident) {
+  const listed = incidentMosaicEvents(incident);
+  const events = listed.length
+    ? listed
+    : (incident && (incident.id || incident.created_at || incident.created_epoch) ? [incident] : []);
+  const frames = events
+    .map((event, index) => ({
+      key: `${event?.id ?? "event"}-${index}`,
+      event,
+      epoch: eventEpoch(event),
+      index,
+    }))
+    .sort((left, right) => (left.epoch || Number.POSITIVE_INFINITY) - (right.epoch || Number.POSITIVE_INFINITY) || left.index - right.index)
+    .map(({ index, ...frame }) => frame);
+  const motionMarks = (Array.isArray(incident?.motion_observations) ? incident.motion_observations : []).flatMap((observation, index) => {
+    if (!observation || typeof observation !== "object") return [];
+    const epoch = eventEpoch(observation);
+    if (!epoch) return [];
+    return [{
+      key: `motion-${observation.id ?? index}`,
+      epoch,
+      label: observation.reason === "event_state_cooldown" ? "Motion during cooldown" : "Continued motion",
+    }];
+  });
+  const bounds = [
+    positiveEpoch(incident?.start_epoch) || eventEpoch({ created_at: incident?.start_at }),
+    positiveEpoch(incident?.last_epoch) || eventEpoch({ created_at: incident?.end_at }),
+    ...frames.map((frame) => frame.epoch),
+    ...motionMarks.map((mark) => mark.epoch),
+  ].filter((epoch) => epoch > 0);
+  const startEpoch = bounds.length ? Math.min(...bounds) : 0;
+  const endEpoch = bounds.length ? Math.max(...bounds) : 0;
+  const durationSeconds = Math.max(0, endEpoch - startEpoch);
+  const position = (epoch) => (
+    epoch > 0 && durationSeconds > 0
+      ? Math.min(1, Math.max(0, (epoch - startEpoch) / durationSeconds))
+      : 0.5
+  );
+  return {
+    frames: frames.map((frame) => ({
+      ...frame,
+      position: frame.epoch ? position(frame.epoch) : 1,
+    })),
+    motionMarks: motionMarks.map((mark) => ({ ...mark, position: position(mark.epoch) })),
+    startEpoch,
+    endEpoch,
+    durationSeconds,
+  };
+}
+
 export function incidentEvidenceFrames(event) {
   const epoch = eventEpoch(event);
   if (!epoch) return [];

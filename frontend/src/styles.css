@@ -1098,71 +1098,161 @@ p {
 }
 
 .incident-evidence {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
   min-height: 0;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: repeat(2, minmax(0, 1fr));
-  gap: 7px;
   background: var(--video-bg);
-  padding: 7px;
 }
 
-.incident-evidence-3 {
-  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
-}
-
-.incident-evidence-3 .incident-evidence-tile:first-child {
-  grid-row: 1 / span 2;
-}
-
-.incident-evidence-tile {
+.incident-evidence-hero {
   position: relative;
-  min-width: 0;
+  flex: 1 1 auto;
   min-height: 0;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, .13);
-  border-radius: 7px;
-  background: #020606;
-  padding: 0;
 }
 
-.incident-evidence-tile:hover,
-.incident-evidence-tile:focus-visible {
-  border-color: rgba(45, 212, 191, .8);
-  outline: 0;
-  box-shadow: inset 0 0 0 1px rgba(45, 212, 191, .42);
-}
-
-.incident-evidence-tile .snapshot-frame {
+.incident-card.expanded .incident-preview .incident-evidence-hero .snapshot-frame,
+.incident-desktop-focus .incident-preview .incident-evidence-hero .snapshot-frame {
   width: 100%;
   height: 100%;
   min-height: 0;
   aspect-ratio: auto;
 }
 
-.incident-evidence-hud {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  z-index: 5;
+.incident-evidence-rail {
+  flex: 0 0 auto;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 7px;
-  background: linear-gradient(180deg, transparent, rgba(2, 8, 9, .92));
-  color: #fff;
-  padding: 24px 8px 7px;
-  pointer-events: none;
+  gap: 4px;
+  border-top: 1px solid rgba(255, 255, 255, .12);
+  padding-top: 6px;
+  background: #070b0b;
 }
 
-.incident-evidence-hud strong,
-.incident-evidence-hud time,
-.incident-evidence-hud span {
+.incident-evidence-strip {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 0 8px 2px;
+  scrollbar-width: thin;
+}
+
+.incident-evidence-thumb {
+  display: grid;
+  flex: 0 0 96px;
+  gap: 3px;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
   color: #fff;
+}
+
+.incident-evidence-thumb time,
+.incident-evidence-thumb span {
+  overflow: hidden;
+  color: rgba(255, 255, 255, .78);
   font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.incident-evidence-thumb time {
+  font-variant-numeric: tabular-nums;
+}
+
+.incident-evidence-thumb span {
+  color: rgba(255, 255, 255, .62);
+  font-weight: 650;
+}
+
+.incident-card.expanded .incident-preview .incident-evidence-thumb .snapshot-frame,
+.incident-desktop-focus .incident-preview .incident-evidence-thumb .snapshot-frame {
+  width: 100%;
+  height: 54px;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: 4px;
+  aspect-ratio: 16 / 9;
+}
+
+.incident-card.expanded .incident-preview .incident-evidence-thumb:hover .snapshot-frame,
+.incident-card.expanded .incident-preview .incident-evidence-thumb:focus-visible .snapshot-frame,
+.incident-desktop-focus .incident-preview .incident-evidence-thumb:hover .snapshot-frame,
+.incident-desktop-focus .incident-preview .incident-evidence-thumb:focus-visible .snapshot-frame {
+  border-color: rgba(45, 212, 191, .8);
+}
+
+.incident-evidence-thumb.selected time,
+.incident-evidence-thumb.selected span {
+  color: #ccfbf1;
+}
+
+.incident-card.expanded .incident-preview .incident-evidence-thumb.selected .snapshot-frame,
+.incident-desktop-focus .incident-preview .incident-evidence-thumb.selected .snapshot-frame {
+  border-color: #2dd4bf;
+  box-shadow: 0 0 0 1px #2dd4bf;
+}
+
+.incident-evidence-thumb:focus-visible {
+  outline: 0;
+}
+
+.incident-evidence-ruler {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 7px;
+  color: rgba(255, 255, 255, .72);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.incident-evidence-ruler time,
+.incident-evidence-ruler span {
+  white-space: nowrap;
+}
+
+.incident-evidence-ruler-track {
+  position: relative;
+  height: 14px;
+}
+
+.incident-evidence-ruler-track::before {
+  content: "";
+  position: absolute;
+  top: 6px;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: #3a444c;
+}
+
+.incident-evidence-tick {
+  position: absolute;
+  top: 2px;
+  width: 2px;
+  height: 10px;
+  transform: translateX(-50%);
+  background: rgba(45, 212, 191, .85);
+}
+
+.incident-evidence-tick.selected {
+  top: 0;
+  width: 3px;
+  height: 14px;
+  background: #2dd4bf;
+}
+
+.incident-evidence-tick.motion {
+  top: 4px;
+  height: 7px;
+  background: #d97706;
 }
 
 .incident-inspector {

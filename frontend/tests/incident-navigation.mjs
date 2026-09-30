@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentFocusStep, incidentImageRenderRect, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentEvidenceTimeline, incidentFocusStep, incidentImageRenderRect, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -73,6 +73,43 @@ assert.equal(incidentEvidenceFrames({
   objects: [{ label: "car", temporal_sample_offset_seconds: 8 }],
 })[1].label, "Detected car");
 assert.deepEqual(incidentEvidenceFrames({}), []);
+
+const evidenceTimeline = incidentEvidenceTimeline({
+  id: 99,
+  created_epoch: 1,
+  start_epoch: 1000,
+  last_epoch: 1038,
+  events: [
+    { id: 2, created_epoch: 1010 },
+    { id: 1, created_epoch: 1000 },
+    { id: 3, created_epoch: 1030 },
+  ],
+  motion_observations: [
+    { id: 9, created_epoch: 1020, reason: "event_state_active" },
+    { id: 10, created_at: "bad" },
+    { id: 11, created_epoch: 1038, reason: "event_state_cooldown" },
+  ],
+});
+assert.deepEqual(evidenceTimeline.frames.map((frame) => frame.event.id), [1, 2, 3]);
+assert.equal(evidenceTimeline.startEpoch, 1000);
+assert.equal(evidenceTimeline.endEpoch, 1038);
+assert.equal(evidenceTimeline.durationSeconds, 38);
+assert.equal(evidenceTimeline.frames[0].position, 0);
+assert.ok(Math.abs(evidenceTimeline.frames[1].position - (10 / 38)) < 1e-9);
+assert.ok(Math.abs(evidenceTimeline.frames[2].position - (30 / 38)) < 1e-9);
+assert.deepEqual(evidenceTimeline.motionMarks.map((mark) => mark.label), ["Continued motion", "Motion during cooldown"]);
+assert.ok(Math.abs(evidenceTimeline.motionMarks[0].position - (20 / 38)) < 1e-9);
+assert.equal(evidenceTimeline.motionMarks[1].position, 1);
+assert.deepEqual(incidentEvidenceTimeline({}), { frames: [], motionMarks: [], startEpoch: 0, endEpoch: 0, durationSeconds: 0 });
+assert.deepEqual(incidentEvidenceTimeline(null), { frames: [], motionMarks: [], startEpoch: 0, endEpoch: 0, durationSeconds: 0 });
+const singleEvidenceFrame = incidentEvidenceTimeline({ id: 5, created_epoch: 50 });
+assert.equal(singleEvidenceFrame.frames.length, 1);
+assert.equal(singleEvidenceFrame.frames[0].position, 0.5);
+assert.equal(singleEvidenceFrame.durationSeconds, 0);
+const undatedEvidenceFrame = incidentEvidenceTimeline({
+  events: [{ id: 1, created_epoch: 10 }, { id: 2 }],
+});
+assert.equal(undatedEvidenceFrame.frames[1].position, 1);
 
 assert.equal(showIncidentCardAnnotations(false, true), true);
 assert.equal(showIncidentCardAnnotations(false, false), false);
