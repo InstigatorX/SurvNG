@@ -18,6 +18,11 @@ from urllib.parse import urlsplit
 
 import numpy as np
 
+from .ffmpeg_hw import (
+    CaptureDecodePlan,
+    hardware_mode,
+    resolve_capture_decode_plans,
+)
 from .ffmpeg_process import named_ffmpeg_executable
 from .media_sessions import (
     MediaResourceClass,
@@ -109,6 +114,9 @@ class FfmpegCaptureOptions:
     rtsp_transport: str = "tcp"
     frame_rate: Callable[[], float] | None = None
     frame_transport: str = "rawvideo"
+    # Default stays software so tests and the camera.py fallback match Phase 1.
+    # The manager passes config.hardware_acceleration, whose default is auto.
+    hardware_acceleration: str = "off"
 
 
 class FfmpegCaptureHandle:
@@ -134,6 +142,7 @@ class FfmpegCaptureHandle:
         self._transport_failed = threading.Event()
         self._transport_failure = ""
         self._next_showinfo_index = 0
+        self.decode_plan = ""
 
     def is_opened(self) -> bool:
         return self._process is not None and self._process.poll() is None
@@ -143,7 +152,9 @@ class FfmpegCaptureHandle:
         # owns the single latest-frame buffer and drops superseded work.
         del size
 
-    def start(self, command: list[str]) -> None:
+    def start(self, command: list[str], *, decode_plan: str = "cpu") -> None:
+        self._reset_stream_state()
+        self.decode_plan = decode_plan or "cpu"
         self._command_path = command[0]
         executable = self._named_executable()
         self._process = subprocess.Popen(
@@ -159,6 +170,21 @@ class FfmpegCaptureHandle:
             daemon=True,
         )
         self._stderr_thread.start()
+
+    def _reset_stream_state(self) -> None:
+        """Drop bytes and geometry from a previous decoder before the next one."""
+        self._buffer.clear()
+        self._prefetched = None
+        self._stderr.clear()
+        self._stderr_pending.clear()
+        self._transport_failed.clear()
+        self._transport_failure = ""
+        self._next_showinfo_index = 0
+        while True:
+            try:
+                self._geometries.get_nowait()
+            except queue.Empty:
+                break
 
     def _named_executable(self) -> str:
         return named_ffmpeg_executable(self._command_path, "survng-capture")
@@ -525,8 +551,11 @@ class FfmpegCaptureBackend:
             raise ValueError("rtsp_transport must be tcp or udp")
         if self.options.frame_transport not in {"rawvideo", "bmp"}:
             raise ValueError("frame_transport must be rawvideo or bmp")
+        self._hardware_acceleration = hardware_mode(self.options.hardware_acceleration)
         self._credential_warning_lock = threading.Lock()
         self._credential_warning_hosts: set[str] = set()
+        self._decode_fallback_lock = threading.Lock()
+        self._logged_decode_fallbacks: set[tuple[str, str]] = set()
 
     def create_handle(self) -> CaptureHandle:
         return FfmpegCaptureHandle(
@@ -558,19 +587,73 @@ class FfmpegCaptureBackend:
                         else open_timeout_ms
                     ),
                 )
-                handle.start(self._command(source_url))
-                if cancelled():
+                plans = self._decode_plans()
+                opened = False
+                for index, plan in enumerate(plans):
+                    if cancelled():
+                        handle.close()
+                        return False
+                    # Close the failed decoder before the next plan so reconnect
+                    # backoff is not used for a bad hardware path.
                     handle.close()
-                    return False
-                if not handle.prefetch(timeout_ms, cancelled):
+                    handle.start(
+                        self._command(source_url, plan),
+                        decode_plan=plan.name,
+                    )
+                    if cancelled():
+                        handle.close()
+                        return False
+                    if handle.prefetch(timeout_ms, cancelled):
+                        opened = True
+                        break
+                    if cancelled():
+                        handle.close()
+                        return False
+                    detail = handle.error_detail()
                     handle.close()
-                    return False
-                return True
+                    if index + 1 < len(plans):
+                        self._log_decode_fallback(
+                            plan.name,
+                            plans[index + 1].name,
+                            detail,
+                        )
+                return opened
             finally:
                 self.limiter.release()
         return False
 
-    def _command(self, source_url: str) -> list[str]:
+    def _decode_plans(self) -> tuple[CaptureDecodePlan, ...]:
+        plans = resolve_capture_decode_plans(
+            self._hardware_acceleration,
+            self.options.ffmpeg_path,
+        )
+        requested = self._hardware_acceleration
+        if requested in {"qsv", "vaapi"} and all(plan.name != requested for plan in plans):
+            self._log_decode_fallback(
+                requested,
+                "cpu",
+                "render node or ffmpeg hwaccel is not available",
+            )
+        return plans
+
+    def _log_decode_fallback(self, failed: str, next_plan: str, detail: str) -> None:
+        with self._decode_fallback_lock:
+            if (failed, next_plan) in self._logged_decode_fallbacks:
+                return
+            self._logged_decode_fallbacks.add((failed, next_plan))
+        summary = " ".join(detail.split())[:400] if detail else "no frame"
+        LOGGER.warning(
+            "capture decode plan %s failed; trying %s: %s",
+            failed,
+            next_plan,
+            summary,
+        )
+
+    def _command(
+        self,
+        source_url: str,
+        plan: CaptureDecodePlan | None = None,
+    ) -> list[str]:
         self._warn_credentialed_process_url(source_url)
         requested_rate = (
             self.options.frame_rate()
@@ -580,14 +663,22 @@ class FfmpegCaptureBackend:
         frame_rate = min(10.0, max(0.5, float(requested_rate)))
         minimum_interval = 1.0 / frame_rate
         rawvideo = self.options.frame_transport == "rawvideo"
-        video_filter = (
+        if plan is None:
+            plan = CaptureDecodePlan("cpu", (), ())
+        # Select before hwdownload so frames the rate limit drops are not
+        # copied back to system memory. If select cannot run on the hardware
+        # frames, this process exits and the next plan is software decode.
+        filters = [
             "select='isnan(prev_selected_t)+"
-            f"gte(t-prev_selected_t,{minimum_interval:.6f})',format=bgr24"
-        )
+            f"gte(t-prev_selected_t,{minimum_interval:.6f})'",
+            *plan.download_filters,
+            "format=bgr24",
+        ]
         if rawvideo:
             # FFmpeg 8.1 showinfo: checksum=0 skips the plane scan. The n/s
             # fields on that line are the geometry header for the next raw frame.
-            video_filter += ",showinfo@capture=checksum=0"
+            filters.append("showinfo@capture=checksum=0")
+        video_filter = ",".join(filters)
         command = [
             self.options.ffmpeg_path,
             "-hide_banner",
@@ -609,6 +700,8 @@ class FfmpegCaptureBackend:
         )
         if source_url.lower().startswith(("rtsp://", "rtsps://")):
             command.extend(["-rtsp_transport", self.options.rtsp_transport])
+        if plan.input_args:
+            command.extend(plan.input_args)
         command.extend(
             [
                 "-i",
@@ -903,6 +996,7 @@ class CameraCaptureService:
         }
         self._sequence = 0
         self._generation = 0
+        self._decode_plans: dict[str, str] = {}
 
     @staticmethod
     def _normalize_source(source: str) -> str:
@@ -1167,6 +1261,10 @@ class CameraCaptureService:
                     for source, dimensions in self._dimensions.items()
                 },
                 "capture_stats": capture_stats,
+                "decode_plan": {
+                    "live": self._decode_plans.get("live", ""),
+                    "main": self._decode_plans.get("main", ""),
+                },
             }
 
     def frame_ready(self, source: str = "live") -> bool:
@@ -1300,11 +1398,14 @@ class CameraCaptureService:
                         self._set_error(source, failure_reason)
                     else:
                         handle.set_buffer_size(1)
+                        decode_plan = str(getattr(handle, "decode_plan", "") or "")
                         with self._lock:
                             stats = self._stats[source]
                             if stats["frames_received"] > 0:
                                 stats["reconnects"] += 1
                             stats["starts"] += 1
+                            if decode_plan:
+                                self._decode_plans[source] = decode_plan
                         self._set_error(source, "")
                         while not self._cancelled(stop_event):
                             if self._should_exit_for_idle(source, stop_event):

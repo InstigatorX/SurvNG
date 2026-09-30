@@ -333,6 +333,7 @@ class AppManager:
                 ffmpeg_path=config.ffmpeg_path,
                 rtsp_transport=config.capture_rtsp_transport,
                 frame_transport=config.capture_frame_transport,
+                hardware_acceleration=config.hardware_acceleration,
                 frame_rate=lambda: max(
                     self.config.motion_qualification.sample_fps,
                     self.config.detector.tracking.sample_fps,
