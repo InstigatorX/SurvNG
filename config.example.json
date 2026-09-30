@@ -25,6 +25,7 @@
   },
   "ffmpeg_path": "ffmpeg",
   "capture_rtsp_transport": "tcp",
+  "capture_frame_transport": "rawvideo",
   "event_clip_before_seconds": 5.0,
   "event_clip_after_seconds": 5.0,
   "incident_thumbnail_annotations": false,
