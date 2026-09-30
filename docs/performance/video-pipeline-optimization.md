@@ -5,7 +5,7 @@ Phase 0 was skipped. Recording stream-copy and go2rtc/WebRTC are unchanged.
 | Phase | Change | CPU | p95 latency | Copies | RSS | Result |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | Raw BGR instead of BMP on the live capture pipe (FFmpeg 8.1.2) | Lower at 720p | Read p95 lower at 720p | One pipe fill into the NumPy frame | Similar | Keep |
-| 2 | Hardware decode on the one live capture process, then the Phase 1 software path | Not measured | Not measured | Same bgr24 pipe after hwdownload | Not measured | Keep the fallback. This host has no render node, so the hwdownload cost is unknown |
+| 2 | Hardware decode on the one live capture process, then the Phase 1 software path | Not measured | Not measured | Same bgr24 pipe after hwdownload | Not measured | Revert the live wiring. QSV stays on recorded evidence frames |
 
 ## Phase 1 — raw BGR transport
 
@@ -71,7 +71,7 @@ A plan is used only when a real `/dev/dri/renderD*` node exists and `ffmpeg -hwa
 
 The hardware filter is `select`, then `hwdownload,format=nv12`, then `format=bgr24`, then the existing rawvideo `showinfo` line. Device arguments are input options, before `-i`. Downstream frames stay caller-owned bgr24. There is still one FFmpeg process per source: a failed plan is closed before the next plan starts, inside the same open, so reconnect backoff is not the hardware fallback.
 
-The capture backend is created when the manager starts. Changing `hardware_acceleration` for live capture needs a process restart, same as `capture_frame_transport`.
+The capture backend is created when the manager starts. It does not receive `hardware_acceleration`. That setting remains on the recorded-evidence decoder. The live command is the Phase 1 software command, including when the configured mode is `qsv`.
 
 ### Risks
 
@@ -89,4 +89,4 @@ This machine has no `/dev/dri` render node, so hardware decode and the hwdownloa
 
 ### Recommendation
 
-Keep the fallback. Roll back live capture to software with `hardware_acceleration` set to `off` and a restart. Do not enable this for a speedup until a host with QSV or VAAPI shows that hwdownload still leaves a gain against the Phase 1 numbers.
+Do not put this on the persistent live capture process. On a host whose `hardware_acceleration` is `qsv`, those live processes hold the render node that recorded evidence frames also use, and the incident picture falls back to the substream. The manager leaves live capture on the Phase 1 software command. `hardware_acceleration=qsv` still applies to recorded evidence frames.
