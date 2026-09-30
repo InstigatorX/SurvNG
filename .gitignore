@@ -49,6 +49,9 @@ frames/
 *.m4s
 *.m3u8
 *.ts
+# TypeScript source for the optional HomeKit protocol worker
+!homekit-worker/src/**/*.ts
+!homekit-worker/test/**/*.ts
 *.webm
 *.jpg
 *.jpeg

@@ -4,6 +4,11 @@ Native virtualenv on Linux, run by a dedicated `survng` user and a systemd
 unit. The host needs Python 3.12+, Node.js 20+ (frontend build), Git, FFmpeg,
 and (for Intel GPU) a working `/dev/dri`.
 
+The optional [HKSV3 protocol acceptance lab](homekit-worker/README.md) requires
+Node.js 24 and runs separately from the service. It currently uses a synthetic
+camera; native production-camera integration is pending Apple-device acceptance.
+Its instructions support an isolated Node runtime without changing this service.
+
 Do **not** run this next to the Docker container. Do **not** run SurvNG as
 root on a new install.
 
