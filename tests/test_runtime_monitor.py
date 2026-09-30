@@ -108,11 +108,16 @@ def test_operational_collector_uses_real_detector_runtime_counter_names() -> Non
         process_memory={},
         worker_memory={},
         system_runtime={},
-        detector_runtime={"total_inferences": 14, "failed_inferences": 2},
+        detector_runtime={
+            "total_inferences": 14,
+            "failed_inferences": 2,
+            "detection_fps": 1.91,
+        },
     )
 
     assert system.detector_requests == 4
     assert system.detector_failures == 1
+    assert system.detection_fps == 1.91
 
 
 def test_operational_collector_handles_one_detector_worker_counter_reset() -> None:

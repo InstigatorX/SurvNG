@@ -94,6 +94,7 @@ from .system_telemetry import (
     SystemTelemetryService,
     create_system_telemetry_router,
 )
+from .motion_pipeline import build_builtin_motion_registry
 from .system_routes import SystemRouteDependencies, create_system_router
 from .tls_routes import TlsRouteDependencies, create_tls_router
 from .training_routes import TrainingRouteDependencies, create_training_router
@@ -110,6 +111,9 @@ from .security import (
 from .storage_maintenance import StorageMaintenanceRunner
 
 config = load_config()
+# One builtin stage registry for the process. Catalog and camera workers
+# share it so a manager generation cannot publish a different stage set.
+MOTION_PIPELINE_REGISTRY = build_builtin_motion_registry()
 LOGGER = logging.getLogger(__name__)
 LOG_LINES: deque[dict] = deque(maxlen=1000)
 FACE_OBSERVATIONS_SYNCED = False
@@ -145,6 +149,7 @@ def get_manager() -> AppManager:
         config,
         database_write_lock=MAIN_DATABASE_WRITE_LOCK,
         media_sessions=MEDIA_SESSIONS,
+        motion_pipeline_registry=MOTION_PIPELINE_REGISTRY,
     )
     globals()["manager"] = created
     return created
@@ -744,6 +749,7 @@ def reload_manager(
             app_config,
             database_write_lock=MAIN_DATABASE_WRITE_LOCK,
             media_sessions=MEDIA_SESSIONS,
+            motion_pipeline_registry=MOTION_PIPELINE_REGISTRY,
         ),
         hooks=ManagerReloadHooks(
             active_storage_tasks=_active_storage_tasks,
@@ -1222,6 +1228,7 @@ _system_route_bundle = create_system_router(
         ),
         recording_cache_status=_recording_media_runtime.cache_status,
         model_evaluation=MODEL_EVALUATION,
+        motion_pipeline_registry=MOTION_PIPELINE_REGISTRY,
     )
 )
 app.include_router(_system_route_bundle.router)

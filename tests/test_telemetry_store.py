@@ -71,6 +71,82 @@ def test_store_upgrades_pre_expected_camera_schema(tmp_path) -> None:
     assert "incidents_created" not in columns
 
 
+def test_v3_system_buckets_gain_detection_fps_without_rewriting_rows(tmp_path) -> None:
+    path = tmp_path / "telemetry.sqlite3"
+    sampled_at = "2026-09-30T14:00:00+00:00"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "create table telemetry_metadata(key text primary key, value text not null)"
+        )
+        conn.execute(
+            "insert into telemetry_metadata(key, value) values ('schema_version', '3')"
+        )
+        conn.execute(
+            "create table system_metric_buckets("
+            "sampled_at text not null, resolution_minutes integer not null,"
+            "cpu_load_percent real, memory_used_percent real,"
+            "application_rss_bytes integer, worker_rss_bytes integer,"
+            "inference_ms real, detector_requests integer, detector_failures integer,"
+            "primary key(resolution_minutes, sampled_at)) without rowid"
+        )
+        conn.execute(
+            "insert into system_metric_buckets("
+            "sampled_at, resolution_minutes, cpu_load_percent, inference_ms) "
+            "values (?, 1, 12.5, 70.0)",
+            (sampled_at,),
+        )
+        conn.execute(
+            "create table camera_metric_buckets("
+            "sampled_at text not null, camera_id text not null,"
+            "resolution_minutes integer not null, expected real not null default 0,"
+            "available real not null default 0, live_fps real not null default 0,"
+            "main_fps real not null default 0, capture_interruptions integer not null default 0,"
+            "ema_frames_sampled integer not null default 0,"
+            "ema_frames_superseded integer not null default 0,"
+            "ema_credible_episodes integer not null default 0,"
+            "object_checks_admitted integer not null default 0,"
+            "object_checks_completed integer not null default 0,"
+            "object_check_failures integer not null default 0,"
+            "tracking_requested integer not null default 0,"
+            "tracking_delayed integer not null default 0,"
+            "tracking_skipped integer not null default 0,"
+            "primary key(resolution_minutes, camera_id, sampled_at)) without rowid"
+        )
+
+    store = TelemetryStore(tmp_path)
+    store.write_buckets(
+        SystemTelemetryBucket(
+            sampled_at=datetime(2026, 9, 30, 14, 1, tzinfo=timezone.utc),
+            detection_fps=1.5,
+        ),
+        [],
+    )
+
+    with sqlite3.connect(path) as conn:
+        version = conn.execute(
+            "select value from telemetry_metadata where key = 'schema_version'"
+        ).fetchone()[0]
+        columns = [row[1] for row in conn.execute("pragma table_info(system_metric_buckets)")]
+        preserved = conn.execute(
+            "select cpu_load_percent, inference_ms, detection_fps "
+            "from system_metric_buckets where sampled_at = ?",
+            (sampled_at,),
+        ).fetchone()
+        camera_columns = {
+            row[1] for row in conn.execute("pragma table_info(camera_metric_buckets)")
+        }
+
+    assert version == "4"
+    assert "detection_fps" in columns
+    assert "detection_fps" not in camera_columns
+    assert preserved == (12.5, 70.0, None)
+    written = store.system_history(
+        since=datetime(2026, 9, 30, 14, 1, tzinfo=timezone.utc),
+        resolution_minutes=1,
+    )[0]
+    assert written["detection_fps"] == 1.5
+
+
 def test_lifecycle_events_are_durable_bounded_and_validated(tmp_path) -> None:
     store = TelemetryStore(tmp_path)
     now = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)

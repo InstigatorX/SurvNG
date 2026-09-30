@@ -29,6 +29,7 @@ class SystemTelemetryBucket:
     application_rss_bytes: int = 0
     worker_rss_bytes: int = 0
     inference_ms: float | None = None
+    detection_fps: float | None = None
     detector_requests: int = 0
     detector_failures: int = 0
 
@@ -69,7 +70,7 @@ CAMERA_COLUMNS = tuple(
 class TelemetryStore:
     """Own the telemetry database; it never shares EventStore's writer lock."""
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(
         self,
@@ -167,19 +168,58 @@ class TelemetryStore:
                     on diagnostic_samples (sampled_at);
                 """
             )
-            camera_columns = {
-                str(row["name"])
-                for row in conn.execute("pragma table_info(camera_metric_buckets)")
-            }
-            if "expected" not in camera_columns:
-                conn.execute(
-                    "alter table camera_metric_buckets add column expected real not null default 1"
-                )
-            self._remove_obsolete_metric_columns(conn, system_fields, camera_fields)
+            version = self._schema_version(conn)
+            if version < 3:
+                self._migrate_metric_tables_v3(conn, system_fields, camera_fields)
+            if version < 4:
+                self._migrate_detection_fps_v4(conn)
             conn.execute(
                 "insert or replace into telemetry_metadata (key, value) values ('schema_version', ?)",
                 (str(self.SCHEMA_VERSION),),
             )
+
+    @staticmethod
+    def _schema_version(conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            "select value from telemetry_metadata where key = 'schema_version'"
+        ).fetchone()
+        if row is None:
+            return 0
+        try:
+            return int(row["value"])
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _migrate_metric_tables_v3(
+        cls,
+        conn: sqlite3.Connection,
+        system_fields: str,
+        camera_fields: str,
+    ) -> None:
+        """Bring pre-v3 bucket tables up to the typed camera and system columns."""
+        camera_columns = {
+            str(row["name"])
+            for row in conn.execute("pragma table_info(camera_metric_buckets)")
+        }
+        if camera_columns and "expected" not in camera_columns:
+            conn.execute(
+                "alter table camera_metric_buckets add column expected real not null default 1"
+            )
+        cls._remove_obsolete_metric_columns(conn, system_fields, camera_fields)
+
+    @staticmethod
+    def _migrate_detection_fps_v4(conn: sqlite3.Connection) -> None:
+        """Detector throughput is a system gauge, not a per-camera column."""
+        columns = {
+            str(row["name"])
+            for row in conn.execute("pragma table_info(system_metric_buckets)")
+        }
+        if "detection_fps" in columns:
+            return
+        conn.execute(
+            "alter table system_metric_buckets add column detection_fps real"
+        )
 
     @staticmethod
     def _remove_obsolete_metric_columns(
@@ -309,6 +349,7 @@ class TelemetryStore:
             "application_rss_bytes",
             "worker_rss_bytes",
             "inference_ms",
+            "detection_fps",
         }
         camera_gauges = {"expected", "available", "live_fps", "main_fps"}
         with self._lock, self._connect() as conn:
@@ -380,6 +421,7 @@ class TelemetryStore:
             "application_rss_bytes",
             "worker_rss_bytes",
             "inference_ms",
+            "detection_fps",
         )
         counter_columns = tuple(name for name in SYSTEM_COLUMNS if name not in gauge_columns)
         expressions = [f"avg({name}) as {name}" for name in gauge_columns]

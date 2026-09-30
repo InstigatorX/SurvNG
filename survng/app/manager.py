@@ -69,6 +69,7 @@ from .motion_pipeline import (
     MotionPipeline,
     MotionPipelineFactory,
     MotionStageDependencies,
+    MotionStageRegistry,
     RecordedMotionObjectDetectorFactory,
     build_builtin_motion_registry,
     resolve_motion_pipeline_graphs,
@@ -269,8 +270,16 @@ class AppManager:
         config: AppConfig,
         database_write_lock: threading.RLock | None = None,
         media_sessions: MediaSessionManager | None = None,
+        motion_pipeline_registry: MotionStageRegistry | None = None,
     ) -> None:
         validate_manager_configuration(config)
+        # The process owns one builtin registry. Assign it before any startup
+        # step that can fail so a generation cannot be observed without it.
+        self.motion_pipeline_registry = (
+            motion_pipeline_registry
+            if motion_pipeline_registry is not None
+            else build_builtin_motion_registry()
+        )
         self.config = config
         self.media_session_generation = uuid.uuid4().hex
         self.media_sessions = media_sessions or MediaSessionManager()
@@ -387,7 +396,6 @@ class AppManager:
         self.person_reidentifier = self.inference.person_reidentifier
         self.faces = self.inference.faces
         self.person_visits = PersonVisitStore(self.events.db_path, self.database_write_lock)
-        self.motion_pipeline_registry = build_builtin_motion_registry()
         self.motion_decision_handler_factory = MotionDecisionHandlerFactory(
             events=self.events,
             object_serializer=objects_to_json,

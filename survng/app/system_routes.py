@@ -18,7 +18,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .detector_labels import openvino_package_classes
-from .motion_pipeline import motion_pipeline_catalog
+from .motion_pipeline import MotionStageRegistry, motion_pipeline_catalog
 from .security import authenticate_api_token, authenticate_session
 
 
@@ -61,6 +61,7 @@ class SystemRouteDependencies:
     event_clip_window: Callable[[float | None, float | None], tuple[float, float]]
     recording_cache_status: Callable[[], dict]
     model_evaluation: Any
+    motion_pipeline_registry: MotionStageRegistry
 
 
 class ModelEvaluationRequest(BaseModel):
@@ -257,7 +258,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
 
     @router.get("/api/motion/pipeline/catalog")
     def get_motion_pipeline_catalog() -> dict:
-        return motion_pipeline_catalog(deps.get_manager().motion_pipeline_registry)
+        return motion_pipeline_catalog(deps.motion_pipeline_registry)
 
     @router.get("/api/accelerator")
     def accelerator() -> dict:
