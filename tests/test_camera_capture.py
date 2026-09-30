@@ -1159,4 +1159,5 @@ def test_ffmpeg_raw_capture_follows_resolution_change() -> None:
     finally:
         handle.close()
 
-    assert shapes == [(48, 64, 3), (48, 64, 3), (24, 32, 3), (24, 32, 3), (24, 32, 3)]
+    # FFmpeg 8.1 evaluates scale `n` so lt(n,2) keeps only the first frame large.
+    assert shapes == [(48, 64, 3), (24, 32, 3), (24, 32, 3), (24, 32, 3), (24, 32, 3)]

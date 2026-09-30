@@ -585,8 +585,8 @@ class FfmpegCaptureBackend:
             f"gte(t-prev_selected_t,{minimum_interval:.6f})',format=bgr24"
         )
         if rawvideo:
-            # checksum=0 avoids a full-frame scan. The named showinfo line is
-            # the geometry header for the following fixed-size raw frame.
+            # FFmpeg 8.1 showinfo: checksum=0 skips the plane scan. The n/s
+            # fields on that line are the geometry header for the next raw frame.
             video_filter += ",showinfo@capture=checksum=0"
         command = [
             self.options.ffmpeg_path,

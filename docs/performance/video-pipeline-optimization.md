@@ -4,7 +4,7 @@ Phase 0 was skipped. Recording stream-copy and go2rtc/WebRTC are unchanged.
 
 | Phase | Change | CPU | p95 latency | Copies | RSS | Result |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | Raw BGR instead of BMP on the live capture pipe | Python lower; FFmpeg flat | Saturated read similar or lower | One pipe fill into the NumPy frame | FFmpeg lower at 720p | Keep |
+| 1 | Raw BGR instead of BMP on the live capture pipe (FFmpeg 8.1.2) | Lower at 720p | Read p95 lower at 720p | One pipe fill into the NumPy frame | Similar | Keep |
 
 ## Phase 1 — raw BGR transport
 
@@ -34,24 +34,24 @@ Each output frame is preceded by a `showinfo@capture=checksum=0` line. The reade
 
 ### Benchmark
 
-`scripts/benchmark_capture_transport.py` runs the production backend against a local H.264 file as fast as decode allows. It is not a paced RTSP session. Clock resolution on this machine is 10 ms, so small FFmpeg deltas are coarse. Median of 3 runs:
+Measured with FFmpeg 8.1.2, the same build the image pins in the Dockerfile. `scripts/benchmark_capture_transport.py` runs the production backend against a local H.264 file as fast as decode allows. It is not a paced RTSP session. Clock resolution on this machine is 10 ms, so the smaller deltas are coarse. Median of 3 runs:
 
 640x360, 90 delivered frames:
 
 | Transport | FFmpeg CPU / frame | Python CPU / frame | Read p95 | FFmpeg RSS |
 | --- | --- | --- | --- | --- |
-| bmp | 1.33 ms | 0.67 ms | 1.05 ms | 65 MB |
-| rawvideo | 1.33 ms | 0.33 ms | 1.31 ms | 61 MB |
+| bmp | 1.67 ms | 0.67 ms | 1.00 ms | 79 MB |
+| rawvideo | 1.44 ms | 0.22 ms | 0.90 ms | 83 MB |
 
 1280x720, 60 delivered frames:
 
 | Transport | FFmpeg CPU / frame | Python CPU / frame | Read p50 | Read p95 | FFmpeg RSS |
 | --- | --- | --- | --- | --- | --- |
-| bmp | 3.83 ms | 2.50 ms | 2.74 ms | 4.45 ms | 97 MB |
-| rawvideo | 3.67 ms | 1.00 ms | 1.94 ms | 3.28 ms | 81 MB |
+| bmp | 5.00 ms | 3.17 ms | 3.20 ms | 4.56 ms | 119 MB |
+| rawvideo | 3.83 ms | 1.00 ms | 1.25 ms | 2.59 ms | 112 MB |
 
-Payload bytes match: both paths deliver the same BGR arrays. FFmpeg CPU did not drop. H.264 decode dominates BMP encode here, and showinfo replaces that encode work. Python CPU dropped because the BMP header parse and the extra contiguous copy are gone. Raw read p95 at 720p is lower. Wall time for the saturated 720p run was about 0.22 s (BMP) versus 0.28 s (raw). Both are far under an 8 fps live interval.
+Payload bytes match: both paths deliver the same BGR arrays. At 720p, FFmpeg CPU and the read tail both drop, and Python CPU drops because the BMP parse and extra contiguous copy are gone. Saturated 720p wall time was about 0.28 s (BMP) versus 0.26 s (raw). At 640x360 the raw run still spends more wall time waiting on the showinfo line (about 0.21 s versus 0.14 s). Both are far under an 8 fps live interval.
 
 ### Recommendation
 
-Keep. Roll back with `capture_frame_transport` set to `bmp` if a camera cannot tolerate the stderr framing. The next gain on capture CPU has to come from avoiding software decode, not from the pipe format.
+Keep for the FFmpeg 8.1.2 runtime. Roll back with `capture_frame_transport` set to `bmp` if a camera cannot tolerate the stderr framing. Further capture CPU gains still depend on avoiding software decode.
