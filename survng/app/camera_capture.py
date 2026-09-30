@@ -143,6 +143,11 @@ class FfmpegCaptureHandle:
         self._transport_failure = ""
         self._next_showinfo_index = 0
         self.decode_plan = ""
+        self._stream_generation = 0
+        self._stream_lock = threading.Lock()
+        # connecting: no frame header yet. frame: a header arrived and the
+        # body is still being read. delivered: at least one frame was returned.
+        self._open_phase = "connecting"
 
     def is_opened(self) -> bool:
         return self._process is not None and self._process.poll() is None
@@ -173,37 +178,99 @@ class FfmpegCaptureHandle:
 
     def _reset_stream_state(self) -> None:
         """Drop bytes and geometry from a previous decoder before the next one."""
-        self._buffer.clear()
-        self._prefetched = None
-        self._stderr.clear()
-        self._stderr_pending.clear()
-        self._transport_failed.clear()
-        self._transport_failure = ""
-        self._next_showinfo_index = 0
-        while True:
-            try:
-                self._geometries.get_nowait()
-            except queue.Empty:
-                break
+        with self._stream_lock:
+            # A stderr reader blocked in the previous process can wake after
+            # this reset. The generation makes those bytes miss this stream.
+            self._stream_generation += 1
+            self._open_phase = "connecting"
+            self._buffer.clear()
+            self._prefetched = None
+            self._stderr.clear()
+            self._stderr_pending.clear()
+            self._transport_failed.clear()
+            self._transport_failure = ""
+            self._next_showinfo_index = 0
+            while True:
+                try:
+                    self._geometries.get_nowait()
+                except queue.Empty:
+                    break
 
     def _named_executable(self) -> str:
         return named_ffmpeg_executable(self._command_path, "survng-capture")
 
-    def prefetch(self, timeout_ms: int, cancelled: Callable[[], bool]) -> bool:
-        frame = self._next_frame(
-            max(0.001, timeout_ms / 1000.0),
-            cancelled=cancelled,
-        )
+    def prefetch(
+        self,
+        timeout_ms: int,
+        cancelled: Callable[[], bool],
+        *,
+        frame_timeout_ms: int | None = None,
+    ) -> bool:
+        if self._frame_transport == "rawvideo":
+            frame = self._prefetch_raw_frame(
+                timeout_ms,
+                frame_timeout_ms,
+                cancelled,
+            )
+        else:
+            frame = self._next_frame(
+                max(0.001, timeout_ms / 1000.0),
+                cancelled=cancelled,
+            )
         if frame is None:
             return False
+        self._open_phase = "delivered"
         self._prefetched = frame
         return True
+
+    def _prefetch_raw_frame(
+        self,
+        connect_timeout_ms: int,
+        frame_timeout_ms: int | None,
+        cancelled: Callable[[], bool],
+    ) -> np.ndarray | None:
+        """Wait out the connect budget for a geometry, then read that frame.
+
+        A 4K raw frame is larger than the stdout pipe. Showinfo can arrive
+        while the body is still being written. That is the first frame in
+        flight, not a failed open, so the body uses the read budget.
+        """
+        process = self._process
+        if process is None or process.stdout is None:
+            return None
+        connect_deadline = time.monotonic() + max(0.001, connect_timeout_ms / 1000.0)
+        geometry = self._wait_raw_geometry(connect_deadline, cancelled)
+        if geometry is None:
+            return None
+        self._open_phase = "frame"
+        frame_seconds = (
+            self._read_timeout_seconds
+            if frame_timeout_ms is None
+            else max(0.001, frame_timeout_ms / 1000.0)
+        )
+        width, height = geometry
+        frame = np.empty((height, width, 3), dtype=np.uint8)
+        view = memoryview(frame).cast("B")
+        try:
+            completed = self._read_exact(
+                process,
+                view,
+                time.monotonic() + frame_seconds,
+                cancelled,
+            )
+        finally:
+            view.release()
+        if not completed:
+            return None
+        return frame
 
     def read(self) -> tuple[bool, np.ndarray | None]:
         if self._prefetched is not None:
             frame, self._prefetched = self._prefetched, None
             return True, frame
         frame = self._next_frame(self._read_timeout_seconds)
+        if frame is not None:
+            self._open_phase = "delivered"
         return (frame is not None), frame
 
     def close(self) -> None:
@@ -243,23 +310,43 @@ class FfmpegCaptureHandle:
     def error_detail(self) -> str:
         process = self._process
         return_code = process.poll() if process is not None else None
-        detail = self._stderr.decode("utf-8", errors="replace").strip()[-400:]
-        failure = self._transport_failure.strip()
+        with self._stream_lock:
+            detail = self._stderr_failure_text()
+            failure = self._transport_failure.strip()
+            phase = self._open_phase
         if failure:
-            detail = f"{failure}: {detail}" if detail else failure
-        if return_code is None:
-            return detail
-        outcome = (
-            f"FFmpeg exited from signal {-return_code}"
-            if return_code < 0
-            else f"FFmpeg exited with status {return_code}"
-        )
-        return f"{outcome}: {detail}" if detail else outcome
+            return f"{failure}: {detail}" if detail else failure
+        if return_code is not None:
+            outcome = (
+                f"FFmpeg exited from signal {-return_code}"
+                if return_code < 0
+                else f"FFmpeg exited with status {return_code}"
+            )
+            return f"{outcome}: {detail}" if detail else outcome
+        if phase == "delivered":
+            message = "timed out reading a frame"
+        elif phase == "frame":
+            message = "timed out reading the first frame"
+        else:
+            message = "timed out connecting"
+        return f"{message}: {detail}" if detail else message
+
+    def _stderr_failure_text(self) -> str:
+        """Stderr that is not the rawvideo geometry header."""
+        text = self._stderr.decode("utf-8", errors="replace")
+        lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip() and "showinfo@capture" not in line
+        ]
+        return " ".join(lines)[-400:]
 
     def _drain_stderr(self) -> None:
         process = self._process
         if process is None or process.stderr is None:
             return
+        with self._stream_lock:
+            generation = self._stream_generation
         while True:
             # read() waits until its buffer is full. FFmpeg can block on
             # stdout before stderr reaches that size, so the geometry line
@@ -271,11 +358,14 @@ class FfmpegCaptureHandle:
                 chunk = read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
             if not chunk:
                 return
-            self._stderr.extend(chunk)
-            if len(self._stderr) > 8192:
-                del self._stderr[:-8192]
-            if self._frame_transport == "rawvideo":
-                self._consume_stderr_chunk(chunk)
+            with self._stream_lock:
+                if generation != self._stream_generation:
+                    return
+                self._stderr.extend(chunk)
+                if len(self._stderr) > 8192:
+                    del self._stderr[:-8192]
+                if self._frame_transport == "rawvideo":
+                    self._consume_stderr_chunk(chunk)
 
     def _consume_stderr_chunk(self, chunk: bytes) -> None:
         pending = self._stderr_pending
@@ -316,6 +406,10 @@ class FfmpegCaptureHandle:
             )
             return
         self._next_showinfo_index = index + 1
+        # A later header must not relabel a stream that already delivered a
+        # frame. Timeouts after that stay "reading a frame".
+        if self._open_phase != "delivered":
+            self._open_phase = "frame"
         try:
             self._geometries.put_nowait((width, height))
         except queue.Full:
@@ -603,7 +697,11 @@ class FfmpegCaptureBackend:
                     if cancelled():
                         handle.close()
                         return False
-                    if handle.prefetch(timeout_ms, cancelled):
+                    if handle.prefetch(
+                        timeout_ms,
+                        cancelled,
+                        frame_timeout_ms=self.options.read_timeout_ms,
+                    ):
                         opened = True
                         break
                     if cancelled():

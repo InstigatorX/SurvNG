@@ -37,9 +37,13 @@ def ffmpeg_hwaccels(ffmpeg_path: str) -> frozenset[str]:
     key = ffmpeg_path or "ffmpeg"
     with _hwaccel_lock:
         cached = _hwaccel_cache.get(key)
+    if cached is not None:
+        return cached
+    names = _probe_ffmpeg_hwaccels(key)
+    with _hwaccel_lock:
+        cached = _hwaccel_cache.get(key)
         if cached is not None:
             return cached
-        names = _probe_ffmpeg_hwaccels(key)
         _hwaccel_cache[key] = names
         return names
 

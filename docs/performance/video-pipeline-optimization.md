@@ -67,7 +67,7 @@ Phase 1 still decodes the live/substream in software inside the one persistent `
 
 Live capture reads the existing `hardware_acceleration` setting (`auto`, `qsv`, `vaapi`, `off`). `auto` tries Intel QSV, then VAAPI, then the Phase 1 software command. An explicit mode tries that device and then software. `off` is software only.
 
-A plan is used only when a real `/dev/dri/renderD*` node exists and `ffmpeg -hwaccels` lists that method. The default render-node path is not treated as present. The hwaccel list is cached per FFmpeg binary. `off`, and `auto` with no render node, do not probe FFmpeg.
+A plan is used only when a real `/dev/dri/renderD*` node exists and `ffmpeg -hwaccels` lists that method. The default render-node path is not treated as present. The hwaccel list is cached per FFmpeg binary. The probe runs outside that cache lock. `off`, and every mode when no render node exists, do not probe FFmpeg.
 
 The hardware filter is `select`, then `hwdownload,format=nv12`, then `format=bgr24`, then the existing rawvideo `showinfo` line. Device arguments are input options, before `-i`. Downstream frames stay caller-owned bgr24. There is still one FFmpeg process per source: a failed plan is closed before the next plan starts, inside the same open, so reconnect backoff is not the hardware fallback.
 
