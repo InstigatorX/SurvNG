@@ -69,6 +69,115 @@ def _class_aware_nms(
     return sorted(selected, key=lambda index: scores[index], reverse=True)
 
 
+def _iou_xywh(left: np.ndarray, right: np.ndarray) -> float:
+    left_x2 = float(left[0] + left[2])
+    left_y2 = float(left[1] + left[3])
+    right_x2 = float(right[0] + right[2])
+    right_y2 = float(right[1] + right[3])
+    inter_w = min(left_x2, right_x2) - max(float(left[0]), float(right[0]))
+    inter_h = min(left_y2, right_y2) - max(float(left[1]), float(right[1]))
+    if inter_w <= 0 or inter_h <= 0:
+        return 0.0
+    inter = inter_w * inter_h
+    union = float(left[2] * left[3]) + float(right[2] * right[3]) - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
+
+
+def _integer_xywh_box(box: list[float] | np.ndarray) -> dict[str, int]:
+    x, y, width, height = (int(value) for value in box)
+    return {"x1": x, "y1": y, "x2": x + width, "y2": y + height}
+
+
+def _snap_voted_box(box: np.ndarray) -> dict[str, int] | None:
+    x1 = int(np.rint(box[0]))
+    y1 = int(np.rint(box[1]))
+    x2 = int(np.rint(box[0] + box[2]))
+    y2 = int(np.rint(box[1] + box[3]))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+
+
+def _class_aware_voted_boxes(
+    boxes: list[list[float]],
+    scores: list[float],
+    class_ids: list[int],
+    confidence_threshold: float,
+    nms_threshold: float,
+) -> list[tuple[int, dict[str, int]]]:
+    """Average each same-class cluster, keeping the head's score and identity.
+
+    Membership matches OpenCV NMS: a box joins the cluster only when its IoU
+    with the highest-scoring remaining box is strictly above ``nms_threshold``.
+    A neighbor of a neighbor stays out of the average.
+    """
+    if not boxes:
+        return []
+    xywh = np.asarray(boxes, dtype=np.float64)
+    score_values = np.asarray(scores, dtype=np.float64)
+    classes = np.asarray(class_ids)
+    chosen: list[tuple[float, int, dict[str, int]]] = []
+    for class_id in dict.fromkeys(class_ids):
+        group = [
+            int(index)
+            for index in np.flatnonzero(classes == class_id)
+            if float(score_values[index]) >= confidence_threshold
+        ]
+        order = sorted(group, key=lambda index: float(score_values[index]), reverse=True)
+        suppressed = [False] * len(order)
+        for head_pos, head in enumerate(order):
+            if suppressed[head_pos]:
+                continue
+            members = [head]
+            head_box = xywh[head]
+            for other_pos in range(head_pos + 1, len(order)):
+                if suppressed[other_pos]:
+                    continue
+                other = order[other_pos]
+                if _iou_xywh(head_box, xywh[other]) > nms_threshold:
+                    suppressed[other_pos] = True
+                    members.append(other)
+            weights = score_values[members]
+            fused = (xywh[members] * weights[:, None]).sum(axis=0) / float(weights.sum())
+            snapped = _snap_voted_box(fused) or _integer_xywh_box(head_box)
+            chosen.append((float(score_values[head]), head, snapped))
+    chosen.sort(key=lambda item: item[0], reverse=True)
+    return [(index, box) for _score, index, box in chosen]
+
+
+def _select_detection_boxes(
+    boxes: list[list[float]],
+    scores: list[float],
+    class_ids: list[int],
+    confidence_threshold: float,
+    nms_threshold: float,
+    *,
+    box_voting: bool,
+) -> list[tuple[int, dict[str, int]]]:
+    """Return each surviving detection as ``(source index, integer xyxy box)``."""
+    if not boxes:
+        return []
+    if not box_voting:
+        integer_boxes = [[int(value) for value in box] for box in boxes]
+        selected = _class_aware_nms(
+            integer_boxes,
+            scores,
+            class_ids,
+            confidence_threshold,
+            nms_threshold,
+        )
+        return [(index, _integer_xywh_box(integer_boxes[index])) for index in selected]
+    return _class_aware_voted_boxes(
+        boxes,
+        scores,
+        class_ids,
+        confidence_threshold,
+        nms_threshold,
+    )
+
+
 def detection_failure(objects: list[dict[str, Any]]) -> str:
     return next(
         (
@@ -826,7 +935,7 @@ class OpenVinoDetector:
         scale = metadata["scale"]
         pad_x = metadata["pad_x"]
         pad_y = metadata["pad_y"]
-        boxes: list[list[int]] = []
+        boxes: list[list[float]] = []
         scores: list[float] = []
         class_ids: list[int] = []
         input_boxes: list[tuple[float, float, float, float]] = []
@@ -876,7 +985,7 @@ class OpenVinoDetector:
             y2 = max(0, min(image_height, (input_y2 - pad_y) / scale))
             if x2 <= x1 or y2 <= y1:
                 continue
-            boxes.append([int(x1), int(y1), int(x2 - x1), int(y2 - y1)])
+            boxes.append([x1, y1, x2 - x1, y2 - y1])
             scores.append(confidence)
             class_ids.append(class_id)
             input_boxes.append((input_x1, input_y1, input_x2, input_y2))
@@ -884,21 +993,23 @@ class OpenVinoDetector:
 
         if not boxes:
             return []
-        selected = _class_aware_nms(
+        selected = _select_detection_boxes(
             boxes,
             scores,
             class_ids,
             self.config.confidence_threshold,
             self.config.nms_threshold,
-        ) if raw_format else list(range(len(boxes)))
+            box_voting=self.config.box_voting_enabled,
+        ) if raw_format else [
+            (index, _integer_xywh_box(boxes[index])) for index in range(len(boxes))
+        ]
         objects: list[dict[str, Any]] = []
-        for index in selected:
-            x1, y1, width, height = boxes[index]
+        for index, box in selected:
             class_id = class_ids[index]
             item: dict[str, Any] = {
                 "label": self.labels[class_id] if 0 <= class_id < len(self.labels) else str(class_id),
                 "confidence": round(scores[index], 4),
-                "box": {"x1": x1, "y1": y1, "x2": x1 + width, "y2": y1 + height},
+                "box": box,
             }
             if prototypes is not None and len(coefficients[index]) == prototypes.shape[0]:
                 polygon = self._segmentation_polygon(
@@ -1166,9 +1277,7 @@ class OpenVinoDetector:
             y2 = y2[valid_boxes]
             scores_array = scores_array[valid_boxes]
             class_ids_array = class_ids_array[valid_boxes]
-            boxes_array = np.column_stack((x1, y1, x2 - x1, y2 - y1)).astype(
-                np.int64
-            )
+            boxes_array = np.column_stack((x1, y1, x2 - x1, y2 - y1))
         else:
             boxes_array = np.empty((0, 4), dtype=np.int64)
         boxes = boxes_array.tolist()
@@ -1191,30 +1300,25 @@ class OpenVinoDetector:
             return []
 
         nms_started = time.perf_counter()
-        selected = _class_aware_nms(
+        selected = _select_detection_boxes(
             boxes,
             scores,
             class_ids,
             self.config.confidence_threshold,
             self.config.nms_threshold,
+            box_voting=self.config.box_voting_enabled,
         )
         nms_ms = (time.perf_counter() - nms_started) * 1000
         result_started = time.perf_counter()
         objects: list[dict[str, Any]] = []
-        for index in selected:
-            x, y, width, height = boxes[index]
+        for index, box in selected:
             class_id = class_ids[index]
             label = self.labels[class_id] if class_id < len(self.labels) else str(class_id)
             objects.append(
                 {
                     "label": label,
                     "confidence": round(scores[index], 4),
-                    "box": {
-                        "x1": x,
-                        "y1": y,
-                        "x2": x + width,
-                        "y2": y + height,
-                    },
+                    "box": box,
                 }
             )
         if metrics is not None:
@@ -1248,7 +1352,7 @@ class OpenVinoDetector:
         ):
             detections = detections.T
 
-        boxes: list[list[int]] = []
+        boxes: list[list[float]] = []
         scores: list[float] = []
         class_ids: list[int] = []
         image_width = metadata["image_width"]
@@ -1291,33 +1395,28 @@ class OpenVinoDetector:
             if x2 <= x1 or y2 <= y1:
                 continue
 
-            boxes.append([int(x1), int(y1), int(x2 - x1), int(y2 - y1)])
+            boxes.append([x1, y1, x2 - x1, y2 - y1])
             scores.append(confidence)
             class_ids.append(class_id)
 
         if not boxes:
             return []
-        selected = _class_aware_nms(
+        selected = _select_detection_boxes(
             boxes,
             scores,
             class_ids,
             self.config.confidence_threshold,
             self.config.nms_threshold,
+            box_voting=self.config.box_voting_enabled,
         )
         objects: list[dict[str, Any]] = []
-        for index in selected:
-            x, y, width, height = boxes[index]
+        for index, box in selected:
             class_id = class_ids[index]
             label = self.labels[class_id] if class_id < len(self.labels) else str(class_id)
             objects.append({
                 "label": label,
                 "confidence": round(scores[index], 4),
-                "box": {
-                    "x1": x,
-                    "y1": y,
-                    "x2": x + width,
-                    "y2": y + height,
-                },
+                "box": box,
             })
         return objects
 

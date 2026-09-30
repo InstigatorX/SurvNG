@@ -12,6 +12,7 @@ from survng.app.config import DetectorConfig
 from survng.app.detector import (
     OpenVinoDetector,
     _class_aware_nms,
+    _select_detection_boxes,
     detection_failure,
 )
 
@@ -177,6 +178,65 @@ class OpenVinoDetectorTest(unittest.TestCase):
         scalar_ms = (time.perf_counter() - started) * 1000 / 2
 
         self.assertLess(vectorized_ms, scalar_ms * 0.5)
+
+    def test_box_voting_averages_the_head_cluster_only(self) -> None:
+        boxes = [
+            [10.0, 20.0, 30.0, 40.0],
+            [14.0, 22.0, 34.0, 36.0],
+            [10.0, 20.0, 30.0, 40.0],
+            [0.0, 0.0, 100.0, 100.0],
+            [20.0, 0.0, 100.0, 100.0],
+            [90.0, 0.0, 100.0, 100.0],
+        ]
+        scores = [0.9, 0.6, 0.85, 0.95, 0.8, 0.7]
+        class_ids = [1, 1, 0, 0, 0, 0]
+
+        voted = _select_detection_boxes(boxes, scores, class_ids, 0.5, 0.45, box_voting=True)
+        plain = _select_detection_boxes(boxes, scores, class_ids, 0.5, 0.45, box_voting=False)
+
+        self.assertEqual([index for index, _box in voted], [3, 0, 2, 5])
+        self.assertEqual(voted[0][1], {"x1": 9, "y1": 0, "x2": 109, "y2": 100})
+        self.assertEqual(voted[1][1], {"x1": 12, "y1": 21, "x2": 43, "y2": 59})
+        self.assertEqual(voted[2][1], {"x1": 10, "y1": 20, "x2": 40, "y2": 60})
+        self.assertEqual(voted[3][1], {"x1": 90, "y1": 0, "x2": 190, "y2": 100})
+        self.assertEqual(
+            [box for _index, box in plain],
+            [
+                {"x1": 0, "y1": 0, "x2": 100, "y2": 100},
+                {"x1": 10, "y1": 20, "x2": 40, "y2": 60},
+                {"x1": 10, "y1": 20, "x2": 40, "y2": 60},
+                {"x1": 90, "y1": 0, "x2": 190, "y2": 100},
+            ],
+        )
+
+    def test_raw_yolo_box_voting_keeps_the_winner_score(self) -> None:
+        detector = make_detector(["person", "car"])
+        detector.config.box_voting_enabled = True
+        metadata = {
+            "image_width": 640.0,
+            "image_height": 640.0,
+            "scale": 1.0,
+            "pad_x": 0.0,
+            "pad_y": 0.0,
+        }
+        rows = np.zeros((4, 6), dtype=np.float32)
+        rows[0, :6] = [100.0, 100.0, 80.0, 80.0, 0.9, 0.1]
+        rows[1, :6] = [116.0, 100.0, 80.0, 80.0, 0.5, 0.1]
+        rows[2, :6] = [100.0, 100.0, 80.0, 80.0, 0.1, 0.85]
+
+        objects = detector._parse_yolo_output(rows[np.newaxis, ...], metadata)
+
+        self.assertEqual(
+            [(item["label"], item["confidence"], item["box"]) for item in objects],
+            [
+                ("person", 0.9, {"x1": 66, "y1": 60, "x2": 146, "y2": 140}),
+                ("car", 0.85, {"x1": 60, "y1": 60, "x2": 140, "y2": 140}),
+            ],
+        )
+        detector.config.box_voting_enabled = False
+        unchanged = detector._parse_yolo_output(rows[np.newaxis, ...], metadata)
+        self.assertEqual(unchanged[0]["box"], {"x1": 60, "y1": 60, "x2": 140, "y2": 140})
+        self.assertEqual(unchanged[0]["confidence"], 0.9)
 
     def test_class_aware_nms_falls_back_when_batched_nms_fails(self) -> None:
         boxes = [[10, 10, 30, 30], [11, 11, 30, 30], [10, 10, 30, 30]]

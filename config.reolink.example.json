@@ -73,6 +73,7 @@
     "device": "CPU",
     "confidence_threshold": 0.45,
     "nms_threshold": 0.45,
+    "box_voting_enabled": false,
     "labels": [],
     "tracking": {
       "enabled": true,
