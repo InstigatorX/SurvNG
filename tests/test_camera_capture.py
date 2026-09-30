@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import threading
 import time
@@ -19,6 +21,7 @@ from survng.app.camera_capture import (
     FfmpegCaptureHandle,
     _bmp_frame_size,
     _decode_capture_bmp,
+    _parse_showinfo_geometry,
 )
 
 
@@ -674,15 +677,42 @@ def test_ffmpeg_backend_uses_configured_transport_and_policy_rate() -> None:
 
     command = backend._command("rtsp://camera/live")
 
-    assert command[:5] == ["custom-ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error"]
+    assert command[:5] == ["custom-ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "info"]
+    assert "-nostats" in command
+    assert ["-filter_threads", "1"] == command[
+        command.index("-filter_threads") : command.index("-filter_threads") + 2
+    ]
     assert ["-rtsp_transport", "udp"] == command[command.index("-rtsp_transport") : command.index("-rtsp_transport") + 2]
     assert command[command.index("-threads:v") + 1] == "1"
-    assert "bmp" in command
+    assert "bmp" not in command
     capture_filter = command[command.index("-vf") + 1]
     assert "prev_selected_t" in capture_filter
+    assert "format=bgr24" in capture_filter
+    assert "showinfo@capture=checksum=0" in capture_filter
     assert "0.200000" in capture_filter
     assert command[command.index("-fps_mode") + 1] == "vfr"
+    assert command[-3:] == ["-f", "rawvideo", "pipe:1"]
+
+
+def test_ffmpeg_backend_bmp_transport_remains_available() -> None:
+    backend = FfmpegCaptureBackend(
+        CaptureOpenLimiter(1),
+        FfmpegCaptureOptions(frame_transport="bmp", frame_rate=lambda: 5.0),
+    )
+
+    command = backend._command("rtsp://camera/live")
+
+    assert command[:5] == ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error"]
+    assert "showinfo@capture" not in command[command.index("-vf") + 1]
     assert command[-5:] == ["-f", "image2pipe", "-vcodec", "bmp", "pipe:1"]
+
+
+def test_ffmpeg_backend_rejects_unknown_frame_transport() -> None:
+    with pytest.raises(ValueError, match="frame_transport"):
+        FfmpegCaptureBackend(
+            CaptureOpenLimiter(1),
+            FfmpegCaptureOptions(frame_transport="mjpeg"),
+        )
 
 
 def test_ffmpeg_backend_warns_once_without_logging_url_credentials(caplog) -> None:
@@ -826,6 +856,174 @@ def test_capture_bmp_limit_accepts_8k_frames_but_remains_bounded() -> None:
         _bmp_frame_size(header)
 
 
+def _showinfo_line(index: int, width: int, height: int) -> bytes:
+    return (
+        f"[showinfo@capture @ 0x1] n: {index:3d} pts: 0 pts_time:0 "
+        f"fmt:bgr24 s:{width}x{height} i:P iskey:1 type:I \n"
+    ).encode()
+
+
+def test_showinfo_geometry_ignores_unrelated_stderr() -> None:
+    assert _parse_showinfo_geometry(_showinfo_line(1, 32, 24)) == (1, 32, 24)
+    assert _parse_showinfo_geometry(
+        b"[showinfo@capture @ 0x1] color_range:pc color_space:gbr\n"
+    ) is None
+    assert _parse_showinfo_geometry(
+        b"frame=    1 fps=0.0 q=-0.0 size=      18kB time=00:00:00.20\n"
+    ) is None
+
+
+def test_open_failure_names_the_phase_and_skips_showinfo() -> None:
+    handle = FfmpegCaptureHandle(read_timeout_ms=1000, frame_transport="rawvideo")
+    handle._stderr.extend(_showinfo_line(10, 3840, 2160))
+    handle._stderr.extend(
+        b"[showinfo@capture @ 0x1] color_range:pc color_space:gbr\n"
+        b"Error opening input: immediate exit\n"
+    )
+
+    assert handle.error_detail() == "timed out connecting: Error opening input: immediate exit"
+
+    handle._note_showinfo_line(_showinfo_line(0, 2, 2))
+    assert handle.error_detail() == "timed out reading the first frame: Error opening input: immediate exit"
+    assert "showinfo@capture" not in handle.error_detail()
+    assert "3840x2160" not in handle.error_detail()
+
+    handle._open_phase = "delivered"
+    handle._note_showinfo_line(_showinfo_line(1, 2, 2))
+    assert handle.error_detail() == "timed out reading a frame: Error opening input: immediate exit"
+
+    handle._process = type("Process", (), {"poll": lambda self: 1})()
+    assert handle.error_detail() == "FFmpeg exited with status 1: Error opening input: immediate exit"
+    assert "showinfo@capture" not in handle.error_detail()
+
+    handle._transport_failure = "FFmpeg capture geometry queue overflow"
+    assert handle.error_detail().startswith("FFmpeg capture geometry queue overflow")
+
+
+def test_close_keeps_the_exit_status_for_the_open_failure() -> None:
+    handle = FfmpegCaptureHandle(read_timeout_ms=1000, frame_transport="rawvideo")
+    handle._stderr.extend(b"Error opening input: immediate exit\n")
+    handle._process = type(
+        "Process",
+        (),
+        {
+            "poll": lambda self: 1,
+            "stdout": None,
+            "stderr": None,
+            "wait": lambda self, timeout=0: 1,
+        },
+    )()
+
+    handle.close()
+
+    assert handle.error_detail() == "FFmpeg exited with status 1: Error opening input: immediate exit"
+
+
+def test_prefetch_reads_the_frame_body_after_the_connect_budget() -> None:
+    handle = FfmpegCaptureHandle(read_timeout_ms=1000, frame_transport="rawvideo")
+    read_fd, write_fd = os.pipe()
+    stdout = os.fdopen(read_fd, "rb", buffering=0)
+    payload = bytes((4, 5, 6)) * 4
+
+    def write_late() -> None:
+        time.sleep(0.05)
+        os.write(write_fd, payload)
+        os.close(write_fd)
+
+    writer = threading.Thread(target=write_late)
+    handle._process = type("Process", (), {"stdout": stdout, "poll": lambda self: None})()
+    handle._geometries.put((2, 2))
+    writer.start()
+    try:
+        assert handle.prefetch(1, lambda: False, frame_timeout_ms=1000)
+        ok, frame = handle.read()
+    finally:
+        writer.join(timeout=1)
+        stdout.close()
+        if writer.is_alive():
+            os.close(write_fd)
+
+    assert ok and frame is not None
+    assert frame.shape == (2, 2, 3)
+    assert bytes(frame.reshape(-1)) == payload
+
+
+def test_raw_capture_reads_owned_frames_across_resolution_change() -> None:
+    stdout_read, stdout_write = os.pipe()
+    stderr_read, stderr_write = os.pipe()
+    stdout = os.fdopen(stdout_read, "rb")
+    stderr = os.fdopen(stderr_read, "rb")
+    first = bytes((10, 20, 30)) * (2 * 2)
+    second = bytes((1, 2, 3))
+
+    def write_frames() -> None:
+        os.write(stderr_write, _showinfo_line(0, 2, 2))
+        os.write(
+            stderr_write,
+            b"[showinfo@capture @ 0x1] color_range:pc color_space:gbr\n",
+        )
+        os.write(stdout_write, first)
+        os.write(stderr_write, _showinfo_line(1, 1, 1))
+        os.write(stdout_write, second)
+        os.close(stdout_write)
+        os.close(stderr_write)
+
+    class Process:
+        def __init__(self) -> None:
+            self.stdout = stdout
+            self.stderr = stderr
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+    handle = FfmpegCaptureHandle(read_timeout_ms=1000, frame_transport="rawvideo")
+    handle._process = Process()  # type: ignore[assignment]
+    writer = threading.Thread(target=write_frames)
+    handle._stderr_thread = threading.Thread(target=handle._drain_stderr)
+    handle._stderr_thread.start()
+    writer.start()
+    try:
+        ok, wide = handle.read()
+        assert ok and wide is not None
+        ok, narrow = handle.read()
+        assert ok and narrow is not None
+    finally:
+        writer.join(1.0)
+        handle._stderr_thread.join(1.0)
+        stdout.close()
+        stderr.close()
+
+    assert wide.shape == (2, 2, 3)
+    assert narrow.shape == (1, 1, 3)
+    assert wide[0, 0].tolist() == [10, 20, 30]
+    assert narrow[0, 0].tolist() == [1, 2, 3]
+    wide.setflags(write=False)
+    narrow.setflags(write=False)
+    assert not np.shares_memory(wide, narrow)
+
+
+def test_raw_capture_fails_closed_when_showinfo_index_jumps() -> None:
+    handle = FfmpegCaptureHandle(read_timeout_ms=1000, frame_transport="rawvideo")
+
+    handle._note_showinfo_line(_showinfo_line(0, 2, 2))
+    handle._note_showinfo_line(_showinfo_line(2, 2, 2))
+
+    assert handle._geometries.qsize() == 1
+    assert handle._transport_failed.is_set()
+    assert "lost raw frame alignment" in handle.error_detail()
+
+
+def test_raw_capture_rejects_oversized_geometry_without_allocating() -> None:
+    handle = FfmpegCaptureHandle(read_timeout_ms=1000, frame_transport="rawvideo")
+    huge = int((CAPTURE_FRAME_MAX_BYTES // 3) ** 0.5) + 2
+
+    handle._note_showinfo_line(_showinfo_line(0, huge, huge))
+
+    assert handle._geometries.empty()
+    assert handle._transport_failed.is_set()
+
+
 def test_capture_bmp_decode_preserves_bgr_pixels() -> None:
     # One bottom-up 1×1 24-bit BMP with BGR payload (20, 40, 200).
     encoded = bytearray(58)
@@ -894,3 +1092,147 @@ def test_latest_frame_store_is_bounded_to_one_frame_per_source() -> None:
     latest = service.latest("live")
     assert latest is not None
     assert int(latest.image[0, 0, 0]) == 19
+
+
+def test_ffmpeg_raw_capture_returns_bgr_frames(tmp_path) -> None:
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is not installed")
+    video = tmp_path / "sample.mp4"
+    encoded = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:size=32x24:rate=10:duration=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(video),
+        ],
+        check=False,
+    )
+    if encoded.returncode != 0:
+        pytest.skip("ffmpeg could not encode the capture fixture")
+    backend = FfmpegCaptureBackend(
+        CaptureOpenLimiter(1),
+        FfmpegCaptureOptions(frame_rate=lambda: 5.0, read_timeout_ms=3000),
+    )
+    handle = backend.create_handle()
+    assert isinstance(handle, FfmpegCaptureHandle)
+    opened = False
+    try:
+        opened = backend.open(handle, str(video), lambda: False, open_timeout_ms=5000)
+        assert opened
+        ok, frame = handle.read()
+        assert ok and frame is not None
+        assert frame.shape == (24, 32, 3)
+        assert frame.dtype == np.uint8
+        assert frame.flags.c_contiguous
+        frame.setflags(write=False)
+        assert int(frame[:, :, 2].mean()) > int(frame[:, :, 0].mean())
+    finally:
+        if opened:
+            handle.close()
+
+
+def test_ffmpeg_raw_capture_reads_when_showinfo_runs_ahead(tmp_path) -> None:
+    """A short file can emit more geometries than the queue before prefetch."""
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is not installed")
+    video = tmp_path / "burst.mp4"
+    encoded = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=640x360:rate=15:duration=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(video),
+        ],
+        check=False,
+    )
+    if encoded.returncode != 0:
+        pytest.skip("ffmpeg could not encode the capture fixture")
+    backend = FfmpegCaptureBackend(
+        CaptureOpenLimiter(1),
+        FfmpegCaptureOptions(frame_rate=lambda: 10.0, read_timeout_ms=3000),
+    )
+    handle = backend.create_handle()
+    assert isinstance(handle, FfmpegCaptureHandle)
+    opened = False
+    frames = 0
+    try:
+        opened = backend.open(handle, str(video), lambda: False, open_timeout_ms=5000)
+        assert opened
+        assert not handle._transport_failed.is_set()
+        while True:
+            ok, frame = handle.read()
+            if not ok or frame is None:
+                break
+            assert frame.shape == (360, 640, 3)
+            frames += 1
+    finally:
+        if opened:
+            handle.close()
+
+    # 640x360 is larger than the stdout pipe. This used to deadlock before
+    # the first frame because showinfo sat behind a blocking stderr read.
+    assert frames >= 8
+    assert "lost raw frame alignment" not in handle.error_detail()
+
+
+def test_ffmpeg_raw_capture_follows_resolution_change() -> None:
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is not installed")
+    handle = FfmpegCaptureHandle(read_timeout_ms=5000, frame_transport="rawvideo")
+    handle.start(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-nostats",
+            "-loglevel",
+            "info",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=10:duration=0.5",
+            "-vf",
+            (
+                "scale=w='if(lt(n,2),64,32)':h='if(lt(n,2),48,24)':eval=frame,"
+                "format=bgr24,showinfo@capture=checksum=0"
+            ),
+            "-fps_mode",
+            "vfr",
+            "-pix_fmt",
+            "bgr24",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ]
+    )
+    shapes: list[tuple[int, ...]] = []
+    try:
+        for _ in range(5):
+            ok, frame = handle.read()
+            assert ok and frame is not None
+            shapes.append(frame.shape)
+            frame.setflags(write=False)
+    finally:
+        handle.close()
+
+    # FFmpeg 8.1 evaluates scale `n` so lt(n,2) keeps only the first frame large.
+    assert shapes == [(48, 64, 3), (24, 32, 3), (24, 32, 3), (24, 32, 3), (24, 32, 3)]

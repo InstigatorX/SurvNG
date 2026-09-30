@@ -1072,6 +1072,7 @@ class AppConfig(BaseModel):
     recording_index_dir: str = ""
     ffmpeg_path: str = "ffmpeg"
     capture_rtsp_transport: Literal["tcp", "udp"] = "tcp"
+    capture_frame_transport: Literal["rawvideo", "bmp"] = "rawvideo"
     hardware_acceleration: str = "auto"
     event_clip_before_seconds: float = Field(default=5.0, ge=0.0, le=3600.0)
     event_clip_after_seconds: float = Field(default=5.0, ge=0.0, le=3600.0)
