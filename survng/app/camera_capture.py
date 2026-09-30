@@ -134,6 +134,8 @@ class FfmpegCaptureHandle:
         self._transport_failed = threading.Event()
         self._transport_failure = ""
         self._next_showinfo_index = 0
+        # The stderr reader and the frame reader both update the open phase.
+        self._stream_lock = threading.RLock()
         # connecting: no frame header yet. frame: a header arrived and the
         # body is still being read. delivered: at least one frame was returned.
         self._open_phase = "connecting"
@@ -147,7 +149,8 @@ class FfmpegCaptureHandle:
         del size
 
     def start(self, command: list[str]) -> None:
-        self._open_phase = "connecting"
+        with self._stream_lock:
+            self._open_phase = "connecting"
         self._command_path = command[0]
         executable = self._named_executable()
         self._process = subprocess.Popen(
@@ -187,7 +190,8 @@ class FfmpegCaptureHandle:
             )
         if frame is None:
             return False
-        self._open_phase = "delivered"
+        with self._stream_lock:
+            self._open_phase = "delivered"
         self._prefetched = frame
         return True
 
@@ -210,7 +214,9 @@ class FfmpegCaptureHandle:
         geometry = self._wait_raw_geometry(connect_deadline, cancelled)
         if geometry is None:
             return None
-        self._open_phase = "frame"
+        with self._stream_lock:
+            if self._open_phase != "delivered":
+                self._open_phase = "frame"
         frame_seconds = (
             self._read_timeout_seconds
             if frame_timeout_ms is None
@@ -238,7 +244,8 @@ class FfmpegCaptureHandle:
             return True, frame
         frame = self._next_frame(self._read_timeout_seconds)
         if frame is not None:
-            self._open_phase = "delivered"
+            with self._stream_lock:
+                self._open_phase = "delivered"
         return (frame is not None), frame
 
     def close(self) -> None:
@@ -278,8 +285,10 @@ class FfmpegCaptureHandle:
     def error_detail(self) -> str:
         process = self._process
         return_code = process.poll() if process is not None else None
-        detail = self._stderr_failure_text()
-        failure = self._transport_failure.strip()
+        with self._stream_lock:
+            detail = self._stderr_failure_text()
+            failure = self._transport_failure.strip()
+            phase = self._open_phase
         if failure:
             return f"{failure}: {detail}" if detail else failure
         if return_code is not None:
@@ -289,9 +298,9 @@ class FfmpegCaptureHandle:
                 else f"FFmpeg exited with status {return_code}"
             )
             return f"{outcome}: {detail}" if detail else outcome
-        if self._open_phase == "delivered":
+        if phase == "delivered":
             message = "timed out reading a frame"
-        elif self._open_phase == "frame":
+        elif phase == "frame":
             message = "timed out reading the first frame"
         else:
             message = "timed out connecting"
@@ -354,27 +363,30 @@ class FfmpegCaptureHandle:
             return
         index, width, height = parsed
         frame_bytes = width * height * 3
-        if (
-            index != self._next_showinfo_index
-            or width <= 0
-            or height <= 0
-            or frame_bytes > CAPTURE_FRAME_MAX_BYTES
-        ):
-            self._fail_transport(
-                "FFmpeg capture lost raw frame alignment "
-                f"(showinfo n={index}, expected {self._next_showinfo_index}, "
-                f"{width}x{height})"
-            )
-            return
-        self._next_showinfo_index = index + 1
-        # A later header must not relabel a stream that already delivered a
-        # frame. Timeouts after that stay "reading a frame".
-        if self._open_phase != "delivered":
-            self._open_phase = "frame"
-        try:
-            self._geometries.put_nowait((width, height))
-        except queue.Full:
-            self._fail_transport("FFmpeg capture geometry queue overflow")
+        with self._stream_lock:
+            if self._transport_failed.is_set():
+                return
+            if (
+                index != self._next_showinfo_index
+                or width <= 0
+                or height <= 0
+                or frame_bytes > CAPTURE_FRAME_MAX_BYTES
+            ):
+                self._fail_transport(
+                    "FFmpeg capture lost raw frame alignment "
+                    f"(showinfo n={index}, expected {self._next_showinfo_index}, "
+                    f"{width}x{height})"
+                )
+                return
+            self._next_showinfo_index = index + 1
+            # A later header must not relabel a stream that already delivered a
+            # frame. Timeouts after that stay "reading a frame".
+            if self._open_phase != "delivered":
+                self._open_phase = "frame"
+            try:
+                self._geometries.put_nowait((width, height))
+            except queue.Full:
+                self._fail_transport("FFmpeg capture geometry queue overflow")
 
     def _fail_transport(self, message: str) -> None:
         if self._transport_failed.is_set():
