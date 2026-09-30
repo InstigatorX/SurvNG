@@ -133,6 +133,7 @@ class FfmpegCaptureHandle:
         )
         self._transport_failed = threading.Event()
         self._transport_failure = ""
+        self._failure_detail = ""
         self._next_showinfo_index = 0
         # The stderr reader and the frame reader both update the open phase.
         self._stream_lock = threading.RLock()
@@ -151,6 +152,7 @@ class FfmpegCaptureHandle:
     def start(self, command: list[str]) -> None:
         with self._stream_lock:
             self._open_phase = "connecting"
+            self._failure_detail = ""
         self._command_path = command[0]
         executable = self._named_executable()
         self._process = subprocess.Popen(
@@ -249,6 +251,10 @@ class FfmpegCaptureHandle:
         return (frame is not None), frame
 
     def close(self) -> None:
+        # Open reports failure after this returns, so keep the detail that was
+        # true while the process object still existed.
+        if self._process is not None and not self._failure_detail:
+            self._failure_detail = self.error_detail()
         process, self._process = self._process, None
         if process is None:
             return
@@ -284,6 +290,8 @@ class FfmpegCaptureHandle:
 
     def error_detail(self) -> str:
         process = self._process
+        if process is None and self._failure_detail:
+            return self._failure_detail
         return_code = process.poll() if process is not None else None
         with self._stream_lock:
             detail = self._stderr_failure_text()

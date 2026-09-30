@@ -900,6 +900,25 @@ def test_open_failure_names_the_phase_and_skips_showinfo() -> None:
     assert handle.error_detail().startswith("FFmpeg capture geometry queue overflow")
 
 
+def test_close_keeps_the_exit_status_for_the_open_failure() -> None:
+    handle = FfmpegCaptureHandle(read_timeout_ms=1000, frame_transport="rawvideo")
+    handle._stderr.extend(b"Error opening input: immediate exit\n")
+    handle._process = type(
+        "Process",
+        (),
+        {
+            "poll": lambda self: 1,
+            "stdout": None,
+            "stderr": None,
+            "wait": lambda self, timeout=0: 1,
+        },
+    )()
+
+    handle.close()
+
+    assert handle.error_detail() == "FFmpeg exited with status 1: Error opening input: immediate exit"
+
+
 def test_prefetch_reads_the_frame_body_after_the_connect_budget() -> None:
     handle = FfmpegCaptureHandle(read_timeout_ms=1000, frame_transport="rawvideo")
     read_fd, write_fd = os.pipe()
