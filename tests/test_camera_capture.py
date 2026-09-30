@@ -873,6 +873,62 @@ def test_showinfo_geometry_ignores_unrelated_stderr() -> None:
     ) is None
 
 
+def test_open_failure_names_the_phase_and_skips_showinfo() -> None:
+    handle = FfmpegCaptureHandle(read_timeout_ms=1000, frame_transport="rawvideo")
+    handle._stderr.extend(_showinfo_line(10, 3840, 2160))
+    handle._stderr.extend(
+        b"[showinfo@capture @ 0x1] color_range:pc color_space:gbr\n"
+        b"Error opening input: immediate exit\n"
+    )
+
+    assert handle.error_detail() == "timed out connecting: Error opening input: immediate exit"
+
+    handle._note_showinfo_line(_showinfo_line(0, 2, 2))
+    assert handle.error_detail() == "timed out reading the first frame: Error opening input: immediate exit"
+    assert "showinfo@capture" not in handle.error_detail()
+    assert "3840x2160" not in handle.error_detail()
+
+    handle._open_phase = "delivered"
+    handle._note_showinfo_line(_showinfo_line(1, 2, 2))
+    assert handle.error_detail() == "timed out reading a frame: Error opening input: immediate exit"
+
+    handle._process = type("Process", (), {"poll": lambda self: 1})()
+    assert handle.error_detail() == "FFmpeg exited with status 1: Error opening input: immediate exit"
+    assert "showinfo@capture" not in handle.error_detail()
+
+    handle._transport_failure = "FFmpeg capture geometry queue overflow"
+    assert handle.error_detail().startswith("FFmpeg capture geometry queue overflow")
+
+
+def test_prefetch_reads_the_frame_body_after_the_connect_budget() -> None:
+    handle = FfmpegCaptureHandle(read_timeout_ms=1000, frame_transport="rawvideo")
+    read_fd, write_fd = os.pipe()
+    stdout = os.fdopen(read_fd, "rb", buffering=0)
+    payload = bytes((4, 5, 6)) * 4
+
+    def write_late() -> None:
+        time.sleep(0.05)
+        os.write(write_fd, payload)
+        os.close(write_fd)
+
+    writer = threading.Thread(target=write_late)
+    handle._process = type("Process", (), {"stdout": stdout, "poll": lambda self: None})()
+    handle._geometries.put((2, 2))
+    writer.start()
+    try:
+        assert handle.prefetch(1, lambda: False, frame_timeout_ms=1000)
+        ok, frame = handle.read()
+    finally:
+        writer.join(timeout=1)
+        stdout.close()
+        if writer.is_alive():
+            os.close(write_fd)
+
+    assert ok and frame is not None
+    assert frame.shape == (2, 2, 3)
+    assert bytes(frame.reshape(-1)) == payload
+
+
 def test_raw_capture_reads_owned_frames_across_resolution_change() -> None:
     stdout_read, stdout_write = os.pipe()
     stderr_read, stderr_write = os.pipe()
