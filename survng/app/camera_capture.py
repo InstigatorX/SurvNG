@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import logging
 import math
-import queue
-import re
 import select
 import subprocess
 import threading
@@ -42,16 +40,6 @@ CAPTURE_FRAME_MAX_BYTES = 256 * 1024 * 1024
 CAPTURE_PIPE_READ_CHUNK_BYTES = 64 * 1024
 CAPTURE_SHUTDOWN_WAIT_SECONDS = 1.0
 CAPTURE_STDERR_JOIN_SECONDS = 1.0
-# Width/height only. Deep enough for FFmpeg's filter/muxer lookahead, and
-# never a blocking put: blocking the stderr reader deadlocks a frame larger
-# than the stdout pipe. Overflow fails the stream instead of growing forever.
-CAPTURE_RAW_GEOMETRY_QUEUE_DEPTH = 64
-
-# Named showinfo instance, checksums disabled. The line is the in-band
-# geometry record for rawvideo: stdout is not read until this matches.
-_SHOWINFO_FRAME = re.compile(
-    rb"showinfo@capture\b.*?\bn:[ \t]*(\d+)\b.*?\bs:(\d+)x(\d+)\b"
-)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -108,38 +96,18 @@ class FfmpegCaptureOptions:
     admission_poll_seconds: float = CAPTURE_OPEN_LOCK_POLL_SECONDS
     rtsp_transport: str = "tcp"
     frame_rate: Callable[[], float] | None = None
-    frame_transport: str = "rawvideo"
 
 
 class FfmpegCaptureHandle:
-    """One external FFmpeg decoder. Raw BGR is the default stdout transport."""
+    """One external FFmpeg decoder whose stdout carries self-framed BMPs."""
 
-    def __init__(
-        self,
-        *,
-        read_timeout_ms: int,
-        frame_transport: str = "rawvideo",
-    ) -> None:
+    def __init__(self, *, read_timeout_ms: int) -> None:
         self._read_timeout_seconds = max(0.001, read_timeout_ms / 1000.0)
-        self._frame_transport = frame_transport
         self._process: subprocess.Popen[bytes] | None = None
         self._buffer = bytearray()
         self._prefetched: np.ndarray | None = None
         self._stderr = bytearray()
-        self._stderr_pending = bytearray()
         self._stderr_thread: threading.Thread | None = None
-        self._geometries: queue.Queue[tuple[int, int]] = queue.Queue(
-            maxsize=CAPTURE_RAW_GEOMETRY_QUEUE_DEPTH
-        )
-        self._transport_failed = threading.Event()
-        self._transport_failure = ""
-        self._failure_detail = ""
-        self._next_showinfo_index = 0
-        # The stderr reader and the frame reader both update the open phase.
-        self._stream_lock = threading.RLock()
-        # connecting: no frame header yet. frame: a header arrived and the
-        # body is still being read. delivered: at least one frame was returned.
-        self._open_phase = "connecting"
 
     def is_opened(self) -> bool:
         return self._process is not None and self._process.poll() is None
@@ -150,9 +118,6 @@ class FfmpegCaptureHandle:
         del size
 
     def start(self, command: list[str]) -> None:
-        with self._stream_lock:
-            self._open_phase = "connecting"
-            self._failure_detail = ""
         self._command_path = command[0]
         executable = self._named_executable()
         self._process = subprocess.Popen(
@@ -172,89 +137,24 @@ class FfmpegCaptureHandle:
     def _named_executable(self) -> str:
         return named_ffmpeg_executable(self._command_path, "survng-capture")
 
-    def prefetch(
-        self,
-        timeout_ms: int,
-        cancelled: Callable[[], bool],
-        *,
-        frame_timeout_ms: int | None = None,
-    ) -> bool:
-        if self._frame_transport == "rawvideo":
-            frame = self._prefetch_raw_frame(
-                timeout_ms,
-                frame_timeout_ms,
-                cancelled,
-            )
-        else:
-            frame = self._next_frame(
-                max(0.001, timeout_ms / 1000.0),
-                cancelled=cancelled,
-            )
+    def prefetch(self, timeout_ms: int, cancelled: Callable[[], bool]) -> bool:
+        frame = self._next_frame(
+            max(0.001, timeout_ms / 1000.0),
+            cancelled=cancelled,
+        )
         if frame is None:
             return False
-        with self._stream_lock:
-            self._open_phase = "delivered"
         self._prefetched = frame
         return True
-
-    def _prefetch_raw_frame(
-        self,
-        connect_timeout_ms: int,
-        frame_timeout_ms: int | None,
-        cancelled: Callable[[], bool],
-    ) -> np.ndarray | None:
-        """Wait out the connect budget for a geometry, then read that frame.
-
-        A 4K raw frame is larger than the stdout pipe. Showinfo can arrive
-        while the body is still being written. That is the first frame in
-        flight, not a failed open, so the body uses the read budget.
-        """
-        process = self._process
-        if process is None or process.stdout is None:
-            return None
-        connect_deadline = time.monotonic() + max(0.001, connect_timeout_ms / 1000.0)
-        geometry = self._wait_raw_geometry(connect_deadline, cancelled)
-        if geometry is None:
-            return None
-        with self._stream_lock:
-            if self._open_phase != "delivered":
-                self._open_phase = "frame"
-        frame_seconds = (
-            self._read_timeout_seconds
-            if frame_timeout_ms is None
-            else max(0.001, frame_timeout_ms / 1000.0)
-        )
-        width, height = geometry
-        frame = np.empty((height, width, 3), dtype=np.uint8)
-        view = memoryview(frame).cast("B")
-        try:
-            completed = self._read_exact(
-                process,
-                view,
-                time.monotonic() + frame_seconds,
-                cancelled,
-            )
-        finally:
-            view.release()
-        if not completed:
-            return None
-        return frame
 
     def read(self) -> tuple[bool, np.ndarray | None]:
         if self._prefetched is not None:
             frame, self._prefetched = self._prefetched, None
             return True, frame
         frame = self._next_frame(self._read_timeout_seconds)
-        if frame is not None:
-            with self._stream_lock:
-                self._open_phase = "delivered"
         return (frame is not None), frame
 
     def close(self) -> None:
-        # Open reports failure after this returns, so keep the detail that was
-        # true while the process object still existed.
-        if self._process is not None and not self._failure_detail:
-            self._failure_detail = self.error_detail()
         process, self._process = self._process, None
         if process is None:
             return
@@ -290,216 +190,30 @@ class FfmpegCaptureHandle:
 
     def error_detail(self) -> str:
         process = self._process
-        if process is None and self._failure_detail:
-            return self._failure_detail
         return_code = process.poll() if process is not None else None
-        with self._stream_lock:
-            detail = self._stderr_failure_text()
-            failure = self._transport_failure.strip()
-            phase = self._open_phase
-        if failure:
-            return f"{failure}: {detail}" if detail else failure
-        if return_code is not None:
-            outcome = (
-                f"FFmpeg exited from signal {-return_code}"
-                if return_code < 0
-                else f"FFmpeg exited with status {return_code}"
-            )
-            return f"{outcome}: {detail}" if detail else outcome
-        if phase == "delivered":
-            message = "timed out reading a frame"
-        elif phase == "frame":
-            message = "timed out reading the first frame"
-        else:
-            message = "timed out connecting"
-        return f"{message}: {detail}" if detail else message
-
-    def _stderr_failure_text(self) -> str:
-        """Stderr that is not the rawvideo geometry header."""
-        text = self._stderr.decode("utf-8", errors="replace")
-        lines = [
-            line.strip()
-            for line in text.splitlines()
-            if line.strip() and "showinfo@capture" not in line
-        ]
-        return " ".join(lines)[-400:]
+        detail = self._stderr.decode("utf-8", errors="replace").strip()[-400:]
+        if return_code is None:
+            return detail
+        outcome = (
+            f"FFmpeg exited from signal {-return_code}"
+            if return_code < 0
+            else f"FFmpeg exited with status {return_code}"
+        )
+        return f"{outcome}: {detail}" if detail else outcome
 
     def _drain_stderr(self) -> None:
         process = self._process
         if process is None or process.stderr is None:
             return
         while True:
-            # read() waits until its buffer is full. FFmpeg can block on
-            # stdout before stderr reaches that size, so the geometry line
-            # would sit unread. read1 returns the bytes already available.
-            read1 = getattr(process.stderr, "read1", None)
-            if read1 is None:
-                chunk = process.stderr.read(CAPTURE_PIPE_READ_CHUNK_BYTES)
-            else:
-                chunk = read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
+            chunk = process.stderr.read(CAPTURE_PIPE_READ_CHUNK_BYTES)
             if not chunk:
                 return
             self._stderr.extend(chunk)
             if len(self._stderr) > 8192:
                 del self._stderr[:-8192]
-            if self._frame_transport == "rawvideo":
-                self._consume_stderr_chunk(chunk)
-
-    def _consume_stderr_chunk(self, chunk: bytes) -> None:
-        pending = self._stderr_pending
-        pending.extend(chunk)
-        while True:
-            newline = pending.find(b"\n")
-            carriage = pending.find(b"\r")
-            breaks = [index for index in (newline, carriage) if index >= 0]
-            if not breaks:
-                break
-            index = min(breaks)
-            line = bytes(pending[:index])
-            del pending[: index + 1]
-            self._note_showinfo_line(line)
-        if len(pending) > 8192:
-            # Encoder SEI and other info records can be long. Drop the head
-            # without failing; a real showinfo line is much shorter than this.
-            del pending[:-1024]
-
-    def _note_showinfo_line(self, line: bytes) -> None:
-        if self._transport_failed.is_set():
-            return
-        parsed = _parse_showinfo_geometry(line)
-        if parsed is None:
-            return
-        index, width, height = parsed
-        frame_bytes = width * height * 3
-        with self._stream_lock:
-            if self._transport_failed.is_set():
-                return
-            if (
-                index != self._next_showinfo_index
-                or width <= 0
-                or height <= 0
-                or frame_bytes > CAPTURE_FRAME_MAX_BYTES
-            ):
-                self._fail_transport(
-                    "FFmpeg capture lost raw frame alignment "
-                    f"(showinfo n={index}, expected {self._next_showinfo_index}, "
-                    f"{width}x{height})"
-                )
-                return
-            self._next_showinfo_index = index + 1
-            # A later header must not relabel a stream that already delivered a
-            # frame. Timeouts after that stay "reading a frame".
-            if self._open_phase != "delivered":
-                self._open_phase = "frame"
-            try:
-                self._geometries.put_nowait((width, height))
-            except queue.Full:
-                self._fail_transport("FFmpeg capture geometry queue overflow")
-
-    def _fail_transport(self, message: str) -> None:
-        if self._transport_failed.is_set():
-            return
-        self._transport_failure = message
-        self._transport_failed.set()
 
     def _next_frame(
-        self,
-        timeout_seconds: float,
-        *,
-        cancelled: Callable[[], bool] | None = None,
-    ) -> np.ndarray | None:
-        if self._frame_transport == "rawvideo":
-            return self._next_raw_frame(timeout_seconds, cancelled=cancelled)
-        return self._next_bmp_frame(timeout_seconds, cancelled=cancelled)
-
-    def _next_raw_frame(
-        self,
-        timeout_seconds: float,
-        *,
-        cancelled: Callable[[], bool] | None = None,
-    ) -> np.ndarray | None:
-        process = self._process
-        if process is None or process.stdout is None:
-            return None
-        deadline = time.monotonic() + timeout_seconds
-        geometry = self._wait_raw_geometry(deadline, cancelled)
-        if geometry is None:
-            return None
-        width, height = geometry
-        frame = np.empty((height, width, 3), dtype=np.uint8)
-        view = memoryview(frame).cast("B")
-        try:
-            completed = self._read_exact(process, view, deadline, cancelled)
-        finally:
-            view.release()
-        if not completed:
-            return None
-        return frame
-
-    def _wait_raw_geometry(
-        self,
-        deadline: float,
-        cancelled: Callable[[], bool] | None,
-    ) -> tuple[int, int] | None:
-        while True:
-            if cancelled is not None and cancelled():
-                return None
-            process = self._process
-            if process is None:
-                return None
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
-            try:
-                return self._geometries.get(
-                    timeout=min(remaining, CAPTURE_OPEN_LOCK_POLL_SECONDS)
-                )
-            except queue.Empty:
-                if self._transport_failed.is_set():
-                    return None
-                if process.poll() is not None:
-                    return None
-
-    def _read_exact(
-        self,
-        process: subprocess.Popen[bytes],
-        destination: memoryview,
-        deadline: float,
-        cancelled: Callable[[], bool] | None,
-    ) -> bool:
-        stdout = process.stdout
-        if stdout is None:
-            return False
-        reader = _raw_stdout(stdout)
-        offset = 0
-        total = len(destination)
-        while offset < total:
-            if cancelled is not None and cancelled():
-                return False
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            try:
-                readable, _, _ = select.select(
-                    [reader],
-                    [],
-                    [],
-                    min(remaining, CAPTURE_OPEN_LOCK_POLL_SECONDS),
-                )
-            except (OSError, ValueError):
-                return False
-            if not readable:
-                continue
-            try:
-                read = _read_stdout_into(reader, destination[offset:])
-            except (OSError, ValueError):
-                return False
-            if read <= 0:
-                return False
-            offset += read
-        return True
-
-    def _next_bmp_frame(
         self,
         timeout_seconds: float,
         *,
@@ -531,41 +245,6 @@ class FfmpegCaptureHandle:
             if not chunk:
                 return None
             self._buffer.extend(chunk)
-
-
-def _raw_stdout(stdout: object) -> object:
-    """Return the unbuffered pipe so reads cannot race a buffered select."""
-    raw = getattr(stdout, "raw", None)
-    if raw is None:
-        raw = getattr(getattr(stdout, "buffer", None), "raw", None)
-    if raw is not None and hasattr(raw, "readinto") and hasattr(raw, "fileno"):
-        return raw
-    return stdout
-
-
-def _read_stdout_into(stdout: object, destination: memoryview) -> int:
-    """Copy pipe bytes once, directly into the caller-owned frame."""
-    readinto = getattr(stdout, "readinto", None)
-    if readinto is not None:
-        read = readinto(destination)
-        return 0 if read is None else int(read)
-    read1 = getattr(stdout, "read1", None)
-    if read1 is None:
-        chunk = stdout.read(len(destination))
-    else:
-        chunk = read1(len(destination))
-    if not chunk:
-        return 0
-    destination[: len(chunk)] = chunk
-    return len(chunk)
-
-
-def _parse_showinfo_geometry(line: bytes) -> tuple[int, int, int] | None:
-    """Return `(index, width, height)` from one raw-capture showinfo line."""
-    match = _SHOWINFO_FRAME.search(line)
-    if match is None:
-        return None
-    return int(match.group(1)), int(match.group(2)), int(match.group(3))
 
 
 def _bmp_frame_size(buffer: bytearray) -> int | None:
@@ -624,16 +303,11 @@ class FfmpegCaptureBackend:
         self.options = options or FfmpegCaptureOptions()
         if self.options.rtsp_transport not in {"tcp", "udp"}:
             raise ValueError("rtsp_transport must be tcp or udp")
-        if self.options.frame_transport not in {"rawvideo", "bmp"}:
-            raise ValueError("frame_transport must be rawvideo or bmp")
         self._credential_warning_lock = threading.Lock()
         self._credential_warning_hosts: set[str] = set()
 
     def create_handle(self) -> CaptureHandle:
-        return FfmpegCaptureHandle(
-            read_timeout_ms=self.options.read_timeout_ms,
-            frame_transport=self.options.frame_transport,
-        )
+        return FfmpegCaptureHandle(read_timeout_ms=self.options.read_timeout_ms)
 
     def open(
         self,
@@ -663,11 +337,7 @@ class FfmpegCaptureBackend:
                 if cancelled():
                     handle.close()
                     return False
-                if not handle.prefetch(
-                    timeout_ms,
-                    cancelled,
-                    frame_timeout_ms=self.options.read_timeout_ms,
-                ):
+                if not handle.prefetch(timeout_ms, cancelled):
                     handle.close()
                     return False
                 return True
@@ -684,58 +354,48 @@ class FfmpegCaptureBackend:
         )
         frame_rate = min(10.0, max(0.5, float(requested_rate)))
         minimum_interval = 1.0 / frame_rate
-        rawvideo = self.options.frame_transport == "rawvideo"
-        video_filter = (
-            "select='isnan(prev_selected_t)+"
-            f"gte(t-prev_selected_t,{minimum_interval:.6f})',format=bgr24"
-        )
-        if rawvideo:
-            # FFmpeg 8.1 showinfo: checksum=0 skips the plane scan. The n/s
-            # fields on that line are the geometry header for the next raw frame.
-            video_filter += ",showinfo@capture=checksum=0"
+        output_args = [
+            "-vf",
+            (
+                "select='isnan(prev_selected_t)+"
+                f"gte(t-prev_selected_t,{minimum_interval:.6f})',format=bgr24"
+            ),
+            "-fps_mode",
+            "vfr",
+            "-c:v",
+            "bmp",
+            "-pix_fmt",
+            "bgr24",
+        ]
         command = [
             self.options.ffmpeg_path,
             "-hide_banner",
             "-nostdin",
             "-loglevel",
-            "info" if rawvideo else "error",
+            "error",
+            "-fflags",
+            "+genpts",
+            "-dts_error_threshold",
+            "10",
+            "-threads:v",
+            str(max(1, int(self.options.decoder_threads))),
         ]
-        if rawvideo:
-            command.extend(["-nostats", "-filter_threads", "1"])
-        command.extend(
-            [
-                "-fflags",
-                "+genpts",
-                "-dts_error_threshold",
-                "10",
-                "-threads:v",
-                str(max(1, int(self.options.decoder_threads))),
-            ]
-        )
         if source_url.lower().startswith(("rtsp://", "rtsps://")):
             command.extend(["-rtsp_transport", self.options.rtsp_transport])
-        command.extend(
-            [
-                "-i",
-                source_url,
-                "-map",
-                "0:v:0",
-                "-an",
-                "-vf",
-                video_filter,
-                "-fps_mode",
-                "vfr",
-                "-pix_fmt",
-                "bgr24",
-            ]
-        )
-        if rawvideo:
-            command.extend(["-f", "rawvideo", "pipe:1"])
-        else:
-            command.extend(
-                ["-c:v", "bmp", "-f", "image2pipe", "-vcodec", "bmp", "pipe:1"]
-            )
-        return command
+        return [
+            *command,
+            "-i",
+            source_url,
+            "-map",
+            "0:v:0",
+            "-an",
+            *output_args,
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "bmp",
+            "pipe:1",
+        ]
 
     def _warn_credentialed_process_url(self, source_url: str) -> None:
         try:
