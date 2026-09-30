@@ -384,6 +384,58 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         self.assertEqual(result.scoring.reason, "illumination_change")
         self.assertTrue(result.scoring.features["illumination_would_reject"])
 
+    def test_illumination_filter_cached_gray_matches_color_conversion(self) -> None:
+        def evaluate(luminance: tuple[np.ndarray, ...] = ()) -> dict:
+            pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
+                "light-change",
+                [MotionStageConfig(
+                    "illumination",
+                    "illumination_change_filter",
+                    {"minimum_evidence_frames": 2, "rejection_threshold": 0.82},
+                )],
+                initial_artifacts={"motion_mask_history", "scoring"},
+            )
+            try:
+                return pipeline.process(MotionContext(
+                    camera_id="light-change",
+                    captured_at=100.0,
+                    original_frame=darkest,
+                    frame_history=(base, darker, darkest),
+                    luminance_frame_history=luminance,
+                    motion_mask_history=(mask, mask),
+                    configuration={"illumination_filter_enabled": True},
+                    runtime=pipeline.runtime,
+                    scoring=MotionScoring(
+                        accepted=True,
+                        score=0.82,
+                        threshold=0.48,
+                        reason="qualified",
+                    ),
+                )).scoring.features
+            finally:
+                pipeline.close()
+
+        rng = np.random.default_rng(7)
+        texture = rng.integers(35, 220, (90, 160), dtype=np.uint8)
+        base = cv2.cvtColor(texture, cv2.COLOR_GRAY2BGR)
+        darker = np.clip(base.astype(np.float32) * 0.62, 0, 255).astype(np.uint8)
+        darkest = np.clip(base.astype(np.float32) * 0.42, 0, 255).astype(np.uint8)
+        mask = np.full(base.shape[:2], 255, dtype=np.uint8)
+        gray = tuple(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) for frame in (base, darker, darkest))
+        converted = evaluate()
+        cached = evaluate(gray)
+        mismatched = evaluate((gray[0][:40], gray[1], gray[2]))
+        for key in (
+            "illumination_would_reject",
+            "illumination_evidence_available",
+            "illumination_score",
+            "illumination_structure_preservation",
+        ):
+            if key in converted:
+                self.assertEqual(cached[key], converted[key])
+                self.assertEqual(mismatched[key], converted[key])
+        self.assertEqual(cached["illumination_would_reject"], True)
+
     def test_illumination_filter_skips_color_analysis_when_disabled(self) -> None:
         pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
             "light-observe",

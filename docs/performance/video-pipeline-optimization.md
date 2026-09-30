@@ -6,6 +6,7 @@ Phase 0 was skipped. Recording stream-copy and go2rtc/WebRTC are unchanged.
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | Raw BGR instead of BMP on the live capture pipe (FFmpeg 8.1.2) | Lower at 720p | Read p95 lower at 720p | One pipe fill into the NumPy frame | Similar | Keep |
 | 2 | Hardware decode on the one live capture process, then the Phase 1 software path | Not measured | Not measured | Same bgr24 pipe after hwdownload | Not measured | Revert the live wiring. QSV stays on recorded evidence frames |
+| 3 | Reuse an analysis-sized BGR frame as the color slot, and reuse its gray in the illumination filter | About 0.04 ms less preprocess at 640x360 | Not a capture-read change | Drops the same-size color resize | Same | Keep |
 
 ## Phase 1 — raw BGR transport
 
@@ -90,3 +91,51 @@ This machine has no `/dev/dri` render node, so hardware decode and the hwdownloa
 ### Recommendation
 
 Do not put this on the persistent live capture process. On a host whose `hardware_acceleration` is `qsv`, those live processes hold the render node that recorded evidence frames also use, and the incident picture falls back to the substream. The manager leaves live capture on the Phase 1 software command. `hardware_acceleration=qsv` still applies to recorded evidence frames.
+
+## Phase 3 — gray for motion, color only where a consumer needs it
+
+### Consumer map
+
+Live capture is still one software bgr24 pipe. Phase 2's hardware plan is not wired into that process. Recorded evidence frames still decode through their own FFmpeg process and still follow `hardware_acceleration`.
+
+| Consumer | What it needs | What Phase 3 does |
+| --- | --- | --- |
+| Live capture pipe | Full bgr24 | Unchanged |
+| Snapshots, live object detection, scene discovery | That same full bgr24 frame | Unchanged |
+| Tracking catch-up | bgr24, resized only above 640 px wide | Unchanged |
+| Recorded evidence frames | Full color from the separate decoder | Unchanged |
+| Motion submission | A private bgr24 copy, because detection and tracking share the capture buffer | Kept |
+| Motion color slot | Downscaled bgr24 for illumination chroma and the fast-evidence token | Reuse the private copy when it is already the analysis size |
+| EMA, difference, blobs, score | Blurred gray, already cached as `gray_blur` | Unchanged |
+| Illumination structure | Unblurred gray of those color frames | Use the cached gray. Anchor and background pairs still convert, because those copies are not the cached gray |
+| Spatial alignment, detector RGB, face, depth, search | Their own conversions of the frame they receive | Unchanged |
+
+The qualification stages already skip a second gray conversion and blur when the cached derivative matches. Color was still resized again on the way into that cache, including when the live frame's long edge was already the motion `frame_width`.
+
+### Change
+
+`_preprocess_frame` keeps a frozen, owned bgr24 frame as the color slot when its width and height are already the analysis size. A writeable frame is still copied, so a caller's buffer is not frozen. A larger frame still uses `INTER_AREA` downscale, then one gray conversion and one blur.
+
+Continuous qualification passes that unblurred gray beside the color history. The illumination filter uses it for the Sobel structure measurement. Chroma and luminance polarity still come from the color frame. A missing or mismatched gray buffer falls back to converting the color pair, which is the previous behavior.
+
+Detection thresholds, tracking, snapshot geometry, recording, and the live FFmpeg command are unchanged.
+
+### Tests
+
+`tests/test_motion_analysis_service.py` covers reuse of a frozen analysis-sized frame, the copy that remains for a writeable frame, and passing the cached gray into continuous qualification. `tests/test_adaptive_motion.py` checks that the cached gray produces the same illumination features as converting the color pair, including when a mismatched gray buffer is ignored.
+
+### Benchmark
+
+`scripts/benchmark_motion_color_reuse.py`. Median of 9 passes of 400 frames. This host was serving cameras, so the smaller deltas are coarse. One run:
+
+| Path | Time |
+| --- | --- |
+| 640x360 resize, then gray and blur | 0.134 ms |
+| 640x360 reuse the color frame, then gray and blur | 0.090 ms |
+| 1280x720 downscale, then gray and blur | 0.185 ms |
+
+The 1280x720 path still downscales. Repeated runs kept the reuse path below the same-size resize, by about 0.03–0.04 ms on the quieter passes. At a 640-wide analysis frame that is the whole saving: one fewer BGR buffer per sample. Gray conversion and the blur remain, because those are the motion inputs.
+
+### Recommendation
+
+Keep. The motion hot path was already gray. This stops the extra color copy on analysis-sized live frames and stops the illumination filter from converting those same frames to gray again. Roll back this phase if a same-size frame must be a distinct buffer from the submission copy.
