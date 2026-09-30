@@ -76,6 +76,10 @@ class MotionContext:
     runtime: MotionRuntimeState
 
     frame_history: tuple[Frame, ...] = ()
+    # Unblurred gray aligned with frame_history. Empty when the caller did
+    # not already convert these color frames. The illumination filter uses
+    # this for structure and falls back to converting the color pair.
+    luminance_frame_history: tuple[Frame, ...] = ()
     frame_timestamps: tuple[float, ...] = ()
     processed_frame_history: tuple[Frame, ...] = ()
     difference_history: tuple[Frame, ...] = ()
