@@ -7,6 +7,7 @@ Phase 0 was skipped. Recording stream-copy and go2rtc/WebRTC are unchanged.
 | 1 | Raw BGR instead of BMP on the live capture pipe (FFmpeg 8.1.2) | Lower at 720p | Read p95 lower at 720p | One pipe fill into the NumPy frame | Similar | Keep |
 | 2 | Hardware decode on the one live capture process, then the Phase 1 software path | Not measured | Not measured | Same bgr24 pipe after hwdownload | Not measured | Revert the live wiring. QSV stays on recorded evidence frames |
 | 3 | Reuse an analysis-sized BGR frame as the color slot, and reuse its gray in the illumination filter | About 0.04 ms less preprocess at 640x360 | Not a capture-read change | Drops the same-size color resize | Same | Keep |
+| 4 | Experimental GStreamer appsink backend. FFmpeg stays the default | Higher child CPU per frame | Read p95 similar | Extra pack in the worker, then one NumPy copy | Higher | Keep experimental. Do not switch the default |
 
 ## Phase 1 — raw BGR transport
 
@@ -139,3 +140,48 @@ The 1280x720 path still downscales. Repeated runs kept the reuse path below the 
 ### Recommendation
 
 Keep. The motion hot path was already gray. This stops the extra color copy on analysis-sized live frames and stops the illumination filter from converting those same frames to gray again. Roll back this phase if a same-size frame must be a distinct buffer from the submission copy.
+
+## Phase 4 — experimental GStreamer capture backend
+
+### Current state
+
+Live capture is still one FFmpeg process per source, software bgr24, rawvideo on the pipe. Phase 2's hardware plan is not wired into that process, because a persistent live decoder holds the render node that recorded evidence frames use. `capture_backend` defaults to `ffmpeg`.
+
+### Change
+
+`capture_backend=gstreamer` selects `GStreamerCaptureBackend`. The manager still passes software decode only. Recorded evidence frames still use `hardware_acceleration`.
+
+The worker is system Python, which has the GStreamer bindings. The service venv does not. One process per source:
+
+`rtspsrc` or `filesrc` → `decodebin` → `videorate drop-only` → `videoconvert` to BGR → `appsink` with one buffer and drop enabled
+
+Each buffer is packed as magic, width, height, and tightly packed BGR, then written to stdout. The parent reads that header before the payload, so a resolution change cannot shift the next frame. The worker keeps at most one packed frame queued while stdout is blocked. `CameraCaptureService` still stamps the frame when it is published and still reconnects when `read` fails. `close` terminates the worker process group.
+
+RTSP uses the configured tcp or udp transport, a 100 ms jitter buffer, and drop-on-latency. This image has no VAAPI or QSV GStreamer decoder, and this backend does not request one.
+
+The default remains FFmpeg. Applying `capture_backend` requires a process restart.
+
+### Risks
+
+- The worker needs `/usr/bin/python3`, `python3-gi`, and the GStreamer plugins. A host without them fails the open and the existing reconnect loop keeps retrying.
+- `videorate` max-rate is an integer, so the shared 0.5–10 fps cap is rounded. Configured motion sample rates are already at least 2.
+- Software `decodebin` plus the pack step uses more CPU and RSS than the FFmpeg raw pipe. Hardware decode was not added on this persistent process.
+
+### Tests
+
+`tests/test_gstreamer_capture.py` checks that hardware acceleration is rejected, that an RTSP command stays on the software worker, and that a real local H.264 file returns distinct owned BGR frames. The file test skips when system GStreamer bindings or FFmpeg are absent. The manager test checks that `qsv` still leaves the default backend on FFmpeg, and that an explicit GStreamer selection stays on software decode while the recorder keeps `qsv`.
+
+### Benchmark
+
+`scripts/benchmark_gstreamer_capture.py`. Local 640x360 H.264, 3 seconds at 20 fps, both backends capped at 10 fps. Saturated file decode, not paced RTSP. Three runs:
+
+| Backend | Frames | Child CPU / frame | Read p95 | Child RSS |
+| --- | --- | --- | --- | --- |
+| FFmpeg rawvideo | 25 | 2.8–3.6 ms | 0.57–0.89 ms | 59 MB |
+| GStreamer appsink | 24–28 | 5.6–5.8 ms | 0.70–0.87 ms | 96 MB |
+
+Python time on the read loop stayed under 1 ms per frame for both. Clock resolution is 10 ms, so that smaller number is coarse. The child cost is not: GStreamer spent more CPU per delivered frame and held more memory. Frame counts differ because `videorate` and the FFmpeg `select` interval are not the same drop rule.
+
+### Recommendation
+
+Keep it as an opt-in experiment. Do not make it the default. FFmpeg rawvideo is the lower CPU and RSS path on this host. Switch a process with `capture_backend` set to `gstreamer` only to compare a live camera, and set it back to `ffmpeg` afterward. Do not point this backend at a hardware decoder on the persistent live process.

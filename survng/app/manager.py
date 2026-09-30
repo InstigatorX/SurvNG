@@ -17,6 +17,7 @@ from .camera_capture import (
     FfmpegCaptureOptions,
     FfmpegCaptureBackend,
 )
+from .gstreamer_capture import GStreamerCaptureBackend, GStreamerCaptureOptions
 from .camera_control import CameraControlService
 from .camera_fleet import CameraFleetLifecycle, CameraFleetOperationError
 from .camera_startup import (
@@ -327,24 +328,38 @@ class AppManager:
         self._capture_open_limiter = CaptureOpenLimiter(
             CAMERA_STARTUP_MAX_CONCURRENCY
         )
-        self.capture_backend = FfmpegCaptureBackend(
-            self._capture_open_limiter,
-            FfmpegCaptureOptions(
-                ffmpeg_path=config.ffmpeg_path,
-                rtsp_transport=config.capture_rtsp_transport,
-                frame_transport=config.capture_frame_transport,
-                # Live capture stays on the software bgr24 path. QSV on this
-                # process shares the one render node with recorded evidence
-                # frames and replaces their full-size snapshots with the
-                # substream. hardware_acceleration still applies to those
-                # recorded frames.
-                hardware_acceleration="off",
-                frame_rate=lambda: max(
-                    self.config.motion_qualification.sample_fps,
-                    self.config.detector.tracking.sample_fps,
+        def capture_rate() -> float:
+            return max(
+                self.config.motion_qualification.sample_fps,
+                self.config.detector.tracking.sample_fps,
+            )
+        if config.capture_backend == "gstreamer":
+            # Same software-only rule as the FFmpeg live path. The GStreamer
+            # worker is an appsink experiment and does not open a render node.
+            self.capture_backend = GStreamerCaptureBackend(
+                self._capture_open_limiter,
+                GStreamerCaptureOptions(
+                    rtsp_transport=config.capture_rtsp_transport,
+                    hardware_acceleration="off",
+                    frame_rate=capture_rate,
                 ),
-            ),
-        )
+            )
+        else:
+            self.capture_backend = FfmpegCaptureBackend(
+                self._capture_open_limiter,
+                FfmpegCaptureOptions(
+                    ffmpeg_path=config.ffmpeg_path,
+                    rtsp_transport=config.capture_rtsp_transport,
+                    frame_transport=config.capture_frame_transport,
+                    # Live capture stays on the software bgr24 path. QSV on this
+                    # process shares the one render node with recorded evidence
+                    # frames and replaces their full-size snapshots with the
+                    # substream. hardware_acceleration still applies to those
+                    # recorded frames.
+                    hardware_acceleration="off",
+                    frame_rate=capture_rate,
+                ),
+            )
         self.state_events = StateEventBroker()
         self.activity_events = ActivityEventBus(self._publish_activity_transition)
         try:

@@ -819,6 +819,32 @@ class ManagerLifecycleTest(unittest.TestCase):
                     "off",
                 )
                 self.assertEqual(manager.recorder.hardware_acceleration, "qsv")
+                self.assertEqual(type(manager.capture_backend).__name__, "FfmpegCaptureBackend")
+            finally:
+                manager.stop_all()
+
+    def test_gstreamer_capture_stays_off_the_render_node(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = AppManager(AppConfig(
+                storage_dir=tmpdir,
+                capture_backend="gstreamer",
+                hardware_acceleration="qsv",
+            ))
+            try:
+                self.assertEqual(
+                    type(manager.capture_backend).__name__,
+                    "GStreamerCaptureBackend",
+                )
+                self.assertEqual(
+                    manager.capture_backend.options.hardware_acceleration,
+                    "off",
+                )
+                self.assertEqual(manager.recorder.hardware_acceleration, "qsv")
+                command = manager.capture_backend._command("rtsp://camera/live")
+                self.assertIn("gstreamer_capture_worker.py", command[1])
+                self.assertEqual(command[-1], "tcp")
+                self.assertNotIn("vaapi", " ".join(command))
+                self.assertNotIn("qsv", " ".join(command))
             finally:
                 manager.stop_all()
 
