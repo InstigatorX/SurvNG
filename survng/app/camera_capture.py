@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
+import queue
+import re
 import select
 import subprocess
 import threading
@@ -40,6 +42,16 @@ CAPTURE_FRAME_MAX_BYTES = 256 * 1024 * 1024
 CAPTURE_PIPE_READ_CHUNK_BYTES = 64 * 1024
 CAPTURE_SHUTDOWN_WAIT_SECONDS = 1.0
 CAPTURE_STDERR_JOIN_SECONDS = 1.0
+# Width/height only. Deep enough for FFmpeg's filter/muxer lookahead, and
+# never a blocking put: blocking the stderr reader deadlocks a frame larger
+# than the stdout pipe. Overflow fails the stream instead of growing forever.
+CAPTURE_RAW_GEOMETRY_QUEUE_DEPTH = 64
+
+# Named showinfo instance, checksums disabled. The line is the in-band
+# geometry record for rawvideo: stdout is not read until this matches.
+_SHOWINFO_FRAME = re.compile(
+    rb"showinfo@capture\b.*?\bn:[ \t]*(\d+)\b.*?\bs:(\d+)x(\d+)\b"
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -96,18 +108,32 @@ class FfmpegCaptureOptions:
     admission_poll_seconds: float = CAPTURE_OPEN_LOCK_POLL_SECONDS
     rtsp_transport: str = "tcp"
     frame_rate: Callable[[], float] | None = None
+    frame_transport: str = "rawvideo"
 
 
 class FfmpegCaptureHandle:
-    """One external FFmpeg decoder whose stdout carries self-framed BMPs."""
+    """One external FFmpeg decoder. Raw BGR is the default stdout transport."""
 
-    def __init__(self, *, read_timeout_ms: int) -> None:
+    def __init__(
+        self,
+        *,
+        read_timeout_ms: int,
+        frame_transport: str = "rawvideo",
+    ) -> None:
         self._read_timeout_seconds = max(0.001, read_timeout_ms / 1000.0)
+        self._frame_transport = frame_transport
         self._process: subprocess.Popen[bytes] | None = None
         self._buffer = bytearray()
         self._prefetched: np.ndarray | None = None
         self._stderr = bytearray()
+        self._stderr_pending = bytearray()
         self._stderr_thread: threading.Thread | None = None
+        self._geometries: queue.Queue[tuple[int, int]] = queue.Queue(
+            maxsize=CAPTURE_RAW_GEOMETRY_QUEUE_DEPTH
+        )
+        self._transport_failed = threading.Event()
+        self._transport_failure = ""
+        self._next_showinfo_index = 0
 
     def is_opened(self) -> bool:
         return self._process is not None and self._process.poll() is None
@@ -192,6 +218,9 @@ class FfmpegCaptureHandle:
         process = self._process
         return_code = process.poll() if process is not None else None
         detail = self._stderr.decode("utf-8", errors="replace").strip()[-400:]
+        failure = self._transport_failure.strip()
+        if failure:
+            detail = f"{failure}: {detail}" if detail else failure
         if return_code is None:
             return detail
         outcome = (
@@ -206,14 +235,170 @@ class FfmpegCaptureHandle:
         if process is None or process.stderr is None:
             return
         while True:
-            chunk = process.stderr.read(CAPTURE_PIPE_READ_CHUNK_BYTES)
+            # read() waits until its buffer is full. FFmpeg can block on
+            # stdout before stderr reaches that size, so the geometry line
+            # would sit unread. read1 returns the bytes already available.
+            read1 = getattr(process.stderr, "read1", None)
+            if read1 is None:
+                chunk = process.stderr.read(CAPTURE_PIPE_READ_CHUNK_BYTES)
+            else:
+                chunk = read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
             if not chunk:
                 return
             self._stderr.extend(chunk)
             if len(self._stderr) > 8192:
                 del self._stderr[:-8192]
+            if self._frame_transport == "rawvideo":
+                self._consume_stderr_chunk(chunk)
+
+    def _consume_stderr_chunk(self, chunk: bytes) -> None:
+        pending = self._stderr_pending
+        pending.extend(chunk)
+        while True:
+            newline = pending.find(b"\n")
+            carriage = pending.find(b"\r")
+            breaks = [index for index in (newline, carriage) if index >= 0]
+            if not breaks:
+                break
+            index = min(breaks)
+            line = bytes(pending[:index])
+            del pending[: index + 1]
+            self._note_showinfo_line(line)
+        if len(pending) > 8192:
+            # Encoder SEI and other info records can be long. Drop the head
+            # without failing; a real showinfo line is much shorter than this.
+            del pending[:-1024]
+
+    def _note_showinfo_line(self, line: bytes) -> None:
+        if self._transport_failed.is_set():
+            return
+        parsed = _parse_showinfo_geometry(line)
+        if parsed is None:
+            return
+        index, width, height = parsed
+        frame_bytes = width * height * 3
+        if (
+            index != self._next_showinfo_index
+            or width <= 0
+            or height <= 0
+            or frame_bytes > CAPTURE_FRAME_MAX_BYTES
+        ):
+            self._fail_transport(
+                "FFmpeg capture lost raw frame alignment "
+                f"(showinfo n={index}, expected {self._next_showinfo_index}, "
+                f"{width}x{height})"
+            )
+            return
+        self._next_showinfo_index = index + 1
+        try:
+            self._geometries.put_nowait((width, height))
+        except queue.Full:
+            self._fail_transport("FFmpeg capture geometry queue overflow")
+
+    def _fail_transport(self, message: str) -> None:
+        if self._transport_failed.is_set():
+            return
+        self._transport_failure = message
+        self._transport_failed.set()
 
     def _next_frame(
+        self,
+        timeout_seconds: float,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> np.ndarray | None:
+        if self._frame_transport == "rawvideo":
+            return self._next_raw_frame(timeout_seconds, cancelled=cancelled)
+        return self._next_bmp_frame(timeout_seconds, cancelled=cancelled)
+
+    def _next_raw_frame(
+        self,
+        timeout_seconds: float,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> np.ndarray | None:
+        process = self._process
+        if process is None or process.stdout is None:
+            return None
+        deadline = time.monotonic() + timeout_seconds
+        geometry = self._wait_raw_geometry(deadline, cancelled)
+        if geometry is None:
+            return None
+        width, height = geometry
+        frame = np.empty((height, width, 3), dtype=np.uint8)
+        view = memoryview(frame).cast("B")
+        try:
+            completed = self._read_exact(process, view, deadline, cancelled)
+        finally:
+            view.release()
+        if not completed:
+            return None
+        return frame
+
+    def _wait_raw_geometry(
+        self,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> tuple[int, int] | None:
+        while True:
+            if cancelled is not None and cancelled():
+                return None
+            process = self._process
+            if process is None:
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                return self._geometries.get(
+                    timeout=min(remaining, CAPTURE_OPEN_LOCK_POLL_SECONDS)
+                )
+            except queue.Empty:
+                if self._transport_failed.is_set():
+                    return None
+                if process.poll() is not None:
+                    return None
+
+    def _read_exact(
+        self,
+        process: subprocess.Popen[bytes],
+        destination: memoryview,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> bool:
+        stdout = process.stdout
+        if stdout is None:
+            return False
+        reader = _raw_stdout(stdout)
+        offset = 0
+        total = len(destination)
+        while offset < total:
+            if cancelled is not None and cancelled():
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                readable, _, _ = select.select(
+                    [reader],
+                    [],
+                    [],
+                    min(remaining, CAPTURE_OPEN_LOCK_POLL_SECONDS),
+                )
+            except (OSError, ValueError):
+                return False
+            if not readable:
+                continue
+            try:
+                read = _read_stdout_into(reader, destination[offset:])
+            except (OSError, ValueError):
+                return False
+            if read <= 0:
+                return False
+            offset += read
+        return True
+
+    def _next_bmp_frame(
         self,
         timeout_seconds: float,
         *,
@@ -245,6 +430,41 @@ class FfmpegCaptureHandle:
             if not chunk:
                 return None
             self._buffer.extend(chunk)
+
+
+def _raw_stdout(stdout: object) -> object:
+    """Return the unbuffered pipe so reads cannot race a buffered select."""
+    raw = getattr(stdout, "raw", None)
+    if raw is None:
+        raw = getattr(getattr(stdout, "buffer", None), "raw", None)
+    if raw is not None and hasattr(raw, "readinto") and hasattr(raw, "fileno"):
+        return raw
+    return stdout
+
+
+def _read_stdout_into(stdout: object, destination: memoryview) -> int:
+    """Copy pipe bytes once, directly into the caller-owned frame."""
+    readinto = getattr(stdout, "readinto", None)
+    if readinto is not None:
+        read = readinto(destination)
+        return 0 if read is None else int(read)
+    read1 = getattr(stdout, "read1", None)
+    if read1 is None:
+        chunk = stdout.read(len(destination))
+    else:
+        chunk = read1(len(destination))
+    if not chunk:
+        return 0
+    destination[: len(chunk)] = chunk
+    return len(chunk)
+
+
+def _parse_showinfo_geometry(line: bytes) -> tuple[int, int, int] | None:
+    """Return `(index, width, height)` from one raw-capture showinfo line."""
+    match = _SHOWINFO_FRAME.search(line)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
 
 
 def _bmp_frame_size(buffer: bytearray) -> int | None:
@@ -303,11 +523,16 @@ class FfmpegCaptureBackend:
         self.options = options or FfmpegCaptureOptions()
         if self.options.rtsp_transport not in {"tcp", "udp"}:
             raise ValueError("rtsp_transport must be tcp or udp")
+        if self.options.frame_transport not in {"rawvideo", "bmp"}:
+            raise ValueError("frame_transport must be rawvideo or bmp")
         self._credential_warning_lock = threading.Lock()
         self._credential_warning_hosts: set[str] = set()
 
     def create_handle(self) -> CaptureHandle:
-        return FfmpegCaptureHandle(read_timeout_ms=self.options.read_timeout_ms)
+        return FfmpegCaptureHandle(
+            read_timeout_ms=self.options.read_timeout_ms,
+            frame_transport=self.options.frame_transport,
+        )
 
     def open(
         self,
@@ -354,48 +579,58 @@ class FfmpegCaptureBackend:
         )
         frame_rate = min(10.0, max(0.5, float(requested_rate)))
         minimum_interval = 1.0 / frame_rate
-        output_args = [
-            "-vf",
-            (
-                "select='isnan(prev_selected_t)+"
-                f"gte(t-prev_selected_t,{minimum_interval:.6f})',format=bgr24"
-            ),
-            "-fps_mode",
-            "vfr",
-            "-c:v",
-            "bmp",
-            "-pix_fmt",
-            "bgr24",
-        ]
+        rawvideo = self.options.frame_transport == "rawvideo"
+        video_filter = (
+            "select='isnan(prev_selected_t)+"
+            f"gte(t-prev_selected_t,{minimum_interval:.6f})',format=bgr24"
+        )
+        if rawvideo:
+            # checksum=0 avoids a full-frame scan. The named showinfo line is
+            # the geometry header for the following fixed-size raw frame.
+            video_filter += ",showinfo@capture=checksum=0"
         command = [
             self.options.ffmpeg_path,
             "-hide_banner",
             "-nostdin",
             "-loglevel",
-            "error",
-            "-fflags",
-            "+genpts",
-            "-dts_error_threshold",
-            "10",
-            "-threads:v",
-            str(max(1, int(self.options.decoder_threads))),
+            "info" if rawvideo else "error",
         ]
+        if rawvideo:
+            command.extend(["-nostats", "-filter_threads", "1"])
+        command.extend(
+            [
+                "-fflags",
+                "+genpts",
+                "-dts_error_threshold",
+                "10",
+                "-threads:v",
+                str(max(1, int(self.options.decoder_threads))),
+            ]
+        )
         if source_url.lower().startswith(("rtsp://", "rtsps://")):
             command.extend(["-rtsp_transport", self.options.rtsp_transport])
-        return [
-            *command,
-            "-i",
-            source_url,
-            "-map",
-            "0:v:0",
-            "-an",
-            *output_args,
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "bmp",
-            "pipe:1",
-        ]
+        command.extend(
+            [
+                "-i",
+                source_url,
+                "-map",
+                "0:v:0",
+                "-an",
+                "-vf",
+                video_filter,
+                "-fps_mode",
+                "vfr",
+                "-pix_fmt",
+                "bgr24",
+            ]
+        )
+        if rawvideo:
+            command.extend(["-f", "rawvideo", "pipe:1"])
+        else:
+            command.extend(
+                ["-c:v", "bmp", "-f", "image2pipe", "-vcodec", "bmp", "pipe:1"]
+            )
+        return command
 
     def _warn_credentialed_process_url(self, source_url: str) -> None:
         try:
