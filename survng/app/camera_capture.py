@@ -141,6 +141,7 @@ class FfmpegCaptureHandle:
         )
         self._transport_failed = threading.Event()
         self._transport_failure = ""
+        self._failure_detail = ""
         self._next_showinfo_index = 0
         self.decode_plan = ""
         self._stream_generation = 0
@@ -185,6 +186,7 @@ class FfmpegCaptureHandle:
             # this reset. The generation makes those bytes miss this stream.
             self._stream_generation += 1
             self._open_phase = "connecting"
+            self._failure_detail = ""
             self._buffer.clear()
             self._prefetched = None
             self._stderr.clear()
@@ -280,6 +282,10 @@ class FfmpegCaptureHandle:
         return (frame is not None), frame
 
     def close(self) -> None:
+        # Open reports failure after this returns, so keep the detail that was
+        # true while the process object still existed.
+        if self._process is not None and not self._failure_detail:
+            self._failure_detail = self.error_detail()
         process, self._process = self._process, None
         if process is None:
             return
@@ -315,6 +321,8 @@ class FfmpegCaptureHandle:
 
     def error_detail(self) -> str:
         process = self._process
+        if process is None and self._failure_detail:
+            return self._failure_detail
         return_code = process.poll() if process is not None else None
         with self._stream_lock:
             detail = self._stderr_failure_text()
