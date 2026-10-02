@@ -904,6 +904,14 @@ class MotionIncidentService:
             require_motion_correlation=require_motion_correlation,
         )
         self._record_timing(outcome, kind="live")
+        if (
+            outcome.refinement_pending
+            and qualification.get("live_probe")
+            and outcome.event_id is None
+        ):
+            # Bounded live probes buy coverage of an unresolved episode; a
+            # miss must not add recorded work to the shared refinement queue.
+            outcome = replace(outcome, refinement_pending=False)
         refinement_admission = "not_needed"
         if outcome.refinement_pending:
             # Mandatory delayed discovery is admitted before any optional

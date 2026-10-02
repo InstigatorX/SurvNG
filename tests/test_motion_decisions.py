@@ -624,7 +624,10 @@ def test_learned_camera_nuisance_remains_suppressed_without_forced_check() -> No
     assert published["confident_nuisance"] is True
 
 
-def test_active_followup_requires_correlated_object_and_records_audit() -> None:
+@pytest.mark.parametrize("live_probe", [False, True])
+def test_active_followup_requires_correlated_object_and_records_audit(
+    live_probe: bool,
+) -> None:
     events = MotionEventCoordinator(queue_size=4, retry_limit=2)
     now = datetime.now(timezone.utc)
     result = MotionQualificationResult(
@@ -637,6 +640,7 @@ def test_active_followup_requires_correlated_object_and_records_audit() -> None:
             "active_event_followup": True,
             "active_event_followup_anchor": 1,
             "motion_regions": [[0.55, 0.55, 0.85, 0.9]],
+            **({"live_probe": True} if live_probe else {}),
         },
     )
     trigger = MotionTrigger(
@@ -684,6 +688,7 @@ def test_active_followup_requires_correlated_object_and_records_audit() -> None:
     process_kwargs = incidents.process.call_args.kwargs
     assert process_kwargs["require_eligible_object"] is True
     assert process_kwargs["require_motion_correlation"] is True
+    assert incidents.process.call_args.args[3]["live_probe"] is live_probe
     audit_kwargs = audit.record_audit.call_args.kwargs
     assert audit_kwargs["category"] == "active_followup"
     assert audit_kwargs["related_event_id"] == 42

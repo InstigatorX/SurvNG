@@ -381,6 +381,14 @@ class MotionDecisionOrchestrator:
             item.topic == "adaptive/active_followup" for item in triggers
         )
         active_followup = adaptive_only and active_followup_queued
+        live_probe = bool(
+            active_followup
+            and all(
+                item.prequalified is not None
+                and item.prequalified.features.get("live_probe")
+                for item in triggers
+            )
+        )
         result, diagnostics = self._qualification_result(
             triggers=triggers,
             event_at=event_at,
@@ -443,6 +451,7 @@ class MotionDecisionOrchestrator:
                 if active_followup
                 else "adaptive" if adaptive_only else "camera"
             ),
+            "live_probe": live_probe,
             "retry_count": max((item.retry_count for item in triggers), default=0),
             "trigger_received_at_epoch": received_at,
             "event_timing": (

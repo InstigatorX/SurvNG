@@ -1565,6 +1565,7 @@ class MotionAnalysisService:
                     **result.features,
                     "visual_backup": trigger_mode == "camera_rescue" and not followup,
                     "active_event_followup": followup,
+                    **({"live_probe": True} if intent.live_probe else {}),
                     "ema_v2": True,
                     "motion_episode_id": intent.episode_id,
                     "visual_backup_required_score": round(

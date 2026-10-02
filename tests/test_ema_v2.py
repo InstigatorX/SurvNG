@@ -267,6 +267,7 @@ def test_camera_first_merge_remembers_ema_track_for_followup_deduplication() -> 
     )
 
     merged = controller.observe_ema(merged_ema, generation=0)
+    controller.link_incident(41)
     controller.complete(camera.intent.intent_id, occurred_monotonic=1011.2)
     duplicate = controller.observe_ema(
         replace(
@@ -661,6 +662,7 @@ def test_same_track_cannot_create_followup_request() -> None:
     controller.acknowledge_admission(
         first.intent.intent_id, admitted=True, occurred_monotonic=1011.1
     )
+    controller.link_incident(41)
     controller.complete(first.intent.intent_id, occurred_monotonic=1012.0)
 
     duplicate = controller.observe_ema(
@@ -669,3 +671,130 @@ def test_same_track_cannot_create_followup_request() -> None:
     )
 
     assert duplicate.reason is EpisodeDecisionReason.FOLLOWUP_DUPLICATE
+
+
+def _admit_and_complete(controller, decision, at: float) -> None:
+    assert decision.intent is not None
+    controller.acknowledge_admission(
+        decision.intent.intent_id, admitted=True, occurred_monotonic=at
+    )
+    controller.complete(decision.intent.intent_id, occurred_monotonic=at + 0.1)
+
+
+def test_unresolved_episode_live_probes_same_track_through_cooldown() -> None:
+    # One continuous motion track (a person walking through a dark room) must
+    # keep being rechecked while no incident exists, even inside cooldown.
+    controller = MotionEpisodeController(
+        "foyer",
+        cooldown_seconds=20.0,
+        maximum_ema_requests_5m=2,
+        maximum_live_probes=2,
+        live_probe_interval_seconds=3.0,
+    )
+    controller.start_generation(1)
+
+    def observe(started_at: float):
+        return controller.observe_ema(
+            _qualified_region(
+                camera="foyer",
+                track_id=1,
+                region=(0.16, 0.48, 0.20, 0.65),
+                started_at=started_at,
+            ),
+            generation=1,
+        )
+
+    first = observe(10.0)
+    assert first.reason is EpisodeDecisionReason.REQUEST_RESERVED
+    _admit_and_complete(controller, first, 1011.1)
+
+    probe = observe(14.0)
+    assert probe.reason is EpisodeDecisionReason.FOLLOWUP_RESERVED
+    assert probe.intent is not None
+    assert probe.intent.live_probe is True
+    assert probe.intent.followup is True
+    assert probe.intent.episode_id == first.intent.episode_id
+    _admit_and_complete(controller, probe, 1015.1)
+
+    too_soon = observe(15.0)
+    assert too_soon.reason is EpisodeDecisionReason.FOLLOWUP_RATE_LIMITED
+
+    second_probe = observe(18.0)
+    assert second_probe.intent is not None
+    assert second_probe.intent.live_probe is True
+    _admit_and_complete(controller, second_probe, 1019.1)
+
+    exhausted = observe(22.0)
+    assert exhausted.reason is EpisodeDecisionReason.FOLLOWUP_DUPLICATE
+    snapshot = controller.snapshot()
+    assert snapshot["live_probe_count"] == 2
+    assert snapshot["followup_count"] == 0
+
+    # Probes do not consume the camera's five-minute EMA trigger budget.
+    later = controller.observe_ema(
+        _qualified_region(
+            camera="foyer",
+            track_id=9,
+            region=(0.6, 0.5, 0.8, 0.9),
+            started_at=70.0,
+        ),
+        generation=1,
+    )
+    assert later.reason is EpisodeDecisionReason.REQUEST_RESERVED
+    assert later.intent is not None
+    assert later.intent.live_probe is False
+
+
+def test_linked_incident_stops_live_probes() -> None:
+    controller = MotionEpisodeController(
+        "foyer", cooldown_seconds=20.0, live_probe_interval_seconds=3.0
+    )
+    controller.start_generation(1)
+    first = controller.observe_ema(
+        _qualified_region(
+            camera="foyer", track_id=1, region=(0.1, 0.4, 0.2, 0.7), started_at=10.0
+        ),
+        generation=1,
+    )
+    assert first.intent is not None
+    controller.acknowledge_admission(
+        first.intent.intent_id, admitted=True, occurred_monotonic=1011.1
+    )
+    controller.link_incident(83443)
+    controller.complete(first.intent.intent_id, occurred_monotonic=1011.2)
+
+    same_track = controller.observe_ema(
+        _qualified_region(
+            camera="foyer", track_id=1, region=(0.12, 0.4, 0.22, 0.7), started_at=14.0
+        ),
+        generation=1,
+    )
+
+    assert same_track.reason is EpisodeDecisionReason.FOLLOWUP_DUPLICATE
+    assert controller.snapshot()["live_probe_count"] == 0
+
+
+def test_aborted_live_probe_refunds_probe_budget() -> None:
+    controller = MotionEpisodeController(
+        "foyer", maximum_live_probes=1, live_probe_interval_seconds=3.0
+    )
+    controller.start_generation(1)
+
+    def observe(started_at: float):
+        return controller.observe_ema(
+            _qualified_region(
+                camera="foyer", track_id=1, region=(0.1, 0.4, 0.2, 0.7),
+                started_at=started_at,
+            ),
+            generation=1,
+        )
+
+    _admit_and_complete(controller, observe(10.0), 1011.1)
+    rejected = observe(14.0)
+    assert rejected.intent is not None and rejected.intent.live_probe
+    assert controller.snapshot()["live_probe_count"] == 1
+    controller.acknowledge_admission(
+        rejected.intent.intent_id, admitted=False, occurred_monotonic=1015.1
+    )
+
+    assert controller.snapshot()["live_probe_count"] == 0

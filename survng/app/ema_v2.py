@@ -317,6 +317,9 @@ class DetectionIntent:
     followup: bool = False
     ema: EmaQualified | None = None
     camera_notice: CameraNotice | None = None
+    # A live-frame-only recheck of an episode that has not produced an
+    # incident. It bypasses EMA cooldown/budget and recorded refinement.
+    live_probe: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,6 +354,7 @@ class _Episode:
     request_count: int = 0
     intent_sequence: int = 0
     followup_count: int = 0
+    live_probe_count: int = 0
     last_request_monotonic: float = 0.0
     known_track_ids: set[int] = field(default_factory=set)
     covered_regions: list[tuple[float, float, float, float]] = field(
@@ -381,6 +385,8 @@ class MotionEpisodeController:
         minimum_followup_interval_seconds: float = 1.5,
         followup_maximum_overlap: float = 0.10,
         followup_minimum_center_distance: float = 0.10,
+        maximum_live_probes: int = 12,
+        live_probe_interval_seconds: float = 3.0,
         incarnation_id: str | None = None,
     ) -> None:
         self.camera_id = camera_id
@@ -401,6 +407,10 @@ class MotionEpisodeController:
         )
         self.followup_minimum_center_distance = min(
             1.0, max(0.0, float(followup_minimum_center_distance))
+        )
+        self.maximum_live_probes = max(0, int(maximum_live_probes))
+        self.live_probe_interval_seconds = max(
+            0.0, float(live_probe_interval_seconds)
         )
         self._lock = threading.RLock()
         self._generation = 0
@@ -518,6 +528,7 @@ class MotionEpisodeController:
                         followup=episode.intent.followup,
                         ema=episode.ema,
                         camera_notice=episode.camera_notice,
+                        live_probe=episode.intent.live_probe,
                     )
                 return self._decision(
                     EpisodeDecisionReason.MERGED_WITH_REQUEST,
@@ -526,6 +537,7 @@ class MotionEpisodeController:
                     episode,
                     episode.intent,
                 )
+            live_probe_allowed = False
             if episode.status in {
                 DetectionRequestStatus.COMPLETED,
                 DetectionRequestStatus.FAILED,
@@ -538,10 +550,20 @@ class MotionEpisodeController:
                         episode,
                         episode.intent,
                     )
+                live_probe_allowed = self._live_probe_allowed(
+                    episode, observed_monotonic
+                )
                 followup_reason = self._followup_reason(
                     episode, ema, observed_monotonic
                 )
                 if followup_reason is not EpisodeDecisionReason.FOLLOWUP_RESERVED:
+                    if live_probe_allowed:
+                        return self._reserve_live_probe(
+                            episode,
+                            event_at=event_at,
+                            observed_monotonic=observed_monotonic,
+                            generation=generation,
+                        )
                     return self._decision(
                         followup_reason,
                         source,
@@ -556,6 +578,13 @@ class MotionEpisodeController:
                 and observed_monotonic - self._last_completed_monotonic
                 < self.cooldown_seconds
             ):
+                if live_probe_allowed:
+                    return self._reserve_live_probe(
+                        episode,
+                        event_at=event_at,
+                        observed_monotonic=observed_monotonic,
+                        generation=generation,
+                    )
                 return self._decision(
                     EpisodeDecisionReason.COOLDOWN_ACTIVE,
                     source,
@@ -567,6 +596,13 @@ class MotionEpisodeController:
                 and not bypass_ema_limits
                 and self._ema_limit_reached(observed_monotonic)
             ):
+                if live_probe_allowed:
+                    return self._reserve_live_probe(
+                        episode,
+                        event_at=event_at,
+                        observed_monotonic=observed_monotonic,
+                        generation=generation,
+                    )
                 if ema is not None:
                     self._remember_ema(episode, ema)
                 return self._decision(
@@ -610,7 +646,7 @@ class MotionEpisodeController:
                     intent, episode.admitted_sources
                 )
                 if first_admission:
-                    if source is MotionSource.EMA:
+                    if source is MotionSource.EMA and not intent.live_probe:
                         self._record_ema_admission(occurred_monotonic)
                     if intent.ema is not None:
                         self._remember_ema(episode, intent.ema)
@@ -664,10 +700,11 @@ class MotionEpisodeController:
         observed_monotonic: float,
         generation: int,
         sources: Iterable[MotionSource] | None = None,
+        live_probe: bool = False,
     ) -> EpisodeDecision:
         episode.request_count += 1
         episode.intent_sequence += 1
-        followup = episode.request_count > 1
+        followup = live_probe or episode.request_count > 1
         pending_sources = set(sources or ()) | {source}
         request_sources = set(episode.admitted_sources) | pending_sources
         intent = DetectionIntent(
@@ -682,13 +719,16 @@ class MotionEpisodeController:
             followup=followup,
             ema=episode.ema,
             camera_notice=episode.camera_notice,
+            live_probe=live_probe,
         )
         episode.intent = intent
         episode.status = DetectionRequestStatus.RESERVED
         episode.admission_acknowledged = False
         episode.pending_sources = pending_sources
         episode.last_request_monotonic = observed_monotonic
-        if followup:
+        if live_probe:
+            episode.live_probe_count += 1
+        elif followup:
             episode.followup_count += 1
         return self._decision(
             (
@@ -700,6 +740,33 @@ class MotionEpisodeController:
             observed_monotonic,
             episode,
             intent,
+        )
+
+    def _live_probe_allowed(
+        self, episode: _Episode, observed_monotonic: float
+    ) -> bool:
+        return bool(
+            episode.incident_event_id is None
+            and episode.live_probe_count < self.maximum_live_probes
+            and observed_monotonic - episode.last_request_monotonic
+            >= self.live_probe_interval_seconds
+        )
+
+    def _reserve_live_probe(
+        self,
+        episode: _Episode,
+        *,
+        event_at: float,
+        observed_monotonic: float,
+        generation: int,
+    ) -> EpisodeDecision:
+        return self._reserve_intent(
+            episode,
+            source=MotionSource.EMA,
+            event_at=event_at,
+            observed_monotonic=observed_monotonic,
+            generation=generation,
+            live_probe=True,
         )
 
     def _fallback_reservation(
@@ -875,6 +942,7 @@ class MotionEpisodeController:
                 "transition_count": len(self._transitions),
                 "request_count": episode.request_count if episode else 0,
                 "followup_count": episode.followup_count if episode else 0,
+                "live_probe_count": episode.live_probe_count if episode else 0,
                 "incident_event_id": episode.incident_event_id if episode else None,
                 "decision_counts": dict(self._decision_counts),
             }
@@ -964,6 +1032,7 @@ class MotionEpisodeController:
             followup=intent.followup,
             ema=intent.ema,
             camera_notice=intent.camera_notice,
+            live_probe=intent.live_probe,
         )
 
     @staticmethod
@@ -972,7 +1041,9 @@ class MotionEpisodeController:
         intent: DetectionIntent,
     ) -> None:
         episode.request_count = max(0, episode.request_count - 1)
-        if intent.followup:
+        if intent.live_probe:
+            episode.live_probe_count = max(0, episode.live_probe_count - 1)
+        elif intent.followup:
             episode.followup_count = max(0, episode.followup_count - 1)
 
     def _ema_limit_reached(self, observed_monotonic: float) -> bool:

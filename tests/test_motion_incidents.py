@@ -480,6 +480,60 @@ def test_discarding_queued_work_drops_unstarted_refinement_and_discovery() -> No
     assert status["scene_discovery"]["pending"] is False
 
 
+def test_live_probe_miss_does_not_queue_recorded_refinement() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=None,
+        snapshot_path="",
+        object_detected=False,
+        refinement_pending=True,
+    )
+    service, _decision, _tracking, _prewarm, _image_reader = _service(initial)
+    stop = threading.Event()
+    service.start(stop)
+
+    outcome = service.process(
+        "adaptive/active_followup",
+        "motion",
+        datetime.now(timezone.utc),
+        {"live_probe": True},
+        require_eligible_object=True,
+    )
+
+    assert outcome.refinement_pending is False
+    assert outcome.object_detected is False
+    assert service.status()["refinements_queued"] == 0
+    stop.set()
+    service.request_stop()
+    assert service.wait_stopped(1.0)
+
+
+def test_live_probe_that_creates_incident_still_queues_refinement() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=77,
+        snapshot_path="probe.webp",
+        object_detected=True,
+        detected_objects=({"label": "person", "incident_eligible": True},),
+        refinement_pending=True,
+    )
+    service, _decision, _tracking, _prewarm, _image_reader = _service(initial)
+    stop = threading.Event()
+    service.start(stop)
+
+    outcome = service.process(
+        "adaptive/active_followup",
+        "motion",
+        datetime.now(timezone.utc),
+        {"live_probe": True},
+        require_eligible_object=True,
+    )
+
+    assert outcome is initial
+    assert service.status()["refinements_queued"] == 1
+    stop.set()
+    service.request_stop()
+    assert service.wait_stopped(1.0)
+
+
 def test_late_refinement_runs_off_decision_path_and_completes_before_shutdown() -> None:
     initial = MotionDecisionOutcome(
         event_id=None,
