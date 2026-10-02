@@ -123,13 +123,13 @@ class EventStoreEvidenceMixin:
             self._presentation_evidence(before_objects) != self._presentation_evidence(after_objects)
         )
         if reason == "tracking_updated":
-            self._scene_ingest(conn, row, force_revision=True)
+            self._scene_ingest(conn, row, force_revision=True, objects=after_objects)
             tracking = next((item.get("object_tracking") for item in after_objects if item.get("status") == "object_tracking"), {})
             # An extended episode window can now contain acquired context.
             if self._checkpoint_scene_tracking(conn, event_id, tracking):
-                self._scene_ingest(conn, row)
+                self._scene_ingest(conn, row, objects=after_objects)
         else:
-            self._scene_ingest(conn, row, force_revision=changed)
+            self._scene_ingest(conn, row, force_revision=changed, objects=after_objects)
         if changed:
             conn.execute("update events set evidence_revision=evidence_revision+1 where id=?", (event_id,))
             row = conn.execute("select * from events where id=?", (event_id,)).fetchone()

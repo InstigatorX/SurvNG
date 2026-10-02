@@ -116,7 +116,8 @@ class EventStoreSceneMixin:
                 );
                 create index if not exists scene_observation_object on scene_observations(object_id,captured_epoch);
                 create index if not exists scene_observation_episode on scene_observations(episode_id,captured_epoch);
-                create index if not exists scene_observation_event on scene_observations(event_id);
+                create index if not exists scene_observation_event_time on scene_observations(event_id,captured_epoch);
+                drop index if exists scene_observation_event;
                 create index if not exists scene_observation_media on scene_observations(snapshot_path);
                 create table if not exists scene_alert_decisions (
                     event_id integer primary key references events(id) on delete cascade,
@@ -635,8 +636,9 @@ class EventStoreSceneMixin:
             if supporting_id is None:
                 absolute = cover.get("captured_at_epoch", cover.get("snapshot_captured_at"))
                 captured = _epoch(absolute,at) if absolute is not None else at+float(cover.get("temporal_sample_offset_seconds",0) or 0)
-                matches = conn.execute("select id,payload_json from scene_observations where event_id=? and abs(captured_epoch-?)<=0.05",
-                                       (event_id,captured)).fetchall()
+                matches = conn.execute("select id,payload_json from scene_observations where event_id=? "
+                                       "and captured_epoch between ? and ? and abs(captured_epoch-?)<=0.05",
+                                       (event_id,captured-0.06,captured+0.06,captured)).fetchall()
                 matches = [o for o in matches if _overlap(cover,json.loads(o["payload_json"]))>=0.95]
                 if len(matches)==1:
                     supporting_id=matches[0]["id"]

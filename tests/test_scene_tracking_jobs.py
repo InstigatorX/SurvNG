@@ -232,6 +232,22 @@ def test_tracking_update_without_extension_ingests_once(tmp_path):
     assert store.scene_incident(event_id=event["id"])["revision"] > revision
 
 
+def test_existing_scene_observations_gain_the_event_time_index(tmp_path):
+    EventStore(tmp_path)
+    store = EventStore(tmp_path)
+    with store._connect() as conn:
+        conn.execute("drop index scene_observation_event_time")
+        conn.execute("create index scene_observation_event on scene_observations(event_id)")
+    store = EventStore(tmp_path)
+    with store._connect() as conn:
+        names = {row[0] for row in conn.execute("select name from sqlite_master where tbl_name='scene_observations'")}
+        plan = " ".join(str(row[-1]) for row in conn.execute(
+            "explain query plan select id from scene_observations where event_id=1 "
+            "and captured_epoch between 999.94 and 1000.06 and abs(captured_epoch-1000)<=0.05"))
+    assert "scene_observation_event_time" in names and "scene_observation_event" not in names
+    assert "scene_observation_event_time (event_id=? AND captured_epoch>? AND captured_epoch<?)" in plan
+
+
 def test_historical_decisions_backfill_once_per_event(tmp_path):
     store = EventStore(tmp_path)
     event = create_event(store, 1000)
