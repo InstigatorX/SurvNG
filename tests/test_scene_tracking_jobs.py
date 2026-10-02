@@ -292,6 +292,43 @@ def test_tracking_commit_refreshes_alert_decisions_once(tmp_path):
         assert refresh(conn, event["id"]) is False
 
 
+def test_long_activity_continues_the_incident_in_a_bounded_episode(tmp_path):
+    from survng.app.event_store.scenes import MAX_SCENE_EPISODE_SECONDS
+    store = EventStore(tmp_path)
+    events = [create_event(store, 1000 + offset) for offset in range(0, int(MAX_SCENE_EPISODE_SECONDS) + 120, 40)]
+    with store._connect() as conn:
+        rows = conn.execute("select m.event_id,p.id,p.incident_id,p.start_epoch,p.boundary_locked from scene_event_membership m "
+                            "join scene_episodes p on p.id=m.episode_id order by m.event_id").fetchall()
+    episodes = list(dict.fromkeys(row["id"] for row in rows))
+    assert len(rows) == len(events)
+    assert len(episodes) == 2
+    assert len({row["incident_id"] for row in rows}) == 1
+    first = [row for row in rows if row["id"] == episodes[0]]
+    assert max(row["event_id"] for row in first) < min(row["event_id"] for row in rows if row["id"] == episodes[1])
+    assert all(row["boundary_locked"] == 1 for row in first)
+    assert {row["boundary_locked"] for row in rows if row["id"] == episodes[1]} == {0}
+    with store._connect() as conn:
+        second_start = conn.execute("select start_epoch from scene_episodes where id=?", (episodes[1],)).fetchone()[0]
+    assert second_start - 1000 >= MAX_SCENE_EPISODE_SECONDS
+
+
+def test_activity_cannot_extend_a_tracking_job_past_the_episode_bound(tmp_path):
+    from survng.app.event_store.scenes import MAX_SCENE_EPISODE_SECONDS
+    store = EventStore(tmp_path)
+    event = create_event(store, 1000)
+    store.enqueue_scene_tracking(event["id"], 1000, 1045)
+    job = store.claim_scene_tracking("gate", "worker")
+    with store._connect() as conn:
+        conn.execute("update scene_episodes set last_activity_epoch=? where id=?", (1000 + 4 * MAX_SCENE_EPISODE_SECONDS, job["episode_id"]))
+        conn.commit()
+    store.update_object_tracking(event["id"], {
+        "scene_analysis_job": {"episode_id": job["episode_id"], "lease_owner": "worker"}, "state": "active",
+    })
+    with store._connect() as conn:
+        end = conn.execute("select end_epoch from scene_analysis_jobs where episode_id=?", (job["episode_id"],)).fetchone()[0]
+    assert end == job["start_epoch"] + MAX_SCENE_EPISODE_SECONDS
+
+
 def _reference_alerts(conn, event_id):
     def canonical(value):
         return json.dumps(value, sort_keys=True, separators=(",", ":"))

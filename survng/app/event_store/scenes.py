@@ -17,6 +17,11 @@ from ..incident_utils import portable_media_path
 from ..scene_identity import observation_identity
 from .scene_history import legacy_track_observations
 
+# Each camera episode's recorded analysis is recomputed from all of its
+# observations, so one episode is bounded. Longer activity continues the same
+# incident in a new episode.
+MAX_SCENE_EPISODE_SECONDS = 900.0
+
 
 class SceneConflict(ValueError):
     """A correction was based on an obsolete incident revision."""
@@ -494,15 +499,20 @@ class EventStoreSceneMixin:
         if episode is None and target_episode_id is not None:
             episode = conn.execute("select * from scene_episodes where id=?", (target_episode_id,)).fetchone()
         if new_event:
+            continued_incident = None
             if episode is None:
                 episode = conn.execute("select p.* from scene_episodes p join scene_incidents i on i.id=p.incident_id "
                                    "where i.state!='unconfirmed' and p.camera_id=? and p.boundary_locked=0 "
                                    "and p.start_epoch<=? and p.last_activity_epoch>=? order by p.start_epoch desc limit 1",
                                    (camera_id, at+45, at-45)).fetchone()
+                if episode is not None and at - float(episode["start_epoch"]) >= MAX_SCENE_EPISODE_SECONDS:
+                    conn.execute("update scene_episodes set boundary_locked=1 where id=?", (episode["id"],))
+                    continued_incident, episode = episode["incident_id"], None
             if episode is None:
-                incident_id, episode_id = "incident-"+uuid.uuid4().hex, "episode-"+uuid.uuid4().hex
-                conn.execute("insert into scene_incidents(id,start_epoch,end_epoch,historical,state) values(?,?,?,?,?)",
-                             (incident_id, at, at, int(historical), "complete" if historical else "active"))
+                incident_id, episode_id = continued_incident or "incident-"+uuid.uuid4().hex, "episode-"+uuid.uuid4().hex
+                if continued_incident is None:
+                    conn.execute("insert into scene_incidents(id,start_epoch,end_epoch,historical,state) values(?,?,?,?,?)",
+                                 (incident_id, at, at, int(historical), "complete" if historical else "active"))
                 coverage = {"state": "historical" if historical else "incomplete", "analyzed_through": None,
                             "gaps": [], "reason": "legacy evidence only" if historical else "analysis pending"}
                 conn.execute("insert into scene_episodes(id,incident_id,camera_id,start_epoch,end_epoch,last_activity_epoch,coverage_json) "

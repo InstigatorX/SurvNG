@@ -6,6 +6,8 @@ import json
 import math
 import time
 
+from .scenes import MAX_SCENE_EPISODE_SECONDS
+
 
 class EventStoreSceneTrackingMixin:
     def _scene_tracking_extent(self, conn, episode_id, start_epoch, end_epoch, *, pending=False):
@@ -111,7 +113,8 @@ class EventStoreSceneTrackingMixin:
         # notification was generated. Compute chunks retain their finite end.
         requested_end = job["end_epoch"]
         if activity and float(activity[0]) > job["event_epoch"]:
-            requested_end = max(requested_end,float(activity[0])+45.0)
+            requested_end = max(requested_end,min(float(activity[0])+45.0,
+                                                  job["start_epoch"]+MAX_SCENE_EPISODE_SECONDS))
         cursor = job["cursor_epoch"]
         raw = tracking.get("analyzed_through")
         if raw is not None:
