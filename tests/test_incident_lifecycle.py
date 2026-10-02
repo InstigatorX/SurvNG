@@ -39,7 +39,7 @@ class Scenes:
         self.acknowledged.append((incident_id, revision))
         self.pending = [item for item in self.pending if (item["incident_id"], item["revision"]) != (incident_id, revision)]
 
-    def list_scene_incidents(self):
+    def list_scene_incident_notifications(self):
         return [deepcopy(self.current)]
 
     def scene_incident(self, incident_id=None, event_id=None):

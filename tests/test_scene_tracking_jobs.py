@@ -292,6 +292,24 @@ def test_tracking_commit_refreshes_alert_decisions_once(tmp_path):
         assert refresh(conn, event["id"]) is False
 
 
+def test_notification_snapshot_matches_lifecycle_payloads_without_history(tmp_path):
+    store = EventStore(tmp_path)
+    event = create_event(store, 1000)
+    store.enqueue_scene_tracking(event["id"], 1000, 1045)
+    job = store.claim_scene_tracking("gate", "worker")
+    store.update_object_tracking(event["id"], {
+        "scene_analysis_job": {"episode_id": job["episode_id"], "lease_owner": "worker"}, "state": "active",
+        "scene_observations": [{**person(), "captured_at_epoch": 1001 + i} for i in range(6)],
+    })
+    full = store.list_scene_incidents()
+    assert max(len(subject["observations"]) for subject in full[0]["scene_objects"]) > 1
+    pending = {item["incident_id"]: item["payload"] for item in store.scene_pending_notifications()}
+    snapshot = store.list_scene_incident_notifications()
+    assert [item["id"] for item in snapshot] == [item["id"] for item in full]
+    assert all(len(subject["observations"]) == 1 for subject in snapshot[0]["scene_objects"])
+    assert snapshot[0] == pending[snapshot[0]["id"]]
+
+
 def test_long_activity_continues_the_incident_in_a_bounded_episode(tmp_path):
     from survng.app.event_store.scenes import MAX_SCENE_EPISODE_SECONDS
     store = EventStore(tmp_path)

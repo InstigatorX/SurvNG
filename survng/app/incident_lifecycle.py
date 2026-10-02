@@ -59,7 +59,8 @@ class CanonicalIncidentLifecycle:
             self._thread = None
 
     def snapshot(self) -> list[dict]:
-        return [canonical_incident_payload(item) for item in self._events.list_scene_incidents()]
+        """Recovery state in the same form as the lifecycle events it repairs."""
+        return [canonical_incident_payload(item) for item in self._events.list_scene_incident_notifications()]
 
     def get(self, incident_id: str) -> dict | None:
         item = self._events.scene_incident(incident_id=incident_id)

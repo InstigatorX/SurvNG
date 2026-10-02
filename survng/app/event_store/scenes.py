@@ -1010,6 +1010,15 @@ class EventStoreSceneMixin:
                     "join scene_episodes p on p.id=m.episode_id where p.incident_id=?",(row[0],))]} for row in ids]
             return [self._scene_payload(conn,row[0]) for row in ids]
 
+    def list_scene_incident_notifications(self,limit=200):
+        """Recent incidents in the notification form that lifecycle events carry."""
+        where,args=self._scene_query_where()
+        with self._connect() as conn:
+            ids=conn.execute("select i.id from scene_incidents i where "+where+" order by i.start_epoch desc,i.id limit ?",
+                             (*args,max(1,min(int(limit),1000)))).fetchall()
+            payloads=(self._scene_notification_payload(conn,row[0]) for row in ids)
+            return [payload for payload in payloads if payload is not None]
+
     def list_scene_incident_cards(self,*,start_epoch=None,end_epoch=None,start_at=None,end_at=None,camera_id="",limit=200,offset=0,
                                   event_type="all",object_label="",zone=""):
         """Page rows for the incident rail: cover, labels, and time, without observation history."""
