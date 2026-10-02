@@ -61,6 +61,8 @@ def _overlap(a, b):
 
 
 class EventStoreSceneMixin:
+    _scene_outbox_legacy_rowid = 0
+
     def _init_scene_db(self):
         with self._lock, self._connect() as conn:
             conn.executescript("""
@@ -157,6 +159,7 @@ class EventStoreSceneMixin:
             if "facet_label" not in object_columns:
                 conn.execute("alter table scene_objects add column facet_label text not null default ''")
             conn.execute("create index if not exists scene_observation_source on scene_observations(source_observation_id)")
+            self._scene_outbox_legacy_rowid = self._mark_legacy_scene_notifications(conn)
         # Bounded transactions, resumable and silent. Never infer historical
         # video or replay notifications during migration.
         while True:
@@ -643,6 +646,52 @@ class EventStoreSceneMixin:
             self._scene_changed(conn,incident_id,notify=notify)
         return incident_id
 
+    def _mark_legacy_scene_notifications(self, conn):
+        """Retire per-revision payload rows from before outbox coalescing.
+
+        Legacy rows embedded a full snapshot per revision. They are purged in
+        small batches after startup; unfinished incidents are re-queued as one
+        pending marker each so their latest state is still published.
+        """
+        row = conn.execute(
+            "select cursor_event_id from scene_migrations where name='notification_outbox_coalesce_v1'"
+        ).fetchone()
+        if row is not None:
+            return int(row[0])
+        cutoff = int(conn.execute("select coalesce(max(rowid),0) from scene_notification_outbox").fetchone()[0])
+        if cutoff:
+            pending = conn.execute(
+                "select id, revision from scene_incidents where state not in ('complete','merged','unconfirmed') "
+                "and id in (select distinct incident_id from scene_notification_outbox)"
+            ).fetchall()
+            for incident in pending:
+                conn.execute(
+                    "delete from scene_notification_outbox where incident_id=? and revision=?",
+                    (incident["id"], incident["revision"]),
+                )
+                conn.execute(
+                    "insert into scene_notification_outbox values(?,?,'')",
+                    (incident["id"], incident["revision"]),
+                )
+        conn.execute(
+            "insert into scene_migrations values('notification_outbox_coalesce_v1',?)", (cutoff,),
+        )
+        return cutoff
+
+    def purge_legacy_scene_notifications(self, limit=10):
+        """Delete a bounded batch of retired outbox rows; returns rows removed."""
+        if not self._scene_outbox_legacy_rowid:
+            return 0
+        with self._lock, self._connect() as conn:
+            removed = conn.execute(
+                "delete from scene_notification_outbox where rowid in (select rowid from "
+                "scene_notification_outbox where rowid <= ? limit ?)",
+                (self._scene_outbox_legacy_rowid, max(1, int(limit))),
+            ).rowcount
+        if not removed:
+            self._scene_outbox_legacy_rowid = 0
+        return max(0, int(removed))
+
     def _scene_changed(self,conn,incident_id,*,notify=True):
         incident_id=self._scene_resolve(conn,incident_id)
         conn.execute("update scene_incidents set revision=revision+1 where id=?",(incident_id,))
@@ -650,13 +699,24 @@ class EventStoreSceneMixin:
         conn.execute("insert into scene_changes(incident_id,revision,created_at) values(?,?,?)",(incident_id,incident["revision"],time.time()))
         self._scene_facet_cache = {}
         if notify and incident["state"] != "unconfirmed":
-            payload = self._scene_payload(conn,incident_id)
-            # Notifications carry the entire roster, with representative
-            # evidence per object. The canonical detail owns per-frame history.
-            for subject in payload.get("scene_objects",[]):
-                evidence=subject["observations"]
-                subject["observations"]=[max(evidence,key=lambda o:(o.get("snapshot_available",False),o.get("confidence",0)))] if evidence else []
-            conn.execute("insert or ignore into scene_notification_outbox values(?,?,?)",(incident_id,incident["revision"],_json(payload)))
+            # One pending marker per incident. Publication builds the newest
+            # snapshot outside this commit, so superseded revisions coalesce.
+            conn.execute(
+                "delete from scene_notification_outbox where incident_id=? and rowid > ?",
+                (incident_id, self._scene_outbox_legacy_rowid),
+            )
+            conn.execute("insert or ignore into scene_notification_outbox values(?,?,'')",(incident_id,incident["revision"]))
+
+    def _scene_notification_payload(self, conn, incident_id):
+        payload = self._scene_payload(conn, incident_id)
+        if payload is None:
+            return None
+        # Notifications carry the entire roster, with representative
+        # evidence per object. The canonical detail owns per-frame history.
+        for subject in payload.get("scene_objects",[]):
+            evidence=subject["observations"]
+            subject["observations"]=[max(evidence,key=lambda o:(o.get("snapshot_available",False),o.get("confidence",0)))] if evidence else []
+        return payload
 
     def _scene_payload(self, conn, incident_id):
         from ..incident_presenter import _event_row, _incident_row
@@ -1173,13 +1233,41 @@ class EventStoreSceneMixin:
                 self._scene_changed(conn,incident_id)
 
     def scene_pending_notifications(self,limit=100):
+        """Newest snapshot for each incident with an unpublished change.
+
+        Each entry carries the revision it was built at; acknowledging it
+        clears every pending revision up to that one.
+        """
+        entries, orphaned = [], []
         with self._connect() as conn:
-            return [{"incident_id":r["incident_id"],"revision":r["revision"],"payload":json.loads(r["payload_json"])}
-                    for r in conn.execute("select * from scene_notification_outbox order by rowid limit ?",(limit,))]
+            conn.execute("begin")
+            try:
+                rows = conn.execute(
+                    "select incident_id, revision from scene_notification_outbox where rowid > ? order by rowid limit ?",
+                    (self._scene_outbox_legacy_rowid, limit),
+                ).fetchall()
+                for row in rows:
+                    incident_id = str(row["incident_id"])
+                    payload = (
+                        self._scene_notification_payload(conn, incident_id)
+                        if self._scene_resolve(conn, incident_id) == incident_id else None
+                    )
+                    if payload is None:
+                        orphaned.append((incident_id, int(row["revision"])))
+                        continue
+                    entries.append({"incident_id": incident_id, "revision": int(payload["revision"]), "payload": payload})
+            finally:
+                conn.rollback()
+        for incident_id, revision in orphaned:
+            self.acknowledge_scene_notification(incident_id, revision)
+        return entries
 
     def acknowledge_scene_notification(self,incident_id,revision):
         with self._lock,self._connect() as conn:
-            conn.execute("delete from scene_notification_outbox where incident_id=? and revision=?",(incident_id,revision))
+            conn.execute(
+                "delete from scene_notification_outbox where incident_id=? and revision<=? and rowid > ?",
+                (incident_id, revision, self._scene_outbox_legacy_rowid),
+            )
 
     def settle_scene_incidents(self,now=None):
         now=time.time() if now is None else now

@@ -203,6 +203,48 @@ class SceneIncidentTest(unittest.TestCase):
         self.assertEqual(unchanged["labels"],["person"])
         self.assertEqual(unchanged["revision"],split["revision"])
 
+    def test_notification_outbox_coalesces_to_latest_revision(self):
+        event=self.add()
+        incident=self.store.scene_incident(event_id=event["id"])
+        self.store.scene_pending_notifications()
+        with self.store._lock,self.store._connect() as conn:
+            for _ in range(3):
+                self.store._scene_changed(conn,incident["id"])
+            rows=conn.execute("select revision,payload_json from scene_notification_outbox where incident_id=?",(incident["id"],)).fetchall()
+        self.assertEqual([(r["revision"],r["payload_json"]) for r in rows],[(incident["revision"]+3,"")])
+        pending=self.store.scene_pending_notifications()
+        self.assertEqual([(p["incident_id"],p["revision"]) for p in pending],[(incident["id"],incident["revision"]+3)])
+        self.assertEqual(pending[0]["payload"]["revision"],incident["revision"]+3)
+        with self.store._lock,self.store._connect() as conn:
+            self.store._scene_changed(conn,incident["id"])
+        # Acknowledging the older snapshot keeps the change made after it.
+        self.store.acknowledge_scene_notification(incident["id"],pending[0]["revision"])
+        self.assertEqual([p["revision"] for p in self.store.scene_pending_notifications()],[incident["revision"]+4])
+        self.store.acknowledge_scene_notification(incident["id"],incident["revision"]+4)
+        self.assertEqual(self.store.scene_pending_notifications(),[])
+
+    def test_legacy_outbox_rows_are_retired_and_unfinished_incidents_requeued(self):
+        active=self.store.scene_incident(event_id=self.add()["id"])
+        done=self.store.scene_incident(event_id=self.add(5000,camera="gate")["id"])
+        legacy=json.dumps({"legacy":"x"*1000})
+        with self.store._lock,self.store._connect() as conn:
+            conn.execute("update scene_incidents set state='active' where id=?",(active["id"],))
+            conn.execute("update scene_incidents set state='complete' where id=?",(done["id"],))
+            conn.execute("delete from scene_notification_outbox")
+            for incident in (active,done):
+                for revision in range(1,incident["revision"]+1):
+                    conn.execute("insert into scene_notification_outbox values(?,?,?)",(incident["id"],revision,legacy))
+            conn.execute("delete from scene_migrations where name='notification_outbox_coalesce_v1'")
+        restarted=EventStore(self.root)
+        pending=restarted.scene_pending_notifications()
+        self.assertEqual([(p["incident_id"],p["revision"]) for p in pending],[(active["id"],active["revision"])])
+        self.assertNotIn("legacy",pending[0]["payload"])
+        while restarted.purge_legacy_scene_notifications(limit=2):
+            pass
+        with restarted._connect() as conn:
+            remaining=[tuple(r) for r in conn.execute("select incident_id,payload_json from scene_notification_outbox")]
+        self.assertEqual(remaining,[(active["id"],"")])
+
     def test_merged_alias_never_publishes_mismatched_revision(self):
         first=self.add();second=self.add(10,camera="gate")
         a=self.store.scene_incident(event_id=first["id"]);b=self.store.scene_incident(event_id=second["id"])

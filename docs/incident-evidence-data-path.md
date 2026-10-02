@@ -124,7 +124,8 @@ The event database owns:
 - `scene_alert_decisions`: notification significance, separate from membership.
 - `scene_corrections` and `scene_aliases`: operator history and preserved links.
 - `scene_analysis_jobs`: leased, resumable recorded-analysis windows and cursors.
-- `scene_notification_outbox`: durable revision snapshots awaiting delivery.
+- `scene_notification_outbox`: one pending marker per incident with an
+  unpublished change.
 
 Object association uses supported track continuity or unambiguous nearby geometry.
 Ambiguous associations remain separate possible objects. Operator corrections
@@ -209,8 +210,10 @@ explicit; metadata membership does not claim a vector exists for every object.
 
 Notification schema 3 carries the complete object roster and separate alert
 decisions. It contains representative evidence per object; full frame history is
-available from canonical detail. The incident lifecycle publishes database
-outbox revisions and acknowledges only after successful delivery. MQTT is a
+available from canonical detail. The outbox holds one pending marker per
+changed incident; the incident lifecycle builds the newest snapshot at
+publication time, so superseded revisions are coalesced rather than replayed,
+and acknowledges only after successful delivery. MQTT is a
 transport; it no longer constructs incidents. Consumers deduplicate by incident
 ID and revision. A crash after delivery but before acknowledgment may replay a
 revision. Historical identity enrichment does not emit a new alert.

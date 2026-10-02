@@ -110,6 +110,16 @@ def test_invalid_snapshot_revision_is_not_published_or_acknowledged():
     assert not store.acknowledged
 
 
+def test_legacy_outbox_purge_runs_in_bounded_slices_before_publication():
+    store = Scenes(scene())
+    calls = []
+    store.purge_legacy_scene_notifications = lambda: calls.append(len(calls)) or (10 if len(calls) < 3 else 0)
+    published = []
+    assert IncidentLifecycle(store, published.append).run_once() == 1
+    assert len(calls) == 3
+    assert [item["revision"] for item in published] == [1]
+
+
 def test_reads_return_detached_canonical_state_without_notifying():
     store = Scenes()
     publish = Mock()
