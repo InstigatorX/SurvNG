@@ -116,7 +116,8 @@ class EventStoreSceneMixin:
                 );
                 create index if not exists scene_observation_object on scene_observations(object_id,captured_epoch);
                 create index if not exists scene_observation_episode on scene_observations(episode_id,captured_epoch);
-                create index if not exists scene_observation_event on scene_observations(event_id);
+                create index if not exists scene_observation_event_time on scene_observations(event_id,captured_epoch);
+                drop index if exists scene_observation_event;
                 create index if not exists scene_observation_media on scene_observations(snapshot_path);
                 create table if not exists scene_alert_decisions (
                     event_id integer primary key references events(id) on delete cascade,
@@ -486,10 +487,10 @@ class EventStoreSceneMixin:
                                  (decision_id, observation_id, source, payload)).rowcount)
 
     @staticmethod
-    def _scene_candidates(row):
+    def _scene_candidates(row, objects=None):
         row = dict(row)
         at = _epoch(row["created_at"])
-        objects = _objects(row.get("objects_json"))
+        objects = _objects(row.get("objects_json")) if objects is None else objects
         candidates = []
         presentation = []
         for index, item in enumerate(objects):
@@ -577,7 +578,7 @@ class EventStoreSceneMixin:
             from kept f join kept l on l.object_id=f.object_id and l.outcome=f.outcome and l.latest=1
             where f.earliest=1""", (event_id,))
 
-    def _scene_project(self, conn, row, *, historical=False, notify=True, activity=True, force_revision=False, activity_epoch=None, target_episode_id=None, context_only=False, defer_alerts=False):
+    def _scene_project(self, conn, row, *, historical=False, notify=True, activity=True, force_revision=False, activity_epoch=None, target_episode_id=None, context_only=False, defer_alerts=False, objects=None):
         row = dict(row)
         at = _epoch(row["created_at"])
         event_id, camera_id = int(row["id"]), str(row["camera_id"])
@@ -610,7 +611,7 @@ class EventStoreSceneMixin:
             conn.execute("insert into scene_event_membership values(?,?)", (event_id,episode["id"]))
             conn.execute("insert or ignore into scene_aliases values(?,?)", (f"incident-{camera_id}-{event_id}", episode["incident_id"]))
         episode_id, incident_id = episode["id"], episode["incident_id"]
-        objects, candidates, presentation = self._scene_candidates(row)
+        objects, candidates, presentation = self._scene_candidates(row, objects)
         changed = new_event or force_revision
         cover_observations = {}
         earliest = latest = at
@@ -723,8 +724,9 @@ class EventStoreSceneMixin:
             if supporting_id is None:
                 absolute = cover.get("captured_at_epoch", cover.get("snapshot_captured_at"))
                 captured = _epoch(absolute,at) if absolute is not None else at+float(cover.get("temporal_sample_offset_seconds",0) or 0)
-                matches = conn.execute("select id,payload_json from scene_observations where event_id=? and abs(captured_epoch-?)<=0.05",
-                                       (event_id,captured)).fetchall()
+                matches = conn.execute("select id,payload_json from scene_observations where event_id=? "
+                                       "and captured_epoch between ? and ? and abs(captured_epoch-?)<=0.05",
+                                       (event_id,captured-0.06,captured+0.06,captured)).fetchall()
                 matches = [o for o in matches if _overlap(cover,json.loads(o["payload_json"]))>=0.95]
                 if len(matches)==1:
                     supporting_id=matches[0]["id"]
@@ -744,7 +746,7 @@ class EventStoreSceneMixin:
         coverage = json.loads(episode["coverage_json"])
         if isinstance(tracking,dict):
             coverage = {"state":"sampled" if tracking.get("state") in {"complete","completed"} else "incomplete",
-                        "analyzed_through":tracking.get("analyzed_through"), "gaps":tracking.get("coverage_gaps",[]),
+                        "analyzed_through":tracking.get("analyzed_through"), "gaps":list(tracking.get("coverage_gaps",[])),
                         "reason":str(tracking.get("state") or "analysis pending")}
             if isinstance(tracking.get("scene_analysis_job"),dict):
                 job=conn.execute("select state,last_error,coverage_gaps_json from scene_analysis_jobs where episode_id=?",(episode_id,)).fetchone()

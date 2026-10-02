@@ -32,11 +32,11 @@ class EventStoreSceneAdmissionMixin:
             );
         """)
 
-    def _acquire_event_samples(self, conn, row):
+    def _acquire_event_samples(self, conn, row, objects=None):
         """Compatibility sources also acquire before incident projection."""
         row = dict(row)
         at = _epoch(row["created_at"])
-        objects, candidates, _ = self._scene_candidates(row)
+        objects, candidates, _ = self._scene_candidates(row, objects)
         groups = {}
         for index, original in candidates:
             item = dict(original)
@@ -93,16 +93,17 @@ class EventStoreSceneAdmissionMixin:
                 samples.append(variant)
         return samples
 
-    def _scene_ingest(self, conn, row, *, historical=False, notify=True, activity=True, force_revision=False):
+    def _scene_ingest(self, conn, row, *, historical=False, notify=True, activity=True, force_revision=False, objects=None):
+        """``objects`` is the decoded ``row["objects_json"]`` when the caller has it; it is only read."""
         from ..scene_activity import evaluate_scene_activity
 
         row = dict(row)
-        objects = _objects(row.get("objects_json"))
+        objects = _objects(row.get("objects_json")) if objects is None else objects
         qualification = next((o.get("motion_qualification", {}) for o in objects if o.get("status") == "motion_qualification"), {})
         sample_ids = qualification.get("scene_sample_ids") or []
         samples = [self._scene_sample(conn, key) for key in sample_ids]
         samples = [s for s in samples if s is not None]
-        samples.extend(self._acquire_event_samples(conn, row))
+        samples.extend(self._acquire_event_samples(conn, row, objects))
         sample_ids = list(dict.fromkeys(s["id"] for s in samples))
         at = _epoch(row["created_at"])
         decision_id = qualification.get("scene_activity_decision_id")
@@ -164,7 +165,7 @@ class EventStoreSceneAdmissionMixin:
         incident_id = self._scene_project(
             conn, row, historical=historical, notify=False, activity=supported and activity,
             activity_epoch=decision.get("activity_epoch") if supported and activity else None,
-            force_revision=force_revision, defer_alerts=force_revision,
+            force_revision=force_revision, defer_alerts=force_revision, objects=objects,
         )
         alerts_pending = force_revision
         episode = conn.execute("select p.* from scene_episodes p join scene_event_membership m on m.episode_id=p.id where m.event_id=?", (row["id"],)).fetchone()

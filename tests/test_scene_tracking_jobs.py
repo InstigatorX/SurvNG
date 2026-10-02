@@ -282,6 +282,72 @@ def test_tracking_update_without_extension_ingests_once(tmp_path):
     assert store.scene_incident(event_id=event["id"])["revision"] > revision
 
 
+def test_tracking_commit_decodes_the_stored_objects_once(tmp_path, monkeypatch):
+    from survng.app.event_store import evidence, scene_admission, scenes
+
+    decoded = []
+    for module in (evidence, scene_admission, scenes):
+        original = module._objects
+        monkeypatch.setattr(module, "_objects", lambda raw, original=original: decoded.append(raw) or original(raw))
+    store = EventStore(tmp_path)
+    event = create_event(store, 1000)
+    store.enqueue_scene_tracking(event["id"], 1000, 1002)
+    job = store.claim_scene_tracking("gate", "worker")
+    session = make_session(store)
+    commits = []
+
+    def update(event_id, payload, objects):
+        decoded.clear()
+        result = store.update_object_tracking(event_id, payload, objects)
+        with store._connect() as conn:
+            stored = conn.execute("select objects_json from events where id=?", (event_id,)).fetchone()[0]
+        commits.append(decoded.count(stored))
+        return result
+
+    session.update_event = update
+    run_job(session, job, "worker")
+    assert commits and commits == [1] * len(commits)
+
+
+def test_scene_ingest_only_reads_the_decoded_objects(tmp_path):
+    import copy
+
+    store = EventStore(tmp_path)
+    event = create_event(store, 1000)
+    store.enqueue_scene_tracking(event["id"], 1000, 1045)
+    job = store.claim_scene_tracking("gate", "worker")
+    gap = {"start_epoch": 1010, "end_epoch": 1020, "reason": "recording_unavailable"}
+    payload = {**_measured_tracking_payload(job, "worker", analyzed_through=1044),
+               "coverage_gaps": [{"start_epoch": 1030, "end_epoch": 1031, "reason": "decode_failed"}]}
+    with store._connect() as conn:
+        conn.execute("update scene_analysis_jobs set coverage_gaps_json=? where episode_id=?",
+                     (json.dumps([gap]), job["episode_id"]))
+    store.update_object_tracking(event["id"], payload)
+    with store._lock, store._connect() as conn:
+        row = dict(conn.execute("select * from events where id=?", (event["id"],)).fetchone())
+        objects = json.loads(row["objects_json"])
+        before = copy.deepcopy(objects)
+        store._scene_ingest(conn, row, force_revision=True, objects=objects)
+        conn.rollback()
+    assert objects == before
+
+
+def test_existing_scene_observations_gain_the_event_time_index(tmp_path):
+    EventStore(tmp_path)
+    store = EventStore(tmp_path)
+    with store._connect() as conn:
+        conn.execute("drop index scene_observation_event_time")
+        conn.execute("create index scene_observation_event on scene_observations(event_id)")
+    store = EventStore(tmp_path)
+    with store._connect() as conn:
+        names = {row[0] for row in conn.execute("select name from sqlite_master where tbl_name='scene_observations'")}
+        plan = " ".join(str(row[-1]) for row in conn.execute(
+            "explain query plan select id from scene_observations where event_id=1 "
+            "and captured_epoch between 999.94 and 1000.06 and abs(captured_epoch-1000)<=0.05"))
+    assert "scene_observation_event_time" in names and "scene_observation_event" not in names
+    assert "scene_observation_event_time (event_id=? AND captured_epoch>? AND captured_epoch<?)" in plan
+
+
 def test_historical_decisions_backfill_once_per_event(tmp_path):
     store = EventStore(tmp_path)
     event = create_event(store, 1000)
