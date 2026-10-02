@@ -149,7 +149,7 @@ class EventStoreMotionIntelligenceMixin:
                     )
             if audit_id is None and normalized_decision_id:
                 existing = conn.execute(
-                    "select id, snapshot_path from motion_audits where decision_id = ?",
+                    "select id, snapshot_path from motion_audits where decision_id = ? and decision_id != ''",
                     (normalized_decision_id,),
                 ).fetchone()
                 if existing is not None:
@@ -246,7 +246,7 @@ class EventStoreMotionIntelligenceMixin:
                     audit_id = int(cursor.lastrowid)
                 elif normalized_decision_id:
                     existing = conn.execute(
-                        "select id from motion_audits where decision_id = ?",
+                        "select id from motion_audits where decision_id = ? and decision_id != ''",
                         (normalized_decision_id,),
                     ).fetchone()
                     if existing is not None:
