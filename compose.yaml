@@ -20,6 +20,7 @@ services:
       SURVNG_UID: ${SURVNG_UID:-1000}
       SURVNG_GID: ${SURVNG_GID:-1000}
       MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-16}
+      OPENBLAS_NUM_THREADS: ${OPENBLAS_NUM_THREADS:-1}
     volumes:
       - ${SURVNG_CONFIG_DIR:-./docker-data/config}:/config
       - ${SURVNG_DATA_DIR:-./docker-data/data}:/data

@@ -22,6 +22,9 @@ Environment=SURVNG_REPO_ROOT=/root/SurvNG
 # Bound glibc's per-thread arenas; transient high-resolution decoder threads
 # otherwise retain several GiB of reusable native heap after they stop.
 Environment=MALLOC_ARENA_MAX=16
+# Camera workers run many small numpy operations concurrently; a per-core
+# OpenBLAS pool only adds spin-wait and handoff CPU.
+Environment=OPENBLAS_NUM_THREADS=1
 
 # SIGUSR1 releases ONVIF first; FastAPI lifespan then stops the remaining workers.
 # SurvNG gracefully stops FFmpeg children; systemd kills the cgroup only if that stalls.
