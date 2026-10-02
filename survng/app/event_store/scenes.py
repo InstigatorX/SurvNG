@@ -128,6 +128,78 @@ class EventStoreSceneMixin:
                     source text not null, payload_json text not null
                 );
                 create index if not exists scene_decision_observation on scene_observation_decisions(observation_id);
+                create table if not exists scene_alert_entries (
+                    event_id integer not null references events(id) on delete cascade,
+                    object_id text not null, outcome text not null, explicit integer not null,
+                    first_epoch real not null, first_index integer not null,
+                    first_observation text not null, first_decision text not null,
+                    last_epoch real not null, last_index integer not null,
+                    last_observation text not null, last_decision text not null,
+                    payload_json text not null,
+                    primary key(event_id,object_id,outcome)
+                );
+                create table if not exists scene_alert_state (
+                    event_id integer primary key references events(id) on delete cascade
+                );
+                -- scene_alert_entries summarizes one event's decisions per subject
+                -- and policy outcome while its scene_alert_state row exists. New
+                -- decisions fold in here; anything that reorders, reassigns or
+                -- removes evidence drops the state so the next refresh rebuilds.
+                -- Positions order by (epoch, index, observation, decision rowid).
+                -- A new rowid exceeds every existing one, so it only breaks ties
+                -- toward the newest decision. Entries never store rowids because
+                -- VACUUM may renumber them.
+                create trigger if not exists scene_alert_fold after insert on scene_observation_decisions
+                when exists(select 1 from scene_observations o join scene_alert_state s on s.event_id=o.event_id
+                            where o.id=new.observation_id)
+                begin
+                    delete from scene_alert_entries where new.source='explicit' and explicit=0
+                        and (event_id,object_id)=(select event_id,object_id from scene_observations where id=new.observation_id);
+                    insert or ignore into scene_alert_entries
+                        select o.event_id,o.object_id,json_remove(new.payload_json,'$.label'),new.source='explicit',
+                               o.captured_epoch,coalesce(o.object_index,2147483647),o.id,new.id,
+                               o.captured_epoch,coalesce(o.object_index,2147483647),o.id,new.id,new.payload_json
+                        from scene_observations o where o.id=new.observation_id
+                        and (new.source='explicit' or not exists(select 1 from scene_alert_entries e
+                             where e.event_id=o.event_id and e.object_id=o.object_id and e.explicit=1));
+                    update scene_alert_entries set first_epoch=o.captured_epoch,first_index=coalesce(o.object_index,2147483647),
+                        first_observation=o.id,first_decision=new.id
+                        from scene_observations o where o.id=new.observation_id
+                        and scene_alert_entries.event_id=o.event_id and scene_alert_entries.object_id=o.object_id
+                        and scene_alert_entries.outcome=json_remove(new.payload_json,'$.label')
+                        and scene_alert_entries.explicit=(new.source='explicit')
+                        and (o.captured_epoch,coalesce(o.object_index,2147483647),o.id)
+                            < (scene_alert_entries.first_epoch,scene_alert_entries.first_index,scene_alert_entries.first_observation);
+                    update scene_alert_entries set last_epoch=o.captured_epoch,last_index=coalesce(o.object_index,2147483647),
+                        last_observation=o.id,last_decision=new.id,payload_json=new.payload_json
+                        from scene_observations o where o.id=new.observation_id
+                        and scene_alert_entries.event_id=o.event_id and scene_alert_entries.object_id=o.object_id
+                        and scene_alert_entries.outcome=json_remove(new.payload_json,'$.label')
+                        and scene_alert_entries.explicit=(new.source='explicit')
+                        and (o.captured_epoch,coalesce(o.object_index,2147483647),o.id)
+                            >= (scene_alert_entries.last_epoch,scene_alert_entries.last_index,scene_alert_entries.last_observation);
+                end;
+                create trigger if not exists scene_alert_decision_changed after update on scene_observation_decisions
+                begin
+                    delete from scene_alert_state where event_id in
+                        (select event_id from scene_observations where id in (old.observation_id,new.observation_id));
+                end;
+                create trigger if not exists scene_alert_decision_removed after delete on scene_observation_decisions
+                begin
+                    delete from scene_alert_state where event_id in
+                        (select event_id from scene_observations where id=old.observation_id);
+                end;
+                create trigger if not exists scene_alert_observation_moved
+                after update of event_id,object_id,captured_epoch,object_index,id on scene_observations
+                when old.event_id is not new.event_id or old.object_id is not new.object_id or old.id is not new.id
+                    or old.captured_epoch is not new.captured_epoch or old.object_index is not new.object_index
+                begin
+                    delete from scene_alert_state where event_id in (old.event_id,new.event_id);
+                end;
+                create trigger if not exists scene_alert_observation_removed after delete on scene_observations
+                begin
+                    delete from scene_alert_state where event_id=old.event_id;
+                end;
                 create table if not exists scene_event_decision_backfill (
                     event_id integer primary key references events(id) on delete cascade
                 );
@@ -467,27 +539,43 @@ class EventStoreSceneMixin:
         JSON with exactly label/eligible/reasons/zones, so the payload without
         its label identifies the policy outcome.
         """
-        rows = conn.execute("""
-            with policy as (
-                select o.id observation_id,o.object_id,d.source,d.payload_json,
-                       row_number() over (order by o.captured_epoch,coalesce(o.object_index,2147483647),o.id,d.rowid) position
-                from scene_observation_decisions d join scene_observations o on o.id=d.observation_id
-                where o.event_id=?),
-            kept as (
-                select *,json_remove(payload_json,'$.label') outcome from policy
-                where source='explicit' or object_id not in (select object_id from policy where source='explicit')),
-            grouped as (
-                select min(position) first_position,max(position) last_position from kept group by object_id,outcome)
-            select kept.observation_id,kept.object_id,kept.payload_json from grouped
-            join kept on kept.position=grouped.last_position order by grouped.first_position""",
-            (event_id,)).fetchall()
-        alerts = [{**json.loads(o["payload_json"]), "object_id":o["object_id"], "observation_id":o["observation_id"]}
+        if conn.execute("insert or ignore into scene_alert_state values(?)", (event_id,)).rowcount:
+            self._scene_rebuild_alert_entries(conn, event_id)
+        rows = conn.execute("select e.last_observation,e.object_id,e.payload_json from scene_alert_entries e "
+                            "join scene_observation_decisions d on d.id=e.first_decision where e.event_id=? "
+                            "order by e.first_epoch,e.first_index,e.first_observation,d.rowid", (event_id,)).fetchall()
+        alerts = [{**json.loads(o["payload_json"]), "object_id":o["object_id"], "observation_id":o["last_observation"]}
                   for o in rows]
         alert_payload = _json({"event_id":event_id,"objects":alerts,"eligible":any(o["eligible"] for o in alerts)})
         old_alert = conn.execute("select payload_json from scene_alert_decisions where event_id=?",(event_id,)).fetchone()
         conn.execute("insert into scene_alert_decisions values(?,?) on conflict(event_id) do update set payload_json=excluded.payload_json",
                      (event_id,alert_payload))
         return old_alert is None or old_alert[0] != alert_payload
+
+    @staticmethod
+    def _scene_rebuild_alert_entries(conn, event_id):
+        conn.execute("delete from scene_alert_entries where event_id=?", (event_id,))
+        conn.execute("""
+            insert into scene_alert_entries
+            with policy as (
+                select o.event_id,o.object_id,o.captured_epoch epoch,coalesce(o.object_index,2147483647) position,
+                       o.id observation_id,d.id decision_id,d.rowid decision_rowid,d.source,d.payload_json,
+                       json_remove(d.payload_json,'$.label') outcome
+                from scene_observation_decisions d join scene_observations o on o.id=d.observation_id
+                where o.event_id=?),
+            kept as (
+                select *,
+                       row_number() over (partition by object_id,outcome
+                           order by epoch,position,observation_id,decision_rowid) earliest,
+                       row_number() over (partition by object_id,outcome
+                           order by epoch desc,position desc,observation_id desc,decision_rowid desc) latest
+                from policy
+                where source='explicit' or object_id not in (select object_id from policy where source='explicit'))
+            select f.event_id,f.object_id,f.outcome,f.source='explicit',
+                   f.epoch,f.position,f.observation_id,f.decision_id,
+                   l.epoch,l.position,l.observation_id,l.decision_id,l.payload_json
+            from kept f join kept l on l.object_id=f.object_id and l.outcome=f.outcome and l.latest=1
+            where f.earliest=1""", (event_id,))
 
     def _scene_project(self, conn, row, *, historical=False, notify=True, activity=True, force_revision=False, activity_epoch=None, target_episode_id=None, context_only=False, defer_alerts=False):
         row = dict(row)
