@@ -164,9 +164,33 @@ def _motion_snapshot(raw: object, incidents: dict[str, Any]) -> dict[str, Any] |
                 ("fusion", "fusion_pipeline"),
             )
         },
-        "refinement": _numeric_fields(incidents, (
-            "refinement_queue_depth", "refinement_pending_episodes", "oldest_refinement_age_ms",
-        )),
+        "refinement": {
+            **_numeric_fields(incidents, (
+                "refinement_queue_depth", "refinement_pending_episodes", "oldest_refinement_age_ms",
+                "refinements_completed", "refinements_resumed", "refinement_failures",
+            )),
+            "worker_stage_ms": _numeric_table(
+                incidents.get("worker_stage_ms"), ("samples", "p50_ms", "p95_ms", "p99_ms"),
+            ),
+            "store_lock_wait": _numeric_table(
+                incidents.get("store_lock_wait"),
+                ("acquisitions", "contended", "wait_total_ms", "wait_p50_ms", "wait_p95_ms", "wait_p99_ms"),
+            ),
+            "scene_discovery": _numeric_fields(
+                incidents.get("scene_discovery"),
+                ("offered", "superseded", "stale", "completed", "failed"),
+            ),
+        },
+    }
+
+
+def _numeric_table(raw: object, names: Sequence[str]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: _numeric_fields(value, names)
+        for key, value in list(raw.items())[:MAX_MOTION_STAGES]
+        if _motion_identifier(key) is not None
     }
 
 

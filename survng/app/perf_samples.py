@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 import math
 import threading
+import time
 
 
 class RollingLatencySamples:
@@ -57,3 +58,52 @@ class RollingLatencySamples:
             max(0, int(math.ceil(len(sorted_values) * percentile) - 1)),
         )
         return float(sorted_values[index])
+
+
+class TimedLock:
+    """Lock wrapper that measures only contended acquisitions.
+
+    An uncontended acquire costs one extra non-blocking attempt; waits are
+    sampled so status can distinguish lock contention from slow work.
+    """
+
+    def __init__(self, inner: object | None = None, maxlen: int = 2000) -> None:
+        self._inner = inner if inner is not None else threading.Lock()
+        self._waits = RollingLatencySamples(maxlen)
+        self._acquisitions = 0
+        self._contended = 0
+        self._wait_total_ms = 0.0
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._inner.acquire(False):
+            self._acquisitions += 1
+            return True
+        if not blocking:
+            return False
+        started = time.monotonic()
+        acquired = self._inner.acquire(True, timeout)
+        if acquired:
+            waited = (time.monotonic() - started) * 1000.0
+            self._acquisitions += 1
+            self._contended += 1
+            self._wait_total_ms += waited
+            self._waits.add(waited)
+        return acquired
+
+    def release(self) -> None:
+        self._inner.release()
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self.release()
+
+    def snapshot(self) -> dict[str, int | float | None]:
+        return {
+            "acquisitions": self._acquisitions,
+            "contended": self._contended,
+            "wait_total_ms": round(self._wait_total_ms, 3),
+            **{f"wait_{key}": value for key, value in self._waits.snapshot().items()
+               if key != "samples"},
+        }

@@ -14,6 +14,7 @@ from ..incident_utils import event_snapshot_path, portable_media_path, snapshot_
 from ..main_database import connect_main_database
 from ..media_storage import MediaStorageRegistry
 from ..object_motion import tracking_motion_promotions
+from ..perf_samples import TimedLock
 from .calibration import EventStoreCalibrationMixin
 from .jobs import EventStoreJobsMixin
 from .evidence import EventStoreEvidenceMixin, EventSnapshotChangedError
@@ -74,12 +75,12 @@ class EventStore(
         self.db_path = (database_dir or storage_dir) / "survng.sqlite3"
         self.jobs_db_path = self.db_path.parent / "detection-jobs.sqlite3"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self._lock = TimedLock(threading.Lock())
         self._database_write_lock = database_write_lock or threading.RLock()
         # SQLite permits a single writer.  Camera event/refinement workers share
         # the jobs ledger, so serialize their short local transactions instead
         # of making them contend through SQLite's busy timeout.
-        self._jobs_lock = threading.RLock()
+        self._jobs_lock = TimedLock(threading.RLock())
         self._jobs_maintenance_lock = threading.Lock()
         self._last_detection_job_prune_monotonic = 0.0
         self._init_db()
@@ -95,6 +96,10 @@ class EventStore(
         self._recover_snapshot_deletion_claims()
         self._init_jobs_db()
         self._migrate_legacy_jobs()
+
+    def lock_wait_status(self) -> dict[str, dict[str, int | float | None]]:
+        """Contended waits on the in-process serialization locks."""
+        return {"events": self._lock.snapshot(), "jobs": self._jobs_lock.snapshot()}
 
     def _connect(self) -> sqlite3.Connection:
         conn = connect_main_database(

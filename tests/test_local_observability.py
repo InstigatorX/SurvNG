@@ -234,6 +234,32 @@ def test_motion_projection_excludes_payloads_and_preserves_unavailable_values() 
     assert build_runtime_status(AppConfig(), manager, instance_id="one", uptime_seconds=10, stopping=False)["cameras"][0]["motion"] is None
 
 
+def test_refinement_worker_timing_is_numeric_and_allowlisted() -> None:
+    manager = _manager()
+    raw = manager.statuses.return_value[0]
+    raw["motion_qualification"] = {"mode": "camera_rescue"}
+    raw["object_tracking"].update({
+        "refinements_resumed": 3,
+        "worker_stage_ms": {
+            "refine": {"samples": 4, "p95_ms": 812.5, "last_error": "secret-payload"},
+            "rtsp://secret@example/stream": {"samples": 1},
+        },
+        "store_lock_wait": {"jobs": {"contended": 2, "wait_p99_ms": float("inf")}},
+        "scene_discovery": {"offered": 9, "superseded": 6, "event_at": "secret-payload"},
+    })
+    payload = build_runtime_status(AppConfig(), manager, instance_id="one", uptime_seconds=10, stopping=False)
+    refinement = payload["cameras"][0]["motion"]["refinement"]
+    assert refinement["refinements_resumed"] == 3
+    assert refinement["worker_stage_ms"] == {
+        "refine": {"samples": 4, "p50_ms": None, "p95_ms": 812.5, "p99_ms": None},
+    }
+    assert refinement["store_lock_wait"]["jobs"]["contended"] == 2
+    assert refinement["store_lock_wait"]["jobs"]["wait_p99_ms"] is None
+    assert refinement["scene_discovery"]["superseded"] == 6
+    encoded = json.dumps(payload, allow_nan=False)
+    assert "secret-payload" not in encoded and "rtsp://" not in encoded
+
+
 def test_motion_stage_projection_has_explicit_bounds() -> None:
     manager = _manager()
     manager.statuses.return_value[0]["motion_qualification"] = {
