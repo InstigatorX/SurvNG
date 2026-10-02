@@ -2312,7 +2312,12 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                         <option value="enforce">Prevent false incident labels</option>
                         <option value="shadow">Observe only</option>
                         <option value="off">Off</option>
-                      </select><small>Controls whether stable objects repeatedly seen in one location can remain evidence without labeling the incident.</small></label>
+                      </select><small>Controls whether a repeated stationary subject can establish an incident or raise an alert. Evidence is still stored. Moving and uncertain objects stay eligible.</small></label>
+                      <label>Stationary subject presence<select value={selectedCamera.stationary_subject_presence || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["stationary_subject_presence"], event.target.value)}>
+                        <option value="inherit">Use global ({config.detector?.stationary_subject_presence === "activity" ? "Presence counts" : "Only on movement"})</option>
+                        <option value="ignore">Only when it moves, arrives, or departs</option>
+                        <option value="activity">Presence can establish and alert</option>
+                      </select><small>Applies to incident establishment and alerts on this camera, not only live labels.</small></label>
                     </div> : null}
 
                     {cameraSection === "info" ? <div className="field-row camera-info-fields">
@@ -4304,7 +4309,11 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                 <option value="enforce">Prevent false incident labels</option>
                 <option value="shadow">Observe without changing incidents</option>
                 <option value="off">Off</option>
-              </select><small>Runs after object detection. Repeated stable objects remain stored as evidence without being treated as the cause; moving or uncertain objects remain eligible.</small></label>
+              </select><small>Runs after object detection and again on recorded evidence. In enforcement mode a repeated stationary subject does not establish an incident or raise an alert; moving or uncertain objects remain eligible. Evidence is still stored.</small></label>
+              <label>Stationary subject presence<select value={config.detector?.stationary_subject_presence || "ignore"} onChange={(event) => updateConfig(["detector", "stationary_subject_presence"], event.target.value)}>
+                <option value="ignore">Only when it moves, arrives, or departs</option>
+                <option value="activity">Presence can establish and alert</option>
+              </select><small>Applies to incident establishment and alerts, not only live labels. Choose presence when a camera should treat a known stationary subject as activity.</small></label>
               <div className="detection-settings-subhead"><strong>Fixed areas remain explicit</strong><small>Object Ignore zones suppress only their matching classes. “Exclude from EMA” independently removes all visual motion in that polygon.</small></div>
             </div>
           </section> : null}

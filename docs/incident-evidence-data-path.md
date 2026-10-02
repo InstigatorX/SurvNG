@@ -71,7 +71,12 @@ it establishes activity only when a retained box on the same camera is in an
 eligible zone (`verified_camera_notice`). A notice with no such box, and measured
 motion that names no observation, cannot satisfy the restriction
 (`insufficient_spatial_evidence`). A notice also cannot override a physical
-witness that was measured and found ineligible. Cross-camera association uses the
+witness that was measured and found ineligible. A box already known as stationary
+scene context does not verify a notice or count as in-place `localized_motion`
+when the snapshotted policy ignores stationary presence and enforcement is on
+(`stationary_scene_context`). Movement and arrival still count. A snapshot
+without that policy, or with presence set to activity, shadow, or off, keeps
+its recorded meaning. Cross-camera association uses the
 same rule: the camera being admitted needs its own zone-eligible activity.
 Decisions recorded before this policy remain as recorded.
 

@@ -90,7 +90,16 @@ def acquire_detection_result(events, camera_id, event_at, qualification, frame, 
         )
         persisted.append(events.scene_sample(acquired["id"]))
     policy = qualification.get("establishment_zone_policy")
-    assessment = evaluate_scene_establishment(persisted, policy=policy if isinstance(policy, dict) else None)
+    memory = None
+    if callable(getattr(type(events), "scene_context_memory", None)):
+        memory = events.scene_context_memory(camera_id)
+    assessment = evaluate_scene_establishment(
+        persisted,
+        policy=policy if isinstance(policy, dict) else None,
+        scene_context_memory=memory,
+        event_key=event_at.isoformat(),
+        observed_at_epoch=at,
+    )
     ids = [sample["id"] for sample in persisted]
     seed_ids = list(qualification.get("scene_seed_sample_ids") or [])
     all_ids = list(dict.fromkeys([*seed_ids, *ids]))

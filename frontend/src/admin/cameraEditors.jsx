@@ -25,6 +25,7 @@ export function defaultCamera(cameras, seed = {}) {
     },
     require_incident_zone: seed.require_incident_zone ?? null,
     object_activity_attribution: seed.object_activity_attribution || "inherit",
+    stationary_subject_presence: seed.stationary_subject_presence || "inherit",
     motion_qualification: {
       ...defaultCameraMotionQualification(),
       mode: seed.motion_qualification?.mode || "inherit",

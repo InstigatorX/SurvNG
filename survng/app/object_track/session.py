@@ -18,7 +18,12 @@ from ..detector import detection_failure
 from ..domain_events import TrackingCompleted
 from ..motion_pipeline.scene_evidence import scene_observation
 from ..scene_activity_evidence import scene_sample_records
-from ..scene_zone_admission import establishment_zone_policy
+from ..object_activity import annotate_box_history_motion, apply_stationary_alert
+from ..scene_zone_admission import (
+    effective_activity_attribution,
+    effective_stationary_presence,
+    establishment_zone_policy,
+)
 from ..security import redact_secret_text
 from ..video_frames import DecodedVideoFrame, VideoFrameReference
 from ..visual_quality import image_quality
@@ -357,6 +362,7 @@ class ObjectTrackingSession:
             require_incident_zone=bool(require),
             confidence_threshold=getattr(detector_config, "confidence_threshold", None),
             class_confidence_thresholds=getattr(detector_config, "event_class_confidence_thresholds", None),
+            detector_config=detector_config,
         )
         return self.update_event(event_id, stamped, tracked_objects)
 
@@ -1228,12 +1234,28 @@ class ObjectTrackingSession:
                 )
                 tracking_started = time.monotonic()
                 tracked = tracker.update(objects, sample_epoch)
+                histories = {
+                    int(item["track_id"]): item.get("box_history") or []
+                    for item in tracker.summaries(sample_epoch)
+                    if item.get("track_id") is not None
+                }
+                attributor = getattr(self, "activity_attributor", None)
+                stamped_observations = []
                 for detected in tracked:
                     observation = frame_observations.get(str(detected.get("observation_key") or ""))
                     if observation is not None:
                         observation["scene_track_key"] = f"tracking:{event_id}:{self._scene_run_key}:{detected['track_id']}"
                         observation["track_id"] = detected["track_id"]
                         observation["track_state"] = detected.get("track_state")
+                        history = histories.get(int(detected["track_id"]))
+                        if history and self._frame_width and self._frame_height:
+                            annotate_box_history_motion(
+                                observation,
+                                history,
+                                width=float(self._frame_width),
+                                height=float(self._frame_height),
+                            )
+                        stamped_observations.append(observation)
                         label = str(detected.get("label") or "").lower()
                         key = (int(detected["track_id"]), label)
                         alert_confirmations[key] = alert_confirmations.get(key, 0) + int(
@@ -1251,6 +1273,16 @@ class ObjectTrackingSession:
                             if not policy_allowed else ["temporal_unconfirmed"]
                         )
                         observation["alert_confirmation_observations"] = alert_confirmations[key]
+                if attributor is not None and stamped_observations:
+                    attributor.stamp_recorded(
+                        stamped_observations,
+                        event_key=event_at.isoformat(),
+                        observed_at_epoch=sample_epoch,
+                    )
+                    presence = effective_stationary_presence(self.camera, self.detector.config)
+                    attribution = effective_activity_attribution(self.camera, self.detector.config)
+                    for observation in stamped_observations:
+                        apply_stationary_alert(observation, presence=presence, mode=attribution)
                 # Physical evidence and object/alert associations have separate
                 # ownership. Keep only one prior image; persist the measurements
                 # and both frame references, never infer activity from a new ID.

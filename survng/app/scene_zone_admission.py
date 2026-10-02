@@ -13,12 +13,46 @@ from typing import Any
 
 from .config import CameraConfig, DetectionZone
 from .scene_activity import _number, evaluate_scene_activity
+from .scene_context_memory import normalized_box
+from .stationary_policy import stationary_object_policy
 from .zones import apply_depth_zone_filters, apply_detection_zones, class_confidence_threshold
 
 ESTABLISHMENT_ZONE_POLICY_VERSION = "establishment_zones_v1"
+ESTABLISHMENT_ZONE_POLICY_VERSION_V2 = "establishment_zones_v2"
 # A box verifies where a notice occurred. Only boxes this soon after the notice
 # date it; a stationary subject seen later is not further activity.
 NOTICE_VERIFICATION_SECONDS = 10.0
+
+
+def effective_stationary_presence(camera: CameraConfig, detector_config: Any | None = None) -> str:
+    """Resolve a camera inherit to the detector's presence mode."""
+    value = getattr(camera, "stationary_subject_presence", "inherit")
+    if value == "inherit":
+        value = getattr(detector_config, "stationary_subject_presence", "ignore")
+    return value if value in {"ignore", "activity"} else "ignore"
+
+
+def effective_activity_attribution(camera: CameraConfig, detector_config: Any | None = None) -> str:
+    value = getattr(camera, "object_activity_attribution", "inherit")
+    if value == "inherit":
+        value = getattr(detector_config, "object_activity_attribution", "enforce")
+    return value if value in {"off", "shadow", "enforce"} else "enforce"
+
+
+def stationary_presence_enforced(policy: dict[str, Any] | None) -> bool:
+    return bool(
+        isinstance(policy, dict)
+        and policy.get("stationary_subject_presence") == "ignore"
+        and policy.get("object_activity_attribution") == "enforce"
+    )
+
+
+def stationary_presence_shadow(policy: dict[str, Any] | None) -> bool:
+    return bool(
+        isinstance(policy, dict)
+        and policy.get("stationary_subject_presence") == "ignore"
+        and policy.get("object_activity_attribution") == "shadow"
+    )
 
 
 def establishment_zone_policy(
@@ -27,6 +61,7 @@ def establishment_zone_policy(
     require_incident_zone: bool | None = None,
     confidence_threshold: float | None = None,
     class_confidence_thresholds: dict[str, float] | None = None,
+    detector_config: Any | None = None,
 ) -> dict[str, Any]:
     """Snapshot the geometry used to admit activity, without alert settings.
 
@@ -58,6 +93,8 @@ def establishment_zone_policy(
     normalized = _class_thresholds(class_confidence_thresholds)
     if normalized:
         policy["class_confidence_thresholds"] = normalized
+    policy["stationary_subject_presence"] = effective_stationary_presence(camera, detector_config)
+    policy["object_activity_attribution"] = effective_activity_attribution(camera, detector_config)
     return policy
 
 
@@ -128,6 +165,8 @@ def _confidence_admitted(payload: dict[str, Any], policy: dict[str, Any] | None)
 
 
 def _admits_activity(item: dict[str, Any]) -> bool:
+    if item.get("admission_reason") == "stationary_scene_context":
+        return False
     return bool(item.get("establishment_eligible")) and item.get("confidence_admitted") is not False
 
 
@@ -227,9 +266,26 @@ def interpret_establishment_observation(observation: dict[str, Any], policy: dic
     # computed for this same track.
     admitted = _confidence_admitted(payload, policy)
     admission_reason = "below_confidence" if eligible and not admitted else reason
-    return {"observation_id": identifier, "establishment_eligible": eligible, "reason": reason,
-            "admission_reason": admission_reason, "confidence_admitted": admitted,
-            "zones": names, "behaviors": behaviors}
+    role = str(payload.get("activity_role") or "")
+    effect = ""
+    if eligible and role == "scene_context":
+        if stationary_presence_enforced(policy):
+            effect = "enforce"
+            admission_reason = "stationary_scene_context"
+        elif stationary_presence_shadow(policy):
+            effect = "shadow"
+    return {
+        "observation_id": identifier,
+        "establishment_eligible": eligible,
+        "reason": reason,
+        "admission_reason": admission_reason,
+        "confidence_admitted": admitted,
+        "zones": names,
+        "behaviors": behaviors,
+        "activity_role": role or "indeterminate",
+        "stationary_presence": policy.get("stationary_subject_presence") if isinstance(policy, dict) else None,
+        "stationary_counterfactual": effect == "shadow",
+    }
 
 
 def _iter_observations(samples):
@@ -266,6 +322,11 @@ def _rejection_reason(interpretations: list[dict[str, Any]]) -> str:
     if not localized:
         return "insufficient_spatial_evidence"
     reasons = {item.get("admission_reason") or item["reason"] for item in localized}
+    if reasons == {"stationary_scene_context"}:
+        return "stationary_scene_context"
+    reasons.discard("stationary_scene_context")
+    if not reasons:
+        return "stationary_scene_context"
     if reasons <= {"ignored_zone", "depth_ignore_zone"}:
         return "depth_ignore_zone" if reasons == {"depth_ignore_zone"} else "ignored_zone"
     if reasons == {"outside_incident_zone"}:
@@ -296,10 +357,66 @@ def _zone_summary(reason: str, *, established: bool, notice: bool) -> str:
         return "Activity was outside the zones that can establish an incident."
     if reason == "below_confidence":
         return "Activity was below the confidence required to establish an incident."
+    if reason == "stationary_scene_context":
+        return "A stationary object already known at this location did not establish an incident."
     return "Activity was not in a zone that can establish an incident."
 
 
-def evaluate_scene_establishment(samples, *, policy: dict[str, Any] | None = None, notice: dict[str, Any] | None = None) -> dict[str, Any]:
+def _assign_known_stationary_roles(
+    samples,
+    memory,
+    *,
+    event_key: str,
+    observed_at_epoch: float | None,
+) -> None:
+    """A box with no role that sits on a known stationary subject is scene context.
+
+    An explicit role is left alone. The current event does not count as a prior,
+    and a snapshot recorded before this policy does not consult the live ledger.
+    """
+    if memory is None:
+        return
+    thresholds = stationary_object_policy("balanced")
+    for sample in samples or []:
+        if not isinstance(sample, dict):
+            continue
+        camera_id = str(sample.get("camera_id") or "")
+        sample_epoch = _number(sample.get("captured_epoch"))
+        epoch = float(sample_epoch if observed_at_epoch is None else observed_at_epoch)
+        if sample_epoch is not None:
+            epoch = max(epoch, sample_epoch)
+        for observation in sample.get("observations") or []:
+            if not isinstance(observation, dict):
+                continue
+            payload = observation.get("payload", observation)
+            if not isinstance(payload, dict) or str(payload.get("activity_role") or ""):
+                continue
+            label = str(payload.get("label") or "").strip().lower()
+            box = normalized_box(payload)
+            if not label or box is None:
+                continue
+            matched, priors, _age = memory.match(
+                camera_id=camera_id,
+                label=label,
+                box=box,
+                event_key=event_key,
+                observed_at_epoch=epoch,
+                min_iou=thresholds.scene_memory_min_iou,
+                ttl_seconds=thresholds.scene_memory_ttl_seconds,
+            )
+            if matched and priors >= thresholds.scene_memory_min_prior_sightings:
+                payload["activity_role"] = "scene_context"
+
+
+def evaluate_scene_establishment(
+    samples,
+    *,
+    policy: dict[str, Any] | None = None,
+    notice: dict[str, Any] | None = None,
+    scene_context_memory=None,
+    event_key: str = "",
+    observed_at_epoch: float | None = None,
+) -> dict[str, Any]:
     """Combine physical evidence with the snapshotted zone policy.
 
     An unlocalized camera or motion notice is not spatial evidence. When ignore
@@ -307,7 +424,17 @@ def evaluate_scene_establishment(samples, *, policy: dict[str, Any] | None = Non
     only if a retained box on the same camera is establishment-eligible.
     Measured motion that names no observation cannot satisfy the same restriction.
     """
-    activity = evaluate_scene_activity(samples)
+    if isinstance(policy, dict) and "stationary_subject_presence" in policy and policy.get("object_activity_attribution") != "off":
+        _assign_known_stationary_roles(
+            samples,
+            scene_context_memory,
+            event_key=event_key,
+            observed_at_epoch=observed_at_epoch,
+        )
+    activity = evaluate_scene_activity(
+        samples,
+        ignore_stationary_scene_context=stationary_presence_enforced(policy),
+    )
     if not isinstance(policy, dict):
         policy = None
     restricting = policy_restricts(policy)
@@ -331,11 +458,20 @@ def evaluate_scene_establishment(samples, *, policy: dict[str, Any] | None = Non
     result = {
         **{key: activity[key] for key in ("status", "reason", "summary", "activity_epoch", "supporting_observation_ids", "start_epoch") if key in activity},
         "diagnostics": activity.get("diagnostics") or {},
-        "policy_version": activity.get("policy_version", 1) if policy is None else ESTABLISHMENT_ZONE_POLICY_VERSION,
+        "policy_version": activity.get("policy_version", 1) if policy is None else (
+            ESTABLISHMENT_ZONE_POLICY_VERSION_V2
+            if isinstance(policy, dict) and "stationary_subject_presence" in policy
+            else ESTABLISHMENT_ZONE_POLICY_VERSION
+        ),
         "physical_evidence": _compact_activity(activity),
         "zone_interpretation": zone,
         "witnesses": activity.get("witnesses") or [],
     }
+    if any(item.get("stationary_counterfactual") for item in interpretations):
+        result["diagnostics"] = {
+            **(result.get("diagnostics") or {}),
+            "stationary_scene_context_counterfactual": True,
+        }
     if not restricting:
         if notice and result.get("status") != "supported":
             source = "camera" if notice.get("source") == "camera" else "motion"

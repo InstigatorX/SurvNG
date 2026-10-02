@@ -242,6 +242,19 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
             "coverage_interruption_counts": dict(
                 tracking.get("coverage_interruption_counts") or {}
             ),
+            "scene_context_entries": int(_number(
+                (tracking.get("object_activity_attribution") or {}).get("scene_context_memory_entries")
+                if isinstance(tracking.get("object_activity_attribution"), dict)
+                else 0
+            )),
+            "scene_context_mode": str(
+                (tracking.get("object_activity_attribution") or {}).get("mode") or ""
+            ) if isinstance(tracking.get("object_activity_attribution"), dict) else "",
+            "scene_context_enforced_suppressions": int(_number(
+                (tracking.get("object_activity_attribution") or {}).get("enforced_suppressions")
+                if isinstance(tracking.get("object_activity_attribution"), dict)
+                else 0
+            )),
         },
     }
 

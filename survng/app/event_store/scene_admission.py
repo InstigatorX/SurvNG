@@ -132,7 +132,19 @@ class EventStoreSceneAdmissionMixin:
             notice = None
             if not qualification.get("scene_discovery") and not qualification.get("scene_confirmation"):
                 notice = {"source": "camera" if qualification.get("trigger_source", "camera") == "camera" else "motion", "epoch": at}
-            assessment = evaluate_scene_establishment(samples, policy=policy if isinstance(policy, dict) else None, notice=notice)
+            memory = None
+            if callable(getattr(type(self), "scene_context_snapshot", None)):
+                memory = self.scene_context_snapshot(conn, str(row.get("camera_id") or ""))
+            created = row.get("created_at")
+            event_key = created.isoformat() if hasattr(created, "isoformat") else str(created or "")
+            assessment = evaluate_scene_establishment(
+                samples,
+                policy=policy if isinstance(policy, dict) else None,
+                notice=notice,
+                scene_context_memory=memory,
+                event_key=event_key,
+                observed_at_epoch=at,
+            )
         newer_activity = assessment["status"] == "supported" and (
             decision is None or decision["verdict"] != "supported" or (assessment.get("activity_epoch") or 0) > (decision.get("activity_epoch") or 0))
         if decision is None or (newer_activity and activity and not historical):

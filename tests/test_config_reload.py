@@ -661,6 +661,7 @@ class ConfigReloadTest(unittest.TestCase):
         main.manager = active
         incoming = current.model_copy(deep=True)
         incoming.cameras[0].object_activity_attribution = "shadow"
+        incoming.cameras[0].stationary_subject_presence = "activity"
 
         with (
             patch("survng.app.main.reload_manager") as reload,

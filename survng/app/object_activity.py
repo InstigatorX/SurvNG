@@ -5,11 +5,16 @@ from __future__ import annotations
 import math
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Iterable, Literal, Mapping
 
-from .object_motion import TemporalObjectMotionEvidence, temporal_object_motion_evidence
+from .object_motion import (
+    TemporalObjectMotionEvidence,
+    estimate_object_motion,
+    temporal_object_motion_evidence,
+)
+from .scene_context_memory import InMemorySceneContextMemory, SceneContextMemory, normalized_box
 from .stationary_policy import StationaryObjectPolicy, stationary_object_policy
 
 
@@ -124,16 +129,71 @@ class ObjectIncidentAdmission:
         return self.attribution.observation
 
 
-@dataclass(slots=True)
-class _SceneContextEntry:
-    label: str
-    box: tuple[float, float, float, float]
-    last_seen_epoch: float
-    stable_event_keys: list[str] = field(default_factory=list)
+def apply_stationary_alert(observation: dict[str, Any], *, presence: str, mode: str) -> None:
+    """Clear alert eligibility for an enforced stationary subject.
 
-    @property
-    def stable_sightings(self) -> int:
-        return len(self.stable_event_keys)
+    An unconfirmed track keeps its temporal reason. Shadow mode records the
+    counterfactual and leaves eligibility unchanged.
+    """
+    effect = stationary_subject_effect(str(observation.get("activity_role") or ""), presence, mode)
+    if effect == "shadow":
+        observation["alert_shadow_reasons"] = ["stationary_scene_context"]
+    if effect != "enforce":
+        return
+    if observation.get("alert_reasons") == ["temporal_unconfirmed"]:
+        return
+    if str(observation.get("label") or "").lower() == "face":
+        return
+    observation["alert_eligible"] = False
+    observation["alert_reasons"] = ["stationary_scene_context"]
+
+
+def stationary_subject_effect(role: str, presence: str, mode: str) -> str:
+    """How a proven stationary subject affects establishment and alerts.
+
+    ``enforce`` suppresses presence. ``shadow`` records the counterfactual.
+    Anything else, including a missing role, fails open.
+    """
+    if str(role or "") != "scene_context" or presence != "ignore":
+        return ""
+    if mode == "enforce":
+        return "enforce"
+    if mode == "shadow":
+        return "shadow"
+    return ""
+
+
+def annotate_box_history_motion(
+    observation: dict[str, Any],
+    box_history: Any,
+    *,
+    width: float,
+    height: float,
+) -> None:
+    """Attach bounded-excursion motion from a track's pixel box history."""
+    if width <= 0 or height <= 0 or not isinstance(box_history, list):
+        return
+    centers: list[tuple[float, float, float]] = []
+    for sample in box_history:
+        if not isinstance(sample, (list, tuple)) or len(sample) < 5:
+            continue
+        try:
+            timestamp, x1, y1, x2, y2 = (float(value) for value in sample[:5])
+        except (TypeError, ValueError):
+            continue
+        if not all(math.isfinite(value) for value in (timestamp, x1, y1, x2, y2)):
+            continue
+        centers.append((timestamp, (x1 + x2) / (2.0 * width), (y1 + y2) / (2.0 * height)))
+    estimate = estimate_object_motion(centers)
+    observation["temporal_track_observations"] = estimate.samples
+    observation["temporal_consensus"] = estimate.samples >= 2
+    observation["temporal_pretrigger_observations"] = 1 if estimate.samples >= 2 else 0
+    observation["temporal_posttrigger_observations"] = 1 if estimate.samples >= 2 else 0
+    observation["temporal_center_displacement_ratio"] = estimate.raw_displacement_ratio
+    observation["temporal_center_path_ratio"] = estimate.filtered_path_ratio
+    observation["temporal_motion"] = estimate.as_dict()
+    observation["temporal_robust_new_appearance"] = False
+    observation.setdefault("temporal_zone_entry", False)
 
 
 class ObjectActivityAttributor:
@@ -152,8 +212,13 @@ class ObjectActivityAttributor:
         self,
         mode: AttributionMode = "enforce",
         stationary_tolerance: str = "balanced",
+        *,
+        memory: SceneContextMemory | None = None,
+        camera_id: str = "",
     ) -> None:
         self.mode: AttributionMode = mode
+        self.camera_id = camera_id
+        self.memory: SceneContextMemory = memory or InMemorySceneContextMemory()
         self.stationary_policy: StationaryObjectPolicy = stationary_object_policy(
             stationary_tolerance
         )
@@ -175,8 +240,6 @@ class ObjectActivityAttributor:
         }
         self._reasons: dict[str, int] = {}
         self._semantic_rescue_by_source: dict[str, dict[str, int]] = {}
-        self._context_memory: list[_SceneContextEntry] = []
-
     def attribute(
         self,
         objects: Iterable[dict[str, Any]],
@@ -221,7 +284,7 @@ class ObjectActivityAttributor:
                     source: dict(counts)
                     for source, counts in self._semantic_rescue_by_source.items()
                 },
-                "scene_context_memory_entries": len(self._context_memory),
+                "scene_context_memory_entries": self.memory.count(self.camera_id),
                 "scene_context_memory_ttl_seconds": self.stationary_policy.scene_memory_ttl_seconds,
                 "stationary_policy": self.stationary_policy.as_dict(),
             }
@@ -254,11 +317,38 @@ class ObjectActivityAttributor:
         with self._lock:
             self.mode = mode
             if mode == "off":
-                self._context_memory.clear()
+                self.memory.clear(self.camera_id)
 
     def reconfigure_stationary_tolerance(self, tolerance: str) -> None:
         with self._lock:
             self.stationary_policy = stationary_object_policy(tolerance)
+
+    def stamp_recorded(
+        self,
+        observations: Iterable[dict[str, Any]],
+        *,
+        event_key: str,
+        observed_at_epoch: float,
+    ) -> None:
+        """Record the same activity role on recorded observations.
+
+        Enforcement stays with establishment and alerts. This only writes the
+        role, and it does not remember subjects while attribution is off.
+        """
+        if self.mode == "off":
+            return
+        for item in observations:
+            if not isinstance(item, dict) or not item.get("label"):
+                continue
+            result = self._attribute_one(
+                item,
+                {},
+                event_key=event_key,
+                observed_at_epoch=observed_at_epoch,
+            )
+            item["activity_role"] = result.role.value
+            item["activity_confidence"] = round(result.confidence, 4)
+            item["activity_evidence"] = result.evidence.as_dict()
 
     def _attribute_one(
         self,
@@ -293,6 +383,28 @@ class ObjectActivityAttributor:
             and motion.movement_extent_ratio <= self.stationary_policy.scene_stable_path_ratio
             and not motion.zone_entry
         )
+        with self.memory.hold():
+            return self._attribute_stable(
+                observation,
+                qualification,
+                motion=motion,
+                stable=stable,
+                stable_observation=stable_observation,
+                event_key=event_key,
+                observed_at_epoch=observed_at_epoch,
+            )
+
+    def _attribute_stable(
+        self,
+        observation: dict[str, Any],
+        qualification: Mapping[str, Any],
+        *,
+        motion: TemporalObjectMotionEvidence,
+        stable: bool,
+        stable_observation: bool,
+        event_key: str,
+        observed_at_epoch: float,
+    ) -> ObjectActivityAttribution:
         memory_match, memory_sightings, memory_age = self._context_memory_evidence(
             observation,
             event_key=event_key,
@@ -417,24 +529,15 @@ class ObjectActivityAttributor:
         box = self._normalized_box(observation)
         if not label or box is None:
             return False, 0, None
-        with self._lock:
-            self._prune_context_memory(observed_at_epoch)
-            matches = [
-                entry
-                for entry in self._context_memory
-                if entry.label == label
-                and event_key not in entry.stable_event_keys
-                and entry.last_seen_epoch <= observed_at_epoch
-                and self._box_iou(entry.box, box) >= self.stationary_policy.scene_memory_min_iou
-            ]
-            if not matches:
-                return False, 0, None
-            match = max(matches, key=lambda entry: self._box_iou(entry.box, box))
-            return (
-                True,
-                match.stable_sightings,
-                max(0.0, observed_at_epoch - match.last_seen_epoch),
-            )
+        return self.memory.match(
+            camera_id=self.camera_id,
+            label=label,
+            box=box,
+            event_key=event_key,
+            observed_at_epoch=observed_at_epoch,
+            min_iou=self.stationary_policy.scene_memory_min_iou,
+            ttl_seconds=self.stationary_policy.scene_memory_ttl_seconds,
+        )
 
     def _remember_scene_context(
         self,
@@ -447,31 +550,17 @@ class ObjectActivityAttributor:
         box = self._normalized_box(observation)
         if not label or box is None:
             return
-        with self._lock:
-            self._prune_context_memory(observed_at_epoch)
-            match = next(
-                (
-                    entry
-                    for entry in self._context_memory
-                    if entry.label == label
-                    and entry.last_seen_epoch <= observed_at_epoch
-                    and self._box_iou(entry.box, box) >= self.stationary_policy.scene_memory_min_iou
-                ),
-                None,
-            )
-            if match is not None:
-                if event_key not in match.stable_event_keys:
-                    match.stable_event_keys.append(event_key)
-                    del match.stable_event_keys[:-self.CONTEXT_MEMORY_MAX_SIGHTINGS]
-                match.box = box
-                match.last_seen_epoch = observed_at_epoch
-            else:
-                self._context_memory.append(
-                    _SceneContextEntry(label, box, observed_at_epoch, [event_key])
-                )
-            if len(self._context_memory) > self.CONTEXT_MEMORY_MAX_ENTRIES:
-                self._context_memory.sort(key=lambda entry: entry.last_seen_epoch)
-                del self._context_memory[:-self.CONTEXT_MEMORY_MAX_ENTRIES]
+        self.memory.remember(
+            camera_id=self.camera_id,
+            label=label,
+            box=box,
+            event_key=event_key,
+            observed_at_epoch=observed_at_epoch,
+            min_iou=self.stationary_policy.scene_memory_min_iou,
+            ttl_seconds=self.stationary_policy.scene_memory_ttl_seconds,
+            max_entries=self.CONTEXT_MEMORY_MAX_ENTRIES,
+            max_sightings=self.CONTEXT_MEMORY_MAX_SIGHTINGS,
+        )
 
     def _forget_scene_context_observation(
         self,
@@ -484,26 +573,14 @@ class ObjectActivityAttributor:
         box = self._normalized_box(observation)
         if not label or box is None:
             return
-        with self._lock:
-            retained: list[_SceneContextEntry] = []
-            for entry in self._context_memory:
-                matches = bool(
-                    entry.label == label
-                    and self._box_iou(entry.box, box) >= self.stationary_policy.scene_memory_min_iou
-                )
-                if matches and invalidate_location:
-                    continue
-                if matches and event_key in entry.stable_event_keys:
-                    entry.stable_event_keys.remove(event_key)
-                if entry.stable_event_keys:
-                    retained.append(entry)
-            self._context_memory[:] = retained
-
-    def _prune_context_memory(self, observed_at_epoch: float) -> None:
-        cutoff = observed_at_epoch - self.stationary_policy.scene_memory_ttl_seconds
-        self._context_memory[:] = [
-            entry for entry in self._context_memory if entry.last_seen_epoch >= cutoff
-        ]
+        self.memory.forget(
+            camera_id=self.camera_id,
+            label=label,
+            box=box,
+            event_key=event_key,
+            invalidate_location=invalidate_location,
+            min_iou=self.stationary_policy.scene_memory_min_iou,
+        )
 
     def _admit_one(
         self,
@@ -562,25 +639,7 @@ class ObjectActivityAttributor:
     def _normalized_box(
         observation: Mapping[str, Any],
     ) -> tuple[float, float, float, float] | None:
-        box = observation.get("box")
-        try:
-            width = float(observation.get("detection_frame_width") or 0.0)
-            height = float(observation.get("detection_frame_height") or 0.0)
-            if not isinstance(box, Mapping) or width <= 0 or height <= 0:
-                return None
-            normalized = (
-                float(box["x1"]) / width,
-                float(box["y1"]) / height,
-                float(box["x2"]) / width,
-                float(box["y2"]) / height,
-            )
-        except (KeyError, TypeError, ValueError):
-            return None
-        if normalized[2] <= normalized[0] or normalized[3] <= normalized[1]:
-            return None
-        if not all(math.isfinite(value) for value in normalized):
-            return None
-        return normalized
+        return normalized_box(observation)
 
     @staticmethod
     def _box_iou(

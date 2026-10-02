@@ -337,5 +337,6 @@ def test_repeated_scene_context_history_is_bounded() -> None:
             observed_at_epoch=1000.0 + index,
         )
 
-    assert len(attributor._context_memory) == 1
-    assert len(attributor._context_memory[0].stable_event_keys) == 16
+    subjects = [subject for _, subject in attributor.memory._subjects]
+    assert len(subjects) == 1
+    assert len(subjects[0].stable_event_keys) == 16

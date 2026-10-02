@@ -8,7 +8,7 @@ import threading
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
 from typing import Any, Callable, Protocol
@@ -25,6 +25,7 @@ from ..scene_activity_evidence import scene_sample_records as _scene_sample_reco
 from ..detector import detection_failure
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..ffmpeg_hw import recorded_frame_hw_args
+from ..object_activity import ObjectActivityAttributor
 from ..object_motion import ObjectMotionEstimate, estimate_object_motion
 from ..recording_media import mp4_video_dimensions
 from ..visual_quality import VisualQuality, image_quality
@@ -2437,6 +2438,7 @@ class RecordedMotionObjectDetector:
         # replace the selected sample with a cover-oriented object projection.
         observations: list[dict[str, Any]] = []
         for track in _collect_temporal_evidence(samples):
+            motion = _temporal_motion_metrics(track, samples)
             first_index = min(track.observations)
             first = scene_observation(
                 track.observations[first_index],
@@ -2455,6 +2457,15 @@ class RecordedMotionObjectDetector:
                     scene_track_key=track_key,
                 )
                 if observation is not None:
+                    observation["temporal_motion"] = motion.as_dict()
+                    observation["temporal_center_displacement_ratio"] = round(motion.raw_displacement_ratio, 5)
+                    observation["temporal_center_path_ratio"] = round(motion.raw_path_ratio, 5)
+                    observation["temporal_track_observations"] = motion.samples
+                    observation["temporal_consensus"] = motion.samples >= 2
+                    observation["temporal_pretrigger_observations"] = 1 if motion.samples >= 2 else 0
+                    observation["temporal_posttrigger_observations"] = 1 if motion.samples >= 2 else 0
+                    observation["temporal_robust_new_appearance"] = False
+                    observation.setdefault("temporal_zone_entry", False)
                     observation["snapshot_visible"] = sample is selected
                     observations.append(observation)
         # Dedicated face enrichment runs only after consensus. Collect
@@ -2495,6 +2506,13 @@ class RecordedMotionObjectDetector:
                     detected.get("temporal_sample_offset_seconds", selected.offset)
                 )
                 detected["frame_source"] = "recorded_main"
+        attributor = getattr(self, "activity_attributor", None)
+        if isinstance(attributor, ObjectActivityAttributor) and observations:
+            attributor.stamp_recorded(
+                observations,
+                event_key=datetime.fromtimestamp(event_epoch, timezone.utc).isoformat(),
+                observed_at_epoch=event_epoch,
+            )
         scene_samples = _scene_sample_records(samples,observations,event_epoch,
             str(getattr(getattr(self,"camera",None),"id","")),confirmation_offsets)
         self._release_nonselected_frames(samples, selected)

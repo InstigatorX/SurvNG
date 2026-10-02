@@ -561,6 +561,7 @@ class CameraConfig(BaseModel):
     retention: CameraRetentionConfig = Field(default_factory=CameraRetentionConfig)
     require_incident_zone: bool | None = None
     object_activity_attribution: Literal["inherit", "off", "shadow", "enforce"] = "inherit"
+    stationary_subject_presence: Literal["inherit", "ignore", "activity"] = "inherit"
     motion_qualification: CameraMotionQualificationConfig = Field(default_factory=CameraMotionQualificationConfig)
     onvif: OnvifConfig = Field(default_factory=OnvifConfig)
     zones: list[DetectionZone] = Field(default_factory=list)
@@ -874,6 +875,7 @@ class DetectorConfig(BaseModel):
         le=60.0,
     )
     object_activity_attribution: Literal["off", "shadow", "enforce"] = "enforce"
+    stationary_subject_presence: Literal["ignore", "activity"] = "ignore"
     require_incident_zone: bool = True
     labels: list[str] = Field(default_factory=list)
     depth: DepthConfig = Field(default_factory=DepthConfig)

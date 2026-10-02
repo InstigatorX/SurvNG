@@ -438,6 +438,7 @@ class CameraWorker:
                 require_incident_zone=require,
                 confidence_threshold=None if config is None else getattr(config, "confidence_threshold", None),
                 class_confidence_thresholds=None if config is None else getattr(config, "event_class_confidence_thresholds", None),
+                detector_config=config,
             )
 
         self.motion_decision_handler = motion_decision_handler_factory.create(
@@ -460,21 +461,8 @@ class CameraWorker:
             event_callback=(
                 self.motion_state.publish_event if event_callback is not None else None
             ),
-            activity_attributor=ObjectActivityAttributor(
-                mode=(
-                    getattr(
-                        motion_object_detector_factory.detector.config,
-                        "object_activity_attribution",
-                        "enforce",
-                    )
-                    if camera.object_activity_attribution == "inherit"
-                    else camera.object_activity_attribution
-                ),
-                stationary_tolerance=(
-                    self.motion_config.stationary_object_tolerance
-                    if camera.motion_qualification.stationary_object_tolerance == "inherit"
-                    else camera.motion_qualification.stationary_object_tolerance
-                ),
+            activity_attributor=self._activity_attributor(
+                motion_decision_handler_factory
             ),
             spatial_alignment=self._effective_spatial_alignment,
             route_admission_callback=route_target_admitted,
@@ -988,8 +976,55 @@ class CameraWorker:
     def status(self) -> dict[str, Any]:
         return self.status_reporter.snapshot()
 
+    def _activity_attributor(self, decision_factory):
+        detector_config = getattr(
+            getattr(self.motion_object_detector, "detector", None), "config", None,
+        )
+        mode = (
+            getattr(detector_config, "object_activity_attribution", "enforce")
+            if self.camera.object_activity_attribution == "inherit"
+            else self.camera.object_activity_attribution
+        )
+        tolerance = (
+            self.motion_config.stationary_object_tolerance
+            if self.camera.motion_qualification.stationary_object_tolerance == "inherit"
+            else self.camera.motion_qualification.stationary_object_tolerance
+        )
+        store = getattr(decision_factory, "events", None)
+        memory = None
+        if callable(getattr(type(store), "scene_context_memory", None)):
+            memory = store.scene_context_memory(self.camera.id)
+        attributor = ObjectActivityAttributor(
+            mode=mode,
+            stationary_tolerance=tolerance,
+            memory=memory,
+            camera_id=self.camera.id,
+        )
+        self.scene_context_memory = attributor.memory
+        self.tracking_lifecycle.scene_context_memory = attributor.memory
+        self.tracking_lifecycle.activity_attributor = attributor
+        current = self.tracking_lifecycle.current()
+        current.scene_context_memory = attributor.memory
+        current.activity_attributor = attributor
+        detector = getattr(self, "motion_object_detector", None)
+        if detector is not None:
+            detector.scene_context_memory = attributor.memory
+            detector.activity_attributor = attributor
+        return attributor
+
     def reconfigure_object_activity_attribution(self, mode: AttributionMode) -> None:
         self.motion_decision_handler.reconfigure_activity_attribution(mode)
+
+    def reconfigure_stationary_subject_policy(self, camera, detector) -> None:
+        """Apply scene-context enforcement and presence without rebuilding the camera."""
+        self.camera.object_activity_attribution = camera.object_activity_attribution
+        self.camera.stationary_subject_presence = camera.stationary_subject_presence
+        mode = (
+            detector.object_activity_attribution
+            if camera.object_activity_attribution == "inherit"
+            else camera.object_activity_attribution
+        )
+        self.reconfigure_object_activity_attribution(mode)
 
     def reconfigure_motion_policy(
         self,

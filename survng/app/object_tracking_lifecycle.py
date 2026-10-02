@@ -59,6 +59,8 @@ class ObjectTrackingLifecycle:
         self.cover_frame_provider = cover_frame_provider
         self.snapshot_writer = snapshot_writer
         self.scene_job_store = scene_job_store
+        self.scene_context_memory = None
+        self.activity_attributor = None
         self._scene_lease_owner = uuid.uuid4().hex
         self._session = self.create(factory)
 
@@ -78,13 +80,16 @@ class ObjectTrackingLifecycle:
         self,
         factory: ObjectTrackingSessionFactory,
     ) -> ObjectTrackingSession:
-        return factory.create(
+        session = factory.create(
             camera=self.camera,
             frame_provider=self.frame_provider,
             catchup_frame_provider=self.catchup_frame_provider,
             cover_frame_provider=self.cover_frame_provider,
             snapshot_writer=self.snapshot_writer,
         )
+        session.scene_context_memory = self.scene_context_memory
+        session.activity_attributor = self.activity_attributor
+        return session
 
     def prewarm(self) -> FrameSample | None:
         return self.prewarm_frame_provider()

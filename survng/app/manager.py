@@ -1316,6 +1316,9 @@ class AppManager:
         cameras = {camera.id: camera for camera in config.cameras}
         for worker in self.camera_fleet.workers.values():
             camera = cameras.get(worker.camera.id)
+            if camera is not None and hasattr(worker, "reconfigure_stationary_subject_policy"):
+                worker.reconfigure_stationary_subject_policy(camera, config.detector)
+                continue
             mode = (
                 config.detector.object_activity_attribution
                 if camera is None or camera.object_activity_attribution == "inherit"

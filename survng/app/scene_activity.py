@@ -18,7 +18,7 @@ def _number(value):
         return None
 
 
-def evaluate_scene_activity(samples, *, policy_version=1) -> dict[str, Any]:
+def evaluate_scene_activity(samples, *, policy_version=1, ignore_stationary_scene_context=False) -> dict[str, Any]:
     if policy_version != 1:
         raise ValueError("unsupported scene activity policy version")
     # A retry, a second model, or a second resolution of one capture does not
@@ -93,6 +93,14 @@ def evaluate_scene_activity(samples, *, policy_version=1) -> dict[str, Any]:
                     displacement = _number(witness.get("normalized_displacement"))
                     if displacement is None or displacement < .01:
                         continue
+                if (
+                    ignore_stationary_scene_context
+                    and witness["kind"] == "localized_motion"
+                    and all(str(observations[key].get("activity_role") or "") == "scene_context" for key in ids)
+                ):
+                    # In-place pixel change on a known stationary subject is
+                    # retained on the sample, but it is not activity.
+                    continue
                 supported.append((after, ids, "video_verified_activity"))
                 witnesses.append({"epoch": after, "observation_ids": ids, "kind": "video_verified_activity"})
     result["witnesses"] = witnesses
