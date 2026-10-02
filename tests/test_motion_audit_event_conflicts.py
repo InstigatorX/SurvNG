@@ -30,3 +30,30 @@ def test_refined_decision_links_to_already_audited_event(tmp_path, existing_deci
     assert [a['id'] for a in store.motion_audits_for_related_events([event['id']])] == [completed['id']]
     rows, total = store.motion_audits(camera_id='gate', include_incident_activity=True)
     assert total == 2
+
+
+def test_decision_lookups_use_the_decision_index(tmp_path):
+    store = EventStore(tmp_path)
+    statements = []
+    connect = store._connect
+
+    def traced():
+        conn = connect()
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    store._connect = traced
+    base = dict(camera_id='gate', snapshot_path='', created_at='2026-09-12T12:00:00+00:00',
+                mode='camera_rescue', sensitivity='balanced', score=.8, threshold=.5,
+                reason='visual_backup_trigger', object_detected=True, trigger_count=1,
+                features={}, category='visual_backup')
+    event = store.add_event(camera_id='gate', kind='motion', objects_json='[]')
+    store.add_motion_audit(**base, decision_id='qualified')
+    store.add_motion_audit(**base, event_id=event['id'], decision_id='qualified')
+    lookups = [sql for sql in statements
+               if sql.lstrip().lower().startswith('select') and 'from motion_audits where decision_id' in sql]
+    assert lookups
+    with connect() as conn:
+        for sql in lookups:
+            plan = " ".join(row[-1] for row in conn.execute("explain query plan " + sql))
+            assert "idx_motion_audits_decision" in plan, (sql, plan)
