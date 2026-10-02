@@ -123,6 +123,9 @@ class EventStoreSceneMixin:
                     source text not null, payload_json text not null
                 );
                 create index if not exists scene_decision_observation on scene_observation_decisions(observation_id);
+                create table if not exists scene_event_decision_backfill (
+                    event_id integer primary key references events(id) on delete cascade
+                );
                 create table if not exists scene_aliases (alias text primary key, incident_id text not null);
                 create table if not exists scene_corrections (
                     id integer primary key, incident_id text not null, revision integer not null,
@@ -450,7 +453,38 @@ class EventStoreSceneMixin:
         candidates.extend(legacy_candidates)
         return objects, candidates, presentation
 
-    def _scene_project(self, conn, row, *, historical=False, notify=True, activity=True, force_revision=False, activity_epoch=None, target_episode_id=None, context_only=False):
+    def _scene_refresh_alerts(self, conn, event_id):
+        """Store the event's alert decisions; return whether they changed.
+
+        Explicit decisions supersede legacy ones for the same subject. One
+        alert remains per subject and policy outcome, positioned at its first
+        observation and carrying its latest. Decision payloads are canonical
+        JSON with exactly label/eligible/reasons/zones, so the payload without
+        its label identifies the policy outcome.
+        """
+        rows = conn.execute("""
+            with policy as (
+                select o.id observation_id,o.object_id,d.source,d.payload_json,
+                       row_number() over (order by o.captured_epoch,coalesce(o.object_index,2147483647),o.id,d.rowid) position
+                from scene_observation_decisions d join scene_observations o on o.id=d.observation_id
+                where o.event_id=?),
+            kept as (
+                select *,json_remove(payload_json,'$.label') outcome from policy
+                where source='explicit' or object_id not in (select object_id from policy where source='explicit')),
+            grouped as (
+                select min(position) first_position,max(position) last_position from kept group by object_id,outcome)
+            select kept.observation_id,kept.object_id,kept.payload_json from grouped
+            join kept on kept.position=grouped.last_position order by grouped.first_position""",
+            (event_id,)).fetchall()
+        alerts = [{**json.loads(o["payload_json"]), "object_id":o["object_id"], "observation_id":o["observation_id"]}
+                  for o in rows]
+        alert_payload = _json({"event_id":event_id,"objects":alerts,"eligible":any(o["eligible"] for o in alerts)})
+        old_alert = conn.execute("select payload_json from scene_alert_decisions where event_id=?",(event_id,)).fetchone()
+        conn.execute("insert into scene_alert_decisions values(?,?) on conflict(event_id) do update set payload_json=excluded.payload_json",
+                     (event_id,alert_payload))
+        return old_alert is None or old_alert[0] != alert_payload
+
+    def _scene_project(self, conn, row, *, historical=False, notify=True, activity=True, force_revision=False, activity_epoch=None, target_episode_id=None, context_only=False, defer_alerts=False):
         row = dict(row)
         at = _epoch(row["created_at"])
         event_id, camera_id = int(row["id"]), str(row["camera_id"])
@@ -532,9 +566,11 @@ class EventStoreSceneMixin:
                 previous = conn.execute("select o.* from scene_observations o join scene_track_aliases a on a.object_id=o.object_id "
                                         "where a.episode_id=? and o.episode_id=a.episode_id and a.track_key=? order by o.captured_epoch desc limit 1",
                                         (episode_id,track_key)).fetchone()
+            # The widened range lets the episode/time index seek; abs() stays exact.
             shared=conn.execute("select o.* from scene_observations o join scene_objects s on s.id=o.object_id "
-                                "where o.episode_id=? and abs(o.captured_epoch-?)<=0.01 and s.association_locked=0 and s.label_override is null",
-                                (episode_id,captured)).fetchall()
+                                "where o.episode_id=? and o.captured_epoch between ? and ? "
+                                "and abs(o.captured_epoch-?)<=0.01 and s.association_locked=0 and s.label_override is null",
+                                (episode_id,captured-0.02,captured+0.02,captured)).fetchall()
             shared=[o for o in shared if self._scene_same_source_frame(o,item,event_id=event_id,captured=captured)
                     and json.loads(o["payload_json"]).get("label")==item["label"] and _overlap(item,json.loads(o["payload_json"]))>=0.95]
             shared_ids={o["object_id"] for o in shared}
@@ -545,10 +581,13 @@ class EventStoreSceneMixin:
                 if previous is None or self._scene_join_subjects(conn,retained,previous["object_id"]):
                     previous=next(o for o in shared if o["object_id"]==retained)
             if previous is None:
+                window = 2 if activity else 45
                 nearby = conn.execute("select o.* from scene_observations o join scene_objects s on s.id=o.object_id "
-                                      "where o.episode_id=? and abs(o.captured_epoch-?)<=? and s.association_locked=0 and s.label_override is null "
+                                      "where o.episode_id=? and o.captured_epoch between ? and ? "
+                                      "and abs(o.captured_epoch-?)<=? and s.association_locked=0 and s.label_override is null "
                                       "and o.captured_epoch=(select max(n.captured_epoch) from scene_observations n where n.object_id=o.object_id) "
-                                      "order by o.captured_epoch desc limit 100", (episode_id,captured,2 if activity else 45)).fetchall()
+                                      "order by o.captured_epoch desc limit 100",
+                                      (episode_id,captured-window-0.01,captured+window+0.01,captured,window)).fetchall()
                 matches = [o for o in nearby if json.loads(o["payload_json"]).get("label")==item["label"]
                            and abs(o["captured_epoch"]-captured)>0.01
                            and o["captured_epoch"]>float(item.get("association_after_epoch",float("-inf")))
@@ -595,26 +634,14 @@ class EventStoreSceneMixin:
                 changed = self._scene_record_decision(conn, supporting_id, cover, legacy=True) or changed
         # Historical observations may predate the decision table. Only explicit
         # policy annotations qualify; raw confidence/zone metadata is not policy.
-        for observed in conn.execute("select id,payload_json from scene_observations where event_id=?", (event_id,)):
-            self._scene_record_decision(conn, observed["id"], json.loads(observed["payload_json"]))
-        policy = conn.execute("select o.id,o.object_id,o.captured_epoch,o.object_index,d.source,d.payload_json "
-                              "from scene_observation_decisions d join scene_observations o on o.id=d.observation_id "
-                              "where o.event_id=? order by o.captured_epoch,coalesce(o.object_index,2147483647),o.id,d.rowid",
-                              (event_id,)).fetchall()
-        explicit_objects = {o["object_id"] for o in policy if o["source"] == "explicit"}
-        alerts = [{**json.loads(o["payload_json"]), "object_id":o["object_id"], "observation_id":o["id"]}
-                  for o in policy if o["source"] == "explicit" or o["object_id"] not in explicit_objects]
-        decisions = {}
-        for decision in alerts:
-            key = (decision.get("object_id", decision["label"]), decision["eligible"],
-                   _json(decision["reasons"]), _json(decision["zones"]))
-            decisions[key] = decision
-        alerts = list(decisions.values())
-        alert_payload = _json({"event_id":event_id,"objects":alerts,"eligible":any(o["eligible"] for o in alerts)})
-        old_alert = conn.execute("select payload_json from scene_alert_decisions where event_id=?",(event_id,)).fetchone()
-        changed = changed or old_alert is None or old_alert[0] != alert_payload
-        conn.execute("insert into scene_alert_decisions values(?,?) on conflict(event_id) do update set payload_json=excluded.payload_json",
-                     (event_id,alert_payload))
+        # Later observations record their own decision when inserted above.
+        if conn.execute("insert or ignore into scene_event_decision_backfill values(?)", (event_id,)).rowcount:
+            for observed in conn.execute("select id,payload_json from scene_observations where event_id=?", (event_id,)):
+                self._scene_record_decision(conn, observed["id"], json.loads(observed["payload_json"]))
+        # A deferring caller already forced this revision and refreshes alerts
+        # once after its context projection, which recomputes them anyway.
+        if not (defer_alerts and changed):
+            changed = self._scene_refresh_alerts(conn, event_id) or changed
         tracking = next((o.get("object_tracking") for o in objects if o.get("status")=="object_tracking"),None)
         coverage = json.loads(episode["coverage_json"])
         if isinstance(tracking,dict):
@@ -1151,12 +1178,12 @@ class EventStoreSceneMixin:
             incident_id=member["incident_id"]
             at=_epoch(member["created_at"])
             def person_interval(anchor):
-                people = [(r, json.loads(r["payload_json"])) for r in conn.execute(
-                    "select object_id,captured_epoch,payload_json from scene_observations where event_id=? order by captured_epoch",(anchor,))]
-                people = [(r,o) for r,o in people if o.get("label") in {"person","pedestrian"}]
-                if len({r["object_id"] for r,_ in people}) != 1:
+                people = conn.execute(
+                    "select count(distinct object_id),min(captured_epoch),max(captured_epoch) from scene_observations "
+                    "where event_id=? and json_extract(payload_json,'$.label') in ('person','pedestrian')",(anchor,)).fetchone()
+                if people[0] != 1:
                     return None
-                return min(r["captured_epoch"] for r,_ in people), max(r["captured_epoch"] for r,_ in people)
+                return people[1], people[2]
             current_interval = person_interval(event_id)
             route_values = [r.model_dump() if hasattr(r,"model_dump") else r for r in routes]
             search_window = max([45.0, *[float(r.get("max_seconds",45)) for r in route_values if r.get("enabled",True)]])

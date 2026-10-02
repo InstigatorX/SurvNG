@@ -1074,6 +1074,18 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(store.motion_trigger_status("gate"), {"failed": 1})
             self.assertIsNone(store.claim_motion_trigger("gate"))
 
+    def test_snapshot_reference_lookup_uses_motion_audit_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            with store._connect() as conn:
+                plan = " ".join(
+                    str(row[3]) for row in conn.execute(
+                        "explain query plan select 1 from motion_audits where snapshot_path = ?",
+                        ("snapshots/gate/a.webp",),
+                    )
+                )
+            self.assertIn("idx_motion_audits_snapshot", plan)
+
     def test_snapshot_size_backfill_yields_writer_between_bounded_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1143,6 +1155,23 @@ class EventStoreTest(unittest.TestCase):
                 ).fetchall()
             self.assertTrue(all(int(row["snapshot_size_bytes"]) == 0 for row in rows[:3]))
             self.assertTrue(all(int(row["snapshot_size_bytes"]) > 0 for row in rows[3:]))
+
+            # Exhausting the cohort resets the cursor; the next empty full
+            # pass idles instead of rescanning every maintenance tick.
+            self.assertEqual(store.migrate_snapshot_sizes(limit=3), 0)
+            self.assertEqual(store.migrate_snapshot_sizes(limit=3), 0)
+            late = snapshots / "late.webp"
+            late.write_bytes(b"late")
+            late_event = store.add_event(camera_id="gate", kind="object", snapshot_path=str(late))
+            with store._connect() as connection:
+                connection.execute(
+                    "update events set snapshot_size_bytes = 0 where id = ?",
+                    (late_event["id"],),
+                )
+            with patch.object(store, "_connect", side_effect=AssertionError("scanned")):
+                self.assertEqual(store.migrate_snapshot_sizes(limit=3), 0)
+            store._snapshot_size_scan_idle_until = 0.0
+            self.assertEqual(store.migrate_snapshot_sizes(limit=3), 1)
 
     def test_snapshot_retention_plan_is_read_only_and_does_not_stat_legacy_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

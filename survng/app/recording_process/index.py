@@ -754,6 +754,20 @@ class RecordingIndexMixin:
         if recorder_active and files and self._recording_file_may_be_active(files[-1]):
             files = files[:-1]
         rows: list[dict] = []
+        locations_by_directory: dict[Path, str] = {}
+
+        def location_id(file_path: Path) -> str:
+            if self.media_storage is None:
+                return "default"
+            if file_path.is_symlink():
+                return self.media_storage.location_id_for(file_path, "recordings") or "default"
+            directory = file_path.parent
+            if directory not in locations_by_directory:
+                locations_by_directory[directory] = (
+                    self.media_storage.location_id_for(file_path, "recordings") or "default"
+                )
+            return locations_by_directory[directory]
+
         for index, file_path in enumerate(files):
             try:
                 stat = file_path.stat()
@@ -781,11 +795,7 @@ class RecordingIndexMixin:
                     "duration_seconds": duration_seconds,
                     "end_epoch": start_epoch + duration_seconds,
                     "source": source,
-                    "location_id": (
-                        self.media_storage.location_id_for(file_path, "recordings")
-                        if self.media_storage is not None
-                        else "default"
-                    ) or "default",
+                    "location_id": location_id(file_path),
                 }
             )
         return rows

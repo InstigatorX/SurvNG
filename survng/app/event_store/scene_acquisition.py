@@ -37,7 +37,8 @@ class EventStoreSceneAcquisitionMixin:
                     metadata_json text not null, snapshot_path text not null, recording_path text not null,
                     created_at real not null
                 );
-                create index if not exists acquired_sample_camera on acquired_samples(camera_id,captured_epoch);
+                create index if not exists acquired_sample_camera_id on acquired_samples(camera_id,captured_epoch,id);
+                drop index if exists acquired_sample_camera;
                 create index if not exists acquired_sample_snapshot on acquired_samples(snapshot_path);
                 create table if not exists scene_activity_measurements (
                     id text primary key, sample_id text not null references acquired_samples(id),
@@ -151,10 +152,12 @@ class EventStoreSceneAcquisitionMixin:
 
     @staticmethod
     def _record_activity_measurements(conn, sample_id, metadata):
+        inserted = 0
         for witness in (metadata or {}).get("activity_witnesses", []):
             raw = _json(witness)
             measurement_id = hashlib.sha256(_json([sample_id,witness]).encode()).hexdigest()
-            conn.execute("insert or ignore into scene_activity_measurements values(?,?,?,?)", (measurement_id,sample_id,raw,time.time()))
+            inserted += conn.execute("insert or ignore into scene_activity_measurements values(?,?,?,?)", (measurement_id,sample_id,raw,time.time())).rowcount
+        return inserted
 
     def _acquire_scene_sample(self, conn, *, sample_id, camera_id, captured_epoch, source, status,
                               observations, metadata=None, snapshot_path="", recording_path="",
@@ -166,16 +169,17 @@ class EventStoreSceneAcquisitionMixin:
         if existing:
             if (existing["camera_id"], existing["captured_epoch"], existing["source"]) != (camera_id, captured_epoch, source):
                 raise ValueError("acquisition identity collision")
-            self._record_activity_measurements(conn, sample_id, metadata)
+            refresh = self._record_activity_measurements(conn, sample_id, metadata) > 0
             snapshot = self._acquired_media_path(conn, snapshot_path)
             if snapshot and not existing["snapshot_path"]:
+                refresh = True
                 conn.execute("update acquired_samples set snapshot_path=? where id=?", (snapshot,sample_id))
                 conn.execute("update acquired_observations set snapshot_path=? where snapshot_path='' and id in "
                              "(select observation_id from acquired_sample_observations where sample_id=?)", (snapshot,sample_id))
                 self._register_acquired_snapshot(conn,snapshot,camera_id,captured_epoch,(metadata or {}).get("snapshot_size_bytes",0))
             if request_confirmation:
                 self._enqueue_scene_candidate(conn, camera_id, seed_sample_id=sample_id, **request_confirmation)
-            return {**self._sample_payload(conn,sample_id), "created": False}
+            return {**(self._sample_payload(conn,sample_id) if refresh else existing), "created": False}
         if status == "failed" and observations:
             raise ValueError("failed acquisition cannot contain detections")
         snapshot = self._acquired_media_path(conn, snapshot_path)

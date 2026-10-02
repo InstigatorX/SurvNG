@@ -1170,6 +1170,28 @@ class RecorderTest(unittest.TestCase):
 
         self.assertEqual([row["name"] for row in rows], [clip.name for clip in clips])
 
+    def test_recording_rows_resolve_storage_location_once_per_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = Mock()
+            storage.location_id_for.return_value = "archive"
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            recorder.media_storage = storage
+            hour_dir = Path(tmpdir) / "recordings" / "front-door" / "main" / "2020-01-02" / "03"
+            hour_dir.mkdir(parents=True)
+            clips = [hour_dir / f"20200102-0300{second:02d}.mp4" for second in (0, 10, 20)]
+            for clip in clips:
+                clip.write_bytes(b"x")
+            linked = hour_dir / "20200102-030030.mp4"
+            linked.symlink_to(clips[0])
+
+            rows = recorder._recording_rows_for_files("front-door", "main", [*clips, linked])
+
+        self.assertEqual([row["location_id"] for row in rows], ["archive"] * 4)
+        self.assertEqual(
+            [call.args[0] for call in storage.location_id_for.call_args_list],
+            [clips[0], linked],
+        )
+
     def test_active_recorder_hides_segment_started_before_hour_rollover_until_finalized(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)

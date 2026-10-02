@@ -148,6 +148,8 @@ class EventStoreSceneTrackingMixin:
                       job["lease_owner"] if not finished else "",reason if not consumed else "",job["episode_id"]))
         if requested_end > job["end_epoch"]:
             self._scene_tracking_extent(conn,job["episode_id"],job["start_epoch"],requested_end,pending=True)
+            return True
+        return False
 
     def scene_track_resume(self, event_id: int) -> dict | None:
         """Last confirmed tracks from a scene job, so the next claim keeps their ids."""

@@ -164,8 +164,9 @@ class EventStoreSceneAdmissionMixin:
         incident_id = self._scene_project(
             conn, row, historical=historical, notify=False, activity=supported and activity,
             activity_epoch=decision.get("activity_epoch") if supported and activity else None,
-            force_revision=force_revision,
+            force_revision=force_revision, defer_alerts=force_revision,
         )
+        alerts_pending = force_revision
         episode = conn.execute("select p.* from scene_episodes p join scene_event_membership m on m.episode_id=p.id where m.event_id=?", (row["id"],)).fetchone()
         conn.execute("insert into scene_event_establishment values(?,?) on conflict(event_id) do update set decision_id=excluded.decision_id", (row["id"], decision_id))
         if supported:
@@ -186,7 +187,12 @@ class EventStoreSceneAdmissionMixin:
                                "order by s.captured_epoch,s.id limit 200", (row["camera_id"],context_start,context_end,episode["id"])).fetchall()
             if not ids:
                 break
-            self._project_acquired_context(conn, episode, row, [self._scene_sample(conn,key[0]) for key in ids])
+            if self._project_acquired_context(conn, episode, row, [self._scene_sample(conn,key[0]) for key in ids]):
+                alerts_pending = False
+            if len(ids) < 200:
+                break
+        if alerts_pending:
+            self._scene_refresh_alerts(conn, row["id"])
         self._refresh_scene_establishment(conn, incident_id)
         revision = conn.execute("select revision from scene_incidents where id=?", (incident_id,)).fetchone()[0]
         if revision != previous_revision:
@@ -211,6 +217,7 @@ class EventStoreSceneAdmissionMixin:
             projected = dict(anchor)
             projected["objects_json"] = _json([{"status": "scene_observations", "observations": evidence}])
             self._scene_project(conn, projected, activity=False, notify=False, target_episode_id=episode["id"], context_only=True)
+        return bool(evidence)
 
     def _attach_open_episode_context(self, conn, row, samples):
         """Keep in-window observations without prolonging the episode."""

@@ -408,6 +408,9 @@ class EventStoreJobsMixin:
             conn.execute(
                 "create index if not exists idx_motion_audits_related_event on motion_audits(related_event_id, created_at) where related_event_id is not null"
             )
+            conn.execute(
+                "create index if not exists idx_motion_audits_snapshot on motion_audits(snapshot_path)"
+            )
 
             conn.execute(
                 "create unique index if not exists idx_motion_audits_event on motion_audits(event_id) where event_id is not null"

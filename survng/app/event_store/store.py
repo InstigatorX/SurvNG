@@ -6,6 +6,7 @@ import math
 import os
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ class EventStore(
     SNAPSHOT_SIZE_WRITE_BATCH = 50
     SNAPSHOT_REFERENCE_WRITE_BATCH = 50
     SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY = "snapshot_size_backfill_cursor"
+    SNAPSHOT_SIZE_IDLE_SCAN_SECONDS = 3600.0
     COMPACT_COLUMNS = (
         "id, camera_id, kind, snapshot_path, recording_path, objects_json, created_at, evidence_revision"
     )
@@ -83,6 +85,7 @@ class EventStore(
         self._jobs_lock = TimedLock(threading.RLock())
         self._jobs_maintenance_lock = threading.Lock()
         self._next_detection_job_prune_monotonic = 0.0
+        self._snapshot_size_scan_idle_until = 0.0
         self._init_db()
         self._init_evidence_db()
         self._init_scene_acquisition_db()
@@ -1351,8 +1354,11 @@ class EventStore(
         This is intentionally an explicit, low-priority migration operation:
         retention status reads must never perform media filesystem I/O or take
         an SQLite writer lock merely because an older row has no stored size.
+        Once a full pass finds nothing, scans pause for the idle interval.
         """
-        with self._lock, self._connect() as conn:
+        if time.monotonic() < self._snapshot_size_scan_idle_until:
+            return 0
+        with self._connect() as conn:
             try:
                 cursor_id = max(
                     0,
@@ -1393,6 +1399,10 @@ class EventStore(
                         self.SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY,
                         "0",
                     )
+            else:
+                self._snapshot_size_scan_idle_until = (
+                    time.monotonic() + self.SNAPSHOT_SIZE_IDLE_SCAN_SECONDS
+                )
             return 0
         next_cursor_id = max(int(row["cursor_id"]) for row in rows)
         updates = [

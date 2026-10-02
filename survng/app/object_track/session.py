@@ -53,6 +53,11 @@ LOGGER = logging.getLogger("survng.app.object_tracking")
 TRACKING_STOP_TIMEOUT_SECONDS = 18.0
 TRACKING_CATCHUP_SETTLE_SECONDS = 5.0
 TRACKING_CATCHUP_RETRY_SECONDS = 0.25
+# Routine progress commits re-project the whole event under the shared store
+# lock. Space them by a multiple of their measured cost, bounded, so a long
+# busy event cannot monopolize the store. Track transitions still persist.
+TRACKING_PERSIST_COST_MULTIPLIER = 10.0
+TRACKING_PERSIST_MAX_INTERVAL_SECONDS = 5.0
 # Small open-segment handoff gaps are expected; escalate only when large
 # or repeated, or when catch-up itself fails (exception path below).
 COVERAGE_GAP_WARNING_SECONDS = 10.0
@@ -230,6 +235,7 @@ class ObjectTrackingSession:
         self._frame_width = 0
         self._frame_height = 0
         self._catchup_frames_processed = 0
+        self._persist_interval_floor = 0.0
         self._recorded_window: tuple[float, float] | None = None
         self._analyzed_from: float | None = None
         self._seed_assignments: list[dict[str, Any]] = []
@@ -1005,6 +1011,7 @@ class ObjectTrackingSession:
             self._frame_width = 0
             self._frame_height = 0
             self._catchup_frames_processed = 0
+            self._persist_interval_floor = 0.0
             self._scene_coverage_gaps = []
             self._archived_replay_tracks = []
             self._carried_replay_tracks = []
@@ -1309,8 +1316,11 @@ class ObjectTrackingSession:
                 if catchup:
                     self._catchup_frames_processed += 1
                 now_monotonic = time.monotonic()
+                persist_interval = self.config.persist_interval_seconds
+                if persist_interval > 0:
+                    persist_interval = max(persist_interval, self._persist_interval_floor)
                 persist_due = _tracking_persistence_due(
-                    self.config.persist_interval_seconds,
+                    persist_interval,
                     last_persisted_at,
                     now_monotonic,
                     important_transition=important_transition,
@@ -1339,7 +1349,11 @@ class ObjectTrackingSession:
                         frames_processed,
                         "active",
                     )
-                    last_persisted_at = now_monotonic
+                    last_persisted_at = time.monotonic()
+                    self._persist_interval_floor = min(
+                        TRACKING_PERSIST_MAX_INTERVAL_SECONDS,
+                        (last_persisted_at - now_monotonic) * TRACKING_PERSIST_COST_MULTIPLIER,
+                    )
                 return True
 
             catchup_deferred = False
@@ -1503,10 +1517,17 @@ class ObjectTrackingSession:
                         advanced=True
                     if not pending_batch.frames:
                         pending_batch = None
-                if advanced and last_persisted_at == persisted_before_batch:
+                if (advanced and last_persisted_at == persisted_before_batch
+                        and (self.config.persist_interval_seconds == 0
+                             or time.monotonic() - last_persisted_at >= self._persist_interval_floor)):
+                    persist_started = time.monotonic()
                     self._persist(event_id, tracker, captured_at, latest_tracked_objects,
                                   frames_processed, "active")
                     last_persisted_at = time.monotonic()
+                    self._persist_interval_floor = min(
+                        TRACKING_PERSIST_MAX_INTERVAL_SECONDS,
+                        (last_persisted_at - persist_started) * TRACKING_PERSIST_COST_MULTIPLIER,
+                    )
                 return advanced
 
             def coverage_failed(gap: float) -> None:
