@@ -27,6 +27,8 @@ if TYPE_CHECKING:
     from .camera_lifecycle import CameraRuntimeState
 
 LOGGER = logging.getLogger(__name__)
+# A drain's in-flight refinement is cancellable like a normal generation's.
+MOTION_DRAIN_YIELD_SECONDS = 22.0
 
 
 class CameraMotionState:
@@ -316,6 +318,9 @@ class MotionRuntimeService:
                     f"cannot start motion runtime for {self.camera_id} after "
                     "incomplete generation cleanup"
                 )
+            stop_drain = getattr(self.incidents, "stop_drain", None)
+            if callable(stop_drain):
+                stop_drain(MOTION_DRAIN_YIELD_SECONDS)
             residual = self.active_workers()
             if residual:
                 raise RuntimeError(

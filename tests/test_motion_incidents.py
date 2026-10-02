@@ -480,6 +480,85 @@ def test_discarding_queued_work_drops_unstarted_refinement_and_discovery() -> No
     assert status["scene_discovery"]["pending"] is False
 
 
+def _queued_service() -> tuple[MotionIncidentService, Mock]:
+    initial = MotionDecisionOutcome(
+        event_id=None, snapshot_path="", object_detected=False, refinement_pending=True,
+    )
+    service, decision, _tracking, _prewarm, _image_reader = _service(initial)
+    decision.refine.return_value = MotionDecisionOutcome(
+        event_id=None, snapshot_path="", object_detected=False,
+    )
+    service.process("motion", "person", datetime.now(timezone.utc), {"detection_intent_id": "ema:11"})
+    return service, decision
+
+
+def test_drain_finishes_recorded_work_without_new_discovery_and_then_stops() -> None:
+    service, decision = _queued_service()
+    service.offer_scene_discovery(datetime.now(timezone.utc))
+    scenes_pending = [True, False]
+
+    def scene_analysis_pending() -> bool:
+        if len(scenes_pending) == 2:
+            service.offer_scene_discovery(datetime.now(timezone.utc))
+        return scenes_pending.pop(0) if scenes_pending else False
+
+    service.scene_analysis_pending = scene_analysis_pending
+
+    assert service.start_drain(time.time())
+    service._refinement_thread.join(3.0)
+
+    assert not service.running()
+    assert decision.refine.call_count == 1
+    assert decision.refine.call_args.args[0] == "motion"
+    status = service.status()
+    assert status["refinement_queue_depth"] == 0
+    assert status["refinements_completed"] == 1
+    assert status["scene_discovery"]["completed"] == 0
+    assert not scenes_pending
+    assert service.drain_cutoff() is None
+
+
+def test_drain_limit_closes_out_unfinished_work() -> None:
+    service, decision = _queued_service()
+    closed: list[str] = []
+    service.close_out_scene_analysis = lambda reason: closed.append(reason) or 2
+
+    assert service.start_drain(time.time(), seconds=0)
+    service._refinement_thread.join(3.0)
+
+    assert not service.running()
+    decision.refine.assert_not_called()
+    assert service.status()["refinement_queue_depth"] == 0
+    assert closed == ["camera_disabled"]
+
+
+def test_turning_detection_back_on_preempts_a_drain_and_keeps_its_work() -> None:
+    service, decision = _queued_service()
+    with service.refinement_store._lock:
+        for job in service.refinement_store._jobs.values():
+            job["available_at"] = time.monotonic() + 30.0
+
+    assert service.start_drain(time.time())
+    deadline = time.monotonic() + 1.0
+    while service.drain_cutoff() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert service.drain_cutoff() is not None
+
+    assert service.stop_drain(2.0)
+    assert not service.running()
+    stop = threading.Event()
+    service.start(stop)
+    try:
+        assert service._refinement_worker_accepting()
+        assert service.drain_cutoff() is None
+    finally:
+        stop.set()
+        service.request_stop()
+        assert service.wait_stopped(1.0)
+    decision.refine.assert_not_called()
+    assert service.status()["refinement_queue_depth"] == 1
+
+
 def test_live_probe_miss_does_not_queue_recorded_refinement() -> None:
     initial = MotionDecisionOutcome(
         event_id=None,

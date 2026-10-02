@@ -223,6 +223,7 @@ class ObjectTrackingSession:
         ] | None = None
         self._deadline = 0.0
         self._accepting = False
+        self._recorded_only = False
         self._status: dict[str, Any] = self._idle_status()
         self._status["enabled"] = config.enabled
         self._reid_recovery_base = 0
@@ -400,7 +401,7 @@ class ObjectTrackingSession:
         )):
             return False
         with self._lock:
-            if not self._accepting:
+            if not self._accepting or (self._recorded_only and recorded_window is None):
                 return False
             if self._thread is not None and self._thread.is_alive():
                 if recorded_window is not None:
@@ -425,7 +426,7 @@ class ObjectTrackingSession:
                 )
                 return True
         with self._lock:
-            if not self._accepting:
+            if not self._accepting or (self._recorded_only and recorded_window is None):
                 return False
             self._stop = threading.Event()
             self._event_id = event_id
@@ -469,10 +470,12 @@ class ObjectTrackingSession:
                 raise
             return True
 
-    def set_accepting(self, accepting: bool) -> None:
+    def set_accepting(self, accepting: bool, *, recorded_only: bool = False) -> None:
+        """Admit incidents; ``recorded_only`` admits only recorded windows."""
         with self._lock:
             self._accepting = bool(accepting and self.config.enabled)
-            if not self._accepting:
+            self._recorded_only = bool(recorded_only and self._accepting)
+            if not self._accepting or self._recorded_only:
                 self._pending_start = None
         if not accepting:
             self.stop()

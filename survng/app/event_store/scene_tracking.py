@@ -43,6 +43,10 @@ class EventStoreSceneTrackingMixin:
             conn.execute("alter table scene_analysis_jobs add column analyzed_epoch real")
         if "coverage_gaps_json" not in columns:
             conn.execute("alter table scene_analysis_jobs add column coverage_gaps_json text not null default '[]'")
+        # Set while the camera's detection is off: recorded analysis does not
+        # extend past the time it turned off.
+        if "end_limit_epoch" not in columns:
+            conn.execute("alter table scene_analysis_jobs add column end_limit_epoch real")
         conn.execute("create index if not exists scene_analysis_jobs_camera on scene_analysis_jobs(camera_id,state,retry_at)")
 
     def enqueue_scene_tracking(self, event_id, start_epoch, end_epoch):
@@ -59,7 +63,8 @@ class EventStoreSceneTrackingMixin:
                 (episode_id,event_id,camera_id,event_epoch,start_epoch,end_epoch)
                 values(?,?,?,?,?,?) on conflict(episode_id) do update set
                 start_epoch=min(start_epoch,excluded.start_epoch),
-                end_epoch=max(end_epoch,excluded.end_epoch),
+                end_epoch=coalesce(min(max(end_epoch,excluded.end_epoch),max(start_epoch,end_limit_epoch)),
+                                   max(end_epoch,excluded.end_epoch)),
                 cursor_epoch=case when excluded.start_epoch<start_epoch then null else cursor_epoch end,
                 lease_owner=case when excluded.start_epoch<start_epoch then '' else lease_owner end,
                 lease_expires=case when excluded.start_epoch<start_epoch then 0 else lease_expires end,
@@ -72,10 +77,18 @@ class EventStoreSceneTrackingMixin:
             self._scene_tracking_extent(conn,job["episode_id"],job["start_epoch"],job["end_epoch"],pending=job["state"]!="complete")
             return job
 
-    def claim_scene_tracking(self, camera_id, lease_owner, lease_seconds=60.0):
+    def claim_scene_tracking(self, camera_id, lease_owner, lease_seconds=60.0, end_limit=None):
+        """Lease the camera's next recorded window; ``end_limit`` caps windows first."""
         now = time.time()
         with self._lock, self._connect() as conn:
             conn.execute("begin immediate")
+            if end_limit is not None:
+                conn.execute("update scene_analysis_jobs set end_limit_epoch=?,end_epoch=max(start_epoch,min(end_epoch,?)) "
+                             "where camera_id=? and state='queued' and (end_limit_epoch is null or end_limit_epoch!=? or end_epoch>?)",
+                             (end_limit,end_limit,camera_id,end_limit,end_limit))
+                ended = [r[0] for r in conn.execute("select episode_id from scene_analysis_jobs where camera_id=? "
+                         "and state='queued' and (cursor_epoch>=end_epoch or end_epoch<=start_epoch)", (camera_id,))]
+                self._end_scene_tracking(conn, ended, "", "recorded analysis ended when detection turned off")
             if conn.execute("select 1 from scene_analysis_jobs where camera_id=? and state='running' "
                             "and lease_expires>? limit 1",(camera_id,now)).fetchone():
                 return None
@@ -115,6 +128,8 @@ class EventStoreSceneTrackingMixin:
         if activity and float(activity[0]) > job["event_epoch"]:
             requested_end = max(requested_end,min(float(activity[0])+45.0,
                                                   job["start_epoch"]+MAX_SCENE_EPISODE_SECONDS))
+        if job["end_limit_epoch"] is not None:
+            requested_end = min(requested_end,max(job["start_epoch"],job["end_limit_epoch"]))
         cursor = job["cursor_epoch"]
         raw = tracking.get("analyzed_through")
         if raw is not None:
@@ -189,6 +204,42 @@ class EventStoreSceneTrackingMixin:
             carried["prior_coverage_gaps"] = list(gaps) if isinstance(gaps, list) else []
             return carried
         return None
+
+    def _end_scene_tracking(self, conn, episode_ids, error, coverage_reason):
+        for episode_id in episode_ids:
+            conn.execute("update scene_analysis_jobs set state='complete',lease_owner='',lease_expires=0,last_error=? "
+                         "where episode_id=?", (error, episode_id))
+            episode = conn.execute("select incident_id,coverage_json from scene_episodes where id=?", (episode_id,)).fetchone()
+            if episode is None:
+                continue
+            coverage = json.loads(episode["coverage_json"])
+            if coverage.get("state") == "incomplete":
+                coverage["reason"] = coverage_reason
+                conn.execute("update scene_episodes set coverage_json=? where id=?",
+                             (json.dumps(coverage,sort_keys=True,separators=(",",":")),episode_id))
+                self._scene_changed(conn,episode["incident_id"],notify=False)
+
+    def scene_tracking_pending(self, camera_id):
+        """Whether recorded analysis is queued or leased for the camera."""
+        with self._connect() as conn:
+            return conn.execute("select 1 from scene_analysis_jobs where camera_id=? and state in ('queued','running') "
+                                "limit 1", (camera_id,)).fetchone() is not None
+
+    def close_scene_tracking(self, camera_id, reason):
+        """End the camera's unfinished recorded analysis; returns jobs closed."""
+        with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
+            ids = [r[0] for r in conn.execute("select episode_id from scene_analysis_jobs where camera_id=? "
+                                              "and state in ('queued','running')", (camera_id,))]
+            self._end_scene_tracking(conn, ids, str(reason)[:160],
+                                     "detection turned off before recorded analysis finished")
+            return len(ids)
+
+    def clear_scene_tracking_limit(self, camera_id):
+        """Let recorded analysis follow activity again once detection is back on."""
+        with self._lock, self._connect() as conn:
+            conn.execute("update scene_analysis_jobs set end_limit_epoch=null where camera_id=? "
+                         "and end_limit_epoch is not null", (camera_id,))
 
     def release_scene_tracking(self, episode_id, lease_owner, error):
         with self._lock, self._connect() as conn:

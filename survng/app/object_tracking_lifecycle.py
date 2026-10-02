@@ -46,8 +46,10 @@ class ObjectTrackingLifecycle:
         cover_frame_provider: TrackingCoverFrameProvider | None = None,
         snapshot_writer: TrackingSnapshotWriter | None = None,
         scene_job_store: Any | None = None,
+        drain_cutoff: Callable[[], float | None] | None = None,
     ) -> None:
         self.camera = camera
+        self.drain_cutoff = drain_cutoff or (lambda: None)
         self.frame_provider = frame_provider
         self.catchup_frame_provider = catchup_frame_provider
         self.prewarm_frame_provider = prewarm_frame_provider
@@ -143,9 +145,16 @@ class ObjectTrackingLifecycle:
             return False
         with self.lifecycle_lock:
             session = self._session
-            if not self.accepting() or not session.config.enabled or session.running():
+            live = self.accepting()
+            cutoff = None if live else self.drain_cutoff()
+            if (not live and cutoff is None) or not session.config.enabled or session.running():
                 return False
-            job = self.scene_job_store.claim_scene_tracking(self.camera.id, self._scene_lease_owner)
+            if cutoff is not None:
+                # Detection is off: only footage recorded before it turned off.
+                session.set_accepting(True, recorded_only=True)
+            job = self.scene_job_store.claim_scene_tracking(
+                self.camera.id, self._scene_lease_owner, end_limit=cutoff,
+            )
             if job is None:
                 return False
             try:
@@ -170,7 +179,21 @@ class ObjectTrackingLifecycle:
 
     def sync_accepting(self) -> None:
         with self.lifecycle_lock:
-            self._session.set_accepting(self.accepting())
+            accepting = self.accepting()
+            self._session.set_accepting(accepting)
+            if accepting and self.scene_job_store is not None:
+                self.scene_job_store.clear_scene_tracking_limit(self.camera.id)
+
+    def scene_work_pending(self) -> bool:
+        """Recorded scene analysis is running or still queued for this camera."""
+        if self.scene_job_store is None:
+            return False
+        return self._session.running() or self.scene_job_store.scene_tracking_pending(self.camera.id)
+
+    def close_out_scene_work(self, reason: str) -> int:
+        if self.scene_job_store is None:
+            return 0
+        return int(self.scene_job_store.close_scene_tracking(self.camera.id, reason))
 
     def pause(self) -> None:
         with self.lifecycle_lock:

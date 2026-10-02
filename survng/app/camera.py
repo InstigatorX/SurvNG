@@ -422,6 +422,9 @@ class CameraWorker:
             scene_job_store=(motion_decision_handler_factory.events if callable(getattr(
                 type(motion_decision_handler_factory.events), "enqueue_scene_tracking", None,
             )) else None),
+            drain_cutoff=lambda: (
+                None if self._stop.is_set() else self.motion_incidents.drain_cutoff()
+            ),
         )
         detector_factory = motion_object_detector_factory
 
@@ -488,6 +491,8 @@ class CameraWorker:
             evidence_ready_at=getattr(
                 self.motion_object_detector, "recorded_evidence_ready_at", None,
             ),
+            scene_analysis_pending=self.tracking_lifecycle.scene_work_pending,
+            close_out_scene_analysis=self.tracking_lifecycle.close_out_scene_work,
             has_trackable_objects=self.tracking_lifecycle.has_trackable_objects,
             start_tracking=self.tracking_lifecycle.start_incident,
             prewarm_tracking=self.tracking_lifecycle.prewarm,
@@ -686,7 +691,7 @@ class CameraWorker:
         if not already_running and detection_enabled:
             self._spawn_startup_spatial_alignment()
         elif not already_running:
-            self._discard_queued_detection_work()
+            self._drain_pending_detection_work()
 
     def consider_route_detection_watch(self, watch: Any) -> bool:
         return self.motion_analysis.consider_route_watch(watch)
@@ -1022,16 +1027,19 @@ class CameraWorker:
         with self.runtime_state.lock:
             previously_enabled = bool(self.runtime_state.detection_enabled)
         self.lifecycle.set_detection_enabled(enabled)
+        with self.runtime_state.lock:
+            running = self.runtime_state.phase is CameraLifecyclePhase.RUNNING
         if bool(enabled) and not previously_enabled:
             self._request_spatial_alignment_calibration(reason="detection_enabled")
-        elif not enabled:
-            self._discard_queued_detection_work()
+        elif not enabled and previously_enabled and running:
+            self._drain_pending_detection_work()
 
-    def _discard_queued_detection_work(self) -> None:
+    def _drain_pending_detection_work(self) -> None:
+        """Finish work for footage recorded before detection turned off."""
         try:
-            self.motion_incidents.discard_queued_work("detection_disabled")
+            self.motion_incidents.start_drain(time.time())
         except Exception:
-            LOGGER.exception("queued detection cleanup failed for %s", self.camera.id)
+            LOGGER.exception("pending detection drain failed to start for %s", self.camera.id)
 
     def create_object_tracking_session(
         self,

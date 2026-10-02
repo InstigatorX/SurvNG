@@ -421,15 +421,13 @@ class CameraWorkerTest(unittest.TestCase):
             worker.runtime_state.detection_enabled = False
             worker.lifecycle.start = Mock()
             worker._spawn_startup_spatial_alignment = Mock()
-            worker.motion_incidents.discard_queued_work = Mock(return_value=0)
+            worker.motion_incidents.start_drain = Mock(return_value=True)
             worker.start()
             worker.lifecycle.start.assert_called_once_with()
             worker._spawn_startup_spatial_alignment.assert_not_called()
-            worker.motion_incidents.discard_queued_work.assert_called_once_with(
-                "detection_disabled"
-            )
+            worker.motion_incidents.start_drain.assert_called_once()
 
-    def test_detection_disable_discards_queued_work_after_runtime_stops(self) -> None:
+    def test_detection_disable_drains_pending_work_after_runtime_stops(self) -> None:
         camera = CameraConfig(
             id="gate",
             name="Gate",
@@ -438,15 +436,22 @@ class CameraWorkerTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             worker = make_worker(camera, Path(temp_dir))
+            worker.runtime_state.phase = CameraLifecyclePhase.RUNNING
             order: list[str] = []
             worker.lifecycle.set_detection_enabled = Mock(
                 side_effect=lambda _enabled: order.append("lifecycle")
             )
-            worker.motion_incidents.discard_queued_work = Mock(
-                side_effect=lambda _reason: order.append("discard")
+            worker.motion_incidents.start_drain = Mock(
+                side_effect=lambda cutoff: order.append("drain")
             )
+            before = time.time()
             worker.set_detection_enabled(False)
-            self.assertEqual(order, ["lifecycle", "discard"])
+            self.assertEqual(order, ["lifecycle", "drain"])
+            self.assertGreaterEqual(worker.motion_incidents.start_drain.call_args.args[0], before)
+            # Turning off an already-off camera does not move the cutoff.
+            worker.runtime_state.detection_enabled = False
+            worker.set_detection_enabled(False)
+            self.assertEqual(order, ["lifecycle", "drain", "lifecycle"])
 
     def test_detection_enable_requests_fov_calibration(self) -> None:
         camera = CameraConfig(

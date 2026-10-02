@@ -151,6 +151,56 @@ def test_new_activity_extends_same_episode_job_and_old_lease_cannot_advance_it(t
     assert persisted["cursor_epoch"] is None
 
 
+def test_detection_off_caps_recorded_analysis_until_it_is_back_on(tmp_path):
+    store = EventStore(tmp_path)
+    event = create_event(store, 1000)
+    store.enqueue_scene_tracking(event["id"], 995, 1045)
+    job = store.claim_scene_tracking("gate", "drain", end_limit=1030)
+    assert job["end_epoch"] == 1030
+    store.update_object_tracking(event["id"], {
+        "scene_analysis_job":{"episode_id":job["episode_id"],"lease_owner":"drain"},
+        "state":"complete", "window_end_epoch":1030,
+        "analyzed_through":datetime.fromtimestamp(1030,timezone.utc).isoformat(),
+    })
+    # A refinement finishing during the drain cannot reopen time after the cutoff.
+    later = create_event(store, 1020)
+    assert store.enqueue_scene_tracking(later["id"], 1015, 1065)["end_epoch"] == 1030
+    assert store.claim_scene_tracking("gate", "drain", end_limit=1030) is None
+    assert not store.scene_tracking_pending("gate")
+
+    store.clear_scene_tracking_limit("gate")
+    store.enqueue_scene_tracking(later["id"], 1015, 1065)
+    resumed = store.claim_scene_tracking("gate", "live")
+    assert (resumed["end_epoch"], resumed["cursor_epoch"]) == (1065, 1030)
+
+
+def test_closing_out_unfinished_recorded_analysis_explains_the_gap(tmp_path):
+    store = EventStore(tmp_path)
+    event = create_event(store, 1000)
+    store.enqueue_scene_tracking(event["id"], 995, 1045)
+    assert store.scene_tracking_pending("gate")
+
+    assert store.close_scene_tracking("gate", "camera_disabled") == 1
+
+    assert not store.scene_tracking_pending("gate")
+    assert store.claim_scene_tracking("gate", "late") is None
+    coverage = store.scene_incident(event_id=event["id"])["episodes"][0]["coverage"]
+    assert coverage["state"] == "incomplete"
+    assert coverage["reason"] == "detection turned off before recorded analysis finished"
+
+
+def test_recorded_only_session_refuses_live_tracking(tmp_path):
+    store = EventStore(tmp_path)
+    session = make_session(store)
+    session.set_accepting(True, recorded_only=True)
+    assert not session.start(1, datetime.fromtimestamp(1000, timezone.utc), [person()],
+                             np.zeros((100, 100, 3), dtype=np.uint8))
+    event = create_event(store, 1000)
+    store.enqueue_scene_tracking(event["id"], 1000, 1002)
+    run_job(session, store.claim_scene_tracking("gate", "drain", end_limit=1002), "drain")
+    assert not store.scene_tracking_pending("gate")
+
+
 def test_measured_motion_extends_analysis_without_another_trigger(tmp_path):
     store = EventStore(tmp_path)
     event = create_event(store, 1000)

@@ -111,6 +111,9 @@ REFINEMENT_STALE_EXPIRY_INTERVAL_SECONDS = 5.0
 # Matches the retired durable discovery expiry. The retained live frame stays
 # usable, but an older sample no longer describes the current scene.
 SCENE_DISCOVERY_MAX_AGE_SECONDS = 60.0
+# After detection turns off, already-recorded work gets this long to finish
+# before the remainder is closed out.
+DETECTION_DRAIN_MAX_SECONDS = 600.0
 REFINEMENT_WORKER_STAGES = (
     "claim", "refine", "checkpoint", "handoff", "completion", "complete",
     "reschedule", "verification", "cover", "discovery",
@@ -572,10 +575,14 @@ class MotionIncidentService:
         scene_analysis_enabled: TrackingEnabled | None = None,
         resume_scene_analysis: Callable[[], bool] | None = None,
         evidence_ready_at: Callable[[datetime, dict[str, Any]], float | None] | None = None,
+        scene_analysis_pending: Callable[[], bool] | None = None,
+        close_out_scene_analysis: Callable[[str], int] | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.decision_processor = decision_processor
         self.evidence_ready_at = evidence_ready_at
+        self.scene_analysis_pending = scene_analysis_pending
+        self.close_out_scene_analysis = close_out_scene_analysis
         self.tracking_enabled = tracking_enabled
         self.scene_analysis_enabled = scene_analysis_enabled or (lambda: False)
         self.resume_scene_analysis = resume_scene_analysis
@@ -602,6 +609,8 @@ class MotionIncidentService:
         self._refinement_stop: threading.Event | None = None
         self._active_refinement: dict[str, Any] | None = None
         self._refinement_accepting = False
+        self._drain_deadline: float | None = None
+        self._drain_cutoff: float | None = None
         self._refinements_queued = 0
         self._refinements_completed = 0
         self._refinements_coalesced = 0
@@ -709,7 +718,7 @@ class MotionIncidentService:
             if self._refinement_thread is not None and self._refinement_thread.is_alive():
                 return
             self._refinement_stop = stop_event
-            self._refinement_accepting = not stop_event.is_set()
+            self._refinement_accepting = not stop_event.is_set() and self._drain_deadline is None
             thread = threading.Thread(
                 target=self._run_refinements,
                 name=f"motion-refine-{self.camera_id}",
@@ -724,7 +733,40 @@ class MotionIncidentService:
                     self._refinement_thread = None
                     self._refinement_stop = None
                     self._refinement_accepting = False
+                    self._drain_deadline = self._drain_cutoff = None
             raise
+
+    def start_drain(self, cutoff_epoch: float, seconds: float = DETECTION_DRAIN_MAX_SECONDS) -> bool:
+        """Finish durable work for footage recorded before detection turned off.
+
+        Nothing new is admitted. Recorded refinement, verification, cover and
+        scene analysis continue up to ``cutoff_epoch`` until they are done or
+        the bound expires; the remainder is then closed out.
+        """
+        with self._status_lock:
+            if self._refinement_thread is not None and self._refinement_thread.is_alive():
+                return False
+            self._pending_scene_discovery = None
+            self._drain_deadline = time.monotonic() + max(0.0, float(seconds))
+            self._drain_cutoff = float(cutoff_epoch)
+        LOGGER.info("finishing pending detection work for %s after detection turned off", self.camera_id)
+        self.start(threading.Event())
+        return True
+
+    def stop_drain(self, timeout: float) -> bool:
+        """Yield to a fresh detection generation; durable work stays queued."""
+        with self._status_lock:
+            draining = self._drain_deadline is not None
+        if not draining:
+            return True
+        self.request_stop()
+        return self.wait_stopped(timeout)
+
+    def drain_cutoff(self) -> float | None:
+        """Recorded-time bound for work finished while detection is off."""
+        with self._status_lock:
+            alive = self._refinement_thread is not None and self._refinement_thread.is_alive()
+            return self._drain_cutoff if alive and self._drain_deadline is not None else None
 
     def _refinement_worker_accepting(self) -> bool:
         with self._status_lock:
@@ -744,6 +786,9 @@ class MotionIncidentService:
         with self._status_lock:
             self._refinement_accepting = False
             self._security_work_pending.set()
+            # A drain owns its stop event; the motion runtime does not set it.
+            if self._drain_deadline is not None and self._refinement_stop is not None:
+                self._refinement_stop.set()
         try:
             self._refinement_queue.put_nowait(True)
         except queue.Full:
@@ -773,6 +818,7 @@ class MotionIncidentService:
             self._refinement_thread = None
             self._refinement_stop = None
             self._refinement_accepting = False
+            self._drain_deadline = self._drain_cutoff = None
         self._clear_refinements()
         return True
 
@@ -805,8 +851,8 @@ class MotionIncidentService:
                 "error_type": error_type,
             }
 
-    def discard_queued_work(self, reason: str = "detection_disabled") -> int:
-        """Drop unstarted inference after detection is turned off for this camera."""
+    def discard_queued_work(self, reason: str = "camera_disabled") -> int:
+        """Drop unstarted inference that a drain could not finish in time."""
         with self._status_lock:
             self._pending_scene_discovery = None
         cancel = getattr(self.refinement_store, "cancel_queued_detection_jobs", None)
@@ -1093,6 +1139,29 @@ class MotionIncidentService:
         finally:
             with self._status_lock:
                 self._refinement_accepting = False
+                self._drain_deadline = self._drain_cutoff = None
+
+    def _drain_finished(self) -> bool:
+        """End a drain once its work is done or its bound has passed."""
+        with self._status_lock:
+            deadline = self._drain_deadline
+        if deadline is None:
+            return False
+        if time.monotonic() < deadline:
+            if self.refinement_store.pending_detection_job_ids(self.camera_id):
+                return False
+            if self.scene_analysis_pending is not None and self.scene_analysis_pending():
+                return False
+            LOGGER.info("finished pending detection work for %s", self.camera_id)
+            return True
+        detections = self.discard_queued_work("camera_disabled")
+        scenes = self.close_out_scene_analysis("camera_disabled") if self.close_out_scene_analysis else 0
+        LOGGER.warning(
+            "closed out %d detection and %d recorded tracking job(s) for %s; "
+            "detection was off longer than the drain limit",
+            detections, scenes, self.camera_id,
+        )
+        return True
 
     @staticmethod
     def _retryable_store_error(error: Exception) -> bool:
@@ -1250,6 +1319,12 @@ class MotionIncidentService:
             stop = self._refinement_stop
             if stop is None or stop.is_set():
                 return
+            with self._status_lock:
+                drain_deadline = self._drain_deadline
+            draining = drain_deadline is not None
+            if drain_deadline is not None and time.monotonic() >= drain_deadline:
+                self._drain_finished()
+                return
             prune = getattr(self.refinement_store, "prune_detection_jobs", None)
             now = time.monotonic()
             if self.resume_scene_analysis is not None and now - last_scene_recovery >= 1.0:
@@ -1331,9 +1406,11 @@ class MotionIncidentService:
                     self._record_worker_stage("cover", started)
                     continue
                 started = time.monotonic()
-                if self._run_scene_discovery():
+                if not draining and self._run_scene_discovery():
                     self._record_worker_stage("discovery", started)
                     continue
+                if draining and self._drain_finished():
+                    return
                 try:
                     self._refinement_queue.get(timeout=0.5)
                 except queue.Empty:

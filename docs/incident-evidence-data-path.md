@@ -124,6 +124,11 @@ The event database owns:
 - `scene_alert_decisions`: notification significance, separate from membership.
 - `scene_corrections` and `scene_aliases`: operator history and preserved links.
 - `scene_analysis_jobs`: leased, resumable recorded-analysis windows and cursors.
+  When a camera's detection turns off, nothing new is admitted, but queued
+  refinement and recorded analysis for footage captured before that time keep
+  running for up to ten minutes; windows do not extend past the off time.
+  Anything still unfinished is then closed out, with the episode's coverage
+  saying why.
 - `scene_notification_outbox`: one pending marker per incident with an
   unpublished change.
 

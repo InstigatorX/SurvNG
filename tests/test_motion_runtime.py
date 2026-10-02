@@ -89,6 +89,17 @@ def test_runtime_starts_both_workers_as_one_generation() -> None:
     owned.decisions.start.assert_called_once_with(stop_event)
 
 
+def test_new_generation_stops_a_drain_before_starting_workers() -> None:
+    runtime, owned = _runtime()
+    order: list[str] = []
+    owned.incidents.stop_drain.side_effect = lambda _timeout: order.append("stop_drain") or True
+    owned.incidents.start.side_effect = lambda _stop: order.append("start")
+
+    runtime.start(threading.Event())
+
+    assert order == ["stop_drain", "start"]
+
+
 def test_partial_start_failure_rolls_back_analysis_worker() -> None:
     runtime, owned = _runtime()
     owned.decisions.start.side_effect = RuntimeError("decision start failed")
