@@ -493,6 +493,10 @@ class MotionDecisionOutcome:
     # side effects suppressed while still allowing that event to own recovery.
     refinement_event_id: int | None = None
     scene_activity_decision_id: str | None = None
+    # Recorded sampling paused before an unindexed stage. Nothing was decided
+    # or persisted; the durable job resumes from this stage.
+    refinement_resume_stage: int | None = None
+    refinement_resume_at: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -655,6 +659,16 @@ class MotionDecisionHandler:
             else self._invoke_detection_provider(provider, event_at, qualification)
         )
         check_evidence_cancellation()
+        resume_at = getattr(provider_result, "resume_at", None)
+        if resume_at is not None:
+            return MotionDecisionOutcome(
+                event_id=existing_event_id,
+                snapshot_path="",
+                object_detected=None,
+                rejection_reason="refinement_resume_scheduled",
+                refinement_resume_stage=int(getattr(provider_result, "resume_stage", 0) or 0),
+                refinement_resume_at=float(resume_at),
+            )
         frame, objects, recording_path = provider_result
         frame_captured_at_epoch = getattr(
             provider_result,

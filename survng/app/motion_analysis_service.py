@@ -40,6 +40,20 @@ from .motion_pipeline import MotionDebugSnapshotStore, MotionEvidenceRepository
 
 LOGGER = logging.getLogger(__name__)
 CACHED_PREPROCESSOR_IMPLEMENTATION = "gray_blur"
+# Localized scene change worth a discovery sample, including sub-threshold and
+# stationary foreground. Illumination, insects, foliage and jitter are left to
+# the discovery heartbeat.
+SCENE_CHANGE_REASONS = frozenset({
+    "qualified",
+    "coherent_edge_track",
+    "low_persistence",
+    "low_score",
+    "stationary_foreground",
+    "stationary_region",
+    "edge_motion",
+    "fragmented_motion",
+    "erratic_motion",
+})
 
 
 class MotionAnalysisQualification(Protocol):
@@ -198,6 +212,7 @@ class MotionAnalysisService:
         self._pending_analysis_at = 0.0
         self._analysis_request_deferred = False
         self.last_continuous_result: MotionQualificationResult | None = None
+        self.last_scene_change_at = float("-inf")
         self._visual_lock = threading.Lock()
         self._visual_nonpromotion_episode: _VisualBackupNonpromotionEpisode | None = None
         self._onvif_effectiveness_observer: (
@@ -363,6 +378,7 @@ class MotionAnalysisService:
             self._last_submitted_ema_candidate_at = 0.0
             self.last_sample_clock = 0.0
             self.last_continuous_result = None
+            self.last_scene_change_at = float("-inf")
             self.last_processed_at = 0.0
             self.last_processed_sequence = 0
             self._last_frame_epoch = 0.0
@@ -583,6 +599,7 @@ class MotionAnalysisService:
             self.recent_accepted_results.clear()
             self._last_submitted_ema_candidate_at = 0.0
             self.last_continuous_result = None
+            self.last_scene_change_at = float("-inf")
             self.last_processed_at = 0.0
             self.primary_last_processed_at = 0.0
             self._pending_analysis_at = 0.0
@@ -692,6 +709,17 @@ class MotionAnalysisService:
             ),
         )
         return qualified, evidence_frame
+
+    def scene_change_since(self, captured_at: float) -> bool:
+        """Whether localized change was analysed for a frame after ``captured_at``.
+
+        Without continuous analysis there is no change signal; report change so
+        discovery keeps its fixed cadence instead of going blind.
+        """
+        if not self.qualification.continuous_primary_required():
+            return True
+        with self.frame_lock:
+            return self.last_scene_change_at > captured_at
 
     def samples_since(self, captured_at: float) -> list[tuple[float, np.ndarray]]:
         with self.frame_lock:
@@ -1127,6 +1155,8 @@ class MotionAnalysisService:
         persist_candidate: dict[str, Any] | None = None
         with self.frame_lock:
             self.last_continuous_result = result
+            if result.reason in SCENE_CHANGE_REASONS:
+                self.last_scene_change_at = max(self.last_scene_change_at, captured_at)
             self.primary_last_processed_at = captured_at
             if (
                 self.qualification_results

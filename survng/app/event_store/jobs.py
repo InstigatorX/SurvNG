@@ -163,6 +163,10 @@ class EventStoreJobsMixin:
                 "create index if not exists idx_detection_jobs_claim "
                 "on detection_jobs(camera_id, state, available_at, created_at)"
             )
+            conn.execute(
+                "create index if not exists idx_detection_jobs_terminal "
+                "on detection_jobs(state, updated_at)"
+            )
             detection_columns = {
                 str(row["name"])
                 for row in conn.execute("pragma table_info(detection_jobs)").fetchall()
@@ -610,9 +614,12 @@ class EventStoreJobsMixin:
         camera_id: str,
         dedupe_key: str,
         payload: dict[str, Any],
+        available_at: float | None = None,
     ) -> str:
         """Durably admit mandatory delayed object discovery."""
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now = time.time()
+        now_iso = datetime.fromtimestamp(now, timezone.utc).isoformat()
+        available_at = now if available_at is None else max(now, float(available_at))
         payload_json = durable_json_dumps(payload, sort_keys=True)
         with self._jobs_lock, self._connect_jobs() as conn:
             cursor = conn.execute(
@@ -624,7 +631,7 @@ class EventStoreJobsMixin:
                     camera_id,
                     dedupe_key,
                     payload_json,
-                    time.time(),
+                    available_at,
                     now_iso,
                     now_iso,
                 ),
@@ -720,11 +727,15 @@ class EventStoreJobsMixin:
                 row = conn.execute(
                     "select * from detection_jobs where camera_id = ? and "
                     "state = 'queued' and available_at <= ? "
-                    # An admitted event owns user-visible evidence. Service it
-                    # before speculative probes, then retain LIFO freshness
-                    # within each class.
-                    "order by case when json_extract(payload_json, "
-                    "'$.existing_event_id') is not null then 0 else 1 end, "
+                    # A security re-check of a live miss is the only path to an
+                    # incident that does not exist yet, and has the shortest
+                    # freshness window. Admitted events already alerted; their
+                    # refinement improves evidence. Legacy durable discovery
+                    # rows run last. Retain LIFO freshness within each class.
+                    "order by case "
+                    "when json_extract(payload_json, '$.qualification.scene_discovery') = 1 then 2 "
+                    "when json_extract(payload_json, '$.existing_event_id') is not null then 1 "
+                    "else 0 end, "
                     # Refinement is time-sensitive evidence, not a FIFO batch.
                     # After restart, processing an old backlog before a current
                     # incident makes the current event unrecoverably stale.
@@ -797,6 +808,9 @@ class EventStoreJobsMixin:
         ).isoformat()
         # Scene samples are retained evidence work. A routine recorded
         # refinement can outlast the shorter freshness window for probes.
+        # Inference freshness counts from predicted evidence readiness, so
+        # waiting for a segment to close does not consume the window.
+        ready = "coalesce(json_extract(payload_json, '$.evidence_ready_epoch'), 0)"
         cursor = conn.execute(
             "update detection_jobs set state = 'failed', lease_expires_at = null, "
             "lease_owner = '', last_error = case when "
@@ -806,11 +820,34 @@ class EventStoreJobsMixin:
             "json_type(payload_json, '$.refined_outcome') = 'object' then created_at <= ? "
             "when json_extract(payload_json, '$.existing_event_id') is not null "
             "or json_extract(payload_json, '$.qualification.scene_discovery') = 1 "
-            "then created_at <= ? else created_at <= ? end) and (state = 'queued' "
+            f"then created_at <= ? and {ready} <= ? "
+            f"else created_at <= ? and {ready} <= ? end) and (state = 'queued' "
             "or (state = 'running' and lease_expires_at <= ?))",
-            (now_iso, camera_id, completion_cutoff, event_cutoff, probe_cutoff, now),
+            (
+                now_iso, camera_id, completion_cutoff,
+                event_cutoff, now - event_maximum_age,
+                probe_cutoff, now - max(0.0, float(maximum_age_seconds)),
+                now,
+            ),
         )
         return max(0, int(cursor.rowcount))
+
+    def cancel_queued_detection_jobs(
+        self, camera_id: str, *, reason: str = "detection_disabled",
+    ) -> int:
+        """Terminally drop unstarted inference for a camera that no longer detects.
+
+        Jobs whose inference already finished keep their completion pending,
+        and leased jobs remain with their owner.
+        """
+        with self._jobs_lock, self._connect_jobs() as conn:
+            cursor = conn.execute(
+                "update detection_jobs set state='failed', last_error=?, updated_at=? "
+                "where camera_id=? and state='queued' "
+                "and json_type(payload_json, '$.refined_outcome') is not 'object'",
+                (str(reason)[:200], datetime.now(timezone.utc).isoformat(), camera_id),
+            )
+            return max(0, int(cursor.rowcount))
 
     def pending_detection_job_ids(self, camera_id: str) -> set[str]:
         """Identify live jobs when their owner reconciles expired local state."""
@@ -865,6 +902,29 @@ class EventStoreJobsMixin:
                 "last_error='detection_stopped', updated_at=? "
                 "where id=? and state='running' and lease_owner=?",
                 (time.time(), datetime.now(timezone.utc).isoformat(), job_id, lease_owner),
+            )
+            return cursor.rowcount == 1
+
+    def reschedule_detection_job(
+        self,
+        job_id: str,
+        payload: dict[str, Any],
+        *,
+        available_at: float,
+        lease_owner: str,
+    ) -> bool:
+        """Release a paused job until its next evidence exists, without spending an attempt."""
+        payload_json = durable_json_dumps(payload, sort_keys=True)
+        with self._jobs_lock, self._connect_jobs() as conn:
+            cursor = conn.execute(
+                "update detection_jobs set state='queued', attempts=max(0, attempts-1), "
+                "payload_json=?, available_at=?, lease_expires_at=null, lease_owner='', "
+                "last_error='', updated_at=? "
+                "where id=? and state='running' and lease_owner=?",
+                (
+                    payload_json, max(time.time(), float(available_at)),
+                    datetime.now(timezone.utc).isoformat(), job_id, lease_owner,
+                ),
             )
             return cursor.rowcount == 1
 
@@ -944,39 +1004,52 @@ class EventStoreJobsMixin:
         self,
         *,
         retention_seconds: float = 7 * 24 * 60 * 60,
+        discovery_retention_seconds: float = 6 * 60 * 60,
         limit: int = 250,
         minimum_interval_seconds: float = 60 * 60,
+        backlog_interval_seconds: float = 60.0,
         force: bool = False,
     ) -> int:
-        """Bound terminal security-job history without touching active work."""
+        """Bound terminal security-job history without touching active work.
+
+        Scene-discovery history is kept for a shorter window. A full batch
+        means a backlog remains, so the next pass runs after the backlog
+        interval instead of the routine interval.
+        """
         now_monotonic = time.monotonic()
         with self._jobs_maintenance_lock:
             if (
                 not force
-                and now_monotonic - self._last_detection_job_prune_monotonic
-                < max(1.0, float(minimum_interval_seconds))
+                and now_monotonic < self._next_detection_job_prune_monotonic
             ):
                 return 0
-            self._last_detection_job_prune_monotonic = now_monotonic
+            batch = max(1, min(int(limit), 1000))
+            now = datetime.now(timezone.utc)
             cutoff = (
-                datetime.now(timezone.utc)
-                - timedelta(seconds=max(60.0, float(retention_seconds)))
+                now - timedelta(seconds=max(60.0, float(retention_seconds)))
             ).isoformat()
+            discovery_cutoff = max(cutoff, (
+                now - timedelta(seconds=max(60.0, float(discovery_retention_seconds)))
+            ).isoformat())
             with self._jobs_lock, self._connect_jobs() as conn:
                 rows = conn.execute(
                     "select id from detection_jobs "
                     "where state in ('completed','failed') and updated_at < ? "
+                    "and (updated_at < ? or json_extract(payload_json, "
+                    "'$.qualification.scene_discovery') = 1) "
                     "order by updated_at asc limit ?",
-                    (cutoff, max(1, min(int(limit), 1000))),
+                    (discovery_cutoff, cutoff, batch),
                 ).fetchall()
-                if not rows:
-                    return 0
-                conn.executemany(
-                    "delete from detection_jobs "
-                    "where id = ? and state in ('completed','failed')",
-                    [(str(row["id"]),) for row in rows],
-                )
-                return len(rows)
+                if rows:
+                    conn.executemany(
+                        "delete from detection_jobs "
+                        "where id = ? and state in ('completed','failed')",
+                        [(str(row["id"]),) for row in rows],
+                    )
+            self._next_detection_job_prune_monotonic = now_monotonic + max(1.0, float(
+                backlog_interval_seconds if len(rows) >= batch else minimum_interval_seconds
+            ))
+            return len(rows)
 
     def enqueue_motion_trigger(
         self,

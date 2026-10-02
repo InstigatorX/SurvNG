@@ -221,6 +221,26 @@ def test_continuous_qualification_reuses_cached_gray() -> None:
     assert run_pipeline.call_args.kwargs["luminance_frames"][1] is second_gray
 
 
+def test_scene_change_signal_ignores_quiet_and_illumination_results() -> None:
+    run_pipeline = Mock()
+    hooks = _hooks(run_pipeline=run_pipeline, trigger_mode="camera")
+    service = _service(hooks)
+    frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    with service.frame_lock:
+        service.color_frames.extend([(99.8, frame), (100.0, frame.copy())])
+    for at, reason in ((100.0, "no_motion_blobs"), (101.0, "global_illumination_change"),
+                       (102.0, "insect_like_motion")):
+        run_pipeline.return_value = MotionQualificationResult(False, 0.0, 0.48, reason, 2, {})
+        service.analyze_continuous(at)
+    assert service.scene_change_since(0.0) is False
+    run_pipeline.return_value = MotionQualificationResult(False, 0.2, 0.48, "stationary_foreground", 2, {})
+    service.analyze_continuous(103.0)
+    assert service.scene_change_since(102.5) is True
+    assert service.scene_change_since(103.0) is False
+    hooks.qualification.continuous_primary_required.return_value = False
+    assert service.scene_change_since(103.0) is True
+
+
 def test_evidence_frame_selection_is_nearest_and_generation_bounded() -> None:
     service = _service(_hooks())
     stop_event = threading.Event()

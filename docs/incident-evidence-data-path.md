@@ -6,17 +6,19 @@ are independent. An object outside an alert zone remains part of the scene.
 
 ## Acquisition and evidence
 
-Camera and motion notices request detection. Periodic scene discovery also
-requests one full-scene frame every ten seconds per detection-enabled camera
-(`detector.scene_discovery_enabled`, `detector.scene_discovery_interval_seconds`).
-Discovery uses the existing durable refinement worker and inference limits.
-Scheduled capture frames are copied into a bounded four-frame buffer before
-their jobs are queued. Workers analyze the matching retained frame without
-waiting for recording finalization; its actual capture time and generation
-remain attached to the observations. Evicted frames and jobs resumed after
-restart use recorded evidence. Discovery uses the existing 60-second evidence
-job window rather than the 20-second probe window, so an ordinary recorded
-refinement ahead of it does not expire its queued sample prematurely.
+Camera and motion notices request detection. Scene discovery also samples one
+full-scene frame per detection-enabled camera when continuous motion analysis
+has seen localized change (including sub-threshold and stationary foreground)
+since the previous sample, at most every `detector.scene_discovery_interval_seconds`,
+and otherwise every `detector.scene_discovery_heartbeat_seconds`. Cameras
+without continuous analysis keep the fixed interval.
+Discovery is not a durable job: each camera holds only its newest sample in
+memory, and the refinement worker analyzes it only when no durable detection,
+verification or cover work is due. Samples older than 60 seconds are dropped.
+Sampled capture frames are copied into a bounded four-frame buffer; the worker
+analyzes the matching retained frame without waiting for recording
+finalization, and its actual capture time and generation remain attached to the
+observations.
 Acquisition is independent of events. Every discovery result is retained in the
 acquisition ledger, including successful empty samples and failed attempts.
 Objects do not establish activity merely by appearing in a detector's output.

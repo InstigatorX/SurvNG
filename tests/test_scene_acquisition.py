@@ -73,6 +73,23 @@ def handler(events, objects, frame=None):
     )
 
 
+def test_paused_recorded_pass_decides_and_persists_nothing():
+    events = Mock()
+    paused = RecordedDetectionResult(
+        frame=None, objects=[{"status": "refinement_resumes_later"}], recording_path="",
+        timings_ms={}, resume_stage=2, resume_at=1234.5,
+    )
+    processor = MotionDecisionHandler(
+        camera_id="gate", events=events, detection_provider=lambda _: paused,
+        snapshot_writer=lambda *_: "cover.webp", object_serializer=json.dumps,
+    )
+    outcome = processor.refine("motion", "", datetime.fromtimestamp(1000, timezone.utc),
+                               {}, existing_event_id=None)
+    assert outcome.object_detected is None
+    assert (outcome.refinement_resume_stage, outcome.refinement_resume_at) == (2, 1234.5)
+    assert events.mock_calls == []
+
+
 def test_cover_only_pass_persists_scene_evidence_before_presentation_rejection():
     events = Mock()
     processor = handler(events, [person()])
@@ -105,19 +122,56 @@ def test_discovery_is_one_bounded_full_scene_sample():
     assert settle == 0
 
 
-def test_discovery_producer_enqueues_existing_durable_worker_without_running_detector():
+def discovery_service():
+    import queue
+    import threading
     service = MotionIncidentService.__new__(MotionIncidentService)
     service.camera_id = "gate"
-    service._queue_refinement = Mock(return_value="queued")
+    service._status_lock = threading.RLock()
+    service._refinement_queue = queue.Queue(maxsize=1)
+    service._refinement_accepting = True
+    service._refinement_stop = threading.Event()
+    service._security_work_pending = threading.Event()
+    service._pending_scene_discovery = None
+    service._scene_discovery_counts = {"offered": 0, "superseded": 0, "stale": 0, "completed": 0, "failed": 0}
+    service._last_scene_discovery_failure_log = float("-inf")
+    service._queue_refinement = Mock(side_effect=AssertionError("discovery must not use the durable ledger"))
+    service._record_timing = Mock()
+    service._handoff = Mock()
     service.decision_processor = Mock()
-    event_at = datetime.fromtimestamp(1000, timezone.utc)
-    assert service.queue_scene_discovery(event_at) == "queued"
-    job = service._queue_refinement.call_args.args[0]
-    assert job.event_at == event_at
-    assert job.payload()["qualification"]["scene_discovery"] is True
-    assert job.payload()["require_eligible_object"] is False
-    service.decision_processor.handle.assert_not_called()
+    service.decision_processor.refine.return_value = SimpleNamespace(event_id=None)
+    return service
+
+
+def test_discovery_offer_keeps_only_newest_sample_without_durable_job():
+    service = discovery_service()
+    older = datetime.fromtimestamp(time.time() - 2, timezone.utc)
+    newer = datetime.fromtimestamp(time.time() - 1, timezone.utc)
+    assert service.offer_scene_discovery(older) == "queued"
+    assert service.offer_scene_discovery(newer) == "superseded"
     service.decision_processor.refine.assert_not_called()
+    assert service._run_scene_discovery() is True
+    assert service._run_scene_discovery() is False
+    service.decision_processor.refine.assert_called_once()
+    args = service.decision_processor.refine.call_args
+    assert args.args[0] == "scene/discovery"
+    assert args.args[2] == newer
+    assert args.args[3]["scene_discovery"] is True
+    assert args.kwargs["require_eligible_object"] is False
+    assert service._scene_discovery_counts == {"offered": 2, "superseded": 1, "stale": 0, "completed": 1, "failed": 0}
+
+
+def test_discovery_yields_to_security_work_and_drops_stale_samples():
+    service = discovery_service()
+    service.offer_scene_discovery(datetime.fromtimestamp(time.time(), timezone.utc))
+    service._security_work_pending.set()
+    assert service._run_scene_discovery() is False
+    assert service._pending_scene_discovery is not None
+    service._security_work_pending.clear()
+    service.offer_scene_discovery(datetime.fromtimestamp(time.time() - 120, timezone.utc))
+    assert service._run_scene_discovery() is True
+    service.decision_processor.refine.assert_not_called()
+    assert service._scene_discovery_counts["stale"] == 1
 
 
 def test_discovery_does_not_relax_configured_alert_confirmation_count():

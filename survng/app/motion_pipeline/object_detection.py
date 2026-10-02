@@ -54,6 +54,10 @@ RECORDED_EVENT_SETTLE_SECONDS = 0.75
 RECORDED_EVENT_RETRY_SECONDS = 24.0
 RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
 RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS = 6.0
+# Finalization and edge indexing after a segment boundary.
+RECORDED_SEGMENT_INDEX_MARGIN_SECONDS = 1.0
+# Shorter waits are cheaper to sleep through than to reschedule.
+RECORDED_SPLIT_MINIMUM_WAIT_SECONDS = 1.0
 FAST_LIVE_FRAME_MAX_AGE_SECONDS = 1.0
 FAST_LIVE_FRAME_FUTURE_TOLERANCE_SECONDS = 0.5
 RECORDED_LIVE_FALLBACK_EVENT_TOLERANCE_SECONDS = 1.5
@@ -227,6 +231,10 @@ class RecordedDetectionResult:
     frame_source: str = ""
     frame_timestamp_exact: bool = False
     review_image: dict[str, Any] | None = None
+    # Set when sampling stopped before a stage whose recording is not yet
+    # indexed; the caller re-runs from ``resume_stage`` at ``resume_at``.
+    resume_stage: int | None = None
+    resume_at: float | None = None
 
     def __iter__(self):
         # Preserve the historical three-value provider contract for callers
@@ -1333,6 +1341,58 @@ class RecordedMotionObjectDetector:
         with self._scene_frames_lock:
             self._scene_frames.append(retained)
 
+    def recorded_evidence_ready_at(
+        self,
+        event_at: datetime,
+        qualification: dict[str, Any] | None = None,
+    ) -> float | None:
+        """Predict when the first refinement stage's newest frame is indexed.
+
+        Segments are indexed only once closed. The newest indexed main segment
+        fixes the boundary phase; the prediction never exceeds one segment
+        past the needed frame, so a stalled recorder delays work only boundedly.
+        """
+        qualification = qualification or {}
+        if qualification.get("scene_discovery") or qualification.get("scene_confirmation"):
+            return None
+        config = getattr(self.detector, "config", None)
+        stages, _retry, settle_seconds, *_ = resolve_recorded_refinement_plan(
+            config, qualification=qualification, event_at=event_at, camera_id=self.camera.id,
+        )
+        if not stages or not stages[0]:
+            return None
+        initial = stages[0]
+        adaptive = tuple(offset for offset in (0.0, 0.5, -0.5) if offset in initial)
+        newest = (
+            max(adaptive)
+            if adaptive and getattr(config, "recorded_adaptive_sampling", True)
+            else max(initial)
+        )
+        return self._predicted_index_epoch(event_at.timestamp() + newest, settle_seconds)
+
+    def _predicted_index_epoch(self, target: float, settle_seconds: float) -> float:
+        ready = target + settle_seconds
+        segment = float(getattr(self.recorder, "segment_seconds", 0.0) or 0.0)
+        rows_between = getattr(self.recorder, "recording_rows_between", None)
+        if segment <= 0 or not callable(rows_between):
+            return ready
+        try:
+            rows = rows_between(
+                self.camera.id, target - 4.0 * segment, target + segment, "main",
+                discover_missing=False,
+            )
+        except Exception:
+            LOGGER.debug("recording readiness lookup unavailable for %s", self.camera.id, exc_info=True)
+            return ready
+        ends = [float(row["end_epoch"]) for row in rows if row.get("end_epoch") is not None]
+        if not ends:
+            return ready
+        latest = max(ends)
+        if target <= latest:
+            return ready
+        closes = latest + math.ceil((target - latest) / segment) * segment
+        return max(ready, min(closes, target + segment) + RECORDED_SEGMENT_INDEX_MARGIN_SECONDS)
+
     def detect(
         self,
         event_at: datetime,
@@ -1384,6 +1444,19 @@ class RecordedMotionObjectDetector:
                 or RECORDED_EVENT_FRAME_STAGES
             )
         )
+        resumable = bool(
+            qualification
+            and qualification.get("refinement_split_allowed")
+            and not confirming_scene
+            and not qualification.get("scene_discovery")
+            and minimum_last_offset is None
+        )
+        start_stage = 0
+        if resumable:
+            try:
+                start_stage = min(max(0, int(qualification.get("refinement_resume_stage") or 0)), len(stages) - 1)
+            except (TypeError, ValueError):
+                start_stage = 0
         result = self._detect(
             event_at,
             stages=stages,
@@ -1397,6 +1470,8 @@ class RecordedMotionObjectDetector:
             minimum_last_offset_seconds=minimum_last_offset,
             preserve_confirmation_counts=bool(qualification and qualification.get("scene_discovery")),
             scene_confirmation=confirming_scene,
+            start_stage=start_stage,
+            split_allowed=resumable,
         )
         if confirming_scene and not any(item.get("samples") is not None for item in result.objects if item.get("status")=="scene_observations"):
             result=replace(result,objects=[*result.objects,{"status":"scene_observations","observations":[],
@@ -1638,6 +1713,8 @@ class RecordedMotionObjectDetector:
         minimum_last_offset_seconds: float | None = None,
         preserve_confirmation_counts: bool = False,
         scene_confirmation: bool = False,
+        start_stage: int = 0,
+        split_allowed: bool = False,
     ) -> RecordedDetectionResult:
         workflow_started = time.monotonic()
         timing = {
@@ -1676,7 +1753,7 @@ class RecordedMotionObjectDetector:
             + newest_initial_offset
             + settle_seconds
         )
-        wait_seconds = max(0.0, newest_needed - time.time())
+        wait_seconds = max(0.0, newest_needed - time.time()) if start_stage == 0 else 0.0
         if wait_seconds > 0:
             slept = min(wait_seconds, 3.0)
             remaining_wait = slept
@@ -1755,6 +1832,8 @@ class RecordedMotionObjectDetector:
                 minimum_last_offset_seconds=minimum_last_offset_seconds,
                 preserve_confirmation_counts=preserve_confirmation_counts,
                 scene_confirmation=scene_confirmation,
+                start_stage=start_stage,
+                split_allowed=split_allowed,
             )
         finally:
             if memory_lease is not None:
@@ -1825,6 +1904,8 @@ class RecordedMotionObjectDetector:
         minimum_last_offset_seconds: float | None = None,
         preserve_confirmation_counts: bool = False,
         scene_confirmation: bool = False,
+        start_stage: int = 0,
+        split_allowed: bool = False,
     ) -> RecordedDetectionResult:
         refinement_deadline: float | None = None
         samples_by_offset: dict[float, _RecordedDetectionSample] = {}
@@ -1909,12 +1990,37 @@ class RecordedMotionObjectDetector:
         )
 
         for stage_index, stage_offsets in enumerate(stages):
+            if stage_index < start_stage:
+                continue
             if (
                 representative_refinement_requested
                 and representative_stage_index is not None
                 and 0 < stage_index < representative_stage_index
             ):
                 continue
+            if (
+                split_allowed
+                and stage_index > start_stage
+                and not representative_refinement_requested
+                # Only an empty prefix can be dropped: later consensus never
+                # needs a track that has not started.
+                and not any(
+                    _candidate_detection(detected)
+                    for sample in samples_by_offset.values()
+                    for detected in sample.objects
+                )
+            ):
+                resume_at = self._predicted_index_epoch(event_epoch + max(stage_offsets), settle_seconds)
+                if resume_at - time.time() > RECORDED_SPLIT_MINIMUM_WAIT_SECONDS:
+                    timing["refinement_resume_stage"] = float(stage_index)
+                    return replace(
+                        self._result(
+                            None, [{"status": "refinement_resumes_later"}], "",
+                            timing, workflow_started, refinement_pending=False,
+                        ),
+                        resume_stage=stage_index,
+                        resume_at=resume_at,
+                    )
             adaptive_stage = bool(
                 stage_index == 0
                 and not scene_confirmation

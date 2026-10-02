@@ -82,7 +82,7 @@ class EventStore(
         # of making them contend through SQLite's busy timeout.
         self._jobs_lock = TimedLock(threading.RLock())
         self._jobs_maintenance_lock = threading.Lock()
-        self._last_detection_job_prune_monotonic = 0.0
+        self._next_detection_job_prune_monotonic = 0.0
         self._init_db()
         self._init_evidence_db()
         self._init_scene_acquisition_db()

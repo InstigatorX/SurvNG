@@ -79,6 +79,28 @@ def _service(
     return service, decision, tracking, prewarm, image_reader
 
 
+def test_refinement_is_scheduled_for_predicted_evidence_readiness() -> None:
+    outcome = MotionDecisionOutcome(
+        event_id=None, snapshot_path="", object_detected=False, refinement_pending=True,
+    )
+    store = Mock()
+    store.enqueue_detection_job.return_value = "queued"
+    service, *_ = _service(outcome, refinement_store=store)
+    ready = time.time() + 8.0
+    service.evidence_ready_at = Mock(return_value=ready)
+    event_at = datetime.now(timezone.utc)
+
+    service.process("motion", "person", event_at, {"detection_intent_id": "ema:1"})
+
+    service.evidence_ready_at.assert_called_once()
+    kwargs = store.enqueue_detection_job.call_args.kwargs
+    assert kwargs["available_at"] == ready
+    assert kwargs["payload"]["evidence_ready_epoch"] == ready
+    restored = _RefinementJob.from_payload(kwargs["payload"], None)
+    assert restored.evidence_ready_epoch == ready
+    assert restored.payload()["evidence_ready_epoch"] == ready
+
+
 def test_process_prewarms_and_seeds_tracking_from_persisted_snapshot() -> None:
     seed = np.ones((90, 160, 3), dtype=np.uint8)
     outcome = MotionDecisionOutcome(
@@ -393,6 +415,69 @@ def test_mandatory_refinement_is_admitted_before_optional_prewarm() -> None:
     stop.set()
     service.request_stop()
     assert service.wait_stopped(1.0)
+
+
+def test_paused_refinement_resumes_later_without_spending_an_attempt() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=None, snapshot_path="", object_detected=False, refinement_pending=True,
+    )
+    service, decision, _tracking, _prewarm, _image_reader = _service(initial)
+    calls: list[dict] = []
+    finished = threading.Event()
+
+    def refine(_topic, _message, _event_at, qualification, **_kwargs):
+        calls.append(dict(qualification))
+        if len(calls) == 1:
+            return MotionDecisionOutcome(
+                event_id=None, snapshot_path="", object_detected=None,
+                rejection_reason="refinement_resume_scheduled",
+                refinement_resume_stage=1, refinement_resume_at=time.time() + 0.3,
+            )
+        finished.set()
+        return MotionDecisionOutcome(event_id=None, snapshot_path="", object_detected=False)
+
+    decision.refine.side_effect = refine
+    stop = threading.Event()
+    service.start(stop)
+    started = time.monotonic()
+    service.process("motion", "person", datetime.now(timezone.utc), {"detection_intent_id": "ema:7"})
+    assert finished.wait(3.0)
+    deadline = time.monotonic() + 2.0
+    while service.status()["refinements_completed"] < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    stop.set()
+    service.request_stop()
+    assert service.wait_stopped(1.0)
+
+    assert time.monotonic() - started >= 0.25
+    assert calls[0]["refinement_split_allowed"] is True
+    assert "refinement_resume_stage" not in calls[0]
+    assert calls[1]["refinement_resume_stage"] == 1
+    status = service.status()
+    assert status["refinements_resumed"] == 1
+    assert status["refinements_completed"] == 1
+    assert status["refinement_failures"] == 0
+    stages = status["worker_stage_ms"]
+    assert stages["claim"]["samples"] == 2
+    assert stages["refine"]["samples"] == 2
+    assert stages["reschedule"]["samples"] == 1
+    assert stages["complete"]["samples"] == 1
+    assert stages["discovery"]["samples"] == 0
+
+
+def test_discarding_queued_work_drops_unstarted_refinement_and_discovery() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=None, snapshot_path="", object_detected=False, refinement_pending=True,
+    )
+    service, _decision, _tracking, _prewarm, _image_reader = _service(initial)
+    service.process("motion", "person", datetime.now(timezone.utc), {"detection_intent_id": "ema:9"})
+    service.offer_scene_discovery(datetime.now(timezone.utc))
+    assert service.status()["refinement_queue_depth"] == 1
+
+    assert service.discard_queued_work() == 1
+    status = service.status()
+    assert status["refinement_queue_depth"] == 0
+    assert status["scene_discovery"]["pending"] is False
 
 
 def test_late_refinement_runs_off_decision_path_and_completes_before_shutdown() -> None:

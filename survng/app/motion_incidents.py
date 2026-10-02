@@ -8,6 +8,7 @@ import errno
 import hashlib
 import json
 import logging
+import math
 import queue
 import sqlite3
 import threading
@@ -54,7 +55,7 @@ class MotionDecisionProcessor(Protocol):
 class DetectionJobStore(Protocol):
     def enqueue_detection_job(
         self, *, job_id: str, camera_id: str, dedupe_key: str,
-        payload: dict[str, Any],
+        payload: dict[str, Any], available_at: float | None = None,
     ) -> str: ...
     def claim_detection_job(
         self, camera_id: str, *, lease_seconds: float = 60.0, lease_owner: str = "",
@@ -66,6 +67,9 @@ class DetectionJobStore(Protocol):
         self, job_id: str, payload: dict[str, Any], *, lease_owner: str = "",
     ) -> bool: ...
     def defer_detection_job(self, job_id: str, *, lease_owner: str) -> bool: ...
+    def reschedule_detection_job(
+        self, job_id: str, payload: dict[str, Any], *, available_at: float, lease_owner: str,
+    ) -> bool: ...
     def retry_detection_job(
         self, job_id: str, error: str, *, retry_delay_seconds: float = 2.0,
         maximum_attempts: int = 5,
@@ -104,6 +108,13 @@ RefinementCompletionHandler = Callable[[MotionDecisionOutcome, dict[str, Any]], 
 REFINEMENT_MAX_QUEUE_AGE_SECONDS = DETECTION_JOB_MAXIMUM_AGE_SECONDS
 REFINEMENT_EVENT_MAX_QUEUE_AGE_SECONDS = DETECTION_EVENT_JOB_MAXIMUM_AGE_SECONDS
 REFINEMENT_STALE_EXPIRY_INTERVAL_SECONDS = 5.0
+# Matches the retired durable discovery expiry. The retained live frame stays
+# usable, but an older sample no longer describes the current scene.
+SCENE_DISCOVERY_MAX_AGE_SECONDS = 60.0
+REFINEMENT_WORKER_STAGES = (
+    "claim", "refine", "checkpoint", "handoff", "completion", "complete",
+    "reschedule", "verification", "cover", "discovery",
+)
 
 
 def _compact_refinement_qualification(
@@ -166,6 +177,10 @@ class _RefinementJob:
     refined_outcome: MotionDecisionOutcome | None = None
     handoff_completed: bool = False
     handoff_disposition: str = "pending"
+    # When recorded evidence is predicted to exist. Claim and freshness are
+    # measured from here, not from admission, so segment closure is not
+    # charged against the job's age.
+    evidence_ready_epoch: float | None = None
 
     def key(self) -> tuple[str, str | int | float]:
         # Once the fast path persists an incident, that canonical event—not the
@@ -208,6 +223,11 @@ class _RefinementJob:
             ),
             "handoff_completed": self.handoff_completed,
             "handoff_disposition": self.handoff_disposition,
+            **(
+                {"evidence_ready_epoch": self.evidence_ready_epoch}
+                if self.evidence_ready_epoch is not None
+                else {}
+            ),
         }
 
     @classmethod
@@ -238,6 +258,11 @@ class _RefinementJob:
             ),
             handoff_completed=bool(payload.get("handoff_completed")),
             handoff_disposition=str(payload.get("handoff_disposition") or "pending"),
+            evidence_ready_epoch=(
+                float(payload["evidence_ready_epoch"])
+                if payload.get("evidence_ready_epoch") is not None
+                else None
+            ),
         )
 
 
@@ -248,7 +273,8 @@ class _MemoryDetectionJobStore:
         self._lock = threading.Lock()
         self._jobs: dict[str, dict[str, Any]] = {}
 
-    def enqueue_detection_job(self, *, job_id, camera_id, dedupe_key, payload):
+    def enqueue_detection_job(self, *, job_id, camera_id, dedupe_key, payload, available_at=None):
+        delay = 0.0 if available_at is None else max(0.0, float(available_at) - time.time())
         with self._lock:
             existing = self._jobs.get(job_id)
             if existing is None:
@@ -280,8 +306,9 @@ class _MemoryDetectionJobStore:
             self._jobs[job_id] = {
                 "id": job_id, "camera_id": camera_id, "dedupe_key": dedupe_key,
                 "payload": copy.deepcopy(payload), "state": "queued", "attempts": 0,
-                "available_at": time.monotonic(),
+                "available_at": time.monotonic() + delay,
                 "created_at_monotonic": time.monotonic(),
+                "ready_at_monotonic": time.monotonic() + delay if delay else None,
                 "lease_owner": "",
                 "lease_expires_at": None,
             }
@@ -335,14 +362,13 @@ class _MemoryDetectionJobStore:
                     and candidate["state"] == "queued"
                     and candidate["available_at"] <= now
                 ]
-                job = next(
-                    (
-                        candidate
-                        for candidate in queued
-                        if candidate["payload"].get("existing_event_id") is not None
-                    ),
-                    queued[0] if queued else None,
-                )
+                def claim_rank(candidate):
+                    qualification = candidate["payload"].get("qualification")
+                    if isinstance(qualification, dict) and qualification.get("scene_discovery") is True:
+                        return 2
+                    return 1 if candidate["payload"].get("existing_event_id") is not None else 0
+
+                job = min(queued, key=claim_rank, default=None)
                 if job is None:
                     return None
             job["state"] = "running"
@@ -393,7 +419,12 @@ class _MemoryDetectionJobStore:
                 if job["payload"].get("existing_event_id") is not None or discovery
                 else probe_cutoff
             )
-            if job["camera_id"] != camera_id or job["created_at_monotonic"] > cutoff:
+            reference = (
+                job["created_at_monotonic"]
+                if checkpointed
+                else max(job["created_at_monotonic"], job.get("ready_at_monotonic") or 0.0)
+            )
+            if job["camera_id"] != camera_id or reference > cutoff:
                 continue
             lease_expires_at = job.get("lease_expires_at")
             reclaimable_running = (
@@ -444,6 +475,18 @@ class _MemoryDetectionJobStore:
                        lease_owner="", last_error="detection_stopped")
             return True
 
+    def reschedule_detection_job(self, job_id, payload, *, available_at, lease_owner):
+        delay = max(0.0, float(available_at) - time.time())
+        with self._lock:
+            job = self._jobs[job_id]
+            if job["state"] != "running" or job["lease_owner"] != lease_owner:
+                return False
+            ready = time.monotonic() + delay
+            job.update(state="queued", attempts=max(0, job["attempts"] - 1),
+                       payload=copy.deepcopy(payload), available_at=ready,
+                       ready_at_monotonic=ready, lease_expires_at=None, lease_owner="")
+            return True
+
     def retry_detection_job(
         self, job_id, error, *, retry_delay_seconds=2.0, maximum_attempts=5,
         lease_owner="",
@@ -461,6 +504,19 @@ class _MemoryDetectionJobStore:
             job["lease_owner"] = ""
             job["lease_expires_at"] = None
             return retry
+
+    def cancel_queued_detection_jobs(self, camera_id, *, reason="detection_disabled"):
+        with self._lock:
+            cancelled = 0
+            for job in self._jobs.values():
+                if (
+                    job["camera_id"] == camera_id and job["state"] == "queued"
+                    and not isinstance(job["payload"].get("refined_outcome"), dict)
+                ):
+                    job["state"] = "failed"
+                    job["last_error"] = reason
+                    cancelled += 1
+            return cancelled
 
     def pending_detection_job_ids(self, camera_id):
         with self._lock:
@@ -515,9 +571,11 @@ class MotionIncidentService:
         refinement_store: DetectionJobStore | None = None,
         scene_analysis_enabled: TrackingEnabled | None = None,
         resume_scene_analysis: Callable[[], bool] | None = None,
+        evidence_ready_at: Callable[[datetime, dict[str, Any]], float | None] | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.decision_processor = decision_processor
+        self.evidence_ready_at = evidence_ready_at
         self.tracking_enabled = tracking_enabled
         self.scene_analysis_enabled = scene_analysis_enabled or (lambda: False)
         self.resume_scene_analysis = resume_scene_analysis
@@ -547,6 +605,12 @@ class MotionIncidentService:
         self._refinements_queued = 0
         self._refinements_completed = 0
         self._refinements_coalesced = 0
+        self._refinements_resumed = 0
+        self._pending_scene_discovery: datetime | None = None
+        self._scene_discovery_counts = {
+            "offered": 0, "superseded": 0, "stale": 0, "completed": 0, "failed": 0,
+        }
+        self._last_scene_discovery_failure_log = float("-inf")
         self._refinement_failures = 0
         self._refinement_timeouts = 0
         self._last_refinement_failure: dict[str, Any] | None = None
@@ -558,9 +622,14 @@ class MotionIncidentService:
         self._last_timing_ms: dict[str, float] = {}
         self._live_workflow_samples = RollingLatencySamples()
         self._refine_workflow_samples = RollingLatencySamples()
+        self._worker_stage_samples = {
+            stage: RollingLatencySamples() for stage in REFINEMENT_WORKER_STAGES
+        }
 
     def status(self) -> dict[str, Any]:
         durable = self.refinement_store.detection_job_status(self.camera_id)
+        lock_status = getattr(self.refinement_store, "lock_wait_status", None)
+        lock_wait = lock_status() if callable(lock_status) else None
         with self._status_lock:
             return {
                 "prewarm_failures": self._prewarm_failures,
@@ -578,6 +647,16 @@ class MotionIncidentService:
                 "refinements_queued": self._refinements_queued,
                 "refinements_completed": self._refinements_completed,
                 "refinements_coalesced": self._refinements_coalesced,
+                "refinements_resumed": self._refinements_resumed,
+                "worker_stage_ms": {
+                    stage: samples.snapshot()
+                    for stage, samples in self._worker_stage_samples.items()
+                },
+                "store_lock_wait": lock_wait,
+                "scene_discovery": {
+                    **self._scene_discovery_counts,
+                    "pending": self._pending_scene_discovery is not None,
+                },
                 "refinement_failures": self._refinement_failures,
                 "refinement_timeouts": self._refinement_timeouts,
                 "last_refinement_failure": (
@@ -726,23 +805,83 @@ class MotionIncidentService:
                 "error_type": error_type,
             }
 
-    def queue_scene_discovery(self, event_at: datetime) -> str:
-        """Durably schedule one whole-scene sample without blocking capture on inference."""
+    def discard_queued_work(self, reason: str = "detection_disabled") -> int:
+        """Drop unstarted inference after detection is turned off for this camera."""
+        with self._status_lock:
+            self._pending_scene_discovery = None
+        cancel = getattr(self.refinement_store, "cancel_queued_detection_jobs", None)
+        if not callable(cancel):
+            return 0
+        cancelled = int(cancel(self.camera_id, reason=reason))
+        self._forget_terminal_refinements()
+        if cancelled:
+            LOGGER.info(
+                "discarded %d queued detection job(s) for %s: %s",
+                cancelled, self.camera_id, reason,
+            )
+        return cancelled
+
+    def offer_scene_discovery(self, event_at: datetime) -> str:
+        """Hold one whole-scene sample for the worker's idle time.
+
+        Discovery is opportunistic: only the newest offer is kept, it is never
+        persisted, and every durable job runs first.
+        """
+        with self._status_lock:
+            self._scene_discovery_counts["offered"] += 1
+            admission = "queued"
+            if self._pending_scene_discovery is not None:
+                self._scene_discovery_counts["superseded"] += 1
+                admission = "superseded"
+            self._pending_scene_discovery = event_at
+            wake = self._refinement_accepting
+        if wake:
+            try:
+                self._refinement_queue.put_nowait(True)
+            except queue.Full:
+                pass
+        return admission
+
+    def _run_scene_discovery(self) -> bool:
+        if self._security_work_pending.is_set():
+            return False
+        with self._status_lock:
+            event_at = self._pending_scene_discovery
+            self._pending_scene_discovery = None
+        if event_at is None:
+            return False
+        if time.time() - event_at.timestamp() > SCENE_DISCOVERY_MAX_AGE_SECONDS:
+            with self._status_lock:
+                self._scene_discovery_counts["stale"] += 1
+            return True
         qualification = {
             "scene_discovery": True,
             "trigger_source": "scene_discovery",
             "detection_intent_id": f"scene:{self.camera_id}:{event_at.timestamp():.6f}",
         }
-        return self._queue_refinement(_RefinementJob(
-            topic="scene/discovery", message="Periodic scene observation",
-            event_at=event_at, qualification=qualification, existing_event_id=None,
-            require_eligible_object=False, require_motion_correlation=False,
-            callback=None, completion_context=None,
-            initial_outcome=MotionDecisionOutcome(
-                event_id=None, snapshot_path="", object_detected=None,
-                refinement_pending=True,
-            ),
-        ))
+        try:
+            with cancellable_evidence_work(lambda: bool(self._refinement_stop and self._refinement_stop.is_set())):
+                outcome = self.decision_processor.refine(
+                    "scene/discovery", "Scene observation", event_at, qualification,
+                    existing_event_id=None, require_eligible_object=False,
+                    require_motion_correlation=False,
+                )
+        except EvidenceWorkPreempted:
+            return True
+        except Exception:
+            with self._status_lock:
+                self._scene_discovery_counts["failed"] += 1
+            now = time.monotonic()
+            if now - self._last_scene_discovery_failure_log >= 60.0:
+                self._last_scene_discovery_failure_log = now
+                LOGGER.exception("scene discovery failed for %s", self.camera_id)
+            return True
+        self._record_timing(outcome, kind="refine")
+        if outcome.event_id is not None:
+            self._handoff(outcome, event_at)
+        with self._status_lock:
+            self._scene_discovery_counts["completed"] += 1
+        return True
 
     def process(
         self,
@@ -871,6 +1010,14 @@ class MotionIncidentService:
                 return False
 
     def _queue_refinement(self, job: _RefinementJob) -> str:
+        if self.evidence_ready_at is not None and job.evidence_ready_epoch is None:
+            try:
+                ready = self.evidence_ready_at(job.event_at, job.qualification)
+            except Exception:
+                LOGGER.debug("evidence readiness unavailable for %s", self.camera_id, exc_info=True)
+                ready = None
+            if ready is not None and math.isfinite(ready):
+                job = replace(job, evidence_ready_epoch=float(ready))
         with self._status_lock:
             stop = self._refinement_stop
             worker_available = bool(
@@ -886,6 +1033,11 @@ class MotionIncidentService:
                 camera_id=self.camera_id,
                 dedupe_key=job.dedupe_key(),
                 payload=job.payload(),
+                **(
+                    {"available_at": job.evidence_ready_epoch}
+                    if job.evidence_ready_epoch is not None
+                    else {}
+                ),
             )
             if admission == "coalesced":
                 self._refinements_coalesced += 1
@@ -1149,6 +1301,7 @@ class MotionIncidentService:
             # point sets the token, including the race between claim and cover.
             with self._status_lock:
                 self._security_work_pending.clear()
+            started = time.monotonic()
             claimed = self.refinement_store.claim_detection_job(
                 self.camera_id,
                 lease_owner=self._lease_owner,
@@ -1158,18 +1311,27 @@ class MotionIncidentService:
                 ),
             )
             if claimed is None:
+                started = time.monotonic()
                 if self._run_scene_candidate():
+                    self._record_worker_stage("verification", started)
                     continue
                 # The event owns cover completion independently of terminal
                 # security jobs. Poll its durable requirements only after
                 # ordinary refinement has had first access to this worker.
+                started = time.monotonic()
                 if self._run_cover_requirement():
+                    self._record_worker_stage("cover", started)
+                    continue
+                started = time.monotonic()
+                if self._run_scene_discovery():
+                    self._record_worker_stage("discovery", started)
                     continue
                 try:
                     self._refinement_queue.get(timeout=0.5)
                 except queue.Empty:
                     pass
                 continue
+            self._record_worker_stage("claim", started)
             job_id = str(claimed["id"])
             with self._status_lock:
                 callback = self._refinement_callbacks.get(job_id)
@@ -1220,6 +1382,9 @@ class MotionIncidentService:
                 )
             refinement_qualification = dict(job.qualification)
             refinement_qualification["detection_intent_id"] = job_id
+            reschedule = getattr(self.refinement_store, "reschedule_detection_job", None)
+            if callable(reschedule) and job.refined_outcome is None:
+                refinement_qualification["refinement_split_allowed"] = True
             completed = False
             with self._status_lock:
                 self._active_refinement = {
@@ -1231,6 +1396,7 @@ class MotionIncidentService:
                     if job.refined_outcome is not None:
                         outcome = job.refined_outcome
                     else:
+                        started = time.monotonic()
                         with cancellable_evidence_work(
                             stop.is_set, optional=False,
                             stage_reporter=self._set_refinement_stage,
@@ -1244,6 +1410,7 @@ class MotionIncidentService:
                                 require_eligible_object=job.require_eligible_object,
                                 require_motion_correlation=job.require_motion_correlation,
                             )
+                        self._record_worker_stage("refine", started)
                 except EvidenceWorkPreempted:
                     self.refinement_store.defer_detection_job(
                         job_id, lease_owner=self._lease_owner,
@@ -1285,6 +1452,34 @@ class MotionIncidentService:
                             self._refinement_callbacks.pop(job_id, None)
                     continue
 
+                if outcome.refinement_resume_at is not None and callable(reschedule):
+                    # Earlier stages were empty and the next recording is not
+                    # indexed yet: free the worker instead of sleeping on it.
+                    resumed = replace(
+                        job,
+                        qualification={
+                            **job.qualification,
+                            "refinement_resume_stage": outcome.refinement_resume_stage,
+                        },
+                        evidence_ready_epoch=outcome.refinement_resume_at,
+                    )
+                    started = time.monotonic()
+                    rescheduled = reschedule(
+                        job_id, resumed.payload(),
+                        available_at=outcome.refinement_resume_at,
+                        lease_owner=self._lease_owner,
+                    )
+                    self._record_worker_stage("reschedule", started)
+                    if rescheduled:
+                        with self._status_lock:
+                            self._refinements_resumed += 1
+                    else:
+                        LOGGER.warning(
+                            "paused motion refinement %s for %s lost its lease",
+                            job_id, self.camera_id,
+                        )
+                    continue
+
                 with self._status_lock:
                     self._active_refinement["stage"] = "completion"
                 if stop.is_set():
@@ -1321,7 +1516,9 @@ class MotionIncidentService:
                 ):
                     continue
                 if not job.handoff_completed:
+                    handoff_started = time.monotonic()
                     started = self._handoff(outcome, job.event_at)
+                    self._record_worker_stage("handoff", handoff_started)
                     disposition = (
                         "started" if started else
                         "not_applicable" if not outcome.object_detected else "declined"
@@ -1345,7 +1542,9 @@ class MotionIncidentService:
                             raise RuntimeError(
                                 "refinement completion handler is unavailable"
                             )
+                        completion_started = time.monotonic()
                         completion_handler(outcome, job.completion_context or {})
+                        self._record_worker_stage("completion", completion_started)
                     except Exception as error:
                         self._record_refinement_completion_failure(job, error)
                         self._retry_refinement_completion(job_id, error)
@@ -1364,11 +1563,13 @@ class MotionIncidentService:
                             redact_secret_text(error)[:500],
                         )
                 try:
+                    complete_started = time.monotonic()
                     transitioned = self.refinement_store.complete_detection_job(
                         job_id,
                         outcome.event_id,
                         lease_owner=self._lease_owner,
                     )
+                    self._record_worker_stage("complete", complete_started)
                     if transitioned is False:
                         raise RuntimeError("refinement completion lost its owner lease")
                 except Exception as error:
@@ -1391,11 +1592,13 @@ class MotionIncidentService:
         job: _RefinementJob,
     ) -> bool:
         try:
+            started = time.monotonic()
             checkpointed = self.refinement_store.checkpoint_detection_job(
                 job_id,
                 job.payload(),
                 lease_owner=self._lease_owner,
             )
+            self._record_worker_stage("checkpoint", started)
         except Exception as error:
             self._record_refinement_completion_failure(job, error)
             retrying = self._retry_refinement_completion(job_id, error)
@@ -1544,6 +1747,9 @@ class MotionIncidentService:
             for key, value in flattened.items():
                 self._timing_totals_ms[key] = self._timing_totals_ms.get(key, 0.0) + value
                 self._timing_counts[key] = self._timing_counts.get(key, 0) + 1
+
+    def _record_worker_stage(self, stage: str, started: float) -> None:
+        self._worker_stage_samples[stage].add((time.monotonic() - started) * 1000.0)
 
     def _clear_refinements(self) -> None:
         while True:

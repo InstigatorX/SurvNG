@@ -511,6 +511,9 @@ class MotionRuntimeService:
             lifecycle_generation=lifecycle_generation,
         )
 
+    def scene_change_since(self, captured_at_epoch: float) -> bool:
+        return self.analysis.scene_change_since(captured_at_epoch)
+
     def runtime_status(self) -> dict[str, Any]:
         return {
             "active_workers": self.active_workers(),

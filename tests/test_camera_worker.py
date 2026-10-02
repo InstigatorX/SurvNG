@@ -238,9 +238,10 @@ class CameraWorkerTest(unittest.TestCase):
                 ))
 
             with patch.object(worker._stream_alignment, "is_pending", return_value=False), \
-                    patch.object(worker.motion_incidents, "queue_scene_discovery") as queue, \
+                    patch.object(worker.motion_incidents, "offer_scene_discovery") as queue, \
                     patch.object(worker.motion_object_detector, "remember_scene_frame",
                                  wraps=worker.motion_object_detector.remember_scene_frame) as retain, \
+                    patch.object(worker.motion_runtime, "scene_change_since", return_value=True), \
                     patch.object(worker.motion_runtime, "submit_frame"):
                 queue.side_effect = lambda _at: self.assertEqual(retain.call_count, queue.call_count)
                 observe(100)
@@ -255,6 +256,45 @@ class CameraWorkerTest(unittest.TestCase):
                 self.assertEqual(worker.motion_object_detector.detector.calls, 0)
                 self.assertEqual(retain.call_count, 2)
                 self.assertEqual(retain.call_args.args[0].captured_at_epoch, 111)
+
+    def test_scene_discovery_samples_on_change_with_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main"), Path(tmpdir))
+            config = worker.motion_object_detector.detector.config
+            config.scene_discovery_enabled = True
+            config.scene_discovery_interval_seconds = 10.0
+            config.scene_discovery_heartbeat_seconds = 120.0
+            image = np.zeros((8, 8, 3), dtype=np.uint8)
+            changed_after: list[float] = []
+
+            def observe(at):
+                worker._capture_frame(CapturedFrame(
+                    source="live", image=image, captured_at_epoch=at,
+                    captured_at_monotonic=at, captured_at_iso="2026-01-01T00:00:00+00:00",
+                    width=8, height=8, sequence=int(at),
+                ))
+
+            with patch.object(worker._stream_alignment, "is_pending", return_value=False), \
+                    patch.object(worker.motion_incidents, "offer_scene_discovery") as offer, \
+                    patch.object(worker.motion_runtime, "scene_change_since",
+                                 side_effect=lambda since: any(at > since for at in changed_after)), \
+                    patch.object(worker.motion_runtime, "submit_frame"):
+                observe(100)
+                self.assertEqual(offer.call_count, 1)
+                observe(115)
+                observe(150)
+                self.assertEqual(offer.call_count, 1)
+                changed_after.append(155)
+                observe(160)
+                self.assertEqual(offer.call_count, 2)
+                observe(175)
+                self.assertEqual(offer.call_count, 2)
+                observe(280)
+                self.assertEqual(offer.call_count, 3)
+                self.assertEqual(
+                    [call.args[0].timestamp() for call in offer.call_args_list],
+                    [100, 160, 280],
+                )
 
     def test_scene_context_policy_uses_camera_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -381,9 +421,32 @@ class CameraWorkerTest(unittest.TestCase):
             worker.runtime_state.detection_enabled = False
             worker.lifecycle.start = Mock()
             worker._spawn_startup_spatial_alignment = Mock()
+            worker.motion_incidents.discard_queued_work = Mock(return_value=0)
             worker.start()
             worker.lifecycle.start.assert_called_once_with()
             worker._spawn_startup_spatial_alignment.assert_not_called()
+            worker.motion_incidents.discard_queued_work.assert_called_once_with(
+                "detection_disabled"
+            )
+
+    def test_detection_disable_discards_queued_work_after_runtime_stops(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            order: list[str] = []
+            worker.lifecycle.set_detection_enabled = Mock(
+                side_effect=lambda _enabled: order.append("lifecycle")
+            )
+            worker.motion_incidents.discard_queued_work = Mock(
+                side_effect=lambda _reason: order.append("discard")
+            )
+            worker.set_detection_enabled(False)
+            self.assertEqual(order, ["lifecycle", "discard"])
 
     def test_detection_enable_requests_fov_calibration(self) -> None:
         camera = CameraConfig(

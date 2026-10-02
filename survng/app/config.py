@@ -833,6 +833,7 @@ class DetectorConfig(BaseModel):
     event_candidate_confidence_threshold: float = Field(default=0.25, ge=0.01, le=0.95)
     scene_discovery_enabled: bool = True
     scene_discovery_interval_seconds: float = Field(default=10.0, ge=5.0, le=300.0)
+    scene_discovery_heartbeat_seconds: float = Field(default=120.0, ge=10.0, le=3600.0)
     nms_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
     event_confirmation_frames: int = Field(default=2, ge=1, le=5)
     event_class_confirmation_frames: dict[str, int] = Field(default_factory=dict)

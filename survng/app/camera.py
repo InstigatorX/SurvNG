@@ -349,6 +349,7 @@ class CameraWorker:
         self.storage_dir = storage_dir
         self.motion_config = motion_config or MotionQualificationConfig()
         self._last_scene_discovery_at = float("-inf")
+        self._last_scene_discovery_epoch = float("-inf")
         self.motion_pipeline = motion_pipeline
         self.motion_observation_pipeline = motion_observation_pipeline
         self.motion_fusion_pipeline = motion_fusion_pipeline
@@ -484,6 +485,9 @@ class CameraWorker:
                 and self.tracking_lifecycle.enabled()
             ),
             resume_scene_analysis=self.tracking_lifecycle.resume_pending_scene,
+            evidence_ready_at=getattr(
+                self.motion_object_detector, "recorded_evidence_ready_at", None,
+            ),
             has_trackable_objects=self.tracking_lifecycle.has_trackable_objects,
             start_tracking=self.tracking_lifecycle.start_incident,
             prewarm_tracking=self.tracking_lifecycle.prewarm,
@@ -681,6 +685,8 @@ class CameraWorker:
         self.lifecycle.start()
         if not already_running and detection_enabled:
             self._spawn_startup_spatial_alignment()
+        elif not already_running:
+            self._discard_queued_detection_work()
 
     def consider_route_detection_watch(self, watch: Any) -> bool:
         return self.motion_analysis.consider_route_watch(watch)
@@ -1018,6 +1024,14 @@ class CameraWorker:
         self.lifecycle.set_detection_enabled(enabled)
         if bool(enabled) and not previously_enabled:
             self._request_spatial_alignment_calibration(reason="detection_enabled")
+        elif not enabled:
+            self._discard_queued_detection_work()
+
+    def _discard_queued_detection_work(self) -> None:
+        try:
+            self.motion_incidents.discard_queued_work("detection_disabled")
+        except Exception:
+            LOGGER.exception("queued detection cleanup failed for %s", self.camera.id)
 
     def create_object_tracking_session(
         self,
@@ -1100,11 +1114,24 @@ class CameraWorker:
                 discovery_interval = float(getattr(
                     detector_config, "scene_discovery_interval_seconds", 10.0,
                 ))
+                discovery_heartbeat = float(getattr(
+                    detector_config, "scene_discovery_heartbeat_seconds", 120.0,
+                ))
+                since_discovery = frame.captured_at_monotonic - self._last_scene_discovery_at
                 if (
                     bool(getattr(detector_config, "scene_discovery_enabled", True))
-                    and frame.captured_at_monotonic >= self._last_scene_discovery_at + discovery_interval
+                    and (
+                        since_discovery >= max(discovery_interval, discovery_heartbeat)
+                        or (
+                            since_discovery >= discovery_interval
+                            and self.motion_runtime.scene_change_since(
+                                self._last_scene_discovery_epoch
+                            )
+                        )
+                    )
                 ):
                     self._last_scene_discovery_at = frame.captured_at_monotonic
+                    self._last_scene_discovery_epoch = frame.captured_at_epoch
                     height, width = frame.image.shape[:2]
                     self.motion_object_detector.remember_scene_frame(TimestampedLiveFrame(
                         frame=frame.image, captured_at_epoch=frame.captured_at_epoch,
@@ -1114,7 +1141,7 @@ class CameraWorker:
                         geometry_trusted=bool(self._effective_spatial_alignment.get("reliable", False)),
                         width=width, height=height,
                     ))
-                    self.motion_incidents.queue_scene_discovery(
+                    self.motion_incidents.offer_scene_discovery(
                         datetime.fromtimestamp(frame.captured_at_epoch, timezone.utc)
                     )
             elif frame.source == "main":

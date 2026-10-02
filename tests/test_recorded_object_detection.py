@@ -2312,5 +2312,106 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertNotIn(8.0, requested)
 
 
+class RecordedEvidenceReadinessTest(unittest.TestCase):
+    def backend(self, rows: list[dict]) -> RecordedMotionObjectDetector:
+        recorder = SimpleNamespace(
+            segment_seconds=10.0,
+            recording_rows_between=Mock(return_value=rows),
+        )
+        detector = SimpleNamespace(config=SimpleNamespace(recorded_adaptive_sampling=True))
+        return RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            detector, recorder, lambda: None,
+        )
+
+    def test_ready_time_follows_predicted_segment_closure(self) -> None:
+        event_at = datetime.fromtimestamp(1000.0, timezone.utc)
+        _stages, _retry, settle, *_ = resolve_recorded_refinement_plan(
+            SimpleNamespace(recorded_adaptive_sampling=True), event_at=event_at, camera_id="gate",
+        )
+        # The adaptive first frame is +0.5s; the open segment began at 998.
+        open_segment = self.backend([{"start_epoch": 988.0, "end_epoch": 998.0}])
+        self.assertAlmostEqual(open_segment.recorded_evidence_ready_at(event_at), 1009.0)
+        closed = self.backend([{"start_epoch": 998.0, "end_epoch": 1008.0}])
+        self.assertAlmostEqual(closed.recorded_evidence_ready_at(event_at), 1000.5 + settle)
+        unknown = self.backend([])
+        self.assertAlmostEqual(unknown.recorded_evidence_ready_at(event_at), 1000.5 + settle)
+        stalled = self.backend([{"start_epoch": 890.0, "end_epoch": 900.0}])
+        self.assertLessEqual(stalled.recorded_evidence_ready_at(event_at), 1000.5 + 10.0 + 1.0)
+
+    def split_backend(self, event_epoch: float, indexed_until: float, objects: list[dict]):
+        row = {"path": "segment.mp4", "start_epoch": event_epoch - 5.0, "end_epoch": indexed_until}
+        recorder = SimpleNamespace(
+            segment_seconds=10.0,
+            recording_rows_between=Mock(return_value=[row]),
+            recording_at=lambda _camera, epoch: row if row["start_epoch"] <= epoch <= row["end_epoch"] else None,
+        )
+        config = SimpleNamespace(
+            recorded_adaptive_sampling=True, event_confirmation_frames=2,
+            event_refinement_stages=[[0.0], [6.0]], event_refinement_retry_seconds=0.5,
+            event_refinement_settle_seconds=0.0, event_refinement_retry_interval_seconds=0.05,
+        )
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            SimpleNamespace(config=config), recorder, lambda: None,
+        )
+        backend._detect_objects = Mock(return_value=objects)
+        return backend
+
+    @staticmethod
+    def decoded(_sampler, _path, offsets, *, deadline=None):
+        from survng.app.motion_pipeline.object_detection import _DecodedRecordedFrame
+        frame = np.zeros((20, 30, 3), dtype=np.uint8)
+        return {offset: _DecodedRecordedFrame(frame, offset, True) for offset in offsets}, 1, 0
+
+    def test_empty_prefix_pauses_before_unindexed_stage(self) -> None:
+        event_epoch = time.time() - 2.0
+        event_at = datetime.fromtimestamp(event_epoch, timezone.utc)
+        backend = self.split_backend(event_epoch, event_epoch + 1.0, [])
+        with patch.object(_EventRecordedSampler, "frames_at", self.decoded):
+            paused = backend.detect(event_at, {"refinement_split_allowed": True})
+            unsplit = backend.detect(event_at, {})
+        self.assertEqual(paused.resume_stage, 1)
+        # The open segment started at +1s, so +6s is indexed when it closes.
+        self.assertAlmostEqual(paused.resume_at, event_epoch + 12.0)
+        self.assertIsNone(unsplit.resume_at)
+
+    def test_candidate_in_prefix_keeps_one_continuous_pass(self) -> None:
+        event_epoch = time.time() - 2.0
+        backend = self.split_backend(
+            event_epoch, event_epoch + 1.0, [detected("person", 0.3, (1, 1, 10, 10))],
+        )
+        with patch.object(_EventRecordedSampler, "frames_at", self.decoded):
+            result = backend.detect(
+                datetime.fromtimestamp(event_epoch, timezone.utc), {"refinement_split_allowed": True},
+            )
+        self.assertIsNone(result.resume_at)
+
+    def test_resumed_pass_samples_only_remaining_stages(self) -> None:
+        event_epoch = time.time() - 10.0
+        backend = self.split_backend(event_epoch, event_epoch + 7.0, [])
+        requested: list[float] = []
+
+        def decoded(sampler, path, offsets, *, deadline=None):
+            requested.extend(offsets)
+            return self.decoded(sampler, path, offsets, deadline=deadline)
+
+        with patch.object(_EventRecordedSampler, "frames_at", decoded):
+            result = backend.detect(
+                datetime.fromtimestamp(event_epoch, timezone.utc),
+                {"refinement_split_allowed": True, "refinement_resume_stage": 1},
+            )
+        self.assertIsNone(result.resume_at)
+        # Frame offsets are relative to the segment start at -5s.
+        self.assertEqual([round(offset, 3) for offset in requested], [11.0])
+        self.assertEqual(backend._detect_objects.call_count, 1)
+
+    def test_scene_work_has_no_recorded_readiness(self) -> None:
+        backend = self.backend([{"start_epoch": 988.0, "end_epoch": 998.0}])
+        event_at = datetime.fromtimestamp(1000.0, timezone.utc)
+        self.assertIsNone(backend.recorded_evidence_ready_at(event_at, {"scene_discovery": True}))
+        self.assertIsNone(backend.recorded_evidence_ready_at(event_at, {"scene_confirmation": True}))
+
+
 if __name__ == "__main__":
     unittest.main()

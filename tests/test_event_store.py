@@ -5,6 +5,7 @@ import math
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -857,6 +858,68 @@ class EventStoreTest(unittest.TestCase):
                 ("failed", "stale_refinement"),
             )
 
+    def test_fresh_security_probe_claims_before_event_and_legacy_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            event_at = datetime.now(timezone.utc).isoformat()
+            payloads = {
+                "probe": {"event_at": event_at, "existing_event_id": None, "qualification": {}},
+                "event": {"event_at": event_at, "existing_event_id": 7, "qualification": {}},
+                "discovery": {"event_at": event_at, "existing_event_id": None,
+                              "qualification": {"scene_discovery": True}},
+            }
+            # Newest first would otherwise win: enqueue the probe earliest.
+            for job_id in ("probe", "event", "discovery"):
+                store.enqueue_detection_job(
+                    job_id=job_id, camera_id="gate", dedupe_key=f"intent:{job_id}",
+                    payload=payloads[job_id],
+                )
+            order = []
+            for _ in range(3):
+                claimed = store.claim_detection_job(
+                    "gate", maximum_age_seconds=20.0, event_maximum_age_seconds=60.0,
+                    lease_owner="worker",
+                )
+                order.append(claimed["id"])
+                store.complete_detection_job(claimed["id"], None, lease_owner="worker")
+            self.assertEqual(order, ["probe", "event", "discovery"])
+
+    def test_job_waits_for_evidence_and_freshness_counts_from_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            now = time.time()
+            event_at = datetime.now(timezone.utc).isoformat()
+            store.enqueue_detection_job(
+                job_id="pending", camera_id="gate", dedupe_key="intent:pending",
+                payload={"event_at": event_at, "qualification": {},
+                         "evidence_ready_epoch": now + 30.0},
+                available_at=now + 30.0,
+            )
+            self.assertFalse(store.has_due_detection_job("gate"))
+            self.assertIsNone(store.claim_detection_job("gate", maximum_age_seconds=20.0))
+            store.enqueue_detection_job(
+                job_id="late", camera_id="gate", dedupe_key="intent:late",
+                payload={"event_at": event_at, "qualification": {},
+                         "evidence_ready_epoch": now - 5.0},
+            )
+            with store._connect_jobs() as connection:
+                connection.execute(
+                    "update detection_jobs set created_at = ?, available_at = ?",
+                    ((datetime.now(timezone.utc) - timedelta(seconds=25)).isoformat(), now - 1.0),
+                )
+            # Both were admitted 25s ago; only the one whose evidence has been
+            # ready for longer than the 20s window is stale.
+            expired = store.expire_stale_detection_jobs("gate", maximum_age_seconds=20.0)
+            self.assertEqual(expired, 0)
+            with store._connect_jobs() as connection:
+                connection.execute(
+                    "update detection_jobs set payload_json = json_set(payload_json, "
+                    "'$.evidence_ready_epoch', ?) where id = 'late'", (now - 21.0,),
+                )
+            self.assertEqual(store.expire_stale_detection_jobs("gate", maximum_age_seconds=20.0), 1)
+            claimed = store.claim_detection_job("gate", maximum_age_seconds=20.0)
+            self.assertEqual(claimed["id"], "pending")
+
     def test_detection_job_pruning_is_bounded_and_preserves_active_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
@@ -882,6 +945,58 @@ class EventStoreTest(unittest.TestCase):
             status = store.detection_job_status("gate")
             self.assertEqual(status["queued"], 1)
             self.assertGreaterEqual(status["oldest_age_ms"], 0.0)
+
+    def test_discovery_history_prunes_sooner_and_backlogs_drain_quickly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            seven_hours_ago = (
+                datetime.now(timezone.utc) - timedelta(hours=7)
+            ).isoformat()
+            for index, discovery in enumerate((True, True, True, False)):
+                store.enqueue_detection_job(
+                    job_id=f"job-{index}",
+                    camera_id="gate",
+                    dedupe_key=f"intent:{index}",
+                    payload={
+                        "event_at": f"2026-08-0{index + 1}T12:00:00+00:00",
+                        "qualification": {"scene_discovery": discovery},
+                    },
+                )
+            with store._connect_jobs() as connection:
+                connection.execute(
+                    "update detection_jobs set state='completed', updated_at=?",
+                    (seven_hours_ago,),
+                )
+
+            self.assertEqual(store.prune_detection_jobs(limit=2), 2)
+            # A full batch reschedules after the backlog interval, not the hour.
+            self.assertEqual(store.prune_detection_jobs(limit=2), 0)
+            store._next_detection_job_prune_monotonic -= 61.0
+            self.assertEqual(store.prune_detection_jobs(limit=2), 1)
+            store._next_detection_job_prune_monotonic -= 61.0
+            self.assertEqual(store.prune_detection_jobs(limit=2), 0)
+            with store._connect_jobs() as connection:
+                remaining = [row["id"] for row in connection.execute(
+                    "select id from detection_jobs"
+                )]
+            self.assertEqual(remaining, ["job-3"])
+
+    def test_disabled_camera_queue_is_cleared_but_finished_inference_is_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            for job_id, camera_id, extra in (
+                ("gate-new", "gate", {}),
+                ("gate-done", "gate", {"refined_outcome": {"event_id": 5}}),
+                ("yard-new", "yard", {}),
+            ):
+                store.enqueue_detection_job(
+                    job_id=job_id, camera_id=camera_id, dedupe_key=job_id,
+                    payload={"event_at": "2026-08-01T12:00:00+00:00", **extra},
+                )
+            self.assertEqual(store.cancel_queued_detection_jobs("gate"), 1)
+            self.assertEqual(store.detection_job_status("gate")["queued"], 1)
+            self.assertEqual(store.detection_job_status("gate")["failed"], 1)
+            self.assertEqual(store.detection_job_status("yard")["queued"], 1)
 
     def test_detection_intent_collision_rejects_different_event_occurrence(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
