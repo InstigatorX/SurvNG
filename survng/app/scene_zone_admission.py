@@ -12,10 +12,13 @@ import math
 from typing import Any
 
 from .config import CameraConfig, DetectionZone
-from .scene_activity import evaluate_scene_activity
+from .scene_activity import _number, evaluate_scene_activity
 from .zones import apply_depth_zone_filters, apply_detection_zones, class_confidence_threshold
 
 ESTABLISHMENT_ZONE_POLICY_VERSION = "establishment_zones_v1"
+# A box verifies where a notice occurred. Only boxes this soon after the notice
+# date it; a stationary subject seen later is not further activity.
+NOTICE_VERIFICATION_SECONDS = 10.0
 
 
 def establishment_zone_policy(
@@ -381,13 +384,14 @@ def evaluate_scene_establishment(samples, *, policy: dict[str, Any] | None = Non
             eligible_ids = sorted(item["observation_id"] for item in interpretations if _admits_activity(item) and item["observation_id"])
             if eligible_ids:
                 epochs = []
+                noticed = _number(notice.get("epoch"))
+                verifying = set(eligible_ids)
                 for identifier, observation, _, _ in _iter_observations(samples):
-                    if identifier in eligible_ids:
+                    if identifier in verifying:
                         payload = observation.get("payload", observation)
-                        try:
-                            epochs.append(float(payload.get("captured_at_epoch")))
-                        except (TypeError, ValueError):
-                            continue
+                        captured = _number(payload.get("captured_at_epoch"))
+                        if captured is not None and (noticed is None or captured <= noticed + NOTICE_VERIFICATION_SECONDS):
+                            epochs.append(captured)
                 zone.update(establishment_eligible=True, reason="incident_zone")
                 result.update(
                     status="supported",

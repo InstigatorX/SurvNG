@@ -217,6 +217,20 @@ def _notice_samples(confidences, *, label="car", y2=80, median=None, track="subj
     }]
 
 
+def test_stationary_box_long_after_a_notice_does_not_advance_its_activity():
+    road = policy(zone("Road", "incident", 0, 1), confidence_threshold=0.7)
+    samples = _notice_samples([0.9, 0.9])
+    samples[0]["observations"][1]["captured_at_epoch"] = 4600
+    verified = evaluate_scene_establishment(samples, policy=road, notice={"source": "camera", "epoch": 1000})
+    assert verified["reason"] == "verified_camera_notice"
+    assert verified["supporting_observation_ids"] == ["observation-0", "observation-1"]
+    assert verified["activity_epoch"] == 1000
+    only_later = [{**samples[0], "observations": samples[0]["observations"][1:]}]
+    later = evaluate_scene_establishment(only_later, policy=road, notice={"source": "camera", "epoch": 1000})
+    assert later["reason"] == "verified_camera_notice"
+    assert later["activity_epoch"] == 1000
+
+
 def test_detector_confidence_gates_establishment_without_hiding_the_zone():
     road = policy(zone("Road", "incident", 0, 1), confidence_threshold=0.7)
     notice = {"source": "camera", "epoch": 1000}
