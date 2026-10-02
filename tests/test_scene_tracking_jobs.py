@@ -403,6 +403,64 @@ def test_alert_decisions_keep_first_position_and_latest_observation(tmp_path):
     assert stored["eligible"] is any(item["eligible"] for item in reference)
 
 
+def test_incremental_alert_decisions_match_a_full_recompute(tmp_path):
+    import random
+    store = EventStore(tmp_path)
+    rng = random.Random(7)
+    events = [create_event(store, 1000), create_event(store, 5000)]
+    counter = iter(range(1, 10**6))
+    with store._connect() as conn:
+        scope = {}
+        for event in events:
+            episode = conn.execute("select episode_id from scene_event_membership where event_id=?",
+                                   (event["id"],)).fetchone()[0]
+            objects = [f"object-{event['id']}-{n}" for n in range(3)]
+            conn.executemany("insert into scene_objects(id,episode_id) values(?,?)", [(o, episode) for o in objects])
+            scope[event["id"]] = (episode, objects)
+        conn.commit()
+        incremental = 0
+        for _step in range(400):
+            event_id = rng.choice(list(scope))
+            episode, objects = scope[event_id]
+            observations = [r[0] for r in conn.execute("select id from scene_observations where event_id=? "
+                                                       "and id like 'obs-%'", (event_id,))]
+            decisions = [r[0] for r in conn.execute(
+                "select d.id from scene_observation_decisions d join scene_observations o on o.id=d.observation_id "
+                "where o.event_id=? and d.id like 'decision-%'", (event_id,))]
+            operation = rng.choices(["observe", "decide", "move", "retime", "undecide", "unobserve"],
+                                    weights=[3, 8, 1, 1, 1, 1])[0]
+            if operation == "observe" or not observations:
+                conn.execute("insert into scene_observations(id,event_id,episode_id,object_id,camera_id,captured_epoch,"
+                             "track_key,object_index,payload_json,snapshot_path,recording_path) values(?,?,?,?,?,?,?,?,?,?,?)",
+                             (f"obs-{next(counter)}", event_id, episode, rng.choice(objects), "gate",
+                              rng.choice([1001.0, 1002.0, 1003.0]), "track", rng.choice([None, 0, 1]), "{}", "", ""))
+            elif operation == "decide":
+                payload = {"label": rng.choice(["person", "car"]), "eligible": rng.random() < .5,
+                           "reasons": rng.choice([[], ["zone"]]), "zones": rng.choice([[], ["a"]])}
+                # Repeated decisions on one observation exercise rowid tie-breaks.
+                observation = rng.choice(observations[:3] if rng.random() < .7 else observations)
+                conn.execute("insert into scene_observation_decisions values(?,?,?,?)", (
+                    f"decision-{next(counter)}", observation, rng.choice(["explicit", "legacy"]),
+                    json.dumps(payload, sort_keys=True, separators=(",", ":"))))
+            elif operation == "move":
+                conn.execute("update scene_observations set object_id=? where id=?", (rng.choice(objects), rng.choice(observations)))
+            elif operation == "retime":
+                conn.execute("update scene_observations set captured_epoch=? where id=?",
+                             (rng.choice([1001.0, 1002.0, 1003.0]), rng.choice(observations)))
+            elif operation == "undecide" and decisions:
+                conn.execute("delete from scene_observation_decisions where id=?", (rng.choice(decisions),))
+            elif operation == "unobserve":
+                conn.execute("delete from scene_observations where id=?", (rng.choice(observations),))
+            for refreshed in scope:
+                incremental += conn.execute("select count(*) from scene_alert_state where event_id=?", (refreshed,)).fetchone()[0]
+                store._scene_refresh_alerts(conn, refreshed)
+                stored = json.loads(conn.execute("select payload_json from scene_alert_decisions where event_id=?",
+                                                 (refreshed,)).fetchone()[0])
+                assert stored["objects"] == _reference_alerts(conn, refreshed)
+            conn.commit()
+        assert incremental > 400
+
+
 def test_slow_progress_commits_back_off_routine_persistence(tmp_path):
     store = EventStore(tmp_path)
     event = create_event(store, 1000)
