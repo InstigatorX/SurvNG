@@ -121,6 +121,13 @@ class SceneIncidentTest(unittest.TestCase):
         self.assertNotIn("scene_objects", card)
         self.assertEqual(card["events"][0]["id"], event["id"])
         self.assertEqual(card["snapshot_path"], "available")
+        self.assertEqual(card["objects"], [{
+            "label": "person",
+            "box": {"x1": 10.0, "y1": 10.0, "x2": 20.0, "y2": 40.0},
+            "confidence": 0.751,
+            "zones": ["front"],
+        }])
+        self.assertEqual(card["events"][0]["objects"], card["objects"])
         again = self.store.scene_incident_facets(start_epoch=1780000000, end_epoch=1780000100)
         self.assertEqual(again["labels"], ["person"])
         self.assertEqual(again["zones"], ["front"])

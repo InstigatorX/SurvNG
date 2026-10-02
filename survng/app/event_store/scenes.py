@@ -51,6 +51,39 @@ def _objects(raw):
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
+def _card_cover_objects(raw):
+    """Labeled boxes for compact thumbs. Keeps the list card payload small."""
+    cover = []
+    for item in _objects(raw):
+        label = item.get("label")
+        box = item.get("box")
+        if not label or not isinstance(box, dict):
+            continue
+        try:
+            coords = [float(box[key]) for key in ("x1", "y1", "x2", "y2")]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not all(math.isfinite(value) for value in coords) or coords[2] <= coords[0] or coords[3] <= coords[1]:
+            continue
+        entry = {
+            "label": label,
+            "box": {"x1": coords[0], "y1": coords[1], "x2": coords[2], "y2": coords[3]},
+        }
+        for key in (
+            "confidence",
+            "zones",
+            "detection_frame_width",
+            "detection_frame_height",
+            "incident_eligible",
+            "track_id",
+            "snapshot_visible",
+        ):
+            if key in item:
+                entry[key] = item[key]
+        cover.append(entry)
+    return cover
+
+
 def _overlap(a, b):
     try:
         aa, bb = a["box"], b["box"]
@@ -1158,6 +1191,25 @@ class EventStoreSceneMixin:
         for row in event_rows:
             events_by.setdefault(row["incident_id"], []).append(row)
         covers={row["incident_id"]: row["id"] for row in cover_rows}
+        # Compact thumbs crop from these boxes. Load only cover events, not every member.
+        cover_event_ids=[]
+        cover_by_incident={}
+        for incident_id in ids:
+            members=events_by.get(incident_id, [])
+            representative=next((event for event in reversed(members) if event["snapshot_path"]), members[-1] if members else None)
+            if representative is not None and representative["snapshot_path"]:
+                cover_by_incident[incident_id]=int(representative["id"])
+                cover_event_ids.append(int(representative["id"]))
+        objects_by_event={}
+        if cover_event_ids:
+            unique_ids=list(dict.fromkeys(cover_event_ids))
+            object_placeholders=",".join("?"*len(unique_ids))
+            with self._connect() as conn:
+                for row in conn.execute(
+                    f"select id,objects_json from events where id in ({object_placeholders})",
+                    unique_ids,
+                ):
+                    objects_by_event[int(row["id"])]=_card_cover_objects(row["objects_json"])
         cards=[]
         for incident_id in ids:
             incident=incidents.get(incident_id)
@@ -1179,6 +1231,8 @@ class EventStoreSceneMixin:
                 snapshot_path="available"
             else:
                 snapshot_path=""
+            cover_event_id=cover_by_incident.get(incident_id)
+            cover_objects=objects_by_event.get(cover_event_id, []) if cover_event_id is not None else []
             cards.append({
                 "id":incident_id,
                 "incident_id":incident_id,
@@ -1203,7 +1257,7 @@ class EventStoreSceneMixin:
                 "trigger_source":trigger,
                 "event_count":len(members),
                 "event_ids":[event["id"] for event in members],
-                "objects":[],
+                "objects":cover_objects,
                 "events":[{
                     "id":event["id"],
                     "camera_id":event["camera_id"],
@@ -1213,6 +1267,7 @@ class EventStoreSceneMixin:
                     "has_objects":bool(labels),
                     "labels":labels,
                     "trigger_source":trigger if event is opener else "camera",
+                    **({"objects":cover_objects} if cover_event_id is not None and int(event["id"]) == cover_event_id else {}),
                 } for event in members],
             })
         return cards
