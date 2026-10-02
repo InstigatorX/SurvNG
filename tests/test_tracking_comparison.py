@@ -246,6 +246,33 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         self.assertIn("trim=start=1.250000:end=2.250000", command[command.index("-vf") + 1])
         self.assertNotIn("-ss", command)
 
+    def test_ffmpeg_sampler_seeks_to_a_keyframe_on_the_source_timeline(self) -> None:
+        def sampled_command(probe_stdout):
+            process = SimpleNamespace(
+                stdout=BytesIO(b""), stderr=BytesIO(b""), wait=Mock(return_value=0),
+                poll=Mock(return_value=0), terminate=Mock(), kill=Mock(),
+            )
+            with (
+                patch("survng.app.tracking_comparison.subprocess.run",
+                      return_value=SimpleNamespace(returncode=0, stdout=probe_stdout)),
+                patch("survng.app.tracking_comparison.subprocess.Popen", return_value=process) as popen,
+            ):
+                list(sampled_video_frames(
+                    Path("segment.mp4"), start_epoch=50.0, sample_fps=2.0, duration_seconds=1.0,
+                    ffmpeg_path="ffmpeg", maximum_width=4, start_offset_seconds=6.5,
+                    probe_path=Path("segment.mp4"),
+                ))
+            return popen.call_args.args[0]
+
+        streams = '"streams":[{"width":8,"height":4,"time_base":"1/90000"}]'
+        command = sampled_command('{%s,"format":{"start_time":"0.000000"}}' % streams)
+        self.assertEqual(command[command.index("-ss") + 1], "6.250000")
+        self.assertLess(command.index("-copyts"), command.index("-i"))
+        self.assertIn("trim=start=6.500000:end=7.500000", command[command.index("-vf") + 1])
+        shifted = sampled_command('{%s,"format":{"start_time":"1.400000"}}' % streams)
+        self.assertNotIn("-ss", shifted)
+        self.assertNotIn("-copyts", shifted)
+
     def test_exact_frame_reference_redecodes_the_identified_pts(self) -> None:
         reference = VideoFrameReference(
             source_path=Path("segment.mp4"),

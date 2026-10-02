@@ -35,6 +35,9 @@ TRACKING_COMPARISON_IMPLEMENTATIONS = (
     "ultralytics_tracktrack",
     "ultralytics_botsort",
 )
+# The seek lands before the first trimmed frame, so FFmpeg's own accurate-seek
+# boundary can never drop a frame that the trim filter keeps.
+INPUT_SEEK_MARGIN_SECONDS = 0.25
 
 
 class DetectorBackend(Protocol):
@@ -105,7 +108,7 @@ def _ffmpeg_sampled_video_frames(
     # ffprobe is isolated and substantially
     # faster under a full camera workload. A constituent file is used when the
     # decoder input itself is an ffconcat manifest.
-    source_width, source_height, time_base_num, time_base_den = _ffprobe_video_metadata(
+    source_width, source_height, time_base_num, time_base_den, source_start = _ffprobe_video_metadata(
         probe_path or path,
         ffmpeg_path,
     )
@@ -119,6 +122,12 @@ def _ffmpeg_sampled_video_frames(
     input_options = ["-f", "concat", "-safe", "0"] if concat_input else []
     duration = max(0.1, float(duration_seconds))
     offset = max(0.0, float(start_offset_seconds))
+    if not concat_input and (probe_path or path) == path and source_start == 0.0 and offset > INPUT_SEEK_MARGIN_SECONDS:
+        # The demuxer starts at the preceding keyframe instead of decoding the
+        # segment from its beginning. -copyts keeps the source timeline, so
+        # trim, showinfo PTS and frame references are unchanged; a container
+        # start offset would shift that timeline, so only zero-start files seek.
+        input_options = ["-ss", f"{offset - INPUT_SEEK_MARGIN_SECONDS:.6f}", "-copyts"]
     command = [
         ffmpeg_path,
         "-nostdin",
@@ -261,7 +270,7 @@ def _ffprobe_video_metadata(
                 ffprobe_path,
                 "-v", "error",
                 "-select_streams", "v:0",
-                "-show_entries", "stream=width,height,time_base",
+                "-show_entries", "stream=width,height,time_base:format=start_time",
                 "-of", "json",
                 str(path),
             ],
@@ -279,8 +288,13 @@ def _ffprobe_video_metadata(
             time_base = str(stream.get("time_base") or "1/1").split("/", 1)
             time_base_num = int(time_base[0])
             time_base_den = int(time_base[1]) if len(time_base) > 1 else 1
+            container = payload.get("format")
+            try:
+                start = float(container.get("start_time")) if isinstance(container, dict) else None
+            except (TypeError, ValueError):
+                start = None
             if width > 0 and height > 0:
-                return width, height, time_base_num, max(1, time_base_den)
+                return width, height, time_base_num, max(1, time_base_den), start
     except (json.JSONDecodeError, OSError, TypeError, ValueError, subprocess.TimeoutExpired):
         pass
     raise RuntimeError("comparison video dimensions are unavailable")
@@ -295,7 +309,7 @@ def video_frame_at_reference(
     """Re-decode the exact source PTS identified during recorded sampling."""
     if not reference.exact or maximum_width <= 0:
         return None
-    source_width, source_height, _time_base_num, _time_base_den = (
+    source_width, source_height, _time_base_num, _time_base_den, _start = (
         _ffprobe_video_metadata(reference.source_path, ffmpeg_path)
     )
     output_width = max(2, min(source_width, max(64, int(maximum_width))))

@@ -21,6 +21,27 @@ def source_clip(tmp_path_factory):
     return ffmpeg, path
 
 
+def test_keyframe_seek_matches_decoding_from_the_segment_start(source_clip, monkeypatch, tmp_path):
+    ffmpeg, _path = source_clip
+    path = tmp_path / "short-gop.mp4"
+    subprocess.run([
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+        "testsrc2=size=96x64:rate=10:duration=5", "-c:v", "libx264", "-g", "7", "-bf", "2", "-y", str(path),
+    ], check=True, capture_output=True, timeout=20)
+
+    def decode(offset):
+        return [(s.captured_at, s.reference.pts, s.frame.tobytes()) for s in sampled_video_frames(
+            path, start_epoch=100 + offset, start_offset_seconds=offset,
+            sample_fps=3, duration_seconds=1.6, ffmpeg_path=ffmpeg,
+        )]
+
+    offsets = (0.0, 0.35, 1.05, 2.8, 3.3)
+    seeked = [decode(offset) for offset in offsets]
+    monkeypatch.setattr("survng.app.tracking_comparison.INPUT_SEEK_MARGIN_SECONDS", 1e9)
+    assert seeked == [decode(offset) for offset in offsets]
+    assert all(seeked)
+
+
 def test_exact_reference_round_trip(source_clip):
     ffmpeg, path = source_clip
     for offset in (0.0, 1.25, 2.8):
