@@ -3,7 +3,7 @@ import React, { forwardRef, useLayoutEffect, useRef, useState } from "react";
 // Keep display ownership separate from playback controls while a new source
 // loads. The outgoing decoded frame survives until the requested frame is ready.
 export const NativeRecordingVideo = forwardRef(function NativeRecordingVideo(
-  { src, nextSrc = "", muted = true, playbackRate = 1, ...callbacks }, forwardedRef,
+  { src, nextSrc = "", muted = true, playbackRate = 1, autoPlay = false, ...callbacks }, forwardedRef,
 ) {
   const videos = useRef([null, null]);
   const sources = useRef(["", ""]);
@@ -13,7 +13,7 @@ export const NativeRecordingVideo = forwardRef(function NativeRecordingVideo(
   const metadataDelivered = useRef(false);
   const endedDelivered = useRef(false);
   const props = useRef(null);
-  props.current = { muted, playbackRate, ...callbacks };
+  props.current = { muted, playbackRate, autoPlay, ...callbacks };
   const [visible, setVisible] = useState(null);
 
   function expose(video) {
@@ -71,6 +71,11 @@ export const NativeRecordingVideo = forwardRef(function NativeRecordingVideo(
     // A preloaded element already emitted this event while it was standby.
     if (video.readyState >= 1) metadata(index);
     reveal(index);
+    // This layout effect still runs inside the scrub gesture. iOS only accepts
+    // play() here; a later loadedmetadata play() is outside the gesture.
+    if (props.current.autoPlay && video.paused && typeof video.play === "function") {
+      video.play().catch(() => {});
+    }
   }, [src]);
 
   useLayoutEffect(() => {

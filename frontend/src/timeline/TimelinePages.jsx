@@ -1527,9 +1527,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           playbackRequestRef.current += 1;
           setPlaybackWindow(null);
           setPlaybackNotice(autoplay ? "Seeking..." : "");
-          if (video.ended) video.pause();
-          if (!video.seeking) seekVideoToTime(video, localTime, { allowFastSeek: fastSeek });
-          if (autoplay && video.paused) requestRecordingPlay(video, false);
+          // iOS applies the seek only after pause, and only honors play() in this gesture.
+          video.pause();
+          if (!video.seeking) seekVideoToTime(video, localTime, { allowFastSeek: false });
+          if (autoplay) requestRecordingPlay(video, false);
           scheduleNativeSeekWatchdog(video, localTime, { local: true });
           if (!autoplay) setPlaybackNotice("");
         } else {
@@ -1559,10 +1560,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       playbackRequestRef.current += 1;
       setPlaybackWindow(null);
       setPlaybackNotice(autoplay ? "Seeking..." : "");
-      if (video.ended) video.pause();
-      // Queue the seek before play(). play() first aborts both on iPhone.
+      // iOS applies the seek only after pause, and only honors play() in this gesture.
+      video.pause();
       if (!video.seeking) seekVideoToTime(video, mediaTime, { allowFastSeek: !nativeHls });
-      if (autoplay && video.paused) requestRecordingPlay(video, false);
+      if (autoplay) requestRecordingPlay(video, false);
       scheduleSeekWatchdog(video, mediaTime, { local: true });
       if (!autoplay) setPlaybackNotice("");
     } else {
@@ -2566,6 +2567,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               src={nativeSegmentUrl}
               nextSrc={nativeNextUrl}
               muted={heroMuted}
+              autoPlay={autoplayRef.current}
               playbackRate={normalizedTimelinePlaybackRate(playbackRate)}
               onLoadedMetadata={handleNativeSegmentMetadata}
               onError={handleNativeRecordingError}
@@ -3281,6 +3283,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
   const [localPreviewFrameReady, setLocalPreviewFrameReady] = useState(false);
   const draftRef = useRef(offset);
   const dragRef = useRef(null);
+  const ignoreInputCommitRef = useRef(0);
   const previewTimerRef = useRef(null);
   const previewAbortRef = useRef(null);
   const previewLastRequestRef = useRef({ epoch: null, at: 0 });
@@ -3594,6 +3597,13 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     onSeek(startEpoch + next);
   }
 
+  function commitFromInput(value) {
+    // iOS fires a change event after pointerup. That second commit starts
+    // another seek and cancels the play() issued for the first one.
+    if (performance.now() - ignoreInputCommitRef.current < 80) return;
+    commit(value);
+  }
+
   function pointerValue(event, drag) {
     if (drag.fine) return Math.max(0, Math.min(duration, drag.initialOffset + event.clientX - drag.originX));
     const pointerX = Math.max(0, Math.min(drag.width, event.clientX - drag.left));
@@ -3663,6 +3673,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     }
     setScrubbing(false);
     hidePreviewAfterDelay();
+    ignoreInputCommitRef.current = performance.now();
     commit(drag.fine && Math.abs(event.clientX - drag.originX) < 8
       ? ((Math.max(0, Math.min(drag.width, event.clientX - drag.left))) / drag.width) * duration
       : pointerValue(event, drag));
@@ -3819,10 +3830,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
           step="0.1"
           value={scrubbing ? draft : offset}
           onChange={(event) => {
-            if (!dragRef.current) {
-              updateDraft(event.target.value);
-              commit(event.target.value);
-            }
+            if (!dragRef.current) commitFromInput(event.target.value);
           }}
           onPointerDown={startDrag}
           onPointerMove={moveDrag}

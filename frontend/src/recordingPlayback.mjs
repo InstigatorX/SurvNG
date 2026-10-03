@@ -5,11 +5,19 @@ export function supportsNativeRecordingHls() {
     && Boolean(document.createElement("video").canPlayType("application/vnd.apple.mpegurl"));
 }
 
-export function recordingPlaybackTransport({ nativeHls, rate, incompatible = false, preferOriginal = false }) {
+export function recordingPlaybackTransport({
+  nativeHls,
+  rate,
+  incompatible = false,
+  preferOriginal = false,
+  mobileNative = PREFER_NATIVE_HLS,
+} = {}) {
   if (incompatible) return "transcode";
-  // Native HLS above 2× uses I-frame trick play. These archive playlists have
-  // no I-frame rendition; buffered original MP4 clips retain smooth fast play.
-  return preferOriginal || (nativeHls && rate > 2) ? "original" : "hls";
+  // iPhone cannot seek these archive HLS playlists: precise playlist starts and
+  // currentTime writes stall or never resume. Original MP4 files answer byte-range
+  // seeks directly. Desktop HLS above 2× has the same I-frame limitation.
+  if (preferOriginal || mobileNative || (nativeHls && rate > 2)) return "original";
+  return "hls";
 }
 
 export function prefersJpegScrubPreview(options = {}) {
