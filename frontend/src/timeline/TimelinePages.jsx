@@ -1278,35 +1278,50 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     }
   }
 
-  function scheduleSeekWatchdog(video, mediaTime) {
+  function scheduleSeekWatchdog(video, mediaTime, options = {}) {
     clearSeekWatchdog();
     if (!video || !Number.isFinite(mediaTime)) return;
     const tolerance = recordingSeekToleranceSeconds();
     const requestedSource = video.getAttribute("src");
+    const local = Boolean(options.local);
     const isCurrent = () => video === videoRef.current && video.getAttribute("src") === requestedSource;
-    seekWatchdogRef.current = window.setTimeout(() => {
+    let waits = 0;
+    let wrote = false;
+    const retryDelay = local ? 400 : (prefersJpegScrubPreview() ? 400 : 150);
+    const tick = () => {
       seekWatchdogRef.current = null;
       if (!isCurrent() || !Number.isFinite(pendingSeekEpochRef.current)) return;
       const pendingMode = pendingSeekModeRef.current;
       if (pendingMode !== "local" && pendingMode !== "window-ready") return;
-      const activeVideo = video;
-      if (!activeVideo) return;
-      if (!videoReachedSeekTarget(activeVideo, mediaTime, tolerance)) {
-        activeVideo.currentTime = mediaTime;
-        seekWatchdogRef.current = window.setTimeout(() => {
-          seekWatchdogRef.current = null;
-          if (isCurrent() && Number.isFinite(pendingSeekEpochRef.current)) {
-            completePendingRecordingSeek(activeVideo);
-          }
-        }, prefersJpegScrubPreview() ? 400 : 150);
+      if (video.seeking && waits < (local ? 8 : 4)) {
+        waits += 1;
+        seekWatchdogRef.current = window.setTimeout(tick, retryDelay);
         return;
       }
-      completePendingRecordingSeek(activeVideo);
-    }, seekWatchdogDelayMs());
+      if (!videoReachedSeekTarget(video, mediaTime, tolerance)) {
+        if (!wrote && !video.seeking) {
+          wrote = true;
+          video.currentTime = mediaTime;
+          seekWatchdogRef.current = window.setTimeout(tick, retryDelay);
+          return;
+        }
+      }
+      completePendingRecordingSeek(video, {
+        fromSeeked: Boolean(video.seeking) && videoReachedSeekTarget(video, mediaTime, tolerance),
+      });
+    };
+    seekWatchdogRef.current = window.setTimeout(
+      tick,
+      local ? seekWatchdogDelayMs({ local: true }) : seekWatchdogDelayMs(),
+    );
   }
 
-  function completePendingRecordingSeek(video) {
-    if (video !== videoRef.current || video.seeking) return;
+  function completePendingRecordingSeek(video, options = {}) {
+    if (video !== videoRef.current) return;
+    // seeked can fire while iPhone still reports seeking. Trust that event
+    // once currentTime matches; other callers must wait so play() does not
+    // abort the seek that is still in flight.
+    if (video.seeking && !options.fromSeeked) return;
     const pendingMode = pendingSeekModeRef.current;
     if (pendingMode !== "local" && pendingMode !== "window-ready") return;
     // A delayed seeked event can belong to the previous scrub on this same video.
@@ -1328,8 +1343,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     }
   }
 
-  function completePendingNativeSeek(video) {
-    if (video !== videoRef.current || video.seeking) return;
+  function completePendingNativeSeek(video, options = {}) {
+    if (video !== videoRef.current) return;
+    if (video.seeking && !options.fromSeeked) return;
     const pendingMode = pendingSeekModeRef.current;
     if (pendingMode !== "native-local" && pendingMode !== "native-ready") return;
     const target = recordingSegmentLocalTime(nativeSegment, pendingSeekEpochRef.current, video);
@@ -1349,25 +1365,41 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (autoplayRef.current && video.paused) requestRecordingPlay(video);
   }
 
-  function scheduleNativeSeekWatchdog(video, localTime) {
+  function scheduleNativeSeekWatchdog(video, localTime, options = {}) {
     clearSeekWatchdog();
     if (!video || !Number.isFinite(localTime)) return;
     const tolerance = recordingSeekToleranceSeconds({ preferNativeHls: true });
     const requestedSource = video.getAttribute("src");
+    const local = Boolean(options.local);
     const isCurrent = () => video === videoRef.current && video.getAttribute("src") === requestedSource;
-    seekWatchdogRef.current = window.setTimeout(() => {
+    let waits = 0;
+    let wrote = false;
+    const tick = () => {
       seekWatchdogRef.current = null;
       if (!isCurrent() || !Number.isFinite(pendingSeekEpochRef.current)) return;
-      if (!videoReachedSeekTarget(video, localTime, tolerance)) {
-        video.currentTime = localTime;
-        seekWatchdogRef.current = window.setTimeout(() => {
-          seekWatchdogRef.current = null;
-          if (isCurrent()) completePendingNativeSeek(video);
-        }, 400);
+      // currentTime written while seeking is ignored on iPhone. Wait for the
+      // in-flight seek to finish, then write the queued target once.
+      if (video.seeking && waits < (local ? 8 : 4)) {
+        waits += 1;
+        seekWatchdogRef.current = window.setTimeout(tick, 400);
         return;
       }
-      completePendingNativeSeek(video);
-    }, seekWatchdogDelayMs({ preferNativeHls: true }));
+      if (!videoReachedSeekTarget(video, localTime, tolerance)) {
+        if (!wrote && !video.seeking) {
+          wrote = true;
+          video.currentTime = localTime;
+          seekWatchdogRef.current = window.setTimeout(tick, 400);
+          return;
+        }
+      }
+      completePendingNativeSeek(video, {
+        fromSeeked: Boolean(video.seeking) && videoReachedSeekTarget(video, localTime, tolerance),
+      });
+    };
+    seekWatchdogRef.current = window.setTimeout(
+      tick,
+      seekWatchdogDelayMs({ preferNativeHls: true, local }),
+    );
   }
 
   function handleNativeSegmentMetadata(event) {
@@ -1470,10 +1502,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       && target < loadedPlaybackWindow.end;
     const coveredByCurrentManifest = playbackRowsCoverEpoch(playbackTimeline, target);
     const video = videoRef.current;
-    // Stop outgoing footage immediately; its ended event must not override this seek.
+    // Mark the seek before any pause so an ended event cannot start the next clip.
+    // Do not pause a playing element for an in-window seek: pause()+play()+currentTime
+    // is the iPhone sequence that drops the seek or leaves the video paused.
     pendingSeekEpochRef.current = target;
     pendingSeekModeRef.current = "window";
-    video?.pause();
     if (useSegmentPlayback) {
       clearSeekWatchdog();
       if (!autoplay) setHeroPlaying(false);
@@ -1494,11 +1527,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           playbackRequestRef.current += 1;
           setPlaybackWindow(null);
           setPlaybackNotice(autoplay ? "Seeking..." : "");
-          if (autoplay && video.paused) requestRecordingPlay(video, false);
-          seekVideoToTime(video, localTime, { allowFastSeek: fastSeek });
-          scheduleNativeSeekWatchdog(video, localTime);
+          // iOS applies the seek only after pause, and only honors play() in this gesture.
+          video.pause();
+          if (!video.seeking) seekVideoToTime(video, localTime, { allowFastSeek: false });
+          if (autoplay) requestRecordingPlay(video, false);
+          scheduleNativeSeekWatchdog(video, localTime, { local: true });
           if (!autoplay) setPlaybackNotice("");
         } else {
+          video?.pause();
           pendingSeekEpochRef.current = target;
           pendingSeekModeRef.current = "native-ready";
           setPlaybackWindow(null);
@@ -1509,6 +1545,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           });
         }
       } else {
+        video?.pause();
         pendingSeekEpochRef.current = target;
         pendingSeekModeRef.current = "window";
         setPlaybackNotice("Loading recording...");
@@ -1523,12 +1560,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       playbackRequestRef.current += 1;
       setPlaybackWindow(null);
       setPlaybackNotice(autoplay ? "Seeking..." : "");
-      // Start playback in the user-gesture window; Safari often pauses again while seeking.
-      if (autoplay && video.paused) requestRecordingPlay(video, false);
-      seekVideoToTime(video, mediaTime, { allowFastSeek: !nativeHls });
-      scheduleSeekWatchdog(video, mediaTime);
+      // iOS applies the seek only after pause, and only honors play() in this gesture.
+      video.pause();
+      if (!video.seeking) seekVideoToTime(video, mediaTime, { allowFastSeek: !nativeHls });
+      if (autoplay) requestRecordingPlay(video, false);
+      scheduleSeekWatchdog(video, mediaTime, { local: true });
       if (!autoplay) setPlaybackNotice("");
     } else {
+      video?.pause();
       pendingSeekEpochRef.current = target;
       pendingSeekModeRef.current = "window";
       setPlaybackNotice("Loading recording...");
@@ -1935,12 +1974,13 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (!loadedPlaybackWindow || !Number.isFinite(target)
       || target < loadedPlaybackWindow.start || target >= loadedPlaybackWindow.end) return;
     const mediaTime = epochToPlaybackMediaTime(target);
-    const seekRequired = Number.isFinite(mediaTime) && Math.abs(video.currentTime - mediaTime) > 0.05;
+    const atMediaTime = Number.isFinite(mediaTime) && Math.abs(video.currentTime - mediaTime) <= 0.05;
+    const seekRequired = Number.isFinite(mediaTime) && (!atMediaTime || Boolean(video.seeking));
     if (seekRequired) {
       pendingSeekEpochRef.current = target;
       pendingSeekModeRef.current = "window-ready";
       setPlaybackNotice("Seeking...");
-      seekVideoToTime(video, mediaTime, { allowFastSeek: !nativeHls });
+      if (!atMediaTime && !video.seeking) seekVideoToTime(video, mediaTime, { allowFastSeek: !nativeHls });
       scheduleSeekWatchdog(video, mediaTime);
     }
     if (Number.isFinite(target)) {
@@ -2007,7 +2047,37 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }
 
   function handleRecordingSeeked(event) {
-    completePendingRecordingSeek(event.currentTarget);
+    const video = event.currentTarget;
+    if (video !== videoRef.current) return;
+    const pendingMode = pendingSeekModeRef.current;
+    if (pendingMode === "local" || pendingMode === "window-ready") {
+      const target = epochToPlaybackMediaTime(pendingSeekEpochRef.current);
+      if (Number.isFinite(target) && !videoReachedSeekTarget(video, target, recordingSeekToleranceSeconds()) && !video.seeking) {
+        seekVideoToTime(video, target, { allowFastSeek: !nativeHls });
+        scheduleSeekWatchdog(video, target, { local: pendingMode === "local" });
+        return;
+      }
+      completePendingRecordingSeek(video, { fromSeeked: true });
+      return;
+    }
+    completePendingRecordingSeek(video);
+  }
+
+  function handleNativeSegmentSeeked(event) {
+    const video = event.currentTarget;
+    if (video !== videoRef.current) return;
+    const pendingMode = pendingSeekModeRef.current;
+    if (pendingMode === "native-local" || pendingMode === "native-ready") {
+      const target = recordingSegmentLocalTime(nativeSegment, pendingSeekEpochRef.current, video);
+      if (Number.isFinite(target) && !videoReachedSeekTarget(video, target, recordingSeekToleranceSeconds({ preferNativeHls: true })) && !video.seeking) {
+        seekVideoToTime(video, target, { allowFastSeek: false });
+        scheduleNativeSeekWatchdog(video, target, { local: pendingMode === "native-local" });
+        return;
+      }
+      completePendingNativeSeek(video, { fromSeeked: true });
+      return;
+    }
+    completePendingNativeSeek(video);
   }
 
   function toggleHeroPlayback() {
@@ -2497,11 +2567,12 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               src={nativeSegmentUrl}
               nextSrc={nativeNextUrl}
               muted={heroMuted}
+              autoPlay={autoplayRef.current}
               playbackRate={normalizedTimelinePlaybackRate(playbackRate)}
               onLoadedMetadata={handleNativeSegmentMetadata}
               onError={handleNativeRecordingError}
               onTimeUpdate={handleNativeSegmentTimeUpdate}
-              onSeeked={(event) => completePendingNativeSeek(event.currentTarget)}
+              onSeeked={handleNativeSegmentSeeked}
               onEnded={handleRecordingEnded}
               onPlay={() => {
                 autoplayRef.current = true;
@@ -3212,6 +3283,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
   const [localPreviewFrameReady, setLocalPreviewFrameReady] = useState(false);
   const draftRef = useRef(offset);
   const dragRef = useRef(null);
+  const ignoreInputCommitRef = useRef(0);
   const previewTimerRef = useRef(null);
   const previewAbortRef = useRef(null);
   const previewLastRequestRef = useRef({ epoch: null, at: 0 });
@@ -3525,6 +3597,13 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     onSeek(startEpoch + next);
   }
 
+  function commitFromInput(value) {
+    // iOS fires a change event after pointerup. That second commit starts
+    // another seek and cancels the play() issued for the first one.
+    if (performance.now() - ignoreInputCommitRef.current < 80) return;
+    commit(value);
+  }
+
   function pointerValue(event, drag) {
     if (drag.fine) return Math.max(0, Math.min(duration, drag.initialOffset + event.clientX - drag.originX));
     const pointerX = Math.max(0, Math.min(drag.width, event.clientX - drag.left));
@@ -3594,6 +3673,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     }
     setScrubbing(false);
     hidePreviewAfterDelay();
+    ignoreInputCommitRef.current = performance.now();
     commit(drag.fine && Math.abs(event.clientX - drag.originX) < 8
       ? ((Math.max(0, Math.min(drag.width, event.clientX - drag.left))) / drag.width) * duration
       : pointerValue(event, drag));
@@ -3750,10 +3830,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
           step="0.1"
           value={scrubbing ? draft : offset}
           onChange={(event) => {
-            if (!dragRef.current) {
-              updateDraft(event.target.value);
-              commit(event.target.value);
-            }
+            if (!dragRef.current) commitFromInput(event.target.value);
           }}
           onPointerDown={startDrag}
           onPointerMove={moveDrag}

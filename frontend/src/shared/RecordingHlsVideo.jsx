@@ -36,9 +36,11 @@ export const RecordingHlsVideo = forwardRef(function RecordingHlsVideo({
     let readyReported = false;
     const isCurrent = () => Boolean(src) && !disposed && callbacks.current.src === src
       && videoRef.current === video && video.getAttribute("src") === src;
+    let startSeekIssued = false;
     const stopStartWatch = () => {
       video.removeEventListener("progress", applyStartTime);
       video.removeEventListener("canplay", applyStartTime);
+      video.removeEventListener("seeked", applyStartTime);
       window.clearTimeout(startTimer);
       startTimer = undefined;
     };
@@ -55,10 +57,13 @@ export const RecordingHlsVideo = forwardRef(function RecordingHlsVideo({
         reportReady();
         return true;
       }
-      if (Math.abs(video.currentTime - target) <= 0.05) {
+      // Seeked position, not merely an assigned currentTime. iPhone keeps
+      // seeking true until the seeked event, and a second write here stalls.
+      if (Math.abs(video.currentTime - target) <= 0.05 && !video.seeking) {
         reportReady();
         return true;
       }
+      if (video.seeking || startSeekIssued) return false;
       // Wait until Safari publishes a seekable range that covers the target.
       // EXT-X-START usually lands here first; currentTime is only a backup.
       if (!seekableContains(video, target) && video.readyState < 2) return false;
@@ -67,21 +72,37 @@ export const RecordingHlsVideo = forwardRef(function RecordingHlsVideo({
       } catch {
         return false;
       }
-      reportReady();
-      return true;
+      startSeekIssued = true;
+      if (Math.abs(video.currentTime - target) <= 0.05 && !video.seeking) {
+        reportReady();
+        return true;
+      }
+      return false;
     }
     const ready = () => {
       if (applyStartTime()) return;
       video.addEventListener("progress", applyStartTime);
       video.addEventListener("canplay", applyStartTime);
+      video.addEventListener("seeked", applyStartTime);
       window.clearTimeout(startTimer);
       startTimer = window.setTimeout(() => {
         if (!isCurrent() || readyReported) return;
-        try {
-          const target = Number(callbacks.current.startTime);
-          if (Number.isFinite(target) && target > 0.05) video.currentTime = target;
-        } catch {
-          // Fall through to onReady; Timeline keeps its own pending seek.
+        if (video.seeking && startSeekIssued) {
+          startTimer = window.setTimeout(() => {
+            if (isCurrent() && !readyReported) reportReady();
+          }, 1000);
+          return;
+        }
+        if (!startSeekIssued) {
+          try {
+            const target = Number(callbacks.current.startTime);
+            if (Number.isFinite(target) && target > 0.05 && !video.seeking) {
+              video.currentTime = target;
+              startSeekIssued = true;
+            }
+          } catch {
+            // Fall through to onReady; Timeline keeps its own pending seek.
+          }
         }
         reportReady();
       }, 1500);

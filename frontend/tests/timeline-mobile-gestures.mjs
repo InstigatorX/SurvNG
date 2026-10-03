@@ -23,6 +23,7 @@ function gestureHarness() {
     Math, Number, duration: 3600, startEpoch: 21600, offset: 1200,
     dragRef: { current: null }, draftRef: { current: 1200 },
     previewHideTimerRef: { current: null }, previewTimerRef: { current: null },
+    ignoreInputCommitRef: { current: 0 }, performance,
     previewManifestUrl: "", prefersJpegScrubPreview: () => true,
     window: { clearTimeout() {} }, setLocalPreviewEnabled() {},
     setDraft: value => drafts.push(value), setScrubbing() {}, hidePreviewAfterDelay() {},
@@ -104,6 +105,20 @@ for (const mode of ["touch", "mouse"]) {
   assert.deepEqual(seeks, []);
   assert.equal(context.dragRef.current.pointerId, 1);
   context.finishDrag(event(190), true);
+}
+
+// The change event iOS emits after pointerup must not start a second seek.
+{
+  const { context, seeks, event } = gestureHarness();
+  context.startDrag(event(190));
+  context.finishDrag(event(190));
+  const committed = seeks.length;
+  context.ignoreInputCommitRef.current = performance.now();
+  context.commitFromInput(1800);
+  assert.equal(seeks.length, committed, "the synthetic change after a touch scrub must not seek again");
+  context.ignoreInputCommitRef.current = performance.now() - 500;
+  context.commitFromInput(1800);
+  assert.equal(seeks.length, committed + 1, "a later keyboard change still seeks");
 }
 
 function panHarness({ anchor = 43200, dayEnd = 86400, view = { startEpoch: 41400, endEpoch: 45000 } } = {}) {

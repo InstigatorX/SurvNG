@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { clipPreviewReachedEnd } from "../src/recordingClipSelection.mjs";
-import { recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, playbackRowsCoverEpoch, videoReachedSeekTarget, recordingSeekToleranceSeconds } from "../src/recordingPlayback.mjs";
+import { recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, recordingSegmentLocalTime, playbackRowsCoverEpoch, videoReachedSeekTarget, recordingSeekToleranceSeconds } from "../src/recordingPlayback.mjs";
 
 for (const error of [{ code: 3 }, { code: 4 }, { code: 4032, category: 4 }, { code: 3014, data: [3] }, { code: 3015, data: [{ name: "NotSupportedError" }] }, { code: 3016, data: [3] }, { code: 3016, data: [4] }, new Error("This browser does not support Shaka Player")]) {
   assert.equal(isRecordingCompatibilityError(error), true, JSON.stringify(error));
@@ -127,9 +127,10 @@ for (const result of [200, 404, 503, "offline"]) {
 // format/decode failure opts into original files first. Network errors never encode.
 for (const nativeHls of [true, false]) {
   for (const rate of [.5, 1, 2, 4]) {
-    assert.equal(recordingPlaybackTransport({ nativeHls, rate }), nativeHls && rate > 2 ? "original" : "hls");
-    assert.equal(recordingPlaybackTransport({ nativeHls, rate, preferOriginal: true }), "original");
-    assert.equal(recordingPlaybackTransport({ nativeHls, rate, incompatible: true, preferOriginal: true }), "transcode");
+    assert.equal(recordingPlaybackTransport({ nativeHls, rate, mobileNative: false }), nativeHls && rate > 2 ? "original" : "hls");
+    assert.equal(recordingPlaybackTransport({ nativeHls, rate, preferOriginal: true, mobileNative: false }), "original");
+    assert.equal(recordingPlaybackTransport({ nativeHls, rate, incompatible: true, preferOriginal: true, mobileNative: true }), "transcode");
+    assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, mobileNative: true }), "original");
   }
 }
 
@@ -245,6 +246,7 @@ const readyHandler = source.slice(source.indexOf("  function handleRecordingRead
     snapToRecording: (time) => time, windowAround: () => ({ start: 1000, end: 1900 }),
     videoRef: { current: video }, autoplayRef: {}, pendingSeekEpochRef: {}, pendingSeekModeRef: {}, desiredEpochRef: {},
     playbackRequestRef: { current: 0 }, epochToPlaybackMediaTime: (epoch) => epoch - 1000, seekVideoToTime,
+    requestRecordingPlay() {},
     setHeroSeeking() {}, setFollowTarget() {}, setPlaybackError() {}, setPlaybackErrorStage() {}, setPlayhead() {},
     setPlaybackWindow() {}, setPlaybackNotice() {}, scheduleSeekWatchdog() {}, clearSeekWatchdog() {},
   });
@@ -256,6 +258,137 @@ const readyHandler = source.slice(source.indexOf("  function handleRecordingRead
     assert.equal(context.pendingSeekModeRef.current, "local");
     assert.equal(context.pendingSeekEpochRef.current, target);
   }
+}
+
+// iOS only applies a scrub after pause(), and only the play() in that same
+// gesture is allowed to resume. A write during an in-flight seek stays queued.
+{
+  const order = [];
+  let currentTime = 4;
+  const video = {
+    paused: false,
+    seeking: false,
+    ended: false,
+    readyState: 4,
+    pause() { order.push("pause"); this.paused = true; },
+    get currentTime() { return currentTime; },
+    set currentTime(value) { order.push(["seek", value]); currentTime = value; },
+    fastSeek() { throw new Error("Native HLS scrub used fastSeek"); },
+  };
+  const context = vm.createContext({
+    Number, nativeHls: true, useSegmentPlayback: false, isAllCameras: false, activeCameraId: "gate",
+    timelineView: { startEpoch: 1000, endEpoch: 1900 }, loadedPlaybackWindow: { start: 1000, end: 1900 },
+    playbackTimeline: [{ start_epoch: 1000, end_epoch: 1010 }], playbackRowsCoverEpoch,
+    snapToRecording: (time) => time, windowAround: () => ({ start: 1000, end: 1900 }),
+    videoRef: { current: video }, autoplayRef: {}, pendingSeekEpochRef: {}, pendingSeekModeRef: {}, desiredEpochRef: {},
+    playbackRequestRef: { current: 0 }, epochToPlaybackMediaTime: (epoch) => epoch - 1000, seekVideoToTime,
+    requestRecordingPlay: () => order.push("play"),
+    setHeroSeeking() {}, setFollowTarget() {}, setPlaybackError() {}, setPlaybackErrorStage() {}, setPlayhead() {},
+    setPlaybackWindow() {}, setPlaybackNotice() {}, scheduleSeekWatchdog() {}, clearSeekWatchdog() {},
+  });
+  const playAt = source.slice(source.indexOf("  function playAt("), source.indexOf("  function panTimelineViewport("));
+  vm.runInContext(playAt, context);
+  context.playAt(1006, true);
+  assert.deepEqual(order, ["pause", ["seek", 6], "play"], "a scrub pauses, seeks, then plays in the gesture");
+  order.length = 0;
+  video.seeking = true;
+  video.paused = false;
+  currentTime = 6;
+  context.playAt(1008, true);
+  assert.deepEqual(order, ["pause", "play"], "a currentTime write during an in-flight seek must be queued");
+  assert.equal(currentTime, 6);
+  assert.equal(context.pendingSeekEpochRef.current, 1008);
+}
+
+// iPhone Timeline playback uses original MP4 segments. A scrub inside the
+// current file must pause, seek, and play on that element.
+{
+  const order = [];
+  let currentTime = 1;
+  const video = {
+    paused: false, seeking: false, readyState: 4,
+    pause() { order.push("pause"); this.paused = true; },
+    get currentTime() { return currentTime; },
+    set currentTime(value) { order.push(["seek", value]); currentTime = value; },
+  };
+  const segment = { start_epoch: 100, end_epoch: 110 };
+  const context = vm.createContext({
+    Number, useSegmentPlayback: true, isAllCameras: false, activeCameraId: "gate",
+    timelineView: { startEpoch: 0, endEpoch: 1000 },
+    loadedPlaybackWindow: { start: 0, end: 900 },
+    playbackTimeline: [segment], nativeSegment: segment, prefetchedNativeWindow: null,
+    snapToRecording: (value) => value, windowAround: () => ({ start: 0, end: 900 }),
+    recordingSegmentAt, recordingSegmentLocalTime, playbackRowsCoverEpoch, seekVideoToTime,
+    videoRef: { current: video }, autoplayRef: { current: false },
+    pendingSeekEpochRef: {}, pendingSeekModeRef: {}, desiredEpochRef: {}, playbackRequestRef: { current: 1 },
+    requestRecordingPlay: () => order.push("play"), scheduleNativeSeekWatchdog() {}, clearSeekWatchdog() {},
+    setHeroSeeking() {}, setHeroPlaying() {}, setFollowTarget() {}, setPlaybackError() {}, setPlaybackErrorStage() {},
+    setPlayhead() {}, setPlaybackWindow() {}, setPlaybackNotice() {}, setPlaybackDetail() {}, setNativeSegment() {},
+  });
+  vm.runInContext(source.slice(source.indexOf("  function playAt("), source.indexOf("  function panTimelineViewport(")), context);
+  context.playAt(104, true);
+  assert.deepEqual(order, ["pause", ["seek", 4], "play"]);
+  assert.equal(context.pendingSeekModeRef.current, "native-local");
+}
+
+{
+  const writes = [];
+  const plays = [];
+  const video = {
+    playbackRate: 1, seeking: true, paused: true,
+    get currentTime() { return 0; },
+    set currentTime(value) { writes.push(value); },
+    fastSeek() { throw new Error("in-flight native seek must not be replaced"); },
+  };
+  const context = vm.createContext({
+    Number, Math, videoRef: { current: video }, useSegmentPlayback: false, transport: "hls", requestedTransport: "hls",
+    originalFallbackRef: {}, transcodeFallbackRef: {}, nativeScope: "gate", nativeHls: true, playbackRate: 1,
+    normalizedTimelinePlaybackRate: (rate) => rate, playbackRetryRef: { current: { attempts: 0 } },
+    pendingSeekEpochRef: { current: 1005 }, pendingSeekModeRef: { current: "window" }, desiredEpochRef: { current: 1005 },
+    snapToRecording: (value) => value, loadedPlaybackWindow: { start: 1000, end: 1900 },
+    epochToPlaybackMediaTime: () => 5, seekVideoToTime, scheduleSeekWatchdog() {},
+    setPlayhead() {}, setPlaybackNotice() {}, setPlaybackError() {}, setPlaybackErrorStage() {},
+    setHeroSeeking() {}, autoplayRef: { current: true }, requestRecordingPlay: () => plays.push("play"),
+  });
+  vm.runInContext(readyHandler, context);
+  context.handleRecordingReady(null, video);
+  assert.deepEqual(writes, [], "ready during EXT-X-START must not stack another currentTime seek");
+  assert.deepEqual(plays, []);
+  assert.equal(context.pendingSeekModeRef.current, "window-ready");
+}
+
+{
+  const writes = [];
+  const plays = [];
+  let currentTime = 1;
+  const video = {
+    paused: true, seeking: false,
+    get currentTime() { return currentTime; },
+    set currentTime(value) { writes.push(value); currentTime = value; },
+  };
+  const context = vm.createContext({
+    Number, Math, performance, videoRef: { current: video }, nativeHls: true,
+    pendingSeekEpochRef: { current: 1008 }, pendingSeekModeRef: { current: "local" }, desiredEpochRef: { current: 1008 },
+    autoplayRef: { current: true }, ignorePauseUntilRef: { current: 0 },
+    epochToPlaybackMediaTime: () => 8, mediaTimeToEpoch: (value) => 1000 + value,
+    recordingSeekToleranceSeconds: () => 0.35, videoReachedSeekTarget, seekVideoToTime,
+    shouldResumePlaybackAfterSeek: ({ autoplay }) => autoplay,
+    requestRecordingPlay: () => plays.push("play"),
+    scheduleSeekWatchdog: () => writes.push("watch"),
+    clearSeekWatchdog() {}, setPlayhead() {}, setPlaybackNotice() {}, setHeroSeeking() {}, ignorePauseAfterSeekMs: () => 0,
+  });
+  const completion = source.slice(source.indexOf("  function completePendingRecordingSeek("), source.indexOf("  function completePendingNativeSeek("));
+  const seeked = source.slice(source.indexOf("  function handleRecordingSeeked("), source.indexOf("  function handleNativeSegmentSeeked("));
+  vm.runInContext(completion + seeked, context);
+  context.handleRecordingSeeked({ currentTarget: video });
+  assert.deepEqual(writes, [8, "watch"], "a seeked event at the old time applies the queued scrub");
+  assert.equal(plays.length, 0);
+  assert.equal(context.pendingSeekEpochRef.current, 1008);
+  currentTime = 8;
+  video.seeking = true;
+  context.handleRecordingSeeked({ currentTarget: video });
+  assert.equal(context.pendingSeekEpochRef.current, null, "seeked at the target resumes even if seeking is still true");
+  assert.deepEqual(plays, ["play"]);
 }
 
 // A fresh camera/day starts with its requested default rather than carrying a
