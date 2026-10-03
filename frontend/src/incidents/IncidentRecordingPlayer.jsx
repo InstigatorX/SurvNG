@@ -7,6 +7,7 @@ import {
   recordingPlayableEpoch,
   recordingSegmentAt,
   recordingSegmentLocalTime,
+  recordingEpochAfterSegment,
   seekVideoToTime,
   supportsNativeRecordingHls,
 } from "../recordingPlayback.mjs";
@@ -108,7 +109,7 @@ export function IncidentRecordingPlayer({
   const endedRef = useRef(false);
   const scrubbingRef = useRef(false);
   const appliedSeekRef = useRef(startEpoch);
-  const playbackReadyRef = useRef(false);
+  const readySourceRef = useRef("");
   const ignorePauseRef = useRef(0);
   const [nativeHls] = useState(supportsNativeRecordingHls);
   const [transport, setTransport] = useState(() => recordingPlaybackTransport({ nativeHls: supportsNativeRecordingHls(), rate: 1 }));
@@ -126,7 +127,7 @@ export function IncidentRecordingPlayer({
 
   useEffect(() => {
     endedRef.current = false;
-    playbackReadyRef.current = false;
+    readySourceRef.current = "";
     ignorePauseRef.current = performance.now() + 1500;
     appliedSeekRef.current = startEpoch;
     setTargetEpoch(startEpoch);
@@ -190,7 +191,10 @@ export function IncidentRecordingPlayer({
 
   const rows = loaded?.rows || [];
   const playable = recordingPlayableEpoch(rows, loaded?.seekEpoch);
-  const segment = transport === "hls" ? null : recordingSegmentAt(rows, playable);
+  // HLS owns a whole window; native playback owns the segment at the latest
+  // requested epoch, including seeks and automatic segment handoffs.
+  const segment = transport === "hls" || Number(loaded?.start) !== windowStart
+    ? null : recordingSegmentAt(rows, recordingPlayableEpoch(rows, targetEpoch));
   const mediaTime = transport === "hls" ? playbackMediaTimeForEpoch(rows, playable) : null;
   const manifestUrl = transport === "hls" && loaded && Number.isFinite(mediaTime)
     ? `${recordingDayHlsUrl(loaded.cameraId, loaded.start, loaded.end, loaded.source, mediaTime)}&reload=${loaded.revision}`
@@ -198,6 +202,7 @@ export function IncidentRecordingPlayer({
   const segmentUrl = segment
     ? `${recordingSegmentUrl(loaded.cameraId, segment.start_epoch, loaded.source, transport === "transcode")}&reload=${loaded.revision}`
     : "";
+  const playbackUrl = manifestUrl || segmentUrl;
 
   function mediaEpoch(video) {
     if (!video || !rows.length) return null;
@@ -209,6 +214,9 @@ export function IncidentRecordingPlayer({
     if (!video || !rows.length || !Number.isFinite(epoch)) return;
     const next = recordingPlayableEpoch(rows, epoch);
     if (!Number.isFinite(next)) return;
+    // A cross-segment seek is applied when the new source delivers metadata,
+    // never to the outgoing element using the incoming segment's clock.
+    if (transport !== "hls" && (!segment || next < segment.start_epoch || next >= segment.end_epoch)) return;
     const local = transport === "hls"
       ? playbackMediaTimeForEpoch(rows, next)
       : recordingSegmentLocalTime(segment, next, video);
@@ -219,13 +227,13 @@ export function IncidentRecordingPlayer({
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !loaded || scrubbingRef.current) return;
+    if (!video || !loaded || scrubbingRef.current || readySourceRef.current !== playbackUrl) return;
     if (Math.abs(targetEpoch - appliedSeekRef.current) <= 0.35) return;
     if (Math.abs(playbackWindowForEpoch(targetEpoch).start - Number(loaded.start)) > 1) return;
     appliedSeekRef.current = targetEpoch;
     seekVideo(video, targetEpoch);
     if (playing) video.play?.().catch(() => { });
-  }, [loaded, targetEpoch, transport]);
+  }, [loaded, targetEpoch, transport, playbackUrl]);
 
   function finishEpisode() {
     if (endedRef.current) return;
@@ -234,7 +242,7 @@ export function IncidentRecordingPlayer({
   }
 
   function handleTimeUpdate(event) {
-    if (scrubbingRef.current || !playbackReadyRef.current) return;
+    if (scrubbingRef.current || readySourceRef.current !== playbackUrl) return;
     const video = event.currentTarget;
     const epoch = mediaEpoch(video);
     if (!Number.isFinite(epoch) || epoch < startEpoch - 0.5) return;
@@ -255,6 +263,14 @@ export function IncidentRecordingPlayer({
       return;
     }
     const epoch = mediaEpoch(video);
+    if (transport !== "hls") {
+      const next = recordingEpochAfterSegment(segment, rows);
+      if (Number.isFinite(next) && next < safeEnd) {
+        setTargetEpoch(next);
+        setPlaying(true);
+        return;
+      }
+    }
     if (loaded && Number.isFinite(epoch) && epoch < safeEnd - 0.25 && safeEnd > loaded.end - 0.05) {
       setTargetEpoch(Math.min(safeEnd, loaded.end + 0.01));
       setPlaying(true);
@@ -264,7 +280,8 @@ export function IncidentRecordingPlayer({
   }
 
   function handleError(mediaError) {
-    if (transport === "hls" && isRecordingCompatibilityError(mediaError)) {
+    if (transport !== "transcode" && isRecordingCompatibilityError(mediaError)) {
+      setTargetEpoch(playhead);
       setTransport("transcode");
       return;
     }
@@ -314,7 +331,7 @@ export function IncidentRecordingPlayer({
           muted={muted}
           playsInline
           preload="auto"
-          onReady={(_player, video) => { playbackReadyRef.current = true; ignorePauseRef.current = performance.now() + 1500; seekVideo(video, targetEpoch); }}
+          onReady={(_player, video) => { readySourceRef.current = playbackUrl; ignorePauseRef.current = performance.now() + 1500; seekVideo(video, targetEpoch); }}
           onTimeUpdate={handleTimeUpdate}
           onEnded={handleEnded}
           onError={handleError}
@@ -326,11 +343,12 @@ export function IncidentRecordingPlayer({
         <NativeRecordingVideo
           ref={videoRef}
           src={segmentUrl}
+          autoPlay={playing}
           muted={muted}
-          onLoadedMetadata={(event) => { playbackReadyRef.current = true; ignorePauseRef.current = performance.now() + 1500; seekVideo(event.currentTarget, targetEpoch); }}
+          onLoadedMetadata={(event) => { readySourceRef.current = playbackUrl; ignorePauseRef.current = performance.now() + 1500; seekVideo(event.currentTarget, targetEpoch); }}
           onTimeUpdate={handleTimeUpdate}
           onEnded={handleEnded}
-          onError={() => handleError({ code: 4, message: "segment playback failed" })}
+          onError={(event) => handleError(event.currentTarget.error)}
           onPlay={() => setPlaying(true)}
           onPause={() => { if (!scrubbingRef.current && performance.now() >= ignorePauseRef.current) setPlaying(false); }}
         />
