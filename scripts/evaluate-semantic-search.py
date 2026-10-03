@@ -131,10 +131,11 @@ def main() -> int:
         )
 
         manifest = load_semantic_manifest(args.model_dir)
-        encoder = IsolatedOpenVinoManifestEncoder(
-            args.model_dir, manifest, args.device
-        )
         index = SemanticIndex(args.database)
+        identity = index.resolve_model_identity(args.model_dir, manifest)
+        encoder = IsolatedOpenVinoManifestEncoder(
+            args.model_dir, manifest, args.device, identity
+        )
 
         def search(query: str, limit: int) -> tuple[list[dict[str, Any]], float]:
             started = time.perf_counter()

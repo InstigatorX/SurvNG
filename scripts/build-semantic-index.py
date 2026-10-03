@@ -25,7 +25,6 @@ from survng.app.semantic_search import (
     IsolatedOpenVinoManifestEncoder,
     SemanticIndex,
     SemanticSearchService,
-    _semantic_model_identity,
     load_semantic_manifest,
     semantic_event_searchable,
 )
@@ -165,7 +164,9 @@ def build(
         index_object_crops=True,
         max_object_crops_per_event=24,
     )
-    target_identity = _semantic_model_identity(model_dir, manifest)
+    # Bind the active package before the reuse package so an equal image
+    # contract keeps vectors already stored for this database.
+    target_identity = index.resolve_model_identity(model_dir, manifest)
     before = index.coverage(target_identity)
     reused_evidence = 0
     if reuse_image_model_dir is not None:
@@ -176,12 +177,14 @@ def build(
             raise RuntimeError(
                 "cannot reuse semantic evidence: image encoder contract differs"
             )
-        reused_evidence = index.clone_image_generation(
-            _semantic_model_identity(reuse_image_model_dir, source_manifest),
-            target_identity,
+        source_identity = index.resolve_model_identity(
+            reuse_image_model_dir, source_manifest
         )
+        reused_evidence = index.clone_image_generation(source_identity, target_identity)
     service = SemanticSearchService(config, index, model_dir, manifest)
-    encoder = IsolatedOpenVinoManifestEncoder(model_dir, manifest, device)
+    encoder = IsolatedOpenVinoManifestEncoder(
+        model_dir, manifest, device, target_identity
+    )
     service.encoder = encoder
     service._storage_dir = storage_dir
     started = time.monotonic()
