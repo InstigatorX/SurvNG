@@ -2159,6 +2159,11 @@ class EventStoreTest(unittest.TestCase):
 
             self.assertEqual([row["id"] for row in first_page], [events[6]["id"], events[5]["id"], events[4]["id"]])
             self.assertEqual([row["id"] for row in second_page], [events[3]["id"], events[2]["id"], events[1]["id"]])
+            newer = store.recent_compact_since(10, cursor["created_at"], int(cursor["id"]))
+            self.assertEqual(
+                [row["id"] for row in newer],
+                [events[6]["id"], events[5]["id"]],
+            )
             self.assertEqual(
                 set(first_page[0]),
                 {"id", "camera_id", "kind", "snapshot_path", "recording_path", "objects_json", "created_at", "evidence_revision"},

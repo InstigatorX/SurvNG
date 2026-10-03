@@ -195,6 +195,172 @@ class SemanticIndexTest(unittest.TestCase):
 
         self.assertNotEqual(before, fingerprint_model_package(model_dir))
 
+    def _image_manifest(self, model_dir: Path) -> dict:
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "image_encoder.xml").write_text("<net/>", encoding="utf-8")
+        (model_dir / "image_encoder.bin").write_bytes(b"image-weights")
+        (model_dir / "text_encoder.xml").write_text("<text/>", encoding="utf-8")
+        return {
+            "implementation": "openvino_manifest",
+            "dimensions": 3,
+            "image_model": "image_encoder.xml",
+            "image": {"size": 224, "mean": [0.0, 0.0, 0.0]},
+            "text": {"tokenizer_kind": "openclip_bpe", "max_length": 77},
+        }
+
+    def test_extra_package_file_keeps_legacy_generation(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+        from survng.app.semantic_search import legacy_semantic_model_identity
+
+        model_dir = Path(self.temporary.name) / "model"
+        manifest = self._image_manifest(model_dir)
+        legacy = legacy_semantic_model_identity(model_dir, manifest)
+        captured_at = "2026-01-01T00:00:00+00:00"
+        self.index.upsert(
+            [SemanticEvidence(1, "gate", captured_at, "full_frame", "frame", "snap.jpg")],
+            [[1, 0, 0]],
+            legacy,
+        )
+
+        self.assertEqual(self.index.resolve_model_identity(model_dir, manifest), legacy)
+        (model_dir / "notes.txt").write_text("unrelated", encoding="utf-8")
+        self.assertNotEqual(fingerprint_model_package(model_dir), legacy.model_fingerprint)
+        self.assertEqual(self.index.resolve_model_identity(model_dir, manifest), legacy)
+
+        encoded: list = []
+
+        class Encoder:
+            identity = legacy
+
+            def encode_images(self, images):
+                encoded.append(len(images))
+                return np.asarray([[1, 0, 0]], dtype=np.float32)
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True, index_object_crops=False),
+            self.index,
+            model_dir,
+            manifest,
+        )
+        service.encoder = Encoder()
+        service._backfill(type("Store", (), {
+            "recent_compact": lambda self, *_args, **_kwargs: [{
+                "id": 1,
+                "camera_id": "gate",
+                "created_at": captured_at,
+                "snapshot_path": "snap.jpg",
+                "evidence_revision": 0,
+                "objects_json": '[{"label":"person","box":{"x1":1,"y1":1,"x2":2,"y2":2}}]',
+            }],
+        })())
+
+        self.assertEqual(encoded, [])
+        self.assertTrue(service._queue.empty())
+        self.assertTrue(self.index.backfill_state(legacy).complete)
+
+    def test_changed_image_encoder_starts_new_generation_and_keeps_old_rows(self) -> None:
+        model_dir = Path(self.temporary.name) / "model"
+        manifest = self._image_manifest(model_dir)
+        original = self.index.resolve_model_identity(model_dir, manifest)
+        self.index.upsert(
+            [SemanticEvidence(1, "gate", "now", "full_frame", "frame", "a.jpg")],
+            [[1, 0, 0]],
+            original,
+        )
+        (model_dir / "text_encoder.xml").write_text("<text changed/>", encoding="utf-8")
+
+        self.assertEqual(self.index.resolve_model_identity(model_dir, manifest), original)
+        (model_dir / "image_encoder.bin").write_bytes(b"different-weights")
+        revised = self.index.resolve_model_identity(model_dir, manifest)
+
+        self.assertNotEqual(revised.generation, original.generation)
+        self.assertEqual(self.index.coverage(original)["evidence_count"], 1)
+        self.assertEqual(self.index.coverage(revised)["evidence_count"], 0)
+
+    def test_backfill_resumes_after_saved_cursor(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+        from survng.app.semantic_search import SemanticBackfillState
+
+        model_dir = Path(self.temporary.name) / "model"
+        manifest = self._image_manifest(model_dir)
+        identity = self.index.resolve_model_identity(model_dir, manifest)
+        self.index.save_backfill_state(identity, SemanticBackfillState(
+            before_created_at="b", before_id=2, head_created_at="c", head_id=3, complete=False,
+        ))
+        seen: list[tuple] = []
+
+        class Store:
+            def recent_compact_since(self, *_args, **_kwargs):
+                return []
+
+            def recent_compact(self, _limit, before_created_at=None, before_id=None, camera_id=""):
+                seen.append((before_created_at, before_id))
+                if before_id == 2:
+                    return [{"id": 1, "created_at": "a", "objects_json": "[]"}]
+                return []
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True, backfill_batch_size=2),
+            self.index,
+            model_dir,
+            manifest,
+        )
+        service.encoder = type("Encoder", (), {"identity": identity})()
+        service._backfill(Store())
+
+        self.assertEqual(seen, [("b", 2)])
+        state = self.index.backfill_state(identity)
+        self.assertTrue(state.complete)
+        self.assertEqual((state.before_created_at, state.before_id), ("a", 1))
+        self.assertEqual((state.head_created_at, state.head_id), ("c", 3))
+
+    def test_completed_backfill_indexes_only_newer_incidents(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+        from survng.app.semantic_search import SemanticBackfillState
+
+        model_dir = Path(self.temporary.name) / "model"
+        manifest = self._image_manifest(model_dir)
+        identity = self.index.resolve_model_identity(model_dir, manifest)
+        self.index.save_backfill_state(identity, SemanticBackfillState(
+            before_created_at="a", before_id=1, head_created_at="b", head_id=2, complete=True,
+        ))
+        newer = {
+            "id": 4,
+            "created_at": "d",
+            "snapshot_path": "d.jpg",
+            "evidence_revision": 0,
+            "objects_json": '[{"label":"person","box":{"x1":1,"y1":1,"x2":2,"y2":2}}]',
+        }
+
+        class Store:
+            def recent_compact(self, *_args, **_kwargs):
+                raise AssertionError("completed backfill walked old history")
+
+            def recent_compact_since(
+                self, _limit, after_created_at, after_id,
+                before_created_at=None, before_id=None,
+            ):
+                self.seen = (after_created_at, after_id, before_created_at, before_id)
+                return [newer]
+
+        store = Store()
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True, index_object_crops=False),
+            self.index,
+            model_dir,
+            manifest,
+        )
+        service.encoder = type("Encoder", (), {"identity": identity})()
+        service._backfill(store)
+
+        self.assertEqual(store.seen, ("b", 2, None, None))
+        _priority, _sequence, queued = service._queue.get_nowait()
+        self.assertEqual(queued["id"], 4)
+        state = self.index.backfill_state(identity)
+        self.assertTrue(state.complete)
+        self.assertEqual((state.head_created_at, state.head_id), ("d", 4))
+        self.assertEqual((state.before_created_at, state.before_id), ("a", 1))
+
     def test_upsert_is_idempotent_per_generation_and_source(self) -> None:
         evidence = [SemanticEvidence(1, "gate", "now", "full_frame", "frame", "one.webp")]
         self.index.upsert(evidence, [[1, 0, 0]], self.identity)

@@ -720,6 +720,34 @@ class EventStore(
                 ).fetchall()
         return self._event_views(rows)
 
+    def recent_compact_since(
+        self,
+        limit: int,
+        after_created_at: str,
+        after_id: int,
+        before_created_at: str | None = None,
+        before_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return compact events strictly newer than a saved semantic head."""
+        bounded_limit = max(1, min(int(limit), 10000))
+        clauses = ["(created_at > ? or (created_at = ? and id > ?))"]
+        parameters: list[Any] = [after_created_at, after_created_at, int(after_id)]
+        if before_created_at is not None and before_id is not None:
+            clauses.append("(created_at < ? or (created_at = ? and id < ?))")
+            parameters.extend([before_created_at, before_created_at, int(before_id)])
+        parameters.append(bounded_limit)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                select {self.COMPACT_COLUMNS} from events
+                where {' and '.join(clauses)}
+                order by created_at desc, id desc
+                limit ?
+                """,
+                parameters,
+            ).fetchall()
+        return self._event_views(rows)
+
     def between_compact(
         self,
         start_at: str,

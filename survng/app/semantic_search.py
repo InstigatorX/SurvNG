@@ -52,6 +52,17 @@ class SemanticModelIdentity:
 
 
 @dataclass(frozen=True)
+class SemanticBackfillState:
+    """Durable cursor for one image generation's historical walk."""
+
+    before_created_at: str | None = None
+    before_id: int | None = None
+    head_created_at: str | None = None
+    head_id: int | None = None
+    complete: bool = False
+
+
+@dataclass(frozen=True)
 class SemanticEvidence:
     event_id: int
     camera_id: str
@@ -384,6 +395,27 @@ class SemanticIndex:
                     evidence_revision integer not null, image_path text not null,
                     plan_key text not null, outcome_json text not null,
                     primary key(event_id,model_fingerprint,preprocessing_fingerprint)
+                )
+            """)
+            connection.execute("""
+                create table if not exists semantic_generation_sources (
+                    image_contract text primary key,
+                    implementation text not null,
+                    model_fingerprint text not null,
+                    preprocessing_fingerprint text not null,
+                    dimensions integer not null
+                )
+            """)
+            connection.execute("""
+                create table if not exists semantic_backfill_state (
+                    model_fingerprint text not null,
+                    preprocessing_fingerprint text not null,
+                    before_created_at text,
+                    before_id integer,
+                    head_created_at text,
+                    head_id integer,
+                    complete integer not null default 0,
+                    primary key (model_fingerprint, preprocessing_fingerprint)
                 )
             """)
 
@@ -862,21 +894,219 @@ class SemanticIndex:
             ).fetchall()
         return {int(row["event_id"]) for row in rows}
 
+    def resolve_model_identity(self, model_dir: Path, manifest: dict[str, Any]) -> SemanticModelIdentity:
+        """Reuse the generation whose image tower matches this package.
+
+        An index built by the previous whole-directory fingerprint stays on
+        that fingerprint when its image encoder still matches. A later extra
+        file in the package does not encode the history again.
+        """
+        contract = semantic_image_contract(model_dir, manifest)
+        bound = self._generation_source(contract)
+        if bound is not None:
+            return bound
+        fresh = SemanticModelIdentity(
+            _semantic_implementation(manifest),
+            contract,
+            _preprocessing_fingerprint(manifest, include_text=False),
+            _semantic_dimensions(manifest),
+        )
+        chosen = fresh
+        # Hash the legacy whole-directory key only when an older generation
+        # might already hold these image vectors.
+        if not self._generation_recorded(fresh) and self._has_recorded_generation():
+            legacy = legacy_semantic_model_identity(model_dir, manifest)
+            if self._generation_recorded(legacy):
+                chosen = legacy
+        with self._lock, self._connect() as connection:
+            connection.execute("begin immediate")
+            row = self._generation_source_row(connection, contract)
+            if row is not None:
+                return self._identity_from_source(row)
+            connection.execute(
+                """
+                insert or ignore into semantic_generation_sources (
+                    image_contract, implementation, model_fingerprint,
+                    preprocessing_fingerprint, dimensions
+                ) values (?, ?, ?, ?, ?)
+                """,
+                (
+                    contract,
+                    chosen.implementation,
+                    chosen.model_fingerprint,
+                    chosen.preprocessing_fingerprint,
+                    chosen.dimensions,
+                ),
+            )
+            row = self._generation_source_row(connection, contract)
+        if row is None:
+            raise RuntimeError("semantic generation source was not recorded")
+        return self._identity_from_source(row)
+
+    def _generation_source(self, contract: str) -> SemanticModelIdentity | None:
+        with self._connect() as connection:
+            row = self._generation_source_row(connection, contract)
+        return self._identity_from_source(row) if row is not None else None
+
+    @staticmethod
+    def _generation_source_row(connection: sqlite3.Connection, contract: str) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            select implementation, model_fingerprint, preprocessing_fingerprint, dimensions
+            from semantic_generation_sources where image_contract = ?
+            """,
+            (contract,),
+        ).fetchone()
+
+    @staticmethod
+    def _identity_from_source(row: sqlite3.Row) -> SemanticModelIdentity:
+        return SemanticModelIdentity(
+            str(row["implementation"]),
+            str(row["model_fingerprint"]),
+            str(row["preprocessing_fingerprint"]),
+            int(row["dimensions"]),
+        )
+
+    def _generation_recorded(self, identity: SemanticModelIdentity) -> bool:
+        with self._connect() as connection:
+            for table in ("semantic_embeddings", "semantic_projection_receipts"):
+                row = connection.execute(
+                    f"""
+                    select 1 from {table}
+                    where model_fingerprint = ? and preprocessing_fingerprint = ?
+                    limit 1
+                    """,
+                    (identity.model_fingerprint, identity.preprocessing_fingerprint),
+                ).fetchone()
+                if row is not None:
+                    return True
+        return False
+
+    def _has_recorded_generation(self) -> bool:
+        with self._connect() as connection:
+            for table in ("semantic_embeddings", "semantic_projection_receipts"):
+                if connection.execute(f"select 1 from {table} limit 1").fetchone() is not None:
+                    return True
+        return False
+
+    def backfill_state(self, identity: SemanticModelIdentity) -> SemanticBackfillState:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select before_created_at, before_id, head_created_at, head_id, complete
+                from semantic_backfill_state
+                where model_fingerprint = ? and preprocessing_fingerprint = ?
+                """,
+                (identity.model_fingerprint, identity.preprocessing_fingerprint),
+            ).fetchone()
+        if row is None:
+            return SemanticBackfillState()
+        before_id = row["before_id"]
+        head_id = row["head_id"]
+        return SemanticBackfillState(
+            before_created_at=row["before_created_at"],
+            before_id=None if before_id is None else int(before_id),
+            head_created_at=row["head_created_at"],
+            head_id=None if head_id is None else int(head_id),
+            complete=bool(row["complete"]),
+        )
+
+    def save_backfill_state(
+        self,
+        identity: SemanticModelIdentity,
+        state: SemanticBackfillState,
+    ) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                insert into semantic_backfill_state (
+                    model_fingerprint, preprocessing_fingerprint,
+                    before_created_at, before_id, head_created_at, head_id, complete
+                ) values (?, ?, ?, ?, ?, ?, ?)
+                on conflict (model_fingerprint, preprocessing_fingerprint) do update set
+                    before_created_at = excluded.before_created_at,
+                    before_id = excluded.before_id,
+                    head_created_at = excluded.head_created_at,
+                    head_id = excluded.head_id,
+                    complete = excluded.complete
+                """,
+                (
+                    identity.model_fingerprint,
+                    identity.preprocessing_fingerprint,
+                    state.before_created_at,
+                    state.before_id,
+                    state.head_created_at,
+                    state.head_id,
+                    int(state.complete),
+                ),
+            )
+
 
 def fingerprint_model_package(model_dir: Path) -> str:
-    """Fingerprint every byte of local model artifacts to prevent stale generations."""
+    """Fingerprint every byte under a model directory.
+
+    This is the legacy generation key. A current index binds that key to the
+    image-encoder contract so an unrelated file cannot start a new generation.
+    """
     digest = hashlib.sha256()
     for path in sorted(item for item in Path(model_dir).rglob("*") if item.is_file()):
         relative = path.relative_to(model_dir).as_posix()
-        stat = path.stat()
-        encoded_relative = relative.encode("utf-8")
-        digest.update(len(encoded_relative).to_bytes(8, "big"))
-        digest.update(encoded_relative)
-        digest.update(stat.st_size.to_bytes(8, "big"))
-        with path.open("rb") as handle:
-            while chunk := handle.read(MODEL_FINGERPRINT_CHUNK_SIZE):
-                digest.update(chunk)
+        _update_fingerprint(digest, relative, path)
     return digest.hexdigest()[:24]
+
+
+def _update_fingerprint(digest: Any, name: str, path: Path) -> None:
+    encoded_name = name.encode("utf-8")
+    digest.update(len(encoded_name).to_bytes(8, "big"))
+    digest.update(encoded_name)
+    digest.update(path.stat().st_size.to_bytes(8, "big"))
+    with path.open("rb") as handle:
+        while chunk := handle.read(MODEL_FINGERPRINT_CHUNK_SIZE):
+            digest.update(chunk)
+
+
+def _semantic_dimensions(manifest: dict[str, Any]) -> int:
+    dimensions = int(manifest.get("dimensions") or 0)
+    if not 0 < dimensions <= 8192:
+        raise RuntimeError("semantic manifest dimensions must be between 1 and 8192")
+    return dimensions
+
+
+def _preprocessing_fingerprint(manifest: dict[str, Any], *, include_text: bool) -> str:
+    payload: dict[str, Any] = {"image": dict(manifest.get("image") or {})}
+    if include_text:
+        payload["text"] = dict(manifest.get("text") or {})
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:24]
+
+
+def semantic_image_artifacts(model_dir: Path, manifest: dict[str, Any]) -> tuple[Path, Path]:
+    """Return the image encoder IR pair declared by the manifest."""
+    xml_path = _semantic_package_path(
+        model_dir, manifest.get("image_model"), "image_encoder.xml"
+    )
+    binary_path = xml_path.with_suffix(".bin")
+    return xml_path, binary_path
+
+
+def semantic_image_contract(model_dir: Path, manifest: dict[str, Any]) -> str:
+    """Identity of the image tower that produced stored vectors.
+
+    Text-encoder, tokenizer, license, and cache files are query or package
+    metadata. They are not part of an image vector and must not invalidate one.
+    """
+    xml_path, binary_path = semantic_image_artifacts(model_dir, manifest)
+    relative_xml = xml_path.relative_to(Path(model_dir).resolve()).as_posix()
+    digest = hashlib.sha256()
+    for name, path in ((relative_xml, xml_path), (str(Path(relative_xml).with_suffix(".bin")), binary_path)):
+        if not path.is_file():
+            raise RuntimeError(f"semantic image model artifact is missing: {path}")
+        _update_fingerprint(digest, name, path)
+    material = (
+        f"{digest.hexdigest()}:{_preprocessing_fingerprint(manifest, include_text=False)}:"
+        f"{_semantic_dimensions(manifest)}"
+    ).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()[:24]
 
 
 def load_semantic_manifest(model_dir: Path) -> dict[str, Any]:
@@ -990,26 +1220,33 @@ def _semantic_package_path(model_dir: Path, value: object, default: str) -> Path
     return path
 
 
+def _semantic_implementation(manifest: dict[str, Any]) -> str:
+    return str(manifest.get("implementation") or "openvino_manifest")
+
+
+def legacy_semantic_model_identity(
+    model_dir: Path,
+    manifest: dict[str, Any],
+) -> SemanticModelIdentity:
+    """Generation key used before image vectors were bound to the image tower."""
+    return SemanticModelIdentity(
+        _semantic_implementation(manifest),
+        fingerprint_model_package(model_dir),
+        _preprocessing_fingerprint(manifest, include_text=True),
+        _semantic_dimensions(manifest),
+    )
+
+
 def _semantic_model_identity(
     model_dir: Path,
     manifest: dict[str, Any],
 ) -> SemanticModelIdentity:
-    dimensions = int(manifest.get("dimensions") or 0)
-    if not 0 < dimensions <= 8192:
-        raise RuntimeError("semantic manifest dimensions must be between 1 and 8192")
-    preprocessing = json.dumps(
-        {
-            "image": dict(manifest.get("image") or {}),
-            "text": dict(manifest.get("text") or {}),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    """New generation key: image encoder bytes and image preprocessing only."""
     return SemanticModelIdentity(
-        str(manifest.get("implementation") or "openvino_manifest"),
-        fingerprint_model_package(model_dir),
-        hashlib.sha256(preprocessing).hexdigest()[:24],
-        dimensions,
+        _semantic_implementation(manifest),
+        semantic_image_contract(model_dir, manifest),
+        _preprocessing_fingerprint(manifest, include_text=False),
+        _semantic_dimensions(manifest),
     )
 
 
@@ -1254,14 +1491,20 @@ def _semantic_encoder_worker_main(
 class IsolatedOpenVinoManifestEncoder:
     """OpenVINO encoder proxy backed by a named, failure-isolated process."""
 
-    def __init__(self, model_dir: Path, manifest: dict[str, Any], device: str) -> None:
+    def __init__(
+        self,
+        model_dir: Path,
+        manifest: dict[str, Any],
+        device: str,
+        identity: SemanticModelIdentity | None = None,
+    ) -> None:
         self.model_dir = Path(model_dir)
         self.manifest = dict(manifest)
         self.device = str(device)
         self._image_spec = dict(manifest.get("image") or {})
         self._text_spec = dict(manifest.get("text") or {})
         self._tokenizer = _semantic_tokenizer(self.model_dir, self._text_spec)
-        self._identity = _semantic_model_identity(self.model_dir, manifest)
+        self._identity = identity or _semantic_model_identity(self.model_dir, manifest)
         self._context = multiprocessing.get_context("spawn")
         self._connection: Any = None
         self._process: Any = None
@@ -1418,6 +1661,8 @@ class _SemanticEventRevision:
     event: dict[str, Any]
     valid: bool = True
     pending: bool = False
+    historical: bool = False
+    outcome: str = ""
 
 
 class SemanticSearchService(DisabledSemanticSearch):
@@ -1480,12 +1725,28 @@ class SemanticSearchService(DisabledSemanticSearch):
         configured_device = str(self.config.device)
         target_device = configured_device
         configured_device_failures = 0
+        identity: SemanticModelIdentity | None = None
         while not self._stop.is_set():
             try:
+                # A package without its image encoder fails in the worker
+                # constructor. Resolve only after the files exist so a test
+                # double, or a retry once the files appear, still runs.
+                resolved = identity
+                if resolved is None:
+                    try:
+                        resolved = self.index.resolve_model_identity(
+                            self.model_dir, self.manifest
+                        )
+                    except RuntimeError as exc:
+                        if "artifact is missing" not in str(exc):
+                            raise
+                    else:
+                        identity = resolved
                 encoder = IsolatedOpenVinoManifestEncoder(
                     self.model_dir,
                     self.manifest,
                     target_device,
+                    resolved,
                 )
             except Exception as exc:
                 reason = str(exc).strip() or "semantic inference worker exited during startup"
@@ -1593,17 +1854,73 @@ class SemanticSearchService(DisabledSemanticSearch):
                 if self._stop.wait(SEMANTIC_BACKFILL_RETRY_SECONDS):
                     return
 
+    def _history_pending(self) -> bool:
+        with self._event_revision_lock:
+            return any(
+                token.historical and token.pending
+                for token in self._event_revisions.values()
+            )
+
+    def _wait_for_queued_history(self) -> None:
+        """Let queued history finish before the cursor moves past it.
+
+        Direct backfill calls used by tests have no worker thread. They keep
+        the previous queue-and-return behavior.
+        """
+        worker = self._thread
+        if worker is None or not worker.is_alive():
+            return
+        while not self._stop.is_set() and self._history_pending():
+            self._stop.wait(0.05)
+
+    def _finish_history_page(self, tokens: list[_SemanticEventRevision]) -> bool:
+        self._wait_for_queued_history()
+        if self._stop.is_set():
+            return False
+        if any(token.outcome == "failed" for token in tokens):
+            raise RuntimeError("semantic historical indexing failed")
+        return True
+
     def _backfill(self, event_store: Any) -> None:
-        before_created_at: str | None = None
-        before_id: int | None = None
         encoder = self.encoder
         if encoder is None:
             return
+        identity = encoder.identity
         if not self.config.index_full_frame:
-            self.index.delete_generation_source(encoder.identity, "full_frame")
+            self.index.delete_generation_source(identity, "full_frame")
         if not self.config.index_object_crops:
-            self.index.delete_generation_source(encoder.identity, "object_crop")
+            self.index.delete_generation_source(identity, "object_crop")
+        state = self.index.backfill_state(identity)
         indexed_event_ids = self.index.indexed_event_ids()
+        if state.complete and state.head_created_at is not None and state.head_id is not None:
+            head = self._backfill_newer(
+                event_store,
+                state.head_created_at,
+                state.head_id,
+                indexed_event_ids,
+            )
+            if head is None:
+                return
+            if head != (state.head_created_at, state.head_id):
+                self.index.save_backfill_state(identity, SemanticBackfillState(
+                    before_created_at=state.before_created_at,
+                    before_id=state.before_id,
+                    head_created_at=head[0],
+                    head_id=head[1],
+                    complete=True,
+                ))
+            return
+        before_created_at = state.before_created_at
+        before_id = state.before_id
+        head_created_at = state.head_created_at
+        head_id = state.head_id
+        if head_created_at is not None and head_id is not None:
+            head = self._backfill_newer(
+                event_store, head_created_at, head_id, indexed_event_ids,
+            )
+            if head is None:
+                return
+            head_created_at, head_id = head
         while not self._stop.is_set():
             rows = event_store.recent_compact(
                 self.config.backfill_batch_size,
@@ -1611,38 +1928,118 @@ class SemanticSearchService(DisabledSemanticSearch):
                 before_id,
             )
             if not rows:
+                self.index.save_backfill_state(identity, SemanticBackfillState(
+                    before_created_at=before_created_at,
+                    before_id=before_id,
+                    head_created_at=head_created_at,
+                    head_id=head_id,
+                    complete=True,
+                ))
                 return
-            for event in reversed(rows):
-                if self._stop.is_set():
-                    return
-                event_id = int(event.get("id") or 0)
-                has_scene = getattr(event_store, "scene_has_search_observation", None)
-                scene_present = has_scene(event_id) if callable(has_scene) else next(self._scene_observations(event_id), None) is not None
-                if not semantic_event_searchable(event) and not scene_present:
-                    if event_id > 0 and event_id in indexed_event_ids:
-                        # Resolve current evidence before acting on a historical snapshot.
-                        self.index_event(event)
-                        indexed_event_ids.discard(event_id)
-                    continue
-                if self.encoder and self.projection_current(event):
-                    continue
-                while not self._stop.is_set():
-                    if not self._history_queue_has_capacity():
-                        self._stop.wait(0.1)
-                        continue
-                    try:
-                        self._queue.put(
-                            (1, next(self._queue_sequence), self._revision_event(event)),
-                            timeout=0.5,
-                        )
-                        break
-                    except queue.Full:
-                        continue
+            if head_created_at is None or head_id is None:
+                head_created_at = str(rows[0].get("created_at") or "")
+                head_id = int(rows[0].get("id") or 0)
+            tokens = self._consume_backfill_rows(event_store, rows, indexed_event_ids)
+            if tokens is None or not self._finish_history_page(tokens):
+                return
             last = rows[-1]
             before_created_at = str(last.get("created_at") or "")
             before_id = int(last.get("id") or 0)
-            if len(rows) < self.config.backfill_batch_size:
+            finished = len(rows) < self.config.backfill_batch_size
+            self.index.save_backfill_state(identity, SemanticBackfillState(
+                before_created_at=before_created_at,
+                before_id=before_id,
+                head_created_at=head_created_at,
+                head_id=head_id,
+                complete=finished,
+            ))
+            if finished:
                 return
+
+    def _backfill_newer(
+        self,
+        event_store: Any,
+        after_created_at: str,
+        after_id: int,
+        indexed_event_ids: set[int],
+    ) -> tuple[str, int] | None:
+        """Index incidents admitted after the saved head. Return the new head."""
+        newest = (after_created_at, after_id)
+        before_created_at: str | None = None
+        before_id: int | None = None
+        first_page = True
+        since = getattr(event_store, "recent_compact_since", None)
+        if not callable(since):
+            raise RuntimeError("event store cannot page incidents newer than the semantic cursor")
+        while not self._stop.is_set():
+            rows = since(
+                self.config.backfill_batch_size,
+                after_created_at,
+                after_id,
+                before_created_at,
+                before_id,
+            )
+            if not rows:
+                return newest
+            if first_page:
+                newest = (str(rows[0].get("created_at") or ""), int(rows[0].get("id") or 0))
+                first_page = False
+            tokens = self._consume_backfill_rows(event_store, rows, indexed_event_ids)
+            if tokens is None or not self._finish_history_page(tokens):
+                return None
+            if len(rows) < self.config.backfill_batch_size:
+                return newest
+            last = rows[-1]
+            before_created_at = str(last.get("created_at") or "")
+            before_id = int(last.get("id") or 0)
+        return None
+
+    def _consume_backfill_rows(
+        self,
+        event_store: Any,
+        rows: list[dict[str, Any]],
+        indexed_event_ids: set[int],
+    ) -> list[_SemanticEventRevision] | None:
+        tokens: list[_SemanticEventRevision] = []
+        for event in reversed(rows):
+            if self._stop.is_set():
+                return None
+            event_id = int(event.get("id") or 0)
+            has_scene = getattr(event_store, "scene_has_search_observation", None)
+            scene_present = has_scene(event_id) if callable(has_scene) else next(self._scene_observations(event_id), None) is not None
+            if not semantic_event_searchable(event) and not scene_present:
+                if event_id > 0 and event_id in indexed_event_ids:
+                    # Resolve current evidence before acting on a historical snapshot.
+                    self.index_event(event)
+                    indexed_event_ids.discard(event_id)
+                continue
+            if self.encoder and self.projection_current(event):
+                continue
+            while not self._stop.is_set():
+                if not self._history_queue_has_capacity():
+                    self._stop.wait(0.1)
+                    continue
+                queued = self._revision_event(event)
+                revision = queued.get("_semantic_revision")
+                if isinstance(revision, _SemanticEventRevision):
+                    revision.outcome = ""
+                    revision.historical = True
+                    revision.pending = True
+                try:
+                    self._queue.put(
+                        (1, next(self._queue_sequence), queued),
+                        timeout=0.5,
+                    )
+                except queue.Full:
+                    if isinstance(revision, _SemanticEventRevision):
+                        revision.pending = False
+                    continue
+                if isinstance(revision, _SemanticEventRevision):
+                    tokens.append(revision)
+                break
+            else:
+                return None
+        return tokens
 
     def _revision_event(self, event: dict[str, Any], *, refresh: bool = False) -> dict[str, Any]:
         with self._event_revision_lock:
@@ -1751,16 +2148,20 @@ class SemanticSearchService(DisabledSemanticSearch):
                 continue
             if event is None:
                 break
+            revision = event.get("_semantic_revision")
             try:
                 self.index_event(event)
                 self._error = ""
+                if isinstance(revision, _SemanticEventRevision):
+                    revision.outcome = "done"
                 if priority > 0:
                     self._stop.wait(self.config.backfill_pause_seconds)
             except Exception as exc:
                 self._error = str(exc)
+                if isinstance(revision, _SemanticEventRevision):
+                    revision.outcome = "failed"
                 LOGGER.warning("semantic indexing failed for event %s: %s", event.get("id"), exc)
             finally:
-                revision = event.get("_semantic_revision")
                 if isinstance(revision, _SemanticEventRevision):
                     revision.pending = False
 
