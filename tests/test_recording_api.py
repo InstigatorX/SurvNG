@@ -81,6 +81,7 @@ class RecordingApiTest(unittest.TestCase):
             "start_epoch": 100.0,
             "end_epoch": 110.0,
         }]
+        recorder.acquire_recording_for_playback.return_value = "lease-1"
         manager = SimpleNamespace(
             camera=lambda camera_id: object() if camera_id == "gate" else None,
             recorder=recorder,
@@ -95,9 +96,13 @@ class RecordingApiTest(unittest.TestCase):
                 "gate", 105.0, "live", active_manager=manager
             )
 
-        self.assertEqual(result, expected)
+        self.assertEqual(result.path, expected)
+        self.assertEqual(result.lease_token, "lease-1")
         recorder.recording_rows_between.assert_called_once_with(
             "gate", 104.999, 105.001, "live", discover_missing=False
+        )
+        recorder.acquire_recording_for_playback.assert_called_once_with(
+            recorder.recording_rows_between.return_value[0]
         )
         storage_path.assert_called_once_with(
             "/recordings/gate/segment.mp4", active_manager=manager

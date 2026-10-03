@@ -480,7 +480,7 @@ class CameraWorker:
                 self.motion_object_detector, "recorded_evidence_ready_at", None,
             ),
             scene_analysis_pending=self.tracking_lifecycle.scene_work_pending,
-            close_out_scene_analysis=self.tracking_lifecycle.close_out_scene_work,
+            close_out_scene_analysis=self.tracking_lifecycle.abort_scene_work,
             has_trackable_objects=self.tracking_lifecycle.has_trackable_objects,
             start_tracking=self.tracking_lifecycle.start_incident,
             prewarm_tracking=self.tracking_lifecycle.prewarm,

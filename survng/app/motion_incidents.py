@@ -1155,7 +1155,14 @@ class MotionIncidentService:
             LOGGER.info("finished pending detection work for %s", self.camera_id)
             return True
         detections = self.discard_queued_work("camera_disabled")
-        scenes = self.close_out_scene_analysis("camera_disabled") if self.close_out_scene_analysis else 0
+        try:
+            scenes = self.close_out_scene_analysis("camera_disabled") if self.close_out_scene_analysis else 0
+        except RuntimeError:
+            LOGGER.exception(
+                "could not stop active recorded tracking for %s; durable scene jobs remain open",
+                self.camera_id,
+            )
+            return False
         LOGGER.warning(
             "closed out %d detection and %d recorded tracking job(s) for %s; "
             "detection was off longer than the drain limit",

@@ -846,37 +846,48 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         active_manager = _require_recording_camera(deps, camera_id)
         if not math.isfinite(epoch) or epoch <= 0:
             raise HTTPException(status_code=400, detail="invalid recording segment time")
-        path = deps.recording_segment_path(
+        leased = deps.recording_segment_path(
             active_manager,
             camera_id,
             epoch,
             recording_source(source),
         )
-        if mobile:
-            # Transcode exactly this segment, retaining mobile codec compatibility
-            # without concatenating across wall-clock gaps.
-            rows = active_manager.recorder.recording_rows_between(
-                camera_id, epoch, epoch + 0.001, recording_source(source), discover_missing=False,
+        path = getattr(leased, "path", leased)
+        lease_token = getattr(leased, "lease_token", None)
+        source_path = path
+        release = getattr(active_manager.recorder, "release_recording_playback", None)
+        try:
+            if mobile:
+                # Transcode exactly this segment, retaining mobile codec compatibility
+                # without concatenating across wall-clock gaps.
+                rows = active_manager.recorder.recording_rows_between(
+                    camera_id, epoch, epoch + 0.001, recording_source(source), discover_missing=False,
+                )
+                row = next((row for row in rows if Path(str(row["path"])).resolve() == path.resolve()), None)
+                if row is None:
+                    raise HTTPException(status_code=404, detail="recording segment metadata is unavailable")
+                start = float(row["start_epoch"])
+                path = deps.ensure_event_clip(
+                    active_manager,
+                    {"id": int(start * 1000), "camera_id": camera_id,
+                     "created_at": datetime.fromtimestamp(start, timezone.utc).isoformat(),
+                     "_recording_rows": [row]},
+                    before=0.0, after=float(row["end_epoch"]) - start,
+                    source=recording_source(source),
+                )
+            background = BackgroundTask(release, lease_token) if callable(release) and lease_token else None
+            # FileResponse provides byte-range requests needed by native MP4 seeking.
+            # Do not use the fMP4 cache response helper: this is the source recording.
+            return FileResponse(
+                path,
+                media_type="video/mp4",
+                headers={"Cache-Control": "private, max-age=3600"},
+                background=background,
             )
-            row = next((row for row in rows if Path(str(row["path"])).resolve() == path.resolve()), None)
-            if row is None:
-                raise HTTPException(status_code=404, detail="recording segment metadata is unavailable")
-            start = float(row["start_epoch"])
-            path = deps.ensure_event_clip(
-                active_manager,
-                {"id": int(start * 1000), "camera_id": camera_id,
-                 "created_at": datetime.fromtimestamp(start, timezone.utc).isoformat(),
-                 "_recording_rows": [row]},
-                before=0.0, after=float(row["end_epoch"]) - start,
-                source=recording_source(source),
-            )
-        # FileResponse provides byte-range requests needed by native MP4 seeking.
-        # Do not use the fMP4 cache response helper: this is the source recording.
-        return FileResponse(
-            path,
-            media_type="video/mp4",
-            headers={"Cache-Control": "private, max-age=3600"},
-        )
+        except Exception:
+            if callable(release) and lease_token:
+                release(lease_token)
+            raise
 
     @router.get("/api/cameras/{camera_id}/recordings/mobile-window.mp4")
     @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)

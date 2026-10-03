@@ -111,7 +111,7 @@ function App() {
   }
   const detailMatch = pathname.match(/^\/incidents\/(incident-[^/]+)\/?$/);
   if (detailMatch) {
-    return <Suspense fallback={<WorkspaceFallback />}><IncidentDetailPage incidentId={detailMatch[1]} timeZone={timeZone} /></Suspense>;
+    return <Suspense fallback={<WorkspaceFallback />}><IncidentDetailPage incidentId={detailMatch[1]} timeZone={timeZone} canCorrectIncident={!viewer} /></Suspense>;
   }
   const workspacePage = viewer && page === "admin" ? "live" : page;
   return (
@@ -128,11 +128,11 @@ function App() {
                 : workspacePage === "observations"
                   ? <ObservationsPage timeZone={timeZone} />
                   : workspacePage === "incidents"
-                  ? <IncidentsPage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
+                  ? <IncidentsPage timeZone={timeZone} canCorrectIncident={!viewer} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
                   : workspacePage === "people"
                     ? <FacesPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
                     : workspacePage === "live"
-                      ? <LivePage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
+                      ? <LivePage timeZone={timeZone} canCorrectIncident={!viewer} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
                       : <main className="workspace-not-found"><CircleAlert size={30} /><h2>Page not found</h2><p>This SurvNG workspace does not exist.</p><a className="nav-button" href={appUrl("/")}>Return to Live</a></main>}
       </Suspense>
       {viewer ? null : <AssistantPanel pageContext={{ ...assistantContext, page: workspacePage }} timeZone={timeZone} askRequest={assistantAsk} onAskRequestHandled={() => setAssistantAsk(null)} />}

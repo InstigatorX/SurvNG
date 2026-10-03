@@ -888,6 +888,41 @@ class RecorderTest(unittest.TestCase):
             self.assertFalse(deleted)
             self.assertTrue(clip.exists())
 
+    def test_active_playback_lease_is_reference_counted_and_released(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "recordings" / "gate" / "main" / "clip.mp4"
+            clip.parent.mkdir(parents=True)
+            clip.write_bytes(b"recording")
+            row = {"path": str(clip)}
+
+            first = recorder.acquire_recording_for_playback(row)
+            second = recorder.acquire_recording_for_playback(row)
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            self.assertNotEqual(second, first)
+            recorder.release_recording_playback(first)
+            self.assertFalse(recorder._delete_recording_for_retention(clip))
+            # A late duplicate release cannot revoke the newer holder.
+            recorder.release_recording_playback(first)
+            self.assertFalse(recorder._delete_recording_for_retention(clip))
+            recorder.release_recording_playback(second)
+            self.assertTrue(recorder._delete_recording_for_retention(clip))
+
+    def test_abandoned_active_playback_lease_expires(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "recordings" / "gate" / "main" / "clip.mp4"
+            clip.parent.mkdir(parents=True)
+            clip.write_bytes(b"recording")
+            with patch("survng.app.recording_process.index.time.monotonic", return_value=100.0):
+                token = recorder.acquire_recording_for_playback(
+                    {"path": str(clip)}, ttl_seconds=60,
+                )
+            self.assertIsNotNone(token)
+            with patch("survng.app.recording_process.index.time.monotonic", return_value=161.0):
+                self.assertTrue(recorder._delete_recording_for_retention(clip))
+
     def test_manifest_validation_removes_missing_rows_from_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)

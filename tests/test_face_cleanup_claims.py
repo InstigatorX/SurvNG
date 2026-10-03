@@ -326,6 +326,32 @@ def test_claimed_refinement_preserves_live_event_without_replacement_side_effect
     assert faces.observation_count() == 0
 
 
+def test_claimed_cover_only_observation_never_adopts_claimed_or_old_image(tmp_path):
+    events, faces = stores(tmp_path)
+    old = snapshot(tmp_path, "old-cover")
+    existing = events.add_event(
+        camera_id="gate", kind="motion", snapshot_path=str(old),
+        objects_json=json.dumps([{"label": "car", "confidence": .8, "box": BOX}]),
+    )
+    handler, _published, _writer, _sink, _independent = claimed_snapshot_handler(
+        tmp_path, events, faces,
+    )
+
+    handler.refine(
+        "onvif/motion", "motion", datetime.fromisoformat(STAMP),
+        {"cover_only": True}, existing_event_id=existing["id"],
+    )
+
+    with events._connect() as connection:
+        person_rows = connection.execute(
+            "select snapshot_path from scene_observations where event_id=? "
+            "and json_extract(payload_json,'$.label')='person'",
+            (existing["id"],),
+        ).fetchall()
+    assert person_rows
+    assert {row[0] for row in person_rows} == {""}
+
+
 def test_claimed_new_event_publishes_empty_snapshot_without_tracking_seeds(tmp_path):
     events, faces = stores(tmp_path)
     handler, published, writer, sink, independent = claimed_snapshot_handler(tmp_path, events, faces)

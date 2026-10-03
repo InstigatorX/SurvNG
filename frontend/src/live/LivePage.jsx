@@ -805,7 +805,7 @@ export function LiveCommandBar({ cameras = [], focusedCameraId = "", onFocusedCa
   );
 }
 
-export function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange }) {
+export function LivePage({ timeZone, canCorrectIncident = false, onRecordingContextChange, onAssistantContextChange }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
   const liveItems = useMemo(() => liveItemsWithWeather(cameras, appConfig?.weather), [cameras, appConfig?.weather]);
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? false;
@@ -839,6 +839,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
     setIncidentDetails,
     incidentSelectionRequestRef,
     selectedEvent,
+    setSelectedEvent,
     openIncidentOverlay,
     closeIncidentOverlay,
   } = useIncidentDetails();
@@ -1385,16 +1386,22 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
     setIncidentRefreshToken((value) => value + 1);
   }
 
-  useAppEvents(({ type }) => {
-    if (type !== "incident" || incidentPage !== 0 || document.hidden) return;
+  useAppEvents(({ type, data }) => {
+    if (type !== "incident" && type !== "resync") return;
+    const forceReconcile = type === "resync" || data?.reason === "operator_correction";
+    if (!forceReconcile && (incidentPage !== 0 || document.hidden)) return;
     window.clearTimeout(incidentEventRefreshTimer.current);
     incidentEventRefreshTimer.current = window.setTimeout(() => {
       incidentEventRefreshTimer.current = null;
       incidentFeedCacheRef.current.clear();
-      if (focusedDetailQuery) {
-        incidentDetailCacheRef.current.invalidate(focusedDetailQuery);
-        incidentDetailCacheRef.current.load(focusedDetailQuery).then((detail) => {
-          setIncidentDetails((current) => ({ ...current, [focusedDetailQuery]: detail }));
+      const selections = [[focusedSummary, null], [selectedEvent, setSelectedEvent]];
+      for (const [selection, setSelection] of selections) {
+        const query = incidentDetailQuery(selection);
+        if (!query) continue;
+        incidentDetailCacheRef.current.invalidate(query);
+        incidentDetailCacheRef.current.load(query).then((detail) => {
+          setIncidentDetails((current) => ({ ...current, [query]: detail }));
+          setSelection?.((current) => incidentDetailQuery(current) === query ? detail : current);
         }).catch(() => {
           // Keep the existing detail visible; the next event or fallback poll retries.
         });
@@ -1653,7 +1660,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
           <a href={appUrl("/incidents")}>View all incidents <ChevronRight size={14} /></a>
         </div>
       </section> : null}
-      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refreshIncidents} /> : null}
+      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} canCorrectIncident={canCorrectIncident} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refreshIncidents} /> : null}
       {expandedCamera ? (
         <LiveCameraOverlay
           camera={expandedCamera}

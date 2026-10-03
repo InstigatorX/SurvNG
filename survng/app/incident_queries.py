@@ -705,7 +705,12 @@ def create_incident_query_router(
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             except (ValueError, TypeError) as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
-            active.state_events.publish("incident_updated", {"incident_id": result["id"], "revision": result["revision"]})
+            active.state_events.publish("incident", {
+                "incident_id": result["id"],
+                "revision": result["revision"],
+                "updated": True,
+                "reason": "operator_correction",
+            })
             return service.with_faces(active, [result])[0]
         return with_manager(correct)
 

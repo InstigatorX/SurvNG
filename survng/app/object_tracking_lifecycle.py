@@ -62,6 +62,12 @@ class ObjectTrackingLifecycle:
         self.scene_context_memory = None
         self.activity_attributor = None
         self._scene_lease_owner = uuid.uuid4().hex
+        # Terminal drain owns scene admission until detection is explicitly
+        # enabled again. This fences a resume racing the stop/join window.
+        self._scene_abort_in_progress = False
+        self._scene_abort_waiting = False
+        self._scene_abort_failed = False
+        self._scene_reenable_pending = False
         self._session = self.create(factory)
 
     def current(self) -> ObjectTrackingSession:
@@ -124,6 +130,8 @@ class ObjectTrackingLifecycle:
             session = self._session
             trackable = self._trackable_objects(session, objects)
             if self.scene_job_store is not None and session.config.enabled:
+                if self._scene_abort_in_progress:
+                    return None
                 start, end = (
                     session.window_provider(event_id, event_at)
                     if session.window_provider is not None
@@ -149,6 +157,8 @@ class ObjectTrackingLifecycle:
         if self.scene_job_store is None:
             return False
         with self.lifecycle_lock:
+            if self._scene_abort_in_progress:
+                return False
             session = self._session
             live = self.accepting()
             cutoff = None if live else self.drain_cutoff()
@@ -185,6 +195,16 @@ class ObjectTrackingLifecycle:
     def sync_accepting(self) -> None:
         with self.lifecycle_lock:
             accepting = self.accepting()
+            if self._scene_abort_in_progress and self._scene_abort_waiting:
+                self._scene_reenable_pending = accepting
+            if accepting:
+                if self._scene_abort_in_progress and self._scene_abort_waiting:
+                    return
+                if self._scene_abort_failed:
+                    raise RuntimeError(
+                        f"cannot re-enable scene work after tracking stop failed for {self.camera.id}"
+                    )
+                self._scene_abort_in_progress = False
             self._session.set_accepting(accepting)
             if accepting and self.scene_job_store is not None:
                 self.scene_job_store.clear_scene_tracking_limit(self.camera.id)
@@ -199,6 +219,41 @@ class ObjectTrackingLifecycle:
         if self.scene_job_store is None:
             return 0
         return int(self.scene_job_store.close_scene_tracking(self.camera.id, reason))
+
+    def abort_scene_work(self, reason: str, timeout: float = 10.0) -> int:
+        """Stop active compute before terminalizing its durable scene jobs."""
+        if self.scene_job_store is None:
+            return 0
+        with self.lifecycle_lock:
+            self._scene_abort_in_progress = True
+            self._scene_abort_waiting = True
+            self._scene_abort_failed = False
+            session = self._session
+            session.request_stop()
+        # Do not hold the camera lifecycle lock while the worker joins. Session
+        # completion may need to publish its final checkpoint through the camera.
+        if not session.wait_stopped(max(0.0, float(timeout))):
+            with self.lifecycle_lock:
+                self._scene_abort_waiting = False
+                self._scene_abort_failed = True
+            raise RuntimeError(
+                f"object tracking session did not stop before closing scene work for {self.camera.id}"
+            )
+        with self.lifecycle_lock:
+            self._scene_abort_waiting = False
+            self._scene_abort_failed = False
+            accepting = self.accepting()
+            self._scene_reenable_pending = False
+            if accepting:
+                self._scene_abort_in_progress = False
+                session.set_accepting(True)
+                self.scene_job_store.clear_scene_tracking_limit(self.camera.id)
+                return 0
+            if self._session is not session:
+                raise RuntimeError(
+                    f"object tracking session changed while closing scene work for {self.camera.id}"
+                )
+            return int(self.scene_job_store.close_scene_tracking(self.camera.id, reason))
 
     def pause(self) -> None:
         with self.lifecycle_lock:

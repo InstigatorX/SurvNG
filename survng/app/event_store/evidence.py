@@ -29,6 +29,8 @@ class EventStoreEvidenceMixin:
             columns = {row["name"] for row in conn.execute("pragma table_info(events)")}
             if "evidence_revision" not in columns:
                 conn.execute("alter table events add column evidence_revision integer not null default 0")
+            if "scene_media_revision" not in columns:
+                conn.execute("alter table events add column scene_media_revision integer not null default 0")
             conn.executescript("""
                 create table if not exists event_cover_requirements (
                     event_id integer primary key references events(id) on delete cascade,
@@ -70,12 +72,25 @@ class EventStoreEvidenceMixin:
 
     def _evidence_outbox(self, conn, row, kind, **extra) -> None:
         payload = {"event_id": int(row["id"]), "camera_id": row["camera_id"],
-                   "evidence_revision": int(row["evidence_revision"]), **extra}
-        conn.execute(
+                   "evidence_revision": int(row["evidence_revision"]),
+                   "scene_media_revision": int(row["scene_media_revision"] or 0),
+                   **extra}
+        inserted = conn.execute(
             "insert or ignore into event_evidence_outbox "
             "(event_id,evidence_revision,kind,payload_json,created_at) values(?,?,?,?,?)",
             (row["id"], row["evidence_revision"], kind, json.dumps(payload), time.time()),
         )
+        if not inserted.rowcount and kind == "evidence_updated":
+            # Scene media can advance without changing the event evidence
+            # revision. Refresh the coalesced obligation instead of losing the
+            # newer wake-up behind its still-pending predecessor.
+            conn.execute(
+                "update event_evidence_outbox set payload_json=?,created_at=?,publication_done=0 "
+                "where event_id=? and evidence_revision=? and kind=? and "
+                "coalesce(json_extract(payload_json,'$.scene_media_revision'),0)<?",
+                (json.dumps(payload), time.time(), row["id"], row["evidence_revision"],
+                 kind, int(row["scene_media_revision"] or 0)),
+            )
 
     def _admit_event_evidence(self, conn, event_id: int) -> None:
         conn.execute("update events set evidence_revision=1 where id=?", (event_id,))
@@ -251,8 +266,17 @@ class EventStoreEvidenceMixin:
             result.append(item)
         return result
 
-    def acknowledge_evidence_update(self, outbox_id: int) -> bool:
+    def acknowledge_evidence_update(
+        self, outbox_id: int, *, expected_scene_media_revision: int | None = None,
+    ) -> bool:
         with self._lock, self._connect() as conn:
+            if expected_scene_media_revision is not None:
+                current = conn.execute(
+                    "select e.scene_media_revision from event_evidence_outbox o "
+                    "join events e on e.id=o.event_id where o.id=?", (outbox_id,),
+                ).fetchone()
+                if current is None or int(current[0] or 0) != int(expected_scene_media_revision):
+                    return False
             return conn.execute("delete from event_evidence_outbox where id=?", (outbox_id,)).rowcount == 1
 
     def record_evidence_attempt(self, event_id: int, summary: dict[str, Any]) -> None:
@@ -332,18 +356,27 @@ class EventStoreEvidenceMixin:
                 areas.append(width * height)
         return max(areas, default=0)
 
-    def mark_evidence_publication(self, outbox_ids: list[int]) -> bool:
+    def mark_evidence_publication(
+        self, outbox_ids: list[int], *,
+        expected_scene_media_revisions: dict[int, int] | None = None,
+    ) -> bool:
         ids = sorted({int(value) for value in outbox_ids})
         if not ids:
             return False
         changed = 0
         with self._lock, self._connect() as conn:
-            for offset in range(0, len(ids), 500):
-                chunk = ids[offset:offset + 500]
-                placeholders = ",".join("?" for _ in chunk)
+            for outbox_id in ids:
+                expected = (expected_scene_media_revisions or {}).get(outbox_id)
+                if expected is not None:
+                    current = conn.execute(
+                        "select e.scene_media_revision from event_evidence_outbox o "
+                        "join events e on e.id=o.event_id where o.id=?", (outbox_id,),
+                    ).fetchone()
+                    if current is None or int(current[0] or 0) != int(expected):
+                        continue
                 changed += conn.execute(
-                    "update event_evidence_outbox set publication_done=1 "
-                    f"where id in({placeholders})", chunk,
+                    "update event_evidence_outbox set publication_done=1 where id=?",
+                    (outbox_id,),
                 ).rowcount
         return changed == len(ids)
 

@@ -72,6 +72,41 @@ def test_weekly_pass_is_preferred_when_both_are_due():
     assert due_pass(now, "weekly", now - timedelta(hours=1), now - timedelta(hours=1)) is None
 
 
+def test_failed_system_run_does_not_advance_cadence() -> None:
+    from survng.app.intelligence_routes import IntelligenceService
+
+    runs = [
+        {"mode": "system_weekly", "status": "failed", "created_at": "2026-09-28T00:00:00+00:00"},
+        {"mode": "system_weekly", "status": "completed", "created_at": "2026-09-20T00:00:00+00:00",
+         "completed_at": "2026-09-21T00:00:00+00:00"},
+    ]
+    assert IntelligenceService._latest_system_run(runs, "system_weekly") == datetime(2026, 9, 21, tzinfo=timezone.utc)
+    assert IntelligenceService._latest_system_run(runs[:1], "system_weekly") is None
+
+
+def test_failed_system_run_has_a_bounded_retry_backoff() -> None:
+    from survng.app.intelligence_routes import IntelligenceService
+
+    now = datetime(2026, 9, 28, 1, 0, tzinfo=timezone.utc)
+    runs = [{
+        "mode": "system_weekly",
+        "status": "failed",
+        "created_at": "2026-09-28T00:30:00+00:00",
+    }]
+    assert IntelligenceService._system_retry_blocked(
+        runs, "system_weekly", now,
+    )
+    assert not IntelligenceService._system_retry_blocked(
+        runs, "system_weekly", now + timedelta(minutes=31),
+    )
+
+
+def test_system_review_requires_explicit_opt_in() -> None:
+    from survng.app.config import AppConfig
+
+    assert AppConfig().system_review.cadence == "off"
+
+
 def test_stored_signals_survive_a_database_without_scene_tables():
     import sqlite3
 

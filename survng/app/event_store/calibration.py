@@ -98,15 +98,32 @@ class EventStoreCalibrationMixin:
         limit: int = 20,
         *,
         include_result: bool = False,
+        mode: str | None = None,
+        mode_prefix: str | None = None,
+        statuses: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         columns = "*" if include_result else """
             id, status, mode, camera_ids_json, configuration_fingerprint,
             error, created_at, updated_at, completed_at
         """
+        where: list[str] = []
+        args: list[Any] = []
+        if mode is not None:
+            where.append("mode = ?")
+            args.append(str(mode))
+        elif mode_prefix is not None:
+            where.append("mode like ?")
+            args.append(f"{mode_prefix}%")
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            where.append(f"status in ({placeholders})")
+            args.extend(sorted(statuses))
+        predicate = f" where {' and '.join(where)}" if where else ""
         with self._connect() as conn:
             rows = conn.execute(
-                f"select {columns} from calibration_runs order by created_at desc, id desc limit ?",
-                (max(1, min(int(limit), 100)),),
+                f"select {columns} from calibration_runs{predicate} "
+                "order by created_at desc, id desc limit ?",
+                (*args, max(1, min(int(limit), 100))),
             ).fetchall()
         return [item for row in rows if (item := self._calibration_run_row(row))]
 

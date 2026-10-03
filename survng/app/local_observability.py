@@ -174,7 +174,11 @@ def _motion_snapshot(raw: object, incidents: dict[str, Any]) -> dict[str, Any] |
             ),
             "store_lock_wait": _numeric_table(
                 incidents.get("store_lock_wait"),
-                ("acquisitions", "contended", "wait_total_ms", "wait_p50_ms", "wait_p95_ms", "wait_p99_ms"),
+                (
+                    "acquisitions", "contended", "wait_total_ms",
+                    "wait_p50_ms", "wait_p95_ms", "wait_p99_ms",
+                    "hold_p50_ms", "hold_p95_ms", "hold_p99_ms",
+                ),
             ),
             "scene_discovery": _numeric_fields(
                 incidents.get("scene_discovery"),

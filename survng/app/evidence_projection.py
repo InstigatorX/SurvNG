@@ -35,7 +35,7 @@ class EvidenceProjection:
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
         self._run_lock = threading.Lock()
-        self._retry_at: OrderedDict[tuple[int, int, int], float] = OrderedDict()
+        self._retry_at: OrderedDict[tuple[int, int, int, int], float] = OrderedDict()
         self._delivery: OrderedDict[int, tuple[tuple, bool, bool]] = OrderedDict()
         self._next_error_log = 0.0
         self._cursor = 0
@@ -82,7 +82,10 @@ class EvidenceProjection:
             return True
         if callable(getattr(semantic, "projection_pending", None)) and semantic.projection_pending(event):
             return False
-        key = (int(event["id"]), int(event.get("evidence_revision") or 0), id(semantic))
+        key = (
+            int(event["id"]), int(event.get("evidence_revision") or 0),
+            int(event.get("scene_media_revision") or 0), id(semantic),
+        )
         if now < self._retry_at.get(key, 0):
             return False
         # Same-revision submissions reuse a pending token. A failed enqueue or
@@ -95,6 +98,12 @@ class EvidenceProjection:
         """Process one bounded batch; safe to invoke directly in focused tests."""
         with self._run_lock:
             now = time.monotonic()
+            project_context = getattr(self.events, "project_pending_scene_context", None)
+            if callable(project_context):
+                try:
+                    project_context()
+                except Exception:
+                    self._log_failure()
             if now >= self._next_expiry:
                 self._next_expiry = now + 30.0
                 for name in ("expire_cover_requirements",):
@@ -135,14 +144,27 @@ class EvidenceProjection:
                         event_id, semantic, needs_semantic, metadata_token, publication_needed,
                     )
                     if publication_needed and published:
-                        if not self.events.mark_evidence_publication([int(row["id"]) for row in updates]):
+                        if not self.events.mark_evidence_publication(
+                            [int(row["id"]) for row in updates],
+                            expected_scene_media_revisions={
+                                int(row["id"]): int(row.get("payload", {}).get("scene_media_revision") or 0)
+                                for row in updates
+                                if row["kind"] == "evidence_updated" and "payload" in row
+                            },
+                        ):
                             continue
                     if not current or not published:
                         continue
                     for row in updates:
                         # A later revision has its own entry; never acknowledge
                         # a broad range containing work this batch did not read.
-                        acknowledged += bool(self.events.acknowledge_evidence_update(int(row["id"])))
+                        acknowledged += bool(self.events.acknowledge_evidence_update(
+                            int(row["id"]),
+                            expected_scene_media_revision=(
+                                int(row.get("payload", {}).get("scene_media_revision") or 0)
+                                if row["kind"] == "evidence_updated" and "payload" in row else None
+                            ),
+                        ))
                 except Exception:
                     self._log_failure()
             return acknowledged
@@ -155,6 +177,7 @@ class EvidenceProjection:
         if event is None:
             return True, True
         revision = int(event.get("evidence_revision") or 0)
+        scene_revision = int(event.get("scene_media_revision") or 0)
         semantic_current = not needs_semantic
         if needs_semantic:
             try:
@@ -166,14 +189,20 @@ class EvidenceProjection:
         latest = self.events.get(event_id)
         if latest is None:
             return True, True
-        if int(latest.get("evidence_revision") or 0) != revision:
+        if (
+            int(latest.get("evidence_revision") or 0) != revision
+            or int(latest.get("scene_media_revision") or 0) != scene_revision
+        ):
             return False, False
         if not publication_needed:
             return semantic_current, True
         requirement = latest.get("cover_requirement") or {}
         delivered_identity, notified, published = self._delivery.get(event_id, ((), False, False))
         metadata_token = max(metadata_token, int(delivered_identity[-1]) if delivered_identity else 0)
-        identity = (revision, requirement.get("state"), requirement.get("reason"), requirement.get("attempts"), metadata_token)
+        identity = (
+            revision, scene_revision, requirement.get("state"),
+            requirement.get("reason"), requirement.get("attempts"), metadata_token,
+        )
         if delivered_identity != identity:
             notified = published = False
         camera_id = str(latest.get("camera_id") or "")
@@ -185,6 +214,7 @@ class EvidenceProjection:
             message = self.state_events.publish("incident", {
                 "event_id": event_id, "camera_id": camera_id,
                 "evidence_revision": revision, "updated": True,
+                "scene_media_revision": scene_revision,
                 "reason": "evidence_updated" if needs_semantic else "incident_metadata_updated",
                 "cover_requirement": latest.get("cover_requirement"),
             })

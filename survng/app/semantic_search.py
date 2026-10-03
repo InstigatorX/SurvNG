@@ -33,6 +33,8 @@ SEMANTIC_WORKER_CONFIGURED_DEVICE_ATTEMPTS = 2
 SEMANTIC_WORKER_FALLBACK_DELAY_SECONDS = 1.0
 MODEL_FINGERPRINT_CHUNK_SIZE = 1024 * 1024
 SEMANTIC_BACKFILL_RETRY_SECONDS = 5.0
+SEMANTIC_MEDIA_QUARANTINE_ATTEMPTS = 3
+SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS = 15 * 60.0
 
 
 class SemanticInferenceError(RuntimeError):
@@ -299,12 +301,18 @@ class SemanticIndex:
     @staticmethod
     def _event_matches(connection: sqlite3.Connection, event: dict[str, Any]) -> bool:
         columns = {row[1] for row in connection.execute("pragma table_info(events)")}
-        guarded = [name for name in ("evidence_revision", "snapshot_path") if name in columns]
+        guarded = [
+            name for name in
+            ("evidence_revision", "scene_media_revision", "snapshot_path")
+            if name in columns
+        ]
         row = connection.execute(
             f"select {','.join(['id', *guarded])} from events where id = ?", (int(event["id"]),),
         ).fetchone()
         return row is not None and all(
-            row[name] == event.get(name, 0 if name == "evidence_revision" else "")
+            row[name] == event.get(
+                name, 0 if name in {"evidence_revision", "scene_media_revision"} else "",
+            )
             for name in guarded
         )
 
@@ -416,6 +424,18 @@ class SemanticIndex:
                     head_id integer,
                     complete integer not null default 0,
                     primary key (model_fingerprint, preprocessing_fingerprint)
+                )
+            """)
+            connection.execute("""
+                create table if not exists semantic_media_failures (
+                    event_id integer not null references events(id) on delete cascade,
+                    model_fingerprint text not null,
+                    preprocessing_fingerprint text not null,
+                    failure_count integer not null default 0,
+                    last_error text not null default '',
+                    last_attempt_at real not null,
+                    next_attempt_at real not null,
+                    primary key(event_id,model_fingerprint,preprocessing_fingerprint)
                 )
             """)
 
@@ -886,6 +906,31 @@ class SemanticIndex:
             ).fetchall()
         return {(str(row["observation_id"]), str(row["image_path"])) for row in rows}
 
+    def reconcile_observation_keys(
+        self, event: dict[str, Any], identity: SemanticModelIdentity,
+        desired: set[tuple[str, str]],
+    ) -> int:
+        """Delete retired observation vectors under the event revision guard."""
+        event_id = int(event.get("id") or 0)
+        with self._lock, self._connect() as connection:
+            connection.execute("begin immediate")
+            if not self._event_matches(connection, event):
+                return 0
+            rows = connection.execute(
+                "select id,observation_id,image_path from semantic_embeddings "
+                "where event_id=? and model_fingerprint=? and preprocessing_fingerprint=? "
+                "and observation_id!=''",
+                (event_id, identity.model_fingerprint, identity.preprocessing_fingerprint),
+            ).fetchall()
+            retired = [
+                int(row["id"]) for row in rows
+                if (str(row["observation_id"]), str(row["image_path"])) not in desired
+            ]
+            connection.executemany(
+                "delete from semantic_embeddings where id=?", ((row_id,) for row_id in retired),
+            )
+        return len(retired)
+
     def indexed_event_ids(self) -> set[int]:
         """Return event IDs with any semantic evidence, across model generations."""
         with self._connect() as connection:
@@ -895,20 +940,22 @@ class SemanticIndex:
         return {int(row["event_id"]) for row in rows}
 
     def resolve_model_identity(self, model_dir: Path, manifest: dict[str, Any]) -> SemanticModelIdentity:
-        """Reuse the generation whose image tower matches this package.
+        """Reuse the generation whose declared joint embedding space matches.
 
-        An index built by the previous whole-directory fingerprint stays on
-        that fingerprint when its image encoder still matches. A later extra
-        file in the package does not encode the history again.
+        Packages may explicitly declare a stable ``embedding_space_id``. When
+        they do not, both towers and the tokenizer are part of the contract so
+        text vectors are never compared with incompatible stored image vectors.
         """
-        contract = semantic_image_contract(model_dir, manifest)
+        contract = semantic_embedding_contract(model_dir, manifest)
         bound = self._generation_source(contract)
         if bound is not None:
             return bound
         fresh = SemanticModelIdentity(
             _semantic_implementation(manifest),
             contract,
-            _preprocessing_fingerprint(manifest, include_text=False),
+            _preprocessing_fingerprint(
+                manifest, include_text=not bool(str(manifest.get("embedding_space_id") or "").strip())
+            ),
             _semantic_dimensions(manifest),
         )
         chosen = fresh
@@ -1041,6 +1088,61 @@ class SemanticIndex:
                 ),
             )
 
+    def record_media_failure(
+        self, identity: SemanticModelIdentity, event_id: int, error: BaseException,
+    ) -> bool:
+        now = time.time()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                insert into semantic_media_failures(
+                    event_id,model_fingerprint,preprocessing_fingerprint,
+                    failure_count,last_error,last_attempt_at,next_attempt_at
+                ) values(?,?,?,?,?,?,?)
+                on conflict(event_id,model_fingerprint,preprocessing_fingerprint)
+                do update set failure_count=failure_count+1,
+                    last_error=excluded.last_error,last_attempt_at=excluded.last_attempt_at,
+                    next_attempt_at=excluded.next_attempt_at
+                """,
+                (int(event_id), identity.model_fingerprint, identity.preprocessing_fingerprint,
+                 1, str(error)[:500], now, now + SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS),
+            )
+            count = connection.execute(
+                "select failure_count from semantic_media_failures where event_id=? "
+                "and model_fingerprint=? and preprocessing_fingerprint=?",
+                (int(event_id), identity.model_fingerprint, identity.preprocessing_fingerprint),
+            ).fetchone()[0]
+        return int(count) >= SEMANTIC_MEDIA_QUARANTINE_ATTEMPTS
+
+    def clear_media_failure(self, identity: SemanticModelIdentity, event_id: int) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "delete from semantic_media_failures where event_id=? and model_fingerprint=? "
+                "and preprocessing_fingerprint=?",
+                (int(event_id), identity.model_fingerprint, identity.preprocessing_fingerprint),
+            )
+
+    def due_media_failures(
+        self, identity: SemanticModelIdentity, *, limit: int = 10,
+    ) -> list[int]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "select event_id from semantic_media_failures where model_fingerprint=? "
+                "and preprocessing_fingerprint=? and failure_count>=? and next_attempt_at<=? "
+                "order by next_attempt_at,event_id limit ?",
+                (identity.model_fingerprint, identity.preprocessing_fingerprint,
+                 SEMANTIC_MEDIA_QUARANTINE_ATTEMPTS, time.time(), max(1, min(100, int(limit)))),
+            ).fetchall()
+        return [int(row[0]) for row in rows]
+
+    def has_media_failures(self, identity: SemanticModelIdentity) -> bool:
+        with self._connect() as connection:
+            return connection.execute(
+                "select 1 from semantic_media_failures where model_fingerprint=? "
+                "and preprocessing_fingerprint=? limit 1",
+                (identity.model_fingerprint, identity.preprocessing_fingerprint),
+            ).fetchone() is not None
+
 
 def fingerprint_model_package(model_dir: Path) -> str:
     """Fingerprint every byte under a model directory.
@@ -1105,6 +1207,38 @@ def semantic_image_contract(model_dir: Path, manifest: dict[str, Any]) -> str:
     material = (
         f"{digest.hexdigest()}:{_preprocessing_fingerprint(manifest, include_text=False)}:"
         f"{_semantic_dimensions(manifest)}"
+    ).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()[:24]
+
+
+def semantic_embedding_contract(model_dir: Path, manifest: dict[str, Any]) -> str:
+    """Identity of the shared image/text vector space used for retrieval."""
+    image_contract = semantic_image_contract(model_dir, manifest)
+    declared = str(manifest.get("embedding_space_id") or "").strip()
+    if declared:
+        material = f"declared:{declared}:{image_contract}".encode("utf-8")
+        return hashlib.sha256(material).hexdigest()[:24]
+
+    text_spec = dict(manifest.get("text") or {})
+    text_xml = _semantic_package_path(
+        model_dir, manifest.get("text_model"), "text_encoder.xml"
+    )
+    text_bin = text_xml.with_suffix(".bin")
+    tokenizer = _semantic_package_path(
+        model_dir,
+        text_spec.get("tokenizer_path"),
+        "tokenizer/bpe_simple_vocab_16e6.txt.gz",
+    )
+    digest = hashlib.sha256()
+    for path in (text_xml, text_bin, tokenizer):
+        if not path.is_file():
+            raise RuntimeError(f"semantic text model artifact is missing: {path}")
+        _update_fingerprint(
+            digest, path.relative_to(Path(model_dir).resolve()).as_posix(), path
+        )
+    material = (
+        f"derived:{image_contract}:{digest.hexdigest()}:"
+        f"{_preprocessing_fingerprint(manifest, include_text=True)}"
     ).encode("utf-8")
     return hashlib.sha256(material).hexdigest()[:24]
 
@@ -1241,11 +1375,13 @@ def _semantic_model_identity(
     model_dir: Path,
     manifest: dict[str, Any],
 ) -> SemanticModelIdentity:
-    """New generation key: image encoder bytes and image preprocessing only."""
+    """Generation key for a compatible joint image/text embedding space."""
     return SemanticModelIdentity(
         _semantic_implementation(manifest),
-        semantic_image_contract(model_dir, manifest),
-        _preprocessing_fingerprint(manifest, include_text=False),
+        semantic_embedding_contract(model_dir, manifest),
+        _preprocessing_fingerprint(
+            manifest, include_text=not bool(str(manifest.get("embedding_space_id") or "").strip())
+        ),
         _semantic_dimensions(manifest),
     )
 
@@ -1665,6 +1801,10 @@ class _SemanticEventRevision:
     outcome: str = ""
 
 
+class SemanticMediaUnavailable(RuntimeError):
+    """A retained historical image is temporarily unavailable for projection."""
+
+
 class SemanticSearchService(DisabledSemanticSearch):
     """Low-priority asynchronous incident indexer and text search service."""
 
@@ -1843,16 +1983,45 @@ class SemanticSearchService(DisabledSemanticSearch):
         )
 
     def _run_backfill(self, event_store: Any) -> None:
-        """Retry transient index/event-store failures without losing backfill forever."""
+        """Retry transient failures and periodically revisit quarantined media."""
         while not self._stop.is_set():
             try:
+                self._retry_quarantined_media(event_store)
                 self._backfill(event_store)
-                return
+                encoder = self.encoder
+                if encoder is None or not self.index.has_media_failures(encoder.identity):
+                    return
+                if self._stop.wait(SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS):
+                    return
             except Exception as exc:
                 self._error = str(exc)
                 LOGGER.warning("semantic historical indexing interrupted: %s", exc)
                 if self._stop.wait(SEMANTIC_BACKFILL_RETRY_SECONDS):
                     return
+
+    def _retry_quarantined_media(self, event_store: Any) -> None:
+        encoder = self.encoder
+        getter = getattr(event_store, "get", None)
+        if encoder is None or not callable(getter):
+            return
+        for event_id in self.index.due_media_failures(encoder.identity):
+            if self._stop.is_set():
+                return
+            event = getter(event_id)
+            if event is None:
+                self.index.clear_media_failure(encoder.identity, event_id)
+                continue
+            queued = self._revision_event(event, refresh=True)
+            revision = queued.get("_semantic_revision")
+            if isinstance(revision, _SemanticEventRevision):
+                revision.historical = True
+            try:
+                self.index_event(queued)
+            except SemanticMediaUnavailable as exc:
+                self.index.record_media_failure(encoder.identity, event_id, exc)
+            else:
+                if self.projection_current(queued):
+                    self.index.clear_media_failure(encoder.identity, event_id)
 
     def _history_pending(self) -> bool:
         with self._event_revision_lock:
@@ -2099,6 +2268,7 @@ class SemanticSearchService(DisabledSemanticSearch):
             token = self._event_revisions.get(int(event.get("id") or 0))
             return bool(token and token.valid and token.pending
                         and token.event.get("evidence_revision", 0) == event.get("evidence_revision", 0)
+                        and token.event.get("scene_media_revision", 0) == event.get("scene_media_revision", 0)
                         and token.event.get("snapshot_path") == event.get("snapshot_path"))
 
     def _projection_plan_key(self, objects: list[dict[str, Any]]) -> str:
@@ -2154,12 +2324,22 @@ class SemanticSearchService(DisabledSemanticSearch):
                 self._error = ""
                 if isinstance(revision, _SemanticEventRevision):
                     revision.outcome = "done"
+                if self.encoder is not None and self.projection_current(event):
+                    self.index.clear_media_failure(self.encoder.identity, int(event.get("id") or 0))
                 if priority > 0:
                     self._stop.wait(self.config.backfill_pause_seconds)
             except Exception as exc:
                 self._error = str(exc)
                 if isinstance(revision, _SemanticEventRevision):
-                    revision.outcome = "failed"
+                    quarantined = bool(
+                        revision.historical
+                        and isinstance(exc, SemanticMediaUnavailable)
+                        and self.encoder is not None
+                        and self.index.record_media_failure(
+                            self.encoder.identity, int(event.get("id") or 0), exc,
+                        )
+                    )
+                    revision.outcome = "quarantined" if quarantined else "failed"
                 LOGGER.warning("semantic indexing failed for event %s: %s", event.get("id"), exc)
             finally:
                 if isinstance(revision, _SemanticEventRevision):
@@ -2179,9 +2359,15 @@ class SemanticSearchService(DisabledSemanticSearch):
                 (str(observation["id"]), str(observation.get("snapshot_path") or "")) not in indexed
                 for observation in self._scene_observations(event_id)
             )
+        current_media = {
+            (str(row["id"]), str(row.get("snapshot_path") or ""))
+            for row in media(event_id)
+        }
+        if indexed - current_media:
+            return True
         missing = [
-            str(row["id"]) for row in media(event_id)
-            if (str(row["id"]), str(row.get("snapshot_path") or "")) not in indexed
+            observation_id for observation_id, path in current_media
+            if (observation_id, path) not in indexed
         ]
         if not missing:
             return False
@@ -2220,33 +2406,49 @@ class SemanticSearchService(DisabledSemanticSearch):
                 return
             after_id = str(rows[-1]["id"])
 
-    def _index_scene_observations(self, event_id: int) -> int:
+    def _index_scene_observations(self, event: dict[str, Any], *, historical: bool = False) -> int:
         """Retain independently addressable crops within the existing worker budget."""
         encoder = self.encoder
         if encoder is None:
             return 0
+        event_id = int(event.get("id") or 0)
         identity = encoder.identity
         written = 0
         indexed = self.index.indexed_observation_keys(event_id, identity)
-        for observation in self._scene_observations(event_id):
+        observations = list(self._scene_observations(event_id))
+        desired = {
+            (str(observation["id"]), str(observation.get("snapshot_path") or ""))
+            for observation in observations
+        }
+        completed = True
+        for observation in observations:
             if self._stop.is_set():
+                completed = False
                 break
             identity_key = (str(observation["id"]), str(observation.get("snapshot_path") or ""))
             if identity_key in indexed:
                 continue
             indexed.add(identity_key)
             item = json.loads(observation["payload_json"])
-            event = {"snapshot_path": observation["snapshot_path"], "objects": [item]}
+            image_event = {"snapshot_path": observation["snapshot_path"], "objects": [item]}
             try:
                 # Load only retained evidence. A missing frame never produces
                 # a vector or a successful projection receipt.
-                path = event_snapshot_path(self._storage_dir, event, self._media_storage)
+                path = event_snapshot_path(self._storage_dir, image_event, self._media_storage)
             except (FileNotFoundError, PermissionError):
                 self._skipped_missing += 1
+                if historical:
+                    raise SemanticMediaUnavailable(
+                        f"semantic observation media is unavailable: {observation['id']}"
+                    )
                 continue
             frame = cv2.imread(str(path))
             if frame is None:
                 self._skipped_missing += 1
+                if historical:
+                    raise SemanticMediaUnavailable(
+                        f"semantic observation media is unreadable: {observation['id']}"
+                    )
                 continue
             height, width = frame.shape[:2]
             x1, y1, x2, y2 = semantic_object_bbox(item)
@@ -2264,6 +2466,7 @@ class SemanticSearchService(DisabledSemanticSearch):
             )
             with self._encoder_lock:
                 if self.encoder is not encoder:
+                    completed = False
                     break
                 embeddings = encoder.encode_images([frame[box[1]:box[3], box[0]:box[2]]])
             count = self.index.upsert([evidence], embeddings, identity, expected_observation=observation)
@@ -2272,12 +2475,19 @@ class SemanticSearchService(DisabledSemanticSearch):
             # Historical scene evidence shares the configured pacing and the
             # one semantic worker, never spawning unbounded inference work.
             if self._stop.wait(self.config.backfill_pause_seconds):
+                completed = False
                 break
+        if completed:
+            self.index.reconcile_observation_keys(event, identity, desired)
         return written
 
     def index_event(self, event: dict[str, Any]) -> int:
         written = self._index_current_event(event)
-        return written + self._index_scene_observations(int(event.get("id") or 0))
+        revision = event.get("_semantic_revision")
+        return written + self._index_scene_observations(
+            event,
+            historical=isinstance(revision, _SemanticEventRevision) and revision.historical,
+        )
 
     def _index_current_event(self, event: dict[str, Any]) -> int:
         """Synchronously index one event for tooling and the worker loop.
@@ -2330,12 +2540,20 @@ class SemanticSearchService(DisabledSemanticSearch):
                 return 0
         try:
             path = event_snapshot_path(self._storage_dir, event, self._media_storage)
-        except FileNotFoundError:
+        except (FileNotFoundError, PermissionError):
             self._skipped_missing += 1
+            if revision.historical:
+                raise SemanticMediaUnavailable(
+                    f"semantic event media is unavailable: {event_id}"
+                )
             return 0
         frame = cv2.imread(str(path))
         if frame is None:
             self._skipped_missing += 1
+            if revision.historical:
+                raise SemanticMediaUnavailable(
+                    f"semantic event media is unreadable: {event_id}"
+                )
             return 0
         skipped_crops: dict[str, str] = {}
         indexed_crop_keys: set[str] = set(existing_crop_keys & desired_crop_keys)

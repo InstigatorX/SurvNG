@@ -107,6 +107,7 @@ class Recorder(RecordingIndexMixin):
         self._migrate_snapshot_sizes = migrate_snapshot_sizes
         self._playback_lease_lock = threading.Lock()
         self._playback_leases: dict[str, float] = {}
+        self._playback_active_leases: dict[str, tuple[str, float]] = {}
         self._retention_deletions: set[str] = set()
         self._init_recording_index()
         self.retention = RecordingRetentionService(

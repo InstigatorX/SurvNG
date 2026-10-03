@@ -244,7 +244,11 @@ def test_refinement_worker_timing_is_numeric_and_allowlisted() -> None:
             "refine": {"samples": 4, "p95_ms": 812.5, "last_error": "secret-payload"},
             "rtsp://secret@example/stream": {"samples": 1},
         },
-        "store_lock_wait": {"jobs": {"contended": 2, "wait_p99_ms": float("inf")}},
+        "store_lock_wait": {"jobs": {
+            "contended": 2,
+            "wait_p99_ms": float("inf"),
+            "hold_p95_ms": 12.5,
+        }},
         "scene_discovery": {"offered": 9, "superseded": 6, "event_at": "secret-payload"},
     })
     payload = build_runtime_status(AppConfig(), manager, instance_id="one", uptime_seconds=10, stopping=False)
@@ -255,6 +259,7 @@ def test_refinement_worker_timing_is_numeric_and_allowlisted() -> None:
     }
     assert refinement["store_lock_wait"]["jobs"]["contended"] == 2
     assert refinement["store_lock_wait"]["jobs"]["wait_p99_ms"] is None
+    assert refinement["store_lock_wait"]["jobs"]["hold_p95_ms"] == 12.5
     assert refinement["scene_discovery"]["superseded"] == 6
     encoded = json.dumps(payload, allow_nan=False)
     assert "secret-payload" not in encoded and "rtsp://" not in encoded

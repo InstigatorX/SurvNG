@@ -684,6 +684,21 @@ p {
   color: var(--danger);
 }
 
+.incident-focus-load-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--warning, #bc934e);
+  border-radius: 10px;
+}
+
+.incident-focus-load-status {
+  padding: 8px 12px;
+  color: var(--muted-text, #9aa4b2);
+}
+
 .incident-filter-panel>.incident-semantic-search {
   margin-top: 8px;
 }

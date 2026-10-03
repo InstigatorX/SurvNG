@@ -75,6 +75,12 @@ class SceneIncidentTest(unittest.TestCase):
         for projection in (self.store.list_scene_incidents()[0], _incident_list_payload(incident),
                            _recording_grid_incident_payload(incident)):
             self.assertEqual(projection["snapshot_url"], incident["snapshot_url"])
+        card = self.store.list_scene_incident_cards()[0]
+        self.assertEqual(card["snapshot_observation_id"], observation_id)
+        self.assertEqual(card["snapshot_url"], incident["snapshot_url"])
+        self.assertEqual(card["representative_event_id"], event["id"])
+        self.assertEqual(card["objects"][0]["label"], "car")
+        self.assertEqual(card["events"][0]["objects"], card["objects"])
         self.assertTrue(first.exists())
         self.assertTrue(empty.exists())
 
@@ -95,6 +101,59 @@ class SceneIncidentTest(unittest.TestCase):
         incident = self.store.scene_incident(event_id=event["id"])
         self.assertNotIn("snapshot_observation_id", incident)
         self.assertNotIn("/observations/", incident.get("snapshot_url") or "")
+
+    def test_card_and_detail_choose_the_same_multi_event_cover(self):
+        snapshots = self.root / "snapshots"
+        snapshots.mkdir()
+        first_path = snapshots / "first.webp"
+        second_path = snapshots / "second.webp"
+        first_path.write_bytes(b"first")
+        second_path.write_bytes(b"second")
+        first = self.add(snapshot_path=str(first_path), objects=[person(
+            confidence=.7, detection_frame_width=640, detection_frame_height=360,
+        )])
+        second = self.add(10, camera="gate", snapshot_path=str(second_path), objects=[person(
+            confidence=.95, detection_frame_width=1920, detection_frame_height=1080,
+        )])
+        a = self.store.scene_incident(event_id=first["id"])
+        b = self.store.scene_incident(event_id=second["id"])
+        self.store.correct_scene_incident(
+            a["id"], a["revision"],
+            {"operation": "merge", "incident_ids": [b["id"]],
+             "expected_revisions": {b["id"]: b["revision"]}},
+        )
+
+        detail = self.store.scene_incident(event_id=first["id"])
+        card = self.store.list_scene_incident_cards()[0]
+
+        self.assertEqual(card["representative_event_id"], detail["representative_event_id"])
+        self.assertEqual(card.get("snapshot_observation_id"), detail.get("snapshot_observation_id"))
+        self.assertEqual(card.get("snapshot_url"), detail.get("snapshot_url"))
+        self.assertEqual(card["camera_id"], detail["camera_id"])
+        self.assertEqual(card["camera_id"], "gate")
+
+    def test_existing_scene_object_schema_adds_facet_index_after_column(self):
+        with self.store._connect() as connection:
+            connection.execute("drop index if exists scene_object_facet_label")
+            connection.execute("pragma foreign_keys=off")
+            connection.execute(
+                "create table scene_objects_legacy("
+                "id text primary key,episode_id text not null references scene_episodes(id),"
+                "label_override text,association_locked integer not null default 0)"
+            )
+            connection.execute(
+                "insert into scene_objects_legacy select id,episode_id,label_override,association_locked "
+                "from scene_objects"
+            )
+            connection.execute("drop table scene_objects")
+            connection.execute("alter table scene_objects_legacy rename to scene_objects")
+
+        restored = EventStore(self.root)
+        with restored._connect() as connection:
+            columns = {row[1] for row in connection.execute("pragma table_info(scene_objects)")}
+            indexes = {row[1] for row in connection.execute("pragma index_list(scene_objects)")}
+        self.assertIn("facet_label", columns)
+        self.assertIn("scene_object_facet_label", indexes)
 
     def test_bounded_facets_include_whole_overlapping_incident(self):
         first = self.add(objects=[person(zones=["front"])])
@@ -251,6 +310,21 @@ class SceneIncidentTest(unittest.TestCase):
         with restarted._connect() as conn:
             remaining=[tuple(r) for r in conn.execute("select incident_id,payload_json from scene_notification_outbox")]
         self.assertEqual(remaining,[(active["id"],"")])
+
+    def test_sole_highest_legacy_row_cannot_hide_requeued_marker(self):
+        active=self.store.scene_incident(event_id=self.add()["id"])
+        with self.store._lock,self.store._connect() as conn:
+            conn.execute("update scene_incidents set state='active' where id=?",(active["id"],))
+            conn.execute("delete from scene_notification_outbox")
+            conn.execute("insert into scene_notification_outbox values(?,?,?)",
+                         (active["id"],active["revision"],json.dumps({"legacy":True})))
+            conn.execute("delete from scene_migrations where name='notification_outbox_coalesce_v1'")
+        restarted=EventStore(self.root)
+        pending=restarted.scene_pending_notifications()
+        self.assertEqual([(item["incident_id"],item["revision"]) for item in pending],
+                         [(active["id"],active["revision"])])
+        self.assertEqual(restarted.purge_legacy_scene_notifications(),0)
+        self.assertEqual(len(restarted.scene_pending_notifications()),1)
 
     def test_merged_alias_never_publishes_mismatched_revision(self):
         first=self.add();second=self.add(10,camera="gate")

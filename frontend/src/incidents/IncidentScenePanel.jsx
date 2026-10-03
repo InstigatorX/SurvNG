@@ -28,7 +28,7 @@ export function ObservationImage({ observation, timeZone }) {
   </div>;
 }
 
-export function IncidentScenePanel({ incident, timeZone, cameraNameById = new Map(), onSelectObservation, onSelectEpisode, onPlayScene, activeEpisodeId, onNextEpisode, onStopPlayback, onFindSimilar, onChanged }) {
+export function IncidentScenePanel({ incident, timeZone, canCorrectIncident = false, cameraNameById = new Map(), onSelectObservation, onSelectEpisode, onPlayScene, activeEpisodeId, onNextEpisode, onStopPlayback, onFindSimilar, onChanged }) {
   const [corrected, setCorrected] = useState(null);
   const [selectedObjectId, setSelectedObjectId] = useState(null);
   const [selectedObservationId, setSelectedObservationId] = useState(null);
@@ -157,7 +157,7 @@ export function IncidentScenePanel({ incident, timeZone, cameraNameById = new Ma
         </li>)}</ul>
       </div>)}</details> : null}
     </section>
-    {scene?.incident_id && scene.revision != null && Number.isFinite(Number(scene.revision)) ? <details className="incident-corrections"><summary>Correct this incident</summary><p>Changes preserve the original evidence. Incident ID: <code>{scene.incident_id}</code></p>
+    {canCorrectIncident && scene?.incident_id && scene.revision != null && Number.isFinite(Number(scene.revision)) ? <details className="incident-corrections"><summary>Correct this incident</summary><p>Changes preserve the original evidence. Incident ID: <code>{scene.incident_id}</code></p>
       <form onSubmit={correct}><label>Correction<select value={operation} onChange={(event) => { setOperation(event.target.value); setSelectedIds([]); setError(""); }}>
         <option value="label">Correct object label</option><option value="associate">Associate object observations</option><option value="separate">Separate object observations</option><option value="split">Separate camera episodes</option><option value="merge">Merge incidents</option>
       </select></label>

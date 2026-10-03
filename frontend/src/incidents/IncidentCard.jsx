@@ -210,7 +210,7 @@ function EvidenceTimeline({ incident, hero, timeline, timeZone, stripRef, onSele
         <SnapshotImage event={heroEvent} alt="Selected evidence frame" objectFocusMode="off" objectFocusControls={false} showAnnotations showTracking={false}>
           <div className="incident-snapshot-hud">
             <div className="incident-snapshot-main">
-              <strong>{incident.camera_id}</strong>
+              <strong>{heroEvent.camera_id || incident.camera_id}</strong>
               <time>{heroTime}</time>
             </div>
             <div className="pill-row compact incident-labels">

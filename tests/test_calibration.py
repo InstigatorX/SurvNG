@@ -261,6 +261,44 @@ def test_calibration_ledger_is_durable_and_contains_inverse_values() -> None:
         assert reloaded["configuration_fingerprint_after"] == "b" * 64
 
 
+def test_restart_interrupts_cancelling_calibration_run() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        store = EventStore(root)
+        run = store.create_calibration_run(
+            mode="standard", camera_ids=["gate"], configuration_fingerprint="a" * 64,
+        )
+        store.update_calibration_run(int(run["id"]), status="cancelling")
+
+        restored = EventStore(root).get_calibration_run(int(run["id"]))
+
+    assert restored is not None
+    assert restored["status"] == "interrupted"
+    assert "restarted" in restored["error"]
+
+
+def test_calibration_history_can_query_system_modes_without_mixed_limit() -> None:
+    with TemporaryDirectory() as tmpdir:
+        store = EventStore(Path(tmpdir))
+        weekly = store.create_calibration_run(
+            mode="system_weekly", camera_ids=["gate"],
+            configuration_fingerprint="a" * 64,
+        )
+        store.update_calibration_run(int(weekly["id"]), status="completed", result={})
+        for index in range(100):
+            run = store.create_calibration_run(
+                mode="quick", camera_ids=["gate"],
+                configuration_fingerprint=f"{index:064x}"[-64:],
+            )
+            store.update_calibration_run(int(run["id"]), status="completed", result={})
+
+        selected = store.calibration_runs(
+            1, mode="system_weekly", statuses={"completed"},
+        )
+
+    assert [run["id"] for run in selected] == [weekly["id"]]
+
+
 def test_calibration_ledger_tracks_individually_rolled_back_changes() -> None:
     with TemporaryDirectory() as tmpdir:
         store = EventStore(Path(tmpdir))

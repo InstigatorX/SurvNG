@@ -1581,8 +1581,23 @@ class EventStore(
             conn.execute("insert or ignore into scene_expired_snapshots values(?)",(path,))
             scene_ids = [row[0] for row in conn.execute(
                 "select distinct p.incident_id from scene_observations o join scene_episodes p on p.id=o.episode_id where o.snapshot_path=?", (path,))]
+            scene_event_ids = [int(row[0]) for row in conn.execute(
+                "select distinct event_id from scene_observations where snapshot_path=?", (path,)
+            )]
             conn.execute("update scene_observations set snapshot_path='' where snapshot_path=?", (path,))
             conn.execute("delete from scene_snapshot_assets where snapshot_path=?", (path,))
+            for event_id in scene_event_ids:
+                conn.execute(
+                    "update events set scene_media_revision=scene_media_revision+1 where id=?",
+                    (event_id,),
+                )
+                current = conn.execute(
+                    "select * from events where id=?", (event_id,),
+                ).fetchone()
+                if current is not None:
+                    self._evidence_outbox(
+                        conn, current, "evidence_updated", reason="scene_snapshot_expired",
+                    )
             before_rows = conn.execute("select * from events where snapshot_path=?", (path,)).fetchall()
             conn.execute("update events set snapshot_path='',snapshot_size_bytes=0 where snapshot_path=?", (path,))
             for before in before_rows:

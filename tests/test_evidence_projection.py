@@ -21,13 +21,13 @@ class Events:
     def get(self, event_id):
         return copy.deepcopy(self.event)
 
-    def mark_evidence_publication(self, outbox_ids):
+    def mark_evidence_publication(self, outbox_ids, **_kwargs):
         for row in self.rows:
             if row["id"] in outbox_ids:
                 row["publication_done"] = True
         return True
 
-    def acknowledge_evidence_update(self, outbox_id):
+    def acknowledge_evidence_update(self, outbox_id, **_kwargs):
         if self.fail_ack:
             raise RuntimeError("temporary acknowledgement failure")
         before = len(self.rows)
@@ -307,3 +307,33 @@ def test_expired_requirements_settle_without_camera_worker_and_are_rate_limited(
     with patch("survng.app.evidence_projection.time.monotonic", return_value=131):
         worker.run_once()
     assert events.expire_cover_requirements.call_count == 2
+
+
+def test_metadata_row_does_not_stall_when_scene_media_advances(tmp_path):
+    from survng.app.events import EventStore
+
+    events = EventStore(tmp_path)
+    event = events.add_event(camera_id="gate", kind="motion", objects_json="[]")
+    with events._lock, events._connect() as connection:
+        connection.execute("delete from event_evidence_outbox")
+        row = connection.execute("select * from events where id=?", (event["id"],)).fetchone()
+        events._evidence_outbox(
+            connection, row, "incident_metadata_updated", reason="face_metadata",
+        )
+        connection.execute(
+            "update events set scene_media_revision=1 where id=?", (event["id"],),
+        )
+        row = connection.execute("select * from events where id=?", (event["id"],)).fetchone()
+        events._evidence_outbox(
+            connection, row, "evidence_updated", reason="scene_observation_added",
+        )
+    semantic = SimpleNamespace(
+        config=SimpleNamespace(enabled=False),
+        index=SimpleNamespace(delete_event=Mock()),
+    )
+    worker = EvidenceProjection(
+        events, lambda: semantic, StateEventBroker(), Mock(),
+    )
+
+    assert worker.run_once() == 2
+    assert events.pending_evidence_updates() == []

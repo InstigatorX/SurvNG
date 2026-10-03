@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
@@ -494,6 +495,37 @@ class RecordingIndexMixin:
                     self._playback_leases.get(path, 0.0),
                 )
 
+    def acquire_recording_for_playback(
+        self, row: dict, *, ttl_seconds: float = 6 * 60 * 60,
+    ) -> str | None:
+        """Atomically fence retention and return a release token for one segment."""
+        raw_path = str(row.get("path") or "")
+        if not raw_path:
+            return None
+        resolved_path = Path(raw_path).resolve(strict=False)
+        if self.media_storage is not None:
+            if not self.media_storage.contains(resolved_path, "recordings"):
+                return None
+        else:
+            try:
+                resolved_path.relative_to(self.recordings_dir.resolve())
+            except ValueError:
+                return None
+        resolved = str(resolved_path)
+        with self._playback_lease_lock:
+            self._discard_expired_playback_leases_locked()
+            if resolved in self._retention_deletions:
+                return None
+            token = uuid.uuid4().hex
+            self._playback_active_leases[token] = (
+                resolved, time.monotonic() + max(60.0, float(ttl_seconds)),
+            )
+        return token
+
+    def release_recording_playback(self, token: str) -> None:
+        with self._playback_lease_lock:
+            self._playback_active_leases.pop(str(token), None)
+
     def discard_missing_recording_rows(self, rows: list[dict]) -> list[dict]:
         """Remove missing indexed files before a playback manifest advertises them."""
         existing: list[dict] = []
@@ -514,6 +546,7 @@ class RecordingIndexMixin:
         with self._playback_lease_lock:
             self._discard_expired_playback_leases_locked()
             protected.update(self._playback_leases)
+            protected.update(path for path, _expires_at in self._playback_active_leases.values())
         return protected
 
     def _discard_expired_playback_leases_locked(self) -> None:
@@ -524,13 +557,21 @@ class RecordingIndexMixin:
         ]
         for path in expired:
             self._playback_leases.pop(path, None)
+        expired_active = [
+            token for token, (_path, expires_at) in self._playback_active_leases.items()
+            if expires_at <= now
+        ]
+        for token in expired_active:
+            self._playback_active_leases.pop(token, None)
 
     def _delete_recording_for_retention(self, path: Path) -> bool:
         """Atomically recheck playback ownership immediately before unlink."""
         resolved = str(path.resolve(strict=False))
         with self._playback_lease_lock:
             self._discard_expired_playback_leases_locked()
-            if resolved in self._playback_leases or resolved in self._retention_deletions:
+            if (resolved in self._playback_leases
+                    or resolved in {path for path, _expires_at in self._playback_active_leases.values()}
+                    or resolved in self._retention_deletions):
                 return False
             self._retention_deletions.add(resolved)
         try:

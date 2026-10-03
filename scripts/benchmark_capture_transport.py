@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -135,30 +136,31 @@ def main() -> None:
     parser.add_argument("--frame-rate", type=float, default=10.0)
     parser.add_argument("--repeats", type=int, default=3)
     args = parser.parse_args()
-    source = Path("/tmp/survng-capture-transport-bench.mp4")
-    _source(source, args.width, args.height, args.fps, args.duration)
-    print(
-        f"source {args.width}x{args.height} @{args.fps}fps "
-        f"duration={args.duration}s select={args.frame_rate}fps"
-    )
-    for transport in ("bmp", "rawvideo"):
-        runs = [
-            _run(source, transport, args.frame_rate) for _ in range(args.repeats)
-        ]
-        ffmpeg_ms = [float(run["ffmpeg_ms_per_frame"]) for run in runs]
-        python_ms = [float(run["python_ms_per_frame"]) for run in runs]
+    with tempfile.TemporaryDirectory(prefix="survng-capture-bench-") as temp_dir:
+        source = Path(temp_dir) / "source.mp4"
+        _source(source, args.width, args.height, args.fps, args.duration)
         print(
-            transport,
-            {
-                "frames": runs[-1]["frames"],
-                "ffmpeg_ms_per_frame_median": round(float(np.median(ffmpeg_ms)), 3),
-                "python_ms_per_frame_median": round(float(np.median(python_ms)), 3),
-                "payload_bytes": runs[-1]["payload_bytes"],
-                "ffmpeg_rss_bytes": max(int(run["ffmpeg_rss_bytes"]) for run in runs),
-                "python_rss_bytes": max(int(run["python_rss_bytes"]) for run in runs),
-                "runs": runs,
-            },
+            f"source {args.width}x{args.height} @{args.fps}fps "
+            f"duration={args.duration}s select={args.frame_rate}fps"
         )
+        for transport in ("bmp", "rawvideo"):
+            runs = [
+                _run(source, transport, args.frame_rate) for _ in range(args.repeats)
+            ]
+            ffmpeg_ms = [float(run["ffmpeg_ms_per_frame"]) for run in runs]
+            python_ms = [float(run["python_ms_per_frame"]) for run in runs]
+            print(
+                transport,
+                {
+                    "frames": runs[-1]["frames"],
+                    "ffmpeg_ms_per_frame_median": round(float(np.median(ffmpeg_ms)), 3),
+                    "python_ms_per_frame_median": round(float(np.median(python_ms)), 3),
+                    "payload_bytes": runs[-1]["payload_bytes"],
+                    "ffmpeg_rss_bytes": max(int(run["ffmpeg_rss_bytes"]) for run in runs),
+                    "python_rss_bytes": max(int(run["python_rss_bytes"]) for run in runs),
+                    "runs": runs,
+                },
+            )
 
 
 if __name__ == "__main__":

@@ -52,6 +52,7 @@ from .security import redact_secret_text
 LOGGER = logging.getLogger(__name__)
 AI_RECOMMENDATION_SECRET = secrets.token_bytes(32)
 AI_RECOMMENDATION_MAX_AGE_SECONDS = 60 * 60
+SYSTEM_REVIEW_RETRY_BACKOFF = timedelta(hours=1)
 CALIBRATION_MODE_LIMITS = {
     "quick": (24.0, 100, 12),
     "standard": (168.0, 100, 20),
@@ -912,26 +913,52 @@ class IntelligenceService:
             detector_queue=queued,
         )
 
-    def _latest_system_run(self, runs: list[dict], mode: str):
+    @staticmethod
+    def _latest_system_run(runs: list[dict], mode: str):
         for run in runs:
-            if str(run.get('mode') or '') == mode:
-                return parse_timestamp(run.get('created_at'))
+            if str(run.get('mode') or '') == mode and str(run.get('status') or '') == 'completed':
+                return parse_timestamp(run.get('completed_at') or run.get('created_at'))
         return None
+
+    @staticmethod
+    def _system_retry_blocked(runs: list[dict], mode: str, now: datetime) -> bool:
+        """Keep a failed scheduled review from becoming a once-a-minute loop."""
+        attempts = [
+            parse_timestamp(run.get('completed_at') or run.get('created_at'))
+            for run in runs
+            if str(run.get('mode') or '') == mode
+            and str(run.get('status') or '') not in {'completed', 'queued', 'running', 'cancelling'}
+        ]
+        latest = max((attempt for attempt in attempts if attempt is not None), default=None)
+        return bool(latest and now < latest + SYSTEM_REVIEW_RETRY_BACKOFF)
 
     def _schedule_system_review(self) -> None:
         with self.deps.manager_lock:
             active_config = self.deps.get_config()
             active_manager = self.deps.get_manager()
-            runs = active_manager.events.calibration_runs(40)
-            if any(item.get('status') in {'queued', 'running', 'cancelling'} for item in runs):
+            active = active_manager.events.calibration_runs(
+                100, statuses={'queued', 'running', 'cancelling'},
+            )
+            if active:
                 return
+            runs = []
+            for mode in ('system_daily', 'system_weekly'):
+                runs.extend(active_manager.events.calibration_runs(
+                    1, mode=mode, statuses={'completed'},
+                ))
+                runs.extend(active_manager.events.calibration_runs(
+                    1, mode=mode, statuses={'failed', 'cancelled', 'interrupted'},
+                ))
+            now = datetime.now(timezone.utc)
             decision = due_pass(
-                datetime.now(timezone.utc),
+                now,
                 active_config.system_review.cadence,
                 self._latest_system_run(runs, 'system_daily'),
                 self._latest_system_run(runs, 'system_weekly'),
             )
         if decision not in {'weekly', 'daily'}:
+            return
+        if self._system_retry_blocked(runs, f'system_{decision}', now):
             return
         try:
             self.start_system_review(decision)
@@ -944,8 +971,10 @@ class IntelligenceService:
         with self.deps.manager_lock:
             active_manager = self.deps.get_manager()
             active_config = self.deps.get_config().model_copy(deep=True)
-            runs = active_manager.events.calibration_runs(20)
-            if any(item.get('status') in {'queued', 'running', 'cancelling'} for item in runs):
+            runs = active_manager.events.calibration_runs(
+                100, statuses={'queued', 'running', 'cancelling'},
+            )
+            if runs:
                 raise HTTPException(status_code=409, detail='a system review is already running')
             camera_ids = detection_camera_ids(active_config.cameras, active_manager.statuses())
             if not camera_ids:
@@ -995,8 +1024,15 @@ class IntelligenceService:
         with self.deps.manager_lock:
             active_config = self.deps.get_config()
             active_manager = self.deps.get_manager()
-            runs = active_manager.events.calibration_runs(20, include_result=True)
-        system_runs = [item for item in runs if str(item.get('mode') or '').startswith('system_')]
+            system_runs = active_manager.events.calibration_runs(
+                100, include_result=True, mode_prefix='system_',
+            )
+            completed_daily = active_manager.events.calibration_runs(
+                1, mode='system_daily', statuses={'completed'},
+            )
+            completed_weekly = active_manager.events.calibration_runs(
+                1, mode='system_weekly', statuses={'completed'},
+            )
         briefing = next((item for item in system_runs if item.get('status') in {'queued', 'running', 'cancelling'}), None)
         if briefing is None:
             briefing = next((item for item in system_runs if item.get('status') == 'completed'), None)
@@ -1016,8 +1052,12 @@ class IntelligenceService:
         system_ids = {int(item.get('id') or 0) for item in system_runs}
         now = datetime.now(timezone.utc)
         cadence = active_config.system_review.cadence
-        last_daily = self._latest_system_run(system_runs, 'system_daily')
-        last_weekly = self._latest_system_run(system_runs, 'system_weekly')
+        last_daily = self._latest_system_run(completed_daily, 'system_daily')
+        last_weekly = self._latest_system_run(completed_weekly, 'system_weekly')
+        daily_covered = max(
+            (item for item in (last_daily, last_weekly) if item is not None),
+            default=None,
+        )
         return {
             'cadence': cadence,
             'automatic_classes': list(active_config.system_review.automatic_classes),
@@ -1026,7 +1066,7 @@ class IntelligenceService:
                 for class_id, spec in AUTOMATIC_CLASSES.items()
             ],
             'apply_enabled': bool(active_config.audit_ai.allow_apply_recommendations),
-            'next_daily_at': next_run_at(last_daily, hours=20, now=now).isoformat() if cadence in {'daily', 'weekly'} else None,
+            'next_daily_at': next_run_at(daily_covered, hours=20, now=now).isoformat() if cadence in {'daily', 'weekly'} else None,
             'next_weekly_at': next_run_at(last_weekly, hours=24 * 6, now=now).isoformat() if cadence == 'weekly' else None,
             'briefing': briefing,
             'change_sets': [item for item in change_sets if int(item.get('run_id') or 0) in system_ids],

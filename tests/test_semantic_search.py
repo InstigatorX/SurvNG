@@ -200,6 +200,10 @@ class SemanticIndexTest(unittest.TestCase):
         (model_dir / "image_encoder.xml").write_text("<net/>", encoding="utf-8")
         (model_dir / "image_encoder.bin").write_bytes(b"image-weights")
         (model_dir / "text_encoder.xml").write_text("<text/>", encoding="utf-8")
+        (model_dir / "text_encoder.bin").write_bytes(b"text-weights")
+        tokenizer = model_dir / "tokenizer" / "bpe_simple_vocab_16e6.txt.gz"
+        tokenizer.parent.mkdir()
+        tokenizer.write_bytes(b"tokenizer")
         return {
             "implementation": "openvino_manifest",
             "dimensions": 3,
@@ -258,7 +262,7 @@ class SemanticIndexTest(unittest.TestCase):
         self.assertTrue(service._queue.empty())
         self.assertTrue(self.index.backfill_state(legacy).complete)
 
-    def test_changed_image_encoder_starts_new_generation_and_keeps_old_rows(self) -> None:
+    def test_changed_embedding_tower_starts_new_generation_and_keeps_old_rows(self) -> None:
         model_dir = Path(self.temporary.name) / "model"
         manifest = self._image_manifest(model_dir)
         original = self.index.resolve_model_identity(model_dir, manifest)
@@ -268,12 +272,12 @@ class SemanticIndexTest(unittest.TestCase):
             original,
         )
         (model_dir / "text_encoder.xml").write_text("<text changed/>", encoding="utf-8")
-
-        self.assertEqual(self.index.resolve_model_identity(model_dir, manifest), original)
+        text_revised = self.index.resolve_model_identity(model_dir, manifest)
+        self.assertNotEqual(text_revised.generation, original.generation)
         (model_dir / "image_encoder.bin").write_bytes(b"different-weights")
         revised = self.index.resolve_model_identity(model_dir, manifest)
 
-        self.assertNotEqual(revised.generation, original.generation)
+        self.assertNotEqual(revised.generation, text_revised.generation)
         self.assertEqual(self.index.coverage(original)["evidence_count"], 1)
         self.assertEqual(self.index.coverage(revised)["evidence_count"], 0)
 
@@ -871,6 +875,118 @@ class SemanticIndexTest(unittest.TestCase):
 
         self.assertEqual(service.status()["skipped_missing_since_start"], 1)
         self.assertEqual(service.status()["error"], "")
+
+    def test_missing_historical_snapshot_is_retryable(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+        from survng.app.semantic_search import SemanticMediaUnavailable
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        service.encoder = type("Encoder", (), {"identity": self.identity})()
+        service._storage_dir = Path(self.temporary.name)
+        event = service._revision_event({
+            "id": 1,
+            "snapshot_path": "temporarily-unavailable.webp",
+            "objects_json": '[{"label":"person"}]',
+        })
+        event["_semantic_revision"].historical = True
+
+        with self.assertRaises(SemanticMediaUnavailable):
+            service._index_event(event)
+
+        invalid = service._revision_event({
+            "id": 2,
+            "snapshot_path": "/outside-storage/not-an-image.txt",
+            "objects_json": '[{"label":"person"}]',
+        })
+        invalid["_semantic_revision"].historical = True
+        with self.assertRaises(SemanticMediaUnavailable):
+            service._index_event(invalid)
+
+    def test_missing_historical_media_is_durably_quarantined_and_retried(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+        from survng.app.semantic_search import (
+            SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS,
+            _SemanticEventRevision,
+        )
+
+        error = RuntimeError("retained image is unavailable")
+        self.assertFalse(self.index.record_media_failure(self.identity, 1, error))
+        self.assertFalse(self.index.record_media_failure(self.identity, 1, error))
+        self.assertTrue(self.index.record_media_failure(self.identity, 1, error))
+
+        reopened = SemanticIndex(self.database_path)
+        self.assertTrue(reopened.has_media_failures(self.identity))
+        with patch(
+            "survng.app.semantic_search.time.time",
+            return_value=time.time() + SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS + 1,
+        ):
+            self.assertEqual(reopened.due_media_failures(self.identity), [1])
+
+        # Quarantined work no longer prevents its page cursor from advancing.
+        token = _SemanticEventRevision({"id": 1}, historical=True, outcome="quarantined")
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True),
+            reopened, Path(self.temporary.name), {},
+        )
+        self.assertTrue(service._finish_history_page([token]))
+        reopened.clear_media_failure(self.identity, 1)
+        self.assertFalse(reopened.has_media_failures(self.identity))
+
+    def test_expired_scene_snapshot_advances_revision_and_removes_vector(self) -> None:
+        import json
+        from survng.app.config import SemanticSearchConfig
+        from survng.app.events import EventStore
+
+        root = Path(self.temporary.name) / "retention"
+        store = EventStore(root)
+        event = store.add_event(
+            camera_id="gate", kind="motion",
+            objects_json=json.dumps([{"label": "car", "box": {"x1": 1, "y1": 1, "x2": 8, "y2": 8}}]),
+        )
+        scene_path = "snapshots/gate/scene.webp"
+        store.record_scene_observations(event["id"], [{
+            "label": "person", "confidence": .9,
+            "box": {"x1": 1, "y1": 1, "x2": 9, "y2": 9},
+            "detection_frame_width": 10, "detection_frame_height": 10,
+            "captured_at_epoch": 1000, "snapshot_path": scene_path,
+        }])
+        observation = next(
+            item for item in store.scene_search_observations(event_id=event["id"])
+            if item["snapshot_path"] == scene_path
+        )
+        index = SemanticIndex(store.db_path)
+        identity = SemanticModelIdentity("test", "retention-model", "retention-prep", 3)
+        index.upsert(
+            [SemanticEvidence(
+                event["id"], "gate", "now", "object_crop", "scene:test",
+                scene_path, "person", (1, 1, 9, 9), observation_id=observation["id"],
+            )],
+            [[1, 0, 0]], identity, expected_observation=observation,
+        )
+        before = store.get(event["id"])["scene_media_revision"]
+
+        with store._lock, store._connect() as connection:
+            store._clear_snapshot_references(connection, [scene_path])
+
+        current = store.get(event["id"])
+        self.assertEqual(current["scene_media_revision"], before + 1)
+        self.assertTrue(any(
+            row["payload"].get("reason") == "scene_snapshot_expired"
+            for row in store.pending_evidence_updates()
+        ))
+        service = SemanticSearchService(
+            SemanticSearchConfig(
+                enabled=True, index_full_frame=False, index_object_crops=False,
+            ),
+            index, root, {},
+        )
+        service.encoder = type("Encoder", (), {"identity": identity})()
+        service._event_store = store
+        service._storage_dir = root
+        service.index_event(current)
+        self.assertEqual(index.indexed_observation_keys(event["id"], identity), set())
 
     def test_live_events_have_priority_over_historical_backfill(self) -> None:
         from survng.app.config import SemanticSearchConfig

@@ -45,5 +45,9 @@ assert.match(evidence, /playback\.mimeType === "video\/mp4" \? <video/);
 
 assert.match(incidentsPage, /import \{ IncidentCard, IncidentInspector \} from "\.\/IncidentCard\.jsx"/);
 assert.match(livePage, /import \{ IncidentListItem, EventOverlay \} from "\.\.\/shared\/evidence\.jsx"/);
+assert.match(livePage, /data\?\.reason === "operator_correction"/);
+assert.match(livePage, /type === "resync"/);
+assert.match(livePage, /\[selectedEvent, setSelectedEvent\]/);
+assert.match(livePage, /setSelection\?\.\(\(current\) => incidentDetailQuery\(current\) === query \? detail : current\)/);
 
 console.log("incident card module tests passed");

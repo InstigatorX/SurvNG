@@ -88,6 +88,10 @@
     "timeout_seconds": 45.0,
     "allow_apply_recommendations": false
   },
+  "system_review": {
+    "cadence": "off",
+    "automatic_classes": []
+  },
   "semantic_search": {
     "enabled": false,
     "implementation": "mobileclip2_openvino",

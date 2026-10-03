@@ -514,7 +514,7 @@ class EventStoreJobsMixin:
                 "create index if not exists idx_calibration_change_sets_created on calibration_change_sets(created_at desc, id desc)"
             )
             conn.execute(
-                "update calibration_runs set status = 'interrupted', error = 'SurvNG restarted before calibration completed', updated_at = ? where status in ('queued', 'running')",
+                "update calibration_runs set status = 'interrupted', error = 'SurvNG restarted before calibration completed', updated_at = ? where status in ('queued', 'running', 'cancelling')",
                 (datetime.now(timezone.utc).isoformat(),),
             )
             conn.execute(

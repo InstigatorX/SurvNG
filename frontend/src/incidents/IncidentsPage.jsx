@@ -26,7 +26,7 @@ import { useIncidentPlayback } from "./useIncidentPlayback.js";
 import "./mobile-incidents.css";
 import { FaceReviewDialog } from "../people/FacesPage.jsx";
 
-export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextChange, onAskAssistant = null }) {
+export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordingContextChange, onAssistantContextChange, onAskAssistant = null }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? false;
   const thumbnailObjectFocus = appConfig?.incident_thumbnail_object_focus ?? "off";
@@ -101,6 +101,9 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const [observationPreviewRequest, setObservationPreviewRequest] = useState(null);
   const [findSimilarObject, setFindSimilarObject] = useState(null);
   const [tabletInspectorOpen, setTabletInspectorOpen] = useState(false);
+  const [focusedDetailError, setFocusedDetailError] = useState("");
+  const [focusedDetailLoading, setFocusedDetailLoading] = useState(false);
+  const [focusedDetailRetry, setFocusedDetailRetry] = useState(0);
   const tabletInspectorToggleRef = useRef(null);
   const relatedPreviewRequestRef = useRef(0);
   const mobileView = isMobileViewport();
@@ -429,13 +432,16 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   useAppEvents(({ type, data }) => {
     if (document.hidden || (type !== "incident" && type !== "resync")) return;
     const affectedId = Number(data?.event_id);
+    const affectedIncidentId = data?.incident_id;
+    const forceReconcile = data?.reason === "operator_correction";
     const visible = [focusedIncident, selectedEvent, linkedIncidentDetail, relatedPreviewIncident, ...incidents];
     const affectsVisibleEvidence = visible.some((incident) => (
-      Number(incident?.representative_event_id) === affectedId
+      sameIncidentId(incident?.incident_id || incident?.id, affectedIncidentId)
+      || Number(incident?.representative_event_id) === affectedId
       || Number(incident?.id) === affectedId
       || incident?.events?.some((event) => Number(event.id) === affectedId)
     ));
-    if (type !== "resync" && !affectsVisibleEvidence && (incidentDay !== today || incidentPage !== 0)) return;
+    if (type !== "resync" && !forceReconcile && !affectsVisibleEvidence && (incidentDay !== today || incidentPage !== 0)) return;
     if (incidentEventRefreshTimer.current) return;
     incidentEventRefreshTimer.current = window.setTimeout(
       () => {
@@ -571,18 +577,28 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   }, [focusedIncident?.id, linkedIncidentDetail?.id, linkedIncidentEventId]);
 
   useEffect(() => {
-    if (!focusedSummary || !focusedDetailQuery || incidentDetails[focusedDetailQuery]) return;
+    setFocusedDetailError("");
+    if (!focusedSummary || !focusedDetailQuery || incidentDetails[focusedDetailQuery]) {
+      setFocusedDetailLoading(false);
+      return;
+    }
     let cancelled = false;
     const sequence = incidentEvidenceRefreshSequence.current;
+    setFocusedDetailLoading(true);
     incidentDetailCacheRef.current.load(focusedDetailQuery).then((detail) => {
       if (!cancelled && sequence === incidentEvidenceRefreshSequence.current) {
         setIncidentDetails((current) => ({ ...current, [focusedDetailQuery]: detail }));
+        setFocusedDetailError("");
+        setFocusedDetailLoading(false);
       }
     }).catch(() => {
-      // The compact incident remains usable if investigation details fail.
+      if (!cancelled && sequence === incidentEvidenceRefreshSequence.current) {
+        setFocusedDetailError("Could not load the full incident evidence. The compact summary is still shown.");
+        setFocusedDetailLoading(false);
+      }
     });
     return () => { cancelled = true; };
-  }, [focusedSummary?.id, focusedDetailQuery, incidentDetails]);
+  }, [focusedSummary?.id, focusedDetailQuery, focusedDetailRetry, incidentDetails]);
 
   useEffect(() => {
     if (desktopAnalysisMode !== "tracks") return;
@@ -889,7 +905,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                   </>
                 ) : null}
                 {displayedIncident ? (
-                  <IncidentCard
+                  <>{focusedDetailLoading && !relatedPreviewIncident ? <div className="incident-focus-load-status" role="status">Loading full incident evidence…</div> : null}{focusedDetailError && !relatedPreviewIncident ? <div className="incident-focus-load-error" role="alert"><span>{focusedDetailError}</span><button type="button" onClick={() => setFocusedDetailRetry((value) => value + 1)}>Retry</button></div> : null}<IncidentCard
                     key={`${focusedIncident?.id || "none"}:${displayedIncident.id || displayedIncident.representative_event_id}`}
                     incident={displayedIncident}
                     scenePlayback={scenePlayback}
@@ -920,7 +936,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                     onToggle={toggleIncident}
                     onPreviewChange={relatedPreviewIncident ? undefined : setFocusedFaceEventId}
                     onImageSize={setFocusedImageSize}
-                  />
+                  /></>
                 ) : (
                   <div className="empty-state">
                     {linkedIncidentLoading
@@ -1062,7 +1078,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
           </div>
         ) : null}
       </section>
-      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refresh} /> : null}
+      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} canCorrectIncident={canCorrectIncident} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refresh} /> : null}
     </main>
   );
 }

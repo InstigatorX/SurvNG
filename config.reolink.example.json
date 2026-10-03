@@ -63,6 +63,10 @@
     "timeout_seconds": 45.0,
     "allow_apply_recommendations": false
   },
+  "system_review": {
+    "cadence": "off",
+    "automatic_classes": []
+  },
   "detector": {
     "enabled": false,
     "recorded_decode_max_processes": 2,

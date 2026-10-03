@@ -46,6 +46,12 @@ class RecordingPrewarmCancelled(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class LeasedRecordingSegment:
+    path: Path
+    lease_token: str
+
+
+@dataclass(frozen=True, slots=True)
 class RecordingMediaDependencies:
     get_config: Callable[[], AppConfig]
     get_manager: Callable[[], AppManager]
@@ -1182,7 +1188,7 @@ class RecordingMediaRuntime:
             active_manager=selected_manager,
         )
 
-    def _recording_segment_path(self, camera_id: str, epoch: float, source: str='main', *, active_manager: AppManager | None=None) -> Path:
+    def _recording_segment_path(self, camera_id: str, epoch: float, source: str='main', *, active_manager: AppManager | None=None) -> LeasedRecordingSegment:
         """Resolve the indexed source MP4 containing an epoch for native playback."""
         selected_manager = active_manager or self.manager
         if selected_manager.camera(camera_id) is None:
@@ -1206,10 +1212,18 @@ class RecordingMediaRuntime:
         )
         if row is None:
             raise HTTPException(status_code=404, detail='no recording exists at this time')
-        return self._recording_storage_path(
-            row.get('path'),
-            active_manager=selected_manager,
-        )
+        token = selected_manager.recorder.acquire_recording_for_playback(row)
+        if token is None:
+            raise HTTPException(status_code=404, detail='recording is being removed')
+        try:
+            path = self._recording_storage_path(
+                row.get('path'),
+                active_manager=selected_manager,
+            )
+            return LeasedRecordingSegment(path, token)
+        except Exception:
+            selected_manager.recorder.release_recording_playback(token)
+            raise
 
     def _recording_rows(self, camera_id: str, limit: int, source: str='main', *, active_manager: AppManager | None=None) -> list[dict]:
         selected_manager = active_manager or self.manager

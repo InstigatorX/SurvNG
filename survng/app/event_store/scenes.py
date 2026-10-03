@@ -84,6 +84,56 @@ def _card_cover_objects(raw):
     return cover
 
 
+def _scene_pixels(item):
+    return int(item.get("detection_frame_width") or 0) * int(
+        item.get("detection_frame_height") or 0
+    )
+
+
+def _scene_observation_cover(representative, observations, *, recorded_pixels=None):
+    """Return the canonical retained-observation cover, if it outranks the event."""
+    if representative is None:
+        return None
+    available = [
+        (row, json.loads(row["payload_json"]))
+        for row in observations
+        if row["snapshot_path"]
+    ]
+    if not available:
+        return None
+    current = _objects(representative["objects_json"])
+    current_pixels = max((_scene_pixels(item) for item in current), default=0)
+    visible = any(
+        item.get("label") and item.get("snapshot_visible") is not False
+        for item in current
+    )
+    if recorded_pixels is None:
+        decoded = [json.loads(row["payload_json"]) for row in observations]
+        recorded_pixels = max(
+            (
+                _scene_pixels(item)
+                for item in decoded
+                if item.get("frame_source") == "recorded_main"
+            ),
+            default=0,
+        )
+    cover, evidence = max(
+        available,
+        key=lambda pair: (_scene_pixels(pair[1]), float(pair[1].get("confidence") or 0)),
+    )
+    promoted_cover = bool(representative["snapshot_path"]) and recorded_pixels > _scene_pixels(evidence)
+    if promoted_cover or (visible and _scene_pixels(evidence) <= current_pixels):
+        return None
+    return {
+        "row": cover,
+        "objects": [
+            {**item, "snapshot_visible": True}
+            for row, item in available
+            if row["snapshot_path"] == cover["snapshot_path"]
+        ],
+    }
+
+
 def _overlap(a, b):
     try:
         aa, bb = a["box"], b["box"]
@@ -134,7 +184,6 @@ class EventStoreSceneMixin:
                 create table if not exists scene_facet_labels (value text primary key);
                 create table if not exists scene_facet_cameras (value text primary key);
                 create index if not exists scene_object_label_override on scene_objects(label_override);
-                create index if not exists scene_object_facet_label on scene_objects(facet_label);
                 create table if not exists scene_track_aliases (
                     episode_id text not null,track_key text not null,object_id text not null,
                     primary key(episode_id,track_key)
@@ -272,6 +321,7 @@ class EventStoreSceneMixin:
             object_columns = {r[1] for r in conn.execute("pragma table_info(scene_objects)")}
             if "facet_label" not in object_columns:
                 conn.execute("alter table scene_objects add column facet_label text not null default ''")
+            conn.execute("create index if not exists scene_object_facet_label on scene_objects(facet_label)")
             conn.execute("create index if not exists scene_observation_source on scene_observations(source_observation_id)")
             self._scene_outbox_legacy_rowid = self._mark_legacy_scene_notifications(conn)
         # Bounded transactions, resumable and silent. Never infer historical
@@ -547,6 +597,8 @@ class EventStoreSceneMixin:
                 cover_at=_epoch(cover_absolute,at) if cover_absolute is not None else at+float(cover.get("temporal_sample_offset_seconds",0) or 0)
                 matches=[]
                 for position,(_, candidate) in enumerate(candidates):
+                    if candidate.get("snapshot_visible") is False:
+                        continue
                     absolute=candidate.get("captured_at_epoch",candidate.get("frame_captured_at_epoch",candidate.get("captured_at")))
                     candidate_at=_epoch(absolute,at) if absolute is not None else at+float(candidate.get("offset_seconds",0) or 0)
                     if abs(candidate_at-cover_at)<=0.05 and _overlap(candidate,cover)>=0.95:
@@ -615,6 +667,10 @@ class EventStoreSceneMixin:
         row = dict(row)
         at = _epoch(row["created_at"])
         event_id, camera_id = int(row["id"]), str(row["camera_id"])
+        semantic_media_before = int(conn.execute(
+            "select count(*) from scene_observations where event_id=? and snapshot_path!=''",
+            (event_id,),
+        ).fetchone()[0])
         episode = conn.execute("select p.* from scene_episodes p join scene_event_membership m "
                                "on m.episode_id=p.id where m.event_id=?", (event_id,)).fetchone()
         new_event = episode is None
@@ -804,6 +860,20 @@ class EventStoreSceneMixin:
             conn.execute("update scene_incidents set state='active',historical=0 where id=?",(incident_id,))
         if changed or coverage_changed:
             self._scene_changed(conn,incident_id,notify=notify)
+        semantic_media_after = int(conn.execute(
+            "select count(*) from scene_observations where event_id=? and snapshot_path!=''",
+            (event_id,),
+        ).fetchone()[0])
+        if not historical and semantic_media_after > semantic_media_before:
+            conn.execute(
+                "update events set scene_media_revision=scene_media_revision+1 where id=?",
+                (event_id,),
+            )
+            current = conn.execute("select * from events where id=?", (event_id,)).fetchone()
+            if current is not None:
+                self._evidence_outbox(
+                    conn, current, "evidence_updated", reason="scene_observation_added"
+                )
         return incident_id
 
     def _mark_legacy_scene_notifications(self, conn):
@@ -845,7 +915,7 @@ class EventStoreSceneMixin:
         with self._lock, self._connect() as conn:
             removed = conn.execute(
                 "delete from scene_notification_outbox where rowid in (select rowid from "
-                "scene_notification_outbox where rowid <= ? limit ?)",
+                "scene_notification_outbox where rowid <= ? and payload_json != '' limit ?)",
                 (self._scene_outbox_legacy_rowid, max(1, int(limit))),
             ).rowcount
         if not removed:
@@ -862,8 +932,8 @@ class EventStoreSceneMixin:
             # One pending marker per incident. Publication builds the newest
             # snapshot outside this commit, so superseded revisions coalesce.
             conn.execute(
-                "delete from scene_notification_outbox where incident_id=? and rowid > ?",
-                (incident_id, self._scene_outbox_legacy_rowid),
+                "delete from scene_notification_outbox where incident_id=? and payload_json=''",
+                (incident_id,),
             )
             conn.execute("insert or ignore into scene_notification_outbox values(?,?,'')",(incident_id,incident["revision"]))
 
@@ -986,41 +1056,40 @@ class EventStoreSceneMixin:
                        camera_ids=cameras,scene_objects=scene_objects,episodes=episode_payloads,labels=labels,zones=zones,has_objects=bool(scene_objects),
                        summary=(summary+(" observed" if uncertain_labels else " visible") if summary else "Activity observed"),
                        continuity_uncertain=bool(uncertain_labels),activity=activity,coverage=coverage,alert_decisions=alerts,identities=identities)
+        representative_event = next(
+            (event for event in rows if int(event["id"]) == int(payload.get("representative_event_id") or 0)),
+            None,
+        )
+        if representative_event is not None:
+            payload["camera_id"] = representative_event["camera_id"]
         if incident["state"] == "unconfirmed":
             payload["summary"] = "Activity was not established from these observations."
         # Media quality is independent of alert admission. Retain the exact
         # detector images and expose a larger analyzed image as separate evidence.
         available = [(row,json.loads(row["payload_json"])) for row in observations if row["snapshot_path"]]
-        def pixels(item):
-            return int(item.get("detection_frame_width") or 0)*int(item.get("detection_frame_height") or 0)
-        current_pixels = max((pixels(item) for item in payload.get("objects", [])),default=0)
-        visible = any(item.get("label") and item.get("snapshot_visible") is not False for item in payload.get("objects", []))
-        recorded_pixels = 0
-        for row in observations:
-            item = json.loads(row["payload_json"])
-            if item.get("frame_source") == "recorded_main":
-                recorded_pixels = max(recorded_pixels, pixels(item))
         if available:
-            cover, evidence = max(available, key=lambda pair:(pixels(pair[1]),float(pair[1].get("confidence") or 0)))
-            # The event snapshot is the promoted main-stream cover. A smaller
-            # saved discovery frame must not become the picture for the incident.
-            promoted_cover = bool(payload.get("snapshot_path")) and recorded_pixels > pixels(evidence)
-            if not promoted_cover and (not visible or pixels(evidence) > current_pixels):
+            representative = next(
+                (row for row in rows if int(row["id"]) == int(payload.get("representative_event_id") or 0)),
+                rows[-1],
+            )
+            selected = _scene_observation_cover(representative, observations)
+            if selected is not None:
+                cover = selected["row"]
                 cover_event = next(row for row in rows if row["id"] == cover["event_id"])
                 payload.update(
                     representative_event_id=cover["event_id"], camera_id=cover["camera_id"],
                     created_at=cover_event["created_at"], snapshot_path="available",
                     snapshot_observation_id=cover["id"], snapshot_captured_at=_iso(cover["captured_epoch"]),
                     snapshot_url=f"/api/incidents/observations/{cover['id']}/snapshot",
-                    objects=[{**item, "snapshot_visible":True} for row,item in available if row["snapshot_path"] == cover["snapshot_path"]],
+                    objects=selected["objects"],
                     object_tracking=None,
                 )
             main_images = [(row,item) for row,item in available if item.get("frame_source") == "recorded_main"]
             if main_images:
-                review, image_item = max(main_images,key=lambda pair:pixels(pair[1]))
+                review, image_item = max(main_images,key=lambda pair:_scene_pixels(pair[1]))
                 for subject in scene_objects:
                     for observation in subject["observations"]:
-                        if observation["camera_id"] == review["camera_id"] and pixels(observation) < pixels(image_item):
+                        if observation["camera_id"] == review["camera_id"] and _scene_pixels(observation) < _scene_pixels(image_item):
                             observation["review_image"] = {"url":f"/api/incidents/observations/{review['id']}/snapshot",
                                 "width":image_item.get("detection_frame_width"), "height":image_item.get("detection_frame_height"),
                                 "source":"recorded_main", "captured_at":_iso(review["captured_epoch"]), "analyzed_frame":True}
@@ -1145,6 +1214,7 @@ class EventStoreSceneMixin:
     def list_scene_incident_cards(self,*,start_epoch=None,end_epoch=None,start_at=None,end_at=None,camera_id="",limit=200,offset=0,
                                   event_type="all",object_label="",zone=""):
         """Page rows for the incident rail: cover, labels, and time, without observation history."""
+        from ..incident_presenter import _best_incident_event, _event_row
         if start_at is not None:
             start_epoch=_epoch(start_at)
         if end_at is not None:
@@ -1168,16 +1238,33 @@ class EventStoreSceneMixin:
                 "from scene_objects s join scene_episodes p on p.id=s.episode_id "
                 f"where p.incident_id in ({placeholders})", ids).fetchall()
             event_rows=conn.execute(
-                "select p.incident_id,e.id,e.camera_id,e.kind,e.topic,e.created_at,e.snapshot_path,e.evidence_revision "
+                "select p.incident_id,e.id,e.camera_id,e.kind,e.topic,e.created_at,e.snapshot_path,e.evidence_revision,e.objects_json "
                 "from events e join scene_event_membership m on m.event_id=e.id "
                 "join scene_episodes p on p.id=m.episode_id "
                 f"where p.incident_id in ({placeholders}) order by e.created_at,e.id", ids).fetchall()
             cover_rows=conn.execute(
-                "select incident_id,id from ("
-                "select p.incident_id,o.id,row_number() over (partition by p.incident_id "
-                "order by o.captured_epoch desc) rn "
+                "select incident_id,id,event_id,camera_id,captured_epoch,payload_json,snapshot_path from ("
+                "select p.incident_id,o.*,row_number() over(partition by p.incident_id order by "
+                "coalesce(cast(json_extract(o.payload_json,'$.detection_frame_width') as integer),0)*"
+                "coalesce(cast(json_extract(o.payload_json,'$.detection_frame_height') as integer),0) desc,"
+                "coalesce(cast(json_extract(o.payload_json,'$.confidence') as real),0) desc,"
+                "o.captured_epoch asc,o.id asc) rank "
                 "from scene_observations o join scene_episodes p on p.id=o.episode_id "
-                f"where p.incident_id in ({placeholders}) and o.snapshot_path!='') ranked where rn=1", ids).fetchall()
+                f"where p.incident_id in ({placeholders}) and o.snapshot_path!='') where rank=1", ids).fetchall()
+            recorded_rows=conn.execute(
+                "select p.incident_id,max(coalesce(cast(json_extract(o.payload_json,'$.detection_frame_width') as integer),0)*"
+                "coalesce(cast(json_extract(o.payload_json,'$.detection_frame_height') as integer),0)) pixels "
+                "from scene_observations o join scene_episodes p on p.id=o.episode_id "
+                f"where p.incident_id in ({placeholders}) and json_extract(o.payload_json,'$.frame_source')='recorded_main' "
+                "group by p.incident_id", ids).fetchall()
+            observation_rows=[]
+            if cover_rows:
+                clauses=" or ".join("(p.incident_id=? and o.snapshot_path=?)" for _ in cover_rows)
+                cover_args=[value for row in cover_rows for value in (row["incident_id"],row["snapshot_path"])]
+                observation_rows=conn.execute(
+                    "select p.incident_id,o.id,o.event_id,o.camera_id,o.captured_epoch,o.payload_json,o.snapshot_path "
+                    "from scene_observations o join scene_episodes p on p.id=o.episode_id where "+clauses,
+                    cover_args).fetchall()
         cameras_by={}
         for row in episode_rows:
             cameras_by.setdefault(row["incident_id"], [])
@@ -1190,26 +1277,10 @@ class EventStoreSceneMixin:
         events_by={}
         for row in event_rows:
             events_by.setdefault(row["incident_id"], []).append(row)
-        covers={row["incident_id"]: row["id"] for row in cover_rows}
-        # Compact thumbs crop from these boxes. Load only cover events, not every member.
-        cover_event_ids=[]
-        cover_by_incident={}
-        for incident_id in ids:
-            members=events_by.get(incident_id, [])
-            representative=next((event for event in reversed(members) if event["snapshot_path"]), members[-1] if members else None)
-            if representative is not None and representative["snapshot_path"]:
-                cover_by_incident[incident_id]=int(representative["id"])
-                cover_event_ids.append(int(representative["id"]))
-        objects_by_event={}
-        if cover_event_ids:
-            unique_ids=list(dict.fromkeys(cover_event_ids))
-            object_placeholders=",".join("?"*len(unique_ids))
-            with self._connect() as conn:
-                for row in conn.execute(
-                    f"select id,objects_json from events where id in ({object_placeholders})",
-                    unique_ids,
-                ):
-                    objects_by_event[int(row["id"])]=_card_cover_objects(row["objects_json"])
+        observations_by={}
+        for row in observation_rows:
+            observations_by.setdefault(row["incident_id"], []).append(row)
+        recorded_pixels_by={row["incident_id"]:int(row["pixels"] or 0) for row in recorded_rows}
         cards=[]
         for incident_id in ids:
             incident=incidents.get(incident_id)
@@ -1217,28 +1288,50 @@ class EventStoreSceneMixin:
                 continue
             members=events_by.get(incident_id, [])
             labels=sorted(labels_by.get(incident_id, ()))
-            representative=next((event for event in reversed(members) if event["snapshot_path"]), members[-1] if members else None)
+            presented_members=[_event_row(dict(event)) for event in members]
+            best=(
+                _best_incident_event(presented_members)
+                if presented_members else None
+            )
+            representative=next(
+                (event for event in members if event["id"] == best["id"]),
+                members[-1] if members else None,
+            )
             opener=members[0] if members else None
             raw_trigger=str((opener["topic"] if opener else None) or "camera").lower()
             trigger="ema" if raw_trigger in {"ema","adaptive","visual_backup","adaptive/visual_backup"} else "camera"
             snapshot_observation_id=None
             snapshot_url=None
-            if representative is not None and representative["snapshot_path"]:
-                snapshot_path="available"
-            elif incident_id in covers:
-                snapshot_observation_id=covers[incident_id]
+            selected = _scene_observation_cover(
+                representative, observations_by.get(incident_id, []),
+                recorded_pixels=recorded_pixels_by.get(incident_id, 0),
+            )
+            if selected is not None:
+                cover = selected["row"]
+                representative = next(
+                    (event for event in members if event["id"] == cover["event_id"]),
+                    representative,
+                )
+                snapshot_observation_id=cover["id"]
                 snapshot_url=f"/api/incidents/observations/{snapshot_observation_id}/snapshot"
                 snapshot_path="available"
+                cover_objects=_card_cover_objects(_json(selected["objects"]))
+            elif representative is not None and representative["snapshot_path"]:
+                snapshot_path="available"
+                cover_objects=_card_cover_objects(representative["objects_json"])
             else:
                 snapshot_path=""
-            cover_event_id=cover_by_incident.get(incident_id)
-            cover_objects=objects_by_event.get(cover_event_id, []) if cover_event_id is not None else []
+                cover_objects=[]
+            cover_event_id=int(representative["id"]) if representative is not None and snapshot_path else None
             cards.append({
                 "id":incident_id,
                 "incident_id":incident_id,
                 "revision":int(incident["revision"] or 0),
                 "schema_version":3,
-                "camera_id":(cameras_by.get(incident_id) or [""])[0],
+                "camera_id":str(
+                    (representative["camera_id"] if representative is not None else "")
+                    or (cameras_by.get(incident_id) or [""])[0]
+                ),
                 "camera_ids":cameras_by.get(incident_id, []),
                 "start_at":_iso(incident["start_epoch"]),
                 "end_at":_iso(incident["end_epoch"]),
@@ -1277,8 +1370,19 @@ class EventStoreSceneMixin:
             conn.execute("begin immediate")
             row=conn.execute("select * from events where id=?",(event_id,)).fetchone()
             if row:
+                retained=[]
+                for observation in observations:
+                    item=dict(observation)
+                    if item.get("snapshot_path"):
+                        retained_path=self._acquired_media_path(
+                            conn,item["snapshot_path"]
+                        )
+                        item["snapshot_path"]=retained_path
+                        if not retained_path:
+                            item["snapshot_visible"]=False
+                    retained.append(item)
                 projected=dict(row)
-                projected["objects_json"]=_json([*_objects(row["objects_json"]),{"status":"scene_observations","observations":observations}])
+                projected["objects_json"]=_json([*_objects(row["objects_json"]),{"status":"scene_observations","observations":retained}])
                 self._scene_ingest(conn,projected,activity=activity)
 
     def scene_observation(self,observation_id):
@@ -1434,8 +1538,8 @@ class EventStoreSceneMixin:
             conn.execute("begin")
             try:
                 rows = conn.execute(
-                    "select incident_id, revision from scene_notification_outbox where rowid > ? order by rowid limit ?",
-                    (self._scene_outbox_legacy_rowid, limit),
+                    "select incident_id, revision from scene_notification_outbox where payload_json='' order by rowid limit ?",
+                    (limit,),
                 ).fetchall()
                 for row in rows:
                     incident_id = str(row["incident_id"])
@@ -1456,8 +1560,8 @@ class EventStoreSceneMixin:
     def acknowledge_scene_notification(self,incident_id,revision):
         with self._lock,self._connect() as conn:
             conn.execute(
-                "delete from scene_notification_outbox where incident_id=? and revision<=? and rowid > ?",
-                (incident_id, revision, self._scene_outbox_legacy_rowid),
+                "delete from scene_notification_outbox where incident_id=? and revision<=? and payload_json=''",
+                (incident_id, revision),
             )
 
     def settle_scene_incidents(self,now=None):

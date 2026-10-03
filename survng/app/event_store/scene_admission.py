@@ -30,6 +30,12 @@ class EventStoreSceneAdmissionMixin:
                 event_id integer primary key references events(id) on delete cascade,
                 decision_id text not null references scene_activity_decisions(id)
             );
+            create table if not exists scene_context_projection_jobs (
+                episode_id text primary key references scene_episodes(id) on delete cascade,
+                anchor_event_id integer not null references events(id) on delete cascade,
+                context_start real not null, context_end real not null,
+                created_at real not null
+            );
         """)
 
     def _acquire_event_samples(self, conn, row, objects=None):
@@ -194,16 +200,23 @@ class EventStoreSceneAdmissionMixin:
         # these observations helped establish it or qualify for an alert.
         context_start = min(episode["start_epoch"], min(s["captured_epoch"] for s in samples))
         context_end = max(episode["end_epoch"], max(s["captured_epoch"] for s in samples))
-        while True:
-            ids = conn.execute("select s.id from acquired_samples s where s.camera_id=? and s.captured_epoch>=? and s.captured_epoch<=? "
-                               "and not exists(select 1 from acquired_sample_episodes a where a.sample_id=s.id and a.episode_id=?) "
-                               "order by s.captured_epoch,s.id limit 200", (row["camera_id"],context_start,context_end,episode["id"])).fetchall()
-            if not ids:
-                break
-            if self._project_acquired_context(conn, episode, row, [self._scene_sample(conn,key[0]) for key in ids]):
+        ids = conn.execute("select s.id from acquired_samples s where s.camera_id=? and s.captured_epoch>=? and s.captured_epoch<=? "
+                           "and not exists(select 1 from acquired_sample_episodes a where a.sample_id=s.id and a.episode_id=?) "
+                           "order by s.captured_epoch,s.id limit 200", (row["camera_id"],context_start,context_end,episode["id"])).fetchall()
+        if ids:
+            if self._project_acquired_context(
+                conn, episode, row, self._sample_payloads(conn, [key[0] for key in ids])
+            ):
                 alerts_pending = False
-            if len(ids) < 200:
-                break
+        if len(ids) == 200:
+            conn.execute(
+                "insert into scene_context_projection_jobs values(?,?,?,?,?) "
+                "on conflict(episode_id) do update set "
+                "context_start=min(context_start,excluded.context_start),"
+                "context_end=max(context_end,excluded.context_end),"
+                "anchor_event_id=excluded.anchor_event_id",
+                (episode["id"], row["id"], context_start, context_end, time.time()),
+            )
         if alerts_pending:
             self._scene_refresh_alerts(conn, row["id"])
         self._refresh_scene_establishment(conn, incident_id)
@@ -211,6 +224,55 @@ class EventStoreSceneAdmissionMixin:
         if revision != previous_revision:
             self._scene_changed(conn, incident_id, notify=notify and supported)
         return incident_id
+
+    def project_pending_scene_context(self) -> int:
+        """Project one durable context page without monopolizing the DB lock."""
+        with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
+            job = conn.execute(
+                "select * from scene_context_projection_jobs order by created_at,episode_id limit 1"
+            ).fetchone()
+            if job is None:
+                return 0
+            episode = conn.execute(
+                "select * from scene_episodes where id=?", (job["episode_id"],),
+            ).fetchone()
+            anchor = conn.execute(
+                "select * from events where id=?", (job["anchor_event_id"],),
+            ).fetchone()
+            if episode is None or anchor is None:
+                conn.execute(
+                    "delete from scene_context_projection_jobs where episode_id=?",
+                    (job["episode_id"],),
+                )
+                return 0
+            ids = conn.execute(
+                "select s.id from acquired_samples s where s.camera_id=? "
+                "and s.captured_epoch>=? and s.captured_epoch<=? and not exists("
+                "select 1 from acquired_sample_episodes a where a.sample_id=s.id and a.episode_id=?) "
+                "order by s.captured_epoch,s.id limit 200",
+                (episode["camera_id"], job["context_start"], job["context_end"], episode["id"]),
+            ).fetchall()
+            before = int(conn.execute(
+                "select revision from scene_incidents where id=?", (episode["incident_id"],),
+            ).fetchone()[0])
+            if ids:
+                self._project_acquired_context(
+                    conn, episode, anchor,
+                    self._sample_payloads(conn, [row[0] for row in ids]),
+                )
+            if len(ids) < 200:
+                conn.execute(
+                    "delete from scene_context_projection_jobs where episode_id=?",
+                    (episode["id"],),
+                )
+            self._refresh_scene_establishment(conn, episode["incident_id"])
+            after = int(conn.execute(
+                "select revision from scene_incidents where id=?", (episode["incident_id"],),
+            ).fetchone()[0])
+            if after != before:
+                self._scene_changed(conn, episode["incident_id"], notify=True)
+            return len(ids)
 
     def _project_acquired_context(self, conn, episode, anchor, samples):
         evidence = []

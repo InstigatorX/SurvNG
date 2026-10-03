@@ -218,6 +218,37 @@ def test_context_projection_preserves_acquired_observation_timestamp(tmp_path):
         assert conn.execute('pragma foreign_key_check').fetchall()==[]
 
 
+def test_context_projection_is_paged_by_a_durable_obligation(tmp_path):
+    store = EventStore(tmp_path)
+    for index in range(205):
+        store.acquire_scene_sample(
+            sample_id=f"context-{index:03d}", camera_id="gate",
+            captured_epoch=1000, source="live_discovery", status="complete",
+            observations=[],
+        )
+    event = store.add_event(
+        "gate", "motion",
+        created_at=datetime.fromtimestamp(1000, timezone.utc).isoformat(),
+        objects_json=json.dumps([detection(confidence=.8, incident_eligible=True)]),
+    )
+    incident = store.scene_incident(event_id=event["id"])
+    episode_id = incident["episodes"][0]["id"]
+    with store._connect() as connection:
+        self_count = connection.execute(
+            "select count(*) from acquired_sample_episodes where episode_id=?", (episode_id,),
+        ).fetchone()[0]
+        jobs = connection.execute("select count(*) from scene_context_projection_jobs").fetchone()[0]
+    assert self_count == 200
+    assert jobs == 1
+
+    assert store.project_pending_scene_context() > 0
+    with store._connect() as connection:
+        assert connection.execute(
+            "select count(*) from acquired_sample_episodes where episode_id=?", (episode_id,),
+        ).fetchone()[0] == 206
+        assert connection.execute("select count(*) from scene_context_projection_jobs").fetchone()[0] == 0
+
+
 def test_failed_reanalysis_preserves_original_successful_observations(tmp_path):
     store=EventStore(tmp_path)
     first=confirmation_result()

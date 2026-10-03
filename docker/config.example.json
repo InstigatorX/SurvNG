@@ -72,6 +72,10 @@
     "timeout_seconds": 45.0,
     "allow_apply_recommendations": false
   },
+  "system_review": {
+    "cadence": "off",
+    "automatic_classes": []
+  },
   "mqtt": {
     "enabled": false,
     "host": "",

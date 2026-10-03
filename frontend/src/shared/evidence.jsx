@@ -893,7 +893,7 @@ export function DebugDetectionOverlay({
   return <canvas ref={canvasRef} className="event-detection-canvas" aria-hidden="true" />;
 }
 
-export function EventOverlay({ event: sourceEvent, events, timeZone, onClose, onSelect, onRefresh }) {
+export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectIncident = false, onClose, onSelect, onRefresh }) {
   const [correctedScene, setCorrectedScene] = useState(null);
   const event = correctedScene?.id === sourceEvent.id && Number(correctedScene.revision) >= Number(sourceEvent.revision || 0) ? correctedScene : sourceEvent;
   const scenePlayback = useIncidentPlayback(event);
@@ -1584,7 +1584,7 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, onClose, on
           ) : null}
         </div>
         <div className="event-detail-body">
-          <IncidentScenePanel key={event.incident_id || event.id} incident={event} timeZone={timeZone} onChanged={(detail) => { setCorrectedScene(detail); onRefresh?.(); }} onSelectEpisode={scenePlayback.select} onPlayScene={scenePlayback.playAll} activeEpisodeId={scenePlayback.episode?.episode_id} onNextEpisode={scenePlayback.hasNext ? scenePlayback.nextEpisode : null} onStopPlayback={scenePlayback.stop} />
+          <IncidentScenePanel key={event.incident_id || event.id} incident={event} timeZone={timeZone} canCorrectIncident={canCorrectIncident} onChanged={(detail) => { setCorrectedScene(detail); onRefresh?.(); }} onSelectEpisode={scenePlayback.select} onPlayScene={scenePlayback.playAll} activeEpisodeId={scenePlayback.episode?.episode_id} onNextEpisode={scenePlayback.hasNext ? scenePlayback.nextEpisode : null} onStopPlayback={scenePlayback.stop} />
           <details
             className="event-analysis-details"
             open={analysisToolsOpen}

@@ -7,7 +7,7 @@ import math
 import time
 import uuid
 
-from ..incident_utils import portable_media_path
+from ..incident_utils import portable_media_path, snapshot_deletion_claimed
 from ..scene_identity import observation_identity
 
 # Five evenly spaced confirmation frames must remain close enough for the
@@ -117,6 +117,54 @@ class EventStoreSceneAcquisitionMixin:
         result["observation_ids"] = [o["id"] for o in rows]
         return result
 
+    @staticmethod
+    def _sample_payloads(conn, sample_ids):
+        """Load a bounded page of samples without per-sample SQL round trips."""
+        identifiers = list(dict.fromkeys(str(value) for value in sample_ids if value))
+        if not identifiers:
+            return []
+        placeholders = ",".join("?" for _ in identifiers)
+        samples = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                f"select * from acquired_samples where id in ({placeholders})",
+                identifiers,
+            )
+        }
+        for sample in samples.values():
+            sample["metadata"] = json.loads(sample.pop("metadata_json"))
+            sample["observations"] = []
+            sample["observation_ids"] = []
+        witnesses = {key: [] for key in samples}
+        for row in conn.execute(
+            f"select sample_id,payload_json from scene_activity_measurements "
+            f"where sample_id in ({placeholders}) order by sample_id,id",
+            identifiers,
+        ):
+            key = str(row["sample_id"])
+            if key in witnesses:
+                witnesses[key].append(json.loads(row["payload_json"]))
+        for key, values in witnesses.items():
+            if values:
+                samples[key]["metadata"]["activity_witnesses"] = values
+        for row in conn.execute(
+            "select a.sample_id,o.* from acquired_sample_observations a "
+            "join acquired_observations o on o.id=a.observation_id "
+            f"where a.sample_id in ({placeholders}) order by a.sample_id,o.captured_epoch,o.id",
+            identifiers,
+        ):
+            sample = samples.get(str(row["sample_id"]))
+            if sample is None:
+                continue
+            sample["observations"].append({
+                **json.loads(row["payload_json"]),
+                "id": row["id"],
+                "snapshot_path": row["snapshot_path"],
+                "recording_path": row["recording_path"],
+            })
+            sample["observation_ids"].append(row["id"])
+        return [samples[key] for key in identifiers if key in samples]
+
     def scene_sample(self, sample_id):
         with self._connect() as conn:
             return self._sample_payload(conn, sample_id)
@@ -127,7 +175,7 @@ class EventStoreSceneAcquisitionMixin:
         rows=conn.execute("select id from acquired_samples where camera_id=? and captured_epoch>=? "
                           "and captured_epoch<=? and id>? order by id limit ?",
                           (camera_id,_epoch(start_epoch),_epoch(end_epoch),after_id,max(1,min(int(limit),1000)))).fetchall()
-        return [self._sample_payload(conn,row[0]) for row in rows]
+        return self._sample_payloads(conn, [row[0] for row in rows])
 
     def scene_acquired_observation(self, observation_id):
         with self._connect() as conn:
@@ -136,6 +184,11 @@ class EventStoreSceneAcquisitionMixin:
 
     def _acquired_media_path(self, conn, path):
         path = portable_media_path(self.storage_dir, str(path or ""))
+        has_claims = path and conn.execute(
+            "select 1 from sqlite_master where type='table' and name='media_deletion_claims'"
+        ).fetchone()
+        if has_claims and snapshot_deletion_claimed(conn, self.storage_dir, path):
+            return ""
         if path and conn.execute("select 1 from acquired_expired_snapshots where snapshot_path=?", (path,)).fetchone():
             return ""
         if path and conn.execute("select 1 from sqlite_master where name='scene_expired_snapshots'").fetchone():

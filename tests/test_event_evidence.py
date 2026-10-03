@@ -77,6 +77,26 @@ def test_legacy_migration_does_not_schedule_historical_evidence(tmp_path):
     assert store.pending_evidence_updates() == []
 
 
+def test_new_scene_observation_keeps_semantic_projection_durable(tmp_path):
+    store = EventStore(tmp_path)
+    event = add(store)
+    for row in store.pending_evidence_updates():
+        store.acknowledge_evidence_update(row["id"])
+
+    store.record_scene_observations(event["id"], [{
+        **provisional(),
+        "captured_at_epoch": 1001.0,
+        "snapshot_path": "scene.webp",
+        "scene_track_key": "track-1",
+    }])
+
+    updates = store.pending_evidence_updates()
+    assert [(row["event_id"], row["kind"]) for row in updates] == [
+        (event["id"], "evidence_updated")
+    ]
+    assert updates[0]["payload"]["reason"] == "scene_observation_added"
+
+
 def test_cover_commit_revision_cas_and_noop_are_atomic(tmp_path):
     store = EventStore(tmp_path)
     event = add(store)
@@ -351,6 +371,37 @@ def test_publication_checkpoint_only_marks_observed_ids(tmp_path):
     rows = EventStore(tmp_path).pending_evidence_updates()
     assert all(bool(row["publication_done"]) == (row["id"] in observed_ids) for row in rows)
     assert any(not row["publication_done"] for row in rows)
+
+
+def test_scene_media_outbox_ack_is_a_revision_guarded_cas(tmp_path):
+    store = EventStore(tmp_path)
+    event = add(store)
+    with store._lock, store._connect() as connection:
+        connection.execute("delete from event_evidence_outbox")
+        connection.execute(
+            "update events set scene_media_revision=1 where id=?", (event["id"],),
+        )
+        row = connection.execute("select * from events where id=?", (event["id"],)).fetchone()
+        store._evidence_outbox(connection, row, "evidence_updated", reason="first")
+    stale = store.pending_evidence_updates()[0]
+
+    with store._lock, store._connect() as connection:
+        connection.execute(
+            "update events set scene_media_revision=2 where id=?", (event["id"],),
+        )
+        row = connection.execute("select * from events where id=?", (event["id"],)).fetchone()
+        store._evidence_outbox(connection, row, "evidence_updated", reason="second")
+
+    assert not store.mark_evidence_publication(
+        [stale["id"]], expected_scene_media_revisions={stale["id"]: 1},
+    )
+    assert not store.acknowledge_evidence_update(
+        stale["id"], expected_scene_media_revision=1,
+    )
+    current = store.pending_evidence_updates()
+    assert len(current) == 1
+    assert current[0]["payload"]["scene_media_revision"] == 2
+    assert not current[0]["publication_done"]
 
 
 def test_global_expiry_handles_stopped_cameras_and_preserves_live_leases(tmp_path, monkeypatch):

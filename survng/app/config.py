@@ -216,7 +216,9 @@ class MqttConfig(BaseModel):
 class SystemReviewConfig(BaseModel):
     """Cadence for the site briefing. Automatic classes are an allowlist."""
 
-    cadence: Literal["off", "daily", "weekly"] = "weekly"
+    # Scheduled AI review can upload retained images and incur provider cost.
+    # Existing installations must opt in explicitly.
+    cadence: Literal["off", "daily", "weekly"] = "off"
     automatic_classes: list[str] = Field(default_factory=list)
 
     @field_validator("automatic_classes")

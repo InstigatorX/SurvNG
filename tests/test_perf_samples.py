@@ -34,6 +34,7 @@ def test_timed_lock_samples_only_contended_waits() -> None:
     assert snapshot["contended"] == 1
     assert snapshot["wait_total_ms"] >= 40.0
     assert snapshot["wait_p99_ms"] >= 40.0
+    assert snapshot["hold_p99_ms"] is not None
     assert lock.acquire(blocking=False)
     lock.release()
 

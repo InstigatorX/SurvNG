@@ -111,6 +111,160 @@ def test_pause_refuses_to_hide_a_session_that_did_not_stop() -> None:
     assert lifecycle.current() is initial
 
 
+def test_abort_scene_work_joins_session_before_closing_ledger() -> None:
+    state = [False]
+    initial = _session()
+    order: list[str] = []
+    initial.request_stop.side_effect = lambda: order.append("request")
+    initial.wait_stopped.side_effect = lambda _timeout: order.append("joined") or True
+    lifecycle, _factory, _frame_provider, _history = _lifecycle(
+        initial, accepting=state,
+    )
+    lifecycle.scene_job_store = Mock()
+    lifecycle.scene_job_store.close_scene_tracking.side_effect = (
+        lambda *_args: order.append("closed") or 2
+    )
+
+    assert lifecycle.abort_scene_work("camera_disabled", timeout=1.0) == 2
+    assert order == ["request", "joined", "closed"]
+
+
+def test_abort_scene_work_preserves_ledger_when_session_does_not_stop() -> None:
+    initial = _session()
+    initial.wait_stopped.return_value = False
+    lifecycle, _factory, _frame_provider, _history = _lifecycle(initial)
+    lifecycle.scene_job_store = Mock()
+
+    with pytest.raises(RuntimeError, match="did not stop"):
+        lifecycle.abort_scene_work("camera_disabled", timeout=0.01)
+
+    lifecycle.scene_job_store.close_scene_tracking.assert_not_called()
+
+
+def test_abort_scene_work_fences_new_scene_admission_until_reenabled() -> None:
+    state = [False]
+    initial = _session()
+    lifecycle, _factory, _frame_provider, _history = _lifecycle(
+        initial, accepting=state,
+    )
+    lifecycle.scene_job_store = Mock()
+    lifecycle.scene_job_store.close_scene_tracking.return_value = 1
+
+    assert lifecycle.abort_scene_work("camera_disabled") == 1
+    assert lifecycle.resume_pending_scene() is False
+    assert lifecycle.start_incident(
+        8, datetime.now(timezone.utc), [{"label": "person"}],
+    ) is None
+    lifecycle.scene_job_store.enqueue_scene_tracking.assert_not_called()
+
+    state[0] = True
+    lifecycle.sync_accepting()
+    lifecycle.scene_job_store.claim_scene_tracking.return_value = None
+    assert lifecycle.resume_pending_scene() is False
+    lifecycle.scene_job_store.claim_scene_tracking.assert_called_once()
+
+
+def test_reenable_during_abort_waits_before_reopening_scene_admission() -> None:
+    state = [False]
+    entered = threading.Event()
+    release = threading.Event()
+    initial = _session()
+    initial.wait_stopped.side_effect = lambda _timeout: entered.set() or release.wait(2)
+    lifecycle, _factory, _frame_provider, _history = _lifecycle(
+        initial, accepting=state,
+    )
+    lifecycle.scene_job_store = Mock()
+    results: list[int] = []
+    worker = threading.Thread(
+        target=lambda: results.append(lifecycle.abort_scene_work("camera_disabled")),
+    )
+    worker.start()
+    assert entered.wait(1)
+
+    state[0] = True
+    lifecycle.sync_accepting()
+    assert lifecycle.start_incident(
+        9, datetime.now(timezone.utc), [{"label": "person"}],
+    ) is None
+    lifecycle.scene_job_store.enqueue_scene_tracking.assert_not_called()
+
+    release.set()
+    worker.join(2)
+    assert not worker.is_alive()
+    assert results == [0]
+    lifecycle.scene_job_store.close_scene_tracking.assert_not_called()
+    initial.set_accepting.assert_called_with(True)
+
+
+def test_disable_cancels_reenable_requested_during_abort() -> None:
+    state = [False]
+    entered = threading.Event()
+    release = threading.Event()
+    initial = _session()
+    initial.wait_stopped.side_effect = lambda _timeout: entered.set() or release.wait(2)
+    lifecycle, _factory, _frame_provider, _history = _lifecycle(
+        initial, accepting=state,
+    )
+    lifecycle.scene_job_store = Mock()
+    lifecycle.scene_job_store.close_scene_tracking.return_value = 2
+    results: list[int] = []
+    worker = threading.Thread(
+        target=lambda: results.append(lifecycle.abort_scene_work("camera_disabled")),
+    )
+    worker.start()
+    assert entered.wait(1)
+    state[0] = True
+    lifecycle.sync_accepting()
+    state[0] = False
+    lifecycle.sync_accepting()
+    release.set()
+    worker.join(2)
+
+    assert results == [2]
+    lifecycle.scene_job_store.close_scene_tracking.assert_called_once()
+    assert initial.set_accepting.call_args.args == (False,)
+
+
+def test_abort_timeout_keeps_fence_closed_after_reenable_request() -> None:
+    state = [False]
+    entered = threading.Event()
+    release = threading.Event()
+    initial = _session()
+    def time_out_after_release(_timeout):
+        entered.set()
+        release.wait(2)
+        return False
+
+    initial.wait_stopped.side_effect = time_out_after_release
+    lifecycle, _factory, _frame_provider, _history = _lifecycle(
+        initial, accepting=state,
+    )
+    lifecycle.scene_job_store = Mock()
+    errors: list[BaseException] = []
+
+    def abort() -> None:
+        try:
+            lifecycle.abort_scene_work("camera_disabled", timeout=.01)
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=abort)
+    worker.start()
+    assert entered.wait(1)
+    state[0] = True
+    lifecycle.sync_accepting()
+    release.set()
+    worker.join(2)
+
+    assert errors and isinstance(errors[0], RuntimeError)
+    assert lifecycle.start_incident(
+        10, datetime.now(timezone.utc), [{"label": "person"}],
+    ) is None
+    lifecycle.scene_job_store.close_scene_tracking.assert_not_called()
+    with pytest.raises(RuntimeError, match="tracking stop failed"):
+        lifecycle.sync_accepting()
+
+
 def test_replacement_stops_previous_resizes_history_and_applies_eligibility() -> None:
     initial = _session()
     replacement = _session(fps=3.0)

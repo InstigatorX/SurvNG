@@ -70,6 +70,8 @@ class TimedLock:
     def __init__(self, inner: object | None = None, maxlen: int = 2000) -> None:
         self._inner = inner if inner is not None else threading.Lock()
         self._waits = RollingLatencySamples(maxlen)
+        self._holds = RollingLatencySamples(maxlen)
+        self._held_at = threading.local()
         self._acquisitions = 0
         self._contended = 0
         self._wait_total_ms = 0.0
@@ -77,6 +79,7 @@ class TimedLock:
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
         if self._inner.acquire(False):
             self._acquisitions += 1
+            self._held_at.stack = [*getattr(self._held_at, "stack", ()), time.monotonic()]
             return True
         if not blocking:
             return False
@@ -88,9 +91,15 @@ class TimedLock:
             self._contended += 1
             self._wait_total_ms += waited
             self._waits.add(waited)
+            self._held_at.stack = [*getattr(self._held_at, "stack", ()), time.monotonic()]
         return acquired
 
     def release(self) -> None:
+        stack = list(getattr(self._held_at, "stack", ()))
+        started = stack.pop() if stack else None
+        self._held_at.stack = stack
+        if started is not None:
+            self._holds.add((time.monotonic() - started) * 1000.0)
         self._inner.release()
 
     def __enter__(self) -> bool:
@@ -105,5 +114,7 @@ class TimedLock:
             "contended": self._contended,
             "wait_total_ms": round(self._wait_total_ms, 3),
             **{f"wait_{key}": value for key, value in self._waits.snapshot().items()
+               if key != "samples"},
+            **{f"hold_{key}": value for key, value in self._holds.snapshot().items()
                if key != "samples"},
         }

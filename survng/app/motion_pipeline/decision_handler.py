@@ -721,11 +721,6 @@ class MotionDecisionHandler:
                 )) is not None
             ]
             objects = [*objects, {"status": "scene_observations", "observations": observations}]
-        # Existing incidents acquire evidence even when this pass only changes
-        # the cover or produces no alert-qualified objects.
-        record_scene = getattr(self.events, "record_scene_observations", None)
-        if existing_event_id is not None and observations and callable(record_scene):
-            record_scene(int(existing_event_id), observations)
         workflow_ms = round(
             (time.monotonic() - detection_started) * 1000,
             3,
@@ -933,6 +928,23 @@ class MotionDecisionHandler:
             )
             cover_promoted = False
             cover_promotion_reason = ""
+            # This path does not replace the event payload, so retain its
+            # observations explicitly after snapshot creation. Normal
+            # refinements project them atomically with refine_event_evidence.
+            record_scene = getattr(self.events, "record_scene_observations", None)
+            if existing_event_id is not None and observations and callable(record_scene):
+                retained_observations = [
+                    {
+                        **observation,
+                        **(
+                            {"snapshot_path": snapshot_path}
+                            if snapshot_path and observation.get("snapshot_visible") is not False
+                            and not observation.get("snapshot_path") else {}
+                        ),
+                    }
+                    for observation in observations
+                ]
+                record_scene(int(existing_event_id), retained_observations)
             if (
                 (cover_only or rejection_reason == "object_not_motion_correlated")
                 and existing_event_id is not None
