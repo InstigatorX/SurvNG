@@ -23,9 +23,11 @@ try {
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     let status = 200, imageFailure = false;
+    const requests = [];
     const detail = { camera_name: "Front Door", notification: { state: "active", revision: 2, summary: "Alex detected at Front Door.", people: ["Alex"], zones: ["Porch"], representative_event_id: 42, started_at: "2026-09-13T01:00:00Z" }, incident: { id: "incident-front-door-41", camera_id: "front-door", representative_event_id: 42, created_at: "2026-09-13T01:00:10Z", start_epoch: 1789261200, last_epoch: 1789261210, events: [{ id: 42, created_at: "2026-09-13T01:00:10Z", labels: ["person"] }, { id: 41, created_at: "2026-09-13T01:00:00Z", labels: [] }] } };
     await page.route("**/api/**", (route) => {
       const path = new URL(route.request().url()).pathname;
+      requests.push(path);
       if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
       if (path.endsWith("/cameras")) return route.fulfill({ json: [{ id: "front-door", name: "Front Door" }] });
       if (path.endsWith("/config")) return route.fulfill({ json: {} });
@@ -82,6 +84,10 @@ try {
     await page.keyboard.press("Escape");
     assert.equal(await viewer.count(), 0);
     await page.getByRole("button", { name: "Play incident", exact: true }).click();
+    await page.locator(".incident-recording-player").waitFor();
+    assert.match(page.url(), /incident-front-door-41/);
+    assert.ok(requests.some((path) => path.includes("/recordings/window") || path.includes("/day.m3u8")));
+    assert.equal(requests.some((path) => path.endsWith("/clip.mp4")), false);
     await page.getByRole("button", { name: "Close playback" }).click();
     status = 503;
     await page.evaluate(() => window.dispatchEvent(new Event("online")));

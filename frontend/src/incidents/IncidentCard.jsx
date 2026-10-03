@@ -16,7 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { crossCameraMatchCameraLabel, crossCameraMatchLabel, crossCameraTracePath } from "../crossCameraTrace.mjs";
-import { incidentReplayTracking, incidentTrackingSource, trackingCoverageLabel, storedObjectTracks } from "../objectTrackReplay.mjs";
+import { incidentReplayTracking, trackingCoverageLabel } from "../objectTrackReplay.mjs";
 import { incidentSceneObjects, observedObjectSummaries } from "../incidentScene.mjs";
 import { incidentEvidenceTimeline, incidentMosaicEvents, incidentMosaicPage, incidentTriggerLabel, showIncidentCardAnnotations } from "../incidentNavigation.mjs";
 import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../relatedIncidents.mjs";
@@ -35,157 +35,16 @@ import { writeVisualSearchTrail } from "../visualSearchTrail.mjs";
 import { appUrl, fetch, incidentRecordingContext, recordingsHref } from "../shared/api.js";
 import { formatDateTime, formatTimeOnly, formatDuration } from "../shared/format.js";
 import { eventSnapshotDownloadUrl, eventClipUrl } from "../shared/mediaUrls.js";
-import { prefersNativeMobilePlayback, ShakaVideo } from "../shared/media.jsx";
 import {
-  DebugDetectionOverlay,
   IncidentObjectBadges,
   IncidentSourceDot,
   SnapshotImage,
-  StoredTrackVideoOverlay,
   formatDepthMeters,
   hasDetectedObjects,
   incidentClipWindow,
   incidentLabels,
-  loadIncidentClipInfo,
 } from "../shared/evidence.jsx";
-
-export function IncidentClipLayer({ event, trackingEvent, active, analysisMode = "clean", depthLayer = "both", onAnalysisStats, onEnded }) {
-  const videoRef = useRef(null);
-  const [clipInfo, setClipInfo] = useState(null);
-  const [clipLoading, setClipLoading] = useState(false);
-  const [clipError, setClipError] = useState("");
-  const [playback, setPlayback] = useState(null);
-  const [playbackOriginTime, setPlaybackOriginTime] = useState(null);
-  const storedTracks = storedObjectTracks(trackingEvent || event);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function loadClipSettings() {
-      const eventId = Number(event?.representative_event_id || event?.id);
-      if (!active || !Number.isFinite(eventId)) {
-        setClipInfo(null);
-        setPlayback(null);
-        setPlaybackOriginTime(null);
-        setClipLoading(false);
-        setClipError(active ? "No event video available" : "");
-        return;
-      }
-      setClipInfo(null);
-      setPlayback(null);
-      setPlaybackOriginTime(null);
-      setClipLoading(true);
-      setClipError("");
-      const info = await loadIncidentClipInfo(event, () => cancelled, prefersNativeMobilePlayback());
-      if (!info) return;
-      setClipInfo(info);
-      setPlayback(prefersNativeMobilePlayback()
-        ? { url: info.downloadUrl, mimeType: "video/mp4" }
-        : { url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
-    }
-    loadClipSettings();
-    return () => { cancelled = true; };
-  }, [active, event?.id, event?.representative_event_id, event?.start_epoch, event?.last_epoch]);
-
-  if (!active) return null;
-  return (
-    <div className="incident-video-layer" onClick={(event) => event.stopPropagation()}>
-      {clipInfo && playback && !clipError ? (
-        <>
-          {playback.mimeType === "video/mp4" ? <video
-            ref={videoRef}
-            src={playback.url}
-            autoPlay
-            controls
-            playsInline
-            preload="metadata"
-            onLoadedMetadata={(event) => {
-              const video = event.currentTarget;
-              setPlaybackOriginTime(0);
-              if (clipInfo.playbackStartOffset > 0) {
-                video.currentTime = Number.isFinite(video.duration)
-                  ? Math.min(clipInfo.playbackStartOffset, Math.max(0, video.duration - 0.25))
-                  : clipInfo.playbackStartOffset;
-              }
-              setClipLoading(false);
-              setClipError("");
-            }}
-            onError={() => {
-              setClipLoading(false);
-              setClipError("No recording window found");
-            }}
-            onEnded={onEnded}
-          /> : <ShakaVideo
-            ref={videoRef}
-            src={playback.url}
-            mimeType={playback.mimeType}
-            autoPlay
-            controls
-            playsInline
-            preload="metadata"
-            onReady={(_player, video) => {
-              setPlaybackOriginTime(0);
-              if (clipInfo.playbackStartOffset > 0 && video) {
-                const seekToIncident = () => {
-                  const targetTime = clipInfo.playbackStartOffset;
-                  video.currentTime = Number.isFinite(video.duration)
-                    ? Math.min(targetTime, Math.max(0, video.duration - 0.25))
-                    : targetTime;
-                };
-                if (video.paused) video.addEventListener("playing", seekToIncident, { once: true });
-                else seekToIncident();
-              }
-              setClipLoading(false);
-              setClipError("");
-            }}
-            onError={() => {
-              if (playback.url !== clipInfo.downloadUrl) {
-                setClipLoading(true);
-                setPlaybackOriginTime(null);
-                setClipInfo((current) => current ? {
-                  ...current,
-                  windowStartEpoch: current.requestedWindowStartEpoch,
-                  playbackStartOffset: current.initialPlaybackOffset,
-                } : current);
-                setPlayback({ url: clipInfo.downloadUrl, mimeType: "video/mp4" });
-              } else {
-                setClipLoading(false);
-                setClipError("No recording window found");
-              }
-            }}
-            onEnded={onEnded}
-          />}
-          {analysisMode === "tracks" && trackingEvent?.object_tracking ? (
-            <StoredTrackVideoOverlay
-              videoRef={videoRef}
-              tracks={storedTracks}
-              tracking={trackingEvent?.object_tracking}
-              coordinateSize={{
-                width: Number(trackingEvent?.object_tracking?.frame_width),
-                height: Number(trackingEvent?.object_tracking?.frame_height),
-              }}
-              windowStartEpoch={clipInfo.windowStartEpoch}
-              mediaStartTime={playbackOriginTime}
-              mediaKey={playback.url}
-              sampleFps={trackingEvent?.object_tracking?.sample_fps}
-              lostTimeoutSeconds={trackingEvent?.object_tracking?.lost_timeout_seconds}
-            />
-          ) : null}
-          <DebugDetectionOverlay
-            videoRef={videoRef}
-            active={analysisMode === "ai" || analysisMode === "depth"}
-            depth={analysisMode === "depth"}
-            depthLayer={depthLayer}
-            confidence={0.35}
-            onStats={onAnalysisStats}
-          />
-          {clipLoading ? <div className="incident-video-status preparing">Preparing incident video...</div> : null}
-        </>
-      ) : (
-        <div className="incident-video-status">{clipLoading ? "Preparing video..." : clipError || "No event video available"}</div>
-      )}
-    </div>
-  );
-}
+import { IncidentRecordingPlayer, incidentRecordingBounds } from "./IncidentRecordingPlayer.jsx";
 
 function evidenceSpanLabel(seconds) {
   if (!Number.isFinite(seconds) || seconds < 1) return "";
@@ -296,6 +155,7 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
   }, [evidenceTimeline, incident.representative_event_id, selectedPreview]);
   const preview = scenePlayback?.clip || selectedPreview || incident;
   const videoActive = Boolean(scenePlayback?.clip) || inlineVideoActive;
+  const playbackBounds = videoActive ? incidentRecordingBounds(scenePlayback?.clip || preview) : null;
   const mosaicEvents = useMemo(() => incidentMosaicEvents(incident), [incident]);
   const mosaic = useMemo(() => incidentMosaicPage(mosaicEvents, mosaicPageIndex), [mosaicEvents, mosaicPageIndex]);
   const canShowMosaic = desktopWorkspace && expanded && mosaicEvents.length > 1;
@@ -614,16 +474,19 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
                 </div>
               </div>
             ) : null}
-            <IncidentClipLayer
-              key={scenePlayback?.selection?.key || "preview"}
-              event={scenePlayback?.clip || incident}
-              trackingEvent={trackingPreview}
-              active={expanded && videoActive}
-              analysisMode={analysisMode}
-              depthLayer={depthLayer}
-              onAnalysisStats={onAnalysisStats}
-              onEnded={() => { if (scenePlayback?.clip) scenePlayback.ended(); else setInlineVideoActive(false); }}
-            />
+            {expanded && playbackBounds ? (
+              <IncidentRecordingPlayer
+                key={scenePlayback?.selection?.key || preview.id || "preview"}
+                {...playbackBounds}
+                trackingEvent={trackingPreview}
+                analysisMode={analysisMode}
+                depthLayer={depthLayer}
+                timeZone={timeZone}
+                onAnalysisStats={onAnalysisStats}
+                onEnded={() => { if (scenePlayback?.clip) scenePlayback.ended(); else setInlineVideoActive(false); }}
+                onClose={() => { scenePlayback?.stop(); setInlineVideoActive(false); }}
+              />
+            ) : null}
             {desktopWorkspace
               ? (!expanded ? <IncidentSourceDot trigger={triggerLabel} className="event-count" ariaLabel={`${triggerTitle}. ${countText}`} title={`${triggerTitle} · ${countText}`} /> : null)
               : <IncidentSourceDot trigger={triggerLabel} className="event-count" onClick={openOverlay} ariaLabel={`Open ${triggerTitle.toLowerCase()} incident`} title={`${triggerTitle} · Open incident`} />}

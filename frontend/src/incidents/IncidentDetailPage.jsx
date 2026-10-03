@@ -3,7 +3,7 @@ import { ArrowLeft, Camera, ImageOff, Play, RefreshCw, X } from "lucide-react";
 import { incidentEvidenceFrames } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "../shared/api.js";
 import { formatDateTime } from "../shared/format.js";
-import { IncidentClipLayer } from "./IncidentCard.jsx";
+import { IncidentRecordingPlayer, incidentRecordingBounds } from "./IncidentRecordingPlayer.jsx";
 import "./incident-detail.css";
 import { IncidentScenePanel } from "./IncidentScenePanel.jsx";
 import { canonicalIncidentHref } from "../incidentScene.mjs";
@@ -112,7 +112,7 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
             <p><time dateTime={notification?.started_at || incident.start_at}>{showTime(notification?.started_at || incident.start_at)}</time>{zones.length ? ` · ${zones.join(", ")}` : ""}</p>
           </section>
           <section className="incident-detail-media" aria-label="Incident evidence">
-            {scenePlayback.clip ? <div className="incident-detail-player"><IncidentClipLayer key={scenePlayback.selection.key} event={scenePlayback.clip} active onEnded={scenePlayback.ended} /><button className="incident-detail-close-player" onClick={scenePlayback.stop} aria-label="Close playback"><X size={20} /></button></div>
+            {scenePlayback.clip && incidentRecordingBounds(scenePlayback.clip) ? <div className="incident-detail-player"><IncidentRecordingPlayer key={scenePlayback.selection.key} {...incidentRecordingBounds(scenePlayback.clip)} timeZone={timeZone} autoPlay onEnded={scenePlayback.ended} onClose={scenePlayback.stop} /></div>
               : <EvidenceImage eventId={representative} revision={revision} label={`Incident at ${data.camera_name}`} />}
           </section>
           <div className="incident-detail-actions">
