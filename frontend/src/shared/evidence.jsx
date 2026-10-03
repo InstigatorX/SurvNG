@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 import { IncidentScenePanel } from "../incidents/IncidentScenePanel.jsx";
 import { useIncidentPlayback } from "../incidents/useIncidentPlayback.js";
 import { incidentEpisodeMediaUrl } from "../incidentScene.mjs";
+import { IncidentRecordingPlayer, incidentRecordingBounds } from "../incidents/IncidentRecordingPlayer.jsx";
 import { createPortal } from "react-dom";
 import {
   Activity,
@@ -26,14 +27,13 @@ import {
   UserRound,
   X,
 } from "lucide-react";
-import { recordedIncidentWindow, trackingCoverageAt, containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
+import { recordedIncidentWindow, trackingCoverageAt, containedFrameTransform, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
 import { liveActivityEventId, liveActivityIncidentHref } from "../liveWorkspace.mjs";
 import { adjacentIncident, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentImageRenderRect, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "./api.js";
 import { formatDateTime } from "./format.js";
 import { useStoredState, useModalFocus } from "./hooks.js";
-import { eventSnapshotUrl, eventThumbnailUrl, eventClipUrl, eventStreamUrl } from "./mediaUrls.js";
-import { prefersNativeMobilePlayback, ShakaVideo } from "./media.jsx";
+import { eventSnapshotUrl, eventThumbnailUrl, eventClipUrl } from "./mediaUrls.js";
 import { AI_DETECTION_SAMPLE_MS, advanceDebugDetectionTracks, debugDetectionIou, updateDebugDetectionTracks } from "../debugDetectionTracks.mjs";
 import { TRACKING_SAMPLING_PROFILES, successfulTrackingComparisonEngines, trackingComparisonEngines, trackingComparisonRequestUrl, trackingComparisonResultsArtifact, trackingEngineLabel, trackingHistorySummaryEntries, trackingHistoryVerdictLabel } from "../trackingComparison.mjs";
 
@@ -898,15 +898,10 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, onClose, on
   const event = correctedScene?.id === sourceEvent.id && Number(correctedScene.revision) >= Number(sourceEvent.revision || 0) ? correctedScene : sourceEvent;
   const scenePlayback = useIncidentPlayback(event);
   const modalRef = useModalFocus(onClose);
-  const clipVideoRef = useRef(null);
   const mediaRef = useRef(null);
   const comparisonPanelRef = useRef(null);
   const gestureRef = useRef({ mode: null, pointerId: null, startX: 0, startY: 0, panX: 0, panY: 0, moved: false, pinchDistance: 0, scale: 1 });
-  const [clipInfo, setClipInfo] = useState(null);
-  const [clipLoading, setClipLoading] = useState(false);
-  const [clipError, setClipError] = useState("");
-  const [playback, setPlayback] = useState(null);
-  const [playbackOriginTime, setPlaybackOriginTime] = useState(null);
+  const [playbackBounds, setPlaybackBounds] = useState(null);
   const [videoActive, setVideoActive] = useState(false);
   const [detectionDebug, setDetectionDebug] = useState(false);
   const [detectionDebugStats, setDetectionDebugStats] = useState(null);
@@ -928,7 +923,13 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, onClose, on
   const [manualLoading, setManualLoading] = useState(false);
   const [manualError, setManualError] = useState("");
   useEffect(() => {
-    if (scenePlayback.selection) { setManualDetection(null); setTrackingComparisonEngine(null); setTrackingVisible(false); }
+    if (scenePlayback.selection) {
+      setManualDetection(null);
+      setTrackingComparisonEngine(null);
+      setTrackingVisible(false);
+      setPlaybackBounds(null);
+      setVideoActive(true);
+    }
   }, [scenePlayback.selection]);
   const trackingSource = incidentTrackingSource(event);
   const incidentTrackingEvent = trackingSource && trackingSource !== event ? trackingSource : null;
@@ -969,34 +970,6 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, onClose, on
 
   useEffect(() => {
     let cancelled = false;
-    async function loadClipSettings() {
-      const eventId = Number(viewerEvent.representative_event_id || viewerEvent.id);
-      if (!Number.isFinite(eventId)) {
-        setClipInfo(null);
-        setClipLoading(false);
-        setClipError("No event video available");
-        return;
-      }
-      setClipInfo(null);
-      setPlayback(null);
-      setPlaybackOriginTime(null);
-      setClipLoading(true);
-      setClipError("");
-      setVideoActive(false);
-      const info = await loadIncidentClipInfo(viewerEvent, () => cancelled, prefersNativeMobilePlayback());
-      if (!info) return;
-      setClipInfo(info);
-      setPlayback(prefersNativeMobilePlayback()
-        ? { url: info.downloadUrl, mimeType: "video/mp4" }
-        : { url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
-      if (scenePlayback.selection) setVideoActive(true);
-    }
-    loadClipSettings();
-    return () => { cancelled = true; };
-  }, [viewerEvent.id, viewerEvent.representative_event_id, viewerEvent.start_epoch, viewerEvent.last_epoch, scenePlayback.selection?.key]);
-
-  useEffect(() => {
-    let cancelled = false;
     const cameraId = String(event.camera_id || "");
     setTrackingComparisonHistory({ items: [], summary: null });
     if (!cameraId) return undefined;
@@ -1010,14 +983,21 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, onClose, on
     return () => { cancelled = true; };
   }, [event.camera_id]);
 
+  const sceneBounds = incidentRecordingBounds(scenePlayback.clip || viewerEvent);
+  const activeBounds = playbackBounds
+    || (scenePlayback.clip ? sceneBounds : null)
+    || (videoActive && !event.episodes?.length ? sceneBounds : null);
+  const recordingActive = Boolean(activeBounds);
+  const downloadWindow = incidentClipWindow(viewerEvent, 5, 5);
+  const downloadUrl = Number.isFinite(manualEventId)
+    ? incidentEpisodeMediaUrl(eventClipUrl(manualEventId, downloadWindow.before, downloadWindow.after), viewerEvent)
+    : "";
+
   function playEventClip() {
     if (event.episodes?.length && !scenePlayback.selection) { scenePlayback.playAll(); return; }
-    if (!clipInfo || clipError) return;
+    if (!sceneBounds) return;
+    setPlaybackBounds(null);
     setVideoActive(true);
-    const video = clipVideoRef.current;
-    if (!video) return;
-    if (video.ended || video.currentTime >= Math.max(0, video.duration - 0.1)) video.currentTime = 0;
-    video.play().catch(() => { });
   }
 
 
@@ -1170,8 +1150,8 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, onClose, on
       gestureRef.current.moved = false;
       return;
     }
-    if (zoom.scale > 1 || videoActive) return;
-    if (clipInfo && !clipError) playEventClip();
+    if (zoom.scale > 1 || recordingActive) return;
+    if (sceneBounds) playEventClip();
   }
 
   function resetZoom() {
@@ -1290,40 +1270,15 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, onClose, on
     }
   }
 
-  async function replayTrackingComparison(implementation) {
+  function replayTrackingComparison(implementation) {
     const engine = trackingComparison?.engines?.[implementation];
-    if (!engine || !clipInfo) return;
-    const after = Math.max(0.1, Number(trackingComparison.requested_duration_seconds || trackingComparison.duration_seconds || 0));
     const anchorEpoch = eventEpoch(viewerEvent);
-    const requestedWindowStartEpoch = Number.isFinite(anchorEpoch) ? anchorEpoch : null;
-    const streamUrl = eventStreamUrl(manualEventId, 0, after);
-    const timelineStartEpoch = Number.isFinite(requestedWindowStartEpoch)
-      ? await eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch)
-      : null;
-    const nextClip = {
-      ...clipInfo,
-      before: 0,
-      after,
-      duration: after,
-      streamUrl,
-      downloadUrl: eventClipUrl(manualEventId, 0, after),
-      windowStartEpoch: timelineStartEpoch,
-      requestedWindowStartEpoch,
-      initialPlaybackOffset: 0,
-      playbackStartOffset: hlsPlaybackOffset(requestedWindowStartEpoch, timelineStartEpoch, 0),
-    };
+    if (!engine || !viewerEvent.camera_id || !Number.isFinite(anchorEpoch)) return;
+    const after = Math.max(0.1, Number(trackingComparison.requested_duration_seconds || trackingComparison.duration_seconds || 0));
     setTrackingComparisonEngine(implementation);
     setTrackingVisible(true);
     setDetectionDebug(false);
-    setClipError("");
-    setClipLoading(true);
-    setPlaybackOriginTime(null);
-    setClipInfo(nextClip);
-    setPlayback({
-      url: nextClip.streamUrl,
-      mimeType: "application/vnd.apple.mpegurl",
-      key: `comparison-${implementation}-${Date.now()}`,
-    });
+    setPlaybackBounds({ cameraId: viewerEvent.camera_id, startEpoch: anchorEpoch, endEpoch: anchorEpoch + after });
     setVideoActive(true);
   }
 
@@ -1416,18 +1371,18 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, onClose, on
                   return !enabled;
                 });
               }}
-              disabled={!clipInfo || Boolean(clipError)}
+              disabled={!sceneBounds}
               title="Toggle real-time OpenVINO detection and tracking"
               aria-pressed={detectionDebug}
             >
               <Activity size={16} /> AI
             </button>
-            {clipInfo && !clipError ? (
-              <a className="tile-control-button icon-only" href={clipInfo.downloadUrl} download={downloadName} title="Download event video" aria-label="Download event video">
+            {downloadUrl ? (
+              <a className="tile-control-button icon-only" href={downloadUrl} download={downloadName} title="Download event video" aria-label="Download event video">
                 <Download size={18} />
               </a>
             ) : (
-              <span className="tile-control-button icon-only disabled" title={clipError || "Event video not ready"} aria-label="Event video not ready">
+              <span className="tile-control-button icon-only disabled" title="Event video not ready" aria-label="Event video not ready">
                 <Download size={18} />
               </span>
             )}
@@ -1454,12 +1409,12 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, onClose, on
           onPointerCancel={onMediaPointerUp}
           onKeyDown={(keyEvent) => {
             if (keyEvent.key === "0") resetZoom();
-            if ((keyEvent.key === "Enter" || keyEvent.key === " ") && clipInfo && !clipError && zoom.scale === 1) {
+            if ((keyEvent.key === "Enter" || keyEvent.key === " ") && sceneBounds && zoom.scale === 1) {
               keyEvent.preventDefault();
               playEventClip();
             }
           }}
-          title={zoom.scale > 1 ? "Drag to pan. Double-click to reset zoom." : clipError || (clipLoading ? "Preparing event clip" : "Scroll or pinch to zoom. Click to play event video.")}
+          title={zoom.scale > 1 ? "Drag to pan. Double-click to reset zoom." : "Scroll or pinch to zoom. Click to play the recording."}
         >
           <SnapshotImage
             event={trackingEvent}
@@ -1467,7 +1422,7 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, onClose, on
             iconSize={42}
             className="event-snapshot-frame"
             zoom={zoom}
-            allowObjectFocus={zoom.scale === 1 && !videoActive}
+            allowObjectFocus={zoom.scale === 1 && !recordingActive}
             progressive
             fullResolution={fullSnapshotRequested}
             highQualityZoom={zoom.scale > 1}
@@ -1476,106 +1431,30 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, onClose, on
             showTracking={trackingVisible && !manualDetection}
             onImageSize={setMediaSize}
           />
-          {videoActive && clipInfo && playback && !clipError ? (
-            <>
-              {playback.mimeType === "video/mp4" ? <video
-                key={playback.key || playback.url}
-                className="event-video-layer"
-                ref={clipVideoRef}
-                src={playback.url}
-                autoPlay
-                controls
-                playsInline
-                preload="metadata"
-                onLoadedMetadata={(event) => {
-                  const video = event.currentTarget;
-                  setPlaybackOriginTime(0);
-                  const playbackStartOffset = Math.max(0, Number(clipInfo.playbackStartOffset) || 0);
-                  if (playbackStartOffset > 0) {
-                    video.currentTime = Number.isFinite(video.duration)
-                      ? Math.min(playbackStartOffset, Math.max(0, video.duration - 0.25))
-                      : playbackStartOffset;
-                  }
-                  setClipLoading(false);
-                  setClipError("");
-                }}
-                onError={() => {
-                  setClipLoading(false);
-                  setVideoActive(false);
-                  setClipError("No recording window found");
-                }}
-                onEnded={scenePlayback.ended}
-                onClick={(event) => event.stopPropagation()}
-              /> : <ShakaVideo
-                key={playback.key || playback.url}
-                className="event-video-layer"
-                ref={clipVideoRef}
-                src={playback.url}
-                mimeType={playback.mimeType}
-                autoPlay
-                controls
-                playsInline
-                preload="metadata"
-                onReady={(_player, video) => {
-                  setPlaybackOriginTime(0);
-                  const playbackStartOffset = Math.max(0, Number(clipInfo.playbackStartOffset) || 0);
-                  if (playbackStartOffset > 0 && video) {
-                    const seekToSelectedEvent = () => {
-                      const targetTime = playbackStartOffset;
-                      video.currentTime = Number.isFinite(video.duration)
-                        ? Math.min(targetTime, Math.max(0, video.duration - 0.25))
-                        : targetTime;
-                    };
-                    if (video.paused) video.addEventListener("playing", seekToSelectedEvent, { once: true });
-                    else seekToSelectedEvent();
-                  }
-                  setClipLoading(false);
-                  setClipError("");
-                }}
-                onError={() => {
-                  if (playback.url !== clipInfo.downloadUrl) {
-                    setClipLoading(true);
-                    setPlaybackOriginTime(null);
-                    setClipInfo((current) => current ? {
-                      ...current,
-                      windowStartEpoch: current.requestedWindowStartEpoch,
-                      playbackStartOffset: current.initialPlaybackOffset,
-                    } : current);
-                    setPlayback({ url: clipInfo.downloadUrl, mimeType: "video/mp4" });
-                  } else {
-                    setClipLoading(false);
-                    setVideoActive(false);
-                    setClipError("No recording window found");
-                  }
-                }}
-                onEnded={scenePlayback.ended}
-                onClick={(event) => event.stopPropagation()}
-              />}
-              <DebugDetectionOverlay
-                videoRef={clipVideoRef}
-                active={detectionDebug}
-                confidence={safeManualConfidence}
-                onStats={setDetectionDebugStats}
-              />
-              {trackingVisible ? (
-                <StoredTrackVideoOverlay
-                  videoRef={clipVideoRef}
-                  tracks={storedTracks}
-                  coordinateSize={{
-                    width: Number(trackingEvent.object_tracking?.frame_width) || mediaSize?.width,
-                    height: Number(trackingEvent.object_tracking?.frame_height) || mediaSize?.height,
-                  }}
-                  windowStartEpoch={clipInfo.windowStartEpoch}
-                  mediaStartTime={playbackOriginTime}
-                  mediaKey={playback.key || playback.url}
-                  sampleFps={trackingEvent.object_tracking?.sample_fps}
-                  lostTimeoutSeconds={trackingEvent.object_tracking?.lost_timeout_seconds}
-                />
-              ) : null}
-              {clipLoading ? <div className="event-video-preparing">Preparing incident video...</div> : null}
-            </>
+          {recordingActive ? (
+            <IncidentRecordingPlayer
+              key={`${activeBounds.cameraId}:${activeBounds.startEpoch}:${activeBounds.endEpoch}:${trackingComparisonEngine || ""}`}
+              cameraId={activeBounds.cameraId}
+              startEpoch={activeBounds.startEpoch}
+              endEpoch={activeBounds.endEpoch}
+              timeZone={timeZone}
+              autoPlay
+              analysisMode={detectionDebug ? "ai" : trackingVisible ? "tracks" : "clean"}
+              trackingEvent={{
+                ...trackingEvent,
+                object_tracking: trackingEvent.object_tracking ? {
+                  ...trackingEvent.object_tracking,
+                  frame_width: Number(trackingEvent.object_tracking.frame_width) || mediaSize?.width,
+                  frame_height: Number(trackingEvent.object_tracking.frame_height) || mediaSize?.height,
+                } : trackingEvent.object_tracking,
+              }}
+              confidence={safeManualConfidence}
+              onAnalysisStats={setDetectionDebugStats}
+              onEnded={() => { if (scenePlayback.clip) scenePlayback.ended(); else { setVideoActive(false); setPlaybackBounds(null); } }}
+              onClose={() => { scenePlayback.stop(); setVideoActive(false); setPlaybackBounds(null); }}
+            />
           ) : null}
-          {videoActive && detectionDebug && detectionDebugStats ? (
+          {recordingActive && detectionDebug && detectionDebugStats ? (
             <div className={`event-detection-stats ${detectionDebugStats.error ? "error" : ""}`}>
               {detectionDebugStats.error
                 ? detectionDebugStats.error
@@ -1725,55 +1604,4 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, onClose, on
       </section>
     </div>
   ), document.body);
-}
-
-export async function eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch) {
-  try {
-    const response = await fetch(streamUrl);
-    if (!response.ok) return requestedWindowStartEpoch;
-    return hlsProgramStartEpoch(await response.text()) ?? requestedWindowStartEpoch;
-  } catch {
-    return requestedWindowStartEpoch;
-  }
-}
-
-export async function loadIncidentClipInfo(event, isCancelled = () => false, preferNativeMp4 = false) {
-  const eventId = Number(event?.representative_event_id || event?.id);
-  if (!Number.isFinite(eventId)) return null;
-  let before = 5;
-  let after = 5;
-  try {
-    const response = await fetch("/api/event-clip/settings");
-    if (response.ok) {
-      const settings = await response.json();
-      before = Number(settings.before_seconds ?? before);
-      after = Number(settings.after_seconds ?? after);
-    }
-  } catch {
-    // Defaults keep incident playback useful if settings are temporarily unavailable.
-  }
-  if (isCancelled()) return null;
-  const safeBefore = Number.isFinite(before) ? before : 5;
-  const safeAfter = Number.isFinite(after) ? after : 5;
-  const window = incidentClipWindow(event, safeBefore, safeAfter);
-  const anchorEpoch = eventEpoch(event);
-  const requestedWindowStartEpoch = event?.scene_clip_window?.episode_id ? event.scene_clip_window.start : Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null;
-  const streamUrl = incidentEpisodeMediaUrl(eventStreamUrl(eventId, window.before, window.after), event);
-  const timelineStartEpoch = !preferNativeMp4 && Number.isFinite(requestedWindowStartEpoch)
-    ? await eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch)
-    : requestedWindowStartEpoch;
-  if (isCancelled()) return null;
-  // Play from the beginning of the requested incident, not the cover's vicinity.
-  const initialPlaybackOffset = 0;
-  return {
-    streamUrl,
-    downloadUrl: incidentEpisodeMediaUrl(eventClipUrl(eventId, window.before, window.after), event),
-    before: window.before,
-    after: window.after,
-    duration: window.before + window.after,
-    windowStartEpoch: timelineStartEpoch,
-    requestedWindowStartEpoch,
-    initialPlaybackOffset,
-    playbackStartOffset: hlsPlaybackOffset(requestedWindowStartEpoch, timelineStartEpoch, initialPlaybackOffset),
-  };
 }

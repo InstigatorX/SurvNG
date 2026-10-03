@@ -41,10 +41,20 @@ try {
   ];
   incident.alert_decisions = [{ event_id: 80913, eligible: false, objects: [{ label: "person", eligible: false, reasons: ["outside_incident_zone"], zones: [] }] }];
   let conflict = false;
+  const clipRequests = [];
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
-    if (path.endsWith("/clip.mp4")) return; // Keep media pending; exercise native ended/error events deterministically.
+    if (path.endsWith("/clip.mp4")) {
+      clipRequests.push(path);
+      return route.fulfill({ status: 404, body: "" });
+    }
+    if (path.includes("/recordings/window")) {
+      const start = Number(url.searchParams.get("start_epoch"));
+      const end = Number(url.searchParams.get("end_epoch"));
+      const cameraId = decodeURIComponent(path.split("/cameras/")[1].split("/")[0]);
+      return route.fulfill({ json: { camera_id: cameraId, source: url.searchParams.get("source") || "main", start_epoch: start, end_epoch: end, recordings: [{ start_epoch: start, end_epoch: end, duration_seconds: Math.max(0.01, end - start), name: "segment" }] } });
+    }
     if (path.endsWith("/event-clip/settings")) return route.fulfill({ json: { before_seconds: 5, after_seconds: 5 } });
     if (path.includes("/incidents/notification/")) return route.fulfill({ json: { incident, notification: { state: "active", revision: incident.revision }, camera_name: "Gate" } });
     if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
@@ -122,29 +132,29 @@ try {
   assert.equal(await panel.getByText("outside incident zone", { exact: true }).isVisible(), true);
   assert.equal(await panel.locator(".inspector-detection").count(), 2, "notification decisions never filter the roster");
   await panel.getByText("Policy decision details", { exact: true }).click();
-  async function verifyScenePlayback(owner, videoSelector) {
+  async function verifyScenePlayback(owner, playerSelector) {
     await owner.getByRole("button", { name: "Play whole incident", exact: true }).click();
-    await page.waitForFunction((selector) => document.querySelector(selector)?.getAttribute("src")?.includes("/events/80913/clip.mp4"), videoSelector);
-    let source = new URL(await page.locator(videoSelector).getAttribute("src"), page.url());
-    assert.equal(source.searchParams.get("before"), "0.000");
-    assert.equal(source.searchParams.get("after"), "10.000", "first camera gets only its ten-second episode");
-    assert.equal(source.searchParams.get("episode_id"), "episode-1");
-    assert.equal(Number(source.searchParams.get("start_epoch")), Date.parse(first.created_at) / 1000);
-    await page.locator(videoSelector).dispatchEvent("ended");
-    await page.waitForFunction((selector) => document.querySelector(selector)?.getAttribute("src")?.includes("/events/80914/clip.mp4"), videoSelector);
-    source = new URL(await page.locator(videoSelector).getAttribute("src"), page.url());
-    assert.equal(source.searchParams.get("before"), "0.000");
-    assert.equal(source.searchParams.get("after"), "12.000", "second camera gets its own bounded clip");
+    const player = page.locator(playerSelector);
+    await player.waitFor();
+    assert.equal(await player.getAttribute("data-camera-id"), "gate");
+    assert.equal(Number(await player.getAttribute("data-start-epoch")), Date.parse(first.created_at) / 1000);
+    assert.equal(Number(await player.getAttribute("data-end-epoch")) - Date.parse(first.created_at) / 1000, 10, "first camera gets only its ten-second episode");
+    const video = page.locator(`${playerSelector} video`).first();
+    await video.waitFor();
+    await video.dispatchEvent("ended");
+    await page.waitForFunction((selector) => document.querySelector(selector)?.getAttribute("data-camera-id") === "driveway", playerSelector);
+    assert.equal(Number(await player.getAttribute("data-end-epoch")) - Number(await player.getAttribute("data-start-epoch")), 12, "second camera gets its own bounded recording");
     assert.equal(await owner.locator(".inspector-detection").count(), 2);
     await owner.getByRole("button", { name: "Stop scene playback", exact: true }).click();
-    await page.locator(videoSelector).waitFor({ state: "detached" });
+    await player.waitFor({ state: "detached" });
     await owner.getByRole("button", { name: "Play driveway episode", exact: true }).click();
-    await page.waitForFunction((selector) => document.querySelector(selector)?.getAttribute("src")?.includes("/events/80914/clip.mp4"), videoSelector);
-    await page.locator(videoSelector).dispatchEvent("error");
+    await page.waitForFunction((selector) => document.querySelector(selector)?.getAttribute("data-camera-id") === "driveway", playerSelector);
+    await page.locator(`${playerSelector} video`).first().dispatchEvent("error");
     assert.equal(await owner.locator(".inspector-detection").count(), 2, "missing footage never removes observations");
     await owner.getByRole("button", { name: "Stop scene playback", exact: true }).click();
+    assert.equal(clipRequests.length, 0, "incident playback does not build a clip");
   }
-  await verifyScenePlayback(panel, ".incident-detail-player video");
+  await verifyScenePlayback(panel, ".incident-detail-player .incident-recording-player");
   await panel.getByRole("button", { name: /^person Observed/ }).click();
   const observationButtons = panel.locator(".incident-observation-list button");
   await observationButtons.first().click();
@@ -200,11 +210,11 @@ try {
   const mobilePanel = page.locator(".event-overlay .incident-scene-panel");
   await mobilePanel.getByText("Observed objects", { exact: true }).waitFor();
   assert.equal(await mobilePanel.locator(".inspector-detection").count(), 2, "mobile deep links retain the same whole-scene inventory");
-  await verifyScenePlayback(mobilePanel, ".event-overlay video");
+  await verifyScenePlayback(mobilePanel, ".event-overlay .incident-recording-player");
   await page.goto(`http://127.0.0.1:${server.address().port}/survng/incidents/incident-scene-1`);
   const detailPanel = page.locator(".incident-detail-page .incident-scene-panel");
   await detailPanel.getByText("Observed objects", { exact: true }).waitFor();
-  await verifyScenePlayback(detailPanel, ".incident-detail-player video");
+  await verifyScenePlayback(detailPanel, ".incident-detail-page .incident-recording-player");
   const longStart = Date.parse(first.created_at) / 1000;
   second.created_at = new Date((longStart + 7260) * 1000).toISOString();
   incident = { ...incident, revision: incident.revision + 1, episodes: [
@@ -215,16 +225,13 @@ try {
   await detailPanel.getByRole("button", { name: "Play whole incident", exact: true }).click();
   for (let part = 0; part < 8; part += 1) {
     const expected = longStart + part * 900;
-    await page.waitForFunction((start) => {
-      const source = document.querySelector(".incident-detail-player video")?.getAttribute("src");
-      return source && Number(new URL(source, location.href).searchParams.get("start_epoch")) === start;
-    }, expected);
-    const source = new URL(await page.locator(".incident-detail-player video").getAttribute("src"), page.url());
-    assert.equal(source.searchParams.get("episode_id"), "episode-1");
-    assert.equal(Number(source.searchParams.get("end_epoch")) - expected, 900);
-    await page.locator(".incident-detail-player video").dispatchEvent("ended");
+    await page.waitForFunction((start) => Number(document.querySelector(".incident-detail-page .incident-recording-player")?.getAttribute("data-start-epoch")) === start, expected);
+    const player = page.locator(".incident-detail-page .incident-recording-player");
+    assert.equal(await player.getAttribute("data-camera-id"), "gate");
+    assert.equal(Number(await player.getAttribute("data-end-epoch")) - expected, 900);
+    await page.locator(".incident-detail-page .incident-recording-player video").first().dispatchEvent("ended");
   }
-  await page.waitForFunction(() => document.querySelector(".incident-detail-player video")?.getAttribute("src")?.includes("episode_id=episode-2"));
+  await page.waitForFunction(() => document.querySelector(".incident-detail-page .incident-recording-player")?.getAttribute("data-camera-id") === "driveway");
   assert.equal(await detailPanel.locator(".inspector-detection").count(), 2);
   await detailPanel.getByRole("button", { name: "Stop scene playback", exact: true }).click();
   incident = { ...incident, establishment: { status: "not_established", reason: "candidate_churn_only", supporting_observation_ids: [], policy_version: 1 } };
