@@ -64,7 +64,7 @@ Depending on what SurvNG stored for the incident, you may switch between:
 - Track playback when object tracking produced a path
 - **Depth** replay when monocular depth is configured
 
-Depth replay runs object detection and depth estimation over the incident clip.
+Depth replay runs object detection and depth estimation over the camera recording, in the incident viewer. Playback uses the same recording window as Timeline and starts at the incident, so SurvNG does not build a separate clip.
 Choose **Both**, **Boxes**, or **Heatmap** to show distance-labeled boxes, the
 depth heatmap, or both. Stored object badges may also show an estimated distance
 when representative-frame depth enrichment was available. These values are
@@ -76,7 +76,7 @@ monocular estimates; use them as scene context rather than precise measurements.
 2. Filter to `Front Door` and object `person`.
 3. Open the latest incident.
 4. Confirm the picture matches what you expect.
-5. Choose **View in Timeline** to watch the surrounding video.
+5. Play the incident. The recording opens in the center of the viewer, already at the incident, and you can scrub across it. Choose **View in Timeline** when you want the surrounding day.
 6. If face recognition is enabled, check whether a person suggestion appeared under **People**.
 
 ## What is not an incident

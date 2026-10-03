@@ -4149,6 +4149,56 @@ button.live-overlay-backdrop:active {
   font-weight: 760;
 }
 
+.incident-recording-controls {
+  position: absolute;
+  z-index: 8;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 8px;
+  background: rgba(8, 12, 10, 0.82);
+  color: #fff;
+}
+
+.incident-recording-controls button,
+.incident-recording-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+
+.incident-recording-controls input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.incident-recording-controls time {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.incident-recording-close {
+  position: absolute;
+  z-index: 9;
+  top: 8px;
+  right: 8px;
+  width: 44px;
+  height: 44px;
+  background: #171d19;
+}
+
 .incident-video-status.preparing,
 .event-video-preparing {
   position: absolute;
