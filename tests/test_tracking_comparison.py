@@ -237,6 +237,11 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         self.assertEqual(frames[1].reference.time_base_den, 90000)
         self.assertEqual([frame.shape for _epoch, frame in frames], [(4, 8, 3), (4, 8, 3)])
         command = popen.call_args.args[0]
+        before_input = command[:command.index("-i")]
+        after_input = command[command.index("-i") + 2:]
+        self.assertEqual(before_input[before_input.index("-threads:v") + 1], "2")
+        self.assertEqual(before_input[before_input.index("-filter_threads") + 1], "1")
+        self.assertEqual(after_input[after_input.index("-threads:v") + 1], "1")
         self.assertIn(
             "scale=8:4,showinfo@source,fps=2.000000,showinfo@sampled",
             command[command.index("-vf") + 1],
@@ -305,6 +310,11 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         self.assertIs(sample.reference, reference)
         self.assertEqual(sample.frame.shape, (4, 8, 3))
         command = run.call_args_list[1].args[0]
+        before_input = command[:command.index("-i")]
+        after_input = command[command.index("-i") + 2:]
+        self.assertEqual(before_input[before_input.index("-threads:v") + 1], "2")
+        self.assertEqual(before_input[before_input.index("-filter_threads") + 1], "1")
+        self.assertEqual(after_input[after_input.index("-threads:v") + 1], "1")
         self.assertIn(
             "select='eq(pts\\,32871)'",
             command[command.index("-vf") + 1],

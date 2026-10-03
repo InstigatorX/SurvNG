@@ -19,6 +19,7 @@ import numpy as np
 
 from .config import CameraConfig, ObjectTrackingConfig
 from .detector import detection_failure
+from .ffmpeg_hw import RECORDED_FRAME_INPUT_THREAD_ARGS, RECORDED_FRAME_OUTPUT_THREAD_ARGS
 from .object_tracking import (
     ObjectTrackerRegistry,
     _encode_appearance,
@@ -132,6 +133,7 @@ def _ffmpeg_sampled_video_frames(
         ffmpeg_path,
         "-nostdin",
         "-v", "info",
+        *RECORDED_FRAME_INPUT_THREAD_ARGS,
         *input_options,
         "-i", str(path),
         "-vf", (
@@ -145,6 +147,7 @@ def _ffmpeg_sampled_video_frames(
         "-an", "-sn", "-dn",
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
+        *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
         "pipe:1",
     ]
     process = subprocess.Popen(
@@ -320,6 +323,7 @@ def video_frame_at_reference(
         ffmpeg_path,
         "-nostdin",
         "-v", "error",
+        *RECORDED_FRAME_INPUT_THREAD_ARGS,
         "-i", str(reference.source_path),
         "-vf", (
             f"select='eq(pts\\,{reference.pts})',"
@@ -329,6 +333,7 @@ def video_frame_at_reference(
         "-an", "-sn", "-dn",
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
+        *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
         "pipe:1",
     ]
     try:

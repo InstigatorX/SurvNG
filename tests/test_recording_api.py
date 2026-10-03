@@ -566,6 +566,11 @@ class RecordingApiTest(unittest.TestCase):
             run.assert_called_once()
             command = run.call_args.args[0]
             self.assertEqual(command[command.index("-ss") + 1], "5.000")
+            before_input = command[:command.index("-i")]
+            after_input = command[command.index("-i") + 2:]
+            self.assertEqual(before_input[before_input.index("-threads:v") + 1], "2")
+            self.assertEqual(before_input[before_input.index("-filter_threads") + 1], "1")
+            self.assertEqual(after_input[after_input.index("-threads:v") + 1], "1")
             self.assertIn(str(manager.database_dir / "recording-preview-cache"), str(first))
 
     def test_recording_preview_can_extract_an_exact_display_frame(self) -> None:

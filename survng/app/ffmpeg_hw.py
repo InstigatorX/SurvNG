@@ -6,6 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+# Recorded evidence runs several FFmpeg processes concurrently. Bound each
+# process's codec/filter pools instead of letting each use every host CPU.
+# Input codec options must precede -i; output codec options must follow it.
+# These limit FFmpeg work pools, not all driver/helper threads or CPU time.
+RECORDED_FRAME_INPUT_THREAD_ARGS = ("-threads:v", "2", "-filter_threads", "1")
+RECORDED_FRAME_OUTPUT_THREAD_ARGS = ("-threads:v", "1")
+
+
 def hardware_mode(value: str | None) -> str:
     mode = str(value or "auto").strip().lower()
     return mode if mode in {"auto", "vaapi", "qsv", "off"} else "auto"

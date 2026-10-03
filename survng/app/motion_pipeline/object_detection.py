@@ -24,7 +24,11 @@ from ..config import CameraConfig
 from ..scene_activity_evidence import scene_sample_records as _scene_sample_records
 from ..detector import detection_failure
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
-from ..ffmpeg_hw import recorded_frame_hw_args
+from ..ffmpeg_hw import (
+    RECORDED_FRAME_INPUT_THREAD_ARGS,
+    RECORDED_FRAME_OUTPUT_THREAD_ARGS,
+    recorded_frame_hw_args,
+)
 from ..object_activity import ObjectActivityAttributor
 from ..object_motion import ObjectMotionEstimate, estimate_object_motion
 from ..recording_media import mp4_video_dimensions
@@ -3113,6 +3117,7 @@ class RecordedMotionObjectDetector:
                     "+discardcorrupt",
                     "-err_detect",
                     "ignore_err",
+                    *RECORDED_FRAME_INPUT_THREAD_ARGS,
                     *input_args,
                     "-ss",
                     f"{sample_at:.3f}",
@@ -3130,6 +3135,7 @@ class RecordedMotionObjectDetector:
                     "image2pipe",
                     "-vcodec",
                     "bmp",
+                    *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
                     "pipe:1",
                 ]
                 process_lease = self._acquire_decode_process(
@@ -3236,6 +3242,7 @@ class RecordedMotionObjectDetector:
                 "+discardcorrupt",
                 "-err_detect",
                 "ignore_err",
+                *RECORDED_FRAME_INPUT_THREAD_ARGS,
                 *input_args,
                 "-i",
                 str(path),
@@ -3254,6 +3261,7 @@ class RecordedMotionObjectDetector:
                 "image2pipe",
                 "-vcodec",
                 "bmp",
+                *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
                 "pipe:1",
             ]
             process_lease = self._acquire_decode_process(

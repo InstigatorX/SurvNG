@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse
 
 from .config import AppConfig, slugify_camera_id
 from .encoded_fragments import IndexedMp4FragmentSource
+from .ffmpeg_hw import RECORDED_FRAME_INPUT_THREAD_ARGS, RECORDED_FRAME_OUTPUT_THREAD_ARGS
 from .incident_utils import event_epoch
 from .manager import AppManager
 from .media_exports import MediaExportManager
@@ -926,7 +927,16 @@ class RecordingMediaRuntime:
                         ) from exc
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 jpeg_quality = 3 if requested_width > 480 else 5
-                command = [selected_config.ffmpeg_path, '-hide_banner', '-loglevel', 'info' if exact else 'error', '-ss', f'{preview_offset:.3f}', '-i', str(source_path), '-map', '0:v:0', '-frames:v', '1', '-threads', '1', '-vf', f"showinfo@preview,scale='min({requested_width},iw)':-2" if exact else f"scale='min({requested_width},iw)':-2", '-q:v', str(jpeg_quality), '-y', str(temporary)]
+                command = [
+                    selected_config.ffmpeg_path, '-hide_banner',
+                    '-loglevel', 'info' if exact else 'error',
+                    *RECORDED_FRAME_INPUT_THREAD_ARGS,
+                    '-ss', f'{preview_offset:.3f}', '-i', str(source_path),
+                    '-map', '0:v:0', '-frames:v', '1',
+                    *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
+                    '-vf', f"showinfo@preview,scale='min({requested_width},iw)':-2" if exact else f"scale='min({requested_width},iw)':-2",
+                    '-q:v', str(jpeg_quality), '-y', str(temporary),
+                ]
                 try:
                     if session is None:
                         result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=8)
