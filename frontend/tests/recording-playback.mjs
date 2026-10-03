@@ -76,6 +76,7 @@ assert.equal(shouldUseFastSeek({ preferNativeHls: true }), false);
 assert.equal(shouldUseFastSeek({ coarsePointer: false, preferNativeHls: false }), true);
 assert.equal(recordingSeekToleranceSeconds({ coarsePointer: true }), 0.35);
 assert.equal(seekWatchdogDelayMs({ coarsePointer: true }), 3000);
+assert.equal(seekWatchdogDelayMs({ local: true, coarsePointer: true }), 400);
 assert.equal(videoReachedSeekTarget({ currentTime: 4.92 }, 5, 0.35), true);
 assert.equal(videoReachedSeekTarget({ currentTime: 4.2 }, 5, 0.35), false);
 

@@ -258,6 +258,110 @@ const readyHandler = source.slice(source.indexOf("  function handleRecordingRead
   }
 }
 
+// iPhone drops a currentTime write that follows pause()+play(), and ignores a
+// write issued while seeking. Scrub the open playlist by seeking first, and
+// keep the queued target until the in-flight seek ends.
+{
+  const order = [];
+  let currentTime = 4;
+  const video = {
+    paused: false,
+    seeking: false,
+    ended: false,
+    readyState: 4,
+    pause() { order.push("pause"); this.paused = true; },
+    get currentTime() { return currentTime; },
+    set currentTime(value) { order.push(["seek", value]); currentTime = value; },
+    fastSeek() { throw new Error("Native HLS scrub used fastSeek"); },
+  };
+  const context = vm.createContext({
+    Number, nativeHls: true, useSegmentPlayback: false, isAllCameras: false, activeCameraId: "gate",
+    timelineView: { startEpoch: 1000, endEpoch: 1900 }, loadedPlaybackWindow: { start: 1000, end: 1900 },
+    playbackTimeline: [{ start_epoch: 1000, end_epoch: 1010 }], playbackRowsCoverEpoch,
+    snapToRecording: (time) => time, windowAround: () => ({ start: 1000, end: 1900 }),
+    videoRef: { current: video }, autoplayRef: {}, pendingSeekEpochRef: {}, pendingSeekModeRef: {}, desiredEpochRef: {},
+    playbackRequestRef: { current: 0 }, epochToPlaybackMediaTime: (epoch) => epoch - 1000, seekVideoToTime,
+    requestRecordingPlay: () => order.push("play"),
+    setHeroSeeking() {}, setFollowTarget() {}, setPlaybackError() {}, setPlaybackErrorStage() {}, setPlayhead() {},
+    setPlaybackWindow() {}, setPlaybackNotice() {}, scheduleSeekWatchdog() {}, clearSeekWatchdog() {},
+  });
+  const playAt = source.slice(source.indexOf("  function playAt("), source.indexOf("  function panTimelineViewport("));
+  vm.runInContext(playAt, context);
+  context.playAt(1006, true);
+  assert.deepEqual(order, [["seek", 6]], "a playing scrub seeks without pausing or calling play() first");
+  order.length = 0;
+  video.seeking = true;
+  currentTime = 6;
+  context.playAt(1008, true);
+  assert.deepEqual(order, [], "a currentTime write during an in-flight seek must be queued");
+  assert.equal(context.pendingSeekEpochRef.current, 1008);
+  video.paused = true;
+  video.seeking = false;
+  order.length = 0;
+  context.playAt(1003, true);
+  assert.deepEqual(order, [["seek", 3], "play"], "a paused scrub seeks before the gesture play()");
+}
+
+{
+  const writes = [];
+  const plays = [];
+  const video = {
+    playbackRate: 1, seeking: true, paused: true,
+    get currentTime() { return 0; },
+    set currentTime(value) { writes.push(value); },
+    fastSeek() { throw new Error("in-flight native seek must not be replaced"); },
+  };
+  const context = vm.createContext({
+    Number, Math, videoRef: { current: video }, useSegmentPlayback: false, transport: "hls", requestedTransport: "hls",
+    originalFallbackRef: {}, transcodeFallbackRef: {}, nativeScope: "gate", nativeHls: true, playbackRate: 1,
+    normalizedTimelinePlaybackRate: (rate) => rate, playbackRetryRef: { current: { attempts: 0 } },
+    pendingSeekEpochRef: { current: 1005 }, pendingSeekModeRef: { current: "window" }, desiredEpochRef: { current: 1005 },
+    snapToRecording: (value) => value, loadedPlaybackWindow: { start: 1000, end: 1900 },
+    epochToPlaybackMediaTime: () => 5, seekVideoToTime, scheduleSeekWatchdog() {},
+    setPlayhead() {}, setPlaybackNotice() {}, setPlaybackError() {}, setPlaybackErrorStage() {},
+    setHeroSeeking() {}, autoplayRef: { current: true }, requestRecordingPlay: () => plays.push("play"),
+  });
+  vm.runInContext(readyHandler, context);
+  context.handleRecordingReady(null, video);
+  assert.deepEqual(writes, [], "ready during EXT-X-START must not stack another currentTime seek");
+  assert.deepEqual(plays, []);
+  assert.equal(context.pendingSeekModeRef.current, "window-ready");
+}
+
+{
+  const writes = [];
+  const plays = [];
+  let currentTime = 1;
+  const video = {
+    paused: true, seeking: false,
+    get currentTime() { return currentTime; },
+    set currentTime(value) { writes.push(value); currentTime = value; },
+  };
+  const context = vm.createContext({
+    Number, Math, performance, videoRef: { current: video }, nativeHls: true,
+    pendingSeekEpochRef: { current: 1008 }, pendingSeekModeRef: { current: "local" }, desiredEpochRef: { current: 1008 },
+    autoplayRef: { current: true }, ignorePauseUntilRef: { current: 0 },
+    epochToPlaybackMediaTime: () => 8, mediaTimeToEpoch: (value) => 1000 + value,
+    recordingSeekToleranceSeconds: () => 0.35, videoReachedSeekTarget, seekVideoToTime,
+    shouldResumePlaybackAfterSeek: ({ autoplay }) => autoplay,
+    requestRecordingPlay: () => plays.push("play"),
+    scheduleSeekWatchdog: () => writes.push("watch"),
+    clearSeekWatchdog() {}, setPlayhead() {}, setPlaybackNotice() {}, setHeroSeeking() {}, ignorePauseAfterSeekMs: () => 0,
+  });
+  const completion = source.slice(source.indexOf("  function completePendingRecordingSeek("), source.indexOf("  function completePendingNativeSeek("));
+  const seeked = source.slice(source.indexOf("  function handleRecordingSeeked("), source.indexOf("  function handleNativeSegmentSeeked("));
+  vm.runInContext(completion + seeked, context);
+  context.handleRecordingSeeked({ currentTarget: video });
+  assert.deepEqual(writes, [8, "watch"], "a seeked event at the old time applies the queued scrub");
+  assert.equal(plays.length, 0);
+  assert.equal(context.pendingSeekEpochRef.current, 1008);
+  currentTime = 8;
+  video.seeking = true;
+  context.handleRecordingSeeked({ currentTarget: video });
+  assert.equal(context.pendingSeekEpochRef.current, null, "seeked at the target resumes even if seeking is still true");
+  assert.deepEqual(plays, ["play"]);
+}
+
 // A fresh camera/day starts with its requested default rather than carrying a
 // previous camera's codec fallback or transport, including initial ?speed=4.
 for (const requestedTransport of ["hls", "original"]) {

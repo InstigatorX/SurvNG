@@ -114,4 +114,29 @@ assert.deepEqual(ready.at(-1), ["window.m3u8", video, 42.5]);
 assert.equal(listeners.has("progress"), false, "start watchers release after ready");
 cleanup();
 
+// iPhone sets seeking synchronously when currentTime is assigned. Ready must
+// wait for seeked so Timeline does not issue a second currentTime write.
+ready.length = 0;
+let assignedTime = 0;
+Object.defineProperty(video, "currentTime", {
+  configurable: true,
+  get() { return assignedTime; },
+  set(value) { assignedTime = value; if (value > 0) video.seeking = true; },
+});
+video.seeking = false;
+video.readyState = 0;
+render("inflight.m3u8", 12);
+mount();
+video.seekable = { length: 1, start() { return 0; }, end() { return 30; } };
+metadata();
+assert.equal(ready.length, 0, "do not report ready while the start seek is still in flight");
+assert.equal(assignedTime, 12);
+assert.equal(video.seeking, true);
+assert.equal(listeners.has("seeked"), true);
+video.seeking = false;
+listeners.get("seeked")();
+assert.equal(ready.length, 1, "seeked at the start offset finishes ready");
+assert.equal(ready.at(-1)[2], 12);
+cleanup();
+
 console.log("native HLS source lifecycle and stale callback tests passed");

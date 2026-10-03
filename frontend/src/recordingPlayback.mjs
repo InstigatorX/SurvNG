@@ -60,6 +60,9 @@ export function seekVideoToTime(video, mediaTime, options = {}) {
 }
 
 export function seekWatchdogDelayMs(options = {}) {
+  // A local seek on an open element should recover in under a second.
+  // Playlist loads still wait longer for Safari to publish seekable ranges.
+  if (options.local) return 400;
   return prefersJpegScrubPreview(options) ? 3000 : 1500;
 }
 
