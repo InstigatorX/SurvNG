@@ -42,12 +42,23 @@ try {
   });
   const origin = `http://127.0.0.1:${server.address().port}`;
   await page.goto(`${origin}/incidents?incident_id=scene-1`);
-  await page.getByRole("button", { name: "Analyze extra details" }).waitFor();
+  const inspector = page.locator("#incident-inspector");
+  const analyze = inspector.getByRole("button", { name: "Analyze extra details" });
+  await analyze.waitFor();
+  await inspector.getByRole("progressbar", { name: "Extra analysis progress" }).waitFor();
+  assert.equal(await inspector.locator(".incident-inspector-extra-analysis").evaluate((section) => section.previousElementSibling?.querySelector("h3")?.textContent), "Faces");
   assert.equal(posts, 0, "desktop selected feed preview never admits optional work");
-  await page.getByRole("button", { name: "Analyze extra details" }).click();
+  await analyze.click();
   await page.getByText("Extra details queued", { exact: true }).waitFor();
   assert.equal(posts, 1);
+  status = "complete";
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await inspector.getByText("Extra details ready", { exact: true }).waitFor();
+  await inspector.getByLabel("Analysis finished").waitFor();
+  assert.equal(await inspector.getByRole("progressbar", { name: "Extra analysis progress" }).count(), 0, "finished analysis hides progress");
+  assert.equal(await inspector.getByText("Recording playback does not wait for this analysis.").count(), 0);
 
+  status = "queued";
   await page.goto(`${origin}/incidents/incident-scene-1`);
   await page.getByText("Extra details queued", { exact: true }).waitFor();
   const play = page.getByRole("button", { name: "Play incident", exact: true });

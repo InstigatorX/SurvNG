@@ -20,7 +20,9 @@ assert.match(incidentCard, /visualAnchorEventId=\{visualAnchorEventId\}/);
 assert.match(incidentCard, /appearanceAnchorEventId=\{appearanceAnchorEventId\}/);
 assert.match(incidentsPage, /visualAnchorEventId=\{visualFindSimilarEventId\}/);
 assert.match(incidentsPage, /appearanceAnchorEventId=\{findSimilarEventId\}/);
-assert.match(incidentCard, /<h3>Faces<\/h3>[\s\S]*<RelatedAppearanceIncidents anchorEventId=\{anchorEventId\}/);
+assert.match(incidentCard, /<h3>Faces<\/h3>[\s\S]*incident-inspector-extra-analysis[\s\S]*<RelatedAppearanceIncidents anchorEventId=\{anchorEventId\}/);
+assert.match(incidentsPage, /analysisPanel=\{!galleryExpanded[\s\S]*<IncidentAnalysisStatus[\s\S]*embedded/);
+assert.doesNotMatch(incidentsPage, /<IncidentCard[\s\S]*\/>\{!galleryExpanded && displayedIncident\.incident_id \? <IncidentAnalysisStatus/);
 assert.doesNotMatch(incidentCard, /<RelatedAppearanceIncidents[^>]*\bactive=/);
 assert.match(incidentCard, /isValidObjectIndex\(findSimilarObjectIndex\)/);
 assert.doesNotMatch(
@@ -28,6 +30,8 @@ assert.doesNotMatch(
   /findSimilarActive = Number\.isInteger\(Number\(findSimilarObjectIndex\)\) && Number\(findSimilarObjectIndex\) >= 0/,
 );
 assert.match(incidentCard, /IncidentRecordingPlayer/);
+assert.match(incidentCard, /<EvidenceTimeline/);
+assert.doesNotMatch(incidentCard, /incident-events-toggle|subEventsOpen|showSubEvents/);
 assert.match(incidentCard, /export function RelatedAppearanceIncidents\(/);
 assert.match(incidentCard, /export function CrossCameraTracePanel\(/);
 assert.doesNotMatch(incidentCard, /export function IncidentListItem\(/);
