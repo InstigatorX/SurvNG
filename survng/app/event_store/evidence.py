@@ -76,6 +76,7 @@ class EventStoreEvidenceMixin:
         payload = {"event_id": int(row["id"]), "camera_id": row["camera_id"],
                    "evidence_revision": int(row["evidence_revision"]),
                    "scene_media_revision": int(row["scene_media_revision"] or 0),
+                   "notify": True,
                    **extra}
         inserted = conn.execute(
             "insert or ignore into event_evidence_outbox "
@@ -87,11 +88,14 @@ class EventStoreEvidenceMixin:
             # revision. Refresh the coalesced obligation instead of losing the
             # newer wake-up behind its still-pending predecessor.
             conn.execute(
-                "update event_evidence_outbox set payload_json=?,created_at=?,publication_done=0 "
+                "update event_evidence_outbox set payload_json=json_set(?, '$.notify', "
+                "case when publication_done=0 and coalesce(json_extract(payload_json,'$.notify'),1) "
+                "then json('true') else json_extract(?,'$.notify') end),created_at=?,publication_done=0 "
                 "where event_id=? and evidence_revision=? and kind=? and "
-                "coalesce(json_extract(payload_json,'$.scene_media_revision'),0)<?",
-                (json.dumps(payload), time.time(), row["id"], row["evidence_revision"],
-                 kind, int(row["scene_media_revision"] or 0)),
+                "(coalesce(json_extract(payload_json,'$.scene_media_revision'),0)<? or "
+                "(? and not coalesce(json_extract(payload_json,'$.notify'),1)))",
+                (json.dumps(payload), json.dumps(payload), time.time(), row["id"], row["evidence_revision"],
+                 kind, int(row["scene_media_revision"] or 0), bool(payload["notify"])),
             )
 
     def _admit_event_evidence(self, conn, event_id: int) -> None:
@@ -129,7 +133,8 @@ class EventStoreEvidenceMixin:
         )
         self._evidence_outbox(conn, row, "cover_required", policy_version=1, deadline_epoch=now + 300)
 
-    def _finish_evidence_commit(self, conn, event_id, before, *, reason, cover_satisfied=False):
+    def _finish_evidence_commit(self, conn, event_id, before, *, reason, cover_satisfied=False,
+                                notify=True, activity=True):
         """Finish a writer's transaction; bytes/annotations/revision advance together."""
         row = conn.execute("select * from events where id=?", (event_id,)).fetchone()
         if row is None:
@@ -140,29 +145,37 @@ class EventStoreEvidenceMixin:
             self._presentation_evidence(before_objects) != self._presentation_evidence(after_objects)
         )
         if reason == "tracking_updated":
-            self._scene_ingest(conn, row, force_revision=True, objects=after_objects)
             tracking = next((item.get("object_tracking") for item in after_objects if item.get("status") == "object_tracking"), {})
+            # Only a current persisted demand lease grants retrospective work
+            # its non-alerting semantics. Capture it before checkpointing can
+            # release that lease, and use it for both projection passes.
+            demand = self.is_demand_scene_tracking(tracking.get("scene_analysis_job"), conn=conn)
+            notify = activity = not demand
+            self._scene_ingest(conn, row, force_revision=True, objects=after_objects,
+                               notify=notify, activity=activity)
             # An extended episode window can now contain acquired context.
             if self._checkpoint_scene_tracking(conn, event_id, tracking):
-                self._scene_ingest(conn, row, objects=after_objects)
+                self._scene_ingest(conn, row, objects=after_objects,
+                                   notify=notify, activity=activity)
         else:
-            self._scene_ingest(conn, row, force_revision=changed, objects=after_objects)
+            self._scene_ingest(conn, row, force_revision=changed, objects=after_objects,
+                               notify=notify, activity=activity)
         if changed:
             conn.execute("update events set evidence_revision=evidence_revision+1 where id=?", (event_id,))
             row = conn.execute("select * from events where id=?", (event_id,)).fetchone()
-            self._evidence_outbox(conn, row, "evidence_updated", reason=reason)
+            self._evidence_outbox(conn, row, "evidence_updated", reason=reason, notify=notify)
         elif reason != "tracking_updated" and (
             before_objects != after_objects or before["recording_path"] != row["recording_path"]
         ):
             # Tracking progress already has its own callback. Metadata updates
             # reach clients without re-encoding unchanged image embeddings.
-            self._evidence_outbox(conn, row, "incident_metadata_updated", reason=reason)
+            self._evidence_outbox(conn, row, "incident_metadata_updated", reason=reason, notify=notify)
         if cover_satisfied:
             settled = conn.execute("update event_cover_requirements set state='satisfied', reason=?, "
                          "lease_owner='',lease_expires_at_epoch=null,updated_at=? where event_id=? "
                          "and state='pending'", (reason, time.time(), event_id)).rowcount
             if settled:
-                self._requirement_outbox(conn, event_id)
+                self._requirement_outbox(conn, event_id, notify=notify)
         return row
 
     @staticmethod
@@ -328,12 +341,12 @@ class EventStoreEvidenceMixin:
                     by_id[event_id]["cover_requirement"] = view
         return result
 
-    def _requirement_outbox(self, conn, event_id: int) -> None:
+    def _requirement_outbox(self, conn, event_id: int, *, notify=True) -> None:
         row = conn.execute("select * from events where id=?", (event_id,)).fetchone()
         requirement = conn.execute("select state,reason,attempts,deadline_epoch,policy_version "
                                    "from event_cover_requirements where event_id=?", (event_id,)).fetchone()
         if row is not None and requirement is not None:
-            self._evidence_outbox(conn, row, "cover_requirement_updated", cover_requirement=dict(requirement))
+            self._evidence_outbox(conn, row, "cover_requirement_updated", cover_requirement=dict(requirement), notify=notify)
 
     @staticmethod
     def _presentation_evidence(objects: list[dict[str, Any]]) -> list[dict[str, Any]]:

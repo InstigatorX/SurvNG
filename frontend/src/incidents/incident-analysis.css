@@ -1,0 +1,16 @@
+.incident-analysis-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  margin: 8px 0 14px;
+  border: 1px solid var(--border-color, #52616b);
+  border-radius: 8px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+.incident-analysis-status button { flex-shrink: 0; }
+@media (max-width: 600px) {
+  .incident-analysis-status { align-items: flex-start; flex-direction: column; }
+}

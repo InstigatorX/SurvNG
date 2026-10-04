@@ -9,15 +9,18 @@ import time
 from ..database_polling import polling_connection
 from .scenes import MAX_SCENE_EPISODE_SECONDS
 
+DEMAND_VIEW_SECONDS = 60.0
+DEMAND_REQUEST_EPISODES = 8
+
 
 class EventStoreSceneTrackingMixin:
-    def _scene_tracking_extent(self, conn, episode_id, start_epoch, end_epoch, *, pending=False):
+    def _scene_tracking_extent(self, conn, episode_id, start_epoch, end_epoch, *, pending=False, deferred=False):
         episode = conn.execute("select * from scene_episodes where id=?", (episode_id,)).fetchone()
         if episode is None:
             return
         coverage = json.loads(episode["coverage_json"])
         if pending:
-            coverage.update(state="incomplete", reason="recorded analysis queued")
+            coverage.update(state="incomplete", reason="recorded analysis deferred until viewed" if deferred else "recorded analysis queued")
         changed = (start_epoch < episode["start_epoch"] or end_epoch > episode["end_epoch"]
                    or coverage != json.loads(episode["coverage_json"]))
         if not changed:
@@ -48,9 +51,18 @@ class EventStoreSceneTrackingMixin:
         # extend past the time it turned off.
         if "end_limit_epoch" not in columns:
             conn.execute("alter table scene_analysis_jobs add column end_limit_epoch real")
+        for name, declaration in (
+            ("admission", "text not null default 'automatic'"),
+            ("requested_until", "real not null default 0"),
+            ("request_end_epoch", "real"),
+        ):
+            if name not in columns:
+                conn.execute(f"alter table scene_analysis_jobs add column {name} {declaration}")
         conn.execute("create index if not exists scene_analysis_jobs_camera on scene_analysis_jobs(camera_id,state,retry_at)")
+        conn.execute("create index if not exists scene_analysis_jobs_demand_running "
+                     "on scene_analysis_jobs(lease_expires) where admission='demand' and state='running'")
 
-    def enqueue_scene_tracking(self, event_id, start_epoch, end_epoch):
+    def enqueue_scene_tracking(self, event_id, start_epoch, end_epoch, *, deferred=False):
         if not (math.isfinite(start_epoch) and math.isfinite(end_epoch) and start_epoch < end_epoch):
             raise ValueError("invalid scene analysis window")
         with self._lock, self._connect() as conn:
@@ -61,24 +73,118 @@ class EventStoreSceneTrackingMixin:
                 return None
             event_epoch = datetime.fromisoformat(event["created_at"].replace("Z", "+00:00")).timestamp()
             conn.execute("""insert into scene_analysis_jobs
-                (episode_id,event_id,camera_id,event_epoch,start_epoch,end_epoch)
-                values(?,?,?,?,?,?) on conflict(episode_id) do update set
+                (episode_id,event_id,camera_id,event_epoch,start_epoch,end_epoch,state,admission)
+                values(?,?,?,?,?,?,?,?) on conflict(episode_id) do update set
                 start_epoch=min(start_epoch,excluded.start_epoch),
                 end_epoch=coalesce(min(max(end_epoch,excluded.end_epoch),max(start_epoch,end_limit_epoch)),
                                    max(end_epoch,excluded.end_epoch)),
                 cursor_epoch=case when excluded.start_epoch<start_epoch then null else cursor_epoch end,
                 lease_owner=case when excluded.start_epoch<start_epoch then '' else lease_owner end,
                 lease_expires=case when excluded.start_epoch<start_epoch then 0 else lease_expires end,
-                state=case when excluded.start_epoch<start_epoch then 'queued'
+                state=case when state='running' and excluded.start_epoch>=start_epoch then state
+                    when state='complete' and excluded.start_epoch>=start_epoch and excluded.end_epoch<=end_epoch then state
+                    when admission!='automatic' and (requested_until<=? or state='complete') then 'deferred'
+                    when excluded.start_epoch<start_epoch then 'queued'
                     when state='running' then state
                     when cursor_epoch>=excluded.end_epoch then 'complete' else 'queued' end,
                 retry_at=case when excluded.end_epoch>end_epoch then 0 else retry_at end
-                """, (event["episode_id"],event_id,event["camera_id"],event_epoch,start_epoch,end_epoch))
+                """, (event["episode_id"],event_id,event["camera_id"],event_epoch,start_epoch,end_epoch,
+                       "deferred" if deferred else "queued", "deferred" if deferred else "automatic", time.time()))
             job = dict(conn.execute("select * from scene_analysis_jobs where episode_id=?", (event["episode_id"],)).fetchone())
-            self._scene_tracking_extent(conn,job["episode_id"],job["start_epoch"],job["end_epoch"],pending=job["state"]!="complete")
+            self._scene_tracking_extent(conn,job["episode_id"],job["start_epoch"],job["end_epoch"],
+                                        pending=job["state"]!="complete", deferred=job["state"]=="deferred")
             return job
 
-    def claim_scene_tracking(self, camera_id, lease_owner, lease_seconds=60.0, end_limit=None):
+    def is_demand_scene_tracking(self, identity, *, conn=None):
+        """Validate demand provenance against the currently owned durable lease."""
+        if not isinstance(identity, dict):
+            return False
+        if conn is None:
+            with self._connect() as owned:
+                return self.is_demand_scene_tracking(identity, conn=owned)
+        return conn.execute(
+            "select 1 from scene_analysis_jobs where episode_id=? and lease_owner=? "
+            "and state='running' and admission='demand'",
+            (identity.get("episode_id"), identity.get("lease_owner")),
+        ).fetchone() is not None
+
+    def _incident_analysis_rows(self, conn, incident_id):
+        canonical = self._scene_resolve(conn, incident_id)
+        if not conn.execute("select 1 from scene_incidents where id=?", (canonical,)).fetchone():
+            raise KeyError(incident_id)
+        return conn.execute(
+            "select p.id as scene_episode_id,p.camera_id as scene_camera_id,j.* from scene_episodes p "
+            "left join scene_analysis_jobs j on j.episode_id=p.id "
+            "where p.incident_id=? order by p.start_epoch,p.id", (canonical,),
+        ).fetchall()
+
+    @staticmethod
+    def _incident_analysis_job_status(job, now):
+        if job["episode_id"] is None:
+            return "unavailable"
+        if job["state"] == "complete":
+            if json.loads(job["coverage_gaps_json"]) or job["last_error"]:
+                return "partial" if job["analyzed_epoch"] is not None else "unavailable"
+            return "complete"
+        if job["state"] == "running" and job["lease_expires"] > now:
+            return "running"
+        if job["state"] == "deferred" or (job["admission"] != "automatic" and job["requested_until"] <= now):
+            return "deferred"
+        return "queued"
+
+    def _incident_analysis_status(self, conn, incident_id):
+        now = time.time()
+        episodes = [{"episode_id": row["scene_episode_id"],
+                     "camera_id": row["scene_camera_id"], "admission": row["admission"],
+                     "status": self._incident_analysis_job_status(row, now)}
+                    for row in self._incident_analysis_rows(conn, incident_id)]
+        states = {item["status"] for item in episodes}
+        status = next((state for state in ("running", "queued", "deferred", "partial") if state in states),
+                      "partial" if "complete" in states and "unavailable" in states else
+                      "complete" if states == {"complete"} else "unavailable")
+        return {"status": status, "episodes": episodes,
+                "camera_id": episodes[0]["camera_id"] if episodes else None,
+                "remaining": sum(item["status"] == "deferred" for item in episodes)}
+
+    def incident_analysis_status(self, incident_id):
+        with self._connect() as conn:
+            return self._incident_analysis_status(conn, incident_id)
+
+    def request_incident_analysis(self, incident_id, *, camera_ids=None):
+        """Renew shared demand and admit at most eight finite episode windows."""
+        now = time.time()
+        with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
+            jobs = self._incident_analysis_rows(conn, incident_id)
+            admitted = sum(
+                job["admission"] == "demand" and job["state"] in {"queued", "running"}
+                and (camera_ids is None or job["scene_camera_id"] in camera_ids
+                     or job["requested_until"] > now
+                     or (job["state"] == "running" and job["lease_expires"] > now))
+                for job in jobs
+            )
+            for job in jobs:
+                if camera_ids is not None and job["scene_camera_id"] not in camera_ids:
+                    continue
+                if job["episode_id"] is None or job["admission"] == "automatic" or job["state"] == "complete":
+                    continue
+                # Renew the same target while it is pending. A running chunk
+                # remains owned even if its viewers briefly disconnect.
+                pending = job["state"] in {"queued", "running"} and job["request_end_epoch"] is not None
+                if not pending and admitted >= DEMAND_REQUEST_EPISODES:
+                    continue
+                target = job["request_end_epoch"] if pending else min(job["end_epoch"], now, job["start_epoch"] + MAX_SCENE_EPISODE_SECONDS)
+                if target <= job["start_epoch"]:
+                    continue
+                admitted += int(not pending)
+                state = "running" if job["state"] == "running" else "queued"
+                conn.execute("update scene_analysis_jobs set admission='demand',requested_until=?,"
+                             "request_end_epoch=?,state=? where episode_id=?",
+                             (now + DEMAND_VIEW_SECONDS, target, state, job["episode_id"]))
+            return self._incident_analysis_status(conn, incident_id)
+
+    def claim_scene_tracking(self, camera_id, lease_owner, lease_seconds=60.0, end_limit=None,
+                             demand_lease_seconds=None):
         """Lease the camera's next recorded window; ``end_limit`` caps windows first."""
         now = time.time()
         # Idle recovery runs once per second per camera. It must not take the
@@ -89,7 +195,8 @@ class EventStoreSceneTrackingMixin:
                 due = conn.execute(
                     "select 1 from scene_analysis_jobs where camera_id=? and "
                     "((state='queued' and retry_at<=?) or (state='running' and lease_expires<=?)) "
-                    "limit 1", (camera_id, now, now),
+                    "and (admission='automatic' or (requested_until>? and request_end_epoch>start_epoch)) "
+                    "limit 1", (camera_id, now, now, now),
                 ).fetchone()
             if due is None:
                 return None
@@ -107,13 +214,21 @@ class EventStoreSceneTrackingMixin:
                 return None
             job = conn.execute("""select * from scene_analysis_jobs where camera_id=? and
                 ((state='queued' and retry_at<=?) or (state='running' and lease_expires<=?))
-                order by start_epoch,episode_id limit 1""", (camera_id,now,now)).fetchone()
+                and (admission='automatic' or (requested_until>? and request_end_epoch>start_epoch
+                    and not exists(select 1 from scene_analysis_jobs active where active.admission='demand'
+                        and active.state='running' and active.lease_expires>?)))
+                order by (admission!='automatic'),start_epoch,episode_id limit 1""", (camera_id,now,now,now,now)).fetchone()
             if job is None:
                 return None
+            if job["admission"] == "demand" and demand_lease_seconds is not None:
+                lease_seconds = max(lease_seconds, demand_lease_seconds)
             conn.execute("update scene_analysis_jobs set state='running',lease_owner=?,lease_expires=?,"
                          "attempts=attempts+1 where episode_id=?",
                          (lease_owner,now+max(30.0,lease_seconds),job["episode_id"]))
-            return dict(conn.execute("select * from scene_analysis_jobs where episode_id=?",(job["episode_id"],)).fetchone())
+            claimed = dict(conn.execute("select * from scene_analysis_jobs where episode_id=?",(job["episode_id"],)).fetchone())
+            if claimed["admission"] == "demand":
+                claimed["end_epoch"] = min(claimed["end_epoch"], claimed["request_end_epoch"])
+            return claimed
 
     @staticmethod
     def _scene_tracking_lease_valid(conn, event_id, tracking):
@@ -138,7 +253,10 @@ class EventStoreSceneTrackingMixin:
         # Measured activity extends analysis even when no further trigger or
         # notification was generated. Compute chunks retain their finite end.
         requested_end = job["end_epoch"]
-        if activity and float(activity[0]) > job["event_epoch"]:
+        demand = job["admission"] == "demand"
+        if demand:
+            requested_end = min(requested_end, job["request_end_epoch"])
+        elif activity and float(activity[0]) > job["event_epoch"]:
             requested_end = max(requested_end,min(float(activity[0])+45.0,
                                                   job["start_epoch"]+MAX_SCENE_EPISODE_SECONDS))
         if job["end_limit_epoch"] is not None:
@@ -151,14 +269,14 @@ class EventStoreSceneTrackingMixin:
             except (TypeError,ValueError,OverflowError):
                 analyzed = None
             if analyzed is not None and math.isfinite(analyzed):
-                analyzed=min(analyzed,job["end_epoch"])
+                analyzed=min(analyzed,requested_end)
                 if "scene_cursor_epoch" not in tracking:
                     cursor = max(cursor if cursor is not None else job["start_epoch"],analyzed)
                 conn.execute("update scene_analysis_jobs set analyzed_epoch=max(coalesce(analyzed_epoch,?),?) where episode_id=?",(analyzed,analyzed,job["episode_id"]))
         scan_cursor=tracking.get("scene_cursor_epoch")
         if (isinstance(scan_cursor,(int,float)) and math.isfinite(scan_cursor)
                 and scan_cursor >= job["start_epoch"]):
-            cursor=max(cursor if cursor is not None else job["start_epoch"],min(scan_cursor,job["end_epoch"]))
+            cursor=max(cursor if cursor is not None else job["start_epoch"],min(scan_cursor,requested_end))
         gaps=json.loads(job["coverage_gaps_json"])
         for gap in tracking.get("coverage_gaps",[]):
             if gap not in gaps:
@@ -171,11 +289,25 @@ class EventStoreSceneTrackingMixin:
         consumed = status == "complete" and float(tracking.get("window_end_epoch") or 0) >= requested_end
         state = "complete" if consumed else "queued" if finished else "running"
         reason = str(tracking.get("coverage_interruption") or tracking.get("completion_reason") or status)
+        if demand and finished:
+            if consumed and requested_end < job["end_epoch"]:
+                if requested_end >= job["start_epoch"] + MAX_SCENE_EPISODE_SECONDS:
+                    state, reason = "complete", "analysis_window_limit"
+                    consumed = False
+                else:
+                    state = "deferred"
+            elif status == "failed":
+                # Terminal failures remain visible and do not repeat whenever
+                # an incident is reopened. Progress and gaps are retained.
+                state = "complete"
+            elif not consumed and job["requested_until"] <= time.time():
+                state = "deferred"
         continuing = status == "complete" or reason == "processing_budget_exhausted"
         delay = min(60.0,2.0 ** min(int(job["attempts"]),5)) if finished and not consumed and not continuing else 0
         conn.execute("update scene_analysis_jobs set cursor_epoch=?,end_epoch=?,state=?,lease_expires=?,retry_at=?,"
                      "lease_owner=?,last_error=? where episode_id=?",
-                     (cursor,requested_end,state,time.time()+60 if not finished else 0,time.time()+delay,
+                     (cursor,job["end_epoch"] if demand else requested_end,state,
+                      max(job["lease_expires"] if demand else 0, time.time()+60) if not finished else 0,time.time()+delay,
                       job["lease_owner"] if not finished else "",reason if not consumed else "",job["episode_id"]))
         if requested_end > job["end_epoch"]:
             self._scene_tracking_extent(conn,job["episode_id"],job["start_epoch"],requested_end,pending=True)
@@ -234,9 +366,11 @@ class EventStoreSceneTrackingMixin:
 
     def scene_tracking_pending(self, camera_id):
         """Whether recorded analysis is queued or leased for the camera."""
+        now = time.time()
         with self._connect() as conn:
             return conn.execute("select 1 from scene_analysis_jobs where camera_id=? and state in ('queued','running') "
-                                "limit 1", (camera_id,)).fetchone() is not None
+                                "and (admission='automatic' or requested_until>? or (state='running' and lease_expires>?)) "
+                                "limit 1", (camera_id,now,now)).fetchone() is not None
 
     def close_scene_tracking(self, camera_id, reason):
         """End the camera's unfinished recorded analysis; returns jobs closed."""

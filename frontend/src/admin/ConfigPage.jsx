@@ -4324,6 +4324,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <div><h3>Continuous tracking</h3><p>Identification and path overlays after an incident is confirmed. Tracking does not decide whether an incident is kept.</p></div>
             </header>
             <div className="detection-field-grid">
+              <label>When to analyze extra details<select value={config.detector?.tracking?.analysis_mode ?? "eager"} onChange={(event) => updateConfig(["detector", "tracking", "analysis_mode"], event.target.value)}><option value="eager">Automatically (current behavior)</option><option value="on_demand">When an incident is opened (experimental)</option></select><small>On-demand mode defers detailed recorded tracking, not initial alert verification or recording. Additional objects and details may not be searchable until the incident is opened. Saved results are reused.</small></label>
               <label>Tracking detail<select value={String(config.detector?.tracking?.sample_fps ?? 2)} onChange={(event) => updateConfig(["detector", "tracking", "sample_fps"], Number(event.target.value))}><option value="1">Lower CPU (1 frame/sec)</option><option value="2">Balanced (2 frames/sec)</option><option value="3">Smoother (3 frames/sec)</option><option value="5">Maximum detail (5 frames/sec)</option></select><small>OpenVINO runs once for every analyzed tracking frame.</small></label>
               <div className="zone-class-field tracking-class-field">
                 <span>Do not track</span>

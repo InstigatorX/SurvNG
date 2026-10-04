@@ -482,6 +482,7 @@ def build_runtime_status(
         "tracking": {
             "settings": {
                 "enabled": bool(tracking_config.enabled),
+                "analysis_mode": tracking_config.analysis_mode,
                 "max_active_cameras": int(tracking_config.max_active_cameras),
                 "adaptive_burst_enabled": bool(tracking_config.adaptive_burst_enabled),
                 "burst_max_active_cameras": int(

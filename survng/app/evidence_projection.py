@@ -140,8 +140,11 @@ class EvidenceProjection:
                         (int(row["id"]) for row in updates if row["kind"] == "incident_metadata_updated"), default=0,
                     )
                     publication_needed = not all(row.get("publication_done", False) for row in updates)
+                    notify = any(not row.get("publication_done", False)
+                                 and row.get("payload", {}).get("notify", True) for row in updates)
                     current, published = self._project_event(
                         event_id, semantic, needs_semantic, metadata_token, publication_needed,
+                        notify=notify,
                     )
                     if publication_needed and published:
                         if not self.events.mark_evidence_publication(
@@ -172,6 +175,7 @@ class EvidenceProjection:
     def _project_event(
         self, event_id: int, semantic: Any, needs_semantic: bool,
         metadata_token: int = 0, publication_needed: bool = True,
+        *, notify: bool = True,
     ) -> tuple[bool, bool]:
         event = self.events.get(event_id)
         if event is None:
@@ -201,13 +205,14 @@ class EvidenceProjection:
         metadata_token = max(metadata_token, int(delivered_identity[-1]) if delivered_identity else 0)
         identity = (
             revision, scene_revision, requirement.get("state"),
-            requirement.get("reason"), requirement.get("attempts"), metadata_token,
+            requirement.get("reason"), requirement.get("attempts"), notify, metadata_token,
         )
         if delivered_identity != identity:
             notified = published = False
         camera_id = str(latest.get("camera_id") or "")
         if not notified:
-            self.refresh_notification(camera_id, event_id)
+            if notify:
+                self.refresh_notification(camera_id, event_id)
             notified = True
             self._remember(self._delivery, event_id, (identity, True, False))
         if not published:

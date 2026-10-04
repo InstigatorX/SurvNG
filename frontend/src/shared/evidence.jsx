@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { IncidentScenePanel } from "../incidents/IncidentScenePanel.jsx";
+import { IncidentAnalysisStatus } from "../incidents/IncidentAnalysisStatus.jsx";
 import { useIncidentPlayback } from "../incidents/useIncidentPlayback.js";
 import { incidentEpisodeMediaUrl } from "../incidentScene.mjs";
 import { IncidentRecordingPlayer, incidentRecordingBounds } from "../incidents/IncidentRecordingPlayer.jsx";
@@ -1463,6 +1464,7 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
           ) : null}
         </div>
         <div className="event-detail-body">
+          <IncidentAnalysisStatus key={event.incident_id || event.id} incidentId={event.incident_id} onDetail={(detail) => setCorrectedScene((current) => current?.id === detail.id && Number(current.revision) > Number(detail.revision) ? current : detail)} />
           <IncidentScenePanel key={event.incident_id || event.id} incident={event} timeZone={timeZone} canCorrectIncident={canCorrectIncident} onChanged={(detail) => { setCorrectedScene(detail); onRefresh?.(); }} onSelectEpisode={scenePlayback.select} onPlayScene={scenePlayback.playAll} activeEpisodeId={scenePlayback.episode?.episode_id} onNextEpisode={scenePlayback.hasNext ? scenePlayback.nextEpisode : null} onStopPlayback={scenePlayback.stop} />
           <details
             className="event-analysis-details"

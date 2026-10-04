@@ -449,6 +449,52 @@ class IncidentQueryService:
         return {"incident": detail, "notification": manager.incidents.get(incident_id),
                 "camera_name": camera.name if camera else detail.get("camera_id"), "incident_id": detail["id"]}
 
+    @staticmethod
+    def analysis(manager: AppManager, incident_id: str, *, request: bool = False) -> dict[str, Any]:
+        """Read progress or explicitly admit bounded, optional recorded work.
+
+        This is deliberately separate from detail/search: polling and prefetch
+        must never start inference. A manager lease fences configuration swaps.
+        """
+        try:
+            status = manager.events.incident_analysis_status(incident_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="incident was not found") from exc
+        tracking = manager.config.detector.tracking
+        camera_ids = {episode["camera_id"] for episode in status["episodes"]}
+        available_ids = set()
+        for camera_id in camera_ids:
+            worker = manager.workers.get(camera_id)
+            if (tracking.enabled and worker is not None
+                    and worker.tracking_lifecycle.enabled()
+                    and worker.tracking_lifecycle.accepting()):
+                available_ids.add(camera_id)
+        enabled = bool(available_ids) and (
+            tracking.analysis_mode == "on_demand"
+            or any(episode.get("admission") in {"deferred", "demand"}
+                   and episode["camera_id"] in available_ids for episode in status["episodes"])
+        )
+        if request and enabled:
+            try:
+                status = manager.events.request_incident_analysis(incident_id, camera_ids=available_ids)
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail="incident was not found") from exc
+            # The existing camera recovery loop claims this durable request.
+            # Do not hold an HTTP worker while decoding or waiting for capacity.
+        result = {**status, "mode": tracking.analysis_mode, "enabled": enabled}
+        if camera_ids - available_ids:
+            episodes = [{**episode, "status": "unavailable"}
+                        if episode["camera_id"] not in available_ids and episode["status"] not in {"complete", "partial"}
+                        else episode for episode in status["episodes"]]
+            states = {episode["status"] for episode in episodes}
+            aggregate = next((state for state in ("running", "queued", "deferred", "partial") if state in states),
+                             "partial" if "complete" in states and "unavailable" in states else
+                             "complete" if states == {"complete"} else "unavailable")
+            result.update(episodes=episodes, status=aggregate,
+                          remaining=sum(episode["status"] == "deferred" for episode in episodes),
+                          message="Some detailed analysis is unavailable while camera detection or tracking is off.")
+        return result
+
     def cross_camera_trace(
         self,
         manager: AppManager,
@@ -714,6 +760,14 @@ def create_incident_query_router(
             return service.with_faces(active, [result])[0]
         return with_manager(correct)
 
+    @router.get("/api/incidents/{incident_id}/analysis")
+    def incident_analysis(incident_id: str):
+        return with_manager(lambda active: service.analysis(active, incident_id))
+
+    @router.post("/api/incidents/{incident_id}/analysis")
+    def request_incident_analysis(incident_id: str):
+        return with_manager(lambda active: service.analysis(active, incident_id, request=True))
+
     return IncidentQueryRouteBundle(
         router=router,
         handlers={
@@ -724,5 +778,7 @@ def create_incident_query_router(
             "incident_search": incident_search,
             "incident_for_event": incident_for_event,
             "cross_camera_trace": cross_camera_trace,
+            "incident_analysis": incident_analysis,
+            "request_incident_analysis": request_incident_analysis,
         },
     )

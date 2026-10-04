@@ -22,6 +22,7 @@ import { useAppEvents } from "../shared/events.js";
 import { usePollingData, useIncidentDetails } from "../shared/polling.js";
 import { IncidentListItem, EventOverlay } from "../shared/evidence.jsx";
 import { IncidentCard, IncidentInspector } from "./IncidentCard.jsx";
+import { IncidentAnalysisStatus } from "./IncidentAnalysisStatus.jsx";
 import { useIncidentPlayback } from "./useIncidentPlayback.js";
 import "./mobile-incidents.css";
 import { FaceReviewDialog } from "../people/FacesPage.jsx";
@@ -936,7 +937,11 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                     onToggle={toggleIncident}
                     onPreviewChange={relatedPreviewIncident ? undefined : setFocusedFaceEventId}
                     onImageSize={setFocusedImageSize}
-                  /></>
+                  />{!galleryExpanded && displayedIncident.incident_id ? <IncidentAnalysisStatus key={displayedIncident.incident_id} incidentId={displayedIncident.incident_id} autoStart={false} onDetail={(detail) => {
+                    const query = incidentDetailQuery(detail);
+                    setIncidentDetails((current) => Number(current[query]?.revision) > Number(detail.revision) ? current : { ...current, [query]: detail });
+                    setRelatedPreviewIncident((current) => current?.incident_id === detail.incident_id && Number(current.revision) <= Number(detail.revision) ? detail : current);
+                  }} /> : null}</>
                 ) : (
                   <div className="empty-state">
                     {linkedIncidentLoading
