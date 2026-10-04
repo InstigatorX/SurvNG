@@ -10,6 +10,8 @@ import sqlite3
 import time
 from typing import Any
 
+from ..database_polling import polling_connection
+
 
 class EventSnapshotChangedError(RuntimeError):
     """Evidence no longer describes the event's current revision or snapshot."""
@@ -182,7 +184,7 @@ class EventStoreEvidenceMixin:
             raise ValueError("cover requirement lease owner is required")
         now = time.time()
         # Idle per-camera refiners must not reserve the shared main-DB writer.
-        with self._connect() as conn:
+        with polling_connection(self.db_path) as conn:
             due = conn.execute(
                 "select 1 from event_cover_requirements r join events e on e.id=r.event_id "
                 "where e.camera_id=? and r.state='pending' "

@@ -18,6 +18,7 @@ from typing import Any, Callable, Protocol
 
 import numpy as np
 
+from .database_polling import database_polling_session
 from .durable_payload import durable_json_copy
 from .evidence_work import EvidenceWorkPreempted, cancellable_evidence_work
 from .event_store.jobs import (
@@ -1317,6 +1318,7 @@ class MotionIncidentService:
         )
         return True
 
+    @database_polling_session()
     def _run_refinements_until_error(self) -> None:
         last_prune = 0.0
         last_stale_expiry = 0.0

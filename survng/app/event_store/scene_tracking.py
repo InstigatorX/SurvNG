@@ -6,6 +6,7 @@ import json
 import math
 import time
 
+from ..database_polling import polling_connection
 from .scenes import MAX_SCENE_EPISODE_SECONDS
 
 
@@ -80,6 +81,18 @@ class EventStoreSceneTrackingMixin:
     def claim_scene_tracking(self, camera_id, lease_owner, lease_seconds=60.0, end_limit=None):
         """Lease the camera's next recorded window; ``end_limit`` caps windows first."""
         now = time.time()
+        # Idle recovery runs once per second per camera. It must not take the
+        # shared writer just to discover there is no claimable work. Draining
+        # still enters the transaction to cap/finish queued windows first.
+        if end_limit is None:
+            with polling_connection(self.db_path) as conn:
+                due = conn.execute(
+                    "select 1 from scene_analysis_jobs where camera_id=? and "
+                    "((state='queued' and retry_at<=?) or (state='running' and lease_expires<=?)) "
+                    "limit 1", (camera_id, now, now),
+                ).fetchone()
+            if due is None:
+                return None
         with self._lock, self._connect() as conn:
             conn.execute("begin immediate")
             if end_limit is not None:

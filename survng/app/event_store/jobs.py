@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from ..database_polling import polling_connection
 from ..durable_payload import durable_json_dumps
 
 DETECTION_JOB_MAXIMUM_AGE_SECONDS = 20.0
@@ -691,7 +692,7 @@ class EventStoreJobsMixin:
         now = time.time()
         # Idle refiners poll frequently.  Do not acquire SQLite's exclusive
         # writer reservation until a due job is actually present.
-        with self._jobs_lock, self._connect_jobs() as conn:
+        with polling_connection(self.jobs_db_path) as conn:
             due = conn.execute(
                 "select 1 from detection_jobs where camera_id = ? and "
                 "((state = 'queued' and available_at <= ?) or "

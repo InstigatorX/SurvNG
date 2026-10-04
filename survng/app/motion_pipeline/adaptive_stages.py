@@ -263,8 +263,7 @@ class AdaptiveEmaBackgroundStage:
             for frame_index, frame in enumerate(frames[1:], start=1):
                 current = frame.astype(np.float32, copy=False)
                 delta = cv2.absdiff(current, background)
-                median = float(np.median(delta))
-                mad = float(np.median(np.abs(delta - median)))
+                median, mad = _background_statistics(delta)
                 robust_noise = max(1.0, median + 1.4826 * mad)
                 noise_ema = noise_ema * 0.92 + robust_noise * 0.08
 
@@ -393,8 +392,21 @@ class AdaptiveEmaBackgroundStage:
         return context
 
 
+def _background_statistics(delta: np.ndarray) -> tuple[float, float]:
+    """Reuse one scratch array for exact float-background median and MAD.
+
+    The original delta is still needed for masks and background learning. Only
+    this owned scratch buffer may be partitioned or overwritten.
+    """
+    scratch = delta.copy()
+    median = float(np.median(scratch, overwrite_input=True))
+    np.subtract(delta, median, out=scratch)
+    np.abs(scratch, out=scratch)
+    return median, float(np.median(scratch, overwrite_input=True))
+
+
 def _difference_statistics(difference: np.ndarray) -> tuple[float, float, float]:
-    """Use a byte histogram for median/MAD and NumPy for percentile interpolation."""
+    """Compute byte statistics from one histogram without partitioning a frame."""
     flat = difference.reshape(-1)
     if difference.dtype != np.uint8 or not flat.size:
         flat = flat.astype(np.float32, copy=False)
@@ -414,7 +426,17 @@ def _difference_statistics(difference: np.ndarray) -> tuple[float, float, float]
     )
     mad = float(np.mean(deviations[order[deviation_ranks]]))
 
-    percentile = float(np.percentile(flat.astype(np.float32, copy=False), 80))
+    # Match NumPy's default linear percentile, including its float32
+    # interpolation and the upper-end expression used for weights >= 0.5.
+    # Only the two order statistics are needed; the histogram already has them.
+    rank = (flat.size - 1) * 0.8
+    lower_rank = int(rank)
+    weight = rank - lower_rank
+    lower, upper = np.searchsorted(
+        cumulative, [lower_rank, min(lower_rank + 1, flat.size - 1)], side="right",
+    ).astype(np.float32)
+    delta = upper - lower
+    percentile = float(lower + delta * weight if weight < 0.5 else upper - delta * (1 - weight))
     return median, mad, percentile
 
 

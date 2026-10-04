@@ -8,6 +8,7 @@ import numpy as np
 
 from survng.app.motion_pipeline.adaptive_stages import (
     AdaptiveStatisticalThresholdStage,
+    _background_statistics,
     _difference_statistics,
 )
 from survng.app.motion_pipeline.context import MotionContext
@@ -22,6 +23,29 @@ def numpy_statistics(difference: np.ndarray) -> tuple[float, float, float]:
 
 
 class MotionStatisticsTest(unittest.TestCase):
+    def test_background_statistics_preserve_exact_values_and_input(self) -> None:
+        rng = np.random.default_rng(130)
+        cases = [
+            np.zeros((360, 640), dtype=np.float32),
+            rng.uniform(0, 255, (360, 640)).astype(np.float32),
+            np.array([0, 0.125, 0.2, 255], dtype=np.float32),
+            np.array([0, 0.125, 255], dtype=np.float32),
+        ]
+        cases.extend([cases[1].T, cases[1][::3, ::2]])
+        for delta in cases:
+            with self.subTest(shape=delta.shape):
+                expected = numpy_statistics(delta)[:2]
+                before = delta.copy()
+                delta.flags.writeable = False
+                self.assertEqual(_background_statistics(delta), expected)
+                np.testing.assert_array_equal(delta, before)
+
+    def test_byte_path_does_not_partition_a_float_frame(self) -> None:
+        difference = np.arange(256, dtype=np.uint8).reshape(16, 16)
+        expected = numpy_statistics(difference)
+        with patch("numpy.percentile", side_effect=AssertionError("full-frame percentile")):
+            self.assertEqual(_difference_statistics(difference), expected)
+
     def test_byte_statistics_exactly_match_numpy(self) -> None:
         rng = np.random.default_rng(1702)
         cases = [

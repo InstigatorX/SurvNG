@@ -7,6 +7,7 @@ import math
 import time
 import uuid
 
+from ..database_polling import polling_connection
 from ..incident_utils import portable_media_path, snapshot_deletion_claimed
 from ..scene_identity import observation_identity
 
@@ -401,7 +402,7 @@ class EventStoreSceneAcquisitionMixin:
             raise ValueError("lease owner required")
         now=time.time()
         # Idle camera workers must not reserve the shared SQLite writer.
-        with self._connect() as conn:
+        with polling_connection(self.db_path) as conn:
             due=conn.execute("select 1 from scene_candidate_jobs where camera_id=? and state in ('pending','running') "
                              "and (lease_expires_at_epoch is null or lease_expires_at_epoch<=?) "
                              "and (available_at_epoch<=? or deadline_epoch<=?) limit 1",(camera_id,now,now,now)).fetchone()
