@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -104,3 +105,122 @@ def test_reused_detection_probe_observes_enqueue(tmp_path):
         assert store.claim_detection_job("gate", lease_owner="worker") is None
         store.enqueue_detection_job(job_id="new", camera_id="gate", dedupe_key="new", payload={})
         assert store.claim_detection_job("gate", lease_owner="worker")["id"] == "new"
+
+
+def test_camera_work_deadline_covers_candidate_and_cover_predicates(tmp_path):
+    store = EventStore(tmp_path)
+    now = time.time()
+    with store._connect() as conn:
+        conn.execute(
+            "insert into scene_candidate_jobs "
+            "(id,camera_id,start_epoch,end_epoch,seed_sample_ids_json,deadline_epoch,"
+            "available_at_epoch,state,created_at,updated_at) "
+            "values('candidate','gate',?,?, '[]',?,?,'pending',?,?)",
+            (now, now + 1, now + 3, now + 2, now, now),
+        )
+    delay = store.next_camera_work_delay_seconds("gate")
+    assert delay is not None and 1.5 <= delay <= 2.0
+
+    with store._connect() as conn:
+        conn.execute(
+            "update scene_candidate_jobs set available_at_epoch=?,lease_expires_at_epoch=?",
+            (now - 1, now + 1.5),
+        )
+    delay = store.next_camera_work_delay_seconds("gate")
+    assert delay is not None and 1.0 <= delay <= 1.5
+
+    event = store.add_event(
+        camera_id="cover", kind="motion",
+        created_at=datetime.now(timezone.utc).isoformat(), objects_json="[]",
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "insert into event_cover_requirements "
+            "(event_id,state,deadline_epoch,available_at_epoch,payload_json,created_at,updated_at) "
+            "values(?,'pending',?,?, '{}',?,?)",
+            (event["id"], now + 4, now + 2, now, now),
+        )
+    delay = store.next_camera_work_delay_seconds("cover")
+    assert delay is not None and 1.5 <= delay <= 2.0
+    with store._connect() as conn:
+        conn.execute(
+            "update event_cover_requirements set attempts=3,lease_expires_at_epoch=? "
+            "where event_id=?",
+            (now + 1.5, event["id"]),
+        )
+    delay = store.next_camera_work_delay_seconds("cover")
+    assert delay is not None and 1.0 <= delay <= 1.5
+    with store._connect() as conn:
+        conn.execute(
+            "update event_cover_requirements set lease_expires_at_epoch=null,attempts=0,"
+            "deadline_epoch=? where event_id=?",
+            (now - 1, event["id"]),
+        )
+    assert store.next_camera_work_delay_seconds("cover") == 0.0
+
+
+def test_scene_deadline_respects_camera_and_global_demand_leases(tmp_path):
+    store = EventStore(tmp_path)
+    now = time.time()
+
+    def scene(camera, epoch):
+        event = store.add_event(
+            camera_id=camera, kind="motion",
+            created_at=datetime.fromtimestamp(epoch, timezone.utc).isoformat(),
+            objects_json="[]",
+        )
+        return store.enqueue_scene_tracking(event["id"], epoch, epoch + 1)
+
+    first = scene("gate", now)
+    second = scene("gate", now + 1000)
+    other = scene("other", now + 2000)
+    with store._connect() as conn:
+        conn.execute(
+            "update scene_analysis_jobs set state='running',lease_expires=? "
+            "where episode_id=?",
+            (now + 2, first["episode_id"]),
+        )
+        conn.execute(
+            "update scene_analysis_jobs set retry_at=0 where episode_id=?",
+            (second["episode_id"],),
+        )
+    delay = store.next_scene_analysis_delay_seconds("gate")
+    assert delay is not None and 1.5 <= delay <= 2.0
+
+    with store._connect() as conn:
+        conn.execute(
+            "update scene_analysis_jobs set state='complete' where episode_id=?",
+            (first["episode_id"],),
+        )
+        conn.execute(
+            "update scene_analysis_jobs set admission='demand',requested_until=?,"
+            "request_end_epoch=end_epoch where episode_id=?",
+            (now + 30, second["episode_id"]),
+        )
+        conn.execute(
+            "update scene_analysis_jobs set state='running',admission='demand',"
+            "requested_until=?,request_end_epoch=end_epoch,lease_expires=? "
+            "where episode_id=?",
+            (now + 30, now + 1.5, other["episode_id"]),
+        )
+    delay = store.next_scene_analysis_delay_seconds("gate")
+    assert delay is not None and 1.0 <= delay <= 1.5
+
+
+def test_future_scene_retry_has_its_own_deadline(tmp_path):
+    store = EventStore(tmp_path)
+    now = time.time()
+    event = store.add_event(
+        camera_id="gate", kind="motion",
+        created_at=datetime.fromtimestamp(now, timezone.utc).isoformat(),
+        objects_json="[]",
+    )
+    job = store.enqueue_scene_tracking(event["id"], now, now + 1)
+    with store._connect() as conn:
+        conn.execute(
+            "update scene_analysis_jobs set retry_at=? where episode_id=?",
+            (now + 0.5, job["episode_id"]),
+        )
+    assert store.next_camera_work_delay_seconds("gate") is None
+    delay = store.next_scene_analysis_delay_seconds("gate")
+    assert delay is not None and 0.0 < delay <= 0.5

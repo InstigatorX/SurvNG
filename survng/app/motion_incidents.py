@@ -109,6 +109,7 @@ RefinementCompletionHandler = Callable[[MotionDecisionOutcome, dict[str, Any]], 
 REFINEMENT_MAX_QUEUE_AGE_SECONDS = DETECTION_JOB_MAXIMUM_AGE_SECONDS
 REFINEMENT_EVENT_MAX_QUEUE_AGE_SECONDS = DETECTION_EVENT_JOB_MAXIMUM_AGE_SECONDS
 REFINEMENT_STALE_EXPIRY_INTERVAL_SECONDS = 5.0
+REFINEMENT_RECOVERY_POLL_SECONDS = 5.0
 # Matches the retired durable discovery expiry. The retained live frame stays
 # usable, but an older sample no longer describes the current scene.
 SCENE_DISCOVERY_MAX_AGE_SECONDS = 60.0
@@ -553,6 +554,22 @@ class _MemoryDetectionJobStore:
             )
             return result
 
+    def next_camera_work_delay_seconds(self, camera_id):
+        """Return when this fallback store's next durable job can be claimed."""
+        now = time.monotonic()
+        with self._lock:
+            due = [
+                float(job.get("available_at") or now)
+                for job in self._jobs.values()
+                if job["camera_id"] == camera_id and job["state"] == "queued"
+            ]
+            due.extend(
+                float(job.get("lease_expires_at") or now)
+                for job in self._jobs.values()
+                if job["camera_id"] == camera_id and job["state"] == "running"
+            )
+        return max(0.0, min(due) - now) if due else None
+
 
 class MotionIncidentService:
     """Persists a qualified incident and hands durable results to tracking.
@@ -601,6 +618,7 @@ class MotionIncidentService:
         self._handed_off_event_ids: set[int] = set()
         self._handoff_event_order: deque[int] = deque()
         self._refinement_queue: queue.Queue[bool] = queue.Queue(maxsize=1)
+        self._scene_analysis_wake = threading.Event()
         self._lease_owner = uuid.uuid4().hex
         self._security_work_pending = threading.Event()
         self._refinement_callbacks: dict[str, RefinementCallback] = {}
@@ -621,6 +639,7 @@ class MotionIncidentService:
             "offered": 0, "superseded": 0, "stale": 0, "completed": 0, "failed": 0,
         }
         self._last_scene_discovery_failure_log = float("-inf")
+        self._last_recovery_hint_failure_log = float("-inf")
         self._refinement_failures = 0
         self._refinement_timeouts = 0
         self._last_refinement_failure: dict[str, Any] | None = None
@@ -794,6 +813,75 @@ class MotionIncidentService:
             self._refinement_queue.put_nowait(True)
         except queue.Full:
             pass
+
+    def notify_scene_analysis_requested(self) -> bool:
+        """Advisory wake after durable demand commits; never starts work here."""
+        with self._status_lock:
+            stop = self._refinement_stop
+            if not (
+                self._refinement_accepting
+                and stop is not None
+                and not stop.is_set()
+                and self._refinement_thread is not None
+                and self._refinement_thread.is_alive()
+            ):
+                return False
+            self._scene_analysis_wake.set()
+            try:
+                self._refinement_queue.put_nowait(True)
+            except queue.Full:
+                pass
+        return True
+
+    def _store_delay_hint(self, method_name: str) -> float | None:
+        next_due = getattr(self.refinement_store, method_name, None)
+        if not callable(next_due):
+            return None
+        try:
+            delay = next_due(self.camera_id)
+            if delay is not None and math.isfinite(float(delay)):
+                return max(0.05, float(delay))
+        except Exception:
+            now = time.monotonic()
+            if now - self._last_recovery_hint_failure_log >= 60.0:
+                self._last_recovery_hint_failure_log = now
+                LOGGER.exception("durable-work deadline lookup failed for %s", self.camera_id)
+        return None
+
+    def _scene_recovery_delay_seconds(self, *, draining: bool) -> float:
+        timeout = REFINEMENT_RECOVERY_POLL_SECONDS
+        delay = self._store_delay_hint("next_scene_analysis_delay_seconds")
+        if delay is not None:
+            timeout = min(timeout, delay)
+        if draining:
+            # A drain may expose another recorded chunk without a durable wake.
+            timeout = min(timeout, 1.0)
+        return timeout
+
+    def _recovery_wait_seconds(
+        self,
+        drain_deadline: float | None,
+        scene_recovery_at: float | None = None,
+    ) -> float:
+        timeout = REFINEMENT_RECOVERY_POLL_SECONDS
+        delay = self._store_delay_hint("next_camera_work_delay_seconds")
+        if delay is not None:
+            timeout = min(timeout, delay)
+        if scene_recovery_at is not None:
+            timeout = min(
+                timeout,
+                max(0.05, scene_recovery_at - time.monotonic()),
+            )
+        if drain_deadline is not None:
+            # Detection-off drain is a bounded transitional state whose
+            # in-memory tracking session can finish without a durable write or
+            # wake signal. Preserve its prompt completion behavior.
+            timeout = min(
+                timeout,
+                0.5,
+                max(0.05, drain_deadline - time.monotonic()),
+            )
+        return timeout
 
     def _set_refinement_stage(self, stage: str) -> None:
         with self._status_lock:
@@ -1322,7 +1410,7 @@ class MotionIncidentService:
     def _run_refinements_until_error(self) -> None:
         last_prune = 0.0
         last_stale_expiry = 0.0
-        last_scene_recovery = 0.0
+        next_scene_recovery = 0.0
         last_scene_recovery_log = float("-inf")
         while True:
             stop = self._refinement_stop
@@ -1330,14 +1418,20 @@ class MotionIncidentService:
                 return
             with self._status_lock:
                 drain_deadline = self._drain_deadline
+                scene_wake = self._scene_analysis_wake.is_set()
+                if scene_wake:
+                    # Notification uses this lock too: a signal published after
+                    # the clear remains visible to the following iteration.
+                    self._scene_analysis_wake.clear()
             draining = drain_deadline is not None
             if drain_deadline is not None and time.monotonic() >= drain_deadline:
                 self._drain_finished()
                 return
             prune = getattr(self.refinement_store, "prune_detection_jobs", None)
             now = time.monotonic()
-            if self.resume_scene_analysis is not None and now - last_scene_recovery >= 1.0:
-                last_scene_recovery = now
+            if self.resume_scene_analysis is not None and (
+                scene_wake or now >= next_scene_recovery
+            ):
                 try:
                     self.resume_scene_analysis()
                 except Exception as error:
@@ -1352,6 +1446,9 @@ class MotionIncidentService:
                     if now - last_scene_recovery_log >= 60:
                         last_scene_recovery_log = now
                         LOGGER.exception("scene analysis recovery failed for %s", self.camera_id)
+                next_scene_recovery = time.monotonic() + self._scene_recovery_delay_seconds(
+                    draining=draining,
+                )
             if callable(prune) and now - last_prune >= 60.0:
                 last_prune = now
                 try:
@@ -1421,7 +1518,12 @@ class MotionIncidentService:
                 if draining and self._drain_finished():
                     return
                 try:
-                    self._refinement_queue.get(timeout=0.5)
+                    self._refinement_queue.get(
+                        timeout=self._recovery_wait_seconds(
+                            drain_deadline,
+                            next_scene_recovery if self.resume_scene_analysis is not None else None,
+                        )
+                    )
                 except queue.Empty:
                     pass
                 continue

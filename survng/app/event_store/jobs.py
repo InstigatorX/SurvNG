@@ -679,6 +679,70 @@ class EventStoreJobsMixin:
                 (camera_id, now, now),
             ).fetchone() is not None
 
+    def next_camera_work_delay_seconds(self, camera_id: str) -> float | None:
+        """Read the next durable camera deadline without reserving a writer.
+
+        This is only a sleeping hint. Claim transactions remain authoritative,
+        and callers perform a bounded recovery scan even when no row is found.
+        """
+        now = time.time()
+        with polling_connection(self.jobs_db_path) as conn:
+            detection = conn.execute(
+                "select min(case when state='queued' then available_at "
+                "else coalesce(lease_expires_at,?) end) from detection_jobs "
+                "where camera_id=? and state in ('queued','running')",
+                (now, camera_id),
+            ).fetchone()[0]
+        with polling_connection(self.db_path) as conn:
+            main = conn.execute(
+                """select min(due_at) from (
+                    select max(min(available_at_epoch,deadline_epoch),
+                               coalesce(lease_expires_at_epoch,0)) as due_at
+                    from scene_candidate_jobs
+                    where camera_id=? and state in ('pending','running')
+                    union all
+                    select max(case when attempts>=3 then 0
+                                    else min(r.available_at_epoch,r.deadline_epoch) end,
+                               coalesce(r.lease_expires_at_epoch,0)) as due_at
+                    from event_cover_requirements r join events e on e.id=r.event_id
+                    where e.camera_id=? and r.state='pending'
+                )""",
+                (camera_id, camera_id),
+            ).fetchone()[0]
+        due = [float(value) for value in (detection, main) if value is not None]
+        return max(0.0, min(due) - now) if due else None
+
+    def next_scene_analysis_delay_seconds(self, camera_id: str) -> float | None:
+        """Return the next time recorded scene analysis can be claimed."""
+        now = time.time()
+        with polling_connection(self.db_path) as conn:
+            due = conn.execute(
+                """with blockers as (
+                    select
+                        coalesce(max(case
+                            when camera_id=? and state='running' and lease_expires>?
+                            then lease_expires end),0) as camera_lease,
+                        coalesce(max(case
+                            when admission='demand' and state='running' and lease_expires>?
+                            then lease_expires end),0) as demand_lease
+                    from scene_analysis_jobs
+                )
+                select min(case
+                    when job.state='running' then
+                        max(job.lease_expires,blockers.camera_lease)
+                    when job.admission='automatic' then
+                        max(job.retry_at,blockers.camera_lease)
+                    else max(job.retry_at,blockers.camera_lease,blockers.demand_lease)
+                end)
+                from scene_analysis_jobs job cross join blockers
+                where job.camera_id=? and job.state in ('queued','running')
+                  and (job.admission='automatic' or
+                       (job.requested_until>? and
+                        job.request_end_epoch>job.start_epoch))""",
+                (camera_id, now, now, camera_id, now),
+            ).fetchone()[0]
+        return max(0.0, float(due) - now) if due is not None else None
+
     def claim_detection_job(
         self,
         camera_id: str,
