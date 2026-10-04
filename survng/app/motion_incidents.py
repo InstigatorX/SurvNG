@@ -892,6 +892,14 @@ class MotionIncidentService:
         thread = self._refinement_thread
         if thread is None:
             return True
+        # request_stop() may have published its wake just before the shared
+        # runtime stop event was set. Wake once more at the join boundary so
+        # the worker observes that event instead of sleeping for the recovery
+        # polling interval.
+        try:
+            self._refinement_queue.put_nowait(True)
+        except queue.Full:
+            pass
         thread.join(max(0.0, timeout))
         if thread.is_alive():
             with self._status_lock:
