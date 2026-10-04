@@ -1277,14 +1277,6 @@ class SemanticIndex:
             self._record_cache_mutation(None, force_rebuild=True)
         return deleted
 
-    def observation_indexed(self, observation: dict[str, Any], identity: SemanticModelIdentity) -> bool:
-        with self._connect() as connection:
-            return connection.execute(
-                "select 1 from semantic_embeddings where observation_id=? and image_path=? "
-                "and model_fingerprint=? and preprocessing_fingerprint=? limit 1",
-                (observation["id"], observation["snapshot_path"], identity.model_fingerprint, identity.preprocessing_fingerprint),
-            ).fetchone() is not None
-
     def indexed_observation_keys(self, event_id: int, identity: SemanticModelIdentity) -> set[tuple[str, str]]:
         """Observation/image pairs already stored for this event and model generation."""
         if event_id <= 0:

@@ -224,11 +224,6 @@ class ObjectTrackingLifecycle:
             return False
         return self._session.running() or self.scene_job_store.scene_tracking_pending(self.camera.id)
 
-    def close_out_scene_work(self, reason: str) -> int:
-        if self.scene_job_store is None:
-            return 0
-        return int(self.scene_job_store.close_scene_tracking(self.camera.id, reason))
-
     def abort_scene_work(self, reason: str, timeout: float = 10.0) -> int:
         """Stop active compute before terminalizing its durable scene jobs."""
         if self.scene_job_store is None:

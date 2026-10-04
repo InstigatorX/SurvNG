@@ -8,6 +8,11 @@ tests in that merge are included here. The September reports
 [`dead-code-cleanup.md`](dead-code-cleanup.md) remain historical records and
 were not rewritten.
 
+The initial category-A binding cleanup was committed as `c6d8cda`. After review
+of the three recommended follow-ups, the user explicitly approved removing the
+camera-semantics surface, the four uncalled Python helpers, and the related
+verified-unused CSS. That separately approved follow-up is recorded below.
+
 ## Executive summary
 
 The repository contains 786 tracked files: 216 production Python files, 219
@@ -18,13 +23,14 @@ generated static output, models, recordings, and runtime databases were excluded
 as cleanup targets, but tracked code that reads or generates them was included
 in reference tracing.
 
-The current tree has no orphaned production Python module. All frontend source
-modules and styles are in the four-entry Vite graph except
-`frontend/src/cameraSemantics.mjs`, a tested but production-unreferenced module.
-Static checks found a small, conclusive batch of unused imports and locals. It
-also found four uncalled public helpers, one test-only frontend module, stale-looking
-CSS families, and several unused component parameters; those are retained because
-external, intended-future, compatibility, or visual-state use cannot be ruled out.
+The current tree has no orphaned production Python module. The one frontend
+source module outside the four-entry Vite graph, its isolated test, and its
+unproduced CSS family were removed after product confirmation and pre/post
+desktop/mobile browser checks. Static checks also found four uncalled Python
+helpers; repository tracing plus a check of the separate SurvNG-HA integration
+found no consumers, and the user explicitly retired those surfaces. Other
+stale-looking CSS families and unused component parameters remain because
+compatibility, intended-future, or visual-state use cannot yet be ruled out.
 
 Clone detection found 48 exact blocks (785 lines, 0.50% of the scanned source).
 Review found no safe consolidation: the blocks either express small local UI
@@ -34,8 +40,8 @@ erase intentional differences.
 
 | Classification | Findings | Estimated reduction | Disposition |
 | --- | ---: | ---: | --- |
-| A. Proven safe removal | 16 unused bindings | 16 source lines | One low-risk batch selected |
-| B. Likely dead, requires confirmation | 5 code surfaces, 4 prop groups, CSS upper bound | about 50 code lines plus unverified CSS | Retain |
+| A. Proven safe removal | 16 unused bindings, 5 confirmed dead surfaces | 216 net lines across both approved batches | Implemented |
+| B. Likely dead, requires confirmation | 4 prop groups and remaining CSS upper bound | unverified | Retain |
 | C. Safe duplicate consolidation | 0 | 0 | None justified |
 | D. Similar but intentionally distinct | 48 clone blocks in 19 families | 0 | Retain |
 | E. Obsolete or suspicious, but blocked | 4 compatibility/migration families | potentially large | Requires policy or migration decision |
@@ -119,6 +125,29 @@ These 16 binding removals form the one selected cleanup batch. No new
 characterization test is needed because the values cannot affect behavior and the
 owning route/component/subsystem suites already exercise the containing code.
 
+### Separately approved follow-up
+
+The user subsequently approved recommendations 1–3 after confirming that the
+camera-report UI had not surfaced in the product. The external-consumer check
+included the clean `/root/SurvNG-HA` checkout at commit `0bbd1a3`: it contains
+no import of `survng.app` and no occurrence of any removed symbol. Its client
+integrates through documented HTTP endpoints (including system status, health,
+cameras, incidents, the event stream, snapshots, stream sources, settings, and
+camera actions), so it does not consume these in-process Python interfaces.
+
+| Location | Evidence and action | Risk controls |
+| --- | --- | --- |
+| `frontend/src/cameraSemantics.mjs` and `frontend/tests/camera-semantics.mjs` | The module had no production import, HTML/server injection, dynamic import, or Vite graph membership; its only consumer was its isolated unit test. Removed both files. | Product owner confirmed retirement; the production graph stayed at 1,987 modules. |
+| `frontend/src/styles.css` `.incident-camera-reports` / `.incident-camera-report` family | No JSX, JavaScript, HTML, template, or dynamic class producer exists. Removed 43 CSS lines. | Incident detail and scene Playwright fixtures passed before and after at their desktop/mobile viewports. No other lexical CSS candidate was touched. |
+| `SceneContextSubject.stable_sightings` | Definition-only convenience property; active code reads `stable_event_keys`. Removed. | Repository and SurvNG-HA scans were clean; scene/activity/stationary tests passed. |
+| `ObjectTrackingLifecycle.close_out_scene_work` | Definition-only wrapper superseded internally by `abort_scene_work`, which stops active compute before terminalizing durable jobs. Removed. | Lifecycle and camera-worker tests passed; active shutdown behavior was not changed. |
+| `SemanticSearchStore.observation_indexed` | Definition-only one-row query superseded by active bulk `indexed_observation_keys`. Removed. | Semantic search, refresh, and scene-semantic suites passed. |
+| `FragmentSourceInfo` and `EncodedFragmentSource.describe` / implementation | No constructor, import, method call, protocol consumer, route, or integration reference. Removed the unused typed surface. | Encoded-fragment, recording-route, and scene-playback tests passed. |
+
+This follow-up deletes 203 lines across seven files: 92 production frontend
+lines, 68 test lines, and 43 Python lines. Together with the committed first
+batch, the audit produced a net reduction of 216 lines.
+
 ## B. Likely dead, requires confirmation
 
 These items have no discovered production caller, but their public/tested shape or
@@ -126,14 +155,9 @@ intended product behavior prevents automatic removal.
 
 | Location | Purpose and traces performed | Possible hidden consumer / reason retained | Risk / confidence | Recommended confirmation and action |
 | --- | --- | --- | --- | --- |
-| `frontend/src/cameraSemantics.mjs:1-43` | Normalizes vendor-neutral camera reports. No source import, HTML tag, server injection, or Vite module; only `frontend/tests/camera-semantics.mjs` imports it. Vite includes the other 121 frontend source files and excludes this one. History ties it to camera-report UI work; matching `.incident-camera-report*` CSS also has no literal producer. | May be an unfinished or temporarily disconnected product surface; deleting it would retire tested semantics. | Medium / high that it is production-unused | Product decision: reconnect it to incident presentation or remove module, test, and verified-unused styles together. |
-| `survng/app/scene_context_memory.py:158-160` | `SceneContextSubject.stable_sightings` returns the length of `stable_event_keys`; definition-only across code, tests, docs, and strings. | Public property on a domain dataclass could be consumed by external diagnostics. | Low / medium | Confirm no external Python consumers, then remove the property (3 lines). |
-| `survng/app/object_tracking_lifecycle.py:227-230` | `close_out_scene_work` forwards to durable store closure. Exact search finds only the definition; current shutdown uses `abort_scene_work`, which first stops compute. History shows the wrapper predates the safer abort path. | A direct external caller could depend on closure without abort; semantics are lifecycle-sensitive. | Medium / high that it is internally unused | Confirm no integration caller and decide whether direct terminalization remains supported; then remove with lifecycle regression tests. |
-| `survng/app/semantic_search.py:1280-1286` | `observation_indexed` performs a one-row lookup. Definition-only; active callers use bulk `indexed_observation_keys`. History shows it predates the bulk path. | Public store method could be used by maintenance tooling outside this checkout. | Medium / high that it is internally superseded | Confirm external tooling, then remove and run semantic/backfill suites. |
-| `survng/app/encoded_fragments.py:83-94,131-141` | `FragmentSourceInfo` and protocol/implementation `describe` have no call. Fragment streaming uses `fragments` and `materialize`; module and routes are otherwise live. | This is a typed protocol surface and may be reserved for future transport negotiation or external consumers. | Medium / high that it is internally unused | Interface decision: retain as planned capability or remove the dataclass plus both declarations with recording/fMP4 coverage. |
 | `frontend/src/admin/ConfigPage.jsx:3558`, `Shell.jsx:54`, `TimelinePages.jsx:724,1468,3274` | ESLint reports unused `runtimeStatus`, advisor props, `theme`, `onAskAssistant`, `fastSeek`, `selectedEventId`, and `onEventSelect`. Call sites still supply several values and components are exported/tested. | These are component interfaces and may support fixtures, pending UI restoration, or downstream imports. | Low–medium / medium | Review each component contract in a dedicated frontend cleanup; do not silently narrow props in the binding batch. |
 | `frontend/src/detectionOccupancy.mjs:614` | `restarts` is accepted but not used in occupancy presentation. | The input payload contract may intentionally accept the runtime counter for forward compatibility. | Low / medium | Decide whether restart count should be displayed or remove only the local destructuring, preserving caller payloads. |
-| CSS lexical candidates | 1,174 class selectors were scanned; 126 names have no literal producer. Concrete old families include calibration/tune-up, legacy event cards, camera reports, and older Timeline inspector controls. Dynamic `page-*`, mode, health, track-color, and state classes demonstrate why lexical absence is insufficient. | Conditional, responsive, error, loading, and dynamically composed classes; no complete browser-state coverage was collected. | Medium / low as a group | Audit one UI family at a time with desktop/mobile live DOM and computed-style comparison before deletion. Estimated opportunity: hundreds of lines, not yet safely quantifiable. |
+| CSS lexical candidates | The original scan found 126 class names with no literal producer. The camera-report family was separately validated and removed; calibration/tune-up, legacy event cards, and older Timeline inspector controls remain only candidates. Dynamic `page-*`, mode, health, track-color, and state classes demonstrate why lexical absence is insufficient. | Conditional, responsive, error, loading, and dynamically composed classes; complete browser-state coverage does not exist for the remaining families. | Medium / low as a group | Continue one UI family at a time with desktop/mobile DOM and behavior checks. Estimated opportunity: hundreds of lines, not yet safely quantifiable. |
 
 The ESLint `name`/`index` and object-rest `restarts`/`replay` reports were also
 inspected. `name` and `index` participate only in omission/destructuring patterns;
@@ -221,22 +245,22 @@ configuration key, or serialized field is approved for removal by this report.
 | Change family | Focused validation | Full validation |
 | --- | --- | --- |
 | Selected A binding batch | Scene admission/review/establishment/incidents; incident queries; recorded object detection/motion pipeline; recording routes/API/fMP4; the three directly edited test files; affected frontend unit tests | Ruff/ESLint scans, 3,214-test backend suite, 70-file frontend suite, Vite production build, CLI discovery |
-| B semantic/test-only helpers | Owning store/lifecycle tests plus external-consumer confirmation | Full backend/frontend suites as applicable |
-| B CSS/UI surfaces | Targeted desktop/mobile browser states and synchronous computed-style comparison | Frontend unit suite and production build |
+| Approved semantic/helper follow-up | Encoded fragment, recording, playback, lifecycle, camera worker, scene/activity/stationary, semantic search/refresh tests; repository and SurvNG-HA consumer scans | Full backend suite, frontend suite, and production build |
+| Approved camera-report CSS/UI follow-up | Incident detail and scene browser fixtures before and after at desktop/mobile viewports | Frontend unit suite and production build |
 | E compatibility/migrations | Old-config and upgraded-real-SQLite fixtures, documented deprecation/migration | Full suite plus startup/upgrade smoke |
 
 Recommended future batches, each requiring separate approval:
 
-1. Confirm or reconnect the camera-semantics UI as a product decision.
-2. Decide the supported external Python surface, then retire confirmed superseded
-   public helpers one subsystem at a time.
-3. Audit one stale CSS family with real browser coverage; never bulk-delete the
-   126-name lexical upper bound.
-4. Consider compatibility or migration removal only after an explicit version and
+1. Audit another stale CSS family with real browser coverage; never bulk-delete
+   the remaining lexical candidates.
+2. Review component prop contracts only with their callers and fixtures in scope.
+3. Consider compatibility or migration removal only after an explicit version and
    deprecation policy.
 
-The selected first batch is limited to category A. No category B–F item is part
-of the source patch, and no commit, deployment, or service restart is authorized.
+The first batch was limited to the original category-A findings. The follow-up
+moved its five confirmed surfaces from B to A only after the user decision,
+external-consumer check, and browser baseline. No category C–F item is part of
+either source patch, and no deployment or service restart occurred.
 
 ## Implemented first batch and post-change validation
 
@@ -263,3 +287,31 @@ no tracked generated artifacts, no changes to the September reports, and no
 unrelated source edits. The running service was not queried, restarted, or
 deployed because this batch changes no runtime behavior and validation did not
 require touching external state.
+
+## Implemented follow-up and post-change validation
+
+The separately approved follow-up removes the five confirmed surfaces described
+above. It does not change routes, API payloads, configuration, environment
+variables, serialized fields, schemas, migrations, persistence, operational
+scripts, framework hooks, or active frontend behavior. The deleted frontend unit
+test covered only the deleted production-unreachable module, so the expected
+suite count is 69 files instead of 70.
+
+| Check | Follow-up result |
+| --- | --- |
+| Pre-change browser baseline | Incident detail and canonical scene fixtures **passed** at their desktop/mobile viewports |
+| Focused backend suite | **256 passed, 26 subtests passed** in 11.45s; additional encoded-fragment sanity run **3 passed** |
+| Repository residual-reference scan | **Passed**; removed names/selectors occur only in this report's audit record |
+| SurvNG-HA external-consumer scan | **Passed** at clean commit `0bbd1a3`; no removed names or internal SurvNG imports, HTTP integration only |
+| Ruff `F401,F811,F841` | **Passed**, no findings |
+| ESLint audit | Same 12 pre-existing documented findings; no new finding |
+| Vulture at 80% | Same 12 callback-signature false positives; no new finding |
+| Full backend suite | **3,214 passed** in 136.38s; one unchanged Starlette/httpx deprecation warning |
+| Full frontend suite | **69 test files passed** |
+| Production Vite build | **Passed**, 1,987 modules transformed; unchanged large video-player chunk warning |
+| Post-change browser comparison | Both incident fixtures **passed** again at their desktop/mobile viewports |
+| Follow-up diff | Seven files, **203 deletions**; no tracked generated artifact |
+| `git diff --check` | **Passed** |
+
+The follow-up did not access, deploy, or restart the running service. The browser
+fixtures are self-contained, so no live credentials were stored or needed.

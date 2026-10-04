@@ -79,19 +79,7 @@ class EncodedFragment:
     finalized: bool = True
 
 
-@dataclass(frozen=True, slots=True)
-class FragmentSourceInfo:
-    window: FragmentWindow
-    available_start_epoch: float | None
-    available_end_epoch: float | None
-    fragment_count: int
-    follow_supported: bool = False
-    provenance: str = "indexed_mp4"
-
-
 class EncodedFragmentSource(Protocol):
-    def describe(self, window: FragmentWindow) -> FragmentSourceInfo: ...
-
     def fragments(
         self,
         window: FragmentWindow,
@@ -127,19 +115,6 @@ class IndexedMp4FragmentSource:
         self._remuxer = remuxer
         self._lock = threading.Lock()
         self._closed = False
-
-    def describe(self, window: FragmentWindow) -> FragmentSourceInfo:
-        fragments = list(self.fragments(window))
-        return FragmentSourceInfo(
-            window=window,
-            available_start_epoch=(
-                fragments[0].wall_start_epoch if fragments else None
-            ),
-            available_end_epoch=(
-                fragments[-1].wall_end_epoch if fragments else None
-            ),
-            fragment_count=len(fragments),
-        )
 
     def fragments(
         self,

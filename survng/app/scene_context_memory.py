@@ -155,11 +155,6 @@ class SceneContextSubject:
     row_id: int | None = None
     last_moved_epoch: float | None = None
 
-    @property
-    def stable_sightings(self) -> int:
-        return len(self.stable_event_keys)
-
-
 class SceneContextMemory(Protocol):
     writes: int
 
