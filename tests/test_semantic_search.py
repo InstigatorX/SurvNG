@@ -60,6 +60,34 @@ class SemanticIndexTest(unittest.TestCase):
         detail = " ".join(str(row[-1]) for row in plan)
         self.assertIn("idx_semantic_observation", detail)
 
+    def test_candidate_order_uses_the_generation_search_index(self) -> None:
+        with self.index._connect() as connection:
+            plan = connection.execute(
+                "explain query plan select id from semantic_embeddings "
+                "where model_fingerprint=? and preprocessing_fingerprint=? "
+                "order by captured_at desc,id desc limit 10",
+                ("model-a", "prep-a"),
+            ).fetchall()
+        detail = " ".join(str(row[-1]) for row in plan)
+        self.assertIn("idx_semantic_generation_search", detail)
+        self.assertNotIn("TEMP B-TREE", detail)
+
+    def test_retained_cover_deduplication_uses_partial_index(self) -> None:
+        with self.index._connect() as connection:
+            plan = connection.execute(
+                "explain query plan select 1 from semantic_embeddings candidate "
+                "where exists(select 1 from semantic_embeddings observed "
+                "where observed.observation_id<>'' "
+                "and observed.event_id=candidate.event_id "
+                "and observed.image_path=candidate.image_path "
+                "and observed.bbox_json=candidate.bbox_json "
+                "and observed.model_fingerprint=candidate.model_fingerprint "
+                "and observed.preprocessing_fingerprint="
+                "candidate.preprocessing_fingerprint)"
+            ).fetchall()
+        detail = " ".join(str(row[-1]) for row in plan)
+        self.assertIn("idx_semantic_retained_cover", detail)
+
     def test_semantic_text_inputs_maps_multiple_manifest_inputs(self) -> None:
         tokens = {
             "input_ids": np.asarray([[1, 2]], dtype=np.int64),

@@ -115,11 +115,25 @@ def create_semantic_router(deps: SemanticRouteDependencies) -> SemanticRouteBund
         best_by_event: dict[int, Any] = {}
         canonical_by_event: dict[int, dict] = {}
         seen_incidents: set[str] = set()
+        metadata_resolver = getattr(
+            active_manager.events, "scene_incident_metadata", None
+        )
+        canonical_metadata = (
+            metadata_resolver([hit.event_id for hit in hits])
+            if callable(metadata_resolver)
+            else {}
+        )
         scene_resolver = getattr(active_manager.events, "scene_incident", None)
         for hit in hits:
             if exclude_event_id is not None and hit.event_id == exclude_event_id:
                 continue
-            incident = scene_resolver(event_id=hit.event_id) if callable(scene_resolver) else None
+            incident = canonical_metadata.get(hit.event_id)
+            if incident is None and not callable(metadata_resolver):
+                incident = (
+                    scene_resolver(event_id=hit.event_id)
+                    if callable(scene_resolver)
+                    else None
+                )
             if incident:
                 incident_id = str(incident["incident_id"])
                 if incident_id in seen_incidents:

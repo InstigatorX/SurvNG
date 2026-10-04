@@ -369,18 +369,21 @@ class EventStoreSceneAdmissionMixin:
             if restored:
                 self._retain_scene_facets(conn, incident_id)
 
-    def _scene_establishment(self, conn, incident_id):
-        rows = conn.execute("select d.* from scene_activity_decisions d join scene_event_establishment x on x.decision_id=d.id "
-                            "join scene_event_membership m on m.event_id=x.event_id join scene_episodes p on p.id=m.episode_id "
-                            "where p.incident_id=? order by (d.verdict='supported') desc,d.created_at limit 1", (incident_id,)).fetchall()
-        if not rows:
+    def _scene_establishment_payload(self, row):
+        if row is None:
             return {"status": "unverified", "reason": "legacy_evidence", "summary": "Historical evidence; activity verification is unavailable.", "supporting_observation_ids": []}
-        decision = self._activity_payload(rows[0]); evidence = decision["evidence"]
+        decision = self._activity_payload(row); evidence = decision["evidence"]
         return {"status": "unverified" if evidence.get("historical_unverified") else {"supported":"established", "unsupported":"not_established", "pending":"unverified", "incomplete":"incomplete"}[decision["verdict"]],
                 "reason": decision["reason"], "summary": evidence.get("summary") or "Activity was not established from these observations.",
                 "supporting_observation_ids": evidence.get("supporting_observation_ids", []), "policy_version": decision["policy_version"],
                 "zone_interpretation": evidence.get("zone_interpretation"),
                 "physical_evidence": evidence.get("physical_evidence")}
+
+    def _scene_establishment(self, conn, incident_id):
+        row = conn.execute("select d.* from scene_activity_decisions d join scene_event_establishment x on x.decision_id=d.id "
+                           "join scene_event_membership m on m.event_id=x.event_id join scene_episodes p on p.id=m.episode_id "
+                           "where p.incident_id=? order by (d.verdict='supported') desc,d.created_at limit 1", (incident_id,)).fetchone()
+        return self._scene_establishment_payload(row)
 
     def migrate_scene_establishment(self, *, batch_size=100):
         """Reclassify legacy discovery without inference, alerts, or deleting links."""

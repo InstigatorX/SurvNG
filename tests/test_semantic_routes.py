@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from survng.app.semantic_routes import (
     SemanticRouteDependencies,
+    SemanticSearchRequest,
     SemanticVisualSearchRequest,
     SemanticVisualFrameSearchRequest,
     create_semantic_router,
@@ -44,7 +45,15 @@ class SemanticVisualFrameRouteTests(TestCase):
             )
         ])
         self.search_event_object = Mock(return_value=[])
+        self.search_text = Mock(return_value=self.search_image.return_value)
         self.preview = Mock(return_value=self.preview_path)
+        self.scene_incident = Mock()
+        self.scene_incident_metadata = Mock(return_value={
+            9: {
+                "incident_id": "incident-yard-9",
+                "establishment": {"status": "established"},
+            }
+        })
         self.manager = SimpleNamespace(
             camera=lambda camera_id: object() if camera_id == "gate" else None,
             recorder=SimpleNamespace(
@@ -57,6 +66,7 @@ class SemanticVisualFrameRouteTests(TestCase):
             semantic_search=SimpleNamespace(
                 search_image=self.search_image,
                 search_event_object=self.search_event_object,
+                search_text=self.search_text,
             ),
             events=SimpleNamespace(
                 get=Mock(return_value={
@@ -71,7 +81,9 @@ class SemanticVisualFrameRouteTests(TestCase):
                     "camera_id": "yard",
                     "kind": "object",
                     "created_at": "2026-08-27T16:00:00+00:00",
-                }])
+                }]),
+                scene_incident=self.scene_incident,
+                scene_incident_metadata=self.scene_incident_metadata,
             ),
             faces=None,
             config=SimpleNamespace(
@@ -89,6 +101,9 @@ class SemanticVisualFrameRouteTests(TestCase):
         ]
         self.event_handler = create_semantic_router(dependencies).handlers[
             "semantic_visual_search"
+        ]
+        self.text_handler = create_semantic_router(dependencies).handlers[
+            "semantic_search"
         ]
 
     def tearDown(self) -> None:
@@ -206,6 +221,20 @@ class SemanticVisualFrameRouteTests(TestCase):
         self.assertEqual(call.kwargs["limit"], 1)
         self.assertEqual(call.kwargs["exclude_event_ids"], [8])
         self.assertTrue(call.kwargs["unique_events"])
+
+    def test_text_search_batches_incident_metadata_without_expanding_scenes(self) -> None:
+        payload = self.text_handler(SemanticSearchRequest(
+            query="person wearing red shirt",
+            limit=10,
+        ))
+
+        self.assertEqual(payload["results"][0]["incident_id"], "incident-yard-9")
+        self.assertEqual(
+            payload["results"][0]["establishment"],
+            {"status": "established"},
+        )
+        self.scene_incident_metadata.assert_called_once_with([9])
+        self.scene_incident.assert_not_called()
 
     def test_preview_http_error_is_preserved(self) -> None:
         self.preview.side_effect = HTTPException(

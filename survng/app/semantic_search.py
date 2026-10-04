@@ -375,12 +375,14 @@ class SemanticIndex:
                 connection.execute("alter table semantic_embeddings add column observation_id text not null default ''")
             connection.execute(
                 """
-                create index if not exists idx_semantic_generation_time
+                create index if not exists idx_semantic_generation_search
                 on semantic_embeddings(
-                    model_fingerprint, preprocessing_fingerprint, captured_at desc
+                    model_fingerprint, preprocessing_fingerprint,
+                    captured_at desc, id desc
                 )
                 """
             )
+            connection.execute("drop index if exists idx_semantic_generation_time")
             connection.execute(
                 """
                 create index if not exists idx_semantic_event
@@ -394,6 +396,19 @@ class SemanticIndex:
                 on semantic_embeddings(
                     observation_id, image_path, model_fingerprint, preprocessing_fingerprint
                 )
+                """
+            )
+            # Search suppresses an event-cover crop when independently retained
+            # scene evidence represents the same box.  This partial index keeps
+            # that correlated existence check bounded to one event instead of
+            # walking a model generation for every candidate row.
+            connection.execute(
+                """
+                create index if not exists idx_semantic_retained_cover
+                on semantic_embeddings(
+                    event_id, image_path, bbox_json,
+                    model_fingerprint, preprocessing_fingerprint
+                ) where observation_id <> ''
                 """
             )
             connection.execute("""
@@ -636,7 +651,11 @@ class SemanticIndex:
                 clauses.append(f"({current} or {retained})" if has_scene_observations else current)
             rows = connection.execute(
                 f"""
-                select *, {effective_label} as search_object_label from semantic_embeddings
+                select id, event_id, camera_id, captured_at, source_kind,
+                    source_key, image_path, bbox_json, embedding_size,
+                    embedding_blob, observation_id,
+                    {effective_label} as search_object_label
+                from semantic_embeddings
                 where {' and '.join(clauses)}
                 order by captured_at desc, id desc
                 limit ?
