@@ -3839,21 +3839,6 @@ button.live-overlay-backdrop:active {
   box-shadow: 0 1px 5px rgba(0, 0, 0, 0.25);
 }
 
-.incident-meta {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-  padding: 9px;
-}
-
-.incident-meta-top {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, auto);
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
 .incident-labels {
   justify-content: flex-end;
   min-width: 0;
@@ -3878,19 +3863,6 @@ button.live-overlay-backdrop:active {
 
 .incident-labels .object-icon-pill svg {
   display: block;
-}
-
-.incident-meta strong,
-.incident-meta time {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.incident-meta time {
-  color: var(--muted);
-  font-size: 12px;
 }
 
 .incident-pager {
@@ -4241,78 +4213,6 @@ button.live-overlay-backdrop:active {
 
 .incident-card.expanded {
   grid-column: 1 / -1;
-}
-
-.incident-detail {
-  display: grid;
-  gap: 8px;
-  padding-top: 4px;
-}
-
-.incident-events-toggle {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  min-height: 30px;
-  border-radius: 6px;
-  padding: 5px 7px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.incident-events-toggle strong {
-  color: var(--active-ink);
-  font-size: 11px;
-}
-
-.incident-events {
-  display: grid;
-  gap: 4px;
-}
-
-.incident-events button,
-.incident-activity-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  min-height: 30px;
-  padding: 5px 7px;
-  border-radius: 6px;
-  font-size: 11px;
-  text-align: left;
-}
-
-.incident-events button.active {
-  border-color: rgba(15, 118, 110, 0.4);
-  background: var(--active);
-  color: var(--active-ink);
-}
-
-.incident-events button span,
-.incident-activity-row span {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.incident-events button strong,
-.incident-activity-row strong {
-  min-width: 0;
-  overflow: hidden;
-  justify-self: stretch;
-  font-size: 11px;
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.incident-activity-row {
-  border: 1px dashed var(--line);
-  color: var(--muted);
 }
 
 .empty-thumb {
@@ -12789,14 +12689,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   .incident-focus .incident-snapshot-hud .pill {
     max-width: 72px;
     font-size: 10px;
-  }
-
-  .incident-meta {
-    padding: 7px;
-  }
-
-  .incident-meta-top {
-    gap: 6px;
   }
 
   .incident-labels .pill {

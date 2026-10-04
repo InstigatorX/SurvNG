@@ -30,6 +30,8 @@ assert.doesNotMatch(
   /findSimilarActive = Number\.isInteger\(Number\(findSimilarObjectIndex\)\) && Number\(findSimilarObjectIndex\) >= 0/,
 );
 assert.match(incidentCard, /IncidentRecordingPlayer/);
+assert.match(incidentCard, /<EvidenceTimeline/);
+assert.doesNotMatch(incidentCard, /incident-events-toggle|subEventsOpen|showSubEvents/);
 assert.match(incidentCard, /export function RelatedAppearanceIncidents\(/);
 assert.match(incidentCard, /export function CrossCameraTracePanel\(/);
 assert.doesNotMatch(incidentCard, /export function IncidentListItem\(/);

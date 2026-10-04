@@ -124,7 +124,6 @@ function EvidenceTimeline({ incident, hero, timeline, timeZone, stripRef, onSele
 export function IncidentCard({ incident, scenePlayback, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, zones = null, analysisMode = "clean", depthLayer = "both", replayRequest = 0, observationPreviewRequest = null, selectedObjectIndex = null, onSelectObject = null, onReturnToSelected = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
   const rawEvents = incident.events || [];
   const motionObservations = incident.motion_observations || [];
-  const showSubEvents = rawEvents.length > 1 || motionObservations.length > 0;
   const [selectedPreview, setSelectedPreview] = useState(null);
   const [workspaceView, setWorkspaceView] = useState(() => {
     try {
@@ -133,7 +132,6 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
     } catch { return "focus"; }
   });
   const [mosaicPageIndex, setMosaicPageIndex] = useState(0);
-  const [subEventsOpen, setSubEventsOpen] = useState(false);
   const [inlineVideoActive, setInlineVideoActive] = useState(false);
   const [snapshotZoom, setSnapshotZoom] = useState({ scale: 1, x: 0, y: 0 });
   const [zonesVisible, setZonesVisible] = useState(false);
@@ -172,10 +170,6 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
   const countText = `${eventCount} ${eventCount === 1 ? "event" : "events"}${observationCount ? ` · ${observationCount} additional motion update${observationCount === 1 ? "" : "s"}` : ""}`;
   const triggerLabel = incidentTriggerLabel(incident);
   const triggerTitle = triggerLabel === "EMA" ? "EMA visual backup trigger" : "Camera motion trigger";
-  const incidentTimeline = [
-    ...rawEvents.map((event) => ({ kind: "event", item: event })),
-    ...motionObservations.map((observation) => ({ kind: "activity", item: observation })),
-  ].sort((left, right) => Date.parse(right.item.created_at || 0) - Date.parse(left.item.created_at || 0));
   const timeText = incident.start_at && incident.end_at && incident.start_at !== incident.end_at
     ? `${formatDateTime(incident.start_at, timeZone)} - ${formatDuration(incident.duration_seconds)}`
     : formatDateTime(incident.created_at, timeZone);
@@ -184,7 +178,6 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
   useEffect(() => {
     if (!expanded) {
       setSelectedPreview(null);
-      setSubEventsOpen(false);
       setInlineVideoActive(false);
     }
   }, [expanded]);
@@ -192,7 +185,6 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
   useEffect(() => {
     setSelectedPreview(null);
     setMosaicPageIndex(0);
-    setSubEventsOpen(false);
     setInlineVideoActive(false);
     replayRequestRef.current = replayRequest;
   }, [incident.id]);
@@ -514,46 +506,6 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
           </div>
         ) : null}
       </div>
-      {expanded && showSubEvents && activeWorkspaceView !== "evidence" ? (
-        <div className="incident-meta">
-          <div className="incident-detail" onClick={(event) => event.stopPropagation()}>
-            <button
-              className="incident-events-toggle"
-              type="button"
-              onClick={() => setSubEventsOpen((open) => !open)}
-              aria-expanded={subEventsOpen}
-            >
-              <span>{countText}</span>
-              <strong>{subEventsOpen ? "Hide" : "Show"}</strong>
-            </button>
-            {subEventsOpen ? (
-              <div className="incident-events">
-                {incidentTimeline.map(({ kind, item }, index) => {
-                  if (kind === "activity") {
-                    const activityLabel = item.reason === "event_state_cooldown" ? "motion during cooldown" : "continued motion";
-                    return (
-                      <div className="incident-activity-row" key={`activity-${item.id || index}`}>
-                        <span>{formatTimeOnly(item.created_at || incident.created_at, timeZone)}</span>
-                        <strong>{activityLabel}</strong>
-                      </div>
-                    );
-                  }
-                  const event = item;
-                  const eventLabels = incidentLabels(event);
-                  const eventLabelText = eventLabels.length ? eventLabels.join(", ") : "motion";
-                  const isActive = (preview.id || incident.id) === event.id && (preview.created_at || incident.created_at) === event.created_at;
-                  return (
-                    <button type="button" key={`${event.id || "event"}-${index}`} className={isActive ? "active" : ""} onClick={() => { setSelectedPreview(event); setInlineVideoActive(false); }}>
-                      <span>{formatTimeOnly(event.created_at || incident.created_at, timeZone)}</span>
-                      <strong>{eventLabelText}</strong>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
     </article>
   );
 }
