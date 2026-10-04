@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { peopleObservationRequestPlan, peopleWorkspaceSearch, readPeopleWorkspaceQuery } from "../src/peopleWorkspace.mjs";
+import { PEOPLE_REVIEW_FILTERS, peopleRecognitionLabel, peopleObservationRequestPlan, peopleWorkspaceSearch, readPeopleWorkspaceQuery } from "../src/peopleWorkspace.mjs";
 
 assert.deepEqual(readPeopleWorkspaceQuery(""), {
   mode: "review", status: "unknown", cameraId: "", personId: "", page: 0, faceId: "", clusterId: "",
@@ -35,5 +35,11 @@ assert.deepEqual(peopleObservationRequestPlan({
 const facesPageSource = readFileSync(new URL("../src/people/FacesPage.jsx", import.meta.url), "utf8");
 assert.match(facesPageSource, /const \[peopleLoadError, setPeopleLoadError\] = useState\(""\)/);
 assert.match(facesPageSource, /peopleLoadError[\s\S]*?onClick=\{\(\) => void loadPeople\(\)\}>Retry people/);
+
+assert.equal(PEOPLE_REVIEW_FILTERS.pending, "Pending");
+assert.equal(peopleRecognitionLabel({ recognition: { enabled: false }, recognition_ready: true }), "Recognition disabled");
+assert.equal(peopleRecognitionLabel({ recognition: { enabled: true }, recognition_ready: true }), "Recognition ready");
+assert.equal(peopleRecognitionLabel({ recognition: { enabled: true }, recognition_ready: false }), "Needs attention");
+assert.equal(peopleRecognitionLabel(null), "Needs attention");
 
 console.log("people workspace tests passed");
