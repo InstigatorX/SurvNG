@@ -44,6 +44,20 @@ class _Encoder:
 
 
 class DeferredAppearanceBackfillTest(unittest.TestCase):
+    def test_both_reid_switches_off_disable_backfill_despite_recovery_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "events.db"
+            with sqlite3.connect(database) as connection:
+                connection.execute("create table events (id integer primary key)")
+            service = DeferredAppearanceBackfill(
+                database, Path(tmp), ObjectTrackingConfig(deferred_reid_enabled=True),
+                Mock(), AppearanceIndex(database), Mock(),
+            )
+            service.start()
+            self.assertIsNone(service._thread)
+            self.assertFalse(service.enqueue(7, "gate"))
+            service.encoder.embed_for_label.assert_not_called()
+
     def test_empty_queue_does_not_reserve_or_wait_for_database_writer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "events.db"

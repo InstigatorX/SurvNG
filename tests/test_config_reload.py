@@ -902,6 +902,25 @@ class ConfigReloadTest(unittest.TestCase):
         )
         self.assertFalse(result["camera_workers_restarted"])
 
+    def test_disabling_each_reid_switch_refreshes_all_tracking_owners(self) -> None:
+        for field in ("reid_enabled", "vehicle_reid_enabled"):
+            with self.subTest(field=field):
+                active = Mock()
+                current = AppConfig()
+                current.detector.tracking.reid_model_path = "person.xml"
+                current.detector.tracking.vehicle_reid_model_path = "vehicle.xml"
+                setattr(current.detector.tracking, field, True)
+                active.config = current
+                main.config = current
+                main.manager = active
+                incoming = current.model_copy(deep=True)
+                setattr(incoming.detector.tracking, field, False)
+                with patch("survng.app.main.save_config"):
+                    effective, _ = main.apply_config_update(incoming)
+                active.reconfigure_inference.assert_called_once_with(
+                    effective.detector, {"reid"}, refresh_tracking=True,
+                )
+
     def test_shared_inference_cache_change_restarts_all_inference_roles(self) -> None:
         active = Mock()
         current = AppConfig()

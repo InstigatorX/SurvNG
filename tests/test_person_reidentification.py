@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import unittest
+from unittest.mock import Mock
 
 import numpy as np
 
@@ -17,6 +18,13 @@ class PersonReidentificationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.reidentifier = OpenVinoPersonReidentifier(DetectorConfig())
 
+    def test_disabled_engine_cannot_use_a_retained_inference_request(self) -> None:
+        request = Mock()
+        self.reidentifier._infer_request = request
+        with self.assertRaisesRegex(RuntimeError, "disabled"):
+            self.reidentifier.embed(np.zeros((32, 16, 3), dtype=np.uint8))
+        request.infer.assert_not_called()
+
     def test_image_layout_detection_supports_nchw_and_nhwc(self) -> None:
         self.assertEqual(
             self.reidentifier._image_input([1, 3, 256, 128]),
@@ -30,6 +38,7 @@ class PersonReidentificationTest(unittest.TestCase):
             self.reidentifier._image_input([3, 256, 128])
 
     def test_embed_normalizes_output_and_serializes_inference(self) -> None:
+        self.reidentifier.enabled = True
         active = 0
         maximum_active = 0
         state_lock = threading.Lock()
@@ -75,6 +84,7 @@ class PersonReidentificationTest(unittest.TestCase):
                 return {"output": np.asarray([[np.nan, 0.0]], dtype=np.float32)}
 
         self.reidentifier._infer_request = InvalidInferRequest()
+        self.reidentifier.enabled = True
         self.reidentifier._input = "input"
         self.reidentifier._output = "output"
         with self.assertRaisesRegex(ValueError, "invalid"):

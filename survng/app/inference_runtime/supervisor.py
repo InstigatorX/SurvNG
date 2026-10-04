@@ -948,6 +948,8 @@ class InferenceSupervisor:
             self._leave_device_workload(workload)
 
     def embed_person(self, person: np.ndarray) -> np.ndarray:
+        if not self.config.tracking.reid_enabled:
+            raise InferenceUnavailable("Person ReID is disabled.")
         workload = InferenceWorkload.ENRICHMENT
         if not self._enter_device_workload(workload):
             raise InferenceUnavailable("person ReID shed for incident inference")
@@ -963,6 +965,9 @@ class InferenceSupervisor:
             self._leave_device_workload(workload)
 
     def embed_reid(self, label: str, crop: np.ndarray) -> np.ndarray:
+        label = str(label or "").strip().lower()
+        if not self.config.tracking.reid_enabled_for_label(label):
+            raise InferenceUnavailable(f"ReID is disabled for label {label!r}.")
         workload = InferenceWorkload.ENRICHMENT
         if not self._enter_device_workload(workload):
             raise InferenceUnavailable("object ReID shed for incident inference")
@@ -970,7 +975,7 @@ class InferenceSupervisor:
             result = self._reid.request(
                 "embed_reid",
                 frame=crop,
-                label=str(label or "").strip().lower(),
+                label=label,
                 timeout=PERSON_REID_REQUEST_TIMEOUT_SECONDS,
                 workload=workload,
             )

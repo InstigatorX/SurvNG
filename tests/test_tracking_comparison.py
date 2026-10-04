@@ -31,6 +31,17 @@ class Detector:
 
 
 class TrackingComparisonRunnerTest(unittest.TestCase):
+    def test_disabled_reid_skips_even_an_enabled_encoder(self) -> None:
+        encoder = Mock(enabled=True)
+        runner = TrackingComparisonRunner(
+            config=ObjectTrackingConfig(), detector=Detector(),
+            appearance_encoder=encoder,
+        )
+        frame = np.zeros((100, 120, 3), dtype=np.uint8)
+        self.assertEqual(runner._annotate_appearances(frame, Detector().detect(frame)), 0)
+        encoder.supports_label.assert_not_called()
+        encoder.embed_for_label.assert_not_called()
+
     def test_new_runs_and_default_replays_execute_active_comparison_engines(self) -> None:
         expected = ("survng_hybrid", "survng_sparse_identity", "ultralytics_tracktrack", "ultralytics_botsort")
         registry = ObjectTrackerRegistry()

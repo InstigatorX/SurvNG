@@ -159,6 +159,8 @@ class OpenVinoPersonReidentifier:
         return digest.hexdigest()[:24]
 
     def embed(self, person: np.ndarray) -> np.ndarray:
+        if not self.enabled:
+            raise RuntimeError(f"{self.kind} ReID is disabled.")
         if self._infer_request is None:
             raise RuntimeError(self.error or f"{self.kind} ReID is unavailable.")
         if person.ndim != 3 or person.shape[2] != 3 or min(person.shape[:2]) < 8:
@@ -247,7 +249,7 @@ class OpenVinoAppearanceReidentifier:
             model_kind = "vehicle"
         else:
             return None
-        if not engine.ready or not engine.model_fingerprint:
+        if not engine.enabled or not engine.ready or not engine.model_fingerprint:
             return None
         return {
             "model_kind": model_kind,

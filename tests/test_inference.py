@@ -947,6 +947,7 @@ class InferenceSupervisorTest(unittest.TestCase):
         )
 
     def test_person_reid_requests_use_short_timeout(self) -> None:
+        self.supervisor.config.tracking.reid_enabled = True
         with patch.object(
             self.supervisor._reid,
             "request",
@@ -957,6 +958,63 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertEqual(result.tolist(), [1.0, 0.0])
         request.assert_called_once()
         self.assertEqual(request.call_args.kwargs["timeout"], PERSON_REID_REQUEST_TIMEOUT_SECONDS)
+
+    def test_disabled_reid_labels_never_enter_inference_admission(self) -> None:
+        crop = np.zeros((32, 16, 3), dtype=np.uint8)
+        for person, vehicle in ((False, False), (False, True), (True, False)):
+            with self.subTest(person=person, vehicle=vehicle):
+                self.supervisor.config.tracking.reid_enabled = person
+                self.supervisor.config.tracking.vehicle_reid_enabled = vehicle
+                proxy = IsolatedPersonReidentifier(self.supervisor)
+                with (
+                    patch.object(self.supervisor, "_enter_device_workload") as admission,
+                    patch.object(self.supervisor._reid, "request") as request,
+                ):
+                    if not person:
+                        for embed in (self.supervisor.embed_person, proxy.embed):
+                            with self.assertRaisesRegex(InferenceUnavailable, "disabled"):
+                                embed(crop)
+                    labels = ["dog"] + ([] if person else ["person"]) + ([] if vehicle else ["car", "truck", "bus", "motorcycle"])
+                    for label in labels:
+                        for embed in (self.supervisor.embed_reid, proxy.embed_for_label):
+                            with self.assertRaisesRegex(InferenceUnavailable, "disabled"):
+                                embed(label, crop)
+                    admission.assert_not_called()
+                    request.assert_not_called()
+
+    def test_disabled_reid_proxy_ignores_stale_ready_metadata(self) -> None:
+        supervisor = Mock(config=DetectorConfig())
+        supervisor.cached_reid_status.return_value = {
+            "ready": True,
+            "person": {"ready": True, "model_fingerprint": "person"},
+            "vehicle": {"ready": True, "model_fingerprint": "vehicle"},
+        }
+        supervisor.reid_status.return_value = {"ready": True}
+        proxy = IsolatedPersonReidentifier(supervisor)
+        self.assertFalse(proxy.ready)
+        for label in ("person", "car"):
+            self.assertFalse(proxy.supports_label(label))
+            self.assertIsNone(proxy.model_identity_for_label(label))
+        supervisor.cached_reid_status.assert_not_called()
+        supervisor.reid_status.assert_not_called()
+
+    def test_disabling_reid_reconfigures_worker_without_restarting_it(self) -> None:
+        self.supervisor.config.tracking.reid_enabled = True
+        self.supervisor.config.tracking.vehicle_reid_enabled = True
+        self.supervisor._reid.start_enabled = True
+        incoming = self.supervisor.config.model_copy(deep=True)
+        incoming.tracking.reid_enabled = False
+        incoming.tracking.vehicle_reid_enabled = False
+        with (
+            patch.object(self.supervisor._reid, "stop") as stop,
+            patch.object(self.supervisor._reid, "start") as start,
+        ):
+            self.supervisor.reconfigure_roles(incoming, {"reid"})
+            stop.assert_called_once()
+            start.assert_not_called()
+        self.assertFalse(self.supervisor._reid.start_enabled)
+        with self.assertRaisesRegex(InferenceUnavailable, "disabled"):
+            self.supervisor.embed_reid("car", np.zeros((32, 16, 3), dtype=np.uint8))
 
     def test_face_worker_crash_does_not_restart_object_worker(self) -> None:
         supervisor = InferenceSupervisor(

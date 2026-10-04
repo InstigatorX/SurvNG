@@ -45,7 +45,7 @@ class IsolatedPersonReidentifier:
 
     @property
     def ready(self) -> bool:
-        return bool(self.status().get("ready"))
+        return self.enabled and bool(self.status().get("ready"))
 
     def embed(self, person: np.ndarray) -> np.ndarray:
         return self.supervisor.embed_person(person)
@@ -66,6 +66,8 @@ class IsolatedPersonReidentifier:
 
     def model_identity_for_label(self, label: str) -> dict[str, Any] | None:
         normalized = str(label or "").strip().lower()
+        if not self.config.reid_enabled_for_label(normalized):
+            return None
         status = self.supervisor.cached_reid_status()
         if normalized == "person":
             engine = status.get("person", status)

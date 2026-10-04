@@ -1234,6 +1234,26 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             1,
         )
 
+    def test_disabled_reid_does_not_schedule_eager_or_lazy_embeddings(self) -> None:
+        encoder = Mock(enabled=True)
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(),
+            detector=SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7)),
+            frame_provider=lambda: None,
+            update_event=lambda *_args: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+            appearance_encoder=encoder,
+        )
+        objects = [detection(label, 0.9, (10, 10, 40, 80)) for label in ("person", "car")]
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        for lazy in (False, True):
+            session._annotate_appearances(frame, objects, lazy=lazy)
+        encoder.supports_label.assert_not_called()
+        encoder.embed_for_label.assert_not_called()
+        self.assertEqual(session.status()["reid_attempts"], 0)
+
     def test_malformed_confidence_and_seed_time_do_not_break_tracking(self) -> None:
         tracker = ByteTrackObjectTracker(ObjectTrackingConfig(), 0.7)
         invalid = detection("person", 0.9, (10, 10, 40, 80))
