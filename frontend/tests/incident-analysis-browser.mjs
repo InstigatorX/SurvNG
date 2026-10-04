@@ -51,7 +51,14 @@ try {
   await analyze.click();
   await page.getByText("Extra details queued", { exact: true }).waitFor();
   assert.equal(posts, 1);
+  status = "complete";
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await inspector.getByText("Extra details ready", { exact: true }).waitFor();
+  await inspector.getByLabel("Analysis finished").waitFor();
+  assert.equal(await inspector.getByRole("progressbar", { name: "Extra analysis progress" }).count(), 0, "finished analysis hides progress");
+  assert.equal(await inspector.getByText("Recording playback does not wait for this analysis.").count(), 0);
 
+  status = "queued";
   await page.goto(`${origin}/incidents/incident-scene-1`);
   await page.getByText("Extra details queued", { exact: true }).waitFor();
   const play = page.getByRole("button", { name: "Play incident", exact: true });

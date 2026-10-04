@@ -1043,7 +1043,6 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
         )) : <p>No recognized faces.</p>}
       </section>
       {analysisPanel ? <section className="incident-inspector-extra-analysis">
-        <h3>Extra analysis</h3>
         {analysisPanel}
       </section> : null}
       <RelatedAppearanceIncidents anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
