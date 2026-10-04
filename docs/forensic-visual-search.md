@@ -139,15 +139,18 @@ the same hydrated result shape as object-crop visual search.
 
 ## Vector databases (later)
 
-Current semantic and appearance indexes store embeddings in SQLite and score a
-bounded NumPy candidate set. That fits incident-scale search.
+Current semantic and appearance indexes keep embeddings in SQLite. Semantic
+search scores the complete active generation with an exact NumPy cache and uses
+a chunked exact scan when that cache cannot fit its memory budget. This provides
+full recall across all retained indexed incidents at current incident-scale
+volumes without making a second datastore authoritative.
 
 A vector database enhances **scale, broad-query recall, and dense-archive
 ambition** — not detector quality or timeline UX:
 
 | Option | Fit for SurvNG |
 | --- | --- |
-| Keep SQLite+NumPy | MVP through Phase 6; simplest ops |
+| Keep SQLite+NumPy | Exact full-generation incident search; simplest ops |
 | FAISS (in-process) | First ANN step; rebuildable sidecar |
 | Qdrant | Filtered ANN + payloads if Compose ops are acceptable |
 | Milvus | Usually overkill for single-host NVR |
@@ -155,8 +158,9 @@ ambition** — not detector quality or timeline UX:
 Keep SQLite as system of record for events and media paths. Treat ANN as a
 derived index keyed by model generation fingerprints, cut over on backfill.
 
-Introduce ANN when candidate caps truncate recall, p95 search latency rises, or
-Phase 9 dense frame indexing is committed.
+Introduce ANN when exact full-generation p95 latency or memory use becomes
+unacceptable, or when Phase 9 dense frame indexing is committed. Preserve
+SQLite as the retention authority and treat any ANN index as rebuildable.
 
 ## Ship cuts
 

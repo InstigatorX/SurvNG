@@ -166,6 +166,21 @@ out, and configurable pacing limits sustained accelerator load. The status endpo
 `POST /api/semantic-search`, the Recordings **Smart Search** page, and the
 SurvNG Assistant.
 
+Search scores the entire active model generation, not only the newest subset.
+An exact in-memory NumPy cache is warmed after historical indexing and receives
+live embedding updates between periodic compactions. SQLite remains
+authoritative for camera, label, time, revision, and retained-evidence filters.
+If a generation exceeds the cache's memory budget, SurvNG keeps full recall by
+using a chunked exact scan instead; the status response reports the cache state,
+row count, memory use, and fallback error.
+
+Semantic evidence follows the lifecycle of its source evidence. An embedding is
+searchable while its event snapshot or independently retained scene observation
+is still valid under SurvNG's storage and retention policy. When retention
+expires that source, the database relationship or revision guard removes it from
+search eligibility and the cache is rebuilt or compacted. Result ranking does
+not apply an additional age decay or semantic-search-specific cutoff.
+
 Model files and preprocessing settings produce separate fingerprints. Changing
 the model starts a new generation in the same SQLite index, so incompatible
 embedding spaces are never compared. Old generations can remain available

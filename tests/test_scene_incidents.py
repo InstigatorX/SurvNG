@@ -215,6 +215,17 @@ class SceneIncidentTest(unittest.TestCase):
         self.assertEqual(self.store.scene_incident(f"incident-upper-garage-{first['id']}")["id"],incident["id"])
         self.assertEqual(self.store.list_scene_incidents(start_epoch=1780000010)[0]["event_ids"],incident["event_ids"])
 
+    def test_incident_metadata_batches_canonical_search_fields(self):
+        first=self.add();second=self.add(20,objects=[person(60,label="dog")])
+        incident=self.store.scene_incident(event_id=first["id"])
+
+        metadata=self.store.scene_incident_metadata([second["id"],first["id"],999999])
+
+        self.assertEqual(set(metadata),{first["id"],second["id"]})
+        self.assertEqual(metadata[first["id"]]["incident_id"],incident["id"])
+        self.assertEqual(metadata[second["id"]]["incident_id"],incident["id"])
+        self.assertEqual(metadata[first["id"]]["establishment"],incident["establishment"])
+
     def test_merge_split_conflicts_and_history(self):
         first=self.add();second=self.add(20,camera="gate")
         a=self.store.scene_incident(event_id=first["id"]);b=self.store.scene_incident(event_id=second["id"])

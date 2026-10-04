@@ -1146,6 +1146,47 @@ class EventStoreSceneMixin:
                 incident_id=row[0]
             return self._scene_payload(conn,incident_id)
 
+    def scene_incident_metadata(self, event_ids):
+        """Return canonical incident metadata for events without expanding scenes."""
+        normalized = sorted({int(event_id) for event_id in event_ids if int(event_id) > 0})
+        if not normalized:
+            return {}
+        result = {}
+        with self._connect() as conn:
+            for offset in range(0, len(normalized), 500):
+                chunk = normalized[offset:offset + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    "select m.event_id,p.incident_id from scene_event_membership m "
+                    "join scene_episodes p on p.id=m.episode_id "
+                    f"where m.event_id in ({placeholders})",
+                    chunk,
+                ).fetchall()
+                incident_ids = sorted({str(row["incident_id"]) for row in rows})
+                decisions = {}
+                if incident_ids:
+                    incident_placeholders = ",".join("?" for _ in incident_ids)
+                    decision_rows = conn.execute(
+                        "select p.incident_id,d.* from scene_activity_decisions d "
+                        "join scene_event_establishment x on x.decision_id=d.id "
+                        "join scene_event_membership m on m.event_id=x.event_id "
+                        "join scene_episodes p on p.id=m.episode_id "
+                        f"where p.incident_id in ({incident_placeholders}) "
+                        "order by p.incident_id,(d.verdict='supported') desc,d.created_at",
+                        incident_ids,
+                    ).fetchall()
+                    for decision in decision_rows:
+                        decisions.setdefault(str(decision["incident_id"]), decision)
+                for row in rows:
+                    incident_id = str(row["incident_id"])
+                    result[int(row["event_id"])] = {
+                        "incident_id": incident_id,
+                        "establishment": self._scene_establishment_payload(
+                            decisions.get(incident_id)
+                        ),
+                    }
+        return result
+
     @staticmethod
     def _scene_query_where(*, start_epoch=None, end_epoch=None, camera_id="", event_type="all", object_label="", zone=""):
         clauses=["i.state != 'unconfirmed'", "exists(select 1 from scene_episodes p join scene_event_membership m on m.episode_id=p.id where p.incident_id=i.id)"]

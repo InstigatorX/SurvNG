@@ -60,6 +60,34 @@ class SemanticIndexTest(unittest.TestCase):
         detail = " ".join(str(row[-1]) for row in plan)
         self.assertIn("idx_semantic_observation", detail)
 
+    def test_candidate_order_uses_the_generation_search_index(self) -> None:
+        with self.index._connect() as connection:
+            plan = connection.execute(
+                "explain query plan select id from semantic_embeddings "
+                "where model_fingerprint=? and preprocessing_fingerprint=? "
+                "order by captured_at desc,id desc limit 10",
+                ("model-a", "prep-a"),
+            ).fetchall()
+        detail = " ".join(str(row[-1]) for row in plan)
+        self.assertIn("idx_semantic_generation_search", detail)
+        self.assertNotIn("TEMP B-TREE", detail)
+
+    def test_retained_cover_deduplication_uses_partial_index(self) -> None:
+        with self.index._connect() as connection:
+            plan = connection.execute(
+                "explain query plan select 1 from semantic_embeddings candidate "
+                "where exists(select 1 from semantic_embeddings observed "
+                "where observed.observation_id<>'' "
+                "and observed.event_id=candidate.event_id "
+                "and observed.image_path=candidate.image_path "
+                "and observed.bbox_json=candidate.bbox_json "
+                "and observed.model_fingerprint=candidate.model_fingerprint "
+                "and observed.preprocessing_fingerprint="
+                "candidate.preprocessing_fingerprint)"
+            ).fetchall()
+        detail = " ".join(str(row[-1]) for row in plan)
+        self.assertIn("idx_semantic_retained_cover", detail)
+
     def test_semantic_text_inputs_maps_multiple_manifest_inputs(self) -> None:
         tokens = {
             "input_ids": np.asarray([[1, 2]], dtype=np.int64),
@@ -156,6 +184,99 @@ class SemanticIndexTest(unittest.TestCase):
         self.assertEqual([hit.event_id for hit in hits], [1, 2])
         self.assertEqual(hits[1].bbox, (1, 2, 3, 4))
         self.assertGreater(hits[0].score, hits[1].score)
+
+    def test_search_scores_the_entire_generation_without_a_recent_row_cap(self) -> None:
+        with sqlite3.connect(self.database_path) as connection:
+            connection.executemany("insert into events(id) values (?)", [(3,), (4,)])
+        evidence = [
+            SemanticEvidence(1, "gate", "2026-01-01", "full_frame", "frame", "one.webp"),
+            SemanticEvidence(2, "gate", "2026-02-01", "full_frame", "frame", "two.webp"),
+            SemanticEvidence(3, "gate", "2026-03-01", "full_frame", "frame", "three.webp"),
+            SemanticEvidence(4, "gate", "2026-04-01", "full_frame", "frame", "four.webp"),
+        ]
+        self.index.upsert(
+            evidence,
+            [[1, 0, 0], [0, 1, 0], [0, 1, 0], [0, 1, 0]],
+            self.identity,
+        )
+        # A legacy newest-row cap of two would exclude the oldest, best match.
+        self.index.MAX_CANDIDATE_ROWS = 2
+
+        hits = self.index.search([1, 0, 0], self.identity, limit=1)
+
+        self.assertEqual([hit.event_id for hit in hits], [1])
+        self.assertIsNone(
+            self.index.search_cache_status(self.identity)["candidate_cap"]
+        )
+
+    def test_ranked_metadata_batches_continue_until_filters_find_a_match(self) -> None:
+        with sqlite3.connect(self.database_path) as connection:
+            connection.executemany("insert into events(id) values (?)", [(3,), (4,)])
+        evidence = [
+            SemanticEvidence(1, "other", "one", "full_frame", "frame", "one.webp"),
+            SemanticEvidence(2, "other", "two", "full_frame", "frame", "two.webp"),
+            SemanticEvidence(3, "gate", "three", "full_frame", "frame", "three.webp"),
+            SemanticEvidence(4, "gate", "four", "full_frame", "frame", "four.webp"),
+        ]
+        self.index.upsert(
+            evidence,
+            [[1, 0, 0], [.9, .1, 0], [.8, .2, 0], [0, 1, 0]],
+            self.identity,
+        )
+        self.index.VECTOR_LOAD_BATCH_ROWS = 2
+
+        hits = self.index.search(
+            [1, 0, 0], self.identity, camera_ids=["gate"], limit=1,
+        )
+
+        self.assertEqual([hit.event_id for hit in hits], [3])
+
+    def test_vector_cache_applies_live_upsert_delta(self) -> None:
+        evidence = [
+            SemanticEvidence(1, "gate", "now", "full_frame", "frame", "one.webp")
+        ]
+        self.index.upsert(evidence, [[1, 0, 0]], self.identity)
+        self.index.search([1, 0, 0], self.identity)
+
+        self.index.upsert(evidence, [[0, 1, 0]], self.identity)
+        hits = self.index.search([0, 1, 0], self.identity)
+
+        self.assertAlmostEqual(hits[0].score, 1.0, places=3)
+        status = self.index.search_cache_status(self.identity)
+        self.assertEqual(status["state"], "ready")
+        self.assertEqual(status["rows"], 1)
+        self.assertEqual(status["delta_rows"], 1)
+
+    def test_external_retention_delete_rebuilds_the_vector_cache(self) -> None:
+        evidence = [
+            SemanticEvidence(1, "gate", "now", "full_frame", "frame", "one.webp"),
+            SemanticEvidence(2, "gate", "now", "full_frame", "frame", "two.webp"),
+        ]
+        self.index.upsert(evidence, [[1, 0, 0], [0, 1, 0]], self.identity)
+        self.assertEqual(len(self.index.search([1, 0, 0], self.identity)), 2)
+
+        with self.index._connect() as connection:
+            connection.execute("delete from events where id=1")
+
+        hits = self.index.search([1, 0, 0], self.identity)
+
+        self.assertEqual([hit.event_id for hit in hits], [2])
+        self.assertEqual(self.index.search_cache_status(self.identity)["rows"], 1)
+
+    def test_memory_budget_falls_back_to_an_exact_chunked_full_scan(self) -> None:
+        evidence = [
+            SemanticEvidence(1, "gate", "old", "full_frame", "frame", "one.webp"),
+            SemanticEvidence(2, "gate", "new", "full_frame", "frame", "two.webp"),
+        ]
+        self.index.upsert(evidence, [[1, 0, 0], [0, 1, 0]], self.identity)
+        self.index.VECTOR_CACHE_MAX_BYTES = 1
+
+        hits = self.index.search([1, 0, 0], self.identity, limit=2)
+
+        self.assertEqual([hit.event_id for hit in hits], [1, 2])
+        status = self.index.search_cache_status(self.identity)
+        self.assertEqual(status["state"], "fallback")
+        self.assertIn("memory budget", status["error"])
 
     def test_search_filters_normalized_source_kinds(self) -> None:
         evidence = [
@@ -965,6 +1086,10 @@ class SemanticIndexTest(unittest.TestCase):
             )],
             [[1, 0, 0]], identity, expected_observation=observation,
         )
+        self.assertEqual(
+            [hit.event_id for hit in index.search([1, 0, 0], identity)],
+            [event["id"]],
+        )
         before = store.get(event["id"])["scene_media_revision"]
 
         with store._lock, store._connect() as connection:
@@ -987,6 +1112,7 @@ class SemanticIndexTest(unittest.TestCase):
         service._storage_dir = root
         service.index_event(current)
         self.assertEqual(index.indexed_observation_keys(event["id"], identity), set())
+        self.assertEqual(index.search([1, 0, 0], identity), [])
 
     def test_live_events_have_priority_over_historical_backfill(self) -> None:
         from survng.app.config import SemanticSearchConfig
