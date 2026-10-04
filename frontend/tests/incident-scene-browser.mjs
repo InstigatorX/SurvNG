@@ -107,6 +107,10 @@ try {
   assert.equal(await panel.getByText("supported movement", { exact: true }).isVisible(), false);
   assert.equal(await panel.locator(".incident-scene-objects").evaluate((el) => el.open), false);
   assert.equal(await panel.locator(".incident-scene-activity").evaluate((el) => el.open), false);
+  for (const selector of [".incident-establishment details", ".incident-scene-coverage", ".incident-scene-alerts", ".incident-scene-recordings"]) {
+    assert.equal(await panel.locator(selector).evaluate(el => el.open), false, "review details stay collapsed");
+  }
+  assert.equal(await panel.getByText("The retained evidence supports an episode of activity.", { exact: true }).isVisible(), false);
   assert.equal(await panel.locator(".incident-scene-object").first().isVisible(), false);
   assert.equal(await panel.locator(".incident-scene-activity li").first().isVisible(), false);
   await panel.getByText("Observed objects", { exact: true }).click();
@@ -125,6 +129,7 @@ try {
   assert.match(await panel.locator(".incident-scene-activity li").first().textContent(), /person first observed/);
   assert.match(await panel.locator(".incident-scene-activity li").last().textContent(), /person last observed/);
   assert.doesNotMatch(await panel.locator(".incident-scene-activity").textContent(), /disappeared|vanished|left the scene/);
+  await panel.getByText("Notification policy", { exact: true }).click();
   await panel.getByText("No observations met the notification criteria.", { exact: true }).waitFor();
   assert.equal(await panel.getByText("outside incident zone", { exact: true }).isVisible(), false);
   await panel.getByText("Policy decision details", { exact: true }).click();
@@ -147,6 +152,7 @@ try {
     assert.equal(await owner.locator(".inspector-detection").count(), 2);
     await owner.getByRole("button", { name: "Stop scene playback", exact: true }).click();
     await player.waitFor({ state: "detached" });
+    await owner.getByText("Camera recordings", { exact: true }).click();
     await owner.getByRole("button", { name: "Play driveway episode", exact: true }).click();
     await page.waitForFunction((selector) => document.querySelector(selector)?.getAttribute("data-camera-id") === "driveway", playerSelector);
     await page.locator(`${playerSelector} video`).first().dispatchEvent("error");
@@ -209,6 +215,10 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}/survng/incidents?incident_id=scene-1`);
   const mobilePanel = page.locator(".event-overlay .incident-scene-panel");
   await mobilePanel.getByText("Observed objects", { exact: true }).waitFor();
+  for (const selector of [".incident-scene-objects", ".incident-scene-activity", ".incident-scene-recordings", ".incident-scene-coverage", ".incident-scene-alerts"]) {
+    assert.equal(await mobilePanel.locator(selector).evaluate(el => el.open), false, "mobile starts with a concise review");
+  }
+  assert.equal(await mobilePanel.getByText("Some sightings may show the same subject. The list does not establish a count of unique identities.", { exact: true }).isVisible(), false);
   assert.equal(await mobilePanel.locator(".inspector-detection").count(), 2, "mobile deep links retain the same whole-scene inventory");
   await verifyScenePlayback(mobilePanel, ".event-overlay .incident-recording-player");
   await page.goto(`http://127.0.0.1:${server.address().port}/survng/incidents/incident-scene-1`);

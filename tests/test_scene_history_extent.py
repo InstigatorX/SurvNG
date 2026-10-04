@@ -95,7 +95,7 @@ def test_disconnected_historical_sightings_do_not_assert_unique_people(tmp_path)
     scene=store.scene_incident(event_id=row["id"])
     assert len(scene["scene_objects"])==2
     assert scene["continuity_uncertain"]
-    assert "2 person sightings" in scene["summary"]
+    assert scene["summary"] == "Person observed"
     assert "2 people" not in scene["summary"]
     assert all(s["continuity_uncertain"] for s in scene["scene_objects"])
 
@@ -104,7 +104,7 @@ def test_simultaneously_visible_people_can_be_counted(tmp_path):
     store=EventStore(tmp_path)
     row=event(store,observations=[sample(1000,scene_track_key="first",temporal_observations=3),sample(1000,40,scene_track_key="second",temporal_observations=3)])
     scene=store.scene_incident(event_id=row["id"])
-    assert scene["summary"]=="2 people visible"
+    assert scene["summary"]=="Person observed"
     assert not scene["continuity_uncertain"]
 
 

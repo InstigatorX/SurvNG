@@ -94,28 +94,30 @@ export function IncidentScenePanel({ incident, timeZone, canCorrectIncident = fa
   }
   return <section className="incident-scene-panel" aria-label="Incident scene">
     {establishment ? <section className={`incident-establishment ${establishment.status}`} aria-label="Activity establishment">
-      <strong>{establishment.title}</strong><p>{establishment.explanation}</p>
+      <strong>{establishment.title}</strong>
+      {establishment.status !== "established" ? <p>{establishment.explanation}</p> : null}
       {establishment.status !== "established" ? <a href={appUrl("/observations")}>Review observations</a> : null}
-      {establishment.summary ? <p>{establishment.summary}</p> : null}
       {scene.establishment.reason || establishmentEvidence.length ? <details><summary>Establishment evidence</summary>
+        {establishment.status === "established" ? <p>{establishment.explanation}</p> : null}
+        {establishment.summary ? <p>{establishment.summary}</p> : null}
         {scene.establishment.reason ? <p>{String(scene.establishment.reason).replaceAll("_", " ")}</p> : null}
         {establishmentEvidence.map(({ object, observation }) => <button key={observation.id} type="button" onClick={() => { setSelectedObjectId(object.id); setSelectedObservationId(observation.id); setSelectedIds([]); setLabel(object.label); onSelectObservation?.(observation); }}>{sceneObjectLabel(object)} · {cameraName(observation.camera_id)} · {date(observation.captured_at)}</button>)}
       </details> : null}
     </section> : null}
     {scene?.summary && (!establishment || establishment.status === "established") ? <p className="incident-scene-summary">{scene.summary}</p> : null}
     {onPlayScene && episodes.some((episode) => episode.clip) ? <button type="button" onClick={onPlayScene}>{episodes.every((episode) => episode.clip) ? "Play whole incident" : "Play available episodes"}</button> : null}
-    {episodes.length ? <div className="incident-episode-strip" aria-label="Camera episodes">{episodes.filter((episode) => !episode.part_index).map((episode) => <div key={episode.id}>
+    {episodes.length ? <details className="incident-scene-disclosure incident-scene-recordings"><summary>Camera recordings</summary><div className="incident-episode-strip" aria-label="Camera episodes">{episodes.filter((episode) => !episode.part_index).map((episode) => <div key={episode.id}>
       <strong>{cameraName(episode.camera_id)}</strong><span>{date(episode.start_at)} — {date(episode.end_at)}</span>
       <small>{sceneCoverageText(episode.coverage)}</small>
       {onSelectEpisode ? <button type="button" disabled={!episode.clip} aria-pressed={activeEpisodeId === episode.id} onClick={() => onSelectEpisode(episode.id)}>Play {cameraName(episode.camera_id)} episode</button> : null}
       {!episode.clip ? <small>{episode.playback_note || "Episode recording reference unavailable."}</small> : null}
       {episode.camera_id && Number.isFinite(Date.parse(episode.start_at)) ? <a href={recordingsHref({ cameraId: episode.camera_id, epoch: Date.parse(episode.start_at) / 1000, source: "main", eventId: episode.clip?.representative_event_id })}>Open {cameraName(episode.camera_id)} recording timeline</a> : null}
-    </div>)}</div> : null}
+    </div>)}</div></details> : null}
     {activeEpisodeId ? <div className="incident-scene-playback-controls"><span>Playing {cameraName(episodes.find((episode) => episode.id === activeEpisodeId)?.camera_id)}</span>{onNextEpisode ? <button type="button" onClick={onNextEpisode}>Next camera episode</button> : null}{onStopPlayback ? <button type="button" onClick={onStopPlayback}>Stop scene playback</button> : null}</div> : null}
-    <div className="incident-scene-coverage" role="status"><p>{sceneCoverageText(scene?.coverage)}</p>
+    <details className="incident-scene-coverage"><summary>{scene?.coverage?.state === "incomplete" || scene?.coverage?.gaps?.length ? "Analysis incomplete" : scene?.coverage?.state === "sampled" ? "Sampled footage" : "Analysis coverage unknown"}</summary><p>{sceneCoverageText(scene?.coverage)}</p>
       {scene?.coverage?.analyzed_through ? <small>Analyzed through {date(scene.coverage.analyzed_through)}</small> : null}
       {scene?.coverage?.gaps?.length ? <ul>{scene.coverage.gaps.map((gap, index) => <li key={index}>{typeof gap === "string" ? gap : `${date(gap.start_at)} — ${date(gap.end_at)}${gap.reason ? ` · ${String(gap.reason).replaceAll("_", " ")}` : ""}`}</li>)}</ul> : null}
-    </div>
+    </details>
     <details className="incident-scene-disclosure incident-scene-objects"><summary>Observed objects</summary>
     {scene?.continuity_uncertain ? <p className="incident-scene-continuity">Some sightings may show the same subject. The list does not establish a count of unique identities.</p> : null}
     <div className="incident-summary-objects">{objects.map((object) => <div className={`inspector-detection summary${String(selectedObjectId) === String(object.id) ? " selected" : ""}`} key={object.id}>
@@ -146,9 +148,9 @@ export function IncidentScenePanel({ incident, timeZone, canCorrectIncident = fa
         {selectedObservation.camera_id && Number.isFinite(Date.parse(selectedObservation.captured_at)) ? <a href={recordingsHref({ cameraId: selectedObservation.camera_id, epoch: Date.parse(selectedObservation.captured_at) / 1000, source: "main", eventId: selectedObservation.event_id })}>Open recording at {date(selectedObservation.captured_at)}</a> : null}
         <details><summary>Detection details</summary><p>Detector confidence: {Math.round(Number(selectedObservation.confidence || 0) * 100)}%</p></details></> : null}
     </section> : null}
-    <section className="incident-scene-alerts" aria-label="Notification policy"><h4>Notification policy</h4>
+    <details className="incident-scene-alerts incident-scene-disclosure" aria-label="Notification policy"><summary>Notification policy</summary>
       <p>{sceneNotificationSummary(scene?.alert_decisions)}</p>
-      <small>This describes the policy decision, not confirmation that a notification was delivered. The scene includes every retained object observation.</small>
+      <small>Policy decisions do not confirm delivery. Detections below their recorded confidence threshold are hidden.</small>
       {scene?.alert_decisions?.length ? <details><summary>Policy decision details</summary>{scene.alert_decisions.map((decision, decisionIndex) => <div key={decision.event_id ?? decisionIndex}>
         <small>{date(scene.events?.find((event) => Number(event.id) === Number(decision.event_id))?.created_at)}</small>
         <ul>{(decision.objects || []).map((object, index) => <li key={`${object.label}-${index}`}><strong>{object.label}</strong>: {object.eligible ? "Meets notification criteria" : "Does not meet notification criteria"}
@@ -156,7 +158,7 @@ export function IncidentScenePanel({ incident, timeZone, canCorrectIncident = fa
           {object.reasons?.length ? <details><summary>Technical policy reasons</summary><ul>{object.reasons.map((reason) => <li key={reason}>{String(reason).replaceAll("_", " ")}</li>)}</ul></details> : null}
         </li>)}</ul>
       </div>)}</details> : null}
-    </section>
+    </details>
     {canCorrectIncident && scene?.incident_id && scene.revision != null && Number.isFinite(Number(scene.revision)) ? <details className="incident-corrections"><summary>Correct this incident</summary><p>Changes preserve the original evidence. Incident ID: <code>{scene.incident_id}</code></p>
       <form onSubmit={correct}><label>Correction<select value={operation} onChange={(event) => { setOperation(event.target.value); setSelectedIds([]); setError(""); }}>
         <option value="label">Correct object label</option><option value="associate">Associate object observations</option><option value="separate">Separate object observations</option><option value="split">Separate camera episodes</option><option value="merge">Merge incidents</option>

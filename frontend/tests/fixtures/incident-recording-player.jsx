@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { IncidentRecordingPlayer } from "../../src/incidents/IncidentRecordingPlayer.jsx";
+import "../../src/styles.css";
 
 function Fixture() {
   const params = new URLSearchParams(location.search);

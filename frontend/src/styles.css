@@ -4154,6 +4154,17 @@ button.live-overlay-backdrop:active {
   object-fit: contain;
 }
 
+/* Native recording playback alternates two elements. Only the element whose
+   requested frame is ready may cover the outgoing frame. */
+.incident-video-layer video.standby {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.incident-video-layer video.active {
+  visibility: visible;
+}
+
 .incident-video-status {
   display: grid;
   place-items: center;

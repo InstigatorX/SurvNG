@@ -181,6 +181,8 @@ def _incident_event_payload(event: dict) -> dict:
                 "detection_frame_width",
                 "detection_frame_height",
                 "incident_eligible",
+                "confidence_threshold",
+                "confidence_eligible",
                 "temporal_consensus",
                 "temporal_sample_offset_seconds",
                 "temporal_requested_sample_offset_seconds",

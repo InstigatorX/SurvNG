@@ -17,6 +17,41 @@ def add(store, at, objects):
     return store.add_event('gate','motion',created_at=datetime.fromtimestamp(at,timezone.utc).isoformat(),objects_json=json.dumps(objects))
 
 
+def test_incident_hides_below_threshold_evidence_without_deleting_it(tmp_path):
+    store = EventStore(tmp_path)
+    event = add(store, 1000, [
+        observation(1000, confidence=.9, confidence_threshold=.7, confidence_eligible=True, temporal_observations=2),
+        observation(1000, 'robot_lawnmower', confidence=.5464, confidence_threshold=.8, confidence_eligible=False),
+        # An explicit false flag is not necessary: the saved threshold suffices.
+        observation(1000, 'dog', confidence=.69, confidence_threshold=.7),
+        # Confidence is distinct from notification/zone eligibility.
+        observation(1000, 'car', confidence=.7, confidence_threshold=.7, incident_eligible=False, temporal_observations=2),
+    ])
+    scene = store.scene_incident(event_id=event['id'])
+    assert scene['labels'] == ['car', 'person']
+    assert {obj['label'] for obj in scene['scene_objects']} == {'car', 'person'}
+    assert scene['summary'] == 'Car and person observed'
+    for row in [scene, *scene['events']]:
+        assert not any(obj.get('label') in {'robot_lawnmower', 'dog'} for obj in row['objects'])
+    assert all(entry['label'] in {'car', 'person'} for entry in scene['activity'])
+    cards = store.list_scene_incident_cards()
+    assert cards[0]['labels'] == ['car', 'person']
+    assert store.list_scene_incident_cards(object_label='robot_lawnmower') == []
+    assert store.list_scene_incident_cards(object_label='car')
+    with store._connect() as connection:
+        assert connection.execute('select count(*) from scene_observations').fetchone()[0] == 4
+
+
+def test_incident_summary_does_not_count_unresolved_sightings(tmp_path):
+    store = EventStore(tmp_path)
+    event = add(store, 1000, [observation(1000, scene_track_key='one', temporal_observations=2)])
+    store.record_scene_observations(event['id'], [observation(1020, scene_track_key='two', temporal_observations=2)])
+    scene = store.scene_incident(event_id=event['id'])
+    assert len(scene['scene_objects']) == 2
+    assert scene['summary'] == 'Person observed'
+    assert scene['continuity_uncertain']
+
+
 def test_shared_frame_is_retained_in_every_episode_that_analyzed_it(tmp_path):
     store=EventStore(tmp_path)
     left=add(store,1000,[observation(1000)])

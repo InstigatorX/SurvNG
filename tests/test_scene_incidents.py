@@ -28,7 +28,7 @@ class SceneIncidentTest(unittest.TestCase):
     def test_80913_two_people_in_roster_and_alert_separate(self):
         event=self.add(objects=[person(confidence=.941,incident_eligible=True),person(50,incident_eligible=False,incident_ineligible_reasons=["outside_incident_zone"])])
         incident=self.store.scene_incident(event_id=event["id"])
-        self.assertEqual(incident["summary"],"2 people visible")
+        self.assertEqual(incident["summary"],"Person observed")
         self.assertEqual(len(incident["scene_objects"]),2)
         self.assertEqual(incident["labels"],["person"])
         self.assertFalse(incident["alert_decisions"][0]["objects"][1]["eligible"])
@@ -254,7 +254,7 @@ class SceneIncidentTest(unittest.TestCase):
         event=self.add(objects=[person(confidence=.3,temporal_observations=1)])
         incident=self.store.scene_incident(event_id=event["id"])
         self.assertEqual(incident["scene_objects"][0]["certainty"],"possible")
-        self.assertIn("possible person",incident["summary"])
+        self.assertIn("possible person",incident["summary"].lower())
 
     def test_association_split_owns_independent_corrections(self):
         first=self.add();second=self.add(10,camera="gate")

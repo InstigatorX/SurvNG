@@ -31,6 +31,7 @@ try {
   // media and natural ended events rather than synthetic episode completion.
   const page = await browser.newPage({ userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1" });
   const errors = [], requests = [];
+  await page.setViewportSize({ width: 390, height: 844 });
   let rows = [900, 902, 904], failOriginal = false, failTranscode = false;
   page.on("pageerror", error => errors.push(error.message));
   await page.route("**/api/**", async route => {
@@ -65,7 +66,29 @@ try {
   }, String(epoch));
 
   await open();
-  await waitPlaying(900);
+  for (const epoch of rows) {
+    await waitPlaying(epoch);
+    await page.waitForFunction(value => {
+      const video = document.querySelector("video.active");
+      return video?.src && Number(new URL(video.src).searchParams.get("epoch")) === value;
+    }, epoch);
+    const display = await page.evaluate(() => {
+      const active = document.querySelector("video.active");
+      const bounds = active.getBoundingClientRect();
+      const topVideo = document.elementsFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)
+        .find(element => element.tagName === "VIDEO");
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 1;
+      const context = canvas.getContext("2d");
+      context.drawImage(active, 0, 0, 1, 1);
+      return { activeOnTop: topVideo === active,
+        standbyHidden: [...document.querySelectorAll("video.standby")].every(video => getComputedStyle(video).visibility === "hidden"),
+        blue: context.getImageData(0, 0, 1, 1).data[2] };
+    });
+    assert.equal(display.standbyHidden, true, "incident CSS must hide the inactive native video");
+    assert.equal(display.activeOnTop, true, "a blank standby element must not cover a playing segment");
+    assert.ok(display.blue > 150, "each displayed segment must have a decoded blue frame");
+  }
   await waitComplete();
   assert.deepEqual([...new Set(requests.map(row => row.epoch))], rows, "every segment must play before episode completion");
 

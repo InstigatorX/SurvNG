@@ -23,6 +23,40 @@ from .scene_history import legacy_track_observations
 MAX_SCENE_EPISODE_SECONDS = 900.0
 
 
+def _display_confidence(item):
+    """Hide below-threshold detections, without changing retained evidence or alert policy."""
+    if item.get("confidence_eligible") is False:
+        return False
+    threshold = item.get("confidence_threshold")
+    if threshold is None:
+        return True  # Legacy evidence did not retain its confidence policy.
+    try:
+        score, threshold = float(item.get("confidence", 0)), float(threshold)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(score) and math.isfinite(threshold) and score >= threshold
+
+
+# Equivalent predicate for bounded card/label queries, before loading payloads.
+_DISPLAY_CONFIDENCE_SQL = (
+    "coalesce(json_extract(o.payload_json,'$.confidence_eligible'),1)!=0 and "
+    "(json_extract(o.payload_json,'$.confidence_threshold') is null or "
+    "cast(json_extract(o.payload_json,'$.confidence') as real)>="
+    "cast(json_extract(o.payload_json,'$.confidence_threshold') as real))"
+)
+
+
+def _incident_display_summary(objects):
+    names = []
+    for label in sorted({item["label"] for item in objects} - {"face"}):
+        possible = all(item["certainty"] == "possible" for item in objects if item["label"] == label)
+        names.append(("possible " if possible else "") + label.replace("_", " "))
+    if not names:
+        return "Activity observed"
+    text = ", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else names[0]
+    return text[:1].upper() + text[1:] + " observed"
+
+
 class SceneConflict(ValueError):
     """A correction was based on an obsolete incident revision."""
 
@@ -57,7 +91,7 @@ def _card_cover_objects(raw):
     for item in _objects(raw):
         label = item.get("label")
         box = item.get("box")
-        if not label or not isinstance(box, dict):
+        if not label or not isinstance(box, dict) or not _display_confidence(item):
             continue
         try:
             coords = [float(box[key]) for key in ("x1", "y1", "x2", "y2")]
@@ -97,7 +131,7 @@ def _scene_observation_cover(representative, observations, *, recorded_pixels=No
     available = [
         (row, json.loads(row["payload_json"]))
         for row in observations
-        if row["snapshot_path"]
+        if row["snapshot_path"] and _display_confidence(json.loads(row["payload_json"]))
     ]
     if not available:
         return None
@@ -962,6 +996,7 @@ class EventStoreSceneMixin:
         payload = _incident_row(rows[0]["camera_id"],[_event_row(dict(r)) for r in rows])
         observations = conn.execute("select o.*,s.label_override,s.association_locked from scene_observations o join scene_objects s on s.id=o.object_id "
                                     "join scene_episodes p on p.id=o.episode_id where p.incident_id=? order by o.captured_epoch,o.id",(incident_id,)).fetchall()
+        observations = [row for row in observations if _display_confidence(json.loads(row["payload_json"]))]
         grouped = {}
         for row in observations:
             item = json.loads(row["payload_json"])
@@ -1027,16 +1062,7 @@ class EventStoreSceneMixin:
                     note("last_seen", evidence[-1])
         activity.sort(key=lambda item:(item["captured_at"],item["object_id"],item["kind"]))
         cameras = list(dict.fromkeys(p["camera_id"] for p in episodes))
-        counts = {}
         uncertain_labels = {s["label"] for s in scene_objects if s["continuity_uncertain"]}
-        for s in scene_objects:
-            label = ("possible " if s["certainty"]=="possible" else "")+s["label"]
-            if s["label"] in uncertain_labels:
-                label += " sighting"
-            counts[label]=counts.get(label,0)+1
-        summary = ", ".join(f"{count} {('people' if label=='person' else label+'s') if count!=1 else label}" for label,count in sorted(counts.items()))
-        if uncertain_labels:
-            summary += " (continuity uncertain)"
         coverage = {"state":"historical" if incident["historical"] else ("incomplete" if any(p["coverage"]["state"]!="sampled" for p in episode_payloads) else "sampled"),
                     "analyzed_through":max((p["coverage"].get("analyzed_through") or "" for p in episode_payloads),default="") or None,
                     "gaps":[g for p in episode_payloads for g in p["coverage"].get("gaps",[])]}
@@ -1054,7 +1080,7 @@ class EventStoreSceneMixin:
                        start_at=_iso(incident["start_epoch"]),end_at=_iso(incident["end_epoch"]),start_epoch=incident["start_epoch"],last_epoch=incident["end_epoch"],
                        duration_seconds=incident["end_epoch"]-incident["start_epoch"],event_ids=[r["id"] for r in rows],
                        camera_ids=cameras,scene_objects=scene_objects,episodes=episode_payloads,labels=labels,zones=zones,has_objects=bool(scene_objects),
-                       summary=(summary+(" observed" if uncertain_labels else " visible") if summary else "Activity observed"),
+                       summary=_incident_display_summary(scene_objects),
                        continuity_uncertain=bool(uncertain_labels),activity=activity,coverage=coverage,alert_decisions=alerts,identities=identities)
         representative_event = next(
             (event for event in rows if int(event["id"]) == int(payload.get("representative_event_id") or 0)),
@@ -1093,6 +1119,16 @@ class EventStoreSceneMixin:
                             observation["review_image"] = {"url":f"/api/incidents/observations/{review['id']}/snapshot",
                                 "width":image_item.get("detection_frame_width"), "height":image_item.get("detection_frame_height"),
                                 "source":"recorded_main", "captured_at":_iso(review["captured_epoch"]), "analyzed_frame":True}
+        # The public incident includes event-frame boxes as well as its scene
+        # roster. Apply the same confidence rule to both, without rewriting DB rows.
+        for event in [payload, *payload.get("events", [])]:
+            event["objects"] = [item for item in event.get("objects", []) if _display_confidence(item)]
+            if "labels" in event and event is not payload:
+                event["labels"] = sorted({item["label"] for item in event["objects"] if item.get("label")})
+        visible_ids = {row["id"] for row in observations}
+        for decision in payload.get("alert_decisions", []):
+            decision["objects"] = [item for item in decision.get("objects", [])
+                                   if item.get("observation_id") in visible_ids]
         return payload
 
     def scene_episode_for_event(self, event_id, episode_id):
@@ -1120,12 +1156,12 @@ class EventStoreSceneMixin:
             clauses.append("i.start_epoch<?"); args.append(end_epoch)
         if camera_id:
             clauses.append("exists(select 1 from scene_episodes p where p.incident_id=i.id and p.camera_id=?)");args.append(camera_id)
-        observed="select 1 from scene_observations o join scene_episodes p on p.id=o.episode_id where p.incident_id=i.id"
+        observed="select 1 from scene_observations o join scene_episodes p on p.id=o.episode_id where p.incident_id=i.id and " + _DISPLAY_CONFIDENCE_SQL
         if event_type in {"object","motion"}:
             clauses.append(("not " if event_type=="motion" else "")+"exists("+observed+")")
         if object_label:
             clauses.append("exists(select 1 from scene_observations o join scene_objects s on s.id=o.object_id "
-                           "join scene_episodes p on p.id=o.episode_id where p.incident_id=i.id and "+EventStoreSceneMixin._scene_label_sql()+"=?)")
+                           "join scene_episodes p on p.id=o.episode_id where p.incident_id=i.id and "+_DISPLAY_CONFIDENCE_SQL+" and "+EventStoreSceneMixin._scene_label_sql()+"=?)")
             args.append(object_label)
         if zone:
             clauses.append("exists(select 1 from scene_observations o join scene_episodes p on p.id=o.episode_id "
@@ -1236,7 +1272,8 @@ class EventStoreSceneMixin:
             label_rows=conn.execute(
                 "select p.incident_id, coalesce(nullif(s.label_override,''), nullif(s.facet_label,'')) label "
                 "from scene_objects s join scene_episodes p on p.id=s.episode_id "
-                f"where p.incident_id in ({placeholders})", ids).fetchall()
+                f"where p.incident_id in ({placeholders}) and exists(select 1 from scene_observations o "
+                "where o.object_id=s.id and " + _DISPLAY_CONFIDENCE_SQL + ")", ids).fetchall()
             event_rows=conn.execute(
                 "select p.incident_id,e.id,e.camera_id,e.kind,e.topic,e.created_at,e.snapshot_path,e.evidence_revision,e.objects_json "
                 "from events e join scene_event_membership m on m.event_id=e.id "
