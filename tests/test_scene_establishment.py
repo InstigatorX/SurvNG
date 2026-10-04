@@ -1,7 +1,6 @@
 """Acquisition, activity, membership and notification are separate contracts."""
 import json
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
 import numpy as np
 import pytest

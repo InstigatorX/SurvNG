@@ -9,7 +9,7 @@ import numpy as np
 from survng.app.scene_activity import evaluate_scene_activity
 from survng.app.motion_pipeline.object_detection import (
     RecordedDetectionResult, RecordedMotionObjectDetector, _RecordedDetectionSample, _DecodedRecordedFrame,
-    _scene_sample_records, resolve_recorded_refinement_plan,
+    _scene_sample_records,
 )
 from survng.app.motion_pipeline.scene_evidence import scene_observation
 from survng.app.config import CameraConfig

@@ -6,10 +6,9 @@ Associating an object, changing a cover, and changing alert policy cannot.
 from __future__ import annotations
 
 import hashlib
-import json
 import time
 
-from .scenes import _epoch, _iso, _json, _objects
+from .scenes import _epoch, _json, _objects
 from ..incident_utils import DEFAULT_INCIDENT_GAP_SECONDS
 from ..scene_identity import analysis_observation_ids, observation_identity
 from ..scene_zone_admission import evaluate_scene_establishment
@@ -129,7 +128,6 @@ class EventStoreSceneAdmissionMixin:
             # Today's zone configuration must not reopen or reject those episodes.
             assessment = evaluate_scene_activity(samples)
             if assessment["status"] != "supported" and not qualification.get("scene_discovery") and not qualification.get("scene_confirmation"):
-                camera_notice = qualification.get("trigger_source", "camera") == "camera"
                 assessment = {"status": "supported", "reason": "admitted_camera_notice",
                               "summary": "Historical camera activity; original verification is unavailable.", "activity_epoch": at,
                               "supporting_observation_ids": [], "policy_version": 1,

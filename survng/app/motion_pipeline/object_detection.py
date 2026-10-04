@@ -22,7 +22,6 @@ from ..evidence_work import (
 )
 from ..config import CameraConfig
 from ..scene_activity_evidence import scene_sample_records as _scene_sample_records
-from ..detector import detection_failure
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..ffmpeg_hw import (
     RECORDED_FRAME_INPUT_THREAD_ARGS,

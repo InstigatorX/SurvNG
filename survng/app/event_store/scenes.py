@@ -11,8 +11,6 @@ import math
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any
-
 from ..incident_utils import portable_media_path
 from ..scene_identity import observation_identity
 from .scene_history import legacy_track_observations

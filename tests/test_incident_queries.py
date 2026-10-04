@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 from survng.app.events import EventStore
 import unittest
-from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 

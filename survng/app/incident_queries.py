@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -24,7 +23,6 @@ from .cross_camera_trace import build_cross_camera_trace
 from .incident_presenter import (
     _event_row,
     _incident_list_payload,
-    _incident_row,
 )
 from .incident_utils import (
     DEFAULT_INCIDENT_GAP_SECONDS,

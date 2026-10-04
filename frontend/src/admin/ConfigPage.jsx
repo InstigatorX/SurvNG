@@ -4,7 +4,6 @@ import React, { useContext, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { createPortal } from "react-dom";
 import {
   Activity,
-  ArrowLeft,
   ArrowRight,
   ArrowUpDown,
   Camera,

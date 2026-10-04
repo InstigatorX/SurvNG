@@ -11,7 +11,6 @@ import {
   Pentagon,
   ListTree,
   Play,
-  Search,
   Sparkles,
   X,
 } from "lucide-react";

@@ -1,7 +1,6 @@
 """Read models for acquisition review; these records do not imply incidents."""
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 
 

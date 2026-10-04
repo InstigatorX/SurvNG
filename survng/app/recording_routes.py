@@ -854,7 +854,6 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         )
         path = getattr(leased, "path", leased)
         lease_token = getattr(leased, "lease_token", None)
-        source_path = path
         release = getattr(active_manager.recorder, "release_recording_playback", None)
         try:
             if mobile:
