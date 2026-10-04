@@ -42,9 +42,13 @@ try {
   });
   const origin = `http://127.0.0.1:${server.address().port}`;
   await page.goto(`${origin}/incidents?incident_id=scene-1`);
-  await page.getByRole("button", { name: "Analyze extra details" }).waitFor();
+  const inspector = page.locator("#incident-inspector");
+  const analyze = inspector.getByRole("button", { name: "Analyze extra details" });
+  await analyze.waitFor();
+  await inspector.getByRole("progressbar", { name: "Extra analysis progress" }).waitFor();
+  assert.equal(await inspector.locator(".incident-inspector-extra-analysis").evaluate((section) => section.previousElementSibling?.querySelector("h3")?.textContent), "Faces");
   assert.equal(posts, 0, "desktop selected feed preview never admits optional work");
-  await page.getByRole("button", { name: "Analyze extra details" }).click();
+  await analyze.click();
   await page.getByText("Extra details queued", { exact: true }).waitFor();
   assert.equal(posts, 1);
 

@@ -6,7 +6,7 @@ import "./incident-analysis.css";
 const request = createAnalysisRequester(fetch);
 
 // Only mount in an opened incident, never in feed cards or prefetch paths.
-export function IncidentAnalysisStatus({ incidentId, autoStart = true, onDetail }) {
+export function IncidentAnalysisStatus({ incidentId, autoStart = true, onDetail, embedded = false }) {
   const [state, setState] = useState(null);
   const viewer = useRef(null);
   const detailHandler = useRef(onDetail);
@@ -45,8 +45,29 @@ export function IncidentAnalysisStatus({ incidentId, autoStart = true, onDetail 
     };
   }, [incidentId, autoStart]);
   if (!state || (!state.error && state.mode !== "on_demand" && !state.enabled)) return null;
-  return <aside className="incident-analysis-status" aria-label="Extra incident details">
+  const episodes = Array.isArray(state.episodes) ? state.episodes : [];
+  const completedEpisodes = episodes.filter((episode) => ["complete", "partial", "unavailable"].includes(episode.status)).length;
+  const active = state.status === "queued" || state.status === "running";
+  const terminal = ["complete", "partial", "unavailable"].includes(state.status);
+  const progressMaximum = Math.max(1, episodes.length);
+  const progressValue = terminal ? progressMaximum : state.status === "deferred" || state.error ? 0 : completedEpisodes;
+  const progressLabel = state.error
+    ? "Paused"
+    : state.status === "deferred"
+      ? "Not started"
+      : state.status === "queued"
+        ? "Waiting to start"
+        : state.status === "running"
+          ? (episodes.length > 1 ? `${completedEpisodes} of ${episodes.length} camera views complete` : "Analyzing recording")
+          : terminal
+            ? "Finished"
+            : "Preparing";
+  return <aside className={`incident-analysis-status${embedded ? " embedded" : ""}`} aria-label="Extra incident details">
     <span role="status"><strong>{state.error ? "Extra details paused" : analysisLabel(state.status)}</strong>{" "}{state.error || state.message || (state.status === "running" || state.status === "queued" ? "You can play the recording while details are prepared." : state.status === "partial" ? "Some footage could not be analyzed. This does not mean nothing happened." : state.status === "unavailable" ? "Saved evidence and any retained recording remain available." : "Recording playback does not wait for this analysis.")}</span>
+    {embedded ? <div className="incident-analysis-progress">
+      <progress aria-label="Extra analysis progress" max={progressMaximum} {...(active && completedEpisodes === 0 ? {} : { value: progressValue })} />
+      <small>{progressLabel}</small>
+    </div> : null}
     {state.error ? <button type="button" onClick={() => { void viewer.current?.retry(); }}>Retry extra details</button> : null}
     {!state.error && !autoStart && state.enabled && state.status === "deferred" ? <button type="button" onClick={() => { void viewer.current?.start(); }}>Analyze extra details</button> : null}
   </aside>;

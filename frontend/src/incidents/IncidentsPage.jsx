@@ -937,11 +937,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                     onToggle={toggleIncident}
                     onPreviewChange={relatedPreviewIncident ? undefined : setFocusedFaceEventId}
                     onImageSize={setFocusedImageSize}
-                  />{!galleryExpanded && displayedIncident.incident_id ? <IncidentAnalysisStatus key={displayedIncident.incident_id} incidentId={displayedIncident.incident_id} autoStart={false} onDetail={(detail) => {
-                    const query = incidentDetailQuery(detail);
-                    setIncidentDetails((current) => Number(current[query]?.revision) > Number(detail.revision) ? current : { ...current, [query]: detail });
-                    setRelatedPreviewIncident((current) => current?.incident_id === detail.incident_id && Number(current.revision) <= Number(detail.revision) ? detail : current);
-                  }} /> : null}</>
+                  /></>
                 ) : (
                   <div className="empty-state">
                     {linkedIncidentLoading
@@ -971,6 +967,11 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
               analysisMode={desktopAnalysisMode}
               depthLayer={desktopDepthLayer}
               analysisStats={desktopAnalysisStats}
+              analysisPanel={!galleryExpanded && displayedIncident?.incident_id ? <IncidentAnalysisStatus key={displayedIncident.incident_id} incidentId={displayedIncident.incident_id} autoStart={false} embedded onDetail={(detail) => {
+                const query = incidentDetailQuery(detail);
+                setIncidentDetails((current) => Number(current[query]?.revision) > Number(detail.revision) ? current : { ...current, [query]: detail });
+                setRelatedPreviewIncident((current) => current?.incident_id === detail.incident_id && Number(current.revision) <= Number(detail.revision) ? detail : current);
+              }} /> : null}
               selectedObjectIndex={selectedVisualObject?.objectIndex ?? null}
               findSimilarObjectIndex={findSimilarObject?.objectIndex ?? null}
               onSelectObject={setSelectedVisualObject}

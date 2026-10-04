@@ -11,6 +11,47 @@
   line-height: 1.5;
 }
 .incident-analysis-status button { flex-shrink: 0; }
+.incident-analysis-status.embedded {
+  display: grid;
+  align-items: stretch;
+  gap: 9px;
+  margin: 8px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  font: inherit;
+}
+.incident-analysis-status.embedded > span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.incident-analysis-status.embedded > span strong {
+  display: block;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 620;
+}
+.incident-analysis-progress {
+  display: grid;
+  gap: 4px;
+}
+.incident-analysis-progress progress {
+  width: 100%;
+  height: 6px;
+  accent-color: var(--accent);
+}
+.incident-analysis-progress small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.3;
+}
+.incident-analysis-status.embedded button {
+  justify-self: start;
+  min-height: 32px;
+  border-radius: 3px;
+  font: inherit;
+}
 @media (max-width: 600px) {
   .incident-analysis-status { align-items: flex-start; flex-direction: column; }
 }
