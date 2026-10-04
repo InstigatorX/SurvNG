@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import threading
@@ -32,6 +33,9 @@ from .incident_utils import (
 from .identity_projection import apply_incident_identities
 from .manager import AppManager
 from .manager_access import ManagerAccessCoordinator, manager_generation_lease
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _motion_audit_row(row: dict[str, Any], storage_dir: Path, media_storage=None) -> dict[str, Any]:
@@ -479,8 +483,27 @@ class IncidentQueryService:
                 status = manager.events.request_incident_analysis(incident_id, camera_ids=available_ids)
             except LookupError as exc:
                 raise HTTPException(status_code=404, detail="incident was not found") from exc
-            # The existing camera recovery loop claims this durable request.
-            # Do not hold an HTTP worker while decoding or waiting for capacity.
+            # Commit happens before this advisory signal. The existing camera
+            # worker remains the only owner that may claim, decode, or wait for
+            # capacity; the HTTP request merely removes recovery-poll latency.
+            for camera_id in available_ids:
+                worker = manager.workers.get(camera_id)
+                notify = getattr(
+                    getattr(worker, "motion_incidents", None),
+                    "notify_scene_analysis_requested",
+                    None,
+                )
+                if callable(notify):
+                    try:
+                        notify()
+                    except Exception:
+                        # The request is already durable. An advisory wake must
+                        # not turn successful admission into an HTTP failure;
+                        # bounded recovery will still discover it.
+                        LOGGER.exception(
+                            "incident analysis wake failed for camera %s",
+                            camera_id,
+                        )
         result = {**status, "mode": tracking.analysis_mode, "enabled": enabled}
         if camera_ids - available_ids:
             episodes = [{**episode, "status": "unavailable"}

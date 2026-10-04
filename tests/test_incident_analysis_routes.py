@@ -15,8 +15,12 @@ def manager_for_analysis(*, enabled=True, accepting=True, mode="on_demand"):
     events = Mock()
     events.incident_analysis_status.return_value = status
     events.request_incident_analysis.return_value = {**status, "status": "queued"}
-    worker = SimpleNamespace(tracking_lifecycle=SimpleNamespace(
-        enabled=lambda: enabled, accepting=lambda: accepting))
+    worker = SimpleNamespace(
+        tracking_lifecycle=SimpleNamespace(
+            enabled=lambda: enabled, accepting=lambda: accepting,
+        ),
+        motion_incidents=SimpleNamespace(notify_scene_analysis_requested=Mock()),
+    )
     return SimpleNamespace(events=events, workers={"gate": worker}, config=SimpleNamespace(
         detector=SimpleNamespace(tracking=ObjectTrackingConfig(analysis_mode=mode, enabled=enabled))))
 
@@ -31,12 +35,23 @@ def test_status_reads_never_admit_work():
     manager = manager_for_analysis()
     assert IncidentQueryService.analysis(manager, "incident")["status"] == "deferred"
     manager.events.request_incident_analysis.assert_not_called()
+    manager.workers["gate"].motion_incidents.notify_scene_analysis_requested.assert_not_called()
 
 
 def test_explicit_request_admits_without_waiting_for_worker():
     manager = manager_for_analysis()
     assert IncidentQueryService.analysis(manager, "incident", request=True)["status"] == "queued"
     manager.events.request_incident_analysis.assert_called_once_with("incident", camera_ids={"gate"})
+    manager.workers["gate"].motion_incidents.notify_scene_analysis_requested.assert_called_once_with()
+
+
+def test_advisory_wake_failure_does_not_hide_durable_request(caplog):
+    manager = manager_for_analysis()
+    manager.workers["gate"].motion_incidents.notify_scene_analysis_requested.side_effect = (
+        RuntimeError("wake failed")
+    )
+    assert IncidentQueryService.analysis(manager, "incident", request=True)["status"] == "queued"
+    assert "incident analysis wake failed for camera gate" in caplog.text
 
 
 @pytest.mark.parametrize("enabled,accepting,removed", [(False, True, False), (True, False, False), (True, True, True)])

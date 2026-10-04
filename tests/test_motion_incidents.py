@@ -22,6 +22,7 @@ from survng.app.event_store.jobs import (
 from survng.app.motion_incidents import (
     REFINEMENT_EVENT_MAX_QUEUE_AGE_SECONDS,
     REFINEMENT_MAX_QUEUE_AGE_SECONDS,
+    REFINEMENT_RECOVERY_POLL_SECONDS,
     MotionIncidentService,
     _MemoryDetectionJobStore,
     _RefinementJob,
@@ -77,6 +78,189 @@ def _service(
         refinement_store=refinement_store,
     )
     return service, decision, tracking, prewarm, image_reader
+
+
+def test_scene_analysis_commit_signal_wakes_worker_and_respects_stop_fence() -> None:
+    service, *_ = _service(MotionDecisionOutcome(
+        event_id=None, snapshot_path="", object_detected=False,
+    ))
+    resumed = threading.Event()
+    resume_calls = 0
+
+    def resume() -> bool:
+        nonlocal resume_calls
+        resume_calls += 1
+        if resume_calls >= 2:
+            resumed.set()
+        return False
+
+    service.resume_scene_analysis = resume
+    stop = threading.Event()
+    service.start(stop)
+    deadline = time.monotonic() + 1.0
+    while resume_calls < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert resume_calls == 1
+    assert service.notify_scene_analysis_requested()
+    assert resumed.wait(0.5)
+
+    service.request_stop()
+    assert not service.notify_scene_analysis_requested()
+    stop.set()
+    assert service.wait_stopped(1.0)
+
+
+def test_recovery_wait_uses_actual_due_time_and_bounded_fallback() -> None:
+    service, *_ = _service(MotionDecisionOutcome(
+        event_id=None, snapshot_path="", object_detected=False,
+    ))
+    assert service._recovery_wait_seconds(None) == REFINEMENT_RECOVERY_POLL_SECONDS
+    service.refinement_store.enqueue_detection_job(
+        job_id="future", camera_id="gate", dedupe_key="future",
+        payload={"topic": "motion", "event_at": datetime.now(timezone.utc).isoformat()},
+        available_at=time.time() + 0.2,
+    )
+    wait = service._recovery_wait_seconds(None)
+    assert 0.05 <= wait <= 0.2
+    drain_wait = service._recovery_wait_seconds(time.monotonic() + 0.1)
+    assert 0.05 <= drain_wait <= 0.1
+    assert service._scene_recovery_delay_seconds(draining=False) == (
+        REFINEMENT_RECOVERY_POLL_SECONDS
+    )
+    assert service._scene_recovery_delay_seconds(draining=True) == 1.0
+
+
+def test_persisted_work_due_hint_includes_future_detection_job(tmp_path) -> None:
+    store = EventStore(tmp_path)
+    store.enqueue_detection_job(
+        job_id="future", camera_id="gate", dedupe_key="future",
+        payload={"topic": "motion", "event_at": datetime.now(timezone.utc).isoformat()},
+        available_at=time.time() + 0.25,
+    )
+    delay = store.next_camera_work_delay_seconds("gate")
+    assert delay is not None
+    assert 0.05 <= delay <= 0.25
+    assert store.next_camera_work_delay_seconds("missing") is None
+
+
+def test_external_store_write_recovers_without_in_memory_signal(tmp_path) -> None:
+    store = EventStore(tmp_path)
+    external = EventStore(tmp_path)
+    initial = MotionDecisionOutcome(
+        event_id=None, snapshot_path="", object_detected=False,
+        refinement_pending=True,
+    )
+    service, decision, *_ = _service(initial, refinement_store=store)
+    completed = threading.Event()
+    decision.refine.side_effect = lambda *_args, **_kwargs: (
+        completed.set()
+        or MotionDecisionOutcome(event_id=None, snapshot_path="", object_detected=False)
+    )
+    job = _RefinementJob(
+        topic="motion",
+        message="person",
+        event_at=datetime.now(timezone.utc),
+        qualification={"detection_intent_id": "external-write"},
+        existing_event_id=None,
+        require_eligible_object=False,
+        require_motion_correlation=False,
+        callback=None,
+        completion_context=None,
+        initial_outcome=initial,
+    )
+    stop = threading.Event()
+    with patch(
+        "survng.app.motion_incidents.REFINEMENT_RECOVERY_POLL_SECONDS",
+        0.1,
+    ):
+        service.start(stop)
+        time.sleep(0.15)
+        assert external.enqueue_detection_job(
+            job_id=job.job_id("gate"), camera_id="gate",
+            dedupe_key=job.dedupe_key(), payload=job.payload(),
+        ) == "queued"
+        assert completed.wait(0.5)
+        stop.set()
+        service.request_stop()
+        assert service.wait_stopped(1.0)
+
+
+def test_future_scene_retry_wakes_once_when_claimable(tmp_path) -> None:
+    store = EventStore(tmp_path)
+    now = time.time()
+    event = store.add_event(
+        camera_id="gate", kind="motion",
+        created_at=datetime.fromtimestamp(now, timezone.utc).isoformat(),
+        objects_json="[]",
+    )
+    store.enqueue_scene_tracking(event["id"], now, now + 10)
+    with store._connect() as conn:
+        conn.execute(
+            "update scene_analysis_jobs set retry_at=?",
+            (time.time() + 0.2,),
+        )
+
+    service, *_ = _service(
+        MotionDecisionOutcome(event_id=None, snapshot_path="", object_detected=False),
+        refinement_store=store,
+    )
+    claimed = threading.Event()
+    resume_calls = 0
+
+    def resume() -> bool:
+        nonlocal resume_calls
+        resume_calls += 1
+        job = store.claim_scene_tracking("gate", "test-worker")
+        if job is not None:
+            claimed.set()
+        return job is not None
+
+    service.resume_scene_analysis = resume
+    stop = threading.Event()
+    service.start(stop)
+    assert claimed.wait(1.0)
+    time.sleep(0.1)
+    stop.set()
+    service.request_stop()
+    assert service.wait_stopped(1.0)
+    assert resume_calls == 2
+
+
+def test_scene_analysis_notification_is_atomic_with_stop_fence() -> None:
+    service, *_ = _service(MotionDecisionOutcome(
+        event_id=None, snapshot_path="", object_detected=False,
+    ))
+    service.resume_scene_analysis = lambda: False
+    stop = threading.Event()
+    service.start(stop)
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingWake(threading.Event):
+        def set(self) -> None:
+            entered.set()
+            assert release.wait(1.0)
+            super().set()
+
+    service._scene_analysis_wake = BlockingWake()
+    notified = []
+    notifier = threading.Thread(
+        target=lambda: notified.append(service.notify_scene_analysis_requested())
+    )
+    notifier.start()
+    assert entered.wait(1.0)
+
+    stopper = threading.Thread(target=service.request_stop)
+    stopper.start()
+    stopper.join(0.05)
+    assert stopper.is_alive()
+    release.set()
+    notifier.join(1.0)
+    stopper.join(1.0)
+    assert notified == [True]
+    stop.set()
+    assert service.wait_stopped(1.0)
 
 
 def test_refinement_is_scheduled_for_predicted_evidence_readiness() -> None:
