@@ -482,6 +482,12 @@ def required_api_scope(method: str, path: str) -> ApiScope:
         return "read"
     if normalized_method == "POST" and path in _READ_ONLY_POST_PATHS:
         return "read"
+    # A deliberate viewer capability, NOT a read-only query: this endpoint
+    # admits only server-selected incident windows, with durable deduplication,
+    # expiring requests and a global one-job optional-work cap.
+    if (normalized_method == "POST"
+            and re.fullmatch(r"/api/incidents/[^/]+/analysis", path)):
+        return "read"
     if normalized_method == "PUT" and path == "/api/incident-notifications":
         return "camera:control"
     if path.startswith("/api/cameras/") and any(

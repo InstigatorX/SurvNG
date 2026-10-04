@@ -662,6 +662,9 @@ class DepthConfig(BaseModel):
 
 
 class ObjectTrackingConfig(BaseModel):
+    # Experimental: initial incident verification stays immediate; only the
+    # optional detailed recorded tracking is admitted by an incident viewer.
+    analysis_mode: Literal["eager", "on_demand"] = "eager"
     visit_auto_link_enabled: bool = False
     visit_match_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
     visit_top_two_margin: float = Field(default=0.08, ge=0.0, le=1.0)

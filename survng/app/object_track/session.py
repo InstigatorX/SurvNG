@@ -782,6 +782,7 @@ class ObjectTrackingSession:
                 ),
             },
             **({"expected_revision": expected_revision} if expected_revision is not None else {}),
+            **({"scene_analysis_job": self._scene_analysis_job} if self._scene_analysis_job is not None else {}),
         )
         if promoted is None:
             self._cover_promotion.update({
@@ -1240,6 +1241,11 @@ class ObjectTrackingSession:
                     if item.get("track_id") is not None
                 }
                 attributor = getattr(self, "activity_attributor", None)
+                if (self._scene_analysis_job or {}).get("admission") == "demand":
+                    # Historical review must not teach the live stationary-
+                    # subject memory from old footage. Scene evidence still
+                    # receives its normal persisted retrospective projection.
+                    attributor = None
                 stamped_observations = []
                 for detected in tracked:
                     observation = frame_observations.get(str(detected.get("observation_key") or ""))

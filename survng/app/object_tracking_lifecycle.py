@@ -98,6 +98,8 @@ class ObjectTrackingLifecycle:
         return session
 
     def prewarm(self) -> FrameSample | None:
+        if getattr(self._session.config, "analysis_mode", "eager") == "on_demand":
+            return None
         return self.prewarm_frame_provider()
 
     def sample_fps(self) -> float:
@@ -140,13 +142,15 @@ class ObjectTrackingLifecycle:
                 # The scene quiet boundary outlives an individual tracking
                 # compute chunk. Subsequent activity extends this same job.
                 end = max(end, event_at.timestamp() + 45.0)
-                job = self.scene_job_store.enqueue_scene_tracking(event_id, start, end)
+                deferred = getattr(session.config, "analysis_mode", "eager") == "on_demand"
+                job = self.scene_job_store.enqueue_scene_tracking(event_id, start, end, **({"deferred": True} if deferred else {}))
                 # No scene membership means the event was not established.
                 # None matches the other "nothing to track" path so this is
                 # not reported as a declined tracking session.
                 if job is None:
                     return None
-                self.resume_pending_scene()
+                if not deferred:
+                    self.resume_pending_scene()
                 return True
             if not trackable:
                 return None
@@ -169,6 +173,9 @@ class ObjectTrackingLifecycle:
                 session.set_accepting(True, recorded_only=True)
             job = self.scene_job_store.claim_scene_tracking(
                 self.camera.id, self._scene_lease_owner, end_limit=cutoff,
+                demand_lease_seconds=max(60.0,
+                    float(getattr(session.config, "recorded_processing_budget_seconds", 60.0))
+                    + float(getattr(session.config, "capacity_wait_seconds", 0.0)) + 30.0),
             )
             if job is None:
                 return False
@@ -181,6 +188,8 @@ class ObjectTrackingLifecycle:
                     [], None, recorded_window=(job["start_epoch"], job["end_epoch"]),
                     resume_after=job["cursor_epoch"],
                     scene_analysis_job={"episode_id": job["episode_id"], "lease_owner": self._scene_lease_owner,
+                                        "admission": job.get("admission", "automatic"),
+                                        "request_end_epoch": job.get("request_end_epoch"),
                                         "analyzed_through_epoch":job.get("analyzed_epoch"),
                                         "association_after_epoch":max((g["end_epoch"] for g in json.loads(job.get("coverage_gaps_json","[]"))),default=None)},
                     scene_track_resume=resume_tracks,

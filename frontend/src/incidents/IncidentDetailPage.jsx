@@ -8,6 +8,7 @@ import "./incident-detail.css";
 import { IncidentScenePanel } from "./IncidentScenePanel.jsx";
 import { canonicalIncidentHref } from "../incidentScene.mjs";
 import { useIncidentPlayback } from "./useIncidentPlayback.js";
+import { IncidentAnalysisStatus } from "./IncidentAnalysisStatus.jsx";
 
 function EvidenceImage({ eventId, revision, label, onClick, src }) {
   const [failed, setFailed] = useState(false);
@@ -120,6 +121,7 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
             {ongoing ? <a href={appUrl(`/?camera=${encodeURIComponent(incident.camera_id)}`)}><Camera size={20} />Live view</a> : null}
           </div>
           <p className="incident-detail-hint">Playback follows camera episodes in chronological order. Missing footage is shown as unavailable.</p>
+          <IncidentAnalysisStatus key={incident.incident_id || incident.id} incidentId={incident.incident_id || incident.id} />
           <section className="incident-detail-section"><IncidentScenePanel key={incident.incident_id || incident.id} incident={incident} timeZone={timeZone} canCorrectIncident={canCorrectIncident} cameraNameById={new Map([[incident.camera_id, data.camera_name]])} onChanged={(detail) => setData((current) => ({ ...current, incident: detail }))} onSelectEpisode={scenePlayback.select} onPlayScene={scenePlayback.playAll} activeEpisodeId={scenePlayback.episode?.episode_id} onNextEpisode={scenePlayback.hasNext ? scenePlayback.nextEpisode : null} onStopPlayback={scenePlayback.stop} /></section>
           <section className="incident-detail-section"><h2>Evidence</h2><div className="incident-detail-frames">
             {evidenceFrames.map((frame, index) => <EvidenceImage key={frame.src} src={frame.src} revision={revision} label={frame.label} onClick={() => setSelectedFrame({ frames: evidenceFrames, index })} />)}

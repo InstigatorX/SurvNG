@@ -995,6 +995,7 @@ class EventStore(
         tracked_objects: list[dict[str, Any]],
         cover_metrics: dict[str, Any],
         expected_revision: int | None = None,
+        scene_analysis_job: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Replace only presentation evidence with a better tracked frame.
 
@@ -1022,13 +1023,17 @@ class EventStore(
         updated = None
         with self._lock, self._connect() as conn:
             conn.execute("begin immediate")
+            valid_lease = scene_analysis_job is None or self._scene_tracking_lease_valid(
+                conn, event_id, {"scene_analysis_job": scene_analysis_job}
+            )
+            demand = self.is_demand_scene_tracking(scene_analysis_job, conn=conn)
             if snapshot_deletion_claimed(conn, self.storage_dir, portable_snapshot):
                 return None
             row = conn.execute(
                 "select * from events where id = ?",
                 (event_id,),
             ).fetchone()
-            if row is not None:
+            if row is not None and valid_lease:
                 self._check_evidence_revision(row, expected_revision)
                 try:
                     objects = json.loads(str(row["objects_json"] or "[]"))
@@ -1081,7 +1086,9 @@ class EventStore(
                             event_id,
                         ),
                     )
-                    updated = self._finish_evidence_commit(conn, event_id, row, reason="tracking_cover", cover_satisfied=bool(cover_metrics.get("recorded_cover_requirement_satisfied")))
+                    updated = self._finish_evidence_commit(conn, event_id, row, reason="tracking_cover",
+                        cover_satisfied=bool(cover_metrics.get("recorded_cover_requirement_satisfied")),
+                        notify=not demand, activity=not demand)
         if updated is None:
             self._delete_snapshot_if_unreferenced(portable_snapshot)
             return None

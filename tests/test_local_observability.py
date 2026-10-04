@@ -104,6 +104,7 @@ def test_runtime_status_is_effective_and_strictly_allowlisted() -> None:
     config = AppConfig(
         detector={
             "tracking": {
+                "analysis_mode": "on_demand",
                 "max_active_cameras": 3,
                 "burst_max_active_cameras": 5,
                 "capacity_wait_seconds": 8,
@@ -125,6 +126,7 @@ def test_runtime_status_is_effective_and_strictly_allowlisted() -> None:
     )
 
     assert payload["tracking"]["settings"]["max_active_cameras"] == 3
+    assert payload["tracking"]["settings"]["analysis_mode"] == "on_demand"
     assert payload["tracking"]["settings"]["burst_max_active_cameras"] == 5
     assert payload["tracking"]["settings"]["capacity_wait_seconds"] == 8
     assert payload["tracking"]["capacity"]["active"] == 1

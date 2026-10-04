@@ -1697,6 +1697,21 @@ class AppManager:
         camera_id = str(payload.get("camera_id") or "")
         if not camera_id:
             return
+        if (event_type == "object_tracking"
+                and (payload.get("scene_analysis_job") or {}).get("admission") == "demand"):
+            # The lifecycle supplies this provenance from the durable claimed
+            # job, not an HTTP body. Reviewing old footage updates the browser
+            # and indexes, never external live notifications or route watches.
+            if payload.get("cover_promoted") and payload.get("event_id"):
+                event = self.events.get(int(payload["event_id"]))
+                if event is not None:
+                    self.semantic_search.refresh_event(event)
+            self.state_events.publish(event_type, payload)
+            self.state_events.publish("incident", {
+                "event_id": payload.get("event_id"), "camera_id": camera_id,
+                "updated": True, "reason": "on_demand_analysis",
+            })
+            return
         if event_type == "incident_update":
             event_id = int(payload.get("event_id") or 0)
             event = self.events.get(event_id) if event_id else None

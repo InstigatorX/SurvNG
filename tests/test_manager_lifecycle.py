@@ -331,6 +331,22 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager.publish_event("object", {"camera_id": "gate", "event_id": 41, "objects": [], "incident_objects": []})
         manager._refresh_incident_notification.assert_called_once_with("gate", 41, allow_new=False)
 
+    def test_demand_tracking_updates_browser_and_cover_index_but_not_live_alerts(self):
+        manager = manager_with_mocks()
+        manager._refresh_incident_notification = Mock()
+        manager.events = Mock()
+        event = {"id": 41, "camera_id": "gate"}
+        manager.events.get.return_value = event
+        payload = {"camera_id": "gate", "event_id": 41, "state": "complete",
+                   "cover_promoted": True, "scene_analysis_job": {"admission": "demand"}}
+        manager.publish_event("object_tracking", payload)
+        manager.mqtt.publish.assert_not_called()
+        manager._refresh_incident_notification.assert_not_called()
+        manager.detection_watch.observe_incident.assert_not_called()
+        manager.semantic_search.refresh_event.assert_called_once_with(event)
+        self.assertEqual(manager.state_events.publish.call_count, 2)
+        manager.state_events.publish.assert_any_call("object_tracking", payload)
+
     def test_native_incident_publication_does_not_require_mqtt(self) -> None:
         manager = manager_with_mocks()
         manager.config.mqtt.enabled = False

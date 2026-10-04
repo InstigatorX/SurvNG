@@ -37,6 +37,9 @@ class EventStoreSceneAdmissionMixin:
                 created_at real not null
             );
         """)
+        columns = {row[1] for row in conn.execute("pragma table_info(scene_context_projection_jobs)")}
+        if "notify" not in columns:
+            conn.execute("alter table scene_context_projection_jobs add column notify integer not null default 1")
 
     def _acquire_event_samples(self, conn, row, objects=None):
         """Compatibility sources also acquire before incident projection."""
@@ -184,6 +187,7 @@ class EventStoreSceneAdmissionMixin:
             conn, row, historical=historical, notify=False, activity=supported and activity,
             activity_epoch=decision.get("activity_epoch") if supported and activity else None,
             force_revision=force_revision, defer_alerts=force_revision, objects=objects,
+            evidence_notify=notify,
         )
         alerts_pending = force_revision
         episode = conn.execute("select p.* from scene_episodes p join scene_event_membership m on m.episode_id=p.id where m.event_id=?", (row["id"],)).fetchone()
@@ -205,17 +209,19 @@ class EventStoreSceneAdmissionMixin:
                            "order by s.captured_epoch,s.id limit 200", (row["camera_id"],context_start,context_end,episode["id"])).fetchall()
         if ids:
             if self._project_acquired_context(
-                conn, episode, row, self._sample_payloads(conn, [key[0] for key in ids])
+                conn, episode, row, self._sample_payloads(conn, [key[0] for key in ids]), notify=notify
             ):
                 alerts_pending = False
         if len(ids) == 200:
             conn.execute(
-                "insert into scene_context_projection_jobs values(?,?,?,?,?) "
+                "insert into scene_context_projection_jobs "
+                "(episode_id,anchor_event_id,context_start,context_end,created_at,notify) values(?,?,?,?,?,?) "
                 "on conflict(episode_id) do update set "
                 "context_start=min(context_start,excluded.context_start),"
                 "context_end=max(context_end,excluded.context_end),"
-                "anchor_event_id=excluded.anchor_event_id",
-                (episode["id"], row["id"], context_start, context_end, time.time()),
+                "anchor_event_id=excluded.anchor_event_id,"
+                "notify=max(notify,excluded.notify)",
+                (episode["id"], row["id"], context_start, context_end, time.time(), int(notify)),
             )
         if alerts_pending:
             self._scene_refresh_alerts(conn, row["id"])
@@ -260,6 +266,7 @@ class EventStoreSceneAdmissionMixin:
                 self._project_acquired_context(
                     conn, episode, anchor,
                     self._sample_payloads(conn, [row[0] for row in ids]),
+                    notify=bool(job["notify"]),
                 )
             if len(ids) < 200:
                 conn.execute(
@@ -271,10 +278,10 @@ class EventStoreSceneAdmissionMixin:
                 "select revision from scene_incidents where id=?", (episode["incident_id"],),
             ).fetchone()[0])
             if after != before:
-                self._scene_changed(conn, episode["incident_id"], notify=True)
+                self._scene_changed(conn, episode["incident_id"], notify=bool(job["notify"]))
             return len(ids)
 
-    def _project_acquired_context(self, conn, episode, anchor, samples):
+    def _project_acquired_context(self, conn, episode, anchor, samples, *, notify=True):
         evidence = []
         for sample in samples:
             if conn.execute("select 1 from acquired_sample_episodes where sample_id=? and episode_id=?", (sample["id"],episode["id"])).fetchone():
@@ -291,7 +298,8 @@ class EventStoreSceneAdmissionMixin:
         if evidence:
             projected = dict(anchor)
             projected["objects_json"] = _json([{"status": "scene_observations", "observations": evidence}])
-            self._scene_project(conn, projected, activity=False, notify=False, target_episode_id=episode["id"], context_only=True)
+            self._scene_project(conn, projected, activity=False, notify=False, target_episode_id=episode["id"], context_only=True,
+                                evidence_notify=notify)
         return bool(evidence)
 
     def _attach_open_episode_context(self, conn, row, samples):

@@ -663,7 +663,7 @@ class EventStoreSceneMixin:
             from kept f join kept l on l.object_id=f.object_id and l.outcome=f.outcome and l.latest=1
             where f.earliest=1""", (event_id,))
 
-    def _scene_project(self, conn, row, *, historical=False, notify=True, activity=True, force_revision=False, activity_epoch=None, target_episode_id=None, context_only=False, defer_alerts=False, objects=None):
+    def _scene_project(self, conn, row, *, historical=False, notify=True, activity=True, force_revision=False, activity_epoch=None, target_episode_id=None, context_only=False, defer_alerts=False, objects=None, evidence_notify=True):
         row = dict(row)
         at = _epoch(row["created_at"])
         event_id, camera_id = int(row["id"]), str(row["camera_id"])
@@ -872,7 +872,7 @@ class EventStoreSceneMixin:
             current = conn.execute("select * from events where id=?", (event_id,)).fetchone()
             if current is not None:
                 self._evidence_outbox(
-                    conn, current, "evidence_updated", reason="scene_observation_added"
+                    conn, current, "evidence_updated", reason="scene_observation_added", notify=evidence_notify
                 )
         return incident_id
 

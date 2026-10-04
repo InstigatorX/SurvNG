@@ -322,6 +322,30 @@ class SameOriginMiddlewareTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(messages[0]["status"], 403)
 
+    async def test_incident_analysis_admission_requires_auth_and_same_origin(self) -> None:
+        async def inner(_scope, _receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        admin = WebUserConfig(id="admin", username="admin", role="admin", password_hash=hash_password("admin-pass"))
+        viewer = WebUserConfig(id="viewer", username="viewer", role="viewer", password_hash=hash_password("viewer-pass"))
+        auth = WebAuthConfig(enabled=True, session_key="a" * 64, users=[admin, viewer])
+        token = encode_session("viewer", auth.session_key)
+        middleware = main.SecurityBoundaryMiddleware(inner)
+        for logged_in, origin, expected in ((False, "http://survng.local", 401),
+                                            (True, "http://evil.example", 403),
+                                            (True, "http://survng.local", 200)):
+            with self.subTest(logged_in=logged_in, origin=origin):
+                headers = [(b"host", b"survng.local"), (b"origin", origin.encode())]
+                if logged_in:
+                    headers.append((b"cookie", f"survng_session={token}".encode()))
+                messages = []
+                with patch.object(main.config, "web_auth", auth):
+                    await middleware({"type": "http", "scheme": "http", "method": "POST",
+                                      "path": "/api/incidents/example/analysis", "headers": headers},
+                                     self._receive, self._collector(messages))
+                self.assertEqual(messages[0]["status"], expected)
+
     async def test_sign_in_route_remains_public_when_web_auth_is_enabled(self) -> None:
         called = False
 
