@@ -6,6 +6,7 @@ from pathlib import Path
 import threading
 from types import SimpleNamespace
 from unittest import TestCase
+from unittest.mock import Mock
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import HTTPException, Response
@@ -77,6 +78,90 @@ def _dependencies(get_manager) -> RecordingRouteDependencies:
 
 
 class RecordingRouteLifecycleTests(TestCase):
+    def test_recordings_first_grid_does_not_read_incidents(self):
+        manager = _Manager("current")
+        manager.config.cameras = [SimpleNamespace(id="gate", name="Gate")]
+        manager.events = Mock()
+        manager.events.between_compact.side_effect = AssertionError("review must not query incidents")
+        manager.events.for_camera_range.side_effect = AssertionError("review must not query incidents")
+        availability = {"ranges": [{"start_epoch": 1000, "end_epoch": 2000}], "segment_count": 1}
+        manager.recorder.recording_grid_availability_between = Mock(return_value={
+            "gate": {"main": availability, "live": availability},
+        })
+        handlers = create_recording_router(_dependencies(lambda: manager)).handlers
+        day = handlers["recording_grid_day"](1000, 2000, review_only=True)
+        update = handlers["recording_grid_updates"](1000, 2000, 1500, review_only=True)
+        for result in (day, update):
+            self.assertTrue(result["availability"])
+            self.assertTrue(result["review_only"])
+            self.assertEqual(result["incidents"], [])
+        self.assertEqual(manager.events.mock_calls, [])
+
+    def test_recordings_first_day_and_updates_do_not_read_incidents(self):
+        manager = _Manager("current")
+        manager.events = Mock()
+        manager.events.for_camera_range.side_effect = AssertionError("review must not query incidents")
+        manager.recorder.request_recording_edge_refresh = Mock()
+        handlers = create_recording_router(_dependencies(lambda: manager)).handlers
+        day = handlers["recording_day"]("gate", 1000, 2000, review_only=True)
+        update = handlers["recording_updates"]("gate", 1000, 2000, 1500, review_only=True)
+        for result in (day, update):
+            self.assertTrue(result["availability"])
+            self.assertTrue(result["review_only"])
+            self.assertEqual(result["events"], [])
+            self.assertEqual(result["incidents"], [])
+        manager.events.scene_incident.assert_not_called()
+
+    def test_review_get_and_post_are_distinct_and_camera_detection_is_not_required(self):
+        manager = _Manager("current")
+        manager.config.recording_review = SimpleNamespace(enabled=True)
+        manager.recording_review = Mock()
+        manager.recording_review.status.return_value = {"state": "unreviewed"}
+        manager.recording_review.request.return_value = {"state": "queued"}
+        handlers = create_recording_router(_dependencies(lambda: manager)).handlers
+        self.assertEqual(handlers["recording_review"]("gate", 1000)["state"], "unreviewed")
+        manager.recording_review.request.assert_not_called()
+        self.assertEqual(handlers["request_recording_review"]("gate", 1000)["state"], "queued")
+        manager.recording_review.request.assert_called_once_with("gate", "main", 1000,
+                                                                retry=False, expected_request_id=None)
+
+    def test_disabled_recording_review_cannot_admit_work(self):
+        manager = _Manager("current")
+        manager.recording_review = Mock()
+        handlers = create_recording_router(_dependencies(lambda: manager)).handlers
+        self.assertFalse(handlers["recording_review"]("gate", 1000)["enabled"])
+        with self.assertRaises(HTTPException) as error:
+            handlers["request_recording_review"]("gate", 1000)
+        self.assertEqual(error.exception.status_code, 409)
+        manager.recording_review.request.assert_not_called()
+
+    def test_recording_review_rejects_unknown_camera_source_and_invalid_time(self):
+        manager = _Manager("current")
+        manager.config.recording_review = SimpleNamespace(enabled=True)
+        manager.recording_review = Mock()
+        handler = create_recording_router(_dependencies(lambda: manager)).handlers["request_recording_review"]
+        for camera_id, epoch, source, expected in (("missing", 1000, "main", 404),
+                                                  ("gate", 1000, "arbitrary", 400),
+                                                  ("gate", float("nan"), "main", 400)):
+            with self.subTest(camera_id=camera_id, epoch=epoch, source=source):
+                with self.assertRaises(HTTPException) as error:
+                    handler(camera_id, epoch, source)
+                self.assertEqual(error.exception.status_code, expected)
+        manager.recording_review.request.assert_not_called()
+
+    def test_recording_review_service_errors_do_not_expose_private_details(self):
+        manager = _Manager("current")
+        manager.config.recording_review = SimpleNamespace(enabled=True)
+        manager.recording_review = Mock()
+        handler = create_recording_router(_dependencies(lambda: manager)).handlers["request_recording_review"]
+        for failure, expected in ((ValueError("private path"), 400), (RuntimeError("private path"), 503)):
+            with self.subTest(failure=failure):
+                manager.recording_review.request.side_effect = failure
+                with self.assertRaises(HTTPException) as error:
+                    handler("gate", 1000)
+                self.assertEqual(error.exception.status_code, expected)
+                self.assertNotIn("private path", error.exception.detail)
+
     def test_hls_media_response_prewarms_the_next_fragment(self) -> None:
         manager = _Manager("current")
         fragments = tuple(

@@ -1677,3 +1677,20 @@
   transform: scale(var(--live-view-zoom, 1));
   transform-origin: var(--live-object-position, 50% 50%);
 }
+.recording-review-panel {
+  margin: 0;
+  padding: 16px;
+  border-top: 1px solid var(--line);
+  background: var(--panel, #101827);
+  max-height: min(38dvh, 360px);
+  overflow: auto;
+}
+.recordings-v2-page.recordings-review-mode { grid-template-rows: var(--timeline-command-height) minmax(0, 1fr) auto; }
+.recording-review-panel header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.recording-review-panel p { margin: 8px 0; font-size: 0.85rem; color: var(--muted, #94a3b8); }
+.recording-review-panel strong small { font-weight: 400; color: var(--muted, #94a3b8); }
+.recording-review-panel ul { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; list-style: none; max-height: 240px; overflow-y: auto; }
+.recordings-v2-page .recordings-v2-event-filter[hidden],
+.recordings-v2-page .recordings-timeline-display-controls[hidden],
+.recordings-v2-page .recordings-investigation-toggle[hidden],
+.recordings-v2-page .recordings-v2-incidents[hidden] { display: none; }

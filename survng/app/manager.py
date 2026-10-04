@@ -416,6 +416,9 @@ class AppManager:
             self.events, lambda: self.semantic_search, self.state_events,
             self._refresh_incident_notification,
         )
+        # This optional service has no access to event/incident writers. It is
+        # created on startup only when the experimental review UI is enabled.
+        self.recording_review = None
         try:
             self.mqtt = MqttLifecycle(config.mqtt, self._build_mqtt_service)
         except BaseException:
@@ -884,6 +887,26 @@ class AppManager:
                 self.mqtt.start()
                 self.mqtt.set_server_lifecycle("starting")
                 self.runtime_monitor.start()
+                if self.config.recording_review.enabled:
+                    from .recording_review import RecordingReviewService
+                    from .recording_review_runtime import RecordingReviewRuntime
+
+                    review_runtime = RecordingReviewRuntime(
+                        recorder=self.recorder,
+                        detector_provider=lambda: self.detector,
+                        decode_budget=self.motion_object_detector_factory.decode_budget,
+                        # Config application publishes the requested config
+                        # before engine replacement. Cache provenance must
+                        # describe the effective inference generation instead.
+                        detector_config_provider=lambda: self.detector.config,
+                    )
+                    self.recording_review = RecordingReviewService(
+                        self.database_dir,
+                        manifest_provider=review_runtime.manifest,
+                        analysis_identity=review_runtime.analysis_identity,
+                        analyze=review_runtime.analyze,
+                    )
+                    self.recording_review.start()
                 self._startup_timings["mqtt_seconds"] = round(
                     time.monotonic() - phase_started,
                     3,
@@ -999,6 +1022,14 @@ class AppManager:
         started = time.monotonic()
         self.camera_controls.quiesce()
         self.ema_route_candidates.close_admission()
+        review = getattr(self, "recording_review", None)
+        if review is not None:
+            try:
+                review.stop()
+            except Exception as error:
+                # Do not tear down inference or recording leases underneath
+                # an optional worker that has not acknowledged cancellation.
+                raise ManagerShutdownIncompleteError("recording review") from error
         media_sessions = getattr(self, "media_sessions", None)
         if media_sessions is not None:
             media_sessions.cancel_generation(

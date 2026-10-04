@@ -4219,6 +4219,12 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["depth", "Depth Estimation", Layers], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face Recognition", ScanFace]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
           </nav>
           <div className="detection-settings-content">
+          {detectionSection === "object" ? <section className="detection-settings-card">
+            <header className="detection-settings-card-head"><div><h3>Recordings-first review (experimental)</h3><p>Review a selected minute of recorded footage without creating an incident.</p></div></header>
+            <label className="compact-toggle"><input type="checkbox" checked={config.recording_review?.enabled ?? false} onChange={(event) => updateConfig(["recording_review", "enabled"], event.target.checked)} /><span>Enable recordings-first review</span></label>
+            <p>On the Recordings timeline, choose Analyze this minute to check 12 sampled frames. Browsing does not start analysis. Results are separate from incidents, tracking, and alerts; this does not make all footage searchable.</p>
+            <p>To test record-and-review without automatic incident work, turn off Detection for a test camera while keeping its recording enabled. That camera will not send immediate detection alerts. Enabling this experiment alone does not change detection or recording settings.</p>
+          </section> : null}
           {detectionSection === "object" ? <section className="detection-settings-card primary">
             <header className="detection-settings-card-head">
               <div className="detection-settings-card-icon"><ScanFace size={18} /></div>

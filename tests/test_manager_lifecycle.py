@@ -98,6 +98,29 @@ def manager_with_mocks() -> AppManager:
 
 
 class ManagerLifecycleTest(unittest.TestCase):
+    def test_recording_review_shutdown_failure_keeps_dependencies_alive(self):
+        manager = manager_with_mocks()
+        manager.recording_review = Mock()
+        manager.recording_review.stop.side_effect = RuntimeError("worker still active")
+        with self.assertRaises(RuntimeError):
+            manager._shutdown_components()
+        manager.inference.close.assert_not_called()
+        manager.recorder.stop_all.assert_not_called()
+
+    def test_recording_review_is_started_only_when_explicitly_enabled(self):
+        manager = manager_with_mocks()
+        manager.database_dir = Path("unused-by-mocked-service")
+        manager.config.recording_review.enabled = True
+        manager.detector.config = manager.config.detector
+        manager.detector.isolation_status.return_value = {}
+        service = Mock()
+        with patch("survng.app.recording_review.RecordingReviewService", return_value=service) as constructor:
+            manager.start_all()
+            constructor.assert_called_once()
+            service.start.assert_called_once()
+            manager._shutdown_components()
+            service.stop.assert_called_once()
+
     def test_restart_reconstructs_unexpired_route_watch_from_incident_store(self) -> None:
         now = datetime.now(timezone.utc)
         manager = object.__new__(AppManager)

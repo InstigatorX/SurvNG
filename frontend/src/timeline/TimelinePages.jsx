@@ -66,6 +66,7 @@ import { DebugDetectionOverlay } from "../shared/evidence.jsx";
 import { MobileCameraSelect } from "../shared/MobileCameraSelect.jsx";
 import { usePollingData } from "../shared/polling.js";
 import { useAppEvents } from "../shared/events.js";
+import { RecordingReviewPanel } from "./RecordingReviewPanel.jsx";
 
 
 export function mergeRecordingEvents(current, updates) {
@@ -723,6 +724,7 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
 
 export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssistant = null }) {
   const { cameras: sharedCameras, appConfig } = usePollingData();
+  const recordingReviewEnabled = appConfig?.recording_review?.enabled === true;
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
   const today = dateKeyForTimeZone(Date.now(), timeZone);
   const initialView = useMemo(() => parseTimelineView(initialQuery, today), [initialQuery, today]);
@@ -1072,7 +1074,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   });
 
   useEffect(() => {
-    if (!investigationOpen || !selectedIdentityEventId) {
+    if (recordingReviewEnabled || !investigationOpen || !selectedIdentityEventId) {
       setSelectedIncidentIdentity(null);
       return undefined;
     }
@@ -1097,7 +1099,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
         // The compact timeline incident remains usable when identity detail is unavailable.
       });
     return () => controller.abort();
-  }, [investigationOpen, selectedIdentityEventId, selectedIdentityRevision]);
+  }, [recordingReviewEnabled, investigationOpen, selectedIdentityEventId, selectedIdentityRevision]);
 
   useEffect(() => {
     setTimelineViewportAnchor(null);
@@ -1682,8 +1684,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (playbackRetryRef.current.timer) window.clearTimeout(playbackRetryRef.current.timer);
     playbackRetryRef.current = { attempts: 0, timer: null };
     const indexUrl = isAllCameras
-      ? recordingGridDayUrl(dayStart, dayEnd, source, false)
-      : recordingDayUrl(activeCameraId, dayStart, dayEnd, source, false);
+      ? recordingGridDayUrl(dayStart, dayEnd, source, false, recordingReviewEnabled)
+      : recordingDayUrl(activeCameraId, dayStart, dayEnd, source, false, recordingReviewEnabled);
     fetch(indexUrl, { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(`Recording index failed (${response.status})`);
@@ -1719,7 +1721,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       if (playbackRetryRef.current.timer) window.clearTimeout(playbackRetryRef.current.timer);
       playbackRetryRef.current = { attempts: 0, timer: null };
     };
-  }, [activeCameraId, isAllCameras, source, dayStart, dayEnd, recordingIndexRevision]);
+  }, [activeCameraId, isAllCameras, source, dayStart, dayEnd, recordingIndexRevision, recordingReviewEnabled]);
 
   useVisiblePolling(async (signal) => {
     if (recordingUpdatesInFlightRef.current) return;
@@ -1728,7 +1730,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       const afterEpoch = Number.isFinite(latestAvailabilityRef.current)
         ? latestAvailabilityRef.current
         : dayStart;
-      const response = await fetch(recordingUpdatesUrl(activeCameraId, dayStart, dayEnd, afterEpoch, source, false), { signal });
+      const response = await fetch(recordingUpdatesUrl(activeCameraId, dayStart, dayEnd, afterEpoch, source, false, recordingReviewEnabled), { signal });
       if (!response.ok) throw new Error(`Recording update failed (${response.status})`);
       const payload = await response.json();
       const additions = payload.availability || [];
@@ -1753,7 +1755,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       const afterEpoch = Number.isFinite(gridRefreshCursorRef.current)
         ? gridRefreshCursorRef.current
         : Math.max(dayStart, requestStartedAt - 120);
-      const response = await fetch(recordingGridUpdatesUrl(dayStart, dayEnd, afterEpoch, source, false), { signal });
+      const response = await fetch(recordingGridUpdatesUrl(dayStart, dayEnd, afterEpoch, source, false, recordingReviewEnabled), { signal });
       if (!response.ok) return;
       const payload = await response.json();
       const additions = payload.availability || payload.recordings || [];
@@ -2533,7 +2535,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }
 
   return (
-    <main className={`recordings-v2-page${investigationOpen ? " has-investigation" : " investigation-hidden"}`}>
+    <main className={`recordings-v2-page${investigationOpen ? " has-investigation" : " investigation-hidden"}${recordingReviewEnabled ? " recordings-review-mode" : ""}`}>
       <nav className="recordings-tabs recordings-commandbar" aria-label="Timeline controls">
         <TimelineCameraPicker
           cameras={cameras}
@@ -2747,7 +2749,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           <div className="recordings-v2-timeline-toolbar">
             <div className="recordings-v2-incidents-tools">
               <span className="recordings-v2-filter-label" title="Evidence" aria-label="Evidence"><SlidersHorizontal size={14} /></span>
-              <div className="recordings-v2-event-filter" role="group" aria-label="Recording incident type">
+              <div className="recordings-v2-event-filter" role="group" aria-label="Recording incident type" hidden={recordingReviewEnabled}>
                 <button type="button" className={eventFilter === "all" ? "active" : ""} aria-pressed={eventFilter === "all"} onClick={() => { checkpointTimelineView(); setEventFilter("all"); }}><Images size={14} />All events</button>
                 <button type="button" className={eventFilter === "people" ? "active" : ""} aria-pressed={eventFilter === "people"} onClick={() => { checkpointTimelineView(); setEventFilter("people"); }}><UserRound size={14} />People</button>
                 <button type="button" className={eventFilter === "vehicles" ? "active" : ""} aria-pressed={eventFilter === "vehicles"} onClick={() => { checkpointTimelineView(); setEventFilter("vehicles"); }}><CarFront size={14} />Vehicles</button>
@@ -2765,7 +2767,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               </div>
               <div className="recordings-toolbar-day-controls">{timelineDayControls()}</div>
             </div>
-            <div className="recordings-timeline-display-controls">
+            <div className="recordings-timeline-display-controls" hidden={recordingReviewEnabled}>
               <button type="button" className={timelineLanes.object ? "active object" : "object"} aria-pressed={timelineLanes.object} onClick={() => { checkpointTimelineView(); setTimelineLanes((current) => ({ ...current, object: !current.object })); }}>Objects</button>
               <button type="button" className={timelineLanes.motion ? "active motion" : "motion"} aria-pressed={timelineLanes.motion} onClick={() => { checkpointTimelineView(); setTimelineLanes((current) => ({ ...current, motion: !current.motion })); }}>Motion</button>
             </div>
@@ -2775,6 +2777,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               aria-pressed={investigationOpen}
               aria-expanded={investigationOpen}
               aria-controls="timeline-investigation"
+              hidden={recordingReviewEnabled}
               onClick={() => setInvestigationOpen((current) => !current)}
             >
               {investigationOpen ? <ChevronDown size={15} /> : <ChevronUp size={15} />}
@@ -2861,7 +2864,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
 
       </section>
 
-      <div id="timeline-investigation" className="recordings-v2-incidents" hidden={!investigationOpen}>
+      {recordingReviewEnabled && !isAllCameras ? <RecordingReviewPanel cameraId={activeCameraId} source={source} epoch={playhead} timeZone={timeZone} onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }} /> : null}
+      {recordingReviewEnabled && isAllCameras ? <p className="recording-review-panel">Select one camera to review a minute. This view does not load the automatic incident list.</p> : null}
+
+      <div id="timeline-investigation" className="recordings-v2-incidents" hidden={recordingReviewEnabled || !investigationOpen}>
         <div className={`recordings-v2-investigation${showForensicPanel ? " forensic-active" : " nearby-only"}`}>
           {showForensicPanel && forensicContext ? (
             <aside className="recordings-v2-forensic-context" aria-label="Forensic context">

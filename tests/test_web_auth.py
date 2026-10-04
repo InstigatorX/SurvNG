@@ -99,6 +99,13 @@ class PasswordAndSessionTest(unittest.TestCase):
         self.assertEqual(scopes_for_web_role("viewer"), frozenset({"read"}))
         self.assertIn("admin", scopes_for_web_role("admin"))
 
+    def test_viewer_can_admit_only_exact_bounded_recording_review_path(self) -> None:
+        self.assertEqual(required_api_scope("POST", "/api/cameras/gate/recordings/review"), "read")
+        for path in ("/api/cameras/gate/recordings/review/reset", "/api/cameras//recordings/review",
+                     "/api/cameras/gate/extra/recordings/review", "/api/recordings/review"):
+            self.assertEqual(required_api_scope("POST", path), "admin")
+        self.assertEqual(required_api_scope("DELETE", "/api/cameras/gate/recordings/review"), "admin")
+
     def test_auth_and_tls_writes_require_admin_scope(self) -> None:
         self.assertEqual(required_api_scope("GET", "/api/auth/users"), "admin")
         self.assertEqual(required_api_scope("GET", "/api/tls"), "admin")
