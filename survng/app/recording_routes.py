@@ -337,6 +337,50 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
 
         return materialized, prewarm_next if next_fragment is not None else None
 
+    def review_result(camera_id: str, source: str, epoch: float, *, request: bool,
+                      retry: bool = False, expected_request_id: str = "") -> dict:
+        active = _require_recording_camera(deps, camera_id)
+        if source not in {"main", "live"}:
+            raise HTTPException(status_code=400, detail="recording source must be main or live")
+        if not math.isfinite(epoch):
+            raise HTTPException(status_code=400, detail="invalid recording review time")
+        if expected_request_id and (len(expected_request_id) != 64 or
+                                    any(char not in "0123456789abcdef" for char in expected_request_id)):
+            raise HTTPException(status_code=400, detail="invalid recording review request identity")
+        config = getattr(active, "config", None) or deps.get_config()
+        enabled = bool(getattr(getattr(config, "recording_review", None), "enabled", False))
+        if not enabled:
+            if request:
+                raise HTTPException(status_code=409, detail="experimental recording review is disabled")
+            return {"enabled": False, "state": "unavailable", "camera_id": camera_id,
+                    "source": source, "message": "Experimental recording review is disabled."}
+        service = getattr(active, "recording_review", None)
+        if service is None:
+            raise HTTPException(status_code=503, detail="recording review is starting or stopping")
+        try:
+            result = (service.request(camera_id, source, epoch, retry=retry,
+                                      expected_request_id=expected_request_id or None)
+                      if request else service.status(camera_id, source, epoch))
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="select a valid, completed minute of recording") from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail="recording review is busy; try again shortly") from error
+        return {**result, "enabled": True, "sample_time_kind": "requested"}
+
+    @router.get("/api/cameras/{camera_id}/recordings/review")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
+    def recording_review(camera_id: str, epoch: float, source: str = "main") -> dict:
+        return review_result(camera_id, source, epoch, request=False)
+
+    @router.post("/api/cameras/{camera_id}/recordings/review")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
+    def request_recording_review(camera_id: str, epoch: float, source: str = "main",
+                                 retry: bool = False, expected_request_id: str = "") -> dict:
+        # The service selects and caps all work; no client-supplied paths,
+        # model settings, incident IDs, sampling rates or unbounded ranges.
+        return review_result(camera_id, source, epoch, request=True, retry=retry,
+                             expected_request_id=expected_request_id)
+
     @router.get("/api/cameras/{camera_id}/recordings")
     @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def recordings(camera_id: str, limit: int = 200, source: str = "main") -> list[dict]:
@@ -384,6 +428,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         end_epoch: float,
         source: str = "main",
         include_identities: bool = True,
+        review_only: bool = False,
     ) -> dict:
         active_manager = _require_recording_camera(deps, camera_id)
         _validate_recording_range(start_epoch, end_epoch, 90000, "invalid recording day range")
@@ -403,14 +448,14 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             candidate for candidate in ("main", "live")
             if int(source_availability[candidate]["segment_count"]) > 0
         ]
-        events = active_manager.events.for_camera_range(
+        events = [] if review_only else active_manager.events.for_camera_range(
             camera_id,
             datetime.fromtimestamp(start_epoch, timezone.utc).isoformat(),
             datetime.fromtimestamp(end_epoch, timezone.utc).isoformat(),
             limit=5000,
         )
         public_events = [_event_row(event) for event in events]
-        timeline_incidents = _identity_hydrated_recording_incidents(
+        timeline_incidents = [] if review_only else _identity_hydrated_recording_incidents(
             active_manager,
             public_events,
             include_identities=include_identities,
@@ -429,6 +474,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                 for incident in timeline_incidents
             ],
             "available_sources": available_sources,
+            "review_only": review_only,
         }
 
 
@@ -439,6 +485,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         end_epoch: float,
         source: str = "live",
         include_identities: bool = True,
+        review_only: bool = False,
     ) -> dict:
         """Return local-index history for the synchronized all-camera recording view."""
         _validate_recording_range(
@@ -459,7 +506,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         cameras = list(active_config.cameras)
         camera_ids = {camera.id for camera in cameras}
         events_by_camera: dict[str, list[dict]] = {camera_id: [] for camera_id in camera_ids}
-        if hasattr(active_manager.events, "between_compact"):
+        if not review_only and hasattr(active_manager.events, "between_compact"):
             for event in active_manager.events.between_compact(start_at, end_at):
                 camera_id = str(event.get("camera_id") or "")
                 if camera_id in events_by_camera:
@@ -500,7 +547,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                     item["source"] = candidate
                     aggregate_ranges.append(item)
             event_rows = events_by_camera[camera.id]
-            if not hasattr(active_manager.events, "between_compact"):
+            if not review_only and not hasattr(active_manager.events, "between_compact"):
                 event_rows = active_manager.events.for_camera_range(
                     camera.id,
                     start_at,
@@ -508,7 +555,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                     limit=5000,
                 )
             public_events = [_event_row(event) for event in event_rows]
-            hydrated_incidents = _identity_hydrated_recording_incidents(
+            hydrated_incidents = [] if review_only else _identity_hydrated_recording_incidents(
                 active_manager,
                 public_events,
                 include_identities=include_identities,
@@ -540,6 +587,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             "incidents": aggregate_incidents,
             "available_sources": sorted(available_sources),
             "cameras": camera_payloads,
+            "review_only": review_only,
         }
 
 
@@ -551,6 +599,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         after_epoch: float,
         source: str = "live",
         include_identities: bool = True,
+        review_only: bool = False,
     ) -> dict:
         """Return a bounded near-live delta for the synchronized camera grid."""
         _validate_recording_range(
@@ -593,7 +642,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             start_epoch,
             min(end_epoch, after_epoch) - max(overlap_seconds, 5 * 60.0),
         )
-        event_rows = [
+        event_rows = [] if review_only else [
             row
             for row in active_manager.events.between_compact(
                 datetime.fromtimestamp(event_start, timezone.utc).isoformat(),
@@ -602,7 +651,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             if str(row.get("camera_id") or "") in camera_ids
         ]
         public_events = [_event_row(event) for event in event_rows]
-        hydrated_incidents = _identity_hydrated_recording_incidents(
+        hydrated_incidents = [] if review_only else _identity_hydrated_recording_incidents(
             active_manager,
             public_events,
             include_identities=include_identities,
@@ -614,6 +663,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             "start_epoch": update_start,
             "end_epoch": end_epoch,
             "availability": aggregate_ranges,
+            "review_only": review_only,
             "incidents": [
                 _recording_grid_incident_payload(incident)
                 for incident in hydrated_incidents
@@ -971,6 +1021,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         after_epoch: float,
         source: str = "main",
         include_identities: bool = True,
+        review_only: bool = False,
     ) -> dict:
         active_manager = _require_recording_camera(deps, camera_id)
         _validate_recording_range(start_epoch, end_epoch, 90000, "invalid recording day range")
@@ -1011,14 +1062,14 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             selected_source,
             discover_missing=False,
         )
-        events = active_manager.events.for_camera_range(
+        events = [] if review_only else active_manager.events.for_camera_range(
             camera_id,
             datetime.fromtimestamp(event_update_start, timezone.utc).isoformat(),
             datetime.fromtimestamp(end_epoch, timezone.utc).isoformat(),
             limit=1000,
         )
         public_events = [_event_row(event) for event in events]
-        timeline_incidents = _identity_hydrated_recording_incidents(
+        timeline_incidents = [] if review_only else _identity_hydrated_recording_incidents(
             active_manager,
             public_events,
             include_identities=include_identities,
@@ -1030,6 +1081,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             "end_epoch": end_epoch,
             "availability": availability["ranges"],
             "events": public_events,
+            "review_only": review_only,
             "incidents": [
                 _incident_list_payload(incident)
                 for incident in timeline_incidents
@@ -1424,6 +1476,8 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                 recordings,
                 recording_events,
                 recording_day,
+                recording_review,
+                request_recording_review,
                 recording_grid_day,
                 recording_grid_updates,
                 _public_media_export,

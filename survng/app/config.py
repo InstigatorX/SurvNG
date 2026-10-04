@@ -1069,7 +1069,14 @@ class WeatherConfig(BaseModel):
         return self
 
 
+class RecordingReviewConfig(BaseModel):
+    """Opt-in sampled recording review, independent of incident creation."""
+
+    enabled: bool = False
+
+
 class AppConfig(BaseModel):
+    recording_review: RecordingReviewConfig = Field(default_factory=RecordingReviewConfig)
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
     base_path: str = "/survng"
     storage_dir: str = "survng/storage"

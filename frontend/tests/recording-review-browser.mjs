@@ -1,0 +1,160 @@
+// Run against the isolated synthetic server: node tools/camera-workspace-preview.mjs
+import assert from "node:assert/strict";
+import { chromium } from "playwright";
+
+const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH });
+try {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  await page.clock.install();
+  const errors = [];
+  const posts = [];
+  const reads = [];
+  const indexes = [];
+  const postUrls = [];
+  const results = new Map();
+  let enabled = true;
+  let fail = false;
+  let completed = false;
+  let revision = 1;
+  let terminalState = null;
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("request", (request) => {
+    if (/\/recordings\/(day|updates)\?/.test(request.url())) indexes.push(request.url());
+  });
+  await page.route("**/api/config", async (route) => {
+    const response = await route.fetch();
+    const config = await response.json();
+    await route.fulfill({ json: { ...config, recording_review: { enabled } } });
+  });
+  await page.route("**/recordings/review?*", async (route) => {
+    const url = new URL(route.request().url());
+    const start = Number(url.searchParams.get("epoch"));
+    const key = `${url.pathname}:${start}:${url.searchParams.get("source")}`;
+    const requestId = `${key}:revision-${revision}`;
+    const method = route.request().method();
+    (method === "POST" ? posts : reads).push(key);
+    if (method === "POST") postUrls.push(url);
+    if (fail) return route.fulfill({ status: 503, json: { detail: "Review worker unavailable; playback is unaffected." } });
+    if (method === "POST" && (!url.searchParams.has("expected_request_id") || url.searchParams.get("expected_request_id") === requestId)) {
+      results.set(requestId, "queued");
+      if (url.searchParams.get("retry") === "true") terminalState = null;
+    }
+    const state = terminalState || (completed && results.has(requestId) ? "sampled" : results.get(requestId) || "unreviewed");
+    await route.fulfill({ json: { enabled, request_id: requestId, source: url.searchParams.get("source"), start_epoch: start, end_epoch: start + 60, state, sample_count: state === "sampled" ? 12 : state === "partial" ? 10 : 0, planned_samples: 12, has_recordings: true, observations: state === "sampled" ? [{ timestamp: start + 10, label: "person", confidence: 0.91 }] : [], sampled_timestamps: [], missing_timestamps: state === "partial" ? [start, start + 5] : [] } });
+  });
+  const base = process.env.LIVE_PREVIEW_URL || "http://127.0.0.1:5182/";
+  const previewIndex = await (await page.request.get(new URL("/api/cameras/driveway/recordings/day?start_epoch=0&end_epoch=1&source=main", base).href)).json();
+  const previewStart = Number((previewIndex.availability || previewIndex.recordings)[0].start_epoch);
+  assert.ok(Number.isFinite(previewStart), "The isolated preview must supply synthetic recording rows");
+  const target = new URL(`/timeline?camera=driveway&at=${previewStart + 120}`, base);
+  await page.goto(target.href);
+  const panel = page.getByRole("region", { name: "Recordings-first review" });
+  const analyze = panel.getByRole("button", { name: "Analyze this minute", exact: true });
+  await analyze.waitFor();
+  await page.waitForFunction(() => !document.querySelector(".recording-review-panel button")?.disabled);
+  assert.equal(posts.length, 0, "Opening the timeline must never schedule analysis");
+  assert.ok(indexes.some((url) => new URL(url).searchParams.get("review_only") === "true"));
+  assert.equal(await page.getByRole("group", { name: "Recording incident type" }).isVisible(), false);
+  await analyze.click();
+  await panel.getByText(/^Queued ·/).waitFor();
+  assert.equal(posts.length, 1);
+  assert.ok(await page.locator("video").count() > 0, "Review must not replace the player");
+  const reviewWindow = await panel.locator("header p").textContent();
+  const advancePlaybackMinute = async () => {
+    await page.waitForFunction(() => Array.from(document.querySelectorAll("video")).some((video) => Number.isFinite(video.duration) && !video.classList.contains("standby")));
+    await page.evaluate(() => {
+      const video = Array.from(document.querySelectorAll("video")).find((item) => Number.isFinite(item.duration) && !item.classList.contains("standby"));
+      video.currentTime += 65;
+      video.dispatchEvent(new Event("timeupdate", { bubbles: true }));
+    });
+    await page.waitForFunction(() => !Array.from(document.querySelectorAll(".recording-review-panel button")).find((button) => button.textContent === "Review current playback minute")?.disabled);
+  };
+  await advancePlaybackMinute();
+  assert.equal(await panel.locator("header p").textContent(), reviewWindow, "Playback crossing a minute keeps the requested review pinned");
+
+  await page.clock.fastForward(31000);
+  await page.waitForFunction(() => document.querySelector(".recording-review-panel")?.textContent.includes("Queued"));
+  await page.waitForTimeout(100);
+  assert.equal(posts.length, 2, "An explicitly requested active minute renews once");
+  assert.ok(postUrls.at(-1).searchParams.get("expected_request_id"), "Renewal is fenced to the admitted job");
+  const visibility = async (hidden) => page.evaluate((value) => {
+    Object.defineProperty(document, "hidden", { configurable: true, value });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, hidden);
+  await visibility(true);
+  await page.clock.fastForward(61000);
+  assert.equal(posts.length, 2, "Hiding the page stops renewal");
+  await visibility(false);
+  await panel.getByRole("button", { name: "Continue this review", exact: true }).waitFor();
+  await page.clock.fastForward(31000);
+  assert.equal(posts.length, 2, "Returning does not automatically resume analysis");
+  await panel.getByRole("button", { name: "Continue this review", exact: true }).click();
+  await panel.getByRole("button", { name: "Review in progress", exact: true }).waitFor();
+  assert.equal(posts.length, 3);
+  revision += 1;
+  await page.clock.fastForward(5000);
+  await analyze.waitFor();
+  await page.clock.fastForward(31000);
+  assert.equal(posts.length, 3, "Changed recording/model revision requires a fresh click");
+  await analyze.click();
+  await panel.getByRole("button", { name: "Review in progress", exact: true }).waitFor();
+  completed = true;
+  await page.clock.fastForward(5000);
+  await panel.getByRole("button", { name: /Around .*person/ }).waitFor();
+  const completedPostCount = posts.length;
+  await page.clock.fastForward(31000);
+  assert.equal(posts.length, completedPostCount, "Completed results must not renew");
+  await page.setViewportSize({ width: 390, height: 844 });
+  const bounds = await panel.boundingBox();
+  assert.ok(bounds.width <= 390 && bounds.height <= 844 * 0.4, "Review panel remains bounded on mobile");
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await panel.getByRole("button", { name: /Around .*person/ }).click();
+  assert.ok(await page.locator("video").count() > 0);
+
+  await page.reload();
+  await panel.getByRole("button", { name: /Around .*person/ }).waitFor();
+  assert.equal(posts.length, completedPostCount, "Reopening saved results must be read-only");
+  fail = true;
+  await page.clock.fastForward(5000);
+  await panel.getByRole("alert").waitFor();
+  assert.match(await panel.textContent(), /playback is unaffected/);
+  assert.ok(await page.locator("video").count() > 0);
+  fail = false;
+  completed = false;
+  await page.getByRole("group", { name: "Recording stream" }).getByRole("button", { name: "Sub", exact: true }).first().click();
+  await analyze.waitFor();
+  assert.equal(posts.length, completedPostCount, "Changing source is read-only");
+  await analyze.click();
+  await panel.getByText(/^Queued ·/).waitFor();
+  terminalState = "partial";
+  await page.clock.fastForward(5000);
+  await panel.getByText(/^Partial review ·/).waitFor();
+  await panel.getByText(/does not rule out activity between samples/).waitFor();
+  const beforeRetry = posts.length;
+  await page.clock.fastForward(31000);
+  assert.equal(posts.length, beforeRetry, "Partial review must not retry automatically");
+  await panel.getByRole("button", { name: "Retry sampled review", exact: true }).click();
+  await panel.getByText(/^Queued ·/).waitFor();
+  assert.equal(postUrls.at(-1).searchParams.get("retry"), "true");
+  assert.equal(postUrls.at(-1).searchParams.has("expected_request_id"), false);
+  await advancePlaybackMinute();
+  const beforeSwitch = posts.length;
+  await panel.getByRole("button", { name: "Review current playback minute", exact: true }).click();
+  await analyze.waitFor();
+  await page.clock.fastForward(31000);
+  assert.equal(posts.length, beforeSwitch, "Switching the review minute stops the previous renewal without starting new work");
+  await analyze.click();
+  await panel.getByText(/^Queued ·/).waitFor();
+  const beforeUnmount = posts.length;
+  await page.goto(base);
+  await page.clock.fastForward(61000);
+  assert.equal(posts.length, beforeUnmount, "Leaving the timeline stops active-job renewal");
+  enabled = false;
+  await page.goto(target.href);
+  await page.locator("video").first().waitFor({ state: "attached" });
+  assert.equal(await panel.count(), 0);
+  assert.deepEqual(errors, []);
+  console.log("recording review browser: explicit admission, cache, fenced renewal, hide/return, revision/source change, unmount, playback isolation, errors and disabled mode passed");
+} finally {
+  await browser.close();
+}
