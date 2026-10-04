@@ -10,7 +10,7 @@ import itertools
 import multiprocessing
 import time
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
@@ -107,6 +107,29 @@ class SemanticQueryPlan:
     @property
     def composed(self) -> bool:
         return bool(self.required)
+
+
+@dataclass
+class _SemanticVectorCache:
+    """Exact vectors for one model generation plus a bounded live delta."""
+
+    generation: str
+    dimensions: int
+    row_ids: np.ndarray
+    vectors: np.ndarray
+    positions: dict[int, int]
+    signature: tuple[int, int, str]
+    expected_signature: tuple[int, int, str]
+    built_monotonic: float
+    overrides: dict[int, np.ndarray] = field(default_factory=dict)
+    dirty_event_ids: set[int] = field(default_factory=set)
+    force_rebuild: bool = False
+
+    @property
+    def bytes(self) -> int:
+        return int(self.row_ids.nbytes + self.vectors.nbytes) + sum(
+            int(vector.nbytes) for vector in self.overrides.values()
+        )
 
 
 SEMANTIC_COLORS = (
@@ -296,7 +319,11 @@ class SemanticIndex:
     generations remain isolated so incompatible vectors are never compared.
     """
 
-    MAX_CANDIDATE_ROWS = 50_000
+    VECTOR_CACHE_MAX_BYTES = 512 * 1024 * 1024
+    VECTOR_CACHE_MAX_DELTA_ROWS = 4_096
+    VECTOR_CACHE_MAX_AGE_SECONDS = 6 * 60 * 60.0
+    VECTOR_CACHE_RETRY_SECONDS = 5 * 60.0
+    VECTOR_LOAD_BATCH_ROWS = 2_000
 
     @staticmethod
     def _event_matches(connection: sqlite3.Connection, event: dict[str, Any]) -> bool:
@@ -324,6 +351,10 @@ class SemanticIndex:
         self.database_path = Path(database_path)
         self._lock = threading.Lock()
         self._database_write_lock = database_write_lock or threading.RLock()
+        self._cache_lock = threading.RLock()
+        self._vector_cache: _SemanticVectorCache | None = None
+        self._vector_cache_disabled_until = 0.0
+        self._vector_cache_error = ""
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -487,6 +518,9 @@ class SemanticIndex:
                 int(record.evidence_revision),
                 str(record.observation_id),
             ))
+        mutation_event_ids = {int(record.event_id) for record in records}
+        if expected_event is not None:
+            mutation_event_ids.add(int(expected_event["id"]))
         with self._lock, self._connect() as connection:
             connection.execute("begin immediate")
             if expected_event is not None:
@@ -546,6 +580,7 @@ class SemanticIndex:
                      int(expected_event.get("evidence_revision") or 0), str(expected_event.get("snapshot_path") or ""),
                      projection_receipt["plan_key"], json.dumps(projection_receipt)),
                 )
+        self._record_cache_mutation(identity, mutation_event_ids)
         return len(prepared)
 
     def projection_receipt(self, event: dict[str, Any], identity: SemanticModelIdentity, plan_key: str):
@@ -558,6 +593,215 @@ class SemanticIndex:
                  int(event.get("evidence_revision") or 0), str(event.get("snapshot_path") or ""), plan_key),
             ).fetchone()
         return json.loads(row[0]) if row else None
+
+    @staticmethod
+    def _generation_signature(
+        connection: sqlite3.Connection,
+        identity: SemanticModelIdentity,
+    ) -> tuple[int, int, str]:
+        row = connection.execute(
+            """
+            select count(*) as row_count, coalesce(max(id), 0) as maximum_id,
+                coalesce(max(created_at), '') as newest_write
+            from semantic_embeddings
+            where model_fingerprint = ? and preprocessing_fingerprint = ?
+            """,
+            (identity.model_fingerprint, identity.preprocessing_fingerprint),
+        ).fetchone()
+        return (
+            int(row["row_count"] if row else 0),
+            int(row["maximum_id"] if row else 0),
+            str(row["newest_write"] if row else ""),
+        )
+
+    def _record_cache_mutation(
+        self,
+        identity: SemanticModelIdentity | None,
+        event_ids: Iterable[int] = (),
+        *,
+        force_rebuild: bool = False,
+    ) -> None:
+        """Publish an in-process semantic write to an already-loaded cache."""
+        with self._cache_lock:
+            cache = self._vector_cache
+            if cache is None or (identity is not None and cache.generation != identity.generation):
+                return
+        if identity is None:
+            with self._cache_lock:
+                if self._vector_cache is cache:
+                    cache.force_rebuild = True
+            return
+        with self._connect() as connection:
+            signature = self._generation_signature(connection, identity)
+        with self._cache_lock:
+            if self._vector_cache is not cache:
+                return
+            cache.expected_signature = signature
+            cache.dirty_event_ids.update(
+                int(event_id) for event_id in event_ids if int(event_id) > 0
+            )
+            cache.force_rebuild = cache.force_rebuild or force_rebuild
+
+    def _build_vector_cache_locked(
+        self,
+        connection: sqlite3.Connection,
+        identity: SemanticModelIdentity,
+        signature: tuple[int, int, str],
+    ) -> _SemanticVectorCache:
+        row_count = signature[0]
+        vector_bytes = row_count * identity.dimensions * np.dtype(np.float32).itemsize
+        id_bytes = row_count * np.dtype(np.int64).itemsize
+        if vector_bytes + id_bytes > self.VECTOR_CACHE_MAX_BYTES:
+            raise MemoryError(
+                "semantic generation exceeds the exact vector cache memory budget"
+            )
+        row_ids = np.empty(row_count, dtype=np.int64)
+        vectors = np.empty((row_count, identity.dimensions), dtype=np.float32)
+        cursor = connection.execute(
+            """
+            select id, embedding_size, embedding_blob
+            from semantic_embeddings
+            where model_fingerprint = ? and preprocessing_fingerprint = ?
+            order by id
+            """,
+            (identity.model_fingerprint, identity.preprocessing_fingerprint),
+        )
+        used = 0
+        while True:
+            batch = cursor.fetchmany(self.VECTOR_LOAD_BATCH_ROWS)
+            if not batch:
+                break
+            for row in batch:
+                size = int(row["embedding_size"] or 0)
+                raw = row["embedding_blob"]
+                if (
+                    size != identity.dimensions
+                    or not isinstance(raw, bytes)
+                    or len(raw) != size * 2
+                ):
+                    continue
+                vector = np.frombuffer(raw, dtype=np.float16).astype(np.float32)
+                if not np.all(np.isfinite(vector)):
+                    continue
+                row_ids[used] = int(row["id"])
+                vectors[used] = vector
+                used += 1
+        if used != row_count:
+            row_ids = np.ascontiguousarray(row_ids[:used])
+            vectors = np.ascontiguousarray(vectors[:used])
+        positions = {int(row_id): index for index, row_id in enumerate(row_ids)}
+        cache = _SemanticVectorCache(
+            generation=identity.generation,
+            dimensions=identity.dimensions,
+            row_ids=row_ids,
+            vectors=vectors,
+            positions=positions,
+            signature=signature,
+            expected_signature=signature,
+            built_monotonic=time.monotonic(),
+        )
+        self._vector_cache = cache
+        self._vector_cache_error = ""
+        return cache
+
+    def _refresh_cache_events_locked(
+        self,
+        connection: sqlite3.Connection,
+        cache: _SemanticVectorCache,
+        identity: SemanticModelIdentity,
+    ) -> None:
+        event_ids = sorted(cache.dirty_event_ids)
+        cache.dirty_event_ids.clear()
+        for offset in range(0, len(event_ids), 250):
+            chunk = event_ids[offset:offset + 250]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = connection.execute(
+                "select id,embedding_size,embedding_blob from semantic_embeddings "
+                f"where event_id in ({placeholders}) and model_fingerprint=? "
+                "and preprocessing_fingerprint=?",
+                (*chunk, identity.model_fingerprint, identity.preprocessing_fingerprint),
+            ).fetchall()
+            for row in rows:
+                size = int(row["embedding_size"] or 0)
+                raw = row["embedding_blob"]
+                if (
+                    size != identity.dimensions
+                    or not isinstance(raw, bytes)
+                    or len(raw) != size * 2
+                ):
+                    continue
+                vector = np.frombuffer(raw, dtype=np.float16).astype(np.float32)
+                if np.all(np.isfinite(vector)):
+                    cache.overrides[int(row["id"])] = vector
+
+    def _vector_cache_locked(
+        self,
+        connection: sqlite3.Connection,
+        identity: SemanticModelIdentity,
+    ) -> _SemanticVectorCache | None:
+        now = time.monotonic()
+        if now < self._vector_cache_disabled_until:
+            return None
+        signature = self._generation_signature(connection, identity)
+        cache = self._vector_cache
+        rebuild = bool(
+            cache is None
+            or cache.generation != identity.generation
+            or cache.dimensions != identity.dimensions
+            or cache.force_rebuild
+            or signature != cache.expected_signature
+            or now - cache.built_monotonic >= self.VECTOR_CACHE_MAX_AGE_SECONDS
+        )
+        try:
+            if rebuild:
+                cache = self._build_vector_cache_locked(connection, identity, signature)
+            else:
+                if cache.dirty_event_ids:
+                    self._refresh_cache_events_locked(connection, cache, identity)
+                cache.signature = signature
+                cache.expected_signature = signature
+                if len(cache.overrides) > self.VECTOR_CACHE_MAX_DELTA_ROWS:
+                    cache = self._build_vector_cache_locked(connection, identity, signature)
+        except (MemoryError, sqlite3.Error) as exc:
+            self._vector_cache = None
+            self._vector_cache_error = str(exc)
+            self._vector_cache_disabled_until = now + self.VECTOR_CACHE_RETRY_SECONDS
+            LOGGER.warning(
+                "semantic exact vector cache unavailable; using chunked full scan: %s",
+                exc,
+            )
+            return None
+        return cache
+
+    def warm_search_cache(self, identity: SemanticModelIdentity) -> None:
+        """Load the complete active generation without delaying application startup."""
+        with self._cache_lock, self._connect() as connection:
+            connection.execute("begin")
+            self._vector_cache_locked(connection, identity)
+
+    def search_cache_status(
+        self, identity: SemanticModelIdentity | None = None
+    ) -> dict[str, Any]:
+        with self._cache_lock:
+            cache = self._vector_cache
+            matching = bool(
+                cache is not None
+                and (identity is None or cache.generation == identity.generation)
+            )
+            return {
+                "mode": "exact_full_generation",
+                "state": (
+                    "ready" if matching
+                    else "fallback" if time.monotonic() < self._vector_cache_disabled_until
+                    else "cold"
+                ),
+                "generation": cache.generation if matching and cache else "",
+                "rows": len(cache.row_ids) if matching and cache else 0,
+                "delta_rows": len(cache.overrides) if matching and cache else 0,
+                "bytes": cache.bytes if matching and cache else 0,
+                "error": self._vector_cache_error,
+                "candidate_cap": None,
+            }
 
     def search(
         self,
@@ -619,8 +863,8 @@ class SemanticIndex:
         if end_at:
             clauses.append("captured_at <= ?")
             parameters.append(str(end_at))
-        parameters.append(self.MAX_CANDIDATE_ROWS)
-        with self._connect() as connection:
+        with self._cache_lock, self._connect() as connection:
+            connection.execute("begin")
             columns = {row[1] for row in connection.execute("pragma table_info(events)")}
             has_scene_observations = connection.execute(
                 "select 1 from sqlite_master where type='table' and name='scene_observations'"
@@ -649,31 +893,151 @@ class SemanticIndex:
                 retained = ("(observation_id<>'' and exists(select 1 from scene_observations o "
                             "where o.id=semantic_embeddings.observation_id and o.snapshot_path=semantic_embeddings.image_path))")
                 clauses.append(f"({current} or {retained})" if has_scene_observations else current)
-            rows = connection.execute(
-                f"""
-                select id, event_id, camera_id, captured_at, source_kind,
-                    source_key, image_path, bbox_json, embedding_size,
-                    embedding_blob, observation_id,
-                    {effective_label} as search_object_label
-                from semantic_embeddings
-                where {' and '.join(clauses)}
-                order by captured_at desc, id desc
-                limit ?
-                """,
-                parameters,
-            ).fetchall()
-        candidates: list[tuple[sqlite3.Row, np.ndarray]] = []
-        for row in rows:
-            size = int(row["embedding_size"] or 0)
-            raw = row["embedding_blob"]
-            if size != identity.dimensions or not isinstance(raw, bytes) or len(raw) != size * 2:
-                continue
-            vector = np.frombuffer(raw, dtype=np.float16).astype(np.float32)
-            if np.all(np.isfinite(vector)):
-                candidates.append((row, vector))
+            selected_columns = (
+                "id,event_id,camera_id,captured_at,source_kind,source_key,"
+                "image_path,bbox_json,observation_id,"
+                f"{effective_label} as search_object_label"
+            )
+            where = " and ".join(clauses)
+            cache = self._vector_cache_locked(connection, identity)
+            candidates: list[sqlite3.Row | dict[str, Any]] = []
+            if cache is not None:
+                base_components = cache.vectors @ query.T
+                extra_ids: list[int] = []
+                extra_components: list[np.ndarray] = []
+                for row_id, override in cache.overrides.items():
+                    components = override @ query.T
+                    position = cache.positions.get(row_id)
+                    if position is None:
+                        extra_ids.append(row_id)
+                        extra_components.append(components)
+                    else:
+                        base_components[position] = components
+                scored_ids = cache.row_ids
+                all_components = base_components
+                if extra_ids:
+                    scored_ids = np.concatenate((
+                        scored_ids, np.asarray(extra_ids, dtype=np.int64),
+                    ))
+                    all_components = np.concatenate((
+                        all_components, np.stack(extra_components),
+                    ))
+                scored_positions = {
+                    **cache.positions,
+                    **{
+                        row_id: len(cache.row_ids) + index
+                        for index, row_id in enumerate(extra_ids)
+                    },
+                }
+                if plan.composed:
+                    rows = connection.execute(
+                        f"select {selected_columns} from semantic_embeddings "
+                        f"where {where} order by captured_at desc,id desc",
+                        parameters,
+                    ).fetchall()
+                    component_matrix = np.empty(
+                        (len(rows), len(component_names)), dtype=np.float32
+                    )
+                    for row in rows:
+                        position = scored_positions.get(int(row["id"]))
+                        if position is None:
+                            continue
+                        component_matrix[len(candidates)] = all_components[position]
+                        candidates.append(row)
+                    component_matrix = component_matrix[:len(candidates)]
+                else:
+                    # Score every retained-generation vector first, then ask
+                    # SQLite to validate ranked IDs in batches. This proves the
+                    # exact top-k without transferring metadata for the whole
+                    # generation on the common single-vector query path.
+                    scores = all_components[:, component_names.index("full")]
+                    ranked_positions = np.argsort(scores)[::-1]
+                    selected_components: list[np.ndarray] = []
+                    selected_event_ids: set[int] = set()
+                    target = max(1, int(limit))
+                    available = 0
+                    for offset in range(0, len(ranked_positions), self.VECTOR_LOAD_BATCH_ROWS):
+                        positions = ranked_positions[
+                            offset:offset + self.VECTOR_LOAD_BATCH_ROWS
+                        ]
+                        if len(positions) == 0 or float(scores[positions[0]]) < minimum_score:
+                            break
+                        positions = positions[scores[positions] >= minimum_score]
+                        if len(positions) == 0:
+                            break
+                        ids = [int(scored_ids[position]) for position in positions]
+                        placeholders = ",".join("?" for _ in ids)
+                        rows = connection.execute(
+                            f"select {selected_columns} from semantic_embeddings "
+                            f"where {where} and id in ({placeholders})",
+                            (*parameters, *ids),
+                        ).fetchall()
+                        rows_by_id = {int(row["id"]): row for row in rows}
+                        for position, row_id in zip(positions, ids, strict=True):
+                            row = rows_by_id.get(row_id)
+                            if row is None:
+                                continue
+                            candidates.append(row)
+                            selected_components.append(all_components[position])
+                            selected_event_ids.add(int(row["event_id"]))
+                            available = (
+                                len(selected_event_ids) if unique_events
+                                else len(candidates)
+                            )
+                            if available >= target:
+                                break
+                        if available >= target:
+                            break
+                    component_matrix = (
+                        np.stack(selected_components)
+                        if selected_components
+                        else np.empty((0, len(component_names)), dtype=np.float32)
+                    )
+            else:
+                cursor = connection.execute(
+                    f"select {selected_columns},embedding_size,embedding_blob "
+                    f"from semantic_embeddings where {where} "
+                    "order by captured_at desc,id desc",
+                    parameters,
+                )
+                component_batches: list[np.ndarray] = []
+                while True:
+                    batch = cursor.fetchmany(self.VECTOR_LOAD_BATCH_ROWS)
+                    if not batch:
+                        break
+                    vectors: list[np.ndarray] = []
+                    metadata: list[dict[str, Any]] = []
+                    for row in batch:
+                        size = int(row["embedding_size"] or 0)
+                        raw = row["embedding_blob"]
+                        if (
+                            size != identity.dimensions
+                            or not isinstance(raw, bytes)
+                            or len(raw) != size * 2
+                        ):
+                            continue
+                        vector = np.frombuffer(raw, dtype=np.float16).astype(np.float32)
+                        if not np.all(np.isfinite(vector)):
+                            continue
+                        vectors.append(vector)
+                        metadata.append({
+                            key: row[key]
+                            for key in (
+                                "id", "event_id", "camera_id", "captured_at",
+                                "source_kind", "source_key", "image_path",
+                                "bbox_json", "observation_id", "search_object_label",
+                            )
+                        })
+                    if vectors:
+                        component_batches.append(np.stack(vectors) @ query.T)
+                        candidates.extend(metadata)
+                component_matrix = (
+                    np.concatenate(component_batches)
+                    if component_batches
+                    else np.empty((0, len(component_names)), dtype=np.float32)
+                )
         if not candidates:
             return []
-        component_matrix = np.stack([item[1] for item in candidates]) @ query.T
         component_indexes = {name: index for index, name in enumerate(component_names)}
         full_scores = component_matrix[:, component_indexes["full"]]
         if plan.composed:
@@ -713,7 +1077,7 @@ class SemanticIndex:
             score = float(full_scores[candidate_index])
             if score < minimum_score:
                 continue
-            row = candidates[int(candidate_index)][0]
+            row = candidates[int(candidate_index)]
             event_id = int(row["event_id"])
             if unique_events and event_id in seen_event_ids:
                 continue
@@ -814,7 +1178,10 @@ class SemanticIndex:
                     source.preprocessing_fingerprint,
                 ),
             )
-            return connection.total_changes - before
+            written = connection.total_changes - before
+        if written:
+            self._record_cache_mutation(target, force_rebuild=True)
+        return written
 
     def event_indexed(self, event_id: int, identity: SemanticModelIdentity) -> bool:
         with self._connect() as connection:
@@ -888,7 +1255,10 @@ class SemanticIndex:
                     str(source_kind),
                 ),
             )
-        return max(0, int(cursor.rowcount or 0))
+        deleted = max(0, int(cursor.rowcount or 0))
+        if deleted:
+            self._record_cache_mutation(identity, force_rebuild=True)
+        return deleted
 
     def delete_event(self, event_id: int, *, expected_event: dict[str, Any] | None = None) -> int:
         """Remove semantic evidence for an event that is not object-searchable."""
@@ -902,7 +1272,10 @@ class SemanticIndex:
                 (int(event_id),),
             )
             connection.execute("delete from semantic_projection_receipts where event_id=?", (int(event_id),))
-        return max(0, int(cursor.rowcount or 0))
+        deleted = max(0, int(cursor.rowcount or 0))
+        if deleted:
+            self._record_cache_mutation(None, force_rebuild=True)
+        return deleted
 
     def observation_indexed(self, observation: dict[str, Any], identity: SemanticModelIdentity) -> bool:
         with self._connect() as connection:
@@ -948,6 +1321,8 @@ class SemanticIndex:
             connection.executemany(
                 "delete from semantic_embeddings where id=?", ((row_id,) for row_id in retired),
             )
+        if retired:
+            self._record_cache_mutation(identity, [event_id])
         return len(retired)
 
     def indexed_event_ids(self) -> set[int]:
@@ -2008,6 +2383,8 @@ class SemanticSearchService(DisabledSemanticSearch):
                 self._retry_quarantined_media(event_store)
                 self._backfill(event_store)
                 encoder = self.encoder
+                if encoder is not None:
+                    self.index.warm_search_cache(encoder.identity)
                 if encoder is None or not self.index.has_media_failures(encoder.identity):
                     return
                 if self._stop.wait(SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS):
@@ -2744,6 +3121,7 @@ class SemanticSearchService(DisabledSemanticSearch):
             "queue_depth": self._queue.qsize(), "indexed_since_start": self._indexed,
             "skipped_missing_since_start": self._skipped_missing,
             "worker_pid": getattr(self.encoder, "worker_pid", None),
+            "search_cache": self.index.search_cache_status(identity),
             **self.index.coverage(identity),
         }
 
