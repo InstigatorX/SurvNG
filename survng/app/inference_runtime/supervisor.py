@@ -909,6 +909,8 @@ class InferenceSupervisor:
             self._leave_device_workload(workload)
 
     def embed(self, face: np.ndarray) -> np.ndarray:
+        if not self.config.face_recognition_enabled:
+            raise InferenceUnavailable("Face recognition is disabled.")
         workload = InferenceWorkload.ENRICHMENT
         if not self._enter_device_workload(workload):
             raise InferenceUnavailable("face embedding shed for incident inference")

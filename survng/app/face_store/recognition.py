@@ -67,7 +67,11 @@ class FaceStoreRecognitionMixin:
         }
 
     def _queue_recognition(self, observation_id: int) -> None:
-        if self.recognizer is None or self._recognition_stop.is_set():
+        if (
+            self.recognizer is None
+            or not self.recognizer.enabled
+            or self._recognition_stop.is_set()
+        ):
             return
         observation_id = int(observation_id)
         with self._recognition_pending_lock:
@@ -325,7 +329,7 @@ class FaceStoreRecognitionMixin:
 
     def _recognize_observation(self, observation_id: int) -> bool:
         recognizer = self.recognizer
-        if recognizer is None:
+        if recognizer is None or not recognizer.enabled:
             return False
         recognizer_status = recognizer.status()
         if not recognizer_status.get("ready"):

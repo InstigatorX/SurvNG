@@ -2,10 +2,15 @@ export const PEOPLE_REVIEW_FILTERS = Object.freeze({
   unknown: "Needs review",
   suggested: "Suggestions",
   known: "Confirmed",
-  pending: "Processing",
+  pending: "Pending",
   unusable: "Unusable",
   all: "All",
 });
+
+export function peopleRecognitionLabel(status) {
+  if (status?.recognition?.enabled === false) return "Recognition disabled";
+  return status?.recognition_ready ? "Recognition ready" : "Needs attention";
+}
 
 export const PEOPLE_WORKSPACE_MODES = Object.freeze({
   visits: "Visits",

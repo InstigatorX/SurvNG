@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { nextFaceReviewObservation } from "../faceReview.mjs";
 import { createConditionalJsonClient } from "../conditionalJson.mjs";
-import { PEOPLE_REVIEW_FILTERS, PEOPLE_WORKSPACE_MODES, peopleObservationRequestPlan, peopleWorkspaceSearch, readPeopleWorkspaceQuery } from "../peopleWorkspace.mjs";
+import { PEOPLE_REVIEW_FILTERS, PEOPLE_WORKSPACE_MODES, peopleObservationRequestPlan, peopleRecognitionLabel, peopleWorkspaceSearch, readPeopleWorkspaceQuery } from "../peopleWorkspace.mjs";
 import { appUrl, recordingsHref, fetch } from "../shared/api.js";
 import { formatDateTime } from "../shared/format.js";
 import { isMobileViewport } from "../shared/hooks.js";
@@ -492,7 +492,7 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
         <div className="faces-command-status">
           <span><strong>{people.length}</strong> enrolled</span>
           <span><strong>{modeCount}</strong> {modeCountLabel}</span>
-          <span className={status?.recognition_ready ? "healthy" : "caution"}><i />{status?.recognition_ready ? "Recognition ready" : "Needs attention"}</span>
+          <span className={status?.recognition_ready ? "healthy" : "caution"}><i />{peopleRecognitionLabel(status)}</span>
         </div>
       </header>
       <nav className="people-mode-tabs" aria-label="People workspace mode">
