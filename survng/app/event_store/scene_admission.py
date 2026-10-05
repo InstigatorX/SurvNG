@@ -139,6 +139,10 @@ class EventStoreSceneAdmissionMixin:
             notice = None
             if not qualification.get("scene_discovery") and not qualification.get("scene_confirmation"):
                 notice = {"source": "camera" if qualification.get("trigger_source", "camera") == "camera" else "motion", "epoch": at}
+                if isinstance(qualification.get("notice_activity_policy"), dict):
+                    notice["activity_policy"] = qualification["notice_activity_policy"]
+                    notice["features"] = qualification.get("features") or {}
+
             memory = None
             if callable(getattr(type(self), "scene_context_snapshot", None)):
                 memory = self.scene_context_snapshot(conn, str(row.get("camera_id") or ""))

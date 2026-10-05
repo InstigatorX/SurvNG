@@ -713,6 +713,82 @@ def _refinement_early_exit_ready(
     return all(offset in samples_by_offset for offset in core_offsets)
 
 
+def _temporal_trigger_evidence(track, samples) -> dict[str, Any]:
+    """Use the same arrival and zone-entry evidence for scenes and alerts."""
+    evidence = {}
+    observation_indices = sorted(track.observations)
+    if observation_indices:
+        peak_observation_index = max(
+            (
+                index
+                for index, item in track.observations.items()
+                if str(item.get("label") or "").strip() == track.winning_label
+            ),
+            key=lambda index: _confidence(track.observations[index]),
+        )
+        evidence["temporal_peak_confidence_offset_seconds"] = samples[
+            peak_observation_index
+        ].offset
+        first_observation_index = observation_indices[0]
+        last_observation_index = observation_indices[-1]
+        evidence["temporal_first_observation_offset_seconds"] = samples[
+            first_observation_index
+        ].offset
+        evidence["temporal_last_observation_offset_seconds"] = samples[
+            last_observation_index
+        ].offset
+        evidence["temporal_newly_appeared"] = first_observation_index > 0
+        pretrigger_indices = [
+            index
+            for index in observation_indices
+            if samples[index].offset < 0.0
+        ]
+        posttrigger_indices = [
+            index
+            for index in observation_indices
+            if samples[index].offset >= 0.0
+        ]
+        pretrigger_sample_count = sum(sample.offset < 0.0 for sample in samples)
+        same_label_seen_pretrigger = any(
+            str(candidate.get("label") or "").strip() == track.winning_label
+            for sample in samples
+            if sample.offset < 0.0
+            for candidate in sample.objects
+            if _candidate_detection(candidate)
+        )
+        evidence["temporal_pretrigger_observations"] = len(pretrigger_indices)
+        evidence["temporal_posttrigger_observations"] = len(posttrigger_indices)
+        evidence["temporal_pretrigger_samples"] = pretrigger_sample_count
+        evidence["temporal_same_label_seen_pretrigger"] = same_label_seen_pretrigger
+        evidence["temporal_robust_new_appearance"] = bool(
+            not pretrigger_indices
+            and pretrigger_sample_count >= 2
+            and len(posttrigger_indices) >= 2
+            and not same_label_seen_pretrigger
+        )
+        first_zones = set(
+            str(value)
+            for value in (
+                track.observations[first_observation_index].get("spatial_zones")
+                or track.observations[first_observation_index].get("zones")
+                or []
+            )
+            if str(value)
+        )
+        later_zones = {
+            str(value)
+            for index in observation_indices[1:]
+            for value in (
+                track.observations[index].get("spatial_zones")
+                or track.observations[index].get("zones")
+                or []
+            )
+            if str(value)
+        }
+        evidence["temporal_zone_entry"] = bool(later_zones - first_zones)
+    return evidence
+
+
 def _temporal_consensus(
     samples: list[_RecordedDetectionSample],
     minimum_confirmations: int,
@@ -983,76 +1059,7 @@ def _temporal_consensus(
             "snapshot_edge_clearance_ratio": round(edge_clearance, 5),
             "snapshot_subject_area_ratio": round(subject_area, 5),
         }
-        observation_indices = sorted(track.observations)
-        if observation_indices:
-            peak_observation_index = max(
-                (
-                    index
-                    for index, item in track.observations.items()
-                    if str(item.get("label") or "").strip() == track.winning_label
-                ),
-                key=lambda index: _confidence(track.observations[index]),
-            )
-            enriched["temporal_peak_confidence_offset_seconds"] = samples[
-                peak_observation_index
-            ].offset
-            first_observation_index = observation_indices[0]
-            last_observation_index = observation_indices[-1]
-            enriched["temporal_first_observation_offset_seconds"] = samples[
-                first_observation_index
-            ].offset
-            enriched["temporal_last_observation_offset_seconds"] = samples[
-                last_observation_index
-            ].offset
-            enriched["temporal_newly_appeared"] = first_observation_index > 0
-            pretrigger_indices = [
-                index
-                for index in observation_indices
-                if samples[index].offset < 0.0
-            ]
-            posttrigger_indices = [
-                index
-                for index in observation_indices
-                if samples[index].offset >= 0.0
-            ]
-            pretrigger_sample_count = sum(sample.offset < 0.0 for sample in samples)
-            same_label_seen_pretrigger = any(
-                str(candidate.get("label") or "").strip() == track.winning_label
-                for sample in samples
-                if sample.offset < 0.0
-                for candidate in sample.objects
-                if _candidate_detection(candidate)
-            )
-            enriched["temporal_pretrigger_observations"] = len(pretrigger_indices)
-            enriched["temporal_posttrigger_observations"] = len(posttrigger_indices)
-            enriched["temporal_pretrigger_samples"] = pretrigger_sample_count
-            enriched["temporal_same_label_seen_pretrigger"] = same_label_seen_pretrigger
-            enriched["temporal_robust_new_appearance"] = bool(
-                not pretrigger_indices
-                and pretrigger_sample_count >= 2
-                and len(posttrigger_indices) >= 2
-                and not same_label_seen_pretrigger
-            )
-            first_zones = set(
-                str(value)
-                for value in (
-                    track.observations[first_observation_index].get("spatial_zones")
-                    or track.observations[first_observation_index].get("zones")
-                    or []
-                )
-                if str(value)
-            )
-            later_zones = {
-                str(value)
-                for index in observation_indices[1:]
-                for value in (
-                    track.observations[index].get("spatial_zones")
-                    or track.observations[index].get("zones")
-                    or []
-                )
-                if str(value)
-            }
-            enriched["temporal_zone_entry"] = bool(later_zones - first_zones)
+        enriched.update(_temporal_trigger_evidence(track, samples))
         motion = motion_by_track.get(id(track))
         if motion is None:
             motion = _temporal_motion_metrics(track, samples)
@@ -2442,6 +2449,7 @@ class RecordedMotionObjectDetector:
         observations: list[dict[str, Any]] = []
         for track in _collect_temporal_evidence(samples):
             motion = _temporal_motion_metrics(track, samples)
+            trigger_evidence = _temporal_trigger_evidence(track, samples)
             first_index = min(track.observations)
             first = scene_observation(
                 track.observations[first_index],
@@ -2465,10 +2473,7 @@ class RecordedMotionObjectDetector:
                     observation["temporal_center_path_ratio"] = round(motion.raw_path_ratio, 5)
                     observation["temporal_track_observations"] = motion.samples
                     observation["temporal_consensus"] = motion.samples >= 2
-                    observation["temporal_pretrigger_observations"] = 1 if motion.samples >= 2 else 0
-                    observation["temporal_posttrigger_observations"] = 1 if motion.samples >= 2 else 0
-                    observation["temporal_robust_new_appearance"] = False
-                    observation.setdefault("temporal_zone_entry", False)
+                    observation.update(trigger_evidence)
                     observation["snapshot_visible"] = sample is selected
                     observations.append(observation)
         # Dedicated face enrichment runs only after consensus. Collect

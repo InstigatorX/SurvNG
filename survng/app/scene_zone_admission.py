@@ -12,6 +12,7 @@ import math
 from typing import Any
 
 from .config import CameraConfig, DetectionZone
+from .motion_correlation import assess_motion_objects
 from .scene_activity import _number, evaluate_scene_activity
 from .scene_context_memory import normalized_box
 from .stationary_policy import stationary_object_policy
@@ -408,6 +409,40 @@ def _assign_known_stationary_roles(
                 payload["activity_role"] = "scene_context"
 
 
+def _notice_activity_assessment(samples, notice):
+    """Replay the alert path's physical assessment, never its notification rules.
+
+    Raw scene observations precede alert filtering. Their presence or stale
+    incident_eligible flag cannot override a required motion assessment.
+    Older notices retain their recorded policy when no snapshot is available.
+    """
+    policy = (notice or {}).get("activity_policy")
+    if not isinstance(policy, dict) or not policy.get("require_motion_correlation"):
+        return None
+    objects = []
+    noticed = _number(notice.get("epoch"))
+    complete = [sample for sample in samples if isinstance(sample, dict) and sample.get("status") == "complete"]
+    for identifier, observation, width, height in _iter_observations(complete):
+        payload = dict(observation.get("payload", observation))
+        captured = _number(payload.get("captured_at_epoch", payload.get("frame_captured_at_epoch")))
+        if not identifier or captured is None or noticed is None or abs(captured - noticed) > NOTICE_VERIFICATION_SECONDS:
+            continue
+        payload.update(id=identifier, detection_frame_width=width, detection_frame_height=height)
+        objects.append(payload)
+    admitted, diagnostics = assess_motion_objects(
+        objects, {"features": notice.get("features") or {}}, policy.get("alignment"),
+    )
+    return {
+        "version": 1,
+        "supporting_observation_ids": sorted({item["id"] for item in admitted}),
+        "observations": [{"observation_id": item["id"],
+                          "supported": item["motion_correlated"],
+                          "reason": item["motion_correlation"] if item["motion_correlated"] else "object_not_motion_correlated"}
+                         for item in objects],
+        "diagnostics": diagnostics,
+    }
+
+
 def evaluate_scene_establishment(
     samples,
     *,
@@ -421,8 +456,10 @@ def evaluate_scene_establishment(
 
     An unlocalized camera or motion notice is not spatial evidence. When ignore
     zones or required incident zones exist, that notice establishes activity
-    only if a retained box on the same camera is establishment-eligible.
-    Measured motion that names no observation cannot satisfy the same restriction.
+    only if retained evidence on the same camera is establishment-eligible.
+    A snapshotted motion-correlation requirement is shared with alert assessment;
+    a box's presence cannot satisfy it. Measured motion that names no observation
+    cannot satisfy a spatial restriction.
     """
     if isinstance(policy, dict) and "stationary_subject_presence" in policy and policy.get("object_activity_attribution") != "off":
         _assign_known_stationary_roles(
@@ -438,6 +475,7 @@ def evaluate_scene_establishment(
     if not isinstance(policy, dict):
         policy = None
     restricting = policy_restricts(policy)
+    notice_activity = _notice_activity_assessment(samples, notice)
     indexed = {}
     interpretations = []
     for identifier, observation, width, height in _iter_observations(samples):
@@ -472,7 +510,10 @@ def evaluate_scene_establishment(
             **(result.get("diagnostics") or {}),
             "stationary_scene_context_counterfactual": True,
         }
-    if not restricting:
+    if notice_activity is not None:
+        result["notice_activity"] = notice_activity
+        result["policy_version"] = "establishment_activity_v3"
+    if not restricting and (notice_activity is None or activity["status"] == "supported"):
         if notice and result.get("status") != "supported":
             source = "camera" if notice.get("source") == "camera" else "motion"
             result.update(
@@ -510,14 +551,28 @@ def evaluate_scene_establishment(
             evidence_kind=(activity.get("diagnostics") or {}).get("evidence_kind") or "video_verified_activity",
         )
         return result
+    if notice_activity is not None and not interpretations and activity["status"] in {"pending", "incomplete"}:
+        return result
     if activity.get("status") == "supported" or notice:
         considered = witness_interpretations or interpretations
         reason = _rejection_reason(considered)
-        # A notice may still be verified by an eligible box when physical
-        # measurement did not itself produce a witness. It cannot override a
-        # witness that was measured and found ineligible.
+        # A notice must satisfy its recorded activity policy as well as the
+        # zone policy. It cannot override an ineligible physical witness.
         if notice and activity.get("status") != "supported":
             eligible_ids = sorted(item["observation_id"] for item in interpretations if _admits_activity(item) and item["observation_id"])
+            if notice_activity is not None:
+                supporting = set(notice_activity["supporting_observation_ids"])
+                verified_ids = [identifier for identifier in eligible_ids if identifier in supporting]
+                if eligible_ids and not verified_ids:
+                    result.update(
+                        status=activity["status"] if activity["status"] in {"pending", "incomplete"} else "unsupported",
+                        reason="object_not_motion_correlated",
+                        summary="Detected objects did not explain the triggering motion; relevant activity remains unconfirmed.",
+                        activity_epoch=None, supporting_observation_ids=[], evidence_kind="none",
+                    )
+                    zone.update(establishment_eligible=False, reason="object_not_motion_correlated")
+                    return result
+                eligible_ids = verified_ids
             if eligible_ids:
                 epochs = []
                 noticed = _number(notice.get("epoch"))
@@ -528,14 +583,15 @@ def evaluate_scene_establishment(
                         captured = _number(payload.get("captured_at_epoch"))
                         if captured is not None and (noticed is None or captured <= noticed + NOTICE_VERIFICATION_SECONDS):
                             epochs.append(captured)
-                zone.update(establishment_eligible=True, reason="incident_zone")
+                zone_reason = "incident_zone" if any(indexed[key]["reason"] == "incident_zone" for key in eligible_ids) else "full_frame"
+                zone.update(establishment_eligible=True, reason=zone_reason)
                 result.update(
                     status="supported",
-                    reason="verified_camera_notice",
-                    summary=_zone_summary("incident_zone", established=True, notice=True),
+                    reason="verified_object_activity" if notice_activity is not None else "verified_camera_notice",
+                    summary="Object activity explained the triggering motion in an eligible zone." if notice_activity is not None else _zone_summary("incident_zone", established=True, notice=True),
                     activity_epoch=max(epochs) if epochs else notice.get("epoch"),
                     supporting_observation_ids=eligible_ids,
-                    evidence_kind="camera_reported",
+                    evidence_kind="motion_correlated_object" if notice_activity is not None else "camera_reported",
                 )
                 return result
         zone.update(establishment_eligible=False, reason=reason)
