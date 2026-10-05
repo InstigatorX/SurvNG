@@ -254,4 +254,3 @@ def assess_motion_objects(
         "alignment_mode": str(alignment.get("mode") or "legacy_identity"),
         "alignment_confidence": float(alignment.get("confidence", 1.0)),
     }
-
