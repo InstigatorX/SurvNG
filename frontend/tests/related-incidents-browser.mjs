@@ -19,11 +19,20 @@ try {
   page.setDefaultTimeout(10000);
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  const event = { id: 41, camera_id: "gate", created_at: "2026-10-03T12:00:00Z", labels: ["person"], objects: [{ label: "person", confidence: .8 }], snapshot_path: "cover.webp" };
+  const event = { id: 41, camera_id: "gate", created_at: "2026-10-03T12:00:00Z", labels: ["person"], objects: [{ label: "cat", snapshot_visible: false }, { label: "person", confidence: .8 }, { label: "dog", confidence: .7 }], snapshot_path: "cover.webp" };
   const incident = { ...event, id: "scene-1", incident_id: "scene-1", revision: 1, summary: "Person at Gate.", representative_event_id: 41, event_ids: [41], events: [event], has_objects: true, start_epoch: 1791028800, last_epoch: 1791028810, start_at: event.created_at, end_at: "2026-10-03T12:00:10Z", episodes: [{ id: "ep-1", camera_id: "gate", start_at: event.created_at, end_at: "2026-10-03T12:00:10Z", event_ids: [41] }] };
   let missing = false;
+  const visualRequests = [];
+  let visualOutcome = "results";
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/semantic-search/visual")) {
+      visualRequests.push(route.request().postDataJSON());
+      return route.fulfill({ status: visualOutcome === "error" ? 503 : 200, json: visualOutcome === "error"
+        ? { detail: "Visual search unavailable" }
+        : { results: visualOutcome === "empty" ? [] : [{ event: { ...event, id: 43 }, score: .8, match_strength: "visual_similarity" }] } });
+    }
+    if (path.endsWith("/appearance-matches")) return route.fulfill({ json: { matches: [] } });
     if (path.endsWith("/related-incidents")) return route.fulfill({ json: { matches: [42, 43, 44].map((id) => ({ event_id: id, camera_id: "gate", created_at: event.created_at, visually_similar: true })) } });
     if (path.includes("/incidents/by-event/")) return route.fulfill({ status: path.endsWith("/42") ? 200 : 404, json: { ...incident, id: "scene-2", representative_event_id: 42, events: [{ ...event, id: 42 }] } });
     if (path.endsWith("/events/43")) return route.fulfill({ json: { ...event, id: 43 } });
@@ -59,6 +68,27 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('.incident-related-grid button')[2]?.getAttribute('aria-pressed') === 'true');
   await related.getByRole("button", { name: "Selected incident", exact: true }).click();
   assert.equal(await related.locator('[aria-pressed="true"]').count(), 0);
+  // Explicit controls must work without snapshot annotation boxes, and use
+  // snapshot-visible object indexes rather than the raw detection array.
+  const actions = page.getByRole("group", { name: "Find similar objects" });
+  assert.equal(await actions.getByRole("button").count(), 2);
+  assert.equal(visualRequests.length, 0, "opening details must not start a search");
+  const similar = page.locator(".incident-visual-similar");
+  await actions.getByRole("button", { name: "Find similar: person (object 1)", exact: true }).click();
+  await similar.locator(".incident-visual-similar-card").waitFor();
+  assert.equal(visualRequests.at(-1).event_id, 41);
+  assert.equal(visualRequests.at(-1).object_index, 0);
+  await similar.getByRole("button", { name: "Clear", exact: true }).click();
+  await similar.waitFor({ state: "hidden" });
+  visualOutcome = "error";
+  await actions.getByRole("button", { name: "Find similar: dog (object 2)", exact: true }).click();
+  await similar.getByText("Visual search unavailable", { exact: true }).waitFor();
+  assert.equal(visualRequests.at(-1).event_id, 41);
+  assert.equal(visualRequests.at(-1).object_index, 1);
+  await similar.getByRole("button", { name: "Clear", exact: true }).click();
+  visualOutcome = "empty";
+  await actions.getByRole("button", { name: "Find similar: dog (object 2)", exact: true }).click();
+  await similar.getByText("No similar incidents in the indexes yet.", { exact: true }).waitFor();
   assert.deepEqual(errors, []);
-  console.log("Related selection: canonical, ungrouped event, missing evidence, retry and return passed");
+  console.log("Related selection and explicit Find similar: results, object indexes, clear, error and empty states passed");
 } finally { await browser.close(); await new Promise((resolve) => server.close(resolve)); }

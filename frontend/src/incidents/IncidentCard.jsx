@@ -965,6 +965,19 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
         {observedObjects.length ? <ul>{observedObjectSummaries(observedObjects).map((detection) => (
           <li key={detection.label}><span>{detection.label}</span><span>{Math.round(detection.confidence * 100)}%</span></li>
         ))}</ul> : <p>No object observations are available.</p>}
+        {onFindSimilar && searchableObjects.length ? <div className="incident-find-similar-actions" role="group" aria-label="Find similar objects">
+          {searchableObjects.map((object, index) => <button
+            type="button"
+            key={`${object.label}-${index}`}
+            aria-pressed={findSimilarActive && Number(findSimilarObjectIndex) === index}
+            onClick={() => onFindSimilar({
+              eventId: Number(findSimilarSourceEvent?.representative_event_id || findSimilarSourceEvent?.id),
+              objectIndex: index,
+              label: object.label,
+              trackId: resolveObjectTrackId(object, findSimilarSourceEvent),
+            })}
+          >Find similar: {object.label}{searchableObjects.length > 1 ? ` (object ${index + 1})` : ""}</button>)}
+        </div> : null}
       </section>
       <section className="incident-replay-analysis">
         <h3>Replay analysis</h3>

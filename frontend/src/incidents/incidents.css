@@ -438,6 +438,13 @@
   color: var(--muted);
 }
 
+.incident-find-similar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .incident-inspector-actions {
   border-top: 1px solid var(--line);
   background: var(--panel-soft);
