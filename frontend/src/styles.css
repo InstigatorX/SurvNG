@@ -4204,6 +4204,21 @@ button.live-overlay-backdrop:active {
   white-space: nowrap;
 }
 
+.incident-recording-source {
+  display: flex;
+  flex-shrink: 0;
+  margin-left: auto;
+  gap: 2px;
+}
+
+.incident-recording-source button { width: auto; padding: 0 7px; }
+.incident-recording-source button[aria-pressed="true"] { background: rgba(255, 255, 255, 0.2); }
+
+@media (max-width: 760px) {
+  .incident-recording-controls { flex-wrap: wrap; }
+  .incident-recording-controls input[type="range"] { flex-basis: 60px; }
+}
+
 .incident-recording-close {
   position: absolute;
   z-index: 9;
@@ -11203,6 +11218,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 .recording-hero-controls {
+  flex-wrap: wrap;
   bottom: 8px;
 }
 

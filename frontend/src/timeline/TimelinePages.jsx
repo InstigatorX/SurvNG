@@ -735,6 +735,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const originalFallbackRef = useRef(null);
   const [originalScope, setOriginalScope] = useState(null);
   const transcodeFallbackRef = useRef(null);
+  const failedSubScopeRef = useRef(null);
   const [transcodeScope, setTranscodeScope] = useState(null);
   const [nativeHls] = useState(supportsNativeRecordingHls);
   const [playbackTransport, setPlaybackTransport] = useState(null);
@@ -1693,12 +1694,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
         const nextAvailableSources = payload.available_sources || [];
         const nextAvailability = payload.availability || payload.recordings || [];
         setAvailableSources(nextAvailableSources);
-        if (!nextAvailability.length && source === "main" && nextAvailableSources.includes("live")) {
+        if (!nextAvailability.length && nextAvailableSources.includes(source === "main" ? "live" : "main")
+          && !(source === "main" && failedSubScopeRef.current === `${activeCameraId}:${dayStart}:${dayEnd}`)) {
           codecFallbackRef.current = true;
-          setPlaybackNotice(isAllCameras
-            ? "No Main recordings exist for this day; using Sub."
-            : "No Main recording exists for this day; using Sub.");
-          setSource("live");
+          setPlaybackNotice(`No ${source === "main" ? "Main" : "Sub"} recordings exist for this day; using ${source === "main" ? "Sub" : "Main"}.`);
+          setSource(source === "main" ? "live" : "main");
           return;
         }
         setRecordings(nextAvailability);
@@ -2305,6 +2305,12 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (!useTranscodedPlayback && transcodeFallbackRef.current === nativeScope) return;
     const detail = describePlaybackError(error);
     setHeroSeeking(true);
+    if (source === "live" && availableSources.includes("main") && isRecordingCompatibilityError(error)) {
+      failedSubScopeRef.current = `${activeCameraId}:${dayStart}:${dayEnd}`;
+      setPlaybackNotice("Sub is not supported by this browser; trying Main.");
+      setSource("main");
+      return;
+    }
     if (!useTranscodedPlayback && isRecordingCompatibilityError(error)) {
       const target = Number.isFinite(pendingSeekEpochRef.current)
         ? pendingSeekEpochRef.current : desiredEpochRef.current;
@@ -2329,7 +2335,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       return;
     }
     console.warn("Recording playback error", { camera: activeCameraId, source, detail, error });
-    if (useTranscodedPlayback && source === "main" && availableSources.includes("live") && !codecFallbackRef.current && isRecordingCompatibilityError(error)) {
+    if (useTranscodedPlayback && source === "main" && failedSubScopeRef.current !== `${activeCameraId}:${dayStart}:${dayEnd}` && availableSources.includes("live") && !codecFallbackRef.current && isRecordingCompatibilityError(error)) {
       codecFallbackRef.current = true;
       setPlaybackNotice(`Main stream is not supported by this browser; using Sub. (${detail})`);
       setSource("live");
@@ -2519,8 +2525,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           <button type="button" onClick={() => changeDate(today)} disabled={date === today}>Today</button>
         </div>
         <div className="recordings-v2-player-source" role="group" aria-label="Recording stream">
-          <button type="button" className={source === "main" ? "active" : ""} aria-pressed={source === "main"} title="High" onClick={() => { checkpointTimelineView(); setSource("main"); }} disabled={availableSources.length > 0 && !availableSources.includes("main")}>Main</button>
-          <button type="button" className={source === "live" ? "active" : ""} aria-pressed={source === "live"} title="Medium" onClick={() => { checkpointTimelineView(); setSource("live"); }} disabled={availableSources.length > 0 && !availableSources.includes("live")}>Sub</button>
+          <button type="button" className={source === "main" ? "active" : ""} aria-pressed={source === "main"} title="High" onClick={() => { checkpointTimelineView(); failedSubScopeRef.current = null; setSource("main"); }} disabled={availableSources.length > 0 && !availableSources.includes("main")}>Main</button>
+          <button type="button" className={source === "live" ? "active" : ""} aria-pressed={source === "live"} title="Medium" onClick={() => { checkpointTimelineView(); failedSubScopeRef.current = null; setSource("live"); }} disabled={availableSources.length > 0 && !availableSources.includes("live")}>Sub</button>
         </div>
         <label className="recordings-playback-rate">
           <span className="sr-only">Playback speed</span>
@@ -2725,6 +2731,13 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
                 <Search size={15} />Find similar
               </button>
               <small className="recording-frame-search-status">{semanticStatusLabel}</small>
+              <div className="incident-recording-source" role="group" aria-label="Playback stream">
+                {["main", "live"].map(value => <button key={value} type="button" aria-pressed={source === value}
+                  disabled={availableSources.length > 0 && !availableSources.includes(value)}
+                  onClick={() => { checkpointTimelineView(); failedSubScopeRef.current = null; setSource(value); }}>
+                  {value === "main" ? "Main" : "Sub"}
+                </button>)}
+              </div>
             </div>
           ) : null}
           {isAllCameras && Number.isFinite(playhead) ? <div className="recording-grid-controls">

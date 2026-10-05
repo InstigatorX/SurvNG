@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { recordingSegmentAt, recordingSegmentLocalTime, recordingSeekToleranceSeconds, videoReachedSeekTarget } from "../src/recordingPlayback.mjs";
+import { recordingSegmentAt, recordingSegmentLocalTime, recordingSeekToleranceSeconds, videoReachedSeekTarget, isRecordingCompatibilityError } from "../src/recordingPlayback.mjs";
 
 const source = readFileSync(new URL("../src/timeline/TimelinePages.jsx", import.meta.url), "utf8");
 function functionSource(name, nextName) {
@@ -117,4 +117,36 @@ console.log("native Timeline handoff, pause intent, and stale seek tests passed"
     assert.equal(urls.length, loadedPlaybackWindow ? 1 : 0);
     assert.equal(Boolean(context.result), Boolean(loadedPlaybackWindow));
   }
+}
+
+// Sub compatibility failures try native Main, then transcode Main without
+// cycling back to the already failed Sub recording.
+{
+  const calls = [];
+  const context = vm.createContext({
+    Number, console, source: "live", availableSources: ["main", "live"],
+    activeCameraId: "gate", dayStart: 0, dayEnd: 900, nativeScope: "gate:live:0:900",
+    useSegmentPlayback: true, useTranscodedPlayback: false,
+    originalFallbackRef: {}, transcodeFallbackRef: {}, failedSubScopeRef: {}, codecFallbackRef: {},
+    describePlaybackError: () => "unsupported", isRecordingCompatibilityError,
+    setHeroSeeking() {}, setPlaybackNotice() {}, setPlaybackErrorStage() {},
+    setPlaybackError: value => calls.push(["error", value]),
+    setSource: value => calls.push(["source", value]),
+    setTranscodeScope: value => calls.push(["transcode", value]),
+    pendingSeekEpochRef: { current: 105 }, desiredEpochRef: { current: 105 }, pendingSeekModeRef: {},
+    clearSeekWatchdog() {}, playbackRetryRef: { current: { attempts: 4, timer: null } },
+    playbackTimeline: [{ start_epoch: 100, end_epoch: 110 }], recordingSegmentAt,
+    setNativeSegment() {}, hasPlaybackMedia: false,
+  });
+  vm.runInContext(functionSource("handleRecordingError", "retryRecordingPlayback"), context);
+  context.handleRecordingError({ code: 4 });
+  assert.deepEqual(calls, [["source", "main"]]);
+  context.source = "main";
+  context.nativeScope = "gate:main:0:900";
+  context.handleRecordingError({ code: 4 });
+  assert.ok(calls.some(([kind]) => kind === "transcode"));
+  assert.equal(context.pendingSeekEpochRef.current, 105);
+  context.useTranscodedPlayback = true;
+  context.handleRecordingError({ code: 4 });
+  assert.equal(calls.filter(([kind]) => kind === "source").length, 1, "do not return to failed Sub");
 }

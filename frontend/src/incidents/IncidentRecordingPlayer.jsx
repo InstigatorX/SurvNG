@@ -12,6 +12,7 @@ import {
   supportsNativeRecordingHls,
 } from "../recordingPlayback.mjs";
 import { fetch } from "../shared/api.js";
+import { preferredStreamSource } from "../shared/cameras.js";
 import { formatTimeOnly } from "../shared/format.js";
 import { recordingDayHlsUrl, recordingSegmentUrl, recordingWindowUrl } from "../shared/mediaUrls.js";
 import { NativeRecordingVideo } from "../shared/NativeRecordingVideo.jsx";
@@ -94,7 +95,7 @@ export function IncidentRecordingPlayer({
   cameraId,
   startEpoch,
   endEpoch,
-  source = "main",
+  source,
   autoPlay = true,
   analysisMode = "clean",
   depthLayer = "both",
@@ -106,6 +107,9 @@ export function IncidentRecordingPlayer({
   onClose,
 }) {
   const videoRef = useRef(null);
+  const [selectedSource, setSelectedSource] = useState(() => source || preferredStreamSource());
+  const [sourceRevision, setSourceRevision] = useState(0);
+  const failedSourcesRef = useRef(new Set());
   const endedRef = useRef(false);
   const scrubbingRef = useRef(false);
   const appliedSeekRef = useRef(startEpoch);
@@ -126,6 +130,8 @@ export function IncidentRecordingPlayer({
   const windowStart = playbackWindowForEpoch(fetchEpoch).start;
 
   useEffect(() => {
+    failedSourcesRef.current.clear();
+    setSelectedSource(source || preferredStreamSource());
     endedRef.current = false;
     readySourceRef.current = "";
     ignorePauseRef.current = performance.now() + 1500;
@@ -142,7 +148,8 @@ export function IncidentRecordingPlayer({
     const controller = new AbortController();
     let cancelled = false;
     const requested = playbackWindowForEpoch(fetchEpoch);
-    const candidates = source === "live" ? ["live", "main"] : ["main", "live"];
+    const candidates = (selectedSource === "live" ? ["live", "main"] : ["main", "live"])
+      .filter(candidate => !failedSourcesRef.current.has(candidate));
     setLoading(true);
     setError("");
     async function load() {
@@ -187,7 +194,7 @@ export function IncidentRecordingPlayer({
       cancelled = true;
       controller.abort();
     };
-  }, [cameraId, safeEnd, source, startEpoch, windowStart]);
+  }, [cameraId, safeEnd, selectedSource, sourceRevision, startEpoch, windowStart]);
 
   const rows = loaded?.rows || [];
   const playable = recordingPlayableEpoch(rows, loaded?.seekEpoch);
@@ -279,7 +286,24 @@ export function IncidentRecordingPlayer({
     finishEpisode();
   }
 
+  function selectSource(nextSource, automatic = false) {
+    if (!automatic) failedSourcesRef.current.clear();
+    ignorePauseRef.current = performance.now() + 1500;
+    readySourceRef.current = "";
+    setTargetEpoch(playhead);
+    setLoaded(null);
+    setError("");
+    setTransport(recordingPlaybackTransport({ nativeHls, rate: 1 }));
+    setSelectedSource(nextSource);
+    setSourceRevision(value => value + 1);
+  }
+
   function handleError(mediaError) {
+    if (loaded?.source === "live" && isRecordingCompatibilityError(mediaError)) {
+      failedSourcesRef.current.add("live");
+      selectSource("main", true);
+      return;
+    }
     if (transport !== "transcode" && isRecordingCompatibilityError(mediaError)) {
       setTargetEpoch(playhead);
       setTransport("transcode");
@@ -400,6 +424,14 @@ export function IncidentRecordingPlayer({
           onChange={(event) => scrubTo(event.target.value)}
         />
         <time>{formatTimeOnly(playhead, timeZone)}</time>
+        <div className="incident-recording-source" role="group" aria-label="Recording stream">
+          {["main", "live"].map(value => (
+            <button key={value} type="button" aria-pressed={(loaded?.source || selectedSource) === value}
+              onClick={() => { if ((loaded?.source || selectedSource) !== value) selectSource(value); }}>
+              {value === "main" ? "Main" : "Sub"}
+            </button>
+          ))}
+        </div>
       </div>
       {onClose ? <button type="button" className="incident-recording-close" onClick={onClose} aria-label="Close playback"><X size={18} /></button> : null}
     </div>

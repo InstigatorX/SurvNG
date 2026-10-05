@@ -32,18 +32,18 @@ try {
   const page = await browser.newPage({ userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1" });
   const errors = [], requests = [];
   await page.setViewportSize({ width: 390, height: 844 });
-  let rows = [900, 902, 904], failOriginal = false, failTranscode = false;
+  let rows = [900, 902, 904], failOriginal = false, failTranscode = false, missingSub = false;
   page.on("pageerror", error => errors.push(error.message));
   await page.route("**/api/**", async route => {
     const url = new URL(route.request().url());
     if (url.pathname.endsWith("/recordings/window")) {
       const start = Number(url.searchParams.get("start_epoch"));
-      return route.fulfill({ json: { camera_id: "fixture", source: "main", start_epoch: start, end_epoch: start + 900,
-        recordings: rows.filter(epoch => epoch >= start && epoch < start + 900)
+      return route.fulfill({ json: { camera_id: "fixture", source: url.searchParams.get("source"), start_epoch: start, end_epoch: start + 900,
+        recordings: (missingSub && url.searchParams.get("source") === "live" ? [] : rows).filter(epoch => epoch >= start && epoch < start + 900)
           .map(epoch => ({ start_epoch: epoch, end_epoch: epoch + 2, duration_seconds: 2 })) } });
     }
     if (!url.pathname.endsWith("/segment.mp4")) return route.fulfill({ status: 404 });
-    requests.push({ epoch: Number(url.searchParams.get("epoch")), transcode: url.searchParams.get("mobile") === "true" });
+    requests.push({ source: url.searchParams.get("source"), epoch: Number(url.searchParams.get("epoch")), transcode: url.searchParams.get("mobile") === "true" });
     if (url.searchParams.get("mobile") === "true" ? failTranscode : failOriginal)
       return route.fulfill({ contentType: "video/mp4", body: "unsupported media fixture" });
     const range = /^bytes=(\d+)-(\d*)$/.exec(route.request().headers().range || "");
@@ -90,6 +90,7 @@ try {
     assert.ok(display.blue > 150, "each displayed segment must have a decoded blue frame");
   }
   await waitComplete();
+  assert.ok(requests.every(row => row.source === "live" && !row.transcode), "mobile starts with native Sub");
   assert.deepEqual([...new Set(requests.map(row => row.epoch))], rows, "every segment must play before episode completion");
 
   await open("?autoplay=false");
@@ -100,6 +101,37 @@ try {
   assert.equal(await page.locator("#ended").textContent(), "0", "cross-segment seek must not finish the episode");
   await seek(900.5);
   await waitPlaying(900);
+
+  await open("?autoplay=false");
+  await page.waitForFunction(() => document.querySelector("video.active")?.readyState >= 2);
+  await seek(903);
+  await waitPlaying(902);
+  await page.getByRole("button", { name: "Pause recording", exact: true }).click();
+  await page.getByRole("button", { name: "Main", exact: true }).click();
+  await page.waitForFunction(() => {
+    const video = document.querySelector("video.active");
+    return video?.readyState >= 2 && new URL(video.src).searchParams.get("source") === "main";
+  });
+  assert.equal(await page.locator("video.active").evaluate(v => v.paused), true, "switch preserves pause");
+  assert.ok(requests.some(row => row.source === "main" && row.epoch === 902 && !row.transcode), "switch preserves position");
+  assert.equal(await page.getByRole("button", { name: "Main", exact: true }).getAttribute("aria-pressed"), "true");
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await open("?autoplay=false");
+  await page.waitForFunction(() => document.querySelector("video.active")?.readyState >= 2);
+  assert.equal(requests[0].source, "main", "desktop defaults to Main");
+  await page.getByRole("button", { name: "Sub", exact: true }).click();
+  await page.waitForFunction(() => {
+    const video = document.querySelector("video.active");
+    return video?.readyState >= 2 && new URL(video.src).searchParams.get("source") === "live";
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  missingSub = true;
+  await open();
+  await waitPlaying(900);
+  assert.equal(requests[0].source, "main", "missing Sub falls back to native Main");
+  assert.equal(requests[0].transcode, false);
+  missingSub = false;
 
   // Missing wall-clock intervals are skipped, not mistaken for episode end.
   rows = [900, 904];
@@ -121,6 +153,8 @@ try {
   await open();
   await waitPlaying(900);
   assert.ok(requests.some(row => row.transcode), "unsupported original must retry as compatible MP4");
+  assert.deepEqual([...new Set(requests.map(row => `${row.source}:${row.transcode}`))],
+    ["live:false", "main:false", "main:true"], "Sub failure tries native Main before transcoding Main");
   await waitComplete();
   assert.deepEqual([...new Set(requests.filter(row => row.transcode).map(row => row.epoch))], rows);
 
