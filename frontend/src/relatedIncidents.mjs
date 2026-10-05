@@ -1,3 +1,16 @@
+export async function loadRelatedIncident(eventId, fetch) {
+  const response = await fetch(`/api/incidents/by-event/${eventId}`);
+  if (response.ok) return response.json();
+  if (response.status !== 404) throw new Error("Could not load related incident. Please try again.");
+  // Related matches include evidence that has not joined a canonical scene.
+  const evidence = await fetch(`/api/events/${eventId}`);
+  if (!evidence.ok) throw new Error(evidence.status === 404
+    ? "This related event is no longer available."
+    : "Could not load related evidence. Please try again.");
+  const event = await evidence.json();
+  return { ...event, representative_event_id: event.id, events: [event] };
+}
+
 export function relatedIncidentsPath(anchorEventId, hours = 24, limit = 16) {
   const eventId = Number(anchorEventId);
   const boundedHours = Math.max(1, Math.min(168, Number(hours) || 24));

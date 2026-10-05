@@ -894,7 +894,7 @@ export function CrossCameraTracePanel({
   );
 }
 
-export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, visualAnchorEventId = anchorEventId, appearanceAnchorEventId = anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", depthLayer = "both", analysisStats, analysisPanel = null, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onDepthLayerChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
+export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, visualAnchorEventId = anchorEventId, appearanceAnchorEventId = anchorEventId, selectedRelatedEventId, relatedLoadingEventId, relatedError = "", cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", depthLayer = "both", analysisStats, analysisPanel = null, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onDepthLayerChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
   const inspectorRef = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -1008,6 +1008,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
       {analysisPanel ? <section className="incident-inspector-extra-analysis">
         {analysisPanel}
       </section> : null}
+      {relatedError ? <p role="alert">{relatedError}</p> : null}
       <RelatedAppearanceIncidents anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
       <VisualSimilarIncidents
         active={findSimilarActive}

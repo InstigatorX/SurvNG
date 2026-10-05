@@ -579,6 +579,16 @@ def create_incident_query_router(
     def events(limit: int = 100) -> list[dict[str, Any]]:
         return with_manager(lambda active: service.events(active, limit))
 
+    @router.get("/api/events/{event_id}")
+    def event_evidence(event_id: int) -> dict[str, Any]:
+        def resolve(active):
+            event = active.events.get(event_id)
+            if event is None:
+                raise HTTPException(status_code=404, detail="event was not found")
+            wrapped = service.with_faces(active, [{"events": [_event_row(event)]}])
+            return wrapped[0]["events"][0]
+        return with_manager(resolve)
+
     @router.get("/api/incidents")
     def incidents(
         limit: int = 200,
@@ -793,6 +803,7 @@ def create_incident_query_router(
         router=router,
         handlers={
             "events": events,
+            "event_evidence": event_evidence,
             "incidents": incidents,
             "incident_feed": incident_feed,
             "incident_detail": incident_detail,

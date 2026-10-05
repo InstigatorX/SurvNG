@@ -21,6 +21,26 @@ from survng.app.manager_access import ManagerAccessCoordinator
 
 
 class IncidentQueryRouterTest(unittest.TestCase):
+    def test_event_evidence_without_scene_membership(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EventStore(Path(tmp))
+            event = store.add_event("garage", "motion", objects_json='[{"label":"person","confidence":0.9}]')
+            with store._connect() as conn:
+                conn.execute("delete from scene_event_membership where event_id=?", (event["id"],))
+            self.assertIsNone(store.scene_incident(event_id=event["id"]))
+            manager = SimpleNamespace(events=store, faces=SimpleNamespace(for_event_ids=lambda _ids: []))
+            bundle = create_incident_query_router(IncidentQueryDependencies(
+                get_manager=lambda: manager, manager_lock=threading.RLock(),
+            ), IncidentQueryService())
+            result = bundle.handlers["event_evidence"](event["id"])
+            self.assertEqual(result["id"], event["id"])
+            self.assertEqual(result["camera_id"], "garage")
+            self.assertEqual(result["objects"][0]["label"], "person")
+            with self.assertRaises(HTTPException) as raised:
+                bundle.handlers["event_evidence"](event["id"] + 100)
+            self.assertEqual(raised.exception.status_code, 404)
+            self.assertIsNone(store.scene_incident(event_id=event["id"]))
+
     def test_recent_feed_pages_canonical_membership(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = EventStore(Path(tmp))

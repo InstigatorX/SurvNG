@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../src/relatedIncidents.mjs";
+import { loadRelatedIncident, relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../src/relatedIncidents.mjs";
 
 assert.equal(relatedIncidentsPath(42), "/api/events/42/related-incidents?hours=24&limit=16");
 assert.equal(relatedIncidentsPath(42, 48, 8), "/api/events/42/related-incidents?hours=48&limit=8");
@@ -28,3 +28,25 @@ assert.equal(relatedEvidenceLabel({ relation_type: "expected_route", sequence_de
 assert.equal(relatedEvidenceLabel({ relation_type: "appearance_route", sequence_delta_seconds: 4.2, similarity: 0.834, visually_similar: true }), "Expected · Appearance 83% · 4s");
 
 console.log("related incident tests passed");
+
+const event = { id: 88661, camera_id: "upper-garage", created_at: "2026-10-04T23:09:01Z" };
+const canonical = { id: "scene-1", events: [event] };
+let requests = [];
+assert.deepEqual(await loadRelatedIncident(event.id, async (path) => {
+  requests.push(path);
+  return { ok: true, json: async () => canonical };
+}), canonical);
+assert.deepEqual(requests, ["/api/incidents/by-event/88661"]);
+requests = [];
+assert.deepEqual(await loadRelatedIncident(event.id, async (path) => {
+  requests.push(path);
+  return path.includes("by-event") ? { ok: false, status: 404 }
+    : { ok: true, json: async () => event };
+}), { ...event, representative_event_id: event.id, events: [event] });
+assert.deepEqual(requests, ["/api/incidents/by-event/88661", "/api/events/88661"]);
+await assert.rejects(loadRelatedIncident(42, async () => ({ ok: false, status: 404 })), /no longer available/);
+for (const status of [401, 403, 503]) {
+  let calls = 0;
+  await assert.rejects(loadRelatedIncident(42, async () => { calls++; return { ok: false, status }; }), /Please try again/);
+  assert.equal(calls, 1, "only missing scene membership falls back to event evidence");
+}

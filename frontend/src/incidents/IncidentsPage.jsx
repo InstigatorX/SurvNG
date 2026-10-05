@@ -9,6 +9,7 @@ import {
   SlidersHorizontal,
   Rows3,
 } from "lucide-react";
+import { loadRelatedIncident } from "../relatedIncidents.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { incidentReplayTracking, incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
 import { incidentDetailQuery, incidentFocusStep, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryPageSize, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
@@ -95,6 +96,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const [desktopAnalysisStats, setDesktopAnalysisStats] = useState(null);
   const [desktopReplayRequest, setDesktopReplayRequest] = useState(0);
   const [focusedImageSize, setFocusedImageSize] = useState(null);
+  const [relatedPreviewError, setRelatedPreviewError] = useState("");
   const [relatedPreviewIncident, setRelatedPreviewIncident] = useState(null);
   const [relatedPreviewEventId, setRelatedPreviewEventId] = useState(null);
   const [relatedPreviewLoadingEventId, setRelatedPreviewLoadingEventId] = useState(null);
@@ -571,6 +573,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     setRelatedPreviewIncident(null);
     setRelatedPreviewEventId(null);
     setRelatedPreviewLoadingEventId(null);
+    setRelatedPreviewError("");
     setSelectedVisualObject(null);
     setObservationPreviewRequest(null);
     setFindSimilarObject(null);
@@ -751,10 +754,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     if (!Number.isInteger(eventId) || eventId <= 0) return;
     const request = ++relatedPreviewRequestRef.current;
     setRelatedPreviewLoadingEventId(eventId);
+    setRelatedPreviewError("");
     try {
-      const response = await fetch(`/api/incidents/by-event/${eventId}`);
-      if (!response.ok) throw new Error("Related incident unavailable");
-      const detail = await response.json();
+      const detail = await loadRelatedIncident(eventId, fetch);
       if (request !== relatedPreviewRequestRef.current) return;
       setRelatedPreviewIncident(detail);
       setRelatedPreviewEventId(eventId);
@@ -762,8 +764,10 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       // do not jump to the related hit or remount into a blank investigation.
       setDesktopAnalysisMode("clean");
       setDesktopAnalysisStats(null);
-    } catch {
-      // Keep the currently displayed incident if a stale related event was removed.
+    } catch (error) {
+      if (request === relatedPreviewRequestRef.current) {
+        setRelatedPreviewError(error.message || "Could not load related incident. Please try again.");
+      }
     } finally {
       if (request === relatedPreviewRequestRef.current) setRelatedPreviewLoadingEventId(null);
     }
@@ -774,6 +778,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     setRelatedPreviewIncident(null);
     setRelatedPreviewEventId(null);
     setRelatedPreviewLoadingEventId(null);
+    setRelatedPreviewError("");
     setDesktopAnalysisMode("clean");
     setDesktopAnalysisStats(null);
   }
@@ -960,6 +965,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
               appearanceAnchorEventId={findSimilarEventId}
               selectedRelatedEventId={relatedPreviewEventId}
               relatedLoadingEventId={relatedPreviewLoadingEventId}
+              relatedError={relatedPreviewError}
               cameraNameById={cameraNameById}
               appConfig={appConfig}
               timeZone={timeZone}
