@@ -1229,6 +1229,85 @@ class EventStoreTest(unittest.TestCase):
             finally:
                 store._lock.release()
 
+    def test_history_reads_do_not_acquire_writer_mutexes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            reads = [
+                store.protected_recording_paths,
+                store.telemetry_activity,
+                lambda: store.tracking_capacity_activity(hours=168, bucket_minutes=15),
+                lambda: store._snapshot_retention_candidates("2023-01-01T00:00:00+00:00", 100),
+            ]
+            for read in reads:
+                with self.subTest(read=read):
+                    completed = threading.Event()
+                    failures = []
+
+                    def run():
+                        try:
+                            read()
+                        except BaseException as error:
+                            failures.append(error)
+                        finally:
+                            completed.set()
+
+                    with store._lock, store._database_write_lock:
+                        worker = threading.Thread(target=run)
+                        worker.start()
+                        finished_without_writer = completed.wait(2.0)
+                    worker.join(2.0)
+                    self.assertTrue(finished_without_writer)
+                    self.assertFalse(failures)
+
+    def test_snapshot_cleanup_rechecks_candidates_before_claiming(self) -> None:
+        for change in ("event", "asset", "face", "cover", "removed"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                store = EventStore(root)
+                snapshot = root / "snapshots" / "gate" / "old.webp"
+                snapshot.parent.mkdir(parents=True)
+                snapshot.write_bytes(b"old")
+                event = store.add_event(
+                    camera_id="gate", kind="object", snapshot_path=str(snapshot),
+                    created_at="2020-01-01T00:00:00+00:00",
+                )
+                path = event["snapshot_path"]
+                original = store._snapshot_retention_candidates
+
+                def discover_then_change(cutoff, limit):
+                    rows = original(cutoff, limit)
+                    self.assertEqual(len(rows), 1)
+                    with store._connect() as conn:
+                        if change == "event":
+                            conn.execute("update events set created_at=? where id=?",
+                                         ("2024-01-01T00:00:00+00:00", event["id"]))
+                        elif change == "asset":
+                            conn.execute("insert into scene_snapshot_assets values (?,?,?,?)",
+                                         (path, "gate", "2024-01-01T00:00:00+00:00", 3))
+                        elif change == "face":
+                            conn.execute("create table face_observations (snapshot_path text, reference_pinned integer)")
+                            conn.execute("insert into face_observations values (?,1)", (path,))
+                        elif change == "cover":
+                            conn.execute(
+                                "insert into event_cover_requirements "
+                                "(event_id,state,deadline_epoch,available_at_epoch,payload_json,created_at,updated_at) "
+                                "values (?,'pending',?,?,?,?,?)",
+                                (event["id"], time.time()+60, time.time(), json.dumps({"snapshot_path": path}),
+                                 time.time(), time.time()),
+                            )
+                        else:
+                            conn.execute("update events set snapshot_path='' where id=?", (event["id"],))
+                    return rows
+
+                with patch.object(store, "_snapshot_retention_candidates", side_effect=discover_then_change):
+                    result = store.apply_snapshot_retention(
+                        datetime(2023, 1, 1, tzinfo=timezone.utc).timestamp(), 100,
+                    )
+                self.assertEqual(result["selected_files"], 0)
+                self.assertTrue(snapshot.exists())
+                with store._connect() as conn:
+                    self.assertEqual(conn.execute("select count(*) from media_deletion_claims").fetchone()[0], 0)
+
     def test_snapshot_cleanup_yields_writer_between_reference_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1260,9 +1339,9 @@ class EventStoreTest(unittest.TestCase):
             )
 
             self.assertEqual(result["deleted_files"], 5)
-            # One transactional claim, three independently committed reference
+            # One read-only discovery, three claim batches, three reference
             # cleanup batches, and one claim release transaction.
-            self.assertEqual(connection_count, 5)
+            self.assertEqual(connection_count, 8)
             with original_connect() as connection:
                 self.assertEqual(
                     connection.execute(

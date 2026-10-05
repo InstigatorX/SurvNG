@@ -118,7 +118,9 @@ class EventStore(
 
     def protected_recording_paths(self) -> set[str]:
         """Return continuous segments still referenced by incident history."""
-        with self._lock, self._connect() as conn:
+        # One WAL read snapshot is consistent without blocking event writers.
+        # Retention already releases this snapshot before selecting deletions.
+        with self._connect() as conn:
             rows = conn.execute(
                 "SELECT recording_path FROM events WHERE recording_path != '' "
                 "UNION SELECT recording_path FROM scene_observations WHERE recording_path != '' "
@@ -514,7 +516,7 @@ class EventStore(
         current_hour = current.replace(minute=0, second=0, microsecond=0)
         first_hour = current_hour - timedelta(hours=bounded_hours - 1)
         one_hour_ago = current - timedelta(hours=1)
-        with self._lock, self._connect() as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 select camera_id, created_at, objects_json
@@ -620,7 +622,7 @@ class EventStore(
             query += " and camera_id = ?"
             parameters.append(camera_id)
         query += " order by created_at, id"
-        with self._lock, self._connect() as conn:
+        with self._connect() as conn:
             rows = conn.execute(query, parameters).fetchall()
         buckets: dict[int, dict[str, Any]] = {}
         for row in rows:
@@ -1648,10 +1650,9 @@ class EventStore(
                 ((path,) for path in releasable),
             )
 
-    def apply_snapshot_retention(self, cutoff_epoch: float, limit: int) -> dict[str, Any]:
-        """Delete age-expired incident images and clear every stale reference."""
-        cutoff = datetime.fromtimestamp(float(cutoff_epoch), timezone.utc).isoformat()
-        bounded_limit = max(1, min(2000, int(limit)))
+    def _snapshot_retention_candidates(self, cutoff: str, limit: int) -> list[sqlite3.Row]:
+        # WAL readers do not need either writer mutex. Candidate discovery may
+        # scan all retained history; eligibility is rechecked when claiming.
         ranked = """
             with ranked as (
                 select id, snapshot_path, snapshot_size_bytes, created_at,
@@ -1662,13 +1663,7 @@ class EventStore(
                       union all select 0,camera_id,snapshot_path,snapshot_size_bytes,created_at from scene_snapshot_assets)
             )
         """
-        with self._lock, self._connect() as conn:
-            conn.execute("begin immediate")
-            conn.execute(
-                "delete from media_deletion_claims "
-                "where role = 'snapshot' and claimed_at < ?",
-                ((datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),),
-            )
+        with self._connect() as conn:
             has_faces = conn.execute(
                 "select 1 from sqlite_master where type = 'table' and name = 'face_observations'"
             ).fetchone() is not None
@@ -1679,7 +1674,7 @@ class EventStore(
                 if has_faces
                 else ""
             )
-            rows = conn.execute(
+            return conn.execute(
                 ranked
                 + f"""
                 select snapshot_path, snapshot_size_bytes from ranked
@@ -1688,19 +1683,61 @@ class EventStore(
                       and r.deadline_epoch>unixepoch() and json_extract(r.payload_json, '$.snapshot_path')=ranked.snapshot_path)
                 order by created_at asc limit ?
                 """,
-                (cutoff, bounded_limit),
+                (cutoff, limit),
             ).fetchall()
-            claimed_at = datetime.now(timezone.utc).isoformat()
-            claimed_rows: list[sqlite3.Row] = []
-            for row in rows:
-                claimed = conn.execute(
-                    "insert or ignore into media_deletion_claims "
-                    "(path, role, claimed_at) values (?, 'snapshot', ?)",
-                    (str(row["snapshot_path"]), claimed_at),
-                )
-                if claimed.rowcount:
-                    claimed_rows.append(row)
-            rows = claimed_rows
+
+    def apply_snapshot_retention(self, cutoff_epoch: float, limit: int) -> dict[str, Any]:
+        """Delete age-expired incident images and clear every stale reference."""
+        cutoff = datetime.fromtimestamp(float(cutoff_epoch), timezone.utc).isoformat()
+        bounded_limit = max(1, min(2000, int(limit)))
+        candidates = self._snapshot_retention_candidates(cutoff, bounded_limit)
+        rows: list[sqlite3.Row] = []
+        # Bound each atomic recheck/claim transaction, yielding to event writers
+        # between batches. A candidate can have gained a new reference since
+        # discovery, so never claim based only on the read-only snapshot.
+        for offset in range(0, max(1, len(candidates)), self.SNAPSHOT_REFERENCE_WRITE_BATCH):
+            with self._lock, self._connect() as conn:
+                conn.execute("begin immediate")
+                if offset == 0:
+                    conn.execute(
+                        "delete from media_deletion_claims "
+                        "where role = 'snapshot' and claimed_at < ?",
+                        ((datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),),
+                    )
+                has_faces = conn.execute(
+                    "select 1 from sqlite_master where type='table' and name='face_observations'"
+                ).fetchone() is not None
+                claimed_at = datetime.now(timezone.utc).isoformat()
+                for candidate in candidates[offset : offset + self.SNAPSHOT_REFERENCE_WRITE_BATCH]:
+                    path = str(candidate["snapshot_path"])
+                    # Keep the nonempty predicate so SQLite can use the
+                    # partial snapshot-retention index for this point lookup.
+                    latest = conn.execute(
+                        "select id,snapshot_path,snapshot_size_bytes,created_at from events "
+                        "where snapshot_path=? and snapshot_path!='' "
+                        "union all select 0,snapshot_path,snapshot_size_bytes,created_at from scene_snapshot_assets "
+                        "where snapshot_path=? order by created_at desc,id desc limit 1",
+                        (path, path),
+                    ).fetchone()
+                    if latest is None or str(latest["created_at"]) >= cutoff:
+                        continue
+                    if has_faces and conn.execute(
+                        "select 1 from face_observations where snapshot_path=? and reference_pinned=1 limit 1",
+                        (path,),
+                    ).fetchone() is not None:
+                        continue
+                    if conn.execute(
+                        "select 1 from event_cover_requirements where state='pending' "
+                        "and deadline_epoch>unixepoch() and json_extract(payload_json,'$.snapshot_path')=? limit 1",
+                        (path,),
+                    ).fetchone() is not None:
+                        continue
+                    claimed = conn.execute(
+                        "insert or ignore into media_deletion_claims (path,role,claimed_at) values (?,'snapshot',?)",
+                        (path, claimed_at),
+                    )
+                    if claimed.rowcount:
+                        rows.append(latest)
         removed: list[str] = []
         deleted_files = 0
         missing_files = 0
