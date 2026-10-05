@@ -11,9 +11,11 @@ import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .config import AppConfig
@@ -84,6 +86,8 @@ class TrainingRouteDependencies:
     get_manager: Callable[[], AppManager]
     manager_lock: threading.RLock
     manager_access: ManagerAccessCoordinator
+    recording_preview_path: Callable[..., Path] | None = None
+    recording_preview_timestamp: Callable[[Path], tuple[float | None, str]] | None = None
 
 
 def _utc_datetime(value: str, field_name: str) -> datetime:
@@ -297,6 +301,7 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
         include_empty: bool = False,
         sample_kinds: str = "",
         sources: str = "",
+        image_source: Literal["stored", "main_recording"] = "stored",
         limit: int = Query(default=100, ge=1, le=500),
         cursor: str = Query(default="", max_length=2048),
     ) -> dict[str, Any]:
@@ -332,6 +337,11 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                 detail="negative_candidate samples require source motion_audit",
             )
         use_motion_audits = motion_audit_source or negative_candidates
+        if image_source == "main_recording" and not use_motion_audits:
+            raise HTTPException(
+                status_code=422,
+                detail="main_recording images require motion-audit negative candidates",
+            )
         decoded_cursor = _decode_cursor(cursor)
         before_created_at = decoded_cursor[0] if decoded_cursor else None
         before_id = decoded_cursor[1] if decoded_cursor else None
@@ -362,7 +372,7 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                         before_created_at=before_created_at,
                         before_id=before_id,
                         camera_ids=selected_cameras,
-                        require_snapshot=True,
+                        require_snapshot=image_source == "stored",
                         exclude_confirmed_objects=True,
                     )
                 else:
@@ -398,14 +408,16 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                         )
                         if not annotations and not include_empty:
                             continue
-                    try:
-                        snapshot_path = event_snapshot_path(
-                            active_manager.storage_dir,
-                            event,
-                            getattr(active_manager, "media_storage", None),
-                        )
-                    except (FileNotFoundError, PermissionError):
-                        continue
+                    snapshot_path = None
+                    if image_source == "stored":
+                        try:
+                            snapshot_path = event_snapshot_path(
+                                active_manager.storage_dir,
+                                event,
+                                getattr(active_manager, "media_storage", None),
+                            )
+                        except (FileNotFoundError, PermissionError):
+                            continue
                     event_at = _utc_datetime(str(event.get("created_at") or ""), "event created_at")
                     captured_at = event_at + timedelta(seconds=sample_offset)
                     source_name = "motion_audit" if is_negative_candidate else "event"
@@ -413,12 +425,16 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                         f"{source_name}\0{before_id}\0{event.get('snapshot_path') or ''}\0"
                         f"{event.get('objects_json') or ''}\0{event.get('features_json') or ''}"
                     )
+                    if image_source == "main_recording":
+                        revision_material += "\0main_recording:v1"
                     revision = hashlib.sha256(revision_material.encode("utf-8")).hexdigest()[:20]
                     image_url = (
                         f"{base_path}/api/motion-audit/{before_id}/snapshot.jpg"
                         if is_negative_candidate
                         else f"{base_path}/api/events/{before_id}/snapshot.jpg"
                     )
+                    if image_source == "main_recording":
+                        image_url = f"{base_path}/api/training/motion-audits/{before_id}/main.jpg"
                     samples.append({
                         "sample_id": f"{source_name}-{before_id}",
                         "revision": revision,
@@ -438,7 +454,7 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                         "captured_at": captured_at.isoformat(),
                         "image": {
                             "url": image_url,
-                            "media_type": snapshot_media_type(snapshot_path),
+                            "media_type": snapshot_media_type(snapshot_path) if snapshot_path else "image/jpeg",
                             "width": width,
                             "height": height,
                         },
@@ -478,6 +494,7 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                 "eligibility": eligibility,
                 "minimum_confidence": minimum_confidence,
                 "include_empty": include_empty,
+                "image_source": image_source,
                 "sample_kinds": list(selected_kinds) or [
                     "negative_candidate" if use_motion_audits else "annotated"
                 ],
@@ -491,5 +508,49 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
             "scan_limited": scanned >= MAX_SCANNED_EVENTS and not exhausted,
             "next_cursor": next_cursor,
         }
+
+    @router.get("/api/training/motion-audits/{audit_id}/main.jpg")
+    def training_main_image(audit_id: int) -> FileResponse:
+        # Sync routes run in FastAPI's worker pool. The shared preview runtime
+        # serializes extraction, bounds its duration and owns cache eviction.
+        with manager_generation_lease(
+            deps.manager_access, deps.manager_lock, deps.get_manager,
+        ) as active_manager:
+            audit = active_manager.events.get_motion_audit(audit_id)
+            if audit is None:
+                raise HTTPException(status_code=404, detail="motion audit entry not found")
+            if audit.get("object_detected") or audit.get("reason") in {
+                "event_state_active", "event_state_cooldown",
+            }:
+                raise HTTPException(status_code=422, detail="audit is not a negative candidate")
+            epoch = _utc_datetime(audit["created_at"], "audit created_at").timestamp()
+            rows = active_manager.recorder.recording_rows_between(
+                audit["camera_id"], epoch - 0.001, epoch + 0.001,
+                "main", discover_missing=False,
+            )
+            row = next(
+                (
+                    candidate for candidate in rows
+                    if float(candidate.get("start_epoch") or 0) <= epoch
+                    < float(candidate.get("end_epoch") or 0)
+                ),
+                None,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="no main recording exists at audit time")
+            if deps.recording_preview_path is None or deps.recording_preview_timestamp is None:
+                raise HTTPException(status_code=503, detail="training image extraction unavailable")
+            path = deps.recording_preview_path(
+                active_manager, row, epoch, exact=True, native_resolution=True,
+            )
+            actual_epoch, timestamp_source = deps.recording_preview_timestamp(path)
+            headers = {
+                "Cache-Control": "private, max-age=3600",
+                "X-SurvNG-Requested-Timestamp": f"{epoch:.6f}",
+                "X-SurvNG-Timestamp-Source": timestamp_source,
+            }
+            if actual_epoch is not None:
+                headers["X-SurvNG-Actual-Timestamp"] = f"{actual_epoch:.6f}"
+            return FileResponse(path, media_type="image/jpeg", headers=headers)
 
     return router

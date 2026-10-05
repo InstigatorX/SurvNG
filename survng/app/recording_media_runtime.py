@@ -853,9 +853,10 @@ class RecordingMediaRuntime:
         *,
         width: int = 480,
         exact: bool = False,
+        native_resolution: bool = False,
         active_manager: AppManager | None = None,
     ) -> Path:
-        """Return a small cached JPEG near an epoch without mutating playback."""
+        """Return a cached JPEG, optionally at native training resolution."""
         selected_manager = active_manager or self.manager
         selected_config = getattr(selected_manager, 'config', self.config)
         source_path = self._recording_storage_path(row.get('path'), active_manager=selected_manager)
@@ -865,7 +866,7 @@ class RecordingMediaRuntime:
             raise HTTPException(status_code=404, detail='no recording exists at this time')
         duration = max(0.05, end_epoch - start_epoch)
         raw_offset = max(0.0, epoch - start_epoch)
-        requested_width = max(320, min(1920, int(width)))
+        requested_width = 0 if native_resolution else max(320, min(1920, int(width)))
         preview_offset = min(
             max(
                 0.0,
@@ -926,7 +927,10 @@ class RecordingMediaRuntime:
                             headers={'Retry-After': '1'},
                         ) from exc
                 cache_dir.mkdir(parents=True, exist_ok=True)
-                jpeg_quality = 3 if requested_width > 480 else 5
+                jpeg_quality = 3 if native_resolution or requested_width > 480 else 5
+                filters = ['showinfo@preview'] if exact else []
+                if not native_resolution:
+                    filters.append(f"scale='min({requested_width},iw)':-2")
                 command = [
                     selected_config.ffmpeg_path, '-hide_banner',
                     '-loglevel', 'info' if exact else 'error',
@@ -934,7 +938,7 @@ class RecordingMediaRuntime:
                     '-ss', f'{preview_offset:.3f}', '-i', str(source_path),
                     '-map', '0:v:0', '-frames:v', '1',
                     *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
-                    '-vf', f"showinfo@preview,scale='min({requested_width},iw)':-2" if exact else f"scale='min({requested_width},iw)':-2",
+                    *(['-vf', ','.join(filters)] if filters else []),
                     '-q:v', str(jpeg_quality), '-y', str(temporary),
                 ]
                 try:

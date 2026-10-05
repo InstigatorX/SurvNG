@@ -42,6 +42,9 @@ requests remain available to local clients.
   negatives because the detector may have missed an object.
 - `sample_kinds=negative_candidate` selects unreviewed negative candidates.
 - `sources=motion_audit` uses clean motion-audit snapshots as that source.
+- `image_source=stored` (default) serves the saved snapshot.
+  `image_source=main_recording` selects native-resolution JPEGs extracted on
+  demand from retained main recordings, for motion-audit negative candidates only.
 - `limit` ranges from 1 to 500.
 - `cursor` accepts the opaque `next_cursor` returned by the previous response.
   Keep the time range and filters unchanged while paging.
@@ -92,6 +95,36 @@ These samples have `source=motion_audit`, `sample_kind=negative_candidate`,
 treating them as ground truth. Audits where SurvNG already confirmed an object
 are excluded. `sample_id` is the stable `motion_audit-{id}` identifier and
 `revision` changes if its stored evidence changes.
+
+### Native-resolution negative images
+
+Add `--data-urlencode 'image_source=main_recording'` to the negative-candidate
+query above. Fetch each returned `image.url` using the same authentication as
+the manifest. Follow `next_cursor` with unchanged filters for further pages.
+
+Listing candidates does not decode video or check recording availability. This
+mode also includes audits without a saved snapshot. Downloading an image seeks
+to the audit timestamp in an indexed main recording and preserves its native
+dimensions, without upscaling or the preview width limit. Width and height in
+the manifest remain null until the consumer reads the image. The revision
+differs from the saved-snapshot variant; sample IDs remain the same.
+
+Extraction runs in an API worker thread using the shared recording-preview
+limiter (one extraction at a time), an eight-second FFmpeg timeout, and the
+existing bounded disk cache. Repeat downloads reuse cached frames while the
+source recording remains available and unchanged. The HTTP download waits for
+its image; this is not a queued export job. Clients should download sequentially
+and retry HTTP 429 according to `Retry-After`. Missing recording coverage/files
+return 404; extraction timeouts return 504 and extraction failures return 500.
+There is no silent fallback to a low-resolution snapshot.
+
+Image responses include `X-SurvNG-Requested-Timestamp`,
+`X-SurvNG-Timestamp-Source`, and, when source timing is available,
+`X-SurvNG-Actual-Timestamp` (Unix seconds). Manifest `captured_at` is the requested
+audit time; the decoded frame may differ slightly. Review the extracted image
+itself before accepting it as a negative, including any extra area visible in
+the main stream. Annotated event exports cannot use this option because their
+boxes belong to the saved image's coordinate plane.
 
 ## Trust and access
 

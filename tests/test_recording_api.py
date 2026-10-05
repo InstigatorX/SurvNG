@@ -628,6 +628,71 @@ class RecordingApiTest(unittest.TestCase):
             self.assertAlmostEqual(actual_epoch or 0.0, 107.909, places=6)
             self.assertEqual(source, "source_pts")
 
+    def test_native_training_frame_preserves_resolution_and_reuses_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            recordings_dir = root / "recordings"
+            recordings_dir.mkdir()
+            source_path = recordings_dir / "segment.mp4"
+            source_path.write_bytes(b"recording")
+            manager = SimpleNamespace(
+                database_dir=root / "database",
+                recorder=SimpleNamespace(recordings_dir=recordings_dir),
+            )
+
+            def create_preview(command: list[str], **_kwargs: object) -> SimpleNamespace:
+                Path(command[-1]).write_bytes(b"jpeg")
+                return SimpleNamespace(
+                    returncode=0,
+                    stderr=(
+                        b"[showinfo@preview] n: 0 pts: 810 "
+                        b"pts_time:0.009 checksum:AAAA\n"
+                    ),
+                )
+
+            row = {
+                "path": str(source_path),
+                "start_epoch": 100.0,
+                "end_epoch": 110.0,
+            }
+            with (
+                patch.object(main, "manager", manager),
+                patch(
+                    "survng.app.recording_media_runtime.subprocess.run",
+                    side_effect=create_preview,
+                ) as run,
+                patch.object(
+                    main._recording_media_runtime,
+                    "_maintain_recording_preview_cache",
+                ),
+            ):
+                preview = main._recording_media_runtime._recording_preview_path(
+                    row,
+                    107.9,
+                    width=1280,
+                    exact=True,
+                    native_resolution=True,
+                )
+
+                cached = main._recording_media_runtime._recording_preview_path(
+                    row, 107.9, exact=True, native_resolution=True)
+                self.assertEqual(preview, cached)
+                run.assert_called_once()
+                scaled = main._recording_media_runtime._recording_preview_path(
+                    row, 107.9, width=1280, exact=True)
+                self.assertNotEqual(preview, scaled)
+                native_command = run.call_args_list[0].args[0]
+
+            self.assertEqual(preview.read_bytes(), b"jpeg")
+            command = native_command
+            self.assertEqual(command[command.index("-ss") + 1], "7.900")
+            self.assertEqual(command[command.index("-vf") + 1], "showinfo@preview")
+            actual_epoch, source = (
+                main._recording_media_runtime._recording_preview_timestamp(preview)
+            )
+            self.assertAlmostEqual(actual_epoch or 0.0, 107.909, places=6)
+            self.assertEqual(source, "source_pts")
+
     def test_recording_preview_reports_index_gap_without_storage_scan(self) -> None:
         recorder = Mock()
         recorder.recording_rows_between.return_value = []
