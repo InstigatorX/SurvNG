@@ -921,6 +921,33 @@ class ConfigReloadTest(unittest.TestCase):
                     effective.detector, {"reid"}, refresh_tracking=True,
                 )
 
+    def test_enabling_reid_or_changing_vehicle_labels_refreshes_worker_and_tracking(self) -> None:
+        changes = (
+            {"reid_enabled": True},
+            {"vehicle_reid_enabled": True},
+            {"reid_enabled": True, "vehicle_reid_enabled": True},
+            {"vehicle_reid_labels": ["car", "truck", "bus", "motorcycle", "bicycle"]},
+        )
+        for change in changes:
+            with self.subTest(change=change):
+                active = Mock()
+                current = AppConfig()
+                current.detector.tracking.reid_model_path = "person.xml"
+                current.detector.tracking.vehicle_reid_model_path = "vehicle.xml"
+                if "vehicle_reid_labels" in change:
+                    current.detector.tracking.vehicle_reid_enabled = True
+                active.config = current
+                main.config = current
+                main.manager = active
+                incoming = current.model_copy(deep=True)
+                for field, value in change.items():
+                    setattr(incoming.detector.tracking, field, value)
+                with patch("survng.app.main.save_config"):
+                    effective, _ = main.apply_config_update(incoming)
+                active.reconfigure_inference.assert_called_once_with(
+                    effective.detector, {"reid"}, refresh_tracking=True,
+                )
+
     def test_shared_inference_cache_change_restarts_all_inference_roles(self) -> None:
         active = Mock()
         current = AppConfig()

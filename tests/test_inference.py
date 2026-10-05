@@ -982,6 +982,44 @@ class InferenceSupervisorTest(unittest.TestCase):
                     admission.assert_not_called()
                     request.assert_not_called()
 
+    def test_enabling_reid_starts_worker_and_routes_enabled_labels(self) -> None:
+        crop = np.zeros((32, 16, 3), dtype=np.uint8)
+        for person, vehicle in ((True, False), (False, True), (True, True)):
+            with self.subTest(person=person, vehicle=vehicle):
+                config = DetectorConfig.model_validate({"enabled": False, "tracking": {
+                    "reid_enabled": person, "reid_model_path": "person.xml",
+                    "vehicle_reid_enabled": vehicle, "vehicle_reid_model_path": "vehicle.xml",
+                    "vehicle_reid_labels": ["car", "bicycle"],
+                }})
+                with (
+                    patch.object(self.supervisor._reid, "stop"),
+                    patch.object(self.supervisor._reid, "start", return_value=True) as start,
+                ):
+                    self.supervisor.reconfigure_roles(config, {"reid"})
+                    start.assert_called_once()
+                self.assertTrue(self.supervisor._reid.start_enabled)
+                proxy = IsolatedPersonReidentifier(self.supervisor)
+                status = {
+                    "ready": True,
+                    "person": {"ready": person, "model_fingerprint": "person", "embedding_size": 2},
+                    "vehicle": {"ready": vehicle, "model_fingerprint": "vehicle", "embedding_size": 2},
+                }
+                with (
+                    patch.object(self.supervisor, "cached_reid_status", return_value=status),
+                    patch.object(self.supervisor._reid, "request", return_value=[1.0, 0.0]) as request,
+                ):
+                    self.assertTrue(proxy.enabled)
+                    labels = (["person"] if person else []) + (["car", "bicycle"] if vehicle else [])
+                    for label in labels:
+                        self.assertTrue(proxy.supports_label(label))
+                        self.assertIsNotNone(proxy.model_identity_for_label(label))
+                        self.assertEqual(proxy.embed_for_label(label, crop).tolist(), [1.0, 0.0])
+                        self.assertEqual(request.call_args.args, ("embed_reid",))
+                        self.assertEqual(request.call_args.kwargs["label"], label)
+                    if person:
+                        self.assertEqual(proxy.embed(crop).tolist(), [1.0, 0.0])
+                        self.assertEqual(request.call_args.args, ("embed_person",))
+
     def test_disabled_reid_proxy_ignores_stale_ready_metadata(self) -> None:
         supervisor = Mock(config=DetectorConfig())
         supervisor.cached_reid_status.return_value = {

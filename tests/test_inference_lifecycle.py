@@ -8,7 +8,7 @@ import pytest
 
 from survng.app.config import AppConfig
 from survng.app.config_application import TargetedConfigApplication
-from survng.app.inference import InferenceRollbackIncomplete, InferenceSupervisor
+from survng.app.inference import InferenceRollbackIncomplete, InferenceSupervisor, IsolatedPersonReidentifier
 from survng.app.inference_lifecycle import InferenceLifecycle
 
 
@@ -49,6 +49,36 @@ class _ReadOnlyFaceRecognizer:
     @property
     def config(self):
         return self._service.detector.config
+
+
+def test_enabling_reid_updates_existing_proxy_tracking_and_backfill() -> None:
+    service = _lifecycle()
+    service.detector = InferenceSupervisor(AppConfig().detector)
+    proxy = IsolatedPersonReidentifier(service.detector)
+    service.person_reidentifier = proxy
+    service.tracking_window_provider = None
+    service._auxiliary_started = True
+    old_backfill = service.appearance_backfill
+    new_backfill = Mock()
+    incoming = service.detector.config.model_copy(deep=True)
+    incoming.tracking.reid_enabled = True
+    incoming.tracking.reid_model_path = "person.xml"
+    incoming.tracking.vehicle_reid_enabled = True
+    incoming.tracking.vehicle_reid_model_path = "vehicle.xml"
+    assert not proxy.enabled
+    with (
+        patch.object(service.detector._reid, "stop"),
+        patch.object(service.detector._reid, "start", return_value=True),
+        patch.object(service, "_build_backfill", return_value=new_backfill) as build,
+    ):
+        service.reconfigure_roles(incoming, {"reid"}, refresh_tracking=True)
+    assert proxy.enabled
+    assert proxy.config is service.detector.config.tracking
+    assert service.tracking_factory.appearance_encoder is proxy
+    assert service.tracking_factory.config.appearance_reid_enabled
+    build.assert_called_once_with(incoming)
+    new_backfill.start.assert_called_once_with()
+    old_backfill.close.assert_called_once_with()
 
 
 def test_constructor_failure_closes_every_completed_dependency() -> None:
