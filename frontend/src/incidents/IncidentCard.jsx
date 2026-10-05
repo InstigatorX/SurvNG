@@ -4,13 +4,17 @@ import {
   ChevronLeft,
   ChevronRight,
   Crop,
+  Clock3,
   Download,
   Grid2X2,
   Images,
   Layers,
   Pentagon,
   ListTree,
+  Link2,
   Play,
+  Route,
+  ScanEye,
   Sparkles,
   X,
 } from "lucide-react";
@@ -18,7 +22,7 @@ import { crossCameraMatchCameraLabel, crossCameraMatchLabel, crossCameraTracePat
 import { incidentReplayTracking, trackingCoverageLabel } from "../objectTrackReplay.mjs";
 import { incidentSceneObjects, observedObjectSummaries } from "../incidentScene.mjs";
 import { incidentEvidenceTimeline, incidentMosaicEvents, incidentMosaicPage, incidentTriggerLabel, showIncidentCardAnnotations } from "../incidentNavigation.mjs";
-import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../relatedIncidents.mjs";
+import { relatedEvidenceReasons, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../relatedIncidents.mjs";
 import {
   appearanceCapableLabel,
   appearanceMatchesPath,
@@ -777,9 +781,17 @@ export function RelatedAppearanceIncidents({
           const eventId = Number(match.event_id);
           const selected = eventId === Number(selectedEventId);
           const pending = eventId === Number(loadingEventId);
+          const reasons = relatedEvidenceReasons(match);
+          const relatedTitle = `${cameraNameById.get(match.camera_id) || match.camera_id}: ${reasons.map((reason) => reason.label).join("; ")}`;
           return (
-            <button type="button" className={selected ? "selected" : ""} key={eventId} onClick={() => onSelect(match)} disabled={pending} aria-pressed={selected} title={match.route_name ? `${match.route_name}: ${relatedEvidenceLabel(match)}` : `Preview related incident from ${cameraNameById.get(match.camera_id) || match.camera_id}`}>
+            <button type="button" className={selected ? "selected" : ""} key={eventId} onClick={() => onSelect(match)} disabled={pending} aria-pressed={selected} title={relatedTitle} aria-label={relatedTitle}>
               <img src={appUrl(relatedIncidentThumbnailPath(eventId))} alt={`${cameraNameById.get(match.camera_id) || match.camera_id} related incident`} loading="lazy" />
+              <span className="incident-related-reasons">
+                {reasons.map(({ kind, label }) => {
+                  const Icon = { appearance: ScanEye, route: Route, time: Clock3, related: Link2 }[kind];
+                  return <span key={kind} title={label} role="img" aria-label={label}><Icon size={12} aria-hidden="true" /></span>;
+                })}
+              </span>
               <strong>{cameraNameById.get(match.camera_id) || match.camera_id}</strong>
               <small>{pending ? "Loading…" : formatDateTime(match.created_at, timeZone)}</small>
             </button>

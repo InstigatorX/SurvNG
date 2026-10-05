@@ -49,3 +49,24 @@ export function relatedEvidenceLabel(match) {
   if (hasTime) return `Likely · ${Math.round(seconds)}s`;
   return "Related incident";
 }
+
+export function relatedEvidenceReasons(match) {
+  const relation = String(match?.relation_type || "");
+  const reasons = [];
+  if (match?.visually_similar || ["appearance", "appearance_route", "appearance_sequence"].includes(relation)) {
+    const similarity = match?.similarity;
+    const score = similarity != null && Number.isFinite(Number(similarity))
+      ? ` · ${Math.round(Number(similarity) * 100)}% similarity` : "";
+    reasons.push({ kind: "appearance", label: `Appearance match (ReID)${score}` });
+  }
+  if (["expected_route", "appearance_route"].includes(relation)) {
+    reasons.push({ kind: "route", label: `Expected camera route${match?.route_name ? ` · ${match.route_name}` : ""}` });
+  }
+  if (["sequence_candidate", "appearance_sequence", "expected_route", "appearance_route"].includes(relation)) {
+    const seconds = match?.sequence_delta_seconds;
+    const gap = seconds != null && Number.isFinite(Number(seconds))
+      ? ` · ${Math.round(Number(seconds))}s apart` : "";
+    reasons.push({ kind: "time", label: `Nearby in time${gap}` });
+  }
+  return reasons.length ? reasons : [{ kind: "related", label: "Related incident" }];
+}

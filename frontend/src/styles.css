@@ -1342,6 +1342,7 @@ p {
 }
 
 .incident-related-grid button {
+  position: relative;
   display: grid;
   min-width: 0;
   overflow: hidden;
@@ -1353,6 +1354,22 @@ p {
 .incident-related-grid button.selected {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
+}
+
+.incident-related-reasons {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 4px;
+  color: #fff;
+  background: rgb(0 0 0 / 75%);
+}
+
+.incident-related-reasons > span {
+  display: flex;
 }
 
 .incident-related-grid img {
