@@ -26,6 +26,10 @@ import { IncidentCard, IncidentInspector } from "./IncidentCard.jsx";
 import { IncidentAnalysisStatus } from "./IncidentAnalysisStatus.jsx";
 import { useIncidentPlayback } from "./useIncidentPlayback.js";
 import "./mobile-incidents.css";
+import "./storyline-selection.css";
+import { storylineIncidentId, toggleStorylineIncident, storylineMembers } from "../incidentStorylineSelection.mjs";
+
+const StorylineEditor = React.lazy(() => import("../storylines/StorylinesPage.jsx").then((module) => ({ default: module.StorylinesPage })));
 import { FaceReviewDialog } from "../people/FacesPage.jsx";
 
 export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordingContextChange, onAssistantContextChange, onAskAssistant = null }) {
@@ -33,6 +37,17 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? false;
   const thumbnailObjectFocus = appConfig?.incident_thumbnail_object_focus ?? "off";
   const thumbnailObjectFocusZoom = appConfig?.incident_thumbnail_object_focus_zoom ?? 1;
+  const [storylineSelecting, setStorylineSelecting] = useState(false);
+  const [storylineSelection, setStorylineSelection] = useState([]);
+  const [storylineBusy, setStorylineBusy] = useState("");
+  const [storylineError, setStorylineError] = useState("");
+  const [storylineNotice, setStorylineNotice] = useState("");
+  const [builtStory, setBuiltStory] = useState(null);
+  const [storylineEditorBusy, setStorylineEditorBusy] = useState(false);
+  const [storylineDirty, setStorylineDirty] = useState(false);
+  const builtStoryCache = useRef(null);
+  const storylineRequest = useRef(null);
+  useEffect(() => () => storylineRequest.current?.abort(), []);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [eventFilter, setEventFilter] = useState("object");
   const [incidentCameraFilter, setIncidentCameraFilter] = useState("all");
@@ -662,6 +677,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   }
 
   function selectGalleryIncident(incident) {
+    if (storylineSelecting) { selectStorylineIncident(incident); return; }
     toggleIncident(incident.id);
     if (galleryExpanded) changeGallery(false, incident);
   }
@@ -689,7 +705,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   }
 
   function toggleIncident(incidentId) {
-    if (mobileView) {
+    if (mobileView && !storylineSelecting) {
       const incident = visibleIncidents.find((candidate) => sameIncidentId(candidate.id, incidentId));
       if (incident) window.location.assign(appUrl(`/incidents/${encodeURIComponent(incident.id)}`));
       return;
@@ -798,6 +814,87 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     return () => window.removeEventListener("keydown", onIncidentArrow);
   }, [mobileView, selectedEvent, galleryExpanded, focusedIndex, visibleIncidents, clampedIncidentPage, incidentPageCount, incidentLoading, semanticIncidentActive]);
 
+  function closeStorylineBuilder() {
+    if (storylineEditorBusy) return false;
+    if (storylineDirty && !window.confirm("Discard unsaved Storyline edits?")) return false;
+    setBuiltStory(null); setStorylineDirty(false); setStorylineEditorBusy(false);
+    return true;
+  }
+
+  function toggleStorylineMode() {
+    if (storylineBusy || !closeStorylineBuilder()) return;
+    if (!storylineSelecting && galleryExpanded) changeGallery(false);
+    setStorylineSelecting((value) => !value);
+    setStorylineError(""); setStorylineNotice("");
+  }
+
+  function selectStorylineIncident(incident) {
+    if (storylineBusy || !closeStorylineBuilder()) return;
+    setStorylineError(""); setStorylineNotice("");
+    const alreadySelected = storylineSelection.some((item) => storylineIncidentId(item) === storylineIncidentId(incident));
+    if (!alreadySelected && storylineSelection.length >= 64) setStorylineError("A Storyline supports at most 64 incidents.");
+    else setStorylineSelection((selected) => toggleStorylineIncident(selected, incident));
+    toggleIncident(incident.id);
+    if (galleryExpanded) changeGallery(false, incident);
+  }
+
+  async function storylineAction(label, action) {
+    if (storylineBusy) return;
+    const controller = new AbortController(); storylineRequest.current = controller;
+    setStorylineBusy(label); setStorylineError(""); setStorylineNotice("");
+    try { await action(controller.signal); }
+    catch (error) { if (error.name !== "AbortError") setStorylineError(error.message); }
+    finally { if (!controller.signal.aborted) setStorylineBusy(""); }
+  }
+
+  async function storylineRequestJson(path, options) {
+    const response = await fetch(path, options);
+    const data = await response.json();
+    if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not build Storyline. Refresh and retry.");
+    return data;
+  }
+
+  function buildStoryline() {
+    void storylineAction("Building", async (signal) => {
+      const members = storylineMembers(storylineSelection), key = JSON.stringify(members);
+      const data = builtStoryCache.current?.key === key ? builtStoryCache.current.story
+        : await storylineRequestJson("/api/storylines", { method: "POST", signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "New Storyline", summary: "", members }) });
+      builtStoryCache.current = { key, story: data };
+      setBuiltStory(data); setTabletInspectorOpen(false);
+      if (galleryExpanded) changeGallery(false);
+    });
+  }
+
+  function autoSelectConnected() {
+    void storylineAction("Finding connected incidents", async (signal) => {
+      const seed = storylineIncidentId(storylineSelection[0]);
+      const data = await storylineRequestJson(`/api/storylines/connected?incident_id=${encodeURIComponent(seed)}`, { signal });
+      setStorylineSelection(data.items);
+      setStorylineNotice(`${data.items.length} incidents selected in time order.${data.excluded_context_count ? ` ${data.excluded_context_count} context-only candidates need manual review.` : ""}`);
+    });
+  }
+
+  const sequenceFor = (incident) => storylineSelecting ? storylineSelection.findIndex((item) => storylineIncidentId(item) === storylineIncidentId(incident)) + 1 : 0;
+  const storylineToggle = canCorrectIncident ? <button type="button" className={`incident-storyline-toggle${storylineSelecting ? " active" : ""}`} aria-pressed={storylineSelecting} disabled={Boolean(storylineBusy) || storylineEditorBusy} onClick={toggleStorylineMode}>Storyline</button> : null;
+  const storylineFooter = storylineSelecting ? <div className="incident-storyline-footer" aria-label="Storyline selection">
+    <span role="status">{storylineBusy ? `${storylineBusy}…` : `${storylineSelection.length} selected`}</span>
+    {storylineNotice ? <small role="status">{storylineNotice}</small> : null}
+    {storylineError ? <small role="alert">{storylineError}</small> : null}
+    <div><button type="button" disabled={Boolean(storylineBusy) || !storylineSelection.length || Boolean(builtStory)} onClick={buildStoryline}>Build</button><button type="button" disabled={Boolean(storylineBusy) || storylineEditorBusy || !storylineSelection.length} onClick={() => { if (!closeStorylineBuilder()) return; builtStoryCache.current = null; setStorylineSelection([]); setStorylineError(""); setStorylineNotice(""); }}>Clear</button><button type="button" disabled={Boolean(storylineBusy) || storylineSelection.length !== 1 || Boolean(builtStory)} onClick={autoSelectConnected}>Auto-select connected</button></div>
+  </div> : null;
+  function syncStorylineBuilder(data) {
+    if (!data) { builtStoryCache.current = null; setBuiltStory(null); setStorylineDirty(false); setStorylineEditorBusy(false); return; }
+    const selected = data.members.map((member) => {
+      const detail = data.incidents?.find((incident) => incident.id === member.incident_id || incident.story_member_ids?.includes(member.incident_id));
+      return { ...detail, id: member.incident_id, incident_id: member.incident_id };
+    });
+    setStorylineSelection(selected);
+    builtStoryCache.current = { key: JSON.stringify(storylineMembers(selected)), story: data };
+    setBuiltStory(data);
+  }
+
+  const storylineBuilder = builtStory ? <React.Suspense fallback={<p role="status">Loading Storyline editor…</p>}><StorylineEditor key={builtStory.id} embedded initialStory={builtStory} timeZone={timeZone} canEdit={canCorrectIncident} onClose={closeStorylineBuilder} onDirtyChange={setStorylineDirty} onStoryChange={syncStorylineBuilder} onBusyChange={setStorylineEditorBusy} /></React.Suspense> : null;
+
   function shiftIncidentDay(days) {
     const next = addDaysToDateKey(incidentDay || today, days);
     if (next <= today) setIncidentDay(next);
@@ -831,7 +928,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
 
   if (!mobileView) {
     return (
-      <main className={`incidents-desktop-page with-inspector${galleryExpanded ? " gallery-expanded" : ""}`}>
+      <main className={`incidents-desktop-page with-inspector${builtStory ? " storyline-building" : ""}${galleryExpanded ? " gallery-expanded" : ""}`}>
         <section className="bento-card incidents-desktop-shell">
           <div className="incidents-desktop-toolbar">
             <div className="incidents-command-primary">
@@ -848,6 +945,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
               </div>
               {semanticIncidentControl}
               <div className="incident-toolbar-summary" aria-label={`${activeIncidentFilterCount} active filters`}>
+                {storylineToggle}
                 {activeIncidentFilterCount ? <button type="button" onClick={clearIncidentFilters}>Clear</button> : null}
                 <span className="shown-bubble">{displayedIncidentTotal} {semanticIncidentActive ? "matches" : "shown"}</span>
               </div>
@@ -855,7 +953,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
           </div>
 
           <div className="incidents-desktop-workspace">
-            <aside className={`incident-rail ${incidentDensity}`}>
+            <aside className={`incident-rail ${incidentDensity}${storylineSelecting ? " storyline-selecting" : ""}`}>
               <div className="incident-rail-head">
                 <button ref={incidentGalleryToggleRef} type="button" className="incident-gallery-toggle" aria-expanded={galleryExpanded} aria-controls="incident-results" onClick={() => changeGallery(!galleryExpanded)}>
                   {galleryExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
@@ -880,7 +978,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                 {displayedIncidentLoading && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
                 {!galleryIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
                 {galleryIncidents.length ? pagedIncidents.map((incident) => (
-                  <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} onSelect={selectGalleryIncident} onOpenOverlay={galleryExpanded ? selectGalleryIncident : openIncidentOverlay} />
+                  <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} storylineSelecting={storylineSelecting} storylineSequence={sequenceFor(incident)} onSelect={selectGalleryIncident} onOpenOverlay={storylineSelecting || galleryExpanded ? selectGalleryIncident : openIncidentOverlay} />
                 )) : null}
                 {!displayedIncidentLoading && !displayedIncidentError && !galleryIncidents.length ? (
                   <div className="empty-state">
@@ -897,10 +995,11 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                 <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
                 <button type="button" onClick={() => changeIncidentPage(Math.min(incidentPageCount - 1, incidentPage + 1))} disabled={clampedIncidentPage >= incidentPageCount - 1}>Next</button>
               </div>
+              {storylineFooter}
             </aside>
 
             <section className="incident-investigation" inert={galleryExpanded} aria-hidden={galleryExpanded}>
-              <div className="incident-desktop-focus">
+              {builtStory ? <div className="incident-storyline-builder">{storylineBuilder}</div> : <div className="incident-desktop-focus">
                 <div className="incident-focus-actions">
                   <button ref={tabletInspectorToggleRef} type="button" className="incident-inspector-toggle" onClick={() => setTabletInspectorOpen((open) => !open)} aria-expanded={tabletInspectorOpen} aria-controls="incident-inspector" disabled={!displayedIncident}>Details</button>
                 </div>
@@ -950,9 +1049,10 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                       : (linkedIncidentError || "No incidents match the current filters.")}
                   </div>
                 )}
-              </div>
+              </div>}
             </section>
 
+            {!builtStory ? <>
             {tabletInspectorOpen ? <button type="button" className="incident-inspector-backdrop" onClick={() => closeTabletInspector()} aria-label="Close incident details" /> : null}
             <IncidentInspector
               open={tabletInspectorOpen}
@@ -1005,6 +1105,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
               onClose={() => closeTabletInspector()}
               onAskAssistant={onAskAssistant}
             />
+            </> : null}
           </div>
         </section>
         {selectedFace ? <FaceReviewDialog observation={selectedFace} people={facePeople} timeZone={timeZone} onClose={() => setSelectedFace(null)} onUpdated={() => { setSelectedFace(null); refresh(); }} /> : null}
@@ -1016,7 +1117,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     <main className="bento-grid incidents-grid">
       <section className="bento-card events-zone incidents-page-zone mobile-incidents">
         <div className="section-head compact incident-head">
-          <div><h2>Incidents</h2></div>
+          <div><h2>Incidents</h2>{storylineToggle}</div>
           <div className="incident-head-actions">
             <button type="button" className="mobile-filter-button" aria-expanded={mobileFiltersOpen} aria-controls="mobile-incident-filters" onClick={() => setMobileFiltersOpen((open) => !open)}>
               <SlidersHorizontal size={17} /> Filters{activeIncidentFilterCount || incidentDay !== today || eventFilter !== "object" || semanticIncidentActive ? <span className="mobile-filter-active" aria-label="Filters active" /> : null}
@@ -1062,11 +1163,14 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
             <button type="button" onClick={() => setMobileFiltersOpen(false)}>Done</button>
           </div>
         </div> : null}
-        <div className="incident-gallery">
+        {storylineSelecting && displayedIncident && !builtStory ? <div className="incident-storyline-mobile-preview" aria-label="Selected incident preview"><IncidentCard incident={displayedIncident} scenePlayback={scenePlayback} timeZone={timeZone} expanded onToggle={toggleIncident} /></div> : null}
+        {builtStory ? <div className="incident-storyline-builder">{storylineBuilder}</div> : <div className="incident-gallery">
           {displayedIncidentLoading ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
           {!displayedIncidentLoading && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
           {!displayedIncidentLoading && !displayedIncidentError && visibleIncidents.length
             ? pagedIncidents.map((incident) => (
+              <div className="incident-storyline-mobile-card" key={incident.id}>
+              {storylineSelecting ? <button className="storyline-sequence mobile" aria-label={`Select ${incident.camera_id} incident for Storyline`} aria-pressed={Boolean(sequenceFor(incident))} disabled={Boolean(storylineBusy)} onClick={() => selectStorylineIncident(incident)}>{sequenceFor(incident) || "+"}</button> : null}
               <IncidentCard
                 key={incident.id}
                 incident={incident}
@@ -1075,20 +1179,22 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                 thumbnailAnnotations={thumbnailAnnotations}
                 thumbnailObjectFocus={thumbnailObjectFocus}
                 thumbnailObjectFocusZoom={thumbnailObjectFocusZoom}
-                onToggle={toggleIncident}
-                onSelect={() => toggleIncident(incident.id)}
+                onToggle={storylineSelecting ? () => selectStorylineIncident(incident) : toggleIncident}
+                onSelect={() => storylineSelecting ? selectStorylineIncident(incident) : toggleIncident(incident.id)}
               />
+              </div>
             ))
             : null}
           {!displayedIncidentLoading && !displayedIncidentError && !visibleIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "No semantic matches for the selected filters." : "No incidents match the current filters."}</div> : null}
-        </div>
-        {displayedIncidentTotal > incidentsPerPage ? (
+        </div>}
+        {!builtStory && displayedIncidentTotal > incidentsPerPage ? (
           <div className="incident-pager" aria-label="Incident pages">
             <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
             <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
             <button type="button" onClick={() => setIncidentPage((page) => Math.min(incidentPageCount - 1, page + 1))} disabled={clampedIncidentPage >= incidentPageCount - 1}>Next</button>
           </div>
         ) : null}
+        {storylineFooter}
       </section>
       {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} canCorrectIncident={canCorrectIncident} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refresh} /> : null}
     </main>

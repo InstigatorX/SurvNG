@@ -1,0 +1,16 @@
+import assert from "node:assert/strict";
+import { storyShotAt, storyCropAt, nextStoryPosition } from "../src/storyReplay.mjs";
+import { resolveWorkspace } from "../src/workspaceNavigation.mjs";
+const plan = { duration: 12, shots: [{ kind: "video", offset: 0, duration: 5 }, { kind: "gap", offset: 5, duration: 2 }, { kind: "video", offset: 7, duration: 5 }] };
+assert.equal(storyShotAt(plan, 5).kind, "gap");
+assert.equal(storyShotAt(plan, 7).kind, "video");
+assert.equal(storyShotAt(plan, 12), null);
+assert.equal(nextStoryPosition(plan, plan.shots[1]), 7);
+assert.deepEqual(storyCropAt([], 5), { x: .5, y: .5, size: 1 });
+const points = [{ at: 0, x: .1, y: .2, size: .5 }, { at: 4, x: .8, y: .7, size: .5 }];
+assert.equal(storyCropAt(points, .5).size, 1);
+assert.equal(storyCropAt(points, 3).size, .5);
+assert.equal(storyCropAt(points, 5).size, 1);
+assert.equal(storyCropAt(points, 4).x, .75);
+assert.equal(resolveWorkspace('/storylines').id, 'storylines');
+console.log('Story Replay timeline, crop boundaries, and navigation passed');

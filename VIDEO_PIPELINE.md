@@ -938,3 +938,43 @@ affects any of the following:
 - Incident grouping or clip generation.
 - Browser streaming, remux, cache, or fallback behavior.
 - MQTT/SSE payload semantics or observability.
+
+## Storyline projection and replay
+
+The additive Storyline layer (`storylines.py`, `storyline_routes.py`) retains
+original incident IDs and operator context in the shared main database. It never
+rewrites events, scene membership, object identities or face references. CRUD,
+merge/split and suggestion decisions use optimistic revisions and the shared
+writer lock. Canonical scene aliases resolve on read; expired evidence remains
+explicitly unavailable. AI review uses the existing provider transport, limiter,
+AI activity accounting and a manager-generation lease, and binds results to source
+evidence revisions. It cannot mutate identity or membership.
+
+`story_replay.py` builds a bounded, source-time plan from camera episode intervals
+and indexed main recordings. Actual recording gaps and stream-fingerprint changes
+create boundaries. The director selects at most two simultaneous camera views,
+unions recorded subject boxes, and uses only bounded, supported crop paths.
+`StoryReplay.jsx` reuses the native recording player and segment endpoints, with
+a primary source clock, synchronized companion view and decoded-frame retention.
+Manual order carries explicit forward/backward source-time jump cards.
+
+`story_export.py` renders the server-generated frozen plan via MediaExportManager.
+The existing worker owns queueing, cancellation, recorder-generation ownership,
+recording leases, progress, protected exports, atomic publication, manifests and
+retention. Per-view footage is trimmed before frame normalization, zoom and
+composition. CPU H.264 rendering is bounded to two threads; output is muted.
+The renderer validates coverage again and fails rather than silently dropping
+source intervals whose recordings disappeared.
+
+Storyline AI montage selection reads retained cover and gallery storage records,
+allocates one usable frame per incident before supplemental views, and caps the
+whole montage at 12 images. It skips missing/corrupt/duplicate frames, carries
+per-frame camera/capture timestamps and non-authoritative detector hints, and
+records the exact reviewed image IDs. Gallery updates advance scene-media and
+incident revisions, so the existing evidence fingerprint invalidates stale reviews.
+
+Incidents selection mode stores ordered incident IDs independently of search
+filters and pagination. Build creates the Storyline once and embeds its editor
+in the incident investigation pane. Connected auto-selection reuses bounded trace
+suggestions and includes high/moderate evidence links only; context-only candidates
+remain explicit review proposals. Selection never changes identity or source events.

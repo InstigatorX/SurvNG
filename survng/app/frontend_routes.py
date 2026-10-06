@@ -85,6 +85,7 @@ def create_frontend_router(
         "config_page": ("/config", "config.html"),
         "admin_page": ("/admin", "config.html"),
         "incidents_page": ("/incidents", "index.html"),
+        "storylines_page": ("/storylines", "index.html"),
         "observations_page": ("/observations", "index.html"),
         "faces_page": ("/faces", "index.html"),
         "people_page": ("/people", "index.html"),

@@ -1,0 +1,13 @@
+import assert from "node:assert/strict";
+import { storylineIncidentId, toggleStorylineIncident, storylineMembers } from "../src/incidentStorylineSelection.mjs";
+const a={id:'a'},b={id:'b'},c={id:'c',incident_id:'canonical-c'};
+let selected=toggleStorylineIncident([],a);
+selected=toggleStorylineIncident(selected,b);
+selected=toggleStorylineIncident(selected,c);
+assert.deepEqual(storylineMembers(selected).map((m)=>m.incident_id),['a','b','canonical-c']);
+selected=toggleStorylineIncident(selected,b);
+assert.deepEqual(selected.map(storylineIncidentId),['a','canonical-c']);
+assert.deepEqual(toggleStorylineIncident(selected,{id:'another-c',incident_id:'canonical-c'}),[a]);
+assert.equal(toggleStorylineIncident(Array.from({length:64},(_,n)=>({id:String(n)})),a).length,64);
+assert.equal(storylineMembers([a])[0].relationship,'related_event');
+console.log('Incident Storyline sequence, canonical selection, deselection, and bounds passed');

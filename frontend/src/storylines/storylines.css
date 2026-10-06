@@ -1,0 +1,49 @@
+.storylines-page { padding: 18px; min-width: 0; }
+.storylines-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 18px; }
+.storylines-heading h2, .story-panel h3 { margin: 0 0 8px; }
+.storylines-heading p { margin: 0; opacity: .7; }
+.storylines-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr) 280px; gap: 16px; align-items: start; }
+.story-panel { min-width: 0; padding: 16px; border: 1px solid var(--line, #334155); border-radius: 14px; background: var(--panel, #151e2c); }
+.story-panel > label { display: grid; gap: 5px; margin-bottom: 12px; }
+.story-panel input:not([type=checkbox]), .story-panel textarea, .story-panel select { max-width: 100%; min-width: 0; padding: 8px; color: inherit; background: var(--control, #111827); border: 1px solid var(--line, #334155); border-radius: 6px; }
+.story-panel textarea { min-height: 70px; resize: vertical; }
+.story-panel button, .story-controls a { padding: 7px 10px; border: 1px solid var(--line, #334155); border-radius: 7px; color: inherit; background: transparent; cursor: pointer; }
+.story-panel button:disabled { opacity: .45; cursor: default; }
+.story-panel button[aria-current=true] { border-color: #3b82f6; background: #3b82f622; }
+.story-library > button { display: grid; text-align: left; width: 100%; gap: 6px; margin: 8px 0; }
+.story-library span, .story-panel small { font-size: 12px; opacity: .7; display: block; }
+.story-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
+.story-controls label { display: inline-flex; gap: 5px; align-items: center; font-size: 13px; }
+.story-members { padding-left: 24px; }
+.story-members li { margin: 12px 0; padding: 12px; border: 1px solid var(--line, #334155); border-radius: 8px; }
+.story-members li > input, .story-members li > select { width: 100%; margin-top: 8px; }
+.story-members li > label { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.story-evidence, .story-suggestion { display: grid; gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--line, #334155); }
+.story-evidence img { width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: 8px; }
+.story-panel a { color: var(--text, #dbeafe); }
+.story-empty { padding: 36px 0; }
+.story-error, .story-warning { padding: 12px; border: 1px solid #dc9a46; border-radius: 8px; }
+.story-ai { padding: 16px; border: 1px solid #3b82f6; border-radius: 10px; margin: 16px 0; }
+.story-replay-stage { width: 100%; aspect-ratio: 16/9; display: grid; background: #070b11; border-radius: 12px; overflow: hidden; }
+.story-replay-stage.split { grid-template-columns: 1fr 1fr; }
+.story-view { position: relative; overflow: hidden; min-width: 0; min-height: 0; }
+.story-view video { position: absolute; max-width: none; object-fit: fill; transition: width .15s linear, height .15s linear, left .15s linear, top .15s linear; }
+.story-view video.standby { visibility: hidden; }
+.story-view-label { position: absolute; left: 8px; top: 8px; padding: 5px; background: #0009; color: white; font-size: 11px; z-index: 2; }
+.story-video-status, .story-gap { display: grid; place-content: center; text-align: center; padding: 20px; color: white; }
+.story-video-status { position: absolute; inset: 0; background: #070b11bb; z-index: 3; }
+.story-controls input[type=range] { flex: 1; width: 100px; padding: 0; }
+.story-replay details { font-size: 12px; }
+.story-replay details button { margin: 4px; }
+@media (max-width: 1200px) { .storylines-layout { grid-template-columns: minmax(0, 1fr) 260px; } .story-library { grid-column: 1/-1; } .story-library > button { display: inline-grid; width: 220px; margin-right: 8px; } }
+@media (max-width: 760px) { .storylines-page { padding: 8px; } .storylines-layout { display: flex; flex-direction: column; } .story-panel { width: 100%; box-sizing: border-box; } .story-replay-stage { min-height: 220px; } }
+
+.storylines-embedded { padding: 14px; }
+.storylines-embedded .storylines-layout { display: block; }
+.storylines-embedded .storylines-heading { flex-wrap: wrap; }
+.storylines-embedded .storylines-heading > div { flex: 1 1 180px; }
+.story-member-evidence { display: flex; align-items: center; gap: 12px; }
+.story-member-thumbnail { width: 128px; aspect-ratio: 16/9; object-fit: cover; flex-shrink: 0; border-radius: 6px; background: var(--panel-soft); }
+.story-member-placeholder { display: grid; place-content: center; font-size: 11px; color: var(--muted); }
+.story-member-evidence > div { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 760px) { .story-member-thumbnail { width: 88px; } }

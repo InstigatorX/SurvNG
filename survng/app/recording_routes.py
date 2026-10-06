@@ -680,7 +680,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         status: str = "",
         protected: bool | None = None,
     ) -> dict[str, object]:
-        if kind and kind not in {"recording", "timelapse"}:
+        if kind and kind not in {"recording", "timelapse", "storyline"}:
             raise HTTPException(status_code=400, detail="invalid export kind")
         if status and status not in {
             "queued", "running", "cancelling", "completed", "failed", "cancelled",

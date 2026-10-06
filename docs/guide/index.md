@@ -53,3 +53,5 @@ http://YOUR-SERVER:8088/survng/help
 ```
 
 Replace the host and path if you use a different address or `base_path`.
+
+Connected activity: [Storylines & Story Replay](storylines.md).

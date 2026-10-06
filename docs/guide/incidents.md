@@ -97,6 +97,7 @@ they are no longer listed as established incidents.
 ## Related
 
 - [Motion & detection](motion-detection.md)
+- [Storylines & Story Replay](storylines.md)
 - [Timeline & exports](timeline.md)
 - [AI assistant](assistant.md)
 - [People](people.md)

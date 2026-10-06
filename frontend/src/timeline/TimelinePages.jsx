@@ -3225,7 +3225,7 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
               allOption={{ value: "", label: "All cameras" }}
               ariaLabel="Select export camera"
             />
-            <label>Type<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">All exports</option><option value="recording">Video clips</option><option value="timelapse">Timelapses</option></select></label>
+            <label>Type<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">All exports</option><option value="recording">Video clips</option><option value="timelapse">Timelapses</option><option value="storyline">Story Replays</option></select></label>
             <label>Status<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">Any status</option><option value="completed">Ready</option><option value="active">In progress</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></label>
             <button type="button" className={protectedOnly ? "active" : ""} onClick={() => setProtectedOnly((current) => !current)}><ShieldCheck size={15} />Protected</button>
             <button type="button" className={selectionMode ? "active" : ""} onClick={() => { setSelectionMode((current) => !current); setSelectedIds([]); }}><Check size={15} />Select</button>
@@ -3242,7 +3242,7 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
           </div>
           <aside className="export-center-details">
             {selected ? <>
-              <header><div><strong>{selected.label || (selected.kind === "timelapse" ? "Timelapse" : "Video clip")}</strong><span className={`export-status ${selected.status}`}>{exportStatusLabel(selected.status)}</span></div><small>{selected.output_name || `${selected.camera_id} export`}</small></header>
+              <header><div><strong>{selected.label || (selected.kind === "storyline" ? "Story Replay" : selected.kind === "timelapse" ? "Timelapse" : "Video clip")}</strong><span className={`export-status ${selected.status}`}>{exportStatusLabel(selected.status)}</span></div><small>{selected.output_name || `${selected.camera_id} export`}</small></header>
               <div className="export-center-rename"><input value={editLabel} onChange={(event) => setEditLabel(event.target.value)} placeholder="Add a useful name" maxLength="120" /><button type="button" onClick={() => saveExportLabel(selected)} disabled={actionBusy === selected.id || editLabel.trim() === (selected.label || "")}><Save size={14} />Save</button></div>
               <dl>
                 <div><dt>Camera</dt><dd>{cameras.find((camera) => camera.id === selected.camera_id)?.name || selected.camera_id}</dd></div>
@@ -3272,7 +3272,7 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
           {filteredExports.map((item) => (
             <button key={item.id} type="button" className={`${item.id === selected?.id && !selectionMode ? "active" : ""} ${selectedIds.includes(item.id) ? "selected" : ""} ${item.status}`} onClick={() => selectionMode ? toggleExportSelection(item.id) : setSelectedId(item.id)} aria-pressed={selectionMode ? selectedIds.includes(item.id) : undefined}>
               <span className="export-center-card-icon">{item.kind === "timelapse" ? <Clock3 size={23} /> : <Film size={23} />}</span>
-              <span className="export-center-card-copy"><strong>{item.label || cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id}</strong><small>{item.label ? `${cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id} · ` : ""}{item.kind === "timelapse" ? "Timelapse" : "Video clip"} · {formatDateTime(Number(item.start_epoch), timeZone)}</small><small>{formatDuration(Number(item.end_epoch) - Number(item.start_epoch))} · {formatBytes(Number(item.size_bytes))}</small></span>
+              <span className="export-center-card-copy"><strong>{item.label || cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id}</strong><small>{item.label ? `${cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id} · ` : ""}{item.kind === "storyline" ? "Story Replay" : item.kind === "timelapse" ? "Timelapse" : "Video clip"} · {formatDateTime(Number(item.start_epoch), timeZone)}</small><small>{formatDuration(item.kind === "storyline" ? Number(item.options?.replay_plan?.duration) || 0 : Number(item.end_epoch) - Number(item.start_epoch))} · {formatBytes(Number(item.size_bytes))}</small></span>
               <span className={`export-center-card-status ${item.status}`}>{item.protected ? <ShieldCheck size={13} /> : null}{exportStatusLabel(item.status)}</span>
             </button>
           ))}

@@ -758,24 +758,26 @@ class MediaExportManager:
         self.store.update(job_id, status="running", phase="Reading recording index", progress=3, started_at=_utc_now())
         exports_dir = self._prepare_output_directory()
         recorder = self._recorder()
-        rows = recorder.recording_rows_between(
-            str(job["camera_id"]),
-            float(job["start_epoch"]),
-            float(job["end_epoch"]),
-            str(job["source"]),
-            discover_missing=False,
-        )
-        rows = [row for row in rows if Path(str(row.get("path") or "")).is_file()]
-        if not rows:
-            raise RuntimeError("no indexed recordings exist in the selected range")
-        lease_seconds = max(600.0, min(21600.0, float(job["end_epoch"]) - float(job["start_epoch"]) + 600.0))
-        recorder.lease_recordings_for_playback(rows, ttl_seconds=lease_seconds)
+        rows = []
+        if job["kind"] != "storyline":
+            rows = recorder.recording_rows_between(
+                str(job["camera_id"]), float(job["start_epoch"]), float(job["end_epoch"]),
+                str(job["source"]), discover_missing=False,
+            )
+            rows = [row for row in rows if Path(str(row.get("path") or "")).is_file()]
+            if not rows:
+                raise RuntimeError("no indexed recordings exist in the selected range")
+            lease_seconds = max(600.0, min(21600.0, float(job["end_epoch"]) - float(job["start_epoch"]) + 600.0))
+            recorder.lease_recordings_for_playback(rows, ttl_seconds=lease_seconds)
         if cancel.is_set() or self._stop.is_set():
             raise InterruptedError
         work = Path(tempfile.mkdtemp(prefix=f"{job_id}-", dir=self.work_dir))
         final_path: Path | None = None
         try:
-            if job["kind"] == "recording":
+            if job["kind"] == "storyline":
+                from .story_export import render_storyline
+                output, gaps = render_storyline(self, job, work, cancel)
+            elif job["kind"] == "recording":
                 output, gaps = self._build_recording(job, rows, work, cancel)
             else:
                 output, gaps = self._build_timelapse(job, rows, work, cancel)
@@ -1306,7 +1308,7 @@ class MediaExportManager:
             self.media_storage.directory("exports", "exports")
             if self.media_storage is not None else self.exports_dir
         )
-        for kind in ("recording", "timelapse", "manifests"):
+        for kind in ("recording", "timelapse", "storyline", "manifests"):
             (root / kind).mkdir(parents=True, exist_ok=True)
         return root
 
@@ -1323,7 +1325,10 @@ class MediaExportManager:
         camera = _safe_component(str(job["camera_id"]))
         suffix = source.suffix.lower() if source.suffix else ".mp4"
         name = f"{camera}-{timestamp}-{str(job['kind'])}{suffix}"
-        destination_dir = exports_dir / ("recording" if job["kind"] == "recording" else "timelapse")
+        destination_kind = str(job["kind"])
+        if destination_kind not in {"recording", "timelapse", "storyline"}:
+            raise ValueError("unsupported export kind")
+        destination_dir = exports_dir / destination_kind
         final = destination_dir / f"{job['id']}-{name}"
         partial = final.with_suffix(final.suffix + ".partial")
         try:
@@ -1385,7 +1390,7 @@ class MediaExportManager:
         """Remove final files published before an interrupted DB transition."""
         for job_id in self.store.interrupted_cleanup_ids():
             for root in self.export_roots:
-                for kind in ("recording", "timelapse"):
+                for kind in ("recording", "timelapse", "storyline"):
                     for path in (root / kind).glob(f"{job_id}-*"):
                         try:
                             if path.is_file():

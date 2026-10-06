@@ -611,15 +611,15 @@ export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, wind
 }
 
 
-export function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, onSelect, onOpenOverlay }) {
+export function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, onSelect, onOpenOverlay, storylineSelecting = false, storylineSequence = 0 }) {
   const labels = incidentLabels(incident);
   const trigger = incidentTriggerLabel(incident);
   const eventId = liveActivityEventId(incident);
   const time = incident.start_at || incident.created_at;
   const activityLabel = labels.length ? labels.join(", ") : "Motion only";
   return (
-    <article className={`live-activity-item${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
-      <button type="button" className="live-activity-select" onClick={() => onSelect(incident)} aria-label={`Open ${cameraName} activity at ${formatDateTime(time, timeZone)}`}>
+    <article className={`live-activity-item${selected ? " selected" : ""}${storylineSequence ? " storyline-selected" : ""}`} aria-current={selected ? "true" : undefined}>
+      <button type="button" className="live-activity-select" onClick={() => onSelect(incident)} aria-pressed={storylineSelecting ? Boolean(storylineSequence) : undefined} aria-label={`Open ${cameraName} activity at ${formatDateTime(time, timeZone)}`}>
         <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusControls={false} showAnnotations={thumbnailAnnotations} showTracking={false} /></span>
         <span className="live-activity-copy">
           <span className="live-activity-kind"><IncidentObjectBadges labels={labels} /><span className="sr-only">{activityLabel}</span></span>
@@ -627,6 +627,7 @@ export function IncidentListItem({ incident, cameraName, timeZone, selected, thu
           <time>{formatDateTime(time, timeZone)}</time>
         </span>
       </button>
+      {storylineSequence ? <span className="storyline-sequence" aria-label={`Storyline position ${storylineSequence}`}>{storylineSequence}</span> : null}
       <IncidentSourceDot trigger={trigger} className="live-activity-trigger" onClick={() => onOpenOverlay(incident)} ariaLabel={`Preview exact ${trigger} event`} title={`${trigger} trigger`} />
       {!eventId ? <span className="sr-only">No exact event link is available.</span> : null}
     </article>
