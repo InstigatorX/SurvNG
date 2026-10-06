@@ -28,6 +28,7 @@ from .camera_startup import (
 from .appearance_backfill import DeferredAppearanceBackfill
 from .appearance_index import AppearanceIndex
 from .person_visits import PersonVisitStore
+from .storylines import StorylineStore
 from .config import (
     AppConfig,
     CameraConfig,
@@ -402,6 +403,7 @@ class AppManager:
         self.person_reidentifier = self.inference.person_reidentifier
         self.faces = self.inference.faces
         self.person_visits = PersonVisitStore(self.events.db_path, self.database_write_lock)
+        self.storylines = StorylineStore(self.events.db_path, self.database_write_lock)
         self.motion_decision_handler_factory = MotionDecisionHandlerFactory(
             events=self.events,
             object_serializer=objects_to_json,

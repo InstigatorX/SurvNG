@@ -839,6 +839,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                 <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}>Objects</button>
                 <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion</button>
               </div>
+              {canCorrectIncident && focusedIncident ? <a className="nav-button" href={appUrl(`/storylines?incident=${encodeURIComponent(focusedIncident.incident_id || focusedIncident.id)}`)}>Build Storyline</a> : null}
               {incidentDayControl()}
               <div className="incident-filter-selects desktop">
                 <label><select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)} aria-label="Incident camera"><option value="all">All cameras</option>{incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}</select></label>
@@ -1016,7 +1017,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     <main className="bento-grid incidents-grid">
       <section className="bento-card events-zone incidents-page-zone mobile-incidents">
         <div className="section-head compact incident-head">
-          <div><h2>Incidents</h2></div>
+          <div><h2>Incidents</h2>{canCorrectIncident && focusedIncident ? <a href={appUrl(`/storylines?incident=${encodeURIComponent(focusedIncident.incident_id || focusedIncident.id)}`)}>Build Storyline</a> : null}</div>
           <div className="incident-head-actions">
             <button type="button" className="mobile-filter-button" aria-expanded={mobileFiltersOpen} aria-controls="mobile-incident-filters" onClick={() => setMobileFiltersOpen((open) => !open)}>
               <SlidersHorizontal size={17} /> Filters{activeIncidentFilterCount || incidentDay !== today || eventFilter !== "object" || semanticIncidentActive ? <span className="mobile-filter-active" aria-label="Filters active" /> : null}

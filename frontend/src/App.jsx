@@ -35,6 +35,7 @@ function lazyExport(importer, exportName) {
 const LivePage = lazyExport(() => import("./live/LivePage.jsx"), "LivePage");
 const IncidentDetailPage = lazyExport(() => import("./incidents/IncidentDetailPage.jsx"), "IncidentDetailPage");
 const ObservationsPage = lazyExport(() => import("./incidents/ObservationsPage.jsx"), "ObservationsPage");
+const StorylinesPage = lazyExport(() => import("./storylines/StorylinesPage.jsx"), "StorylinesPage");
 const IncidentsPage = lazyExport(() => import("./incidents/IncidentsPage.jsx"), "IncidentsPage");
 const ExportCenterPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "ExportCenterPage");
 const RecordingsPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "RecordingsPage");
@@ -119,6 +120,8 @@ function App() {
       <Suspense fallback={<WorkspaceFallback />}>
         {workspacePage === "admin"
           ? <ConfigPage timeZone={timeZone} setTimeZone={setTimeZone} theme={theme} setTheme={setTheme} onAssistantContextChange={setAssistantContext} />
+          : workspacePage === "storylines"
+            ? <StorylinesPage timeZone={timeZone} canEdit={!viewer} />
           : workspacePage === "exports"
             ? <ExportCenterPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
             : workspacePage === "timeline"

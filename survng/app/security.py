@@ -480,6 +480,8 @@ def required_api_scope(method: str, path: str) -> ApiScope:
         return "admin"
     if normalized_method in {"GET", "HEAD", "OPTIONS"}:
         return "read"
+    if normalized_method == "POST" and re.fullmatch(r"/api/storylines/story-[0-9a-f]{32}/replay", path):
+        return "read"
     if normalized_method == "POST" and path in _READ_ONLY_POST_PATHS:
         return "read"
     # A deliberate viewer capability, NOT a read-only query: this endpoint

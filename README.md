@@ -121,6 +121,14 @@ identity—because camera angle, lighting, occlusion, and similar-looking subjec
 can affect the score. Raw appearance vectors remain server-side and are never
 returned by the API or assistant.
 
+## Storylines and directed replay
+
+[Storylines](docs/guide/storylines.md) save related incidents across cameras as one
+event with editable context, evidence-strength suggestions, and configured AI
+review. Story Replay follows the footage with camera changes, bounded object
+zoom, optional synchronized split-screen, and explicit elapsed-time cards.
+The existing Exports worker can render the frozen replay plan to a captioned MP4.
+
 ## Camera / ONVIF Notes
 
 ONVIF camera events are interpreted through shared, vendor-neutral rules. Recognized person, vehicle, animal and face reports can prioritize detection. Reolink's `DogCatDetect` is an alias for an animal report, not a separate detection subsystem. Topic and payload support still depends on the camera's actual message format.

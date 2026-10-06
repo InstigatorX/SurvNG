@@ -77,6 +77,20 @@ def _dependencies(get_manager) -> RecordingRouteDependencies:
 
 
 class RecordingRouteLifecycleTests(TestCase):
+    def test_storyline_export_filter_reaches_existing_export_store(self) -> None:
+        filters = []
+        exports = SimpleNamespace(
+            list=lambda *args, **kwargs: filters.append(kwargs) or [],
+            count=lambda **kwargs: 0,
+        )
+        dependencies = replace(_dependencies(lambda: _Manager("current")), get_media_exports=lambda: exports)
+        handler = create_recording_router(dependencies).handlers["list_media_exports"]
+        assert handler(kind="storyline")["exports"] == []
+        assert filters[0]["kind"] == "storyline"
+        with self.assertRaises(HTTPException) as rejected:
+            handler(kind="unknown")
+        assert rejected.exception.status_code == 400
+
     def test_hls_media_response_prewarms_the_next_fragment(self) -> None:
         manager = _Manager("current")
         fragments = tuple(

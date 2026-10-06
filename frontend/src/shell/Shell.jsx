@@ -25,6 +25,7 @@ import { RecordingHealthBar } from "./RecordingHealthBar.jsx";
 export const WORKSPACE_ICONS = Object.freeze({
   live: Video,
   incidents: Siren,
+  storylines: Rows3,
   timeline: Clock3,
   exports: Download,
   search: Search,

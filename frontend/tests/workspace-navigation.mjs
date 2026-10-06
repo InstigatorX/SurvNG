@@ -64,7 +64,7 @@ assert.equal(
 );
 assert.equal(timelineHref({ epoch: Number.NaN }), "/timeline");
 
-assert.deepEqual(DESKTOP_PRIMARY_WORKSPACES, ["live", "incidents", "timeline", "exports", "search", "people"]);
+assert.deepEqual(DESKTOP_PRIMARY_WORKSPACES, ["live", "incidents", "storylines", "timeline", "exports", "search", "people"]);
 assert.deepEqual(MOBILE_PRIMARY_WORKSPACES, ["live", "incidents", "timeline", "search", "more"]);
 
 const stylesSource = [

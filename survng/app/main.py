@@ -66,6 +66,7 @@ from .incident_queries import (
     IncidentQueryService,
     create_incident_query_router,
 )
+from .storyline_routes import StorylineDependencies, create_storyline_router
 from .intelligence_routes import (
     IntelligenceDependencies,
     create_intelligence_router,
@@ -1255,6 +1256,13 @@ _incident_query_bundle = create_incident_query_router(
     INCIDENT_QUERIES,
 )
 app.include_router(_incident_query_bundle.router)
+app.include_router(create_storyline_router(StorylineDependencies(
+    get_manager=get_manager, manager_lock=MANAGER_RELOAD_LOCK, manager_access=MANAGER_ACCESS,
+    incident_queries=INCIDENT_QUERIES,
+    get_exports=lambda: _recording_media_runtime._media_export_manager(),
+    get_ai_limiter=lambda: AUDIT_AI_LIMITER,
+    begin_ai_operation=_begin_ai_operation, end_ai_operation=_end_ai_operation,
+)))
 
 events = _incident_query_bundle.handlers["events"]
 incidents = _incident_query_bundle.handlers["incidents"]
