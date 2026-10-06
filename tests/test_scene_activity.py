@@ -186,3 +186,51 @@ def test_recorded_confirmation_acquires_whole_plan_despite_semantic_consensus():
     assert detector._detect_objects.call_count==5
     assert result.review_image["source"]=="recorded_main"
     assert evaluate_scene_activity(batch["samples"])["status"]=="supported"
+
+
+def test_background_level_pixel_change_is_not_localized_activity():
+    # A stable box with scattered changes throughout the image: the old
+    # independent cutoffs admitted 8.0247% local versus 6.9505% background.
+    before = frame(20)
+    after = before.copy()
+    after[7::11, 7::11] = 255 - after[7::11, 7::11]
+    after[30, 25:27] = 255 - after[30, 25:27]
+    samples = records([before, after], [[detection()], [detection()]])
+    assert samples[-1]["metadata"]["activity_witnesses"] == []
+    assert evaluate_scene_activity(samples)["status"] == "unsupported"
+
+
+def test_persisted_near_background_witnesses_do_not_establish_activity():
+    from copy import deepcopy
+    from survng.app.scene_zone_admission import evaluate_scene_establishment
+    from tests.test_scene_zone_admission import policy, zone
+    # Measurements retained by the two reported front-door confirmations.
+    for local, background, displacement in (
+        (0.082738, 0.072881, 0.000434),
+        (0.085119, 0.079609, 0.000742),
+    ):
+        samples = records([frame(20), frame(35)], [[detection(20)], [detection(35)]])
+        witness = samples[-1]["metadata"]["activity_witnesses"][0]
+        witness.update(kind="localized_motion", witness_version=1,
+                       local_change_fraction=local, background_change_fraction=background,
+                       normalized_displacement=displacement)
+        for sample in samples:
+            for item in sample["observations"]:
+                item.update(activity_role="indeterminate", confidence=0.93)
+        original = deepcopy(samples)
+        decision = evaluate_scene_establishment(samples, policy=policy(zone("Entry", "incident", 0, 1)))
+        assert decision["status"] == "unsupported"
+        assert decision["supporting_observation_ids"] == []
+        assert decision["diagnostics"]["localized_change_policy_version"] == 2
+        assert samples == original
+
+
+def test_localization_measurements_must_be_valid_and_exceed_background():
+    from survng.app.scene_activity import localized_change_supported
+    for local, background in ((float("nan"), 0), (0.5, float("inf")), (1.1, 0),
+                              (0.2, -0.1), (0.5, 0.081), (None, 0), (0.1, 0.07)):
+        assert not localized_change_supported(local, background)
+    assert localized_change_supported(0.08, 0)
+    assert localized_change_supported(0.2, 0.07)
+    assert localized_change_supported(0.15, 0.07)
+    assert not localized_change_supported(0.149999, 0.07)

@@ -260,3 +260,34 @@ def test_failed_reanalysis_preserves_original_successful_observations(tmp_path):
         assert conn.execute('select count(*) from acquired_observations where camera_id=?',('gate',)).fetchone()[0]==3
         assert conn.execute('select status from acquired_samples where id=?',(failed[0]['id'],)).fetchone()[0]=='failed'
         assert conn.execute('pragma foreign_key_check').fetchall()==[]
+
+
+@pytest.mark.parametrize("local,background", [(0.082738, 0.072881), (0.085119, 0.079609)])
+def test_confirmation_with_background_level_change_keeps_evidence_without_incident(tmp_path, local, background):
+    from tests.test_scene_zone_admission import policy, zone
+
+    store = EventStore(tmp_path)
+    result = confirmation_result()
+    batch = next(item for item in result.objects if item.get("status") == "scene_observations")
+    for sample in batch["samples"]:
+        for witness in sample["metadata"]["activity_witnesses"]:
+            witness.update(kind="localized_motion", witness_version=1,
+                           local_change_fraction=local, background_change_fraction=background,
+                           normalized_displacement=0.0007)
+        for observation in sample["observations"]:
+            observation.update(activity_role="indeterminate", confidence=0.93)
+    outcome = processor(store, result, tmp_path).refine(
+        "scene/confirmation", "", datetime.fromtimestamp(1000, timezone.utc),
+        {"scene_confirmation": True,
+         "establishment_zone_policy": policy(zone("Entry", "incident", 0, 1), confidence_threshold=0.7)},
+        existing_event_id=None,
+    )
+    assert outcome.event_id is None
+    assert outcome.rejection_reason == "scene_activity_unsupported"
+    with store._connect() as conn:
+        assert conn.execute("select count(*) from acquired_observations").fetchone()[0] == 3
+        assert conn.execute("select count(*) from scene_incidents").fetchone()[0] == 0
+        assert conn.execute("select count(*) from scene_notification_outbox").fetchone()[0] == 0
+    restarted = EventStore(tmp_path)
+    with restarted._connect() as conn:
+        assert conn.execute("select count(*) from scene_incidents").fetchone()[0] == 0

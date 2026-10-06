@@ -8,6 +8,7 @@ import numpy as np
 
 from .detector import detection_failure
 from .scene_identity import observation_identity
+from .scene_activity import LOCALIZED_CHANGE_POLICY_VERSION, localized_change_supported
 
 
 def scene_sample_records(samples, observations, event_epoch, camera_id, confirmation_offsets=None, *, source="recorded_main"):
@@ -96,12 +97,13 @@ def scene_sample_records(samples, observations, event_epoch, camera_id, confirma
             if area<9 or area>=changed.size*.8:
                 continue
             local_count=int(np.count_nonzero(changed[top:bottom,left:right]))
-            local=local_count/area
-            background=(int(np.count_nonzero(changed))-local_count)/(changed.size-area)
-            if local<.08 or background>.08:
+            # Assess the same rounded measurements that durable replay reads.
+            local=round(local_count/area,6)
+            background=round((int(np.count_nonzero(changed))-local_count)/(changed.size-area),6)
+            if not localized_change_supported(local, background):
                 continue
             current["metadata"]["activity_witnesses"].append({
-                "kind":kind,"validated":True,"witness_version":1,"camera_stable":True,
+                "kind":kind,"validated":True,"witness_version":LOCALIZED_CHANGE_POLICY_VERSION,"camera_stable":True,
                 "from_sample_id":previous["id"],"to_sample_id":current["id"],
                 "from_epoch":previous["captured_epoch"],"to_epoch":current["captured_epoch"],
                 "observation_ids":[observation["id"]],"normalized_displacement":round(displacement,6),
