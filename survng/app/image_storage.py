@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,14 @@ from .incident_utils import SNAPSHOT_SUFFIXES
 LOGGER = logging.getLogger(__name__)
 SAFE_STEM_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
 MAX_STEM_LENGTH = 160
+
+
+@dataclass(frozen=True)
+class EncodedImage:
+    """An image encoded while its decoded-frame memory lease was still held."""
+
+    data: bytes
+    format: str = "jpeg"
 
 
 class DurableImageWriter:
@@ -36,6 +45,8 @@ class DurableImageWriter:
             return self._config.model_copy(deep=True)
 
     def write(self, directory: Path, stem: str, frame: Any) -> Path | None:
+        if isinstance(frame, EncodedImage):
+            return self.write_encoded(directory, stem, frame)
         config = self.configuration()
         image_format = config.format
         encoded = self._encode(image_format, frame, config.quality)
@@ -51,7 +62,13 @@ class DurableImageWriter:
                         self._webp_fallback_logged = True
         if encoded is None:
             return None
-        suffix = ".webp" if image_format == "webp" else ".jpg"
+        return self.write_encoded(directory, stem, EncodedImage(encoded, image_format))
+
+    def write_encoded(self, directory: Path, stem: str, image: EncodedImage) -> Path | None:
+        if image.format not in {"webp", "jpeg"} or not image.data:
+            return None
+        encoded = image.data
+        suffix = ".webp" if image.format == "webp" else ".jpg"
         safe_stem = self._safe_stem(stem)
         temporary_path: Path | None = None
         descriptor: int | None = None

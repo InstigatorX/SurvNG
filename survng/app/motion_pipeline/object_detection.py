@@ -22,6 +22,7 @@ from ..evidence_work import (
 )
 from ..config import CameraConfig
 from ..scene_activity_evidence import scene_sample_records as _scene_sample_records
+from ..evidence_gallery import GalleryBatch, encode_gallery
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..ffmpeg_hw import (
     RECORDED_FRAME_INPUT_THREAD_ARGS,
@@ -235,6 +236,7 @@ class RecordedDetectionResult:
     frame_source: str = ""
     frame_timestamp_exact: bool = False
     review_image: dict[str, Any] | None = None
+    gallery: GalleryBatch | None = None
     # Set when sampling stopped before a stage whose recording is not yet
     # indexed; the caller re-runs from ``resume_stage`` at ``resume_at``.
     resume_stage: int | None = None
@@ -1483,6 +1485,7 @@ class RecordedMotionObjectDetector:
             scene_confirmation=confirming_scene,
             start_stage=start_stage,
             split_allowed=resumable,
+            gallery_request=(qualification or {}).get("evidence_gallery"),
         )
         if confirming_scene and not any(item.get("samples") is not None for item in result.objects if item.get("status")=="scene_observations"):
             result=replace(result,objects=[*result.objects,{"status":"scene_observations","observations":[],
@@ -1726,6 +1729,7 @@ class RecordedMotionObjectDetector:
         scene_confirmation: bool = False,
         start_stage: int = 0,
         split_allowed: bool = False,
+        gallery_request: dict | None = None,
     ) -> RecordedDetectionResult:
         workflow_started = time.monotonic()
         timing = {
@@ -1845,6 +1849,7 @@ class RecordedMotionObjectDetector:
                 scene_confirmation=scene_confirmation,
                 start_stage=start_stage,
                 split_allowed=split_allowed,
+                gallery_request=gallery_request,
             )
         finally:
             if memory_lease is not None:
@@ -1917,6 +1922,7 @@ class RecordedMotionObjectDetector:
         scene_confirmation: bool = False,
         start_stage: int = 0,
         split_allowed: bool = False,
+        gallery_request: dict | None = None,
     ) -> RecordedDetectionResult:
         refinement_deadline: float | None = None
         samples_by_offset: dict[float, _RecordedDetectionSample] = {}
@@ -2281,6 +2287,7 @@ class RecordedMotionObjectDetector:
                             face_sampler=sampler,
                             face_deadline=deadline,
                             confirmation_offsets=planned_offsets if scene_confirmation else None,
+                            gallery_request=gallery_request,
                         )
                 if (
                     adaptive_stage
@@ -2334,6 +2341,7 @@ class RecordedMotionObjectDetector:
                 face_sampler=sampler,
                 face_deadline=deadline,
                 confirmation_offsets=planned_offsets if scene_confirmation else None,
+                gallery_request=gallery_request,
             )
 
         if scene_confirmation:
@@ -2440,6 +2448,7 @@ class RecordedMotionObjectDetector:
         face_sampler: _EventRecordedSampler | None = None,
         face_deadline: float | None = None,
         confirmation_offsets: tuple[float, ...] | None = None,
+        gallery_request: dict | None = None,
     ) -> RecordedDetectionResult:
         frame = selected.frame
         if frame is None:
@@ -2523,6 +2532,8 @@ class RecordedMotionObjectDetector:
             )
         scene_samples = _scene_sample_records(samples,observations,event_epoch,
             str(getattr(getattr(self,"camera",None),"id","")),confirmation_offsets)
+        gallery = encode_gallery(samples, selected, observations,
+            camera_id=self.camera.id, event_epoch=event_epoch, request=gallery_request, timing=timing)
         self._release_nonselected_frames(samples, selected)
         review_image = ({"role":"additional_review","source":"recorded_main",
                          "captured_at_epoch":event_epoch+selected.offset,
@@ -2544,6 +2555,7 @@ class RecordedMotionObjectDetector:
             scene_observations=observations,
             scene_samples=scene_samples,
             review_image=review_image,
+            gallery=gallery,
         )
 
     def _refine_face_evidence(
@@ -2681,6 +2693,7 @@ class RecordedMotionObjectDetector:
         scene_observations: list[dict[str, Any]] | None = None,
         scene_samples: list[dict[str, Any]] | None = None,
         review_image: dict[str, Any] | None = None,
+        gallery: GalleryBatch | None = None,
     ) -> RecordedDetectionResult:
         normalized = {key: round(max(0.0, value), 3) for key, value in timing.items()}
         normalized["workflow_ms"] = round(
@@ -2717,6 +2730,7 @@ class RecordedMotionObjectDetector:
             frame_source=frame_source,
             frame_timestamp_exact=frame_timestamp_exact,
             review_image=review_image,
+            gallery=gallery,
         )
 
     def _detect_objects(

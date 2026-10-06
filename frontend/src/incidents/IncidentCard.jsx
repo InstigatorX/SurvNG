@@ -61,7 +61,8 @@ function EvidenceTimeline({ incident, hero, timeline, timeZone, stripRef, onSele
   const summary = motionCount
     ? `${frames.length} event ${frames.length === 1 ? "image" : "images"}, ${motionCount} motion ${motionCount === 1 ? "update" : "updates"}`
     : `${frames.length} event ${frames.length === 1 ? "image" : "images"}`;
-  const eventCountLabel = `${frames.length} ${frames.length === 1 ? "event" : "events"}`;
+  const eventCount = new Set(frames.map((frame) => frame.event.id)).size;
+  const eventCountLabel = `${eventCount} ${eventCount === 1 ? "event" : "events"}`;
   const spanLabel = evidenceSpanLabel(timeline.durationSeconds);
   const heroEvent = hero?.event || incident;
   const heroLabels = incidentLabels(heroEvent);
@@ -148,10 +149,12 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
     const frames = evidenceTimeline.frames;
     const explicit = selectedPreview?.id == null
       ? null
-      : frames.find((frame) => String(frame.event?.id) === String(selectedPreview.id));
+      : frames.find((frame) => selectedPreview.evidence_image_id
+        ? frame.event?.evidence_image_id === selectedPreview.evidence_image_id
+        : !frame.event?.evidence_image_id && String(frame.event?.id) === String(selectedPreview.id));
     const representative = incident.representative_event_id == null
       ? null
-      : frames.find((frame) => String(frame.event?.id) === String(incident.representative_event_id));
+      : frames.find((frame) => !frame.event?.evidence_image_id && String(frame.event?.id) === String(incident.representative_event_id));
     return explicit || representative || frames[0] || null;
   }, [evidenceTimeline, incident.representative_event_id, selectedPreview]);
   const preview = scenePlayback?.clip || selectedPreview || incident;

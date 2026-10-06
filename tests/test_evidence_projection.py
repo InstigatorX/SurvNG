@@ -337,3 +337,15 @@ def test_metadata_row_does_not_stall_when_scene_media_advances(tmp_path):
 
     assert worker.run_once() == 2
     assert events.pending_evidence_updates() == []
+
+
+def test_gallery_update_publishes_without_notifications_or_semantic_inference():
+    events = Events([{'id':1,'event_id':7,'evidence_revision':2,'kind':'gallery_updated',
+                     'payload':{'scene_media_revision':3,'notify':False}}])
+    events.event['scene_media_revision']=3
+    worker, _, semantic, subscriber, notification = setup_projection(events)
+    assert worker.run_once()==1
+    semantic.queue_event.assert_not_called()
+    semantic.projection_current.assert_not_called()
+    notification.assert_not_called()
+    assert subscriber.get(timeout=1).type=='incident'

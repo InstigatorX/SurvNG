@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentEvidenceTimeline, incidentFocusStep, incidentImageRenderRect, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentGalleryFrames, incidentEvidenceTimeline, incidentFocusStep, incidentImageRenderRect, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -282,3 +282,16 @@ assert.equal(await retryingCache.load("page"), "recovered");
 assert.equal(retryAttempts, 2);
 
 console.log("incident navigation tests passed");
+
+const galleryIncident = { id: "incident-gallery", events: [{ id: 10, created_epoch: 1000, camera_id: "gate", objects: [] }],
+  evidence_images: [1, 2].map((i) => ({ id: `gallery-${i}`, event_id: 10, camera_id: "gate", captured_epoch: 1000 + i,
+    captured_at: new Date((1000 + i) * 1000).toISOString(), snapshot_url: `/api/incidents/evidence/gallery-${i}/snapshot`,
+    objects: [{ label: "cat", confidence: .52, confidence_eligible: false }] })) };
+const galleryFrames = incidentGalleryFrames(galleryIncident);
+assert.equal(galleryFrames.length, 2);
+assert.equal(incidentEvidenceTimeline(galleryIncident).frames.length, 3);
+assert.equal(galleryFrames[0].event.id, 10, "media keeps its real event identity");
+assert.notEqual(galleryFrames[0].event.evidence_image_id, galleryFrames[1].event.evidence_image_id);
+assert.equal(galleryFrames[0].event.objects[0].confidence, .52);
+assert.deepEqual(incidentGalleryFrames({}), []);
+assert.equal(incidentGalleryFrames({ ...galleryIncident, evidence_images: [...galleryIncident.evidence_images, galleryIncident.evidence_images[0]] }).length, 2);

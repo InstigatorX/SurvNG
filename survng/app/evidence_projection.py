@@ -126,7 +126,7 @@ class EvidenceProjection:
                     # The durable cover requirement itself is polled by the
                     # evidence workflow; acknowledging this wakeup loses no work.
                     acknowledged += bool(self.events.acknowledge_evidence_update(int(row["id"])))
-                elif row["kind"] in {"evidence_updated", "cover_requirement_updated", "incident_metadata_updated"}:
+                elif row["kind"] in {"evidence_updated", "cover_requirement_updated", "incident_metadata_updated", "gallery_updated"}:
                     grouped.setdefault(int(row["event_id"]), []).append(row)
                 else:
                     raise ValueError(f"unsupported evidence outbox kind: {row['kind']}")
@@ -152,7 +152,7 @@ class EvidenceProjection:
                             expected_scene_media_revisions={
                                 int(row["id"]): int(row.get("payload", {}).get("scene_media_revision") or 0)
                                 for row in updates
-                                if row["kind"] == "evidence_updated" and "payload" in row
+                                if row["kind"] in {"evidence_updated", "gallery_updated"} and "payload" in row
                             },
                         ):
                             continue
@@ -165,7 +165,7 @@ class EvidenceProjection:
                             int(row["id"]),
                             expected_scene_media_revision=(
                                 int(row.get("payload", {}).get("scene_media_revision") or 0)
-                                if row["kind"] == "evidence_updated" and "payload" in row else None
+                                if row["kind"] in {"evidence_updated", "gallery_updated"} and "payload" in row else None
                             ),
                         ))
                 except Exception:
