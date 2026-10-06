@@ -731,10 +731,13 @@ def create_incident_query_router(
             raise HTTPException(status_code=404, detail="observation review was not found")
         return result
 
+    @router.get("/api/incidents/evidence/{observation_id}/snapshot")
     @router.get("/api/incidents/observations/{observation_id}/snapshot")
     def observation_snapshot(observation_id: str, width: int = 0, quality: int = 82):
         def resolve(active):
-            observation = active.events.scene_observation(observation_id)
+            observation = (active.events.scene_evidence_image(observation_id)
+                           if observation_id.startswith("gallery-")
+                           else active.events.scene_observation(observation_id))
             if observation is None:
                 observation = active.events.scene_acquired_observation(observation_id)
             if observation is None or not observation.get("snapshot_path"):

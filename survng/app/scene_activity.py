@@ -18,6 +18,28 @@ def _number(value):
         return None
 
 
+LOCALIZED_CHANGE_POLICY_VERSION = 2
+MINIMUM_LOCAL_CHANGE_FRACTION = 0.08
+MAXIMUM_BACKGROUND_CHANGE_FRACTION = 0.08
+
+
+def localized_change_supported(local, background) -> bool:
+    """Require localized change above the measured background change rate.
+
+    The old independent cutoffs admitted 8% local change against nearly 8%
+    background change. That is not evidence that the detected subject acted.
+    Apply the existing minimum to the excess, without requiring box movement:
+    arrival and genuine activity inside a fixed box remain valid evidence.
+    """
+    local, background = _number(local), _number(background)
+    return bool(
+        local is not None and background is not None
+        and 0 <= local <= 1 and 0 <= background <= MAXIMUM_BACKGROUND_CHANGE_FRACTION
+        and (local - background >= MINIMUM_LOCAL_CHANGE_FRACTION
+             or math.isclose(local - background, MINIMUM_LOCAL_CHANGE_FRACTION, rel_tol=0, abs_tol=1e-12))
+    )
+
+
 def evaluate_scene_activity(samples, *, policy_version=1, ignore_stationary_scene_context=False) -> dict[str, Any]:
     if policy_version != 1:
         raise ValueError("unsupported scene activity policy version")
@@ -44,7 +66,8 @@ def evaluate_scene_activity(samples, *, policy_version=1, ignore_stationary_scen
     epochs = [key[1] for key in complete]
     summary = {"policy_version": policy_version, "sample_count": len(complete)+failed,
                "complete_sample_count": len(complete), "failed_sample_count": failed,
-               "witness_count": 0, "evidence_kind": "none"}
+               "witness_count": 0, "evidence_kind": "none",
+               "localized_change_policy_version": LOCALIZED_CHANGE_POLICY_VERSION}
     result = {"status": "pending", "reason": "awaiting_activity_confirmation",
               "summary": "Waiting for evidence of physical activity.", "diagnostics": summary,
               "supporting_observation_ids": [], "activity_epoch": None,
@@ -84,7 +107,7 @@ def evaluate_scene_activity(samples, *, policy_version=1, ignore_stationary_scen
                     continue
                 local = _number(witness.get("local_change_fraction"))
                 background = _number(witness.get("background_change_fraction"))
-                if local is None or background is None or local < .08 or background > .08:
+                if not localized_change_supported(local, background):
                     continue
                 ids = [str(key) for key in witness.get("observation_ids", []) if str(key) in observations]
                 if not ids:

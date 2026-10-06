@@ -55,6 +55,9 @@ class EventStoreEvidenceMixin:
                 create unique index if not exists idx_event_evidence_outbox_revision
                     on event_evidence_outbox(event_id,evidence_revision,kind)
                     where kind in ('cover_required','evidence_updated');
+                create unique index if not exists idx_event_gallery_outbox_revision
+                    on event_evidence_outbox(event_id,evidence_revision,kind)
+                    where kind='gallery_updated';
                 create table if not exists event_evidence_attempts (
                     id integer primary key autoincrement,
                     event_id integer not null references events(id) on delete cascade,
@@ -83,7 +86,7 @@ class EventStoreEvidenceMixin:
             "(event_id,evidence_revision,kind,payload_json,created_at) values(?,?,?,?,?)",
             (row["id"], row["evidence_revision"], kind, json.dumps(payload), time.time()),
         )
-        if not inserted.rowcount and kind == "evidence_updated":
+        if not inserted.rowcount and kind in {"evidence_updated", "gallery_updated"}:
             # Scene media can advance without changing the event evidence
             # revision. Refresh the coalesced obligation instead of losing the
             # newer wake-up behind its still-pending predecessor.

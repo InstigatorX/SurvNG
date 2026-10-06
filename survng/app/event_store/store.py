@@ -21,6 +21,7 @@ from .jobs import EventStoreJobsMixin
 from .evidence import EventStoreEvidenceMixin, EventSnapshotChangedError
 from .motion_intelligence import EventStoreMotionIntelligenceMixin
 from .tracking import EventStoreTrackingMixin
+from .gallery import EventStoreGalleryMixin
 from .scenes import EventStoreSceneMixin
 from .scene_acquisition import EventStoreSceneAcquisitionMixin
 from .scene_admission import EventStoreSceneAdmissionMixin
@@ -32,6 +33,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class EventStore(
+    EventStoreGalleryMixin,
     EventStoreSceneReviewMixin,
     EventStoreSceneAdmissionMixin,
     EventStoreSceneAcquisitionMixin,
@@ -92,6 +94,7 @@ class EventStore(
         self._init_scene_context_db()
         self._init_evidence_db()
         self._init_scene_acquisition_db()
+        self._init_gallery_db()
         self._init_scene_db()
         while not self.backfill_existing_scene_acquisitions(batch_size=1000)["complete"]:
             pass
@@ -1593,6 +1596,14 @@ class EventStore(
             scene_event_ids = [int(row[0]) for row in conn.execute(
                 "select distinct event_id from scene_observations where snapshot_path=?", (path,)
             )]
+            gallery_events = [r[0] for r in conn.execute(
+                "select event_id from scene_evidence_images where snapshot_path=?", (path,))]
+            scene_event_ids = list(set(scene_event_ids + gallery_events))
+            for event_id in gallery_events:
+                incident_id = self._gallery_incident(conn, event_id)
+                if incident_id and incident_id not in scene_ids:
+                    scene_ids.append(incident_id)
+            conn.execute("update scene_evidence_images set snapshot_path='',state='expired' where snapshot_path=?", (path,))
             conn.execute("update scene_observations set snapshot_path='' where snapshot_path=?", (path,))
             conn.execute("delete from scene_snapshot_assets where snapshot_path=?", (path,))
             for event_id in scene_event_ids:
@@ -1605,7 +1616,8 @@ class EventStore(
                 ).fetchone()
                 if current is not None:
                     self._evidence_outbox(
-                        conn, current, "evidence_updated", reason="scene_snapshot_expired",
+                        conn, current, "gallery_updated" if event_id in gallery_events else "evidence_updated",
+                        reason="scene_snapshot_expired", notify=event_id not in gallery_events,
                     )
             before_rows = conn.execute("select * from events where snapshot_path=?", (path,)).fetchall()
             conn.execute("update events set snapshot_path='',snapshot_size_bytes=0 where snapshot_path=?", (path,))
@@ -1789,13 +1801,14 @@ class EventStore(
                 """
                 select exists(select 1 from events where snapshot_path = ?)
                     or exists(select 1 from scene_observations where snapshot_path = ?)
+                    or exists(select 1 from scene_evidence_images where snapshot_path = ?)
                     or exists(select 1 from acquired_observations where snapshot_path = ?)
                     or exists(select 1 from acquired_samples where snapshot_path = ?)
                     or exists(select 1 from motion_audits where snapshot_path = ?)
                     or exists(select 1 from event_cover_requirements where state='pending'
                         and deadline_epoch > unixepoch() and json_extract(payload_json, '$.snapshot_path') = ?)
                 """,
-                (portable, portable, portable, portable, portable, portable),
+                (portable, portable, portable, portable, portable, portable, portable),
             ).fetchone()[0])
             if not referenced:
                 has_faces = conn.execute(

@@ -427,10 +427,15 @@ class MotionDecisionHandler:
             current_event = get_event(int(existing_event_id))
             if isinstance(current_event, dict) and "evidence_revision" in current_event:
                 revision_kwargs["expected_revision"] = int(current_event["evidence_revision"])
+        provider_qualification = qualification
+        gallery_capacity = getattr(type(self.events), "scene_evidence_capacity", None)
+        if callable(gallery_capacity):
+            provider_qualification = {**qualification,
+                "evidence_gallery":self.events.scene_evidence_capacity(existing_event_id)}
         provider_result = (
-            evidence_provider(event_at, qualification)
+            evidence_provider(event_at, provider_qualification)
             if evidence_provider is not None
-            else self._invoke_detection_provider(provider, event_at, qualification)
+            else self._invoke_detection_provider(provider, event_at, provider_qualification)
         )
         check_evidence_cancellation()
         resume_at = getattr(provider_result, "resume_at", None)
@@ -932,6 +937,19 @@ class MotionDecisionHandler:
                 ),
                 refinement_event_id=(event_id if route_admission_replay else None),
             )
+        gallery = getattr(provider_result, "gallery", None)
+        if gallery is not None:
+            started = time.monotonic()
+            try:
+                processing_timing["gallery_saved_images"] = self.events.retain_scene_evidence_images(
+                    event_id, gallery.images, self.snapshot_writer)
+            except Exception:
+                # The incident is already durable. An optional image failure
+                # must not retry admission or turn a successful event into failure.
+                LOGGER.warning("additional evidence image persistence failed for event %s", event_id, exc_info=True)
+            finally:
+                gallery.close()
+                processing_timing["gallery_persist_ms"] = (time.monotonic()-started)*1000
         self._persist_face_candidates(
             event_id,
             event_at,

@@ -251,6 +251,32 @@ try {
   assert.equal(await detailPanel.locator(".inspector-detection").count(), 2, "legacy review retains all evidence");
   assert.equal(await detailPanel.locator(".incident-scene-objects").evaluate((el) => el.open), false);
   assert.match(await detailPanel.getByRole("link", { name: "Review observations" }).getAttribute("href"), /\/observations$/);
+  incident = { ...incident, evidence_images: [1, 2].map((i) => ({
+    id: `gallery-${i}`, event_id: first.id, camera_id: first.camera_id,
+    captured_epoch: Date.parse(first.created_at) / 1000 + i,
+    captured_at: new Date(Date.parse(first.created_at) + i * 1000).toISOString(),
+    snapshot_url: `/api/incidents/evidence/gallery-${i}/snapshot`,
+    objects: [{ label: "cat", confidence: .52, confidence_eligible: false,
+      box: { x1: 10, y1: 20, x2: 40, y2: 60 }, detection_frame_width: 1280, detection_frame_height: 800 }],
+  })) };
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.goto(`http://127.0.0.1:${server.address().port}/survng/incidents?incident_id=scene-1`);
+  await page.locator(".incident-desktop-focus .incident-workspace-view-toggle").getByRole("button", { name: "Evidence", exact: true }).click();
+  const strip = page.locator(".incident-evidence-strip");
+  assert.equal(await strip.locator("button").count(), 4, "two event covers plus two additional images");
+  for (const i of [1, 2]) {
+    const button = strip.locator("button").filter({ has: page.locator(`img[src*="/evidence/gallery-${i}/snapshot"]`) });
+    await button.click();
+    await page.locator(`.incident-evidence-hero img[src*="/evidence/gallery-${i}/snapshot"]`).waitFor();
+    assert.equal(await button.getAttribute("aria-pressed"), "true", "different images of the same event remain selectable");
+  }
+  await page.goto(`http://127.0.0.1:${server.address().port}/survng/incidents/incident-scene-1`);
+  for (const i of [1, 2]) {
+    const image = page.locator(`.incident-detail-frames img[src*="/evidence/gallery-${i}/snapshot"]`);
+    await image.waitFor();
+    await image.evaluate((img) => img.decode());
+  }
+  assert.equal(await page.locator('.incident-detail-frames img[src*="/evidence/gallery-"]').count(), 2);
   assert.deepEqual(errors, []);
   console.log("canonical scene, corrections, source evidence, and multi-camera/long-episode playback browser tests passed");
 } finally {

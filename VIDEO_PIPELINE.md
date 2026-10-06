@@ -965,3 +965,10 @@ retention. Per-view footage is trimmed before frame normalization, zoom and
 composition. CPU H.264 rendering is bounded to two threads; output is muted.
 The renderer validates coverage again and fails rather than silently dropping
 source intervals whose recordings disappeared.
+
+Storyline AI montage selection reads retained cover and gallery storage records,
+allocates one usable frame per incident before supplemental views, and caps the
+whole montage at 12 images. It skips missing/corrupt/duplicate frames, carries
+per-frame camera/capture timestamps and non-authoritative detector hints, and
+records the exact reviewed image IDs. Gallery updates advance scene-media and
+incident revisions, so the existing evidence fingerprint invalidates stale reviews.

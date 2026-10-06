@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Camera, ImageOff, Play, RefreshCw, X } from "lucide-react";
-import { incidentEvidenceFrames } from "../incidentNavigation.mjs";
+import { incidentGalleryFrames, incidentEvidenceFrames } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "../shared/api.js";
 import { formatDateTime } from "../shared/format.js";
 import { IncidentRecordingPlayer, incidentRecordingBounds } from "./IncidentRecordingPlayer.jsx";
@@ -82,17 +82,21 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
     ? notification.representative_event_id : incident?.representative_event_id;
   const evidenceFrames = useMemo(() => {
     const seen = new Set();
-    return events.flatMap((event) => incidentEvidenceFrames(event).map((frame) => {
+    const existing = events.flatMap((event) => incidentEvidenceFrames(event).map((frame) => {
       const src = frame.kind === "snapshot"
         ? `/api/events/${event.id}/thumbnail.jpg?width=1280&quality=85&revision=${encodeURIComponent(notification?.revision || incident?.end_at || 0)}`
         : `/api/cameras/${encodeURIComponent(event.camera_id || incident.camera_id)}/recordings/preview.jpg?epoch=${encodeURIComponent(frame.epoch)}&source=main&width=1280&exact=true`;
       return { ...frame, src, label: `${frame.label} · ${formatDateTime(new Date(frame.epoch * 1000).toISOString(), timeZone)}` };
-    })).filter((frame) => {
+    }));
+    const gallery = incidentGalleryFrames(incident).map((frame) => ({ ...frame,
+      src: `${frame.event.snapshot_url}?width=1280&quality=85`,
+      label: `${frame.label} · ${formatDateTime(frame.event.created_at, timeZone)}` }));
+    return [...existing, ...gallery].filter((frame) => {
       if (seen.has(frame.src)) return false;
       seen.add(frame.src);
       return true;
     });
-  }, [events, incident?.camera_id, incident?.end_at, notification?.revision, timeZone]);
+  }, [events, incident, notification?.revision, timeZone]);
   const labels = notification?.classes || incident?.labels || [];
   const people = notification?.people || (incident?.identities || []).map((item) => item.name).filter(Boolean);
   const zones = notification?.zones || incident?.zones || [];

@@ -190,18 +190,36 @@ function positiveEpoch(value) {
   return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
 }
 
+export function incidentGalleryFrames(incident) {
+  const events = Array.isArray(incident?.events) ? incident.events : [];
+  const seen = new Set();
+  return (Array.isArray(incident?.evidence_images) ? incident.evidence_images : []).flatMap((image) => {
+    if (!image?.id || !image.snapshot_url || seen.has(image.snapshot_url)) return [];
+    seen.add(image.snapshot_url);
+    const source = events.find((event) => Number(event.id) === Number(image.event_id)) || {};
+    const objects = Array.isArray(image.objects) ? image.objects : [];
+    const labels = [...new Set(objects.map((object) => object.label).filter(Boolean))];
+    const event = { ...source, id: image.event_id, camera_id: image.camera_id,
+      created_at: image.captured_at, created_epoch: image.captured_epoch,
+      snapshot_path: "available", snapshot_url: image.snapshot_url, snapshot_evidence_id: image.id,
+      evidence_image_id: image.id, objects, labels, scene_objects: undefined, object_tracking: null };
+    return [{ key: image.id, event, epoch: image.captured_epoch,
+      label: labels.length ? `Evidence: ${labels.join(", ")}` : "Additional evidence", kind: "retained" }];
+  });
+}
+
 export function incidentEvidenceTimeline(incident) {
   const listed = incidentMosaicEvents(incident);
   const events = listed.length
     ? listed
     : (incident && (incident.id || incident.created_at || incident.created_epoch) ? [incident] : []);
-  const frames = events
+  const frames = [...events
     .map((event, index) => ({
       key: `${event?.id ?? "event"}-${index}`,
       event,
       epoch: eventEpoch(event),
       index,
-    }))
+    })), ...incidentGalleryFrames(incident).map((frame, index) => ({ ...frame, index: events.length + index }))]
     .sort((left, right) => (left.epoch || Number.POSITIVE_INFINITY) - (right.epoch || Number.POSITIVE_INFINITY) || left.index - right.index)
     .map(({ index, ...frame }) => frame);
   const motionMarks = (Array.isArray(incident?.motion_observations) ? incident.motion_observations : []).flatMap((observation, index) => {

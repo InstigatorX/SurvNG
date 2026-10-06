@@ -6,6 +6,7 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from fastapi import HTTPException
 
@@ -28,11 +29,15 @@ class TrainingRoutesTest(unittest.TestCase):
             events=self.store,
             storage_dir=Path(self.temporary.name),
         )
+        self.preview = Mock(return_value=Path(self.temporary.name) / "main.jpg")
+        self.manager.recorder = Mock()
         router = create_training_router(TrainingRouteDependencies(
             get_config=lambda: self.config,
             get_manager=lambda: self.manager,
             manager_lock=threading.RLock(),
             manager_access=ManagerAccessCoordinator(),
+            recording_preview_path=self.preview,
+            recording_preview_timestamp=lambda _: (1786377600.01, "source_pts"),
         ))
         self.route = next(
             route
@@ -40,6 +45,8 @@ class TrainingRoutesTest(unittest.TestCase):
             if route.path == "/api/training/samples"
         )
         self.endpoint = self.route.endpoint
+        self.main_image = next(route.endpoint for route in router.routes
+                               if route.path.endswith("/main.jpg"))
 
     @staticmethod
     def detected_object(
@@ -261,6 +268,76 @@ class TrainingRoutesTest(unittest.TestCase):
 
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["samples"][0]["event_at"], "2026-08-10T16:00:00+00:00")
+
+    def add_negative_audit(self, **overrides):
+        payload = dict(camera_id="gate", snapshot_path="",
+                       created_at="2026-08-10T16:00:00+00:00",
+                       mode="camera_rescue", sensitivity="balanced", score=0.5,
+                       threshold=0.6, reason="visual_backup_no_object",
+                       object_detected=False, trigger_count=1, features={})
+        payload.update(overrides)
+        return self.store.add_motion_audit(**payload)
+
+    def test_main_manifest_does_not_extract_or_require_stored_snapshot(self):
+        audit = self.add_negative_audit()
+        payload = self.request(sample_kinds="negative_candidate", image_source="main_recording")
+        self.assertEqual(payload["count"], 1)
+        sample = payload["samples"][0]
+        self.assertEqual(sample["image"]["url"],
+                         f"/survng/api/training/motion-audits/{audit['id']}/main.jpg")
+        self.assertEqual(sample["image"]["media_type"], "image/jpeg")
+        self.assertEqual(sample["annotations"], [])
+        self.assertIsNone(sample["image"]["width"])
+        self.preview.assert_not_called()
+        self.manager.recorder.recording_rows_between.assert_not_called()
+        self.assertEqual(self.request(sample_kinds="negative_candidate")["count"], 0)
+
+    def test_main_images_reject_annotated_samples(self):
+        with self.assertRaises(HTTPException) as error:
+            self.request(image_source="main_recording")
+        self.assertEqual(error.exception.status_code, 422)
+
+    def test_main_image_uses_main_recording_at_audit_time(self):
+        audit = self.add_negative_audit()
+        epoch = 1786377600.0
+        row = {"start_epoch": epoch - 5, "end_epoch": epoch + 5}
+        self.manager.recorder.recording_rows_between.return_value = [row]
+        response = self.main_image(audit["id"])
+        self.manager.recorder.recording_rows_between.assert_called_once_with(
+            "gate", epoch - 0.001, epoch + 0.001, "main", discover_missing=False)
+        self.preview.assert_called_once_with(
+            self.manager, row, epoch, exact=True, native_resolution=True)
+        self.assertEqual(response.media_type, "image/jpeg")
+        self.assertEqual(response.headers["X-SurvNG-Actual-Timestamp"], "1786377600.010000")
+
+    def test_main_image_missing_coverage_does_not_fall_back(self):
+        audit = self.add_negative_audit()
+        for rows in ([], [{"start_epoch": 1, "end_epoch": 2}]):
+            with self.subTest(rows=rows):
+                self.manager.recorder.recording_rows_between.return_value = rows
+                with self.assertRaises(HTTPException) as error:
+                    self.main_image(audit["id"])
+                self.assertEqual(error.exception.status_code, 404)
+        self.preview.assert_not_called()
+
+    def test_main_image_rejects_objects_and_incident_activity(self):
+        for payload in ({"object_detected": True}, {"reason": "event_state_active"},
+                        {"reason": "event_state_cooldown"}):
+            audit = self.add_negative_audit(**payload)
+            with self.assertRaises(HTTPException) as error:
+                self.main_image(audit["id"])
+            self.assertEqual(error.exception.status_code, 422)
+        self.preview.assert_not_called()
+
+    def test_main_image_preserves_busy_response(self):
+        audit = self.add_negative_audit()
+        self.manager.recorder.recording_rows_between.return_value = [
+            {"start_epoch": 1786377590, "end_epoch": 1786377610}]
+        self.preview.side_effect = HTTPException(429, "busy", headers={"Retry-After": "1"})
+        with self.assertRaises(HTTPException) as error:
+            self.main_image(audit["id"])
+        self.assertEqual(error.exception.status_code, 429)
+        self.assertEqual(error.exception.headers, {"Retry-After": "1"})
 
 
 if __name__ == "__main__":

@@ -48,7 +48,7 @@ try {
     else if (path.endsWith('/suggestions') && method === 'POST') { story.members.push({incident_id:incidents[2].id,relationship:'related_event',subject_ids:[],note:'Reviewed context'}); story.revision++; result=hydrate(); }
     else if (path.endsWith('/replay')) result=plan;
     else if (path.endsWith('/export')) { exports++; result={id:'export-fixture',status:'queued'}; }
-    else if (path.endsWith('/ai')) { aiCalls++; story.ai_review={title:'Arrival storyline',summary:'Selected person sightings.',actions:[{description:'A person is visible.',certainty:'observed',incident_ids:[incidents[0].id]}],suggested_relationships:[],provider:'configured',model:'existing-model',reviewed_incident_ids:[incidents[0].id]}; story.revision++; result=hydrate(); }
+    else if (path.endsWith('/ai')) { aiCalls++; story.ai_review={title:'Arrival storyline',summary:'Selected person sightings.',actions:[{description:'A person is visible.',certainty:'observed',incident_ids:[incidents[0].id]}],suggested_relationships:[],provider:'configured',model:'existing-model',reviewed_incident_ids:[incidents[0].id],reviewed_images:[{image_id:'cover'},{image_id:'gallery-first'},{image_id:'gallery-second'}]}; story.revision++; result=hydrate(); }
     else if (path === `/api/storylines/${id}` && method === 'PUT') { story={...story,...route.request().postDataJSON(),revision:story.revision+1}; result=hydrate(); }
     else if (path === `/api/storylines/${id}`) result=hydrate();
     else throw new Error(`Unexpected API request ${method} ${path}`);
@@ -78,6 +78,7 @@ try {
   await page.getByRole('button',{name:'AI title & context'}).click();
   await page.getByRole('heading',{name:'Arrival storyline'}).waitFor();
   assert.equal(aiCalls,1);
+  await page.getByText(/3 images reviewed across 1 incident/).waitFor();
   await page.getByRole('button',{name:'Prepare Story Replay'}).click();
   await page.getByRole('button',{name:'Play Story',exact:true}).click();
   await page.getByText('Replay complete',{exact:true}).waitFor({timeout:18000});

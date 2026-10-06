@@ -1385,6 +1385,12 @@ app.include_router(
             get_manager=get_manager,
             manager_lock=MANAGER_RELOAD_LOCK,
             manager_access=MANAGER_ACCESS,
+            recording_preview_path=lambda active_manager, *args, **kwargs: (
+                _recording_media_runtime._recording_preview_path(
+                    *args, active_manager=active_manager, **kwargs
+                )
+            ),
+            recording_preview_timestamp=_recording_media_runtime._recording_preview_timestamp,
         )
     )
 )

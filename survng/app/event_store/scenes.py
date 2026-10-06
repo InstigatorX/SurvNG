@@ -973,6 +973,7 @@ class EventStoreSceneMixin:
         payload = self._scene_payload(conn, incident_id)
         if payload is None:
             return None
+        payload.pop("evidence_images", None)
         # Notifications carry the entire roster, with representative
         # evidence per object. The canonical detail owns per-frame history.
         for subject in payload.get("scene_objects",[]):
@@ -1127,6 +1128,7 @@ class EventStoreSceneMixin:
         for decision in payload.get("alert_decisions", []):
             decision["objects"] = [item for item in decision.get("objects", [])
                                    if item.get("observation_id") in visible_ids]
+        payload["evidence_images"] = self._scene_gallery_payload(conn, incident_id)
         return payload
 
     def scene_episode_for_event(self, event_id, episode_id):

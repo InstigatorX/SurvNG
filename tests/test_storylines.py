@@ -281,3 +281,138 @@ def test_manual_export_metadata_uses_source_bounds_not_sequence_endpoints(api):
     assert exported[0]['start_epoch'] == 100
     assert exported[0]['end_epoch'] == 115
     assert exported[0]['options']['replay_plan']['shots'][0]['views'][0]['incident_id'] == 'b'
+
+
+def _retained_gallery(store, root, event_id, key, at, color=80, camera='gate'):
+    import cv2
+    import numpy as np
+    from datetime import datetime, timezone
+    from survng.app.evidence_gallery import GalleryImage
+    from survng.app.image_storage import EncodedImage
+    image = np.full((180, 320, 3), color, dtype=np.uint8)
+    encoded = EncodedImage(cv2.imencode('.jpg', image)[1].tobytes())
+    def write(payload, captured):
+        path = root/'snapshots'/f'{key}.jpg'
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(payload.data)
+        return str(path)
+    store.retain_scene_evidence_images(event_id, [GalleryImage(key, at, encoded, {
+        'camera_id': camera, 'captured_epoch': at, 'width':320, 'height':180,
+        'frame_timestamp_exact': True, 'objects':[{'label':'cat', 'confidence':.52,
+            'confidence_eligible':False, 'incident_eligible':False}], 'role':'gallery'})], write)
+    return store.scene_incident(event_id=event_id)
+
+
+def _gallery_scene(root, cover=False):
+    import cv2
+    import numpy as np
+    from datetime import datetime, timezone
+    from survng.app.events import EventStore
+    store = EventStore(root)
+    path = root/'snapshots'/'cover.jpg'
+    path.parent.mkdir(exist_ok=True)
+    if cover:
+        cv2.imwrite(str(path), np.full((180,320,3),20,dtype=np.uint8))
+    event = store.add_event('gate','motion',created_at=datetime.fromtimestamp(1000,timezone.utc).isoformat(),
+        snapshot_path=str(path) if cover else '', objects_json=json.dumps([{
+            'label':'dog','confidence':.8,'incident_eligible':True,
+            'box':{'x1':10,'y1':10,'x2':100,'y2':150},
+            'detection_frame_width':320,'detection_frame_height':180}]))
+    manager = SimpleNamespace(events=store,storage_dir=root,media_storage=None)
+    return manager, event
+
+
+def test_ai_montage_includes_cover_and_actual_gallery_camera_time(tmp_path):
+    manager, event = _gallery_scene(tmp_path, cover=True)
+    detail = _retained_gallery(manager.events, tmp_path, event['id'], 'porch-frame',1003,camera='porch')
+    evidence = _ai_montage(manager,[detail],tmp_path/'montage.png')
+    assert [item['kind'] for item in evidence] == ['cover','gallery']
+    assert evidence[1]['camera_id'] == 'porch'
+    assert evidence[1]['captured_at'] == '1970-01-01T00:16:43+00:00'
+    assert evidence[1]['frame_timestamp_exact'] is True
+    assert evidence[1]['detections'][0]['incident_eligible'] is False
+    assert evidence[1]['image_id'] == detail['evidence_images'][0]['id']
+    assert 'snapshot_path' not in json.dumps(evidence)
+    assert 'snapshot_url' not in json.dumps(evidence)
+
+
+def test_ai_gallery_only_scene_succeeds_through_real_route(api,tmp_path):
+    import cv2
+    client, manager, _, _ = api
+    real, event = _gallery_scene(tmp_path/'real')
+    detail = _retained_gallery(real.events,tmp_path/'real',event['id'],'gallery-only',1002)
+    manager.events = real.events; manager.storage_dir = real.storage_dir
+    manager.config.audit_ai.enabled = True; manager.config.audit_ai.api_key = 'test-only'
+    story = create(client,(detail['id'],))
+    review = StoryAiReview(title='Animal visit',summary='Retained evidence.',actions=[],suggested_relationships=[])
+    def analyze(image,prompt,**kwargs):
+        assert cv2.imread(str(image)).shape == (300,1440,3)
+        frames = json.loads(prompt)['selected_incidents']
+        assert len(frames) == 1 and frames[0]['kind'] == 'gallery'
+        return review
+    with patch('survng.app.storyline_routes.AuditAiAdvisor.analyze_structured',side_effect=analyze):
+        response = client.post('/api/storylines/'+story['id']+'/ai',json={'revision':1})
+    assert response.status_code == 200, response.text
+    result = response.json()['ai_review']
+    assert result['reviewed_incident_ids'] == [detail['id']]
+    assert result['reviewed_images'][0]['image_id'] == detail['evidence_images'][0]['id']
+    assert result['reviewed_images'][0]['camera_id'] == 'gate'
+
+
+def test_ai_skips_corrupt_cover_and_missing_gallery_then_uses_retained_frame(tmp_path):
+    manager,event = _gallery_scene(tmp_path,cover=True)
+    (tmp_path/'snapshots'/'cover.jpg').write_bytes(b'corrupt')
+    _retained_gallery(manager.events,tmp_path,event['id'],'expired',1001)
+    detail = _retained_gallery(manager.events,tmp_path,event['id'],'retained',1002,color=120)
+    (tmp_path/'snapshots'/'expired.jpg').unlink()
+    evidence = _ai_montage(manager,[detail],tmp_path/'montage.png')
+    assert len(evidence) == 1
+    assert evidence[0]['image_id'] == detail['evidence_images'][1]['id']
+
+
+def test_ai_montage_deduplicates_frames_and_shares_twelve_image_budget(tmp_path):
+    import cv2
+    import numpy as np
+    paths = []
+    for n in range(13):
+        path=tmp_path/f'{n}.jpg'
+        cv2.imwrite(str(path),np.full((180,320,3),n*10,dtype=np.uint8)); paths.append(str(path))
+    events = SimpleNamespace(get=lambda n:{'id':n,'snapshot_path':paths[n],'camera_id':'gate','created_at':100+n},
+        scene_evidence_image=lambda key:{'snapshot_path':paths[12],'camera_id':'gate','captured_epoch':200})
+    manager=SimpleNamespace(events=events,storage_dir=tmp_path,media_storage=None)
+    details=[incident(str(n)) | {'representative_event_id':n,
+        'evidence_images':[{'id':'extra','frame_timestamp_exact':True,'objects':[]}]} for n in range(12)]
+    evidence=_ai_montage(manager,details,tmp_path/'montage.png')
+    assert len(evidence) == 12
+    assert [item['incident_id'] for item in evidence] == [str(n) for n in range(12)]
+    # Different paths containing identical frames must not spend extra slots.
+    duplicate=tmp_path/'copy.jpg'; duplicate.write_bytes(Path(paths[0]).read_bytes())
+    events.scene_evidence_image=lambda key:{'snapshot_path':str(duplicate),'camera_id':'gate','captured_epoch':200}
+    assert len(_ai_montage(manager,details[:1],tmp_path/'single.png')) == 1
+
+
+def test_gallery_change_during_ai_review_rejects_stale_result(api,tmp_path):
+    client,manager,_,_=api
+    real,event=_gallery_scene(tmp_path/'real')
+    detail=_retained_gallery(real.events,tmp_path/'real',event['id'],'first',1001)
+    manager.events=real.events;manager.storage_dir=real.storage_dir
+    manager.config.audit_ai.enabled=True;manager.config.audit_ai.api_key='test-only'
+    story=create(client,(detail['id'],))
+    def analyze(*args,**kwargs):
+        _retained_gallery(real.events,tmp_path/'real',event['id'],'new-evidence',1003,color=120)
+        return StoryAiReview(title='Stale',summary='Old frame.',actions=[],suggested_relationships=[])
+    with patch('survng.app.storyline_routes.AuditAiAdvisor.analyze_structured',side_effect=analyze):
+        response=client.post('/api/storylines/'+story['id']+'/ai',json={'revision':1})
+    assert response.status_code == 409,response.text
+    assert manager.storylines.get(story['id'])['ai_review'] is None
+
+
+def test_identical_views_of_distinct_incidents_keep_both_citations(tmp_path):
+    import cv2
+    import numpy as np
+    path=tmp_path/'same-view.jpg'
+    cv2.imwrite(str(path),np.full((180,320,3),100,dtype=np.uint8))
+    events=SimpleNamespace(get=lambda n:{'id':n,'snapshot_path':str(path),'camera_id':'gate','created_at':100+n})
+    manager=SimpleNamespace(events=events,storage_dir=tmp_path,media_storage=None)
+    details=[incident(str(n)) | {'representative_event_id':n} for n in range(2)]
+    assert [item['incident_id'] for item in _ai_montage(manager,details,tmp_path/'montage.png')] == ['0','1']

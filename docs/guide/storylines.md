@@ -49,9 +49,14 @@ silently merges identities. Distinct subjects can belong to the same real-world 
 provider, API key, base URL and detailed analysis model, falling back to the
 configured everyday model. No separate provider settings are needed.
 
-The review sends a labeled montage of at most 12 retained incident images plus
-bounded timestamps, labels, activity and operator context. It does not send stream
-URLs, raw appearance vectors or recording files. AI results include evidence links,
+The review sends a labeled montage of at most 12 retained images total, including
+incident covers and useful additional evidence images. Selection prioritizes one
+usable image per incident before extra views fill remaining slots. Missing covers
+fall back to retained gallery images; unavailable or duplicate frames are skipped. Each tile
+includes its source camera and actual capture time. Bounded timestamps, labels,
+activity and operator context accompany the montage. Gallery detector hints can be
+below admission thresholds and do not establish confirmed incident subjects. It
+does not send stream URLs, raw appearance vectors or recording files. AI results include evidence links,
 observed/possible action labels and proposed connections. These proposals do not
 change incident membership or identity. **Use AI title and summary** copies the
 text into the editable fields; save to adopt it. Review is requested explicitly,
