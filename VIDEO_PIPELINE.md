@@ -972,3 +972,9 @@ whole montage at 12 images. It skips missing/corrupt/duplicate frames, carries
 per-frame camera/capture timestamps and non-authoritative detector hints, and
 records the exact reviewed image IDs. Gallery updates advance scene-media and
 incident revisions, so the existing evidence fingerprint invalidates stale reviews.
+
+Incidents selection mode stores ordered incident IDs independently of search
+filters and pagination. Build creates the Storyline once and embeds its editor
+in the incident investigation pane. Connected auto-selection reuses bounded trace
+suggestions and includes high/moderate evidence links only; context-only candidates
+remain explicit review proposals. Selection never changes identity or source events.

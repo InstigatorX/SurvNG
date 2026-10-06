@@ -139,7 +139,14 @@ def _resolve(manager, story):
 
 
 def _cards(details):
-    return [{k: i.get(k) for k in ("id", "revision", "summary", "camera_id", "camera_ids", "start_at", "end_at", "labels", "representative_event_id", "snapshot_url", "episodes", "story_member_ids")} | {"subjects": [{"id": o["id"], "label": o["label"]} for o in i.get("scene_objects", [])]} for i in details]
+    cards = []
+    for incident in details:
+        card = {key: incident.get(key) for key in ("id", "revision", "summary", "camera_id", "camera_ids", "start_at", "end_at", "labels", "representative_event_id", "snapshot_url", "episodes", "story_member_ids")}
+        card["subjects"] = [{"id": obj["id"], "label": obj["label"]} for obj in incident.get("scene_objects", [])]
+        if not card["snapshot_url"]:
+            card["snapshot_url"] = next((image["snapshot_url"] for image in incident.get("evidence_images", []) if image.get("snapshot_url")), None)
+        cards.append(card)
+    return cards
 
 
 def _suggestions(manager, story, queries):
@@ -284,6 +291,20 @@ def create_storyline_router(deps):
     def create_story(request: StoryCreate):
         with operation() as manager:
             return detail(manager, manager.storylines.create(request.model_dump() | {"members": _members(manager, request.members)}))
+
+    @router.get("/api/storylines/connected")
+    def connected_incidents(incident_id: str = Query(min_length=1, max_length=128)):
+        with operation() as manager:
+            members = _members(manager, [Member(incident_id=incident_id)])
+            seed = manager.events.scene_incident(members[0]["incident_id"])
+            suggestions = _suggestions(manager, {"members": members}, deps.incident_queries)
+            # Auto-select evidence-backed links only. Nearby context is still
+            # available for explicit review in the Storyline suggestions panel.
+            connected = [item for item in suggestions["items"] if item["confidence"] in {"high", "moderate"}]
+            items = _cards([seed]) + [item["incident"] | {"connection_confidence": item["confidence"],
+                "connection_reasons": item["reasons"]} for item in connected]
+            items.sort(key=lambda item: (epoch(item.get("start_at")) or 0, item["id"]))
+            return {"items": items, "excluded_context_count": len(suggestions["items"])-len(connected)}
 
     @router.get("/api/storylines/{story_id}")
     def get_story(story_id: str):

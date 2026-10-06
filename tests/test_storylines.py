@@ -344,6 +344,7 @@ def test_ai_gallery_only_scene_succeeds_through_real_route(api,tmp_path):
     manager.events = real.events; manager.storage_dir = real.storage_dir
     manager.config.audit_ai.enabled = True; manager.config.audit_ai.api_key = 'test-only'
     story = create(client,(detail['id'],))
+    assert story['incidents'][0]['snapshot_url'] == detail['evidence_images'][0]['snapshot_url']
     review = StoryAiReview(title='Animal visit',summary='Retained evidence.',actions=[],suggested_relationships=[])
     def analyze(image,prompt,**kwargs):
         assert cv2.imread(str(image)).shape == (300,1440,3)
@@ -416,3 +417,19 @@ def test_identical_views_of_distinct_incidents_keep_both_citations(tmp_path):
     manager=SimpleNamespace(events=events,storage_dir=tmp_path,media_storage=None)
     details=[incident(str(n)) | {'representative_event_id':n} for n in range(2)]
     assert [item['incident_id'] for item in _ai_montage(manager,details,tmp_path/'montage.png')] == ['0','1']
+
+
+def test_connected_auto_selection_uses_only_evidence_links_and_chronological_order(api):
+    client,manager,details,_=api
+    seed=details['b']
+    candidates={'items':[
+        {'incident':details['a'],'confidence':'high','reasons':['Confirmed link']},
+        {'incident':details['c'],'confidence':'low','reasons':['Nearby only']},
+    ]}
+    with patch('survng.app.storyline_routes._suggestions',return_value=candidates):
+        response=client.get('/api/storylines/connected?incident_id=b')
+    assert response.status_code == 200,response.text
+    assert [item['id'] for item in response.json()['items']] == ['a','b']
+    assert response.json()['excluded_context_count'] == 1
+    assert manager.storylines.list()['total'] == 0  # Selection never creates a draft.
+    assert client.get('/api/storylines/connected?incident_id=expired').status_code == 404

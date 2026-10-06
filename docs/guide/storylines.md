@@ -8,7 +8,23 @@ accessible. A **Story Replay** plays or exports the selected footage as one sequ
 ## Create and edit
 
 Open **Storylines** from the desktop navigation or the mobile More menu. The
-Incidents workspace also has **Build Storyline** for its focused incident.
+Incidents workspace also has **Storyline** selection mode:
+
+1. Click **Storyline**, then click incidents to add or remove them. Number badges
+   show the selected sequence; the normal incident preview updates as you browse.
+2. Use filters and pagination to find more incidents. Selections remain in their
+   chosen order even when they are on another page or hidden by a filter.
+3. **Clear** resets the selection. Clicking **Storyline** again exits selection
+   mode; re-entering keeps the selection until you clear it.
+4. **Build** opens the Storyline editor in the center pane, with a thumbnail for
+   each selected incident and the existing context, relationship, focus, replay,
+   AI and export options. The replay defaults to the selected sequence.
+5. With exactly one incident selected, **Auto-select connected** finds existing
+   identity/appearance links and selects those incidents in source-time order.
+   Context-only candidates require manual review. Review the numbered selection
+   before building. Connection selection does not create a saved Storyline;
+   **Build** creates it. **Back to incidents** returns to the selection.
+
 
 1. Choose a day and optional camera in the evidence browser.
 2. Select incidents, including across browser pages, then **Create from selected**.
@@ -105,6 +121,7 @@ Storylines and prepare/play replay; editing, AI requests and exports require adm
 ## HTTP API
 
 - `GET/POST /api/storylines`: list or create.
+- `GET /api/storylines/connected?incident_id=...`: bounded automatic selection from one seed without persistence.
 - `GET/PUT/DELETE /api/storylines/{id}`: detail, replace editable fields, or delete.
 - `POST /api/storylines/{id}/merge` and `/split`: atomic membership edits.
 - `GET/POST /api/storylines/{id}/suggestions`: evidence candidates and decisions.

@@ -37,3 +37,13 @@
 .story-replay details button { margin: 4px; }
 @media (max-width: 1200px) { .storylines-layout { grid-template-columns: minmax(0, 1fr) 260px; } .story-library { grid-column: 1/-1; } .story-library > button { display: inline-grid; width: 220px; margin-right: 8px; } }
 @media (max-width: 760px) { .storylines-page { padding: 8px; } .storylines-layout { display: flex; flex-direction: column; } .story-panel { width: 100%; box-sizing: border-box; } .story-replay-stage { min-height: 220px; } }
+
+.storylines-embedded { padding: 14px; }
+.storylines-embedded .storylines-layout { display: block; }
+.storylines-embedded .storylines-heading { flex-wrap: wrap; }
+.storylines-embedded .storylines-heading > div { flex: 1 1 180px; }
+.story-member-evidence { display: flex; align-items: center; gap: 12px; }
+.story-member-thumbnail { width: 128px; aspect-ratio: 16/9; object-fit: cover; flex-shrink: 0; border-radius: 6px; background: var(--panel-soft); }
+.story-member-placeholder { display: grid; place-content: center; font-size: 11px; color: var(--muted); }
+.story-member-evidence > div { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 760px) { .story-member-thumbnail { width: 88px; } }
