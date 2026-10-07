@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { FaceFindingPanel } from "./FaceFindingPanel.jsx";
 import { VisitsPanel } from "./VisitsPanel.jsx";
 import {
   Activity,
   ChevronLeft,
   ChevronRight,
+  Crosshair,
   Gauge,
   Play,
   RefreshCw,
@@ -254,7 +256,7 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
 
   async function load({ refreshPeople = false } = {}) {
     const sequence = ++faceLoadSequence.current;
-    if (mode === "clusters" || mode === "visits") {
+    if (mode === "clusters" || mode === "visits" || mode === "finding") {
       if (refreshPeople) await loadPeople();
       if (sequence === faceLoadSequence.current) setLoading(false);
       return [];
@@ -498,7 +500,7 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
       <nav className="people-mode-tabs" aria-label="People workspace mode">
         {Object.entries(PEOPLE_WORKSPACE_MODES).map(([value, label]) => (
           <button key={value} type="button" className={mode === value ? "active" : ""} aria-pressed={mode === value} onClick={() => { setMode(value); setPage(0); setSelectedClusterId(""); }}>
-            {value === "review" ? <ScanFace size={16} /> : value === "people" ? <Users size={16} /> : <Workflow size={16} />} {label}
+            {value === "review" ? <ScanFace size={16} /> : value === "finding" ? <Crosshair size={16} /> : value === "people" ? <Users size={16} /> : <Workflow size={16} />} {label}
           </button>
         ))}
       </nav>
@@ -527,7 +529,7 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
       </aside>
 
       <section className="faces-review-panel" ref={faceReviewPanelRef} tabIndex={-1} aria-label={PEOPLE_WORKSPACE_MODES[mode]}>
-        {mode === "visits" ? <VisitsPanel people={people} personId={personId} timeZone={timeZone} /> : <>
+        {mode === "visits" ? <VisitsPanel people={people} personId={personId} timeZone={timeZone} /> : mode === "finding" ? <FaceFindingPanel timeZone={timeZone} /> : <>
         <div className="faces-toolbar">
           {mode === "clusters" ? <div className="cluster-toolbar-copy"><strong>Unknown clusters</strong><small>Group recurring unknown faces before enrolling a person.</small></div> : null}
           {mode === "clusters" ? <button type="button" className="subtle" onClick={rebuildClusters} disabled={clusterBusy}><RefreshCw size={16} className={clusterBusy ? "spinning" : ""} /> {clusterBusy ? "Rebuilding…" : "Rebuild clusters"}</button> : null}

@@ -142,3 +142,76 @@
 .visit-suggestion + .visit-suggestion { border-top: 1px solid var(--border, #444); padding-top: 1rem; }
 .visit-manual-review { margin: 1rem 0; }
 .visit-manual-review summary { cursor: pointer; }
+
+.face-finding {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+  padding: 12px;
+}
+
+.face-finding-queue ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  max-height: 50vh;
+  overflow: auto;
+}
+
+.face-finding-queue button {
+  display: grid;
+  width: 100%;
+  text-align: left;
+  gap: 2px;
+}
+
+.face-finding-queue button.active {
+  outline: 2px solid var(--accent);
+}
+
+.face-finding-stage {
+  position: relative;
+  max-width: 720px;
+  background: #111;
+  touch-action: none;
+}
+
+.face-finding-stage img {
+  display: block;
+  width: 100%;
+  height: auto;
+  user-select: none;
+}
+
+.face-finding-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid transparent;
+  background: transparent;
+  padding: 0;
+}
+
+.face-finding-box.baseline { border-color: #f5a524; pointer-events: auto; }
+.face-finding-box.face { border-color: #3dd68c; pointer-events: none; }
+.face-finding-box.false { border-color: #ff5d5d; pointer-events: none; }
+
+.face-finding-actions,
+.face-finding-score {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.face-finding-score input,
+.face-finding-actions input {
+  min-width: 180px;
+}
+
+@media (max-width: 760px) {
+  .face-finding { grid-template-columns: 1fr; }
+}

@@ -24,6 +24,7 @@ from ..config import CameraConfig
 from ..scene_activity_evidence import scene_sample_records as _scene_sample_records
 from ..evidence_gallery import GalleryBatch, encode_gallery
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
+from ..face_detection_geometry import upper_body_window
 from ..ffmpeg_hw import (
     RECORDED_FRAME_INPUT_THREAD_ARGS,
     RECORDED_FRAME_OUTPUT_THREAD_ARGS,
@@ -2981,14 +2982,10 @@ class RecordedMotionObjectDetector:
             box = _box(person)
             if box is None:
                 continue
-            x1, y1, x2, y2 = box
-            person_width, person_height = x2 - x1, y2 - y1
-            left = max(0, min(frame_width, int(math.floor(x1 - person_width * 0.08))))
-            right = max(left, min(frame_width, int(math.ceil(x2 + person_width * 0.08))))
-            top = max(0, min(frame_height, int(math.floor(y1 - person_height * 0.05))))
-            bottom = max(top, min(frame_height, int(math.ceil(y1 + person_height * 0.68))))
-            if right - left < 24 or bottom - top < 24:
+            window = upper_body_window(box, frame_width, frame_height)
+            if window is None:
                 continue
+            left, top, right, bottom = window
             for detected in detect_faces(frame[top:bottom, left:right]):
                 if not isinstance(detected, dict):
                     continue

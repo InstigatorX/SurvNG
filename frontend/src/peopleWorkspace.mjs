@@ -15,6 +15,7 @@ export function peopleRecognitionLabel(status) {
 export const PEOPLE_WORKSPACE_MODES = Object.freeze({
   visits: "Visits",
   review: "Review queue",
+  finding: "Face finding",
   people: "People profiles",
   clusters: "Unknown clusters",
 });
@@ -56,7 +57,7 @@ export function peopleObservationRequestPlan({
   page = 0,
   pageSize = 48,
 } = {}) {
-  if (mode === "clusters" || mode === "visits") return { observations: "", count: "" };
+  if (mode === "clusters" || mode === "visits" || mode === "finding") return { observations: "", count: "" };
   const limit = Math.max(1, Math.floor(Number(pageSize) || 48));
   if (mode === "review") {
     return { observations: `/api/faces/review/queue?limit=${limit}`, count: "" };
