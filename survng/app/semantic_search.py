@@ -41,7 +41,8 @@ SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS = 15 * 60.0
 OLLAMA_SEARCH_QUERY_PREFIX = "task: search result | query: "
 OLLAMA_JPEG_QUALITY = 90
 OLLAMA_MAX_IMAGE_EDGE = 768
-OLLAMA_IMAGE_BATCH_SIZE = 4
+OLLAMA_IMAGE_BATCH_SIZE = 8
+OLLAMA_KEEP_ALIVE = "30m"
 OLLAMA_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
@@ -2290,6 +2291,8 @@ class OllamaEmbeddingEncoder:
         self._closed = False
         self._lock = threading.Lock()
         self._active: http.client.HTTPConnection | None = None
+        self._connection: http.client.HTTPConnection | None = None
+        self._connection_key: tuple[str, str, int] | None = None
 
     @property
     def identity(self) -> SemanticModelIdentity:
@@ -2322,6 +2325,7 @@ class OllamaEmbeddingEncoder:
             "model": self.config.ollama_model,
             "input": inputs,
             "dimensions": int(self.config.ollama_dimensions),
+            "keep_alive": OLLAMA_KEEP_ALIVE,
         })
         embeddings = payload.get("embeddings")
         if not isinstance(embeddings, list) or len(embeddings) != len(inputs):
@@ -2334,42 +2338,88 @@ class OllamaEmbeddingEncoder:
             )
         return matrix
 
-    def _post_embed(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _drop_connection(self) -> None:
+        with self._lock:
+            connection = self._connection
+            self._connection = None
+            self._connection_key = None
+            if self._active is connection:
+                self._active = None
+        if connection is not None:
+            try:
+                connection.close()
+            except OSError:
+                return
+
+    def _open_connection(self) -> tuple[http.client.HTTPConnection, str]:
         parsed = urlsplit(self.config.ollama_base_url)
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        key = (parsed.scheme, parsed.hostname or "", port)
+        request_path = f"{parsed.path.rstrip('/')}/api/embed"
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Ollama embedding encoder is closed")
+            reusable = self._connection
+            if (
+                reusable is not None
+                and self._connection_key == key
+                and reusable.sock is not None
+            ):
+                self._active = reusable
+                return reusable, request_path
+            previous = self._connection
+            self._connection = None
+            self._connection_key = None
+        if previous is not None:
+            try:
+                previous.close()
+            except OSError:
+                pass
         connection_type = (
             http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
         )
-        connection = connection_type(parsed.hostname or "", port, timeout=self.config.ollama_timeout_seconds)
-        request_path = f"{parsed.path.rstrip('/')}/api/embed"
-        body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        connection = connection_type(key[1], port, timeout=self.config.ollama_timeout_seconds)
         with self._lock:
             if self._closed:
                 connection.close()
                 raise RuntimeError("Ollama embedding encoder is closed")
+            self._connection = connection
+            self._connection_key = key
             self._active = connection
-        try:
-            connection.request(
-                "POST",
-                request_path,
-                body=body,
-                headers={"Content-Type": "application/json"},
-            )
-            response = connection.getresponse()
-            raw = response.read(OLLAMA_MAX_RESPONSE_BYTES + 1)
-            status = int(response.status)
-        except Exception as exc:
-            if self._closed:
-                raise RuntimeError("Ollama embedding encoder is closed") from exc
-            raise RuntimeError(
-                f"Ollama embeddings request failed ({type(exc).__name__})"
-            ) from exc
-        finally:
-            with self._lock:
-                if self._active is connection:
-                    self._active = None
-            connection.close()
+        return connection, request_path
+
+    def _post_embed(self, payload: dict[str, Any]) -> dict[str, Any]:
+        body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        for attempt in (1, 2):
+            connection, request_path = self._open_connection()
+            try:
+                connection.request(
+                    "POST",
+                    request_path,
+                    body=body,
+                    headers={"Content-Type": "application/json", "Connection": "keep-alive"},
+                )
+                response = connection.getresponse()
+                raw = response.read(OLLAMA_MAX_RESPONSE_BYTES + 1)
+                status = int(response.status)
+            except Exception as exc:
+                self._drop_connection()
+                if self._closed:
+                    raise RuntimeError("Ollama embedding encoder is closed") from exc
+                if attempt == 2:
+                    raise RuntimeError(
+                        f"Ollama embeddings request failed ({type(exc).__name__})"
+                    ) from exc
+                continue
+            finally:
+                with self._lock:
+                    if self._active is connection:
+                        self._active = None
+            break
+        else:
+            raise RuntimeError("Ollama embeddings request failed")
         if len(raw) > OLLAMA_MAX_RESPONSE_BYTES:
+            self._drop_connection()
             raise RuntimeError("Ollama embeddings response was too large")
         try:
             decoded = json.loads(raw.decode("utf-8"))
@@ -2390,12 +2440,7 @@ class OllamaEmbeddingEncoder:
     def abort(self) -> None:
         with self._lock:
             self._closed = True
-            connection = self._active
-        if connection is not None:
-            try:
-                connection.close()
-            except OSError:
-                return
+        self._drop_connection()
 
     def close(self) -> None:
         self.abort()
@@ -2941,7 +2986,7 @@ class SemanticSearchService(DisabledSemanticSearch):
                     revision.outcome = "done"
                 if self.encoder is not None and self.projection_current(event):
                     self.index.clear_media_failure(self.encoder.identity, int(event.get("id") or 0))
-                if priority > 0:
+                if priority > 0 and self.config.implementation != "ollama":
                     self._stop.wait(self.config.backfill_pause_seconds)
             except Exception as exc:
                 self._error = str(exc)
@@ -3036,6 +3081,34 @@ class SemanticSearchService(DisabledSemanticSearch):
             for observation in observations
         }
         completed = True
+        pending: list[tuple[np.ndarray, SemanticEvidence, dict[str, Any]]] = []
+        batch_limit = OLLAMA_IMAGE_BATCH_SIZE if self.config.implementation == "ollama" else 1
+
+        def flush_pending() -> bool:
+            nonlocal written, completed
+            if not pending:
+                return True
+            batch = pending.copy()
+            pending.clear()
+            with self._encoder_lock:
+                if self.encoder is not encoder:
+                    completed = False
+                    return False
+                embeddings = encoder.encode_images([image for image, _evidence, _observation in batch])
+            for (_image, evidence, observation), vector in zip(batch, embeddings, strict=True):
+                count = self.index.upsert(
+                    [evidence],
+                    np.asarray(vector, dtype=np.float32).reshape(1, -1),
+                    identity,
+                    expected_observation=observation,
+                )
+                written += count
+                self._indexed += count
+            if self._stop.wait(self.config.backfill_pause_seconds):
+                completed = False
+                return False
+            return True
+
         for observation in observations:
             if self._stop.is_set():
                 completed = False
@@ -3079,19 +3152,11 @@ class SemanticSearchService(DisabledSemanticSearch):
                 "object_crop", f"scene:{observation['id']}", str(observation["snapshot_path"]),
                 str(item["label"]), box, observation_id=str(observation["id"]),
             )
-            with self._encoder_lock:
-                if self.encoder is not encoder:
-                    completed = False
-                    break
-                embeddings = encoder.encode_images([frame[box[1]:box[3], box[0]:box[2]]])
-            count = self.index.upsert([evidence], embeddings, identity, expected_observation=observation)
-            written += count
-            self._indexed += count
-            # Historical scene evidence shares the configured pacing and the
-            # one semantic worker, never spawning unbounded inference work.
-            if self._stop.wait(self.config.backfill_pause_seconds):
-                completed = False
+            pending.append((frame[box[1]:box[3], box[0]:box[2]], evidence, observation))
+            if len(pending) >= batch_limit and not flush_pending():
                 break
+        else:
+            flush_pending()
         if completed:
             self.index.reconcile_observation_keys(event, identity, desired)
         return written

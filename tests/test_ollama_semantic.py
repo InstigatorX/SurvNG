@@ -152,6 +152,7 @@ class OllamaSemanticEncoderTest(unittest.TestCase):
         self.assertEqual(path, "/api/embed")
         self.assertEqual(body["model"], "embeddinggemma-2")
         self.assertEqual(body["dimensions"], 128)
+        self.assertEqual(body["keep_alive"], "30m")
         self.assertEqual(body["input"], [
             f"{OLLAMA_SEARCH_QUERY_PREFIX}red truck",
             f"{OLLAMA_SEARCH_QUERY_PREFIX}a truck",

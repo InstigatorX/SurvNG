@@ -45,7 +45,11 @@ untouched.
 
 Incident images are posted to that Ollama URL. Localhost keeps them on the
 SurvNG host. A remote URL sends them to that server. They are still not sent to
-the AI assistant provider.
+the AI assistant provider. Historical indexing sends up to eight pictures in
+one request and asks Ollama to keep the model loaded. `embeddinggemma-2:740m`
+still spends more time on each picture than `embeddinggemma-2:440m`. A lower
+crop limit reduces how many pictures are embedded; changing the model name or
+vector size starts a new generation.
 
 ## Build the official Apple model
 
