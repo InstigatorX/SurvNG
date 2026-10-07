@@ -1,9 +1,10 @@
 # Smart Search model packages
 
 SurvNG Smart Search finds object incidents from a visual description such as
-`person in a red jacket` or `white delivery truck`. Images and embeddings stay
-on the SurvNG host. Smart Search does not upload camera images to the configured
-AI assistant provider.
+`person in a red jacket` or `white delivery truck`. The OpenVINO package keeps images and embeddings on the SurvNG host. An Ollama
+provider sends incident images only to the configured Ollama server, which
+defaults to localhost. Smart Search does not upload camera images to the
+configured AI assistant provider.
 
 ## Model choices
 
@@ -14,9 +15,37 @@ dual-encoder package can build a new index without deleting or mixing the
 previous generation.
 
 Smart Search is disabled by default. Put a self-contained model package on a
-local filesystem, then enable it under **Admin → Detection → Smart Search**.
-Docker installations should mount the package read-only beneath
+local filesystem, or point Smart Search at an Ollama server that already has
+EmbeddingGemma 2, then enable it under **Admin → Detection → Smart Search**.
+Docker installations should mount an OpenVINO package read-only beneath
 `/config/models`.
+
+## Ollama and EmbeddingGemma 2
+
+Choose **Ollama** as the Smart Search provider to embed text queries and
+incident pictures with [EmbeddingGemma 2](https://developers.googleblog.com/embeddinggemma-2-the-developer-guide/).
+SurvNG does not download the model. On the Ollama host, pull it first:
+
+```bash
+ollama pull embeddinggemma-2
+```
+
+The default model name is `embeddinggemma-2` and the default server is
+`http://127.0.0.1:11434`. `embeddinggemma-2:440m` is the smaller text-and-vision
+tag when audio is not needed. Text-only tags such as `embeddinggemma-2:270m`
+cannot index pictures.
+
+Queries are sent with EmbeddingGemma 2's search prefix,
+`task: search result | query: `. Pictures are JPEG images with no prefix, so
+both land in the same vector space. The default vector size is **768**, which
+is the right choice when visual recall matters. **512** and **256** store less;
+**128** is mainly a text-first shortlist. Changing the model or the vector size
+starts a new index generation and leaves the previous MobileCLIP generation
+untouched.
+
+Incident images are posted to that Ollama URL. Localhost keeps them on the
+SurvNG host. A remote URL sends them to that server. They are still not sent to
+the AI assistant provider.
 
 ## Build the official Apple model
 
