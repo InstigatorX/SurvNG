@@ -2072,7 +2072,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
         <span><small>Admin</small><strong>{activeAdminDestination.label}</strong></span>
         {currentAdminDirty ? <em>Unsaved</em> : null}
       </header>
-      <AdminCommandBar scope={adminCommandBar?.scope} meta={adminCommandBar?.meta} actions={adminCommandBar?.actions} />
+      <AdminCommandBar className={settingsTab === "telemetry" ? "admin-command-inline" : ""} scope={adminCommandBar?.scope} meta={adminCommandBar?.meta} actions={adminCommandBar?.actions} />
 
       <div className={`admin-workspace-surface admin-workspace-${settingsTab}`}>
 
