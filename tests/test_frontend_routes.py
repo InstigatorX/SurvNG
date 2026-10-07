@@ -45,6 +45,8 @@ class FrontendRouteTest(unittest.TestCase):
         self.assertIn("/exports", paths)
         self.assertIn("/people", paths)
         self.assertIn("/admin", paths)
+        self.assertIn("/review", paths)
+        self.assertIn("/system", paths)
 
     def test_canonical_timeline_routes_serve_the_recordings_application(self) -> None:
         for page in (timeline_page, timeline_exports_page, exports_page, search_page):

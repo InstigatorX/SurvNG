@@ -69,6 +69,8 @@ export const ADMIN_NAV_GROUPS = Object.freeze([
   ] },
   { id: "observe", label: "Observe", items: [
     { id: "health", label: "Health", workspace: "telemetry", description: "Runtime health across cameras and services." },
+    { id: "exports", label: "Exports", href: "/exports", description: "Download clips and timelapses." },
+    { id: "help", label: "Help", href: "/help", description: "Open the SurvNG guide." },
     { id: "audit", label: "Motion Audit", workspace: "audit", description: "Inspect motion decisions and outcomes." },
     { id: "diagnostics", label: "Diagnostics", workspace: "telemetry", subsection: "diagnostics", description: "Capture bounded troubleshooting data." },
     { id: "logs", label: "Logs", workspace: "logs", description: "Review server activity and errors." },

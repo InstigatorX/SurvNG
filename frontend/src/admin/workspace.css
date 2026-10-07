@@ -117,7 +117,24 @@
   text-align: left;
 }
 
-.admin-navigation nav button:hover {
+.admin-navigation nav a {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  border-left: 3px solid transparent;
+  border-radius: 4px;
+  color: var(--muted);
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 570;
+  text-align: left;
+  text-decoration: none;
+}
+
+.admin-navigation nav button:hover,
+.admin-navigation nav a:hover {
   background: var(--control-muted);
   color: var(--ink);
 }

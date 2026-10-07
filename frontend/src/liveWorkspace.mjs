@@ -93,5 +93,5 @@ export function liveActivityEventId(incident) {
 
 export function liveActivityIncidentHref(incident) {
   const eventId = liveActivityEventId(incident);
-  return eventId ? `/incidents?event_ids=${encodeURIComponent(eventId)}` : "/incidents";
+  return eventId ? `/review?event_ids=${encodeURIComponent(eventId)}` : "/review";
 }

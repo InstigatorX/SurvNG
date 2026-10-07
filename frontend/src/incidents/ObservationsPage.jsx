@@ -93,7 +93,7 @@ export function ObservationsPage({ timeZone }) {
   const observations = detail?.observations || [];
   const evidence = observations.find((item, index) => String(item.id ?? index) === selectedObservation);
   return <main className="observations-page">
-    <header><div><h1>Observations</h1><p>Retained evidence before and after activity is established. These records are not all incidents.</p></div><a href={appUrl("/incidents")}>Incidents</a></header>
+    <header><div><h1>Observations</h1><p>Retained evidence before and after activity is established. These records are not all incidents.</p></div><a href={appUrl("/review")}>Review</a></header>
     <form className="observations-filters" onSubmit={(event) => event.preventDefault()}>
       <label>Day<input aria-label="Day" type="date" value={day} onChange={(event) => { if (event.target.value) changeFilter(setDay, event.target.value); }} /></label>
       <label>Status<select aria-label="Status" value={status} onChange={(event) => changeFilter(setStatus, event.target.value)}><option value="all">All observations</option>{Object.entries(statuses).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>

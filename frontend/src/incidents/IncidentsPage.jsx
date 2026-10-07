@@ -28,7 +28,7 @@ import { useIncidentPlayback } from "./useIncidentPlayback.js";
 import "./mobile-incidents.css";
 import { FaceReviewDialog } from "../people/FacesPage.jsx";
 
-export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordingContextChange, onAssistantContextChange, onAskAssistant = null }) {
+export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordingContextChange, onAssistantContextChange, onAskAssistant = null, desk = false, renderPlayer = null }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? false;
   const thumbnailObjectFocus = appConfig?.incident_thumbnail_object_focus ?? "off";
@@ -103,7 +103,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const [selectedVisualObject, setSelectedVisualObject] = useState(null);
   const [observationPreviewRequest, setObservationPreviewRequest] = useState(null);
   const [findSimilarObject, setFindSimilarObject] = useState(null);
-  const [tabletInspectorOpen, setTabletInspectorOpen] = useState(false);
+  const [tabletInspectorOpen, setTabletInspectorOpen] = useState(desk);
   const [focusedDetailError, setFocusedDetailError] = useState("");
   const [focusedDetailLoading, setFocusedDetailLoading] = useState(false);
   const [focusedDetailRetry, setFocusedDetailRetry] = useState(0);
@@ -146,7 +146,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     || (sameIncidentId(linkedIncidentDetail?.id, expandedIncidentId) ? linkedIncidentDetail : null);
   // While a deep-linked event_ids bootstrap is in flight, avoid auto-focusing the first
   // gallery row (that clobbers the deep link URL and can leave a blank investigation).
-  const focusedSummary = mobileView
+  const focusedSummary = mobileView && !desk
     ? explicitlyFocusedSummary
     : (explicitlyFocusedSummary || (linkedIncidentBootRef.current ? null : visibleIncidents[0]) || null);
   const focusedDetailQuery = incidentDetailQuery(focusedSummary);
@@ -188,8 +188,8 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     pageSize: incidentsPerPage, items: visibleIncidents, selectedId: focusedIncident?.id,
   };
   useEffect(() => {
-    if (!displayedIncident && tabletInspectorOpen) setTabletInspectorOpen(false);
-  }, [displayedIncident, tabletInspectorOpen]);
+    if (!desk && !displayedIncident && tabletInspectorOpen) setTabletInspectorOpen(false);
+  }, [desk, displayedIncident, tabletInspectorOpen]);
 
   useEffect(() => {
     onAssistantContextChange?.({
@@ -207,7 +207,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   }, [eventFilter, focusedEvent?.id, focusedEvent?.representative_event_id, focusedIncident?.camera_id, incidentCameraFilter, incidentDay, incidentObjectFilter, incidentZoneFilter, onAssistantContextChange]);
 
   useEffect(() => {
-    if (mobileView || !focusedEvent || relatedPreviewIncident || linkedIncidentBootRef.current) return;
+    if ((mobileView && !desk) || !focusedEvent || relatedPreviewIncident || linkedIncidentBootRef.current) return;
     const eventId = Number(focusedEvent.representative_event_id || focusedEvent.id);
     if (!Number.isInteger(eventId) || eventId <= 0) return;
     const nextHref = focusedIncident?.incident_id && focusedIncident?.revision != null
@@ -221,7 +221,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     if (nextHref && nextHref !== currentHref) {
       window.history.replaceState(window.history.state, "", nextHref);
     }
-  }, [focusedIncident?.incident_id, focusedEvent?.id, focusedEvent?.representative_event_id, mobileView, relatedPreviewIncident]);
+  }, [desk, focusedIncident?.incident_id, focusedEvent?.id, focusedEvent?.representative_event_id, mobileView, relatedPreviewIncident]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -240,7 +240,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       .then((detail) => {
         if (cancelled) return;
         const requestedEventId = eventIds ? Number(String(eventIds).split(",")[0]) : Number(detail.representative_event_id);
-        if (mobileView) {
+        if (mobileView && !desk) {
           setSelectedEvent(detail);
           linkedIncidentBootRef.current = null;
           setLinkedIncidentLoading(false);
@@ -264,7 +264,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
         setLinkedIncidentError("Linked incident unavailable.");
       });
     return () => { cancelled = true; };
-  }, [mobileView, timeZone]);
+  }, [desk, mobileView, timeZone]);
 
   useEffect(() => {
     clearLegacyIncidentFilterStorage();
@@ -535,7 +535,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
         setIncidentTotal(Number(payload.total || 0));
         setIncidentFacets(payload.facets || { camera_ids: [], labels: [], zones: [] });
         setIncidentLoadError("");
-        if (!mobileView && items.length && !incidentPageEdgeRef.current) {
+        if ((!mobileView || desk) && items.length && !incidentPageEdgeRef.current) {
           setExpandedIncidentId((current) => current || items[0].id);
         }
       } catch (error) {
@@ -552,7 +552,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     return () => {
       cancelled = true;
     };
-  }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentPage, incidentsPerPage, incidentRefreshToken]);
+  }, [desk, incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentPage, incidentsPerPage, incidentRefreshToken]);
 
   useEffect(() => {
     retainedGallerySelectionRef.current = null;
@@ -689,7 +689,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   }
 
   function toggleIncident(incidentId) {
-    if (mobileView) {
+    if (mobileView && !desk) {
       const incident = visibleIncidents.find((candidate) => sameIncidentId(candidate.id, incidentId));
       if (incident) window.location.assign(appUrl(`/incidents/${encodeURIComponent(incident.id)}`));
       return;
@@ -829,9 +829,10 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     </div>
   );
 
-  if (!mobileView) {
+  const inspectorOpen = desk || tabletInspectorOpen;
+  if (!mobileView || desk) {
     return (
-      <main className={`incidents-desktop-page with-inspector${galleryExpanded ? " gallery-expanded" : ""}`}>
+      <main className={`incidents-desktop-page with-inspector${desk ? " case-desk" : ""}${galleryExpanded ? " gallery-expanded" : ""}`}>
         <section className="bento-card incidents-desktop-shell">
           <div className="incidents-desktop-toolbar">
             <div className="incidents-command-primary">
@@ -910,7 +911,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                     <button type="button" className="incident-focus-arrow next" onClick={() => moveFocus(1)} disabled={!incidentFocusStep({ index: focusedIndex, count: visibleIncidents.length, page: clampedIncidentPage, pageCount: incidentPageCount, direction: 1 })} title="Next incident" aria-label="Next incident"><ChevronRight size={26} /></button>
                   </>
                 ) : null}
-                {displayedIncident ? (
+                {desk && renderPlayer ? renderPlayer(displayedIncident) : displayedIncident ? (
                   <>{focusedDetailLoading && !relatedPreviewIncident ? <div className="incident-focus-load-status" role="status">Loading full incident evidence…</div> : null}{focusedDetailError && !relatedPreviewIncident ? <div className="incident-focus-load-error" role="alert"><span>{focusedDetailError}</span><button type="button" onClick={() => setFocusedDetailRetry((value) => value + 1)}>Retry</button></div> : null}<IncidentCard
                     key={`${focusedIncident?.id || "none"}:${displayedIncident.id || displayedIncident.representative_event_id}`}
                     incident={displayedIncident}
@@ -953,9 +954,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
               </div>
             </section>
 
-            {tabletInspectorOpen ? <button type="button" className="incident-inspector-backdrop" onClick={() => closeTabletInspector()} aria-label="Close incident details" /> : null}
+            {!desk && inspectorOpen ? <button type="button" className="incident-inspector-backdrop" onClick={() => closeTabletInspector()} aria-label="Close incident details" /> : null}
             <IncidentInspector
-              open={tabletInspectorOpen}
+              open={inspectorOpen}
               incident={displayedIncident}
               scenePlayback={scenePlayback}
               faceEvent={displayedEvent}
@@ -1004,6 +1005,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
               onRelatedReturn={returnToSelectedIncident}
               onClose={() => closeTabletInspector()}
               onAskAssistant={onAskAssistant}
+              openTimelineInPlayer={desk}
             />
           </div>
         </section>

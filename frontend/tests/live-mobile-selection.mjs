@@ -15,7 +15,7 @@ try {
   await primary.waitFor({ state: "visible" });
   let originalId = await primary.getAttribute("data-camera-id");
   assert.equal(await page.locator(".camera-tile-quick-actions, .camera-tile-menu, .camera-tile-control-menu").count(), 0);
-  assert.equal(await page.locator(".live-grid>.events-zone").count(), 0);
+  assert.equal(await page.locator(".live-grid>.events-zone").count(), 1);
 
   // Use enough synthetic cameras to overflow the child area.
   const grid = page.locator(".live-camera-grid");

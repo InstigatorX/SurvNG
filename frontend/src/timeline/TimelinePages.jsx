@@ -638,7 +638,8 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
       });
       const params = new URLSearchParams({ q: searchQuery });
       if (searchCameraId) params.set("camera", searchCameraId);
-      window.history.replaceState(null, "", appUrl(`/search?${params.toString()}`));
+      params.set("mode", "search");
+      window.history.replaceState(null, "", appUrl(`/review?${params.toString()}`));
     } catch (reason) {
       if (reason?.name !== "AbortError") {
         setCameraId(resultsCameraId);
@@ -663,7 +664,7 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
     setResults([]);
     setError("");
     clearSemanticSearchSession(sessionStorage);
-    window.history.replaceState(null, "", appUrl("/search"));
+    window.history.replaceState(null, "", appUrl("/review?mode=search"));
   }
 
   function selectCamera(nextCameraId) {
@@ -713,7 +714,7 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
           const matchLabel = ({ strong_match: "Strong match", possible_match: "Possible match" })[result.match_strength] || "Visually similar";
           const cameraName = cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id;
           const observedAt = formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone);
-          return <article key={item.id} aria-label={`${matchLabel} at ${cameraName}, ${observedAt}`}><div className="semantic-result-image"><img src={mediaUrl(result.snapshot_url)} alt={`${cameraName} search result`} loading="lazy" /><span title={`Raw visual similarity ${Number(result.score || 0).toFixed(3)}`}>{matchLabel}</span></div><footer><div><strong>{cameraName}</strong><small>{observedAt}</small><IdentityChip item={item} className="semantic-result-identity" /></div><nav aria-label={`Actions for ${cameraName} result`}><a href={appUrl(`/incidents?event_ids=${item.id}`)}>Open incident</a><a href={recordingsHref(context)}><Play size={14} />Timeline</a></nav></footer></article>;
+          return <article key={item.id} aria-label={`${matchLabel} at ${cameraName}, ${observedAt}`}><div className="semantic-result-image"><img src={mediaUrl(result.snapshot_url)} alt={`${cameraName} search result`} loading="lazy" /><span title={`Raw visual similarity ${Number(result.score || 0).toFixed(3)}`}>{matchLabel}</span></div><footer><div><strong>{cameraName}</strong><small>{observedAt}</small><IdentityChip item={item} className="semantic-result-identity" /></div><nav aria-label={`Actions for ${cameraName} result`}><a href={appUrl(`/review?event_ids=${item.id}`)}>Open incident</a><a href={recordingsHref(context)}><Play size={14} />Timeline</a></nav></footer></article>;
         })}
         {!loading && !error && !visibleResults.length ? <div className="semantic-search-empty"><Search size={28} /><strong>{results.length && cameraId ? "No matching results from this camera" : "Search indexed incidents by appearance"}</strong><span>{results.length && cameraId ? "Choose All cameras or another camera to widen the current results." : "Results link to the exact incident and recording time."}</span></div> : null}
       </div>
@@ -721,12 +722,13 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
   </main>;
 }
 
-export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssistant = null }) {
+export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssistant = null, embedded = false, controlledCameraId = "", controlledEpoch = null, controlledEventId = null }) {
   const { cameras: sharedCameras, appConfig } = usePollingData();
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
   const today = dateKeyForTimeZone(Date.now(), timeZone);
   const initialView = useMemo(() => parseTimelineView(initialQuery, today), [initialQuery, today]);
-  const initialEpoch = initialView.at;
+  const controlledEpochNumber = Number(controlledEpoch);
+  const initialEpoch = embedded && Number.isFinite(controlledEpochNumber) && controlledEpochNumber > 0 ? controlledEpochNumber : initialView.at;
   const initialDate = !initialQuery.get("date") && initialEpoch ? dateKeyForTimeZone(initialEpoch * 1000, timeZone) : initialView.date;
   const videoRef = useRef(null);
   const desiredEpochRef = useRef(initialEpoch);
@@ -759,7 +761,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const frameSearchRequestRef = useRef(null);
   const [cameras, setCameras] = useState([]);
   const [cameraTransitionRoutes, setCameraTransitionRoutes] = useState([]);
-  const [cameraId, setCameraId] = useState(initialView.cameraId);
+  const [cameraId, setCameraId] = useState(embedded && controlledCameraId ? controlledCameraId : initialView.cameraId);
   const [source, setSource] = useState(initialView.source || (initialView.cameraId === ALL_RECORDING_CAMERAS_ID ? "live" : preferredStreamSource()));
   const [date, setDate] = useState(initialDate);
   const [recordings, setRecordings] = useState([]);
@@ -795,7 +797,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [clipPreviewing, setClipPreviewing] = useState(false);
   const clipPreviewEndRef = useRef(null);
   const [gridPlaying, setGridPlaying] = useState(false);
-  const [selectedEventId, setSelectedEventId] = useState(initialView.eventId);
+  const [selectedEventId, setSelectedEventId] = useState(embedded && controlledEventId ? controlledEventId : initialView.eventId);
   const [trailEventIds, setTrailEventIds] = useState(() => (
     initialView.trailEventIds?.length
       ? initialView.trailEventIds
@@ -806,7 +808,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [selectedIncidentIdentity, setSelectedIncidentIdentity] = useState(null);
   const [selectedIdentityRevision, setSelectedIdentityRevision] = useState(0);
   const [investigationOpen, setInvestigationOpen] = useState(
-    () => Boolean(initialView.eventId || initialView.trailEventIds?.length),
+    () => !embedded && Boolean(initialView.eventId || initialView.trailEventIds?.length),
   );
   const [heroMuted, setHeroMuted] = useState(false);
   const [aiOverlayEnabled, setAiOverlayEnabled] = useState(false);
@@ -1666,7 +1668,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setNativeSegmentRetryToken(0);
     setFollowTarget(null);
     clearSeekWatchdog();
-    if (Number.isFinite(playhead)) desiredEpochRef.current = playhead;
+    if (!embedded && Number.isFinite(playhead)) desiredEpochRef.current = playhead;
     // Ignore outgoing media events while the new camera/day index is loading.
     pendingSeekEpochRef.current = Number.isFinite(desiredEpochRef.current) ? desiredEpochRef.current : dayStart;
     pendingSeekModeRef.current = "window";
@@ -1860,8 +1862,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }, [followTarget, timeline]);
 
   useEffect(() => {
-    if (!activeCameraId) return;
-    const params = new URLSearchParams({ camera: activeCameraId, date, source });
+    if (embedded || !activeCameraId) return;
+    const params = new URLSearchParams({ mode: "timeline", camera: activeCameraId, date, source });
     const retainedEpoch = desiredEpochRef.current;
     if (Number.isFinite(retainedEpoch) && retainedEpoch >= dayStart && retainedEpoch < dayEnd) {
       params.set("at", String(Math.round(retainedEpoch * 1000) / 1000));
@@ -1874,8 +1876,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (!timelineLanes.object) params.set("objects", "0");
     if (!timelineLanes.motion) params.set("motion", "0");
     if (playbackRate !== 1) params.set("speed", String(playbackRate));
-    window.history.replaceState(null, "", appUrl(`/timeline?${params.toString()}`));
-  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, incidentRangeHours, playbackRate, selectedEventId, source, timelineLanes.motion, timelineLanes.object, trailEventIds]);
+    window.history.replaceState(null, "", appUrl(`/review?${params.toString()}`));
+  }, [activeCameraId, date, dayEnd, dayStart, embedded, eventFilter, incidentRangeHours, playbackRate, selectedEventId, source, timelineLanes.motion, timelineLanes.object, trailEventIds]);
 
   useEffect(() => {
     const restoreView = () => {
@@ -2538,8 +2540,36 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     );
   }
 
+  useEffect(() => {
+    if (!embedded || !controlledCameraId || controlledCameraId === cameraId) return;
+    setCameraId(controlledCameraId);
+  }, [cameraId, controlledCameraId, embedded]);
+
+  useEffect(() => {
+    if (!embedded) return;
+    const epoch = Number(controlledEpoch);
+    if (!Number.isFinite(epoch) || epoch <= 0) return;
+    const nextDate = dateKeyForTimeZone(epoch * 1000, timeZone);
+    const dateChanging = Boolean(nextDate && nextDate !== date);
+    const cameraChanging = Boolean(controlledCameraId && controlledCameraId !== cameraId);
+    if (dateChanging || cameraChanging) {
+      desiredEpochRef.current = epoch;
+      if (dateChanging) setDate(nextDate);
+      return;
+    }
+    if (!Number.isFinite(desiredEpochRef.current) || Math.abs(desiredEpochRef.current - epoch) > 0.75) {
+      desiredEpochRef.current = epoch;
+      playAt(epoch, false);
+    }
+  }, [cameraId, controlledCameraId, controlledEpoch, date, embedded, timeZone]);
+
+  useEffect(() => {
+    if (!embedded || !controlledEventId) return;
+    setSelectedEventId(controlledEventId);
+  }, [controlledEventId, embedded]);
+
   return (
-    <main className={`recordings-v2-page${investigationOpen ? " has-investigation" : " investigation-hidden"}`}>
+    <main className={`recordings-v2-page${embedded ? " recordings-embedded" : ""}${investigationOpen ? " has-investigation" : " investigation-hidden"}`}>
       <nav className="recordings-tabs recordings-commandbar" aria-label="Timeline controls">
         <TimelineCameraPicker
           cameras={cameras}

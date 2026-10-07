@@ -40,8 +40,7 @@
 }
 
 .workspace-brand strong {
-  font-size: 20px;
-  letter-spacing: -0.025em;
+  display: none;
 }
 
 .workspace-navigation {
@@ -55,12 +54,17 @@
 .workspace-navigation a {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 44px;
+  justify-content: center;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 52px;
   border: 1px solid transparent;
   border-radius: 8px;
   color: var(--muted);
-  padding: 0 11px;
+  padding: 6px 4px;
+  font-size: 10px;
+  line-height: 1.1;
+  text-align: center;
   text-decoration: none;
 }
 
@@ -93,11 +97,15 @@
 .workspace-help-link {
   display: inline-flex;
   align-items: center;
-  gap: 12px;
+  justify-content: center;
+  flex-direction: column;
+  gap: 3px;
   min-height: 44px;
-  margin: 0 8px;
-  padding: 10px 12px;
+  margin: 0 6px;
+  padding: 6px 4px;
   color: var(--muted);
+  font-size: 10px;
+  text-align: center;
   text-decoration: none;
   border-radius: var(--workspace-control-radius, 4px);
 }
@@ -113,13 +121,17 @@
 }
 
 .workspace-rail-toggle {
-  min-height: 48px;
-  justify-content: flex-start;
+  min-height: 40px;
+  justify-content: center;
   margin: 8px;
   border-color: var(--line);
   background: transparent;
   color: var(--muted);
-  padding-inline: 12px;
+  padding-inline: 0;
+}
+
+.workspace-rail-toggle span {
+  display: none;
 }
 
 .workspace-rail-toggle:hover {
@@ -129,17 +141,17 @@
 .workspace-account {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   gap: 8px;
   margin: 0 8px 10px;
-  padding: 8px 10px;
+  padding: 6px;
   border: 1px solid var(--line);
   border-radius: var(--workspace-control-radius);
   color: var(--ink);
 }
 
 .workspace-account span {
-  display: grid;
+  display: none;
   min-width: 0;
 }
 
@@ -413,7 +425,7 @@
     left: 0;
     z-index: 60;
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     min-height: calc(58px + var(--safe-area-bottom));
     border-top: 1px solid var(--line);
     background: color-mix(in srgb, var(--panel-solid) 96%, transparent);

@@ -531,6 +531,7 @@ export function VisualSimilarIncidents({
   loadingEventId,
   selectedEventId,
   onClear,
+  openInPlayer = false,
 }) {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -704,11 +705,14 @@ export function VisualSimilarIncidents({
                     href={recordingsHref(context, {
                       trailEventIds: results.map((item) => Number(item?.event?.id)).filter((id) => Number.isInteger(id) && id > 0),
                     })}
-                    onClick={() => {
+                    onClick={(clickEvent) => {
                       writeVisualSearchTrail(window.sessionStorage, {
                         eventIds: results.map((item) => Number(item?.event?.id)),
                         hits: results,
                       });
+                      if (!openInPlayer) return;
+                      clickEvent.preventDefault();
+                      onSelect?.(eventRow);
                     }}
                   >
                     <Play size={13} /> Timeline
@@ -897,7 +901,7 @@ export function CrossCameraTracePanel({
   );
 }
 
-export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, visualAnchorEventId = anchorEventId, appearanceAnchorEventId = anchorEventId, selectedRelatedEventId, relatedLoadingEventId, relatedError = "", cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", depthLayer = "both", analysisStats, analysisPanel = null, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onDepthLayerChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
+export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, visualAnchorEventId = anchorEventId, appearanceAnchorEventId = anchorEventId, selectedRelatedEventId, relatedLoadingEventId, relatedError = "", cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", depthLayer = "both", analysisStats, analysisPanel = null, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onDepthLayerChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null, openTimelineInPlayer = false }) {
   const inspectorRef = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -1040,6 +1044,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
         onSelect={onRelatedSelect}
         loadingEventId={relatedLoadingEventId}
         selectedEventId={selectedRelatedEventId}
+        openInPlayer={openTimelineInPlayer}
         onClear={onFindSimilar ? () => onFindSimilar(null) : (onSelectObject ? () => onSelectObject(null) : null)}
       />
       <CrossCameraTracePanel anchorEventId={open ? anchorEventId : null} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} loadingEventId={relatedLoadingEventId} />

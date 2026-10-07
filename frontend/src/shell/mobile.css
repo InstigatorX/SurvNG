@@ -691,3 +691,284 @@
 .semantic-result-identity {
   margin-top: 3px;
 }
+
+/* Phone fit for Night Watch and Case Desk. These follow every earlier mobile
+   rule, including the timeline viewport lock, so an embedded player cannot
+   force the desk wider or taller than the screen. */
+@media (max-width: 760px) {
+  .app-shell > .topbar {
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .mobile-brand-block,
+  .workspace-system-bar,
+  .brand-title {
+    min-width: 0;
+  }
+
+  .workspace-system-bar {
+    flex: 1 1 auto;
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .page-live .workspace-content,
+  .page-review .workspace-content {
+    max-width: 100%;
+    overflow-x: clip;
+  }
+
+  .page-live .live-command-bar {
+    position: absolute !important;
+    top: 0 !important;
+    right: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+  }
+
+  .page-live .live-grid > .camera-zone {
+    padding-top: 46px;
+    min-height: 0;
+  }
+
+  .page-live .camera-grid.live-camera-grid {
+    display: grid !important;
+    grid-template-rows: minmax(0, 1fr) !important;
+    grid-auto-rows: minmax(140px, auto) !important;
+    height: 100% !important;
+    align-content: start !important;
+  }
+
+  .page-live .live-camera-grid .camera-tile.mobile-primary {
+    min-height: 0 !important;
+    height: 100% !important;
+  }
+
+  .page-live .live-camera-grid .camera-tile.mobile-primary .video-frame {
+    height: 100% !important;
+    max-height: none !important;
+    aspect-ratio: auto !important;
+  }
+
+  .page-live .live-mobile-camera-select {
+    width: 100% !important;
+    max-width: none;
+  }
+
+  .page-live .live-grid > .events-zone {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-rows: auto minmax(72px, 1fr);
+    width: 100%;
+    max-width: 100%;
+    height: auto !important;
+    min-height: 118px !important;
+    max-height: 148px !important;
+    overflow: hidden !important;
+  }
+
+  .page-live .live-grid > .events-zone > .section-head {
+    display: flex !important;
+    grid-column: 1;
+    grid-row: 1;
+    min-width: 0;
+    border: 0;
+    padding: 4px 6px;
+  }
+
+  .page-live .live-grid > .events-zone > .section-head h2 {
+    font-size: 0;
+  }
+
+  .page-live .live-grid > .events-zone > .section-head h2::after {
+    content: "Recent";
+    font-size: 13px;
+    font-weight: 620;
+  }
+
+  .page-live .live-quick-filters {
+    width: auto;
+    max-width: 148px;
+  }
+
+  .page-live .live-grid > .events-zone > .live-activity-filters {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: center;
+  }
+
+  .page-live .live-grid > .events-zone > .live-activity-footer {
+    grid-column: 3;
+    grid-row: 1;
+    align-self: center;
+    padding: 4px 6px;
+  }
+
+  .page-live .live-activity-footer .incident-pager {
+    display: none !important;
+  }
+
+  .page-live .live-grid > .events-zone > .live-activity-list {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .page-live .live-grid > .events-zone .live-activity-item {
+    flex-basis: min(200px, 72vw);
+    min-width: 0;
+    height: auto;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+  }
+
+  .page-live .live-grid > .events-zone .live-activity-select {
+    grid-template-columns: 64px minmax(0, 1fr);
+    height: 68px;
+    min-height: 0;
+    gap: 6px;
+    padding: 4px;
+  }
+
+  .page-live .live-grid > .events-zone button,
+  .page-live .live-grid > .events-zone summary,
+  .page-live .live-grid > .events-zone a {
+    min-width: 0;
+    min-height: 32px;
+  }
+
+  .page-live .live-activity-filters > summary {
+    width: 36px;
+    min-width: 36px;
+    justify-content: center;
+    padding: 0;
+    font-size: 0;
+    line-height: 0;
+  }
+
+  .page-live .live-activity-filters > summary svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .page-live .live-grid > .events-zone .live-activity-filters[open] .incident-filter-panel {
+    left: auto;
+    right: 0;
+    width: min(280px, calc(100vw - 16px));
+  }
+
+  .review-modes {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    min-width: 0;
+  }
+
+  .review-modes a {
+    min-width: 0 !important;
+    justify-content: center;
+  }
+
+  .case-desk.incidents-desktop-page,
+  .case-desk .incidents-desktop-shell {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+
+  .case-desk .incidents-command-primary {
+    display: flex !important;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .case-desk .incidents-command-primary > * {
+    flex: 1 1 100%;
+    min-width: 0 !important;
+    max-width: 100%;
+  }
+
+  .case-desk .incidents-desktop-workspace {
+    display: flex !important;
+    flex-direction: column !important;
+    height: auto !important;
+    overflow: visible !important;
+    grid-template-columns: none !important;
+  }
+
+  .case-desk .incidents-desktop-workspace > .incident-rail {
+    position: relative !important;
+    inset: auto !important;
+    width: 100% !important;
+    max-height: 32dvh;
+  }
+
+  .case-desk .incident-investigation,
+  .case-desk .incident-inspector {
+    position: relative !important;
+    inset: auto !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
+    transform: none !important;
+    visibility: visible !important;
+    pointer-events: auto !important;
+  }
+
+  .recordings-v2-page.recordings-embedded {
+    display: grid !important;
+    grid-template-rows: minmax(0, 1fr) auto !important;
+    width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+
+  .recordings-embedded .recordings-tabs.recordings-commandbar,
+  .recordings-embedded .recording-selected-companions {
+    display: none !important;
+  }
+
+  .recordings-embedded .recordings-v2-workspace {
+    display: grid !important;
+    grid-template-rows: minmax(180px, 42dvh) auto !important;
+    width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+  }
+
+  .recordings-embedded .recordings-v2-player,
+  .recordings-embedded .recordings-v2-player.selected-camera-stage {
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 180px !important;
+    max-height: 42dvh !important;
+  }
+
+  .recordings-embedded .recordings-v2-controls {
+    height: 128px !important;
+    min-height: 128px !important;
+  }
+
+  .recordings-embedded .recording-hero-controls {
+    right: 8px !important;
+    bottom: 8px !important;
+  }
+
+  body:has(.recordings-embedded) {
+    overflow: auto !important;
+  }
+
+  .review-mode-timeline .recordings-v2-page:not(.recordings-embedded) {
+    height: auto !important;
+    max-height: none !important;
+    min-height: 0 !important;
+  }
+}

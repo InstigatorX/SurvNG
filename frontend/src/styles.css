@@ -45,7 +45,7 @@
   --safe-area-bottom: env(safe-area-inset-bottom, 0px);
   /* Command-center geometry. Keep these values in one place so Live, its
      shell, and the responsive variants preserve the approved mockup rhythm. */
-  --workspace-rail-width: 176px;
+  --workspace-rail-width: 76px;
   --workspace-topbar-height: 58px;
   --live-command-height: 52px;
   --live-activity-width: 306px;

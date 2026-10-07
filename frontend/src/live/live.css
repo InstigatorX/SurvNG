@@ -1,20 +1,25 @@
 /* Live Command Center */
 .live-grid {
-  grid-template-columns: minmax(0, 1fr) var(--live-activity-width);
-  grid-template-rows: var(--live-command-height) minmax(0, 1fr);
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 0;
   background: var(--canvas);
   padding: 0;
 }
 
 .live-command-bar {
-  min-height: var(--live-command-height);
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 6;
+  width: auto;
+  min-height: 0;
   border: 0;
-  border-bottom: 1px solid var(--line);
-  border-radius: 0;
-  background: var(--topbar);
+  border-radius: 4px;
+  background: transparent;
   box-shadow: none;
-  padding: 6px 12px;
+  padding: 0;
 }
 
 .live-command-context {
@@ -293,7 +298,7 @@
 }
 
 .live-grid>.camera-zone {
-  border-right: 1px solid var(--line);
+  border-right: 0;
 }
 
 .live-camera-grid.viewport-layout .camera-tile.viewport-layout .video-frame,
@@ -524,7 +529,7 @@
   .page-live .live-grid {
     height: 100%;
     min-height: 0;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
     overflow: hidden;
   }
 
@@ -585,6 +590,55 @@
   .live-activity-select {
     grid-template-columns: 112px minmax(0, 1fr);
   }
+}
+
+.live-grid > .events-zone {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  height: auto;
+  min-height: 96px;
+  max-height: 112px;
+  border-top: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.live-grid > .events-zone .section-head {
+  flex: 0 0 auto;
+  min-height: 0;
+  border-bottom: 0;
+  border-right: 1px solid var(--line);
+}
+
+.live-grid > .events-zone .live-activity-filters,
+.live-grid > .events-zone .live-activity-footer {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.live-grid > .events-zone .live-activity-filters[open] .incident-filter-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 7;
+  width: 240px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-solid);
+}
+
+.live-grid > .events-zone .live-activity-list {
+  display: flex;
+  flex: 1;
+  flex-direction: row;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 8px;
+}
+
+.live-grid > .events-zone .live-activity-item {
+  flex: 0 0 188px;
 }
 
 @media (prefers-reduced-motion: reduce) {
