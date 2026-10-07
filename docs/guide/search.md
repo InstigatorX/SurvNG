@@ -15,9 +15,10 @@ zone, and time. That is often enough for “show me cars at the gate yesterday.�
 
 ## Smart Search (optional)
 
-Smart Search compares your text to pictures SurvNG already stored. Images and
-search indexes stay on your SurvNG host. They are not uploaded to the AI
-assistant provider.
+Smart Search compares your text to pictures SurvNG already stored. An OpenVINO
+model package keeps those pictures on your SurvNG host. The Ollama provider
+sends them only to the Ollama server you configure, which defaults to this
+host. They are not uploaded to the AI assistant provider.
 
 ### Example queries
 
@@ -49,8 +50,10 @@ Details and roadmap: [Forensic visual search](../forensic-visual-search.md).
 
 ### Setup summary
 
-1. Build or install the Smart Search model package.
-2. Enable Smart Search under **Admin → Detection**.
+1. Build or install the Smart Search model package, or pull EmbeddingGemma 2
+   into Ollama with `ollama pull embeddinggemma-2`.
+2. Enable Smart Search under **Admin → Detection** and choose OpenVINO or
+   Ollama.
 3. Allow SurvNG time to index existing incident pictures.
 4. Open **Search**, type a description, and review the ranked results — or
    click an object on an incident or select an area on a Timeline frame and

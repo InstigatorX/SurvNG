@@ -32,6 +32,55 @@ def make_service(tmp_path):
     return store, event, service
 
 
+class RecordingEncoder(Encoder):
+    def __init__(self):
+        self.batches = []
+
+    def encode_images(self, images):
+        self.batches.append(len(images))
+        return super().encode_images(images)
+
+
+def _multi_object_service(tmp_path, implementation):
+    store = EventStore(tmp_path)
+    assert cv2.imwrite(str(tmp_path / "frame.png"), np.full((80, 80, 3), 140, dtype=np.uint8))
+    objects = []
+    for index in range(5):
+        origin = 1 + index * 16
+        objects.append({
+            "label": "person",
+            "confidence": .75,
+            "incident_eligible": False,
+            "box": {"x1": origin, "y1": 1, "x2": origin + 12, "y2": 14},
+        })
+    event = store.add_event("gate", "motion", snapshot_path="frame.png", objects_json=json.dumps(objects))
+    index = SemanticIndex(store.db_path)
+    service = SemanticSearchService(
+        SemanticSearchConfig(enabled=True, implementation=implementation, backfill_pause_seconds=.01),
+        index,
+        tmp_path,
+        {},
+    )
+    service._event_store = store
+    service._storage_dir = tmp_path
+    encoder = RecordingEncoder()
+    service.encoder = encoder
+    return store, event, service, encoder
+
+
+def test_ollama_indexes_scene_crops_together(tmp_path):
+    store, event, service, encoder = _multi_object_service(tmp_path, "ollama")
+    assert len(store.scene_search_observations(event_id=event["id"])) == 5
+    assert service.index_event(event) == 11
+    assert encoder.batches == [6, 5]
+
+
+def test_openvino_indexes_scene_crops_one_at_a_time(tmp_path):
+    _store, event, service, encoder = _multi_object_service(tmp_path, "mobileclip2_openvino")
+    assert service.index_event(event) == 11
+    assert encoder.batches == [6, 1, 1, 1, 1, 1]
+
+
 def test_retained_object_search_survives_cover_replacement_and_empty_current_detection(tmp_path):
     store, event, service = make_service(tmp_path)
     assert service.index_event(event) == 3
