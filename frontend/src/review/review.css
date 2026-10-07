@@ -60,23 +60,124 @@
 }
 
 @media (max-width: 760px) {
+  .review-frame {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    height: auto;
+    overflow-x: clip;
+  }
+
+  .review-modes {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+    min-width: 0;
+    padding: 6px;
+  }
+
+  .review-modes a {
+    justify-content: center;
+    min-width: 0;
+    overflow: hidden;
+    padding-inline: 6px;
+  }
+
+  .review-mode-timeline,
+  .review-mode-search {
+    height: var(--workspace-available-height);
+    max-height: var(--workspace-available-height);
+    overflow: hidden;
+  }
+
+  .review-mode-timeline .recordings-v2-page:not(.recordings-embedded),
+  .review-mode-search .search-page {
+    flex: 1;
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+    height: auto;
+    max-height: none;
+  }
+
+  .case-desk.incidents-desktop-page,
+  .case-desk .incidents-desktop-shell {
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .case-desk .incidents-command-primary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    min-width: 0;
+  }
+
+  .case-desk .incidents-command-primary > * {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .case-desk .incidents-command-primary .incident-filter-selects,
+  .case-desk .incident-semantic-search,
+  .case-desk .incident-semantic-search form,
+  .case-desk .incident-day-stepper {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .case-desk .incidents-command-primary .incident-filter-selects {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .case-desk .incidents-command-primary .incident-day-stepper input[type="date"] {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+  }
+
+  .case-desk .incident-semantic-search form {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
   .case-desk .incidents-desktop-workspace {
     display: flex;
     flex-direction: column;
+    height: auto;
     min-height: 0;
+    overflow: visible;
   }
 
   .case-desk .incidents-desktop-workspace > .incident-rail {
     position: relative;
     inset: auto;
     width: 100%;
-    max-height: 220px;
+    max-height: 32dvh;
+    overflow: hidden;
   }
 
   .case-desk .incident-investigation,
   .case-desk .incident-inspector {
     position: relative;
+    inset: auto;
     width: 100%;
-    min-height: 280px;
+    max-width: 100%;
+    height: auto;
+    min-height: 0;
+    transform: none;
+    visibility: visible;
+  }
+
+  .case-desk .incident-inspector {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .case-desk .incident-focus-arrow,
+  .case-desk .incident-focus-actions {
+    display: none;
   }
 }
