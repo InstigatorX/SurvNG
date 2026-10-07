@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import http.client
 import json
 import sqlite3
 import threading
@@ -14,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
+from urllib.parse import urlsplit
 
 import numpy as np
 import cv2
@@ -35,6 +38,12 @@ MODEL_FINGERPRINT_CHUNK_SIZE = 1024 * 1024
 SEMANTIC_BACKFILL_RETRY_SECONDS = 5.0
 SEMANTIC_MEDIA_QUARANTINE_ATTEMPTS = 3
 SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS = 15 * 60.0
+OLLAMA_SEARCH_QUERY_PREFIX = "task: search result | query: "
+OLLAMA_JPEG_QUALITY = 90
+OLLAMA_MAX_IMAGE_EDGE = 768
+OLLAMA_IMAGE_BATCH_SIZE = 8
+OLLAMA_KEEP_ALIVE = "30m"
+OLLAMA_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
 class SemanticInferenceError(RuntimeError):
@@ -1325,6 +1334,37 @@ class SemanticIndex:
             ).fetchall()
         return {int(row["event_id"]) for row in rows}
 
+    def resolve_ollama_identity(self, config: SemanticSearchConfig) -> SemanticModelIdentity:
+        """Record and reuse the generation for this Ollama embedding contract."""
+        identity, contract = ollama_semantic_contract(config)
+        bound = self._generation_source(contract)
+        if bound is not None:
+            return bound
+        with self._lock, self._connect() as connection:
+            connection.execute("begin immediate")
+            row = self._generation_source_row(connection, contract)
+            if row is not None:
+                return self._identity_from_source(row)
+            connection.execute(
+                """
+                insert or ignore into semantic_generation_sources (
+                    image_contract, implementation, model_fingerprint,
+                    preprocessing_fingerprint, dimensions
+                ) values (?, ?, ?, ?, ?)
+                """,
+                (
+                    contract,
+                    identity.implementation,
+                    identity.model_fingerprint,
+                    identity.preprocessing_fingerprint,
+                    identity.dimensions,
+                ),
+            )
+            row = self._generation_source_row(connection, contract)
+        if row is None:
+            raise RuntimeError("semantic generation source was not recorded")
+        return self._identity_from_source(row)
+
     def resolve_model_identity(self, model_dir: Path, manifest: dict[str, Any]) -> SemanticModelIdentity:
         """Reuse the generation whose declared joint embedding space matches.
 
@@ -1568,6 +1608,30 @@ def _preprocessing_fingerprint(manifest: dict[str, Any], *, include_text: bool) 
     return hashlib.sha256(raw).hexdigest()[:24]
 
 
+def ollama_semantic_contract(
+    config: SemanticSearchConfig,
+) -> tuple[SemanticModelIdentity, str]:
+    """Generation key for one Ollama model, dimension, and image encoding."""
+    payload = {
+        "implementation": "ollama",
+        "model": config.ollama_model,
+        "dimensions": int(config.ollama_dimensions),
+        "query_prefix": OLLAMA_SEARCH_QUERY_PREFIX,
+        "jpeg_quality": OLLAMA_JPEG_QUALITY,
+        "max_image_edge": OLLAMA_MAX_IMAGE_EDGE,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    identity = SemanticModelIdentity(
+        "ollama",
+        digest[:24],
+        digest[24:48],
+        int(config.ollama_dimensions),
+    )
+    return identity, digest
+
+
 def semantic_image_artifacts(model_dir: Path, manifest: dict[str, Any]) -> tuple[Path, Path]:
     """Return the image encoder IR pair declared by the manifest."""
     xml_path = _semantic_package_path(
@@ -1718,6 +1782,8 @@ def build_semantic_search(
     """Build safely; semantic failures must never prevent camera startup."""
     if not config.enabled:
         return DisabledSemanticSearch(config, index)
+    if config.implementation == "ollama":
+        return SemanticSearchService(config, index, Path(), {})
     model_dir = Path(config.model_dir)
     if not config.model_dir:
         return UnavailableSemanticSearch(config, index, "model directory is not configured")
@@ -2187,6 +2253,199 @@ class _SemanticEventRevision:
     outcome: str = ""
 
 
+def _ollama_jpeg_bytes(image: np.ndarray) -> bytes:
+    if not isinstance(image, np.ndarray) or image.ndim != 3 or image.shape[2] != 3 or image.size == 0:
+        raise RuntimeError("semantic image must be a BGR frame")
+    if image.dtype != np.uint8:
+        raise RuntimeError("semantic image must be an 8-bit BGR frame")
+    frame = np.ascontiguousarray(image)
+    height, width = frame.shape[:2]
+    longest = max(height, width)
+    if longest > OLLAMA_MAX_IMAGE_EDGE:
+        scale = OLLAMA_MAX_IMAGE_EDGE / longest
+        frame = cv2.resize(
+            frame,
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    success, encoded = cv2.imencode(
+        ".jpg",
+        frame,
+        [int(cv2.IMWRITE_JPEG_QUALITY), OLLAMA_JPEG_QUALITY],
+    )
+    if not success:
+        raise RuntimeError("semantic image could not be encoded")
+    return encoded.tobytes()
+
+
+class OllamaEmbeddingEncoder:
+    """EmbeddingGemma-style encoder backed by a local or configured Ollama server.
+
+    Text queries receive the search-task prefix. Images are sent as JPEG bytes
+    with no prefix, matching EmbeddingGemma 2's multimodal input contract.
+    """
+
+    def __init__(self, config: SemanticSearchConfig, identity: SemanticModelIdentity) -> None:
+        self.config = config
+        self._identity = identity
+        self._closed = False
+        self._lock = threading.Lock()
+        self._active: http.client.HTTPConnection | None = None
+        self._connection: http.client.HTTPConnection | None = None
+        self._connection_key: tuple[str, str, int] | None = None
+
+    @property
+    def identity(self) -> SemanticModelIdentity:
+        return self._identity
+
+    def probe(self) -> None:
+        self.encode_text(["ready"])
+
+    def encode_text(self, texts: Sequence[str]) -> np.ndarray:
+        prompts = [str(text) for text in texts]
+        if not prompts:
+            raise RuntimeError("semantic text batch cannot be empty")
+        return self._embed([f"{OLLAMA_SEARCH_QUERY_PREFIX}{prompt}" for prompt in prompts])
+
+    def encode_images(self, images: Sequence[np.ndarray]) -> np.ndarray:
+        if not images:
+            raise RuntimeError("semantic image batch cannot be empty")
+        encoded = [
+            {"image": base64.b64encode(_ollama_jpeg_bytes(image)).decode("ascii")}
+            for image in images
+        ]
+        parts = [
+            self._embed(encoded[offset:offset + OLLAMA_IMAGE_BATCH_SIZE])
+            for offset in range(0, len(encoded), OLLAMA_IMAGE_BATCH_SIZE)
+        ]
+        return parts[0] if len(parts) == 1 else np.concatenate(parts)
+
+    def _embed(self, inputs: list[Any]) -> np.ndarray:
+        payload = self._post_embed({
+            "model": self.config.ollama_model,
+            "input": inputs,
+            "dimensions": int(self.config.ollama_dimensions),
+            "keep_alive": OLLAMA_KEEP_ALIVE,
+        })
+        embeddings = payload.get("embeddings")
+        if not isinstance(embeddings, list) or len(embeddings) != len(inputs):
+            raise RuntimeError("Ollama embeddings response did not match the request")
+        matrix = normalized_matrix(embeddings)
+        if matrix.shape[1] != self._identity.dimensions:
+            raise RuntimeError(
+                f"Ollama embeddings returned {matrix.shape[1]} dimensions; "
+                f"expected {self._identity.dimensions}"
+            )
+        return matrix
+
+    def _drop_connection(self) -> None:
+        with self._lock:
+            connection = self._connection
+            self._connection = None
+            self._connection_key = None
+            if self._active is connection:
+                self._active = None
+        if connection is not None:
+            try:
+                connection.close()
+            except OSError:
+                return
+
+    def _open_connection(self) -> tuple[http.client.HTTPConnection, str]:
+        parsed = urlsplit(self.config.ollama_base_url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        key = (parsed.scheme, parsed.hostname or "", port)
+        request_path = f"{parsed.path.rstrip('/')}/api/embed"
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Ollama embedding encoder is closed")
+            reusable = self._connection
+            if (
+                reusable is not None
+                and self._connection_key == key
+                and reusable.sock is not None
+            ):
+                self._active = reusable
+                return reusable, request_path
+            previous = self._connection
+            self._connection = None
+            self._connection_key = None
+        if previous is not None:
+            try:
+                previous.close()
+            except OSError:
+                pass
+        connection_type = (
+            http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+        )
+        connection = connection_type(key[1], port, timeout=self.config.ollama_timeout_seconds)
+        with self._lock:
+            if self._closed:
+                connection.close()
+                raise RuntimeError("Ollama embedding encoder is closed")
+            self._connection = connection
+            self._connection_key = key
+            self._active = connection
+        return connection, request_path
+
+    def _post_embed(self, payload: dict[str, Any]) -> dict[str, Any]:
+        body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        for attempt in (1, 2):
+            connection, request_path = self._open_connection()
+            try:
+                connection.request(
+                    "POST",
+                    request_path,
+                    body=body,
+                    headers={"Content-Type": "application/json", "Connection": "keep-alive"},
+                )
+                response = connection.getresponse()
+                raw = response.read(OLLAMA_MAX_RESPONSE_BYTES + 1)
+                status = int(response.status)
+            except Exception as exc:
+                self._drop_connection()
+                if self._closed:
+                    raise RuntimeError("Ollama embedding encoder is closed") from exc
+                if attempt == 2:
+                    raise RuntimeError(
+                        f"Ollama embeddings request failed ({type(exc).__name__})"
+                    ) from exc
+                continue
+            finally:
+                with self._lock:
+                    if self._active is connection:
+                        self._active = None
+            break
+        else:
+            raise RuntimeError("Ollama embeddings request failed")
+        if len(raw) > OLLAMA_MAX_RESPONSE_BYTES:
+            self._drop_connection()
+            raise RuntimeError("Ollama embeddings response was too large")
+        try:
+            decoded = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            if status >= 400:
+                raise RuntimeError(f"Ollama embeddings returned HTTP {status}") from exc
+            raise RuntimeError("Ollama embeddings returned an invalid response") from exc
+        if not isinstance(decoded, dict):
+            raise RuntimeError("Ollama embeddings returned an invalid response")
+        if status >= 400:
+            detail = decoded.get("error")
+            message = f"Ollama embeddings returned HTTP {status}"
+            if isinstance(detail, str) and detail.strip():
+                message = f"{message}: {' '.join(detail.split())[:200]}"
+            raise RuntimeError(message)
+        return decoded
+
+    def abort(self) -> None:
+        with self._lock:
+            self._closed = True
+        self._drop_connection()
+
+    def close(self) -> None:
+        self.abort()
+
+
 class SemanticMediaUnavailable(RuntimeError):
     """A retained historical image is temporarily unavailable for projection."""
 
@@ -2257,29 +2516,36 @@ class SemanticSearchService(DisabledSemanticSearch):
                 # A package without its image encoder fails in the worker
                 # constructor. Resolve only after the files exist so a test
                 # double, or a retry once the files appear, still runs.
-                resolved = identity
-                if resolved is None:
-                    try:
-                        resolved = self.index.resolve_model_identity(
-                            self.model_dir, self.manifest
-                        )
-                    except RuntimeError as exc:
-                        if "artifact is missing" not in str(exc):
-                            raise
-                    else:
-                        identity = resolved
-                encoder = IsolatedOpenVinoManifestEncoder(
-                    self.model_dir,
-                    self.manifest,
-                    target_device,
-                    resolved,
-                )
+                if self.config.implementation == "ollama":
+                    resolved = identity or self.index.resolve_ollama_identity(self.config)
+                    identity = resolved
+                    encoder = OllamaEmbeddingEncoder(self.config, resolved)
+                    encoder.probe()
+                else:
+                    resolved = identity
+                    if resolved is None:
+                        try:
+                            resolved = self.index.resolve_model_identity(
+                                self.model_dir, self.manifest
+                            )
+                        except RuntimeError as exc:
+                            if "artifact is missing" not in str(exc):
+                                raise
+                        else:
+                            identity = resolved
+                    encoder = IsolatedOpenVinoManifestEncoder(
+                        self.model_dir,
+                        self.manifest,
+                        target_device,
+                        resolved,
+                    )
             except Exception as exc:
                 reason = str(exc).strip() or "semantic inference worker exited during startup"
                 if target_device == configured_device:
                     configured_device_failures += 1
                 use_cpu_fallback = bool(
-                    target_device == configured_device
+                    self.config.implementation != "ollama"
+                    and target_device == configured_device
                     and configured_device.strip().upper() != "CPU"
                     and configured_device_failures
                     >= SEMANTIC_WORKER_CONFIGURED_DEVICE_ATTEMPTS
@@ -2297,8 +2563,11 @@ class SemanticSearchService(DisabledSemanticSearch):
                     self._initialization_attempts += 1
                     self._error = reason
                     self._state = "recovering"
-                    self._active_device = target_device
-                    self._fallback_active = use_cpu_fallback or target_device != configured_device
+                    self._active_device = self._reported_device(target_device)
+                    self._fallback_active = (
+                        self.config.implementation != "ollama"
+                        and (use_cpu_fallback or target_device != configured_device)
+                    )
                     self._next_retry_at = time.monotonic() + wait_seconds
                     attempt = self._initialization_attempts
                 if use_cpu_fallback:
@@ -2343,8 +2612,11 @@ class SemanticSearchService(DisabledSemanticSearch):
                 self.encoder = encoder
                 self._error = ""
                 self._next_retry_at = 0.0
-                self._active_device = target_device
-                self._fallback_active = target_device != configured_device
+                self._active_device = self._reported_device(target_device)
+                self._fallback_active = (
+                    self.config.implementation != "ollama"
+                    and target_device != configured_device
+                )
                 self._state = "ready"
                 self._thread = threading.Thread(
                     target=self._run, name="survng-semantic", daemon=True
@@ -2714,7 +2986,7 @@ class SemanticSearchService(DisabledSemanticSearch):
                     revision.outcome = "done"
                 if self.encoder is not None and self.projection_current(event):
                     self.index.clear_media_failure(self.encoder.identity, int(event.get("id") or 0))
-                if priority > 0:
+                if priority > 0 and self.config.implementation != "ollama":
                     self._stop.wait(self.config.backfill_pause_seconds)
             except Exception as exc:
                 self._error = str(exc)
@@ -2809,6 +3081,34 @@ class SemanticSearchService(DisabledSemanticSearch):
             for observation in observations
         }
         completed = True
+        pending: list[tuple[np.ndarray, SemanticEvidence, dict[str, Any]]] = []
+        batch_limit = OLLAMA_IMAGE_BATCH_SIZE if self.config.implementation == "ollama" else 1
+
+        def flush_pending() -> bool:
+            nonlocal written, completed
+            if not pending:
+                return True
+            batch = pending.copy()
+            pending.clear()
+            with self._encoder_lock:
+                if self.encoder is not encoder:
+                    completed = False
+                    return False
+                embeddings = encoder.encode_images([image for image, _evidence, _observation in batch])
+            for (_image, evidence, observation), vector in zip(batch, embeddings, strict=True):
+                count = self.index.upsert(
+                    [evidence],
+                    np.asarray(vector, dtype=np.float32).reshape(1, -1),
+                    identity,
+                    expected_observation=observation,
+                )
+                written += count
+                self._indexed += count
+            if self._stop.wait(self.config.backfill_pause_seconds):
+                completed = False
+                return False
+            return True
+
         for observation in observations:
             if self._stop.is_set():
                 completed = False
@@ -2852,19 +3152,11 @@ class SemanticSearchService(DisabledSemanticSearch):
                 "object_crop", f"scene:{observation['id']}", str(observation["snapshot_path"]),
                 str(item["label"]), box, observation_id=str(observation["id"]),
             )
-            with self._encoder_lock:
-                if self.encoder is not encoder:
-                    completed = False
-                    break
-                embeddings = encoder.encode_images([frame[box[1]:box[3], box[0]:box[2]]])
-            count = self.index.upsert([evidence], embeddings, identity, expected_observation=observation)
-            written += count
-            self._indexed += count
-            # Historical scene evidence shares the configured pacing and the
-            # one semantic worker, never spawning unbounded inference work.
-            if self._stop.wait(self.config.backfill_pause_seconds):
-                completed = False
+            pending.append((frame[box[1]:box[3], box[0]:box[2]], evidence, observation))
+            if len(pending) >= batch_limit and not flush_pending():
                 break
+        else:
+            flush_pending()
         if completed:
             self.index.reconcile_observation_keys(event, identity, desired)
         return written
@@ -3092,6 +3384,11 @@ class SemanticSearchService(DisabledSemanticSearch):
             **filters,
         )
 
+    def _reported_device(self, target_device: str) -> str:
+        if self.config.implementation == "ollama":
+            return "ollama"
+        return target_device
+
     def status(self) -> dict[str, Any]:
         with self._lifecycle_lock:
             state = self._state
@@ -3104,6 +3401,7 @@ class SemanticSearchService(DisabledSemanticSearch):
             "enabled": True, "state": state,
             "backfill_active": backfill_active,
             "implementation": self.config.implementation,
+            "model": self.config.ollama_model if self.config.implementation == "ollama" else "",
             "device": self._active_device,
             "configured_device": self.config.device,
             "fallback_active": self._fallback_active,

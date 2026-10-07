@@ -251,11 +251,15 @@ class SemanticSearchConfig(BaseModel):
     """Optional local vision-language search runtime and indexing policy."""
 
     enabled: bool = False
-    implementation: Literal["mobileclip2_openvino", "openvino_manifest"] = (
+    implementation: Literal["mobileclip2_openvino", "openvino_manifest", "ollama"] = (
         "mobileclip2_openvino"
     )
     model_dir: str = Field(default="", max_length=4096)
     device: str = Field(default="GPU", min_length=1, max_length=64)
+    ollama_base_url: str = Field(default="http://127.0.0.1:11434", max_length=2048)
+    ollama_model: str = Field(default="embeddinggemma-2", max_length=256)
+    ollama_dimensions: Literal[128, 256, 512, 768] = 768
+    ollama_timeout_seconds: float = Field(default=60.0, ge=5.0, le=180.0)
     index_full_frame: bool = True
     index_object_crops: bool = True
     max_object_crops_per_event: int = Field(default=24, ge=1, le=100)
@@ -273,6 +277,46 @@ class SemanticSearchConfig(BaseModel):
     @classmethod
     def normalize_device(cls, value: object) -> str:
         return str(value or "GPU").strip().upper() or "GPU"
+
+    @field_validator("ollama_base_url", mode="before")
+    @classmethod
+    def normalize_ollama_base_url(cls, value: object) -> str:
+        text = str(value or "").strip().rstrip("/")
+        if not text:
+            return "http://127.0.0.1:11434"
+        parsed = urlsplit(text)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or any(char.isspace() for char in text)
+        ):
+            raise ValueError(
+                "Ollama URL must be an HTTP(S) base URL without credentials, query, or fragment"
+            )
+        try:
+            parsed.port
+        except ValueError as error:
+            raise ValueError("Ollama URL has an invalid port") from error
+        return text
+
+    @field_validator("ollama_model", mode="before")
+    @classmethod
+    def normalize_ollama_model(cls, value: object) -> str:
+        text = str(value or "").strip()
+        if not text or any(char.isspace() for char in text):
+            raise ValueError("Ollama embedding model cannot be empty")
+        return text
+
+    @field_validator("ollama_dimensions", mode="before")
+    @classmethod
+    def normalize_ollama_dimensions(cls, value: object) -> object:
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+        return value
 
 
 class MotionStageSelection(BaseModel):

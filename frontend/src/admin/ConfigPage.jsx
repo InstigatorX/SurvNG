@@ -674,7 +674,7 @@ export function TelemetryViewer({ data, cameraId, timeZone }) {
           {!selected ? <section className="telemetry-section">
             <div className="telemetry-section-head"><div><h3>Semantic search</h3></div></div>
             <dl className="telemetry-details">
-              <div><dt>Status</dt><dd>{String(semantic.state || (semantic.enabled ? "starting" : "disabled")).replaceAll("_", " ")}{semantic.device ? ` · ${semantic.device}` : ""}</dd></div>
+              <div><dt>Status</dt><dd>{String(semantic.state || (semantic.enabled ? "starting" : "disabled")).replaceAll("_", " ")}{semantic.device ? ` · ${semantic.device}` : ""}{semantic.model ? ` · ${semantic.model}` : ""}</dd></div>
               <div><dt>Indexed incidents</dt><dd>{Number(semantic.event_count || 0).toLocaleString()}</dd></div>
               <div><dt>Search evidence</dt><dd>{Number(semantic.evidence_count || 0).toLocaleString()} <small>whole images and object crops</small></dd></div>
               <div><dt>Queue / added since restart</dt><dd>{Number(semantic.queue_depth || 0).toLocaleString()} / {Number(semantic.indexed_since_start || 0).toLocaleString()}</dd></div>
@@ -4422,8 +4422,23 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             <summary><span className="detection-settings-card-icon"><Search size={18} /></span><span><strong>Smart Search</strong><small>Find indexed incidents by describing visible details in plain language.</small></span></summary>
             <div className="detection-feature-body detection-field-grid">
               <label className="compact-toggle"><input type="checkbox" checked={config.semantic_search?.enabled ?? false} onChange={(event) => updateConfig(["semantic_search", "enabled"], event.target.checked)} /><span>Smart Search enabled</span></label>
-              <label>Model package<input value={config.semantic_search?.model_dir ?? ""} onChange={(event) => updateConfig(["semantic_search", "model_dir"], event.target.value)} placeholder="/path/to/SurvNG/models/mobileclip2-b-openvino-fp16" /><small>Use the host path for systemd or the mounted container path for Docker. The package contains semantic_model.json, both encoders, and tokenizer assets.</small></label>
-              <label>Inference device<input value={config.semantic_search?.device ?? "GPU"} onChange={(event) => updateConfig(["semantic_search", "device"], event.target.value)} /><small>GPU is recommended on Intel systems. This does not share the object detector queue.</small></label>
+              <label>Provider<select value={(config.semantic_search?.implementation || "mobileclip2_openvino") === "ollama" ? "ollama" : "openvino"} onChange={(event) => updateConfig(["semantic_search", "implementation"], event.target.value === "ollama" ? "ollama" : ((config.semantic_search?.implementation || "mobileclip2_openvino") === "ollama" ? "mobileclip2_openvino" : config.semantic_search?.implementation || "mobileclip2_openvino"))}>
+                <option value="openvino">OpenVINO model package</option>
+                <option value="ollama">Ollama</option>
+              </select><small>OpenVINO runs a local MobileCLIP package. Ollama embeds incident images with a model such as EmbeddingGemma 2.</small></label>
+              {(config.semantic_search?.implementation || "mobileclip2_openvino") === "ollama" ? <>
+                <label>Ollama URL<input value={config.semantic_search?.ollama_base_url ?? "http://127.0.0.1:11434"} onChange={(event) => updateConfig(["semantic_search", "ollama_base_url"], event.target.value)} placeholder="http://127.0.0.1:11434" /><small>Incident images are sent to this Ollama server. The default localhost address keeps them on this host. A remote address sends them there.</small></label>
+                <label>Embedding model<input value={config.semantic_search?.ollama_model ?? "embeddinggemma-2"} onChange={(event) => updateConfig(["semantic_search", "ollama_model"], event.target.value)} placeholder="embeddinggemma-2" /><small>Pull it first with ollama pull embeddinggemma-2. embeddinggemma-2:440m is the smaller text-and-vision tag.</small></label>
+                <label>Vector size<select value={String(config.semantic_search?.ollama_dimensions ?? 768)} onChange={(event) => updateConfig(["semantic_search", "ollama_dimensions"], Number(event.target.value))}>
+                  <option value="768">768 · full visual recall</option>
+                  <option value="512">512</option>
+                  <option value="256">256 · smaller index</option>
+                  <option value="128">128 · text-first shortlist</option>
+                </select><small>Queries and stored images must use the same size. Changing it starts a new search index.</small></label>
+              </> : <>
+                <label>Model package<input value={config.semantic_search?.model_dir ?? ""} onChange={(event) => updateConfig(["semantic_search", "model_dir"], event.target.value)} placeholder="/path/to/SurvNG/models/mobileclip2-b-openvino-fp16" /><small>Use the host path for systemd or the mounted container path for Docker. The package contains semantic_model.json, both encoders, and tokenizer assets.</small></label>
+                <label>Inference device<input value={config.semantic_search?.device ?? "GPU"} onChange={(event) => updateConfig(["semantic_search", "device"], event.target.value)} /><small>GPU is recommended on Intel systems. This does not share the object detector queue.</small></label>
+              </>}
               <label>Historical batch size<input type="number" min="1" max="250" step="1" value={config.semantic_search?.backfill_batch_size ?? 25} onChange={(event) => updateConfig(["semantic_search", "backfill_batch_size"], Number(event.target.value))} /><small>How many older incidents are scheduled at a time. Existing indexed generations are skipped.</small></label>
               <label>Historical pacing<input type="number" min="0.01" max="5" step="0.05" value={config.semantic_search?.backfill_pause_seconds ?? 0.25} onChange={(event) => updateConfig(["semantic_search", "backfill_pause_seconds"], Number(event.target.value))} /><small>Pause between older incidents so object detection and new Smart Search evidence retain priority.</small></label>
               <label className="compact-toggle"><input type="checkbox" checked={config.semantic_search?.index_full_frame ?? true} onChange={(event) => updateConfig(["semantic_search", "index_full_frame"], event.target.checked)} /><span>Index whole incident image</span></label>
