@@ -1201,11 +1201,14 @@
 
   .admin-workspace-surface>.config-tree .tree-list {
     display: flex;
+    max-width: 100%;
+    min-width: 0;
     gap: 6px;
     overflow-x: auto;
     overflow-y: hidden;
     padding: 7px;
     scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
   }
 
   .admin-workspace-surface>.config-tree .tree-list::-webkit-scrollbar {
@@ -1253,10 +1256,28 @@
     padding: 12px;
   }
 
+  /* Tab rows are grid items. Without a zero minimum they grow to their
+     labels, and portrait then clips the rest instead of scrolling. */
+  .settings-grid .general-settings-content,
+  .settings-grid .detection-settings-content,
+  .settings-grid .detection-settings,
+  .settings-grid .subsection-workspace,
+  .settings-grid .subsection-workspace-content,
+  .settings-grid .sub-panel,
+  .settings-grid .config-form,
+  .settings-grid .detection-settings-content > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+
   .camera-section-tabs,
   .detection-subsection-tabs {
+    max-width: 100%;
+    min-width: 0;
     overflow-x: auto;
+    overflow-y: hidden;
     overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
   }
 
   .camera-section-tabs button,
