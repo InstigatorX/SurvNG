@@ -60,12 +60,15 @@ def _is_safe_app_href(value: str) -> bool:
         return True
     return path.startswith((
         "/admin",
+        "/review",
         "/incidents",
         "/timeline",
         "/recordings",
+        "/exports",
         "/people",
         "/search",
         "/config",
+        "/system",
         "/api/",
     ))
 

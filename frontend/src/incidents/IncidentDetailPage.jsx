@@ -106,7 +106,7 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
   const status = ongoing ? "Ongoing" : notification?.state === "complete" ? "Completed" : "Recorded";
   const showTime = (value) => value ? formatDateTime(value, timeZone) : "";
   return <main className="incident-detail-page"><div className="incident-detail-container">
-    <header className="incident-detail-nav"><a href={appUrl("/incidents")}><ArrowLeft size={18} />All incidents</a><span>SurvNG</span></header>
+    <header className="incident-detail-nav"><a href={appUrl("/review")}><ArrowLeft size={18} />Review</a><span>SurvNG</span></header>
     {error ? <div className="incident-detail-notice" role="alert"><span>{error}{data ? " Showing the last received details." : ""}</span><button onClick={() => setRetry((value) => value + 1)}><RefreshCw size={16} />Retry</button></div> : null}
     {missing ? <section className="incident-detail-empty"><ImageOff size={36} /><h1>Incident unavailable</h1><p>The incident may have expired or been removed.</p><button onClick={() => setRetry((value) => value + 1)}>Try again</button></section>
       : !data ? (!error && <section className="incident-detail-empty" aria-busy="true">Loading incident…</section>)

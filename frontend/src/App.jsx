@@ -24,7 +24,7 @@ import { LoginScreen } from "./auth/LoginScreen.jsx";
 import { Shell } from "./shell/Shell.jsx";
 import { AssistantPanel } from "./assistant/AssistantPanel.jsx";
 import { RuntimeStateProvider } from "./shared/runtimeState.jsx";
-import { canonicalWorkspaceUrl, resolveWorkspace } from "./workspaceNavigation.mjs";
+import { canonicalWorkspaceUrl, resolveWorkspace, reviewMode } from "./workspaceNavigation.mjs";
 import { registerSurvngServiceWorker } from "./registerServiceWorker.mjs";
 import { applyBrowserAppearance } from "./browserAppearance.mjs";
 
@@ -35,12 +35,10 @@ function lazyExport(importer, exportName) {
 const LivePage = lazyExport(() => import("./live/LivePage.jsx"), "LivePage");
 const IncidentDetailPage = lazyExport(() => import("./incidents/IncidentDetailPage.jsx"), "IncidentDetailPage");
 const ObservationsPage = lazyExport(() => import("./incidents/ObservationsPage.jsx"), "ObservationsPage");
-const IncidentsPage = lazyExport(() => import("./incidents/IncidentsPage.jsx"), "IncidentsPage");
 const ExportCenterPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "ExportCenterPage");
-const RecordingsPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "RecordingsPage");
-const SemanticSearchPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "SemanticSearchPage");
 const ConfigPage = lazyExport(() => import("./admin/ConfigPage.jsx"), "ConfigPage");
 const FacesPage = lazyExport(() => import("./people/FacesPage.jsx"), "FacesPage");
+const ReviewPage = lazyExport(() => import("./review/ReviewPage.jsx"), "ReviewPage");
 
 function WorkspaceFallback() {
   return <main className="workspace-not-found" aria-busy="true"><p>Loading workspace…</p></main>;
@@ -56,6 +54,7 @@ function App() {
   const workspace = resolveWorkspace(pathname);
   const page = workspace?.id || "not-found";
   const canonicalPath = canonicalWorkspaceUrl(pathname, window.location.search, window.location.hash);
+  const mode = reviewMode(pathname, window.location.search);
   const [assistantContext, setAssistantContext] = useState({ page });
   const viewer = session?.user?.role === "viewer";
   function askAssistant(prompt) {
@@ -84,10 +83,11 @@ function App() {
     return () => window.removeEventListener("survng:auth-required", onAuthRequired);
   }, []);
   useEffect(() => {
-    const nextUrl = appUrl(canonicalPath);
-    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-    if (nextUrl !== currentUrl) window.history.replaceState(window.history.state, "", nextUrl);
-  }, [canonicalPath]);
+    const currentPath = appPathname();
+    const nextPath = canonicalWorkspaceUrl(currentPath, window.location.search, window.location.hash);
+    const current = `${currentPath}${window.location.search}${window.location.hash}`;
+    if (nextPath !== current) window.history.replaceState(window.history.state, "", appUrl(nextPath));
+  }, [canonicalPath, pathname]);
   useEffect(() => {
     setAssistantContext({ page });
   }, [page]);
@@ -121,19 +121,15 @@ function App() {
           ? <ConfigPage timeZone={timeZone} setTimeZone={setTimeZone} theme={theme} setTheme={setTheme} onAssistantContextChange={setAssistantContext} />
           : workspacePage === "exports"
             ? <ExportCenterPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
-            : workspacePage === "timeline"
-              ? <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
-              : workspacePage === "search"
-                ? <SemanticSearchPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
-                : workspacePage === "observations"
-                  ? <ObservationsPage timeZone={timeZone} />
-                  : workspacePage === "incidents"
-                  ? <IncidentsPage timeZone={timeZone} canCorrectIncident={!viewer} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
-                  : workspacePage === "people"
-                    ? <FacesPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
-                    : workspacePage === "live"
-                      ? <LivePage timeZone={timeZone} canCorrectIncident={!viewer} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
-                      : <main className="workspace-not-found"><CircleAlert size={30} /><h2>Page not found</h2><p>This SurvNG workspace does not exist.</p><a className="nav-button" href={appUrl("/")}>Return to Live</a></main>}
+            : workspacePage === "observations"
+              ? <ObservationsPage timeZone={timeZone} />
+              : workspacePage === "review"
+                ? <ReviewPage mode={mode} timeZone={timeZone} canCorrectIncident={!viewer} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
+                : workspacePage === "people"
+                  ? <FacesPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
+                  : workspacePage === "live"
+                    ? <LivePage timeZone={timeZone} canCorrectIncident={!viewer} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
+                    : <main className="workspace-not-found"><CircleAlert size={30} /><h2>Page not found</h2><p>This SurvNG workspace does not exist.</p><a className="nav-button" href={appUrl("/")}>Return to Live</a></main>}
       </Suspense>
       {viewer ? null : <AssistantPanel pageContext={{ ...assistantContext, page: workspacePage }} timeZone={timeZone} askRequest={assistantAsk} onAskRequestHandled={() => setAssistantAsk(null)} />}
     </Shell></RuntimeStateProvider>

@@ -12,12 +12,12 @@ const VIEWPORTS = Object.freeze({
 });
 const WORKSPACES = Object.freeze([
   { id: "live", path: "/", label: "Live", selector: ".live-grid" },
-  { id: "incidents", path: "/incidents", label: "Incidents", selector: ".incidents-page" },
-  { id: "timeline", path: "/timeline", label: "Timeline", selector: ".recordings-v2-page" },
+  { id: "incidents", path: "/incidents", label: "Review", selector: ".incidents-desktop-page" },
+  { id: "timeline", path: "/timeline", label: "Review", selector: ".recordings-v2-page" },
   { id: "exports", path: "/exports", label: "Exports", selector: ".export-center" },
-  { id: "search", path: "/search", label: "Search", selector: ".semantic-search-page" },
+  { id: "search", path: "/search", label: "Review", selector: ".search-page" },
   { id: "people", path: "/people", label: "People", selector: ".faces-page" },
-  { id: "admin", path: "/admin", label: "Admin", selector: ".config-grid" },
+  { id: "admin", path: "/admin", label: "System", selector: ".config-grid" },
 ]);
 const INHERITED_TYPOGRAPHY = Object.freeze({
   fontFamily: '"Inter Variable", Inter, "SF Pro Text", "Segoe UI", ui-sans-serif, system-ui, sans-serif',

@@ -149,7 +149,7 @@ export function FaceReviewDialog({ observation, people, timeZone, onClose, onUpd
           {observation.person_id && observation.review_status === "confirmed" ? <button type="button" className="subtle" disabled={busy} onClick={() => updateReference(!observation.reference_pinned)}><ShieldCheck size={16} /> {observation.reference_pinned ? "Unpin reference" : "Pin as reference"}</button> : null}
           <div className="face-enroll-row"><input value={newName} disabled={busy} onChange={(event) => setNewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") createPerson(); }} placeholder="New person name" /><button type="button" onClick={createPerson} disabled={busy || !newName.trim()}><UserPlus size={16} /> Enroll</button></div>
           <nav className="face-evidence-links" aria-label="Face evidence links">
-            {observation.event_id ? <a href={appUrl(`/incidents?event_ids=${observation.event_id}`)}>Open incident</a> : null}
+            {observation.event_id ? <a href={appUrl(`/review?event_ids=${observation.event_id}`)}>Open incident</a> : null}
             {observation.camera_id && Number.isFinite(observedEpoch) ? <a href={timelineHref}><Play size={14} />View in Timeline</a> : null}
           </nav>
           {error ? <span className="save-status error">{error}</span> : null}

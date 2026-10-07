@@ -36,7 +36,7 @@ assert.deepEqual(observationBoxStyle({ detection_frame_width: 1280, detection_fr
 assert.equal(observationBoxStyle({ box: { x1: 0, y1: 0, x2: 100, y2: 100 } }), null);
 assert.match(sceneCoverageText({ state: "sampled", gaps: [{ reason: "missing_video" }] }), /incomplete/);
 assert.match(sceneCoverageText({ state: "historical" }), /unknown/);
-assert.equal(canonicalIncidentHref({ incident_id: "scene-1" }), "/incidents?incident_id=scene-1");
+assert.equal(canonicalIncidentHref({ incident_id: "scene-1" }), "/review?incident_id=scene-1");
 assert.equal(incidentDetailQuery({ incident_id: "scene-1", revision: 2, events: [] }), "incident_id=scene-1");
 const start = "2026-09-24T20:25:00Z";
 const clips = incidentEpisodeClips({ camera_id: "a", events: [

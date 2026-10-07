@@ -10,8 +10,8 @@ assert.deepEqual(orderedLiveCamerasForFocus(cameras, "front-door", false).map((c
 assert.equal(orderedLiveCamerasForFocus(cameras, "front-door", true)[0], cameras[1]);
 assert.equal(liveActivityEventId({ representative_event_id: 42, id: 9 }), 42);
 assert.equal(liveActivityEventId({ events: [{ id: 17 }], id: 9 }), 17);
-assert.equal(liveActivityIncidentHref({ representative_event_id: 42 }), "/incidents?event_ids=42");
-assert.equal(liveActivityIncidentHref({}), "/incidents");
+assert.equal(liveActivityIncidentHref({ representative_event_id: 42 }), "/review?event_ids=42");
+assert.equal(liveActivityIncidentHref({}), "/review");
 assert.equal(normalizedLiveDensity("6"), "6");
 assert.equal(normalizedLiveDensity("bogus"), "fit");
 assert.deepEqual(liveDensityPage([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }], "4", 1), {

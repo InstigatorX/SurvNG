@@ -1,29 +1,44 @@
+export const REVIEW_MODES = Object.freeze(["incidents", "timeline", "search"]);
+
+const REVIEW_LEGACY_MODES = Object.freeze({
+  "/incidents": "incidents",
+  "/timeline": "timeline",
+  "/recordings": "timeline",
+  "/search": "search",
+  "/recordings/search": "search",
+});
+
 export const WORKSPACES = Object.freeze([
   Object.freeze({ id: "observations", label: "Observations", path: "/observations", paths: ["/observations"], legacyRoutes: {} }),
   Object.freeze({ id: "live", label: "Live", path: "/", paths: ["/"], legacyRoutes: { "/live": "/" } }),
-  Object.freeze({ id: "incidents", label: "Incidents", path: "/incidents", paths: ["/incidents"], legacyRoutes: {} }),
-  Object.freeze({ id: "timeline", label: "Timeline", path: "/timeline", paths: ["/timeline"], legacyRoutes: { "/recordings": "/timeline" } }),
+  Object.freeze({
+    id: "review",
+    label: "Review",
+    path: "/review",
+    paths: ["/review"],
+    legacyRoutes: {
+      "/incidents": "/review",
+      "/timeline": "/review",
+      "/recordings": "/review",
+      "/search": "/review",
+      "/recordings/search": "/review",
+    },
+  }),
   Object.freeze({ id: "exports", label: "Exports", path: "/exports", paths: ["/exports"], legacyRoutes: { "/timeline/exports": "/exports", "/recordings/exports": "/exports" } }),
-  Object.freeze({ id: "search", label: "Search", path: "/search", paths: ["/search"], legacyRoutes: { "/recordings/search": "/search" } }),
   Object.freeze({ id: "people", label: "People", path: "/people", paths: ["/people"], legacyRoutes: { "/faces": "/people" } }),
-  Object.freeze({ id: "admin", label: "Admin", path: "/admin", paths: ["/admin"], legacyRoutes: { "/config": "/admin" } }),
+  Object.freeze({ id: "admin", label: "System", path: "/admin", paths: ["/admin"], legacyRoutes: { "/config": "/admin", "/system": "/admin" } }),
 ]);
 
 export const DESKTOP_PRIMARY_WORKSPACES = Object.freeze([
   "live",
-  "incidents",
-  "timeline",
-  "exports",
-  "search",
+  "review",
   "people",
 ]);
 
 export const MOBILE_PRIMARY_WORKSPACES = Object.freeze([
   "live",
-  "incidents",
-  "timeline",
-  "search",
-  "more",
+  "review",
+  "people",
 ]);
 
 const WORKSPACE_BY_ID = new Map(WORKSPACES.map((workspace) => [workspace.id, workspace]));
@@ -33,6 +48,11 @@ function normalizedPath(pathname) {
   if (!path.startsWith("/") || path.startsWith("//")) return "/";
   const withoutTrailingSlash = path.length > 1 ? path.replace(/\/+$/, "") : path;
   return withoutTrailingSlash || "/";
+}
+
+function searchParams(search = "") {
+  const value = String(search || "");
+  return new URLSearchParams(value.startsWith("?") ? value.slice(1) : value);
 }
 
 export function workspaceDefinition(workspaceId) {
@@ -56,10 +76,27 @@ export function canonicalWorkspacePath(pathname) {
   return path;
 }
 
+export function reviewMode(pathname, search = "") {
+  const path = canonicalWorkspacePath(pathname);
+  const source = normalizedPath(pathname);
+  if (path !== "/review" && source !== "/review") return null;
+  const explicit = searchParams(search).get("mode");
+  if (REVIEW_MODES.includes(explicit)) return explicit;
+  return REVIEW_LEGACY_MODES[source] || "incidents";
+}
+
 export function canonicalWorkspaceUrl(pathname, search = "", hash = "") {
-  const safeSearch = String(search || "").startsWith("?") ? String(search) : search ? `?${search}` : "";
+  const source = normalizedPath(pathname);
+  const canonicalPath = canonicalWorkspacePath(pathname);
+  const params = searchParams(search);
+  const legacyMode = REVIEW_LEGACY_MODES[source];
+  if (canonicalPath === "/review" && legacyMode && legacyMode !== "incidents" && !params.get("mode")) {
+    params.set("mode", legacyMode);
+  }
+  if (canonicalPath === "/review" && params.get("mode") === "incidents") params.delete("mode");
+  const query = params.toString();
   const safeHash = String(hash || "").startsWith("#") ? String(hash) : hash ? `#${hash}` : "";
-  return `${canonicalWorkspacePath(pathname)}${safeSearch}${safeHash}`;
+  return `${canonicalPath}${query ? `?${query}` : ""}${safeHash}`;
 }
 
 export function workspaceHref(workspaceId, params = {}) {
@@ -70,6 +107,7 @@ export function workspaceHref(workspaceId, params = {}) {
     if (value === undefined || value === null || value === "") return;
     search.set(key, String(value));
   });
+  if (workspaceId === "review" && search.get("mode") === "incidents") search.delete("mode");
   return `${workspace.path}${search.size ? `?${search.toString()}` : ""}`;
 }
 
@@ -82,7 +120,7 @@ export function timelineHref({
   trailEventIds,
   queryMode,
 } = {}) {
-  const params = {};
+  const params = { mode: "timeline" };
   if (cameraId) params.camera = cameraId;
   if (Number.isFinite(Number(epoch))) params.at = Number(epoch);
   if (source) params.source = source;
@@ -104,5 +142,5 @@ export function timelineHref({
       .join(",");
   }
   if (queryMode === "appearance" || queryMode === "visual") params.query_mode = queryMode;
-  return workspaceHref("timeline", params);
+  return workspaceHref("review", params);
 }

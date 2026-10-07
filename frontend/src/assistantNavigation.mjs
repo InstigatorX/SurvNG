@@ -6,7 +6,7 @@ function internalPath(value) {
 export function assistantIncidentHref(eventId) {
   const normalized = Number(eventId);
   if (!Number.isInteger(normalized) || normalized <= 0) return "";
-  return `/incidents?event_ids=${normalized}`;
+  return `/review?event_ids=${normalized}`;
 }
 
 export function assistantEvidenceHref(item) {

@@ -1,0 +1,82 @@
+.review-frame {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.review-modes {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-height: 44px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--topbar);
+}
+
+.review-modes a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--workspace-control-radius);
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 12px;
+}
+
+.review-modes a.active {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+  background: color-mix(in srgb, var(--accent) 12%, var(--control));
+  color: var(--active-ink);
+}
+
+.review-frame .incidents-desktop-page,
+.review-frame .recordings-v2-page,
+.review-frame .search-page {
+  min-height: 0;
+  flex: 1;
+}
+
+.case-desk .incident-desktop-focus {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+}
+
+.case-desk .recordings-embedded {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.recordings-embedded .recordings-commandbar,
+.recordings-embedded .recording-selected-companions {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .case-desk .incidents-desktop-workspace {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .case-desk .incidents-desktop-workspace > .incident-rail {
+    position: relative;
+    inset: auto;
+    width: 100%;
+    max-height: 220px;
+  }
+
+  .case-desk .incident-investigation,
+  .case-desk .incident-inspector {
+    position: relative;
+    width: 100%;
+    min-height: 280px;
+  }
+}

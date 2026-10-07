@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import { ChevronDown, CircleAlert, HardDrive, Radio, ShieldCheck } from "lucide-react";
+import { ChevronDown, Radio, ShieldCheck } from "lucide-react";
+import { appUrl } from "../shared/api.js";
 import { formatBytes, formatMilliseconds, formatRate } from "../shared/format.js";
 import { useRuntimeState } from "../shared/runtimeState.jsx";
 import { formatDuration, recordingHealth, recordingHealthContext } from "../recordingHealth.mjs";
@@ -16,14 +17,11 @@ function ageLabel(value) {
 export function RecordingHealthBar() {
   const runtime = useRuntimeState();
   const [open, setOpen] = useState(false);
-  const [hovered, setHovered] = useState(null);
-  const [focused, setFocused] = useState(null);
   const [now, setNow] = useState(() => Date.now());
   const buttonRef = useRef(null);
   const panelRef = useRef(null);
   const health = recordingHealth({ ...runtime, now });
   const context = recordingHealthContext(health);
-  const tooltip = open ? null : hovered || focused;
   const resources = runtime?.system?.resources;
   const detector = runtime?.system?.detector;
   const storageLabel = health.storage.state === "unavailable" || !Number.isFinite(health.storage.free_bytes)
@@ -36,15 +34,6 @@ export function RecordingHealthBar() {
     const timer = window.setInterval(() => setNow(Date.now()), 10_000);
     return () => window.clearInterval(timer);
   }, []);
-
-  useEffect(() => {
-    if (!tooltip) return undefined;
-    function dismissTooltip(event) {
-      if (event.key === "Escape") { setHovered(null); setFocused(null); }
-    }
-    document.addEventListener("keydown", dismissTooltip);
-    return () => document.removeEventListener("keydown", dismissTooltip);
-  }, [tooltip]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -63,32 +52,23 @@ export function RecordingHealthBar() {
     if (open) panelRef.current?.focus();
   }, [open]);
 
-  const tips = {
-    recording: { title: "Recording status", lines: context.recording },
-    storage: { title: storageTitle, lines: [storageLabel, ...context.storage, ...(health.systemFresh && health.storage.sampled_at ? [`Sampled ${ageLabel(health.storage.sampled_at)}`] : [])] },
-    attention: { title: health.issues ? "Needs attention" : "No issues", lines: context.attention.length ? context.attention : ["All expected recording streams are active, storage is above the cleanup threshold, and no system issues are reported."] },
-  };
-  function metricProps(key) {
-    return {
-      tabIndex: 0,
-      "aria-describedby": tooltip === key ? `recording-health-${key}-tip` : undefined,
-      onMouseEnter: () => setHovered(key),
-      onFocus: () => setFocused(key),
-      onBlur: () => setFocused(null),
-    };
-  }
+  const quiet = health.cameraDataKnown && health.activeCount === health.expectedCount && !health.issues && !["warning", "critical"].includes(health.storage.state);
+  const pillKind = health.storage.state === "critical" ? "critical"
+    : health.storage.state === "warning" || health.issues || (health.cameraDataKnown && health.activeCount !== health.expectedCount) ? "attention"
+    : health.cameraDataKnown ? "healthy"
+    : "unavailable";
+  const pillLabel = !health.cameraDataKnown
+    ? (runtime?.loading ? "Checking" : "Unavailable")
+    : health.storage.state === "critical" ? "Storage critically low"
+    : health.storage.state === "warning" ? "Storage low"
+    : health.issues ? "Needs attention"
+    : quiet ? (health.expectedCount ? `${health.activeCount} recording` : "Quiet")
+    : recordingLabel;
 
-  return <div className="recording-health" aria-label="System health" onMouseLeave={() => setHovered(null)}>
-    <span className={`recording-health-item ${health.cameraDataKnown && health.activeCount === health.expectedCount ? "healthy" : "attention"}`} {...metricProps("recording")}><Radio size={15} /><strong>{recordingLabel}</strong></span>
-    <span className={`recording-health-item ${health.storage.state}`} {...metricProps("storage")} aria-label={`${storageTitle}: ${storageLabel}`}><HardDrive size={15} /><strong>{storageLabel}</strong></span>
-    <span {...metricProps("attention")} className={`recording-health-item ${health.issues ? "attention" : "healthy"}`}><CircleAlert size={15} /><strong>{health.issues ? "Needs attention" : "No issues"}</strong></span>
-    <button ref={buttonRef} type="button" className="recording-health-expand" onMouseEnter={() => setHovered(null)} onClick={() => { setHovered(null); setFocused(null); setOpen((value) => !value); }} aria-expanded={open} aria-controls="recording-health-details">
-      Details <ChevronDown size={15} />
+  return <div className="recording-health" aria-label="System health">
+    <button ref={buttonRef} type="button" className={`recording-health-expand recording-health-pill ${pillKind}`} onClick={() => setOpen((value) => !value)} aria-expanded={open} aria-controls="recording-health-details">
+      <Radio size={15} /><strong>{pillLabel}</strong><ChevronDown size={15} />
     </button>
-    {tooltip ? <div id={`recording-health-${tooltip}-tip`} className="recording-health-tooltip" role="tooltip">
-      <strong>{tips[tooltip].title}</strong>
-      <ul>{tips[tooltip].lines.map((line, index) => <li key={index}>{line}</li>)}</ul>
-    </div> : null}
     {open ? <section ref={panelRef} tabIndex={-1} id="recording-health-details" className="recording-health-popover" aria-label="System health details">
       <header><span><ShieldCheck size={16} /> System health</span><small>{health.cameraDataKnown && health.systemFresh ? "Current" : "Status may be stale"}</small></header>
       <div className="recording-health-summary"><span>Expected <strong>{health.cameraDataKnown ? health.expectedCount : "—"}</strong></span><span>Active <strong>{health.cameraDataKnown ? health.activeCount : "—"}</strong></span><span>Attention areas <strong>{health.issues}</strong></span></div>
@@ -100,7 +80,7 @@ export function RecordingHealthBar() {
         <span>Detection <strong>{!health.systemFresh || !detector ? "Unavailable" : detector.enabled === false ? "Disabled" : `${formatMilliseconds(detector.runtime?.last_inference_ms)} · ${formatRate(detector.runtime?.detection_fps)} det/s`}</strong></span>
       </div>
       <div className="recording-health-rows">{health.rows.length ? health.rows.map((row) => <div className={`recording-health-row ${row.state}`} key={row.id}><span><strong>{row.name}</strong><small>{row.state === "stale" ? "Last known status; refresh needed" : row.state === "healthy" ? "Recording" : row.state === "paused" ? "Recording paused" : row.state === "disabled" ? "Camera disabled" : row.missing.length ? `Missing ${row.missing.join(" and ")}` : "Runtime unavailable"}</small></span><em>{row.state === "stale" ? "last known" : row.state}</em></div>) : <div className="recording-health-empty">Camera status unavailable</div>}</div>
-      <footer><span>System uptime: {formatDuration(health.uptimeSeconds)}</span><span>{health.cameraDataKnown ? "Camera status current" : "Camera status unavailable or stale"}</span></footer>
+      <footer><span>System uptime: {formatDuration(health.uptimeSeconds)}</span><a href={appUrl("/admin?section=telemetry")}>Open System</a></footer>
     </section> : null}
   </div>;
 }

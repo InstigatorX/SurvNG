@@ -64,8 +64,8 @@ try {
   await page.getByRole("button", { name: "All events" }).waitFor({ state: "visible" });
   await page.locator(".timeline-camera-picker-toggle").first().waitFor({ state: "visible" });
   assert.equal(await page.locator(".recordings-v2-page .recordings-v2-cameras").count(), 0);
-  assert.equal(await page.title(), "SurvNG · Timeline");
-  assert.match(await page.locator(".workspace-content > h1").textContent(), /SurvNG — Timeline/);
+  assert.equal(await page.title(), "SurvNG · Review");
+  assert.match(await page.locator(".workspace-content > h1").textContent(), /SurvNG — Review/);
   assert.equal(await page.locator("h1").count(), 1);
   assert.equal(await page.getByRole("button", { name: "All events" }).getAttribute("aria-pressed"), "true");
   const heroVideo = page.locator(".recordings-v2-player.selected-camera-stage video").first();
@@ -125,11 +125,11 @@ try {
   }
 
   for (const [path, title] of [
-    ["incidents", "Incidents"],
+    ["incidents", "Review"],
     ["timeline/exports", "Exports"],
-    ["search", "Search"],
+    ["search", "Review"],
     ["people", "People"],
-    ["admin", "Admin"],
+    ["admin", "System"],
   ]) {
     await openWorkspace(page, path, ".workspace-content > h1");
     assert.match(await page.locator(".workspace-content > h1").textContent(), new RegExp(`SurvNG — ${title}`));

@@ -37,7 +37,7 @@ assert.equal(
     eventId: 84,
     trailEventIds: [12, 84, 91],
   }),
-  "/timeline?camera=gate&at=100&event=84&trail=12%2C84%2C91",
+  "/review?mode=timeline&camera=gate&at=100&event=84&trail=12%2C84%2C91",
 );
 
 const view = parseTimelineView("?camera=gate&at=100&event=84&trail=12,84,91&query_mode=appearance", "2026-08-27");

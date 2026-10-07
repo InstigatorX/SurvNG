@@ -11,7 +11,7 @@ assert.match(appSource, /<Suspense fallback=\{<WorkspaceFallback \/>\}>/);
 
 for (const specifier of [
   "./live/LivePage.jsx",
-  "./incidents/IncidentsPage.jsx",
+  "./review/ReviewPage.jsx",
   "./timeline/TimelinePages.jsx",
   "./admin/ConfigPage.jsx",
   "./people/FacesPage.jsx",
@@ -24,6 +24,7 @@ for (const specifier of [
   assert.match(appSource, new RegExp(`import\\("${specifier.replaceAll(".", "\\.")}"\\)`));
 }
 
+assert.doesNotMatch(appSource, /^import .* from "\.\/incidents\/IncidentsPage\.jsx"/m);
 assert.match(appSource, /import \{ Shell \} from "\.\/shell\/Shell\.jsx"/);
 assert.match(appSource, /import \{ AssistantPanel \} from "\.\/assistant\/AssistantPanel\.jsx"/);
 

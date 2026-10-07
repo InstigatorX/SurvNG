@@ -1592,7 +1592,7 @@ export function LivePage({ timeZone, canCorrectIncident = false, onRecordingCont
           )) : null}
         </div>
       </section>
-      {!mobileLiveView ? <section className="bento-card events-zone" ref={liveIncidentZoneRef}>
+      <section className="bento-card events-zone" ref={liveIncidentZoneRef}>
         <div className="section-head compact incident-head">
           <div><h2>Recent Activity</h2></div>
           <div className="incident-head-actions">
@@ -1657,9 +1657,9 @@ export function LivePage({ timeZone, canCorrectIncident = false, onRecordingCont
             <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
             <button type="button" onClick={() => changeIncidentPage(incidentPage + 1)} disabled={!incidentHasMore}>Next</button>
           </div>
-          <a href={appUrl("/incidents")}>View all incidents <ChevronRight size={14} /></a>
+          <a href={appUrl("/review")}>View all <ChevronRight size={14} /></a>
         </div>
-      </section> : null}
+      </section>
       {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} canCorrectIncident={canCorrectIncident} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refreshIncidents} /> : null}
       {expandedCamera ? (
         <LiveCameraOverlay

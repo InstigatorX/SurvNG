@@ -97,7 +97,7 @@ export function observationBoxStyle(observation) {
 
 export function canonicalIncidentHref(incident) {
   const id = incident?.incident_id;
-  return id ? `/incidents?incident_id=${encodeURIComponent(id)}` : `/incidents?event_ids=${encodeURIComponent(incident?.representative_event_id || "")}`;
+  return id ? `/review?incident_id=${encodeURIComponent(id)}` : `/review?event_ids=${encodeURIComponent(incident?.representative_event_id || "")}`;
 }
 
 export function incidentEpisodeClips(incident) {

@@ -4,7 +4,7 @@
 @media (max-width: 760px) {
   .live-grid {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto auto;
+    grid-template-rows: minmax(0, 1fr) auto;
     width: 100%;
   }
 
@@ -15,15 +15,18 @@
 
   .live-grid>.camera-zone {
     grid-column: 1;
-    grid-row: 2;
+    grid-row: 1;
     min-width: 0;
     margin: 0;
   }
 
   .live-grid>.events-zone {
     grid-column: 1;
-    grid-row: 3;
+    grid-row: 2;
     min-width: 0;
+    height: auto;
+    min-height: 0;
+    max-height: 112px;
     margin: 0;
   }
 
@@ -176,7 +179,7 @@
 @media (max-width: 1050px) {
   .live-grid {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto auto;
+    grid-template-rows: minmax(0, 1fr) auto;
   }
 
   .live-grid>.live-command-bar {
@@ -186,13 +189,16 @@
 
   .live-grid>.camera-zone {
     grid-column: 1;
-    grid-row: 2;
+    grid-row: 1;
     min-width: 0;
   }
 
   .live-grid>.events-zone {
     grid-column: 1;
-    grid-row: 3;
+    grid-row: 2;
+    height: auto;
+    min-height: 0;
+    max-height: 112px;
     min-width: 0;
   }
 

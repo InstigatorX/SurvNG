@@ -24,7 +24,7 @@ function SightingEvidence({ item, personName, timeZone }) {
     <span>{item.camera_id} · {formatDateTime(item.first_seen, timeZone)}</span>
     <SightingPreview key={`${item.event_id}:${item.face_id || "none"}`} item={item} />
     <strong>{({ confirmed: "Confirmed identity", recognized: "Automatically recognized", linked: `Linked to ${personName}'s visit`, unresolved: "Unresolved person", conflict: "Conflicting identity evidence" })[item.identity_status]}</strong>
-    <a href={appUrl(`/incidents?event_ids=${item.event_id}`)}>View incident</a>
+    <a href={appUrl(`/review?event_ids=${item.event_id}`)}>View incident</a>
     <a href={recordingsHref({ cameraId: item.camera_id, epoch: Date.parse(item.first_seen) / 1000 })}>View recording</a>
     {item.face_id ? <a href={appUrl(`/people?face=${item.face_id}`)}>Review face</a> : null}
   </>;

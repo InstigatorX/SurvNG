@@ -2053,7 +2053,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       <button type="button" className={`admin-navigation-backdrop${adminNavOpen ? " open" : ""}`} aria-label="Close Admin menu" onClick={() => setAdminNavOpen(false)} />
       <aside id="admin-navigation" className={`admin-navigation${adminNavOpen ? " open" : ""}`} aria-label="Admin navigation">
         <div className="admin-navigation-head">
-          <span><Cog size={18} /><span><strong>Admin</strong><small>System administration</small></span></span>
+          <span><Cog size={18} /><span><strong>System</strong><small>System administration</small></span></span>
           <button type="button" className="admin-navigation-close" aria-label="Close Admin menu" onClick={() => setAdminNavOpen(false)}><X size={18} /></button>
         </div>
         <nav>
@@ -2061,6 +2061,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
             <h2 id={`admin-group-${group.id}`}>{group.label}</h2>
             {group.items.map((destination) => {
               const Icon = ADMIN_DESTINATION_ICONS[destination.id] || Cog;
+              if (destination.href) return <a id={`admin-destination-${destination.id}`} href={appUrl(destination.href)} key={destination.id} title={destination.description}><Icon size={16} /><span>{destination.label}</span></a>;
               const active = activeAdminDestination.id === destination.id;
               return <button id={`admin-destination-${destination.id}`} type="button" className={`${active ? "active" : ""}${destination.secondary ? " secondary" : ""}`} aria-current={active ? "page" : undefined} onClick={() => selectAdminDestination(destination)} key={destination.id} title={destination.description}><Icon size={16} /><span>{destination.label}</span></button>;
             })}
@@ -2069,7 +2070,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       </aside>
       <header className="admin-mobile-toolbar">
         <button type="button" aria-controls="admin-navigation" aria-expanded={adminNavOpen} onClick={() => setAdminNavOpen(true)}><PanelLeftOpen size={18} />Menu</button>
-        <span><small>Admin</small><strong>{activeAdminDestination.label}</strong></span>
+        <span><small>System</small><strong>{activeAdminDestination.label}</strong></span>
         {currentAdminDirty ? <em>Unsaved</em> : null}
       </header>
       <AdminCommandBar scope={adminCommandBar?.scope} meta={adminCommandBar?.meta} actions={adminCommandBar?.actions} />
