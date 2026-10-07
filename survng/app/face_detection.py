@@ -15,6 +15,41 @@ from .config import DetectorConfig
 LOGGER = logging.getLogger(__name__)
 
 
+def parse_ssd_face_detections(
+    raw: Any,
+    width: int,
+    height: int,
+    threshold: float,
+) -> list[dict[str, Any]]:
+    """Decode Intel SSD rows: confidence at index 2, normalized xyxy at 3:6."""
+    array = np.asarray(raw, dtype=np.float32)
+    if array.size == 0:
+        return []
+    if array.size % 7 != 0:
+        raise ValueError("face detector output is not SSD rows of 7 floats")
+    minimum = max(0.01, min(0.99, float(threshold)))
+    detections: list[dict[str, Any]] = []
+    for row in array.reshape(-1, 7):
+        confidence = float(row[2])
+        if not np.isfinite(confidence) or confidence < minimum:
+            continue
+        x1 = max(0.0, min(float(width), float(row[3]) * width))
+        y1 = max(0.0, min(float(height), float(row[4]) * height))
+        x2 = max(0.0, min(float(width), float(row[5]) * width))
+        y2 = max(0.0, min(float(height), float(row[6]) * height))
+        if not all(np.isfinite(value) for value in (x1, y1, x2, y2)) or x2 <= x1 or y2 <= y1:
+            continue
+        detections.append(
+            {
+                "label": "face",
+                "confidence": round(confidence, 4),
+                "box": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                "detection_source": "dedicated_face",
+            }
+        )
+    return detections
+
+
 class OpenVinoFaceDetector:
     """Small dedicated face detector owned by the isolated face worker."""
 
@@ -101,37 +136,10 @@ class OpenVinoFaceDetector:
         tensor = np.expand_dims(np.transpose(resized.astype(np.float32), (2, 0, 1)), axis=0)
         with self._lock:
             raw = self._request.infer({self._input: tensor})[self._output]
-        minimum = max(
-            0.01,
-            min(
-                0.99,
-                float(
-                    self.config.face_detection_threshold
-                    if threshold is None
-                    else threshold
-                ),
-            ),
+        minimum = float(
+            self.config.face_detection_threshold if threshold is None else threshold
         )
-        detections: list[dict[str, Any]] = []
-        for row in np.asarray(raw, dtype=np.float32).reshape(-1, 7):
-            confidence = float(row[2])
-            if not np.isfinite(confidence) or confidence < minimum:
-                continue
-            x1 = max(0.0, min(float(width), float(row[3]) * width))
-            y1 = max(0.0, min(float(height), float(row[4]) * height))
-            x2 = max(0.0, min(float(width), float(row[5]) * width))
-            y2 = max(0.0, min(float(height), float(row[6]) * height))
-            if x2 <= x1 or y2 <= y1:
-                continue
-            detections.append(
-                {
-                    "label": "face",
-                    "confidence": round(confidence, 4),
-                    "box": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                    "detection_source": "dedicated_face",
-                }
-            )
-        return detections
+        return parse_ssd_face_detections(raw, width, height, minimum)
 
     def status(self) -> dict[str, Any]:
         return {

@@ -47,6 +47,10 @@ from .detection_routes import (
     DetectionRouteDependencies,
     create_detection_router,
 )
+from .face_detection_routes import (
+    FaceDetectionRouteDependencies,
+    create_face_detection_router,
+)
 from .face_routes import (
     FaceRouteDependencies,
     create_face_router,
@@ -1397,6 +1401,14 @@ _face_route_bundle = create_face_router(
     )
 )
 app.include_router(_face_route_bundle.router)
+app.include_router(
+    create_face_detection_router(
+        FaceDetectionRouteDependencies(
+            get_manager=get_manager,
+            get_config=lambda: config,
+        )
+    )
+)
 
 face_status = _face_route_bundle.handlers["face_status"]
 face_people = _face_route_bundle.handlers["face_people"]

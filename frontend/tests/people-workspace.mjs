@@ -13,6 +13,8 @@ assert.deepEqual(readPeopleWorkspaceQuery("?mode=clusters&cluster=12"), {
   mode: "clusters", status: "unknown", cameraId: "", personId: "", page: 0, faceId: "", clusterId: "12",
 });
 assert.equal(readPeopleWorkspaceQuery("?mode=invalid").mode, "review");
+assert.equal(readPeopleWorkspaceQuery("?mode=finding").mode, "finding");
+assert.equal(peopleWorkspaceSearch({ mode: "finding" }), "?mode=finding");
 assert.equal(peopleWorkspaceSearch({ status: "known", cameraId: "front-door", page: 1, faceId: 92 }), "?status=known&camera=front-door&page=2&face=92");
 assert.equal(peopleWorkspaceSearch(), "");
 assert.equal(peopleWorkspaceSearch({ mode: "clusters", clusterId: 4 }), "?mode=clusters&cluster=4");
@@ -22,6 +24,10 @@ assert.deepEqual(peopleObservationRequestPlan({ mode: "review", pageSize: 24 }),
   count: "",
 });
 assert.deepEqual(peopleObservationRequestPlan({ mode: "clusters", pageSize: 24 }), {
+  observations: "",
+  count: "",
+});
+assert.deepEqual(peopleObservationRequestPlan({ mode: "finding", pageSize: 24 }), {
   observations: "",
   count: "",
 });
