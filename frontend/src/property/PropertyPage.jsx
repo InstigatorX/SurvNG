@@ -7,6 +7,7 @@ import {
   applyDetection,
   configuredZoneRows,
   detectionIcon,
+  defaultZonePoints,
   highlightOpacity,
   overlayPresentation,
   pruneHighlights,
@@ -36,6 +37,9 @@ export function PropertyPage({ canEdit = false }) {
   const [highlights, setHighlights] = useState({});
   const [now, setNow] = useState(() => Date.now());
   const [overrides, setOverrides] = useState({});
+  const [selected, setSelected] = useState(null);
+  const [showCameras, setShowCameras] = useState(true);
+  const [showZones, setShowZones] = useState(true);
   const dirtyRef = useRef(false);
   const layoutRef = useRef(layout);
   const prefilledRef = useRef(false);
@@ -296,6 +300,7 @@ export function PropertyPage({ canEdit = false }) {
         range_m: 20,
       }],
     });
+    setSelected({ kind: "camera", id: camera.id });
     void saveLayout(next).catch((saveError) => setError(saveError.message));
   }
 
@@ -306,17 +311,21 @@ export function PropertyPage({ canEdit = false }) {
       zones: [...layoutRef.current.zones, {
         camera_id: zone.cameraId,
         zone_name: zone.zoneName,
-        x: 0.5,
-        y: 0.58,
-        width: 0.22,
-        height: 0.14,
-        rotation_deg: 0,
+        points: defaultZonePoints(),
       }],
     });
+    setSelected({ kind: "zone", id: zoneActivityKey(zone.cameraId, zone.zoneName) });
     void saveLayout(next).catch((saveError) => setError(saveError.message));
   }
 
+  function chooseSelection(next) {
+    setSelected((current) => (
+      current?.kind === next.kind && current.id === next.id ? null : next
+    ));
+  }
+
   function removeCamera(cameraId) {
+    setSelected((current) => (current?.kind === "camera" && current.id === cameraId ? null : current));
     const next = rememberLayout({
       cameras: layoutRef.current.cameras.filter((camera) => camera.camera_id !== cameraId),
       zones: layoutRef.current.zones.filter((zone) => zone.camera_id !== cameraId),
@@ -325,6 +334,8 @@ export function PropertyPage({ canEdit = false }) {
   }
 
   function removeZone(cameraId, zoneName) {
+    const key = zoneActivityKey(cameraId, zoneName);
+    setSelected((current) => (current?.kind === "zone" && current.id === key ? null : current));
     const next = rememberLayout({
       ...layoutRef.current,
       zones: layoutRef.current.zones.filter((zone) => !(zone.camera_id === cameraId && zone.zone_name === zoneName)),
@@ -366,6 +377,12 @@ export function PropertyPage({ canEdit = false }) {
               }))}
               zones={canvasZones}
               canEdit={canEdit}
+              showCameras={showCameras}
+              showZones={showZones}
+              selected={selected}
+              onSelect={setSelected}
+              onShowCameras={setShowCameras}
+              onShowZones={setShowZones}
               onChangeCamera={changeCamera}
               onChangeZone={changeZone}
               onGestureEnd={() => void commitLayout()}
@@ -421,13 +438,16 @@ export function PropertyPage({ canEdit = false }) {
             const notifications = Object.hasOwn(overrides, `camera:${camera.id}`)
               ? overrides[`camera:${camera.id}`]
               : camera.incident_notifications_enabled !== false;
+            const cameraSelected = selected?.kind === "camera" && selected.id === camera.id;
             return (
-              <article className="property-card" key={camera.id}>
+              <article className={`property-card${cameraSelected ? " is-selected" : ""}`} key={camera.id}>
                 <header>
-                  <strong>{camera.name || camera.id}</strong>
+                  <button type="button" className="property-card-name" aria-expanded={Boolean(placement && cameraSelected)} onClick={() => chooseSelection({ kind: "camera", id: camera.id })}>
+                    {camera.name || camera.id}
+                  </button>
                   {placement ? <button type="button" disabled={!canEdit} onClick={() => removeCamera(camera.id)}>Remove</button> : <button type="button" disabled={!canEdit || !image} onClick={() => placeCamera(camera)}>Place</button>}
                 </header>
-                {placement ? (
+                {placement && cameraSelected ? (
                   <>
                     <label>Make
                       <input value={placement.make} disabled={!canEdit} onChange={(event) => changeCamera(camera.id, { make: event.target.value })} onBlur={() => void lookupFov(camera.id, placement.make, placement.model)} />
@@ -453,33 +473,46 @@ export function PropertyPage({ canEdit = false }) {
           {configuredZones.length ? configuredZones.map((zone) => {
             const placed = layout.zones.some((item) => item.camera_id === zone.cameraId && item.zone_name === zone.zoneName);
             const key = `zone:${zone.cameraId}:${zone.zoneName}`;
+            const zoneKey = zoneActivityKey(zone.cameraId, zone.zoneName);
+            const zoneSelected = selected?.kind === "zone" && selected.id === zoneKey;
             const notifications = Object.hasOwn(overrides, key) ? overrides[key] : zone.notificationsEnabled;
             return (
-              <article className="property-card" key={`${zone.cameraId}:${zone.zoneName}`}>
+              <article className={`property-card${zoneSelected ? " is-selected" : ""}`} key={`${zone.cameraId}:${zone.zoneName}`}>
                 <header>
-                  <strong><span className="property-swatch" style={{ background: zone.color }} />{zone.cameraName} · {zone.zoneName}</strong>
+                  <button type="button" className="property-card-name" aria-expanded={Boolean(placed && zoneSelected)} onClick={() => chooseSelection({ kind: "zone", id: zoneKey })}>
+                    <span className="property-swatch" style={{ background: zone.color }} />{zone.cameraName} · {zone.zoneName}
+                  </button>
                   {placed
                     ? <button type="button" disabled={!canEdit} onClick={() => removeZone(zone.cameraId, zone.zoneName)}>Remove</button>
                     : <button type="button" disabled={!canEdit || !image} onClick={() => placeZone(zone)}>Place</button>}
                 </header>
-                {placed ? (
-                  <label className="property-check">
-                    <input type="checkbox" checked={notifications} disabled={!canEdit} onChange={(event) => void toggleZoneNotifications(zone.cameraId, zone.zoneName, event.target.checked)} />
-                    Notifications
-                  </label>
+                {placed && zoneSelected ? (
+                  <>
+                    <label className="property-check">
+                      <input type="checkbox" checked={notifications} disabled={!canEdit} onChange={(event) => void toggleZoneNotifications(zone.cameraId, zone.zoneName, event.target.checked)} />
+                      Notifications
+                    </label>
+                    <p className="property-hint">Drag the points to fit the property. Double-click the outline to add a point, or a point to remove it.</p>
+                  </>
                 ) : null}
               </article>
             );
           }) : <p>Configure detection zones on a camera before placing them here.</p>}
-          {layout.zones.filter((zone) => overlayPresentation(zone, configuredZones).stale).map((zone) => (
-            <article className="property-card" key={`stale:${zone.camera_id}:${zone.zone_name}`}>
-              <header>
-                <strong>{zone.camera_id} · {zone.zone_name}</strong>
-                <button type="button" disabled={!canEdit} onClick={() => removeZone(zone.camera_id, zone.zone_name)}>Remove</button>
-              </header>
-              <p className="property-stale">This zone is no longer configured.</p>
-            </article>
-          ))}
+          {layout.zones.filter((zone) => overlayPresentation(zone, configuredZones).stale).map((zone) => {
+            const zoneKey = zoneActivityKey(zone.camera_id, zone.zone_name);
+            const zoneSelected = selected?.kind === "zone" && selected.id === zoneKey;
+            return (
+              <article className={`property-card${zoneSelected ? " is-selected" : ""}`} key={`stale:${zone.camera_id}:${zone.zone_name}`}>
+                <header>
+                  <button type="button" className="property-card-name" aria-expanded={zoneSelected} onClick={() => chooseSelection({ kind: "zone", id: zoneKey })}>
+                    {zone.camera_id} · {zone.zone_name}
+                  </button>
+                  <button type="button" disabled={!canEdit} onClick={() => removeZone(zone.camera_id, zone.zone_name)}>Remove</button>
+                </header>
+                {zoneSelected ? <p className="property-stale">This zone is no longer configured.</p> : null}
+              </article>
+            );
+          })}
         </section>
       </aside>
     </main>

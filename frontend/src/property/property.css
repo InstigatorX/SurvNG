@@ -35,8 +35,10 @@
 
 .property-view {
   position: absolute;
-  inset: 0;
-  transform-origin: center center;
+  width: calc(100% * var(--property-zoom, 1));
+  height: calc(100% * var(--property-zoom, 1));
+  left: calc(50% + var(--property-pan-x, 0px) - 50% * var(--property-zoom, 1));
+  top: calc(50% + var(--property-pan-y, 0px) - 50% * var(--property-zoom, 1));
 }
 
 .property-view img,
@@ -49,6 +51,7 @@
 
 .property-stage img {
   object-fit: fill;
+  image-rendering: auto;
   user-select: none;
   pointer-events: none;
 }
@@ -63,6 +66,39 @@
 
 .property-stage.is-zoomed .property-view > svg :is(circle, rect) {
   cursor: pointer;
+}
+
+.property-hud {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 2;
+  display: flex;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(3, 10, 12, 0.78);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+.property-hud button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 11px;
+  font-weight: 650;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+
+.property-hud button[aria-pressed="true"] {
+  background: rgba(45, 212, 191, 0.2);
+  color: #ccfbf1;
 }
 
 .property-zoom {
@@ -104,7 +140,7 @@
   position: absolute;
   display: flex;
   gap: 4px;
-  transform: translate(-50%, -50%) scale(calc(1 / var(--property-zoom, 1)));
+  transform: translate(-50%, -50%);
   color: white;
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.65));
 }
@@ -219,6 +255,34 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.property-card.is-selected {
+  border-color: rgba(45, 212, 191, 0.65);
+}
+
+.property-panel button.property-card-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  min-height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  padding: 0;
+  cursor: pointer;
+}
+
+.property-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .property-card header strong {

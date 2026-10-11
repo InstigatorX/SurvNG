@@ -5,20 +5,28 @@ import {
   CircleDot,
   Package,
   PawPrint,
+  Pentagon,
   User,
+  Video,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import { insertZonePointWithIndex } from "../zoneGeometry.mjs";
 import {
   aimFromPointer,
   clampUnit,
   conePolygon,
+  moveZonePoint,
   panPropertyView,
   PROPERTY_ZOOM_FACTOR,
   PROPERTY_ZOOM_MAX,
   PROPERTY_ZOOM_MIN,
   propertyViewAtRest,
-  rotationFromPointer,
+  removeZonePoint,
+  stackPropertyOverlays,
+  translateZonePoints,
+  zoneCentroid,
+  zonePolygon,
   zoomPropertyView,
 } from "./propertyView.mjs";
 
@@ -42,6 +50,12 @@ export function PropertyCanvas({
   cameras,
   zones,
   canEdit,
+  showCameras = true,
+  showZones = true,
+  selected = null,
+  onSelect,
+  onShowCameras,
+  onShowZones,
   onChangeCamera,
   onChangeZone,
   onGestureEnd,
@@ -122,8 +136,10 @@ export function PropertyCanvas({
 
   function beginDrag(event, drag) {
     if (dragRef.current?.kind === "pinch") return;
-    if (drag.kind !== "pan" && !canEdit) return;
     event.stopPropagation();
+    if (drag.kind === "move-camera" || drag.kind === "aim-camera") onSelect?.({ kind: "camera", id: drag.cameraId });
+    if (drag.kind === "move-zone" || drag.kind === "move-point") onSelect?.({ kind: "zone", id: drag.key });
+    if (drag.kind !== "pan" && !canEdit) return;
     dragRef.current = { ...drag, origin: pointer(event), lastX: event.clientX, lastY: event.clientY };
     try {
       event.currentTarget?.setPointerCapture?.(event.pointerId);
@@ -150,17 +166,10 @@ export function PropertyCanvas({
       onChangeCamera(drag.cameraId, aimFromPointer(drag.anchor, point, widthM, heightM));
     } else if (drag.kind === "move-zone") {
       onChangeZone(drag.key, {
-        x: clampUnit(drag.zone.x + point.x - drag.origin.x),
-        y: clampUnit(drag.zone.y + point.y - drag.origin.y),
+        points: translateZonePoints(drag.points, point.x - drag.origin.x, point.y - drag.origin.y),
       });
-    } else if (drag.kind === "rotate-zone") {
-      onChangeZone(drag.key, { rotation_deg: rotationFromPointer(drag.anchor, point) });
-    } else if (drag.kind === "resize-zone") {
-      const local = localPoint(point, drag.anchor, drag.zone.rotation_deg);
-      onChangeZone(drag.key, {
-        width: Math.min(1, Math.max(0.04, Math.abs(local.x) * 2)),
-        height: Math.min(1, Math.max(0.04, Math.abs(local.y) * 2)),
-      });
+    } else if (drag.kind === "move-point") {
+      onChangeZone(drag.key, { points: moveZonePoint(drag.points, drag.index, point) });
     }
   }
 
@@ -173,14 +182,36 @@ export function PropertyCanvas({
 
   const zoomed = view.scale > 1;
   const mark = 1 / view.scale;
+  const visibleCameras = showCameras ? cameras : [];
+  const visibleZones = showZones ? zones : [];
+  const stack = stackPropertyOverlays(visibleCameras, visibleZones, selected);
+
+  function addZonePoint(event, zone, points) {
+    event.stopPropagation();
+    event.preventDefault();
+    if (!canEdit) return;
+    const inserted = insertZonePointWithIndex(points, pointer(event));
+    onSelect?.({ kind: "zone", id: zone.key });
+    onChangeZone(zone.key, { points: inserted.points });
+    onGestureEnd();
+  }
+
+  function deleteZonePoint(event, zone, points, index) {
+    event.stopPropagation();
+    event.preventDefault();
+    if (!canEdit || points.length <= 3) return;
+    onChangeZone(zone.key, { points: removeZonePoint(points, index) });
+    onGestureEnd();
+  }
 
   return (
     <div className={`property-stage${zoomed ? " is-zoomed" : ""}`} ref={stageRef}>
       <div
         className="property-view"
         style={{
-          transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
           "--property-zoom": String(view.scale),
+          "--property-pan-x": `${view.x}px`,
+          "--property-pan-y": `${view.y}px`,
         }}
       >
       <img src={imageUrl} alt="Aerial view of the property" draggable="false" />
@@ -197,116 +228,106 @@ export function PropertyCanvas({
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
       >
-        {cameras.map((camera) => {
-          const cone = conePolygon(camera, widthM, heightM);
-          const tip = cone[Math.floor(cone.length / 2)];
-          return (
-            <g key={camera.camera_id}>
-              <polygon points={pointList(cone)} fill="rgba(15, 118, 110, 0.28)" stroke="#0f766e" strokeWidth={0.004 * mark} />
-              <circle
-                cx={camera.x}
-                cy={camera.y}
-                r={0.016 * mark}
-                fill="#0f766e"
-                stroke="#ffffff"
-                strokeWidth={0.004 * mark}
-                onPointerDown={(event) => beginDrag(event, { kind: "move-camera", cameraId: camera.camera_id })}
-              >
-                <title>{camera.name || camera.camera_id}</title>
-              </circle>
-              {canEdit ? (
+        {stack.map((entry) => {
+          if (entry.kind === "camera") {
+            const camera = entry.item;
+            const cone = conePolygon(camera, widthM, heightM);
+            const tip = cone[Math.floor(cone.length / 2)];
+            const active = selected?.kind === "camera" && selected.id === camera.camera_id;
+            return (
+              <g key={`camera:${camera.camera_id}`}>
+                <polygon points={pointList(cone)} fill="rgba(15, 118, 110, 0.28)" stroke="#0f766e" strokeWidth={0.004 * mark} pointerEvents="none" />
                 <circle
-                  cx={tip.x}
-                  cy={tip.y}
-                  r={0.014 * mark}
-                  fill="#ffffff"
-                  stroke="#0f766e"
-                  strokeWidth={0.004 * mark}
-                  onPointerDown={(event) => beginDrag(event, {
-                    kind: "aim-camera",
-                    cameraId: camera.camera_id,
-                    anchor: { x: camera.x, y: camera.y },
-                  })}
+                  cx={camera.x}
+                  cy={camera.y}
+                  r={0.008 * mark}
+                  fill="#0f766e"
+                  stroke="#ffffff"
+                  strokeWidth={0.002 * mark}
+                  onPointerDown={(event) => beginDrag(event, { kind: "move-camera", cameraId: camera.camera_id })}
                 >
-                  <title>Aim and range</title>
+                  <title>{camera.name || camera.camera_id}</title>
                 </circle>
-              ) : null}
-            </g>
-          );
-        })}
-        {zones.map((zone) => {
-          const halfW = zone.width / 2;
-          const halfH = zone.height / 2;
+                {canEdit && active ? (
+                  <circle
+                    cx={tip.x}
+                    cy={tip.y}
+                    r={0.007 * mark}
+                    fill="#ffffff"
+                    stroke="#0f766e"
+                    strokeWidth={0.002 * mark}
+                    onPointerDown={(event) => beginDrag(event, {
+                      kind: "aim-camera",
+                      cameraId: camera.camera_id,
+                      anchor: { x: camera.x, y: camera.y },
+                    })}
+                  >
+                    <title>Aim and range</title>
+                  </circle>
+                ) : null}
+              </g>
+            );
+          }
+          const zone = entry.item;
+          const points = zonePolygon(zone);
           const opacity = zone.opacity || 0;
+          const active = selected?.kind === "zone" && selected.id === zone.key;
           return (
-            <g key={zone.key} transform={`translate(${zone.x} ${zone.y}) rotate(${zone.rotation_deg})`}>
-              <rect
-                x={-halfW}
-                y={-halfH}
-                width={zone.width}
-                height={zone.height}
+            <g key={`zone:${zone.key}`}>
+              <polygon
+                points={pointList(points)}
                 fill={zone.color}
                 fillOpacity={Math.max(opacity, zone.stale ? 0.08 : 0.16)}
                 stroke={zone.color}
-                strokeWidth={0.005 * mark}
+                strokeWidth={0.004 * mark}
                 strokeDasharray={zone.stale ? `${0.02 * mark} ${0.012 * mark}` : undefined}
-                onPointerDown={(event) => beginDrag(event, {
-                  kind: "move-zone",
-                  key: zone.key,
-                  zone,
-                })}
+                onPointerDown={(event) => beginDrag(event, { kind: "move-zone", key: zone.key, points })}
+                onDoubleClick={(event) => addZonePoint(event, zone, points)}
               >
-                <title>{zone.label}</title>
-              </rect>
-              {canEdit ? (
-                <>
-                  <circle
-                    cx={halfW}
-                    cy={halfH}
-                    r={0.012 * mark}
-                    fill="#ffffff"
-                    stroke={zone.color}
-                    strokeWidth={0.003 * mark}
-                    onPointerDown={(event) => beginDrag(event, {
-                      kind: "resize-zone",
-                      key: zone.key,
-                      zone,
-                      anchor: { x: zone.x, y: zone.y },
-                    })}
-                  >
-                    <title>Resize zone</title>
-                  </circle>
-                  <circle
-                    cx="0"
-                    cy={-halfH - 0.03 * mark}
-                    r={0.012 * mark}
-                    fill="#ffffff"
-                    stroke={zone.color}
-                    strokeWidth={0.003 * mark}
-                    onPointerDown={(event) => beginDrag(event, {
-                      kind: "rotate-zone",
-                      key: zone.key,
-                      anchor: { x: zone.x, y: zone.y },
-                    })}
-                  >
-                    <title>Rotate zone</title>
-                  </circle>
-                </>
-              ) : null}
+                <title>{zone.label}. Drag to move. Double-click the outline to add a point.</title>
+              </polygon>
+              {canEdit && active ? points.map((point, index) => (
+                <circle
+                  key={index}
+                  cx={point.x}
+                  cy={point.y}
+                  r={0.006 * mark}
+                  fill="#ffffff"
+                  stroke={zone.color}
+                  strokeWidth={0.002 * mark}
+                  onPointerDown={(event) => beginDrag(event, { kind: "move-point", key: zone.key, index, points })}
+                  onDoubleClick={(event) => deleteZonePoint(event, zone, points, index)}
+                >
+                  <title>{points.length > 3 ? "Drag point. Double-click to remove." : "Drag point."}</title>
+                </circle>
+              )) : null}
             </g>
           );
         })}
       </svg>
       <div className="property-icons">
-        {zones.filter((zone) => zone.opacity > 0 && zone.icons?.length).map((zone) => (
-          <div key={zone.key} className="property-icon-group" style={{ left: `${zone.x * 100}%`, top: `${zone.y * 100}%`, opacity: Math.min(1, zone.opacity + 0.35) }}>
-            {zone.icons.slice(0, 3).map((name) => {
-              const Icon = ICONS[name] || CircleDot;
-              return <Icon key={name} size={18} aria-label={name} />;
-            })}
-          </div>
-        ))}
+        {visibleZones.filter((zone) => zone.opacity > 0 && zone.icons?.length).map((zone) => {
+          const center = zoneCentroid(zonePolygon(zone));
+          return (
+            <div key={zone.key} className="property-icon-group" style={{ left: `${center.x * 100}%`, top: `${center.y * 100}%`, opacity: Math.min(1, zone.opacity + 0.35) }}>
+              {zone.icons.slice(0, 3).map((name) => {
+                const Icon = ICONS[name] || CircleDot;
+                return <Icon key={name} size={18} aria-label={name} />;
+              })}
+            </div>
+          );
+        })}
       </div>
+      </div>
+      <div className="property-hud" role="group" aria-label="Property overlay">
+        <button type="button" aria-pressed={showCameras} onClick={() => onShowCameras?.(!showCameras)}>
+          <Video size={14} />
+          <span>Cameras</span>
+        </button>
+        <button type="button" aria-pressed={showZones} onClick={() => onShowZones?.(!showZones)}>
+          <Pentagon size={14} />
+          <span>Zones</span>
+        </button>
       </div>
       <div className="property-zoom" role="group" aria-label="Aerial zoom">
         <button type="button" aria-label="Zoom in" onClick={() => zoomBy(PROPERTY_ZOOM_FACTOR)} disabled={view.scale >= PROPERTY_ZOOM_MAX}>
@@ -338,12 +359,3 @@ function touchAnchor(touches, box) {
   };
 }
 
-function localPoint(point, origin, rotationDeg) {
-  const dx = point.x - origin.x;
-  const dy = point.y - origin.y;
-  const rad = (-rotationDeg * Math.PI) / 180;
-  return {
-    x: dx * Math.cos(rad) - dy * Math.sin(rad),
-    y: dx * Math.sin(rad) + dy * Math.cos(rad),
-  };
-}

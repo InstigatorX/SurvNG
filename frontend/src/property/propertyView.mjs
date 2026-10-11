@@ -157,3 +157,79 @@ export function rotationFromPointer(origin, point) {
 export function clampUnit(value) {
   return Math.min(1, Math.max(0, value));
 }
+
+export function rectangleZonePoints(zone) {
+  const x = Number(zone?.x);
+  const y = Number(zone?.y);
+  const width = Number(zone?.width);
+  const height = Number(zone?.height);
+  const rotation = Number(zone?.rotation_deg) || 0;
+  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return [];
+  const radians = (rotation * Math.PI) / 180;
+  const cosine = Math.cos(radians);
+  const sine = Math.sin(radians);
+  const halfW = width / 2;
+  const halfH = height / 2;
+  return [[-halfW, -halfH], [halfW, -halfH], [halfW, halfH], [-halfW, halfH]].map(([dx, dy]) => ({
+    x: clampUnit(x + dx * cosine - dy * sine),
+    y: clampUnit(y + dx * sine + dy * cosine),
+  }));
+}
+
+export function zonePolygon(zone) {
+  if (Array.isArray(zone?.points) && zone.points.length >= 3) {
+    return zone.points.map((point) => ({ x: Number(point.x), y: Number(point.y) }));
+  }
+  return rectangleZonePoints(zone);
+}
+
+export function zoneCentroid(points) {
+  const list = Array.isArray(points) ? points : [];
+  if (!list.length) return { x: 0.5, y: 0.5 };
+  const sum = list.reduce((total, point) => ({ x: total.x + Number(point.x), y: total.y + Number(point.y) }), { x: 0, y: 0 });
+  return { x: sum.x / list.length, y: sum.y / list.length };
+}
+
+export function translateZonePoints(points, dx, dy) {
+  const next = (points || []).map((point) => ({ x: Number(point.x) + dx, y: Number(point.y) + dy }));
+  if (!next.length) return [];
+  const minX = Math.min(...next.map((point) => point.x));
+  const maxX = Math.max(...next.map((point) => point.x));
+  const minY = Math.min(...next.map((point) => point.y));
+  const maxY = Math.max(...next.map((point) => point.y));
+  const shiftX = minX < 0 ? -minX : maxX > 1 ? 1 - maxX : 0;
+  const shiftY = minY < 0 ? -minY : maxY > 1 ? 1 - maxY : 0;
+  return next.map((point) => ({ x: point.x + shiftX, y: point.y + shiftY }));
+}
+
+export function moveZonePoint(points, index, point) {
+  return (points || []).map((item, itemIndex) => (
+    itemIndex === index ? { x: clampUnit(point.x), y: clampUnit(point.y) } : { x: item.x, y: item.y }
+  ));
+}
+
+export function removeZonePoint(points, index) {
+  const list = points || [];
+  if (list.length <= 3) return list.map((point) => ({ x: point.x, y: point.y }));
+  return list.filter((_, itemIndex) => itemIndex !== index).map((point) => ({ x: point.x, y: point.y }));
+}
+
+export function defaultZonePoints() {
+  return [
+    { x: 0.42, y: 0.52 },
+    { x: 0.64, y: 0.52 },
+    { x: 0.64, y: 0.7 },
+    { x: 0.42, y: 0.7 },
+  ];
+}
+
+export function stackPropertyOverlays(cameras, zones, selected) {
+  const entries = [
+    ...(cameras || []).map((camera) => ({ kind: "camera", id: camera.camera_id, item: camera })),
+    ...(zones || []).map((zone) => ({ kind: "zone", id: zone.key, item: zone })),
+  ];
+  if (!selected) return entries;
+  const index = entries.findIndex((entry) => entry.kind === selected.kind && entry.id === selected.id);
+  if (index < 0) return entries;
+  return [...entries.slice(0, index), ...entries.slice(index + 1), entries[index]];
+}

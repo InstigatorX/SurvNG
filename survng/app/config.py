@@ -1150,16 +1150,51 @@ class PropertyCameraPlacement(BaseModel):
         return value
 
 
+def property_rectangle_points(x: float, y: float, width: float, height: float, rotation_deg: float = 0) -> list[dict[str, float]]:
+    """Four corners of a rotated rectangle, in the same y-down space as the canvas."""
+    half_w = width / 2
+    half_h = height / 2
+    radians = math.radians(rotation_deg)
+    cosine = math.cos(radians)
+    sine = math.sin(radians)
+    points = []
+    for dx, dy in ((-half_w, -half_h), (half_w, -half_h), (half_w, half_h), (-half_w, half_h)):
+        points.append({
+            "x": min(1.0, max(0.0, x + dx * cosine - dy * sine)),
+            "y": min(1.0, max(0.0, y + dx * sine + dy * cosine)),
+        })
+    return points
+
+
 class PropertyZoneOverlay(BaseModel):
     """Visual stand-in for a configured detection zone. It does not edit that zone."""
 
     camera_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     zone_name: str = Field(min_length=1, max_length=128)
-    x: float = Field(ge=0, le=1, allow_inf_nan=False)
-    y: float = Field(ge=0, le=1, allow_inf_nan=False)
-    width: float = Field(gt=0, le=1, allow_inf_nan=False)
-    height: float = Field(gt=0, le=1, allow_inf_nan=False)
-    rotation_deg: float = Field(default=0, ge=-180, le=180, allow_inf_nan=False)
+    points: list[ZonePoint] = Field(min_length=3, max_length=32)
+
+    @model_validator(mode="before")
+    @classmethod
+    def rectangle_to_points(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "points" in value:
+            return value
+        required = ("x", "y", "width", "height")
+        if not all(key in value for key in required):
+            return value
+        try:
+            rotation = float(value.get("rotation_deg") or 0)
+            points = property_rectangle_points(
+                float(value["x"]),
+                float(value["y"]),
+                float(value["width"]),
+                float(value["height"]),
+                rotation,
+            )
+        except (TypeError, ValueError):
+            return value
+        converted = dict(value)
+        converted["points"] = points
+        return converted
 
     @field_validator("zone_name")
     @classmethod

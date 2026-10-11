@@ -8,11 +8,17 @@ import {
   highlightOpacity,
   HIGHLIGHT_FADE_MS,
   HIGHLIGHT_PEAK_OPACITY,
+  moveZonePoint,
   overlayPresentation,
   panPropertyView,
   PROPERTY_ZOOM_MAX,
   pruneHighlights,
+  rectangleZonePoints,
+  removeZonePoint,
   rotationFromPointer,
+  stackPropertyOverlays,
+  translateZonePoints,
+  zoneCentroid,
   zoomPropertyView,
 } from "../src/property/propertyView.mjs";
 
@@ -90,5 +96,29 @@ const shoved = panPropertyView({ scale: 2, x: 0, y: 0 }, frame, -1000, 40);
 assert.equal(shoved.x, -200);
 assert.equal(shoved.y, 40);
 assert.deepEqual(panPropertyView({ scale: 1, x: 0, y: 0 }, frame, 30, 30), { scale: 1, x: 0, y: 0 });
+
+const rectangle = rectangleZonePoints({ x: 0.5, y: 0.5, width: 0.2, height: 0.1, rotation_deg: 0 });
+assert.deepEqual(rectangle[0], { x: 0.4, y: 0.45 });
+assert.deepEqual(rectangle[2], { x: 0.6, y: 0.55 });
+assert.deepEqual(zoneCentroid(rectangle), { x: 0.5, y: 0.5 });
+const shifted = translateZonePoints(rectangle, 0.7, 0);
+assert.equal(Math.max(...shifted.map((point) => point.x)), 1);
+assert.equal(removeZonePoint(rectangle, 0).length, 3);
+assert.equal(removeZonePoint(rectangle.slice(0, 3), 0).length, 3);
+assert.equal(moveZonePoint(rectangle, 1, { x: 2, y: -1 })[1].x, 1);
+assert.equal(moveZonePoint(rectangle, 1, { x: 2, y: -1 })[1].y, 0);
+
+const stacked = stackPropertyOverlays(
+  [{ camera_id: "gate" }, { camera_id: "door" }],
+  [{ key: "drive" }, { key: "yard" }],
+  { kind: "camera", id: "gate" },
+);
+assert.deepEqual(stacked.map((entry) => entry.id), ["door", "drive", "yard", "gate"]);
+const zoneOnTop = stackPropertyOverlays(
+  [{ camera_id: "gate" }],
+  [{ key: "drive" }, { key: "yard" }],
+  { kind: "zone", id: "drive" },
+);
+assert.equal(zoneOnTop.at(-1).id, "drive");
 
 console.log("property view tests passed");
