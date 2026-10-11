@@ -20,6 +20,12 @@ from .config import (
     PropertyImageConfig,
     PropertyViewConfig,
     PropertyZoneOverlay,
+    ZonePoint,
+)
+from .property_conform import (
+    PropertyConformError,
+    PropertyConformUnavailable,
+    conform_property_zone_from_config,
 )
 from .property_imagery import (
     ImageryHttp,
@@ -67,6 +73,14 @@ class PropertyLocationRequest(BaseModel):
     height_m: float = Field(default=120, ge=20, le=2000, allow_inf_nan=False)
 
 
+class PropertyConformRequest(BaseModel):
+    """One placed overlay. The response is a preview and does not change the layout."""
+
+    camera_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+    zone_name: str = Field(min_length=1, max_length=128)
+    points: list[ZonePoint] = Field(min_length=3, max_length=32)
+
+
 @dataclass(frozen=True, slots=True)
 class PropertyRouteDependencies:
     get_config: Callable[[], AppConfig]
@@ -74,6 +88,7 @@ class PropertyRouteDependencies:
     recent_object_events: Callable[[int], list[dict]]
     lock: threading.RLock
     client: ImageryHttp | None = None
+    conform_zone: Callable[[AppConfig, str, str, list[ZonePoint]], list[dict[str, float]]] | None = None
 
 
 def create_property_router(deps: PropertyRouteDependencies) -> APIRouter:
@@ -202,6 +217,21 @@ def create_property_router(deps: PropertyRouteDependencies) -> APIRouter:
             "address": effective.property.address,
             "width_m": effective.property.width_m,
             "camera_workers_restarted": bool(result.get("camera_workers_restarted")),
+        }
+
+    @router.post("/api/property/zones/conform")
+    def post_property_zone_conform(body: PropertyConformRequest) -> dict:
+        conform = deps.conform_zone or conform_property_zone_from_config
+        try:
+            points = conform(deps.get_config(), body.camera_id, body.zone_name.strip(), body.points)
+        except PropertyConformError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except PropertyConformUnavailable as error:
+            raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+        return {
+            "camera_id": body.camera_id,
+            "zone_name": body.zone_name.strip(),
+            "points": points,
         }
 
     @router.get("/api/property/fov")

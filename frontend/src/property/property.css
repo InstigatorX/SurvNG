@@ -257,6 +257,11 @@
   gap: 8px;
 }
 
+.property-card-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
 .property-card.is-selected {
   border-color: rgba(45, 212, 191, 0.65);
 }

@@ -364,4 +364,5 @@ def test_property_routes_save_layout_without_reloading_workers(tmp_path: Path):
     assert required_api_scope("POST", "/api/property/imagery") == "admin"
     assert required_api_scope("PUT", "/api/property/layout") == "admin"
     assert required_api_scope("PUT", "/api/property/location") == "admin"
+    assert required_api_scope("POST", "/api/property/zones/conform") == "admin"
     assert rank_imagery([]) == []

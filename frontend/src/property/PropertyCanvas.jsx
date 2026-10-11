@@ -48,6 +48,7 @@ export function PropertyCanvas({
   cameras,
   zones,
   canEdit,
+  reviewing = false,
   showCameras = true,
   showZones = true,
   selected = null,
@@ -184,7 +185,7 @@ export function PropertyCanvas({
   function addSelectedPoint(event) {
     if (!canEdit || selected?.kind !== "zone" || event.target !== event.currentTarget) return false;
     const zone = visibleZones.find((item) => item.key === selected.id);
-    if (!zone || zonePolygon(zone).length >= 32) return false;
+    if (!zone || zone.preview || zonePolygon(zone).length >= 32) return false;
     const rect = event.currentTarget.getBoundingClientRect();
     const inserted = insertZonePointWithIndex(zonePolygon(zone), pointer(event), {
       x: rect.width,
@@ -275,9 +276,9 @@ export function PropertyCanvas({
                   points={outline}
                   fill={zone.color}
                   fillOpacity={Math.max(opacity, zone.stale ? 0.08 : 0.16)}
-                  stroke={zone.color}
-                  strokeWidth={0.004 * mark}
-                  strokeDasharray={zone.stale ? `${0.02 * mark} ${0.012 * mark}` : undefined}
+                  stroke={zone.preview ? "#f8fafc" : zone.color}
+                  strokeWidth={(zone.preview ? 0.006 : 0.004) * mark}
+                  strokeDasharray={zone.preview ? `${0.016 * mark} ${0.01 * mark}` : zone.stale ? `${0.02 * mark} ${0.012 * mark}` : undefined}
                   pointerEvents="none"
                 >
                   <title>{zone.label}</title>
@@ -310,7 +311,9 @@ export function PropertyCanvas({
           );
         })}
       </svg>
-      {canEdit && selectedZone && zonePolygon(selectedZone).length < 3 ? (
+      {canEdit && reviewing ? (
+        <p className="property-canvas-hint">Review the outline, then accept it</p>
+      ) : canEdit && selectedZone && zonePolygon(selectedZone).length < 3 ? (
         <p className="property-canvas-hint">Click at least three points</p>
       ) : null}
       <div className="property-icons">

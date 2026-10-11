@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Undo2 } from "lucide-react";
+import { Sparkles, Undo2 } from "lucide-react";
 import { appUrl, fetch } from "../shared/api.js";
 import { useAppEvents } from "../shared/events.js";
 import { useRuntimeState } from "../shared/runtimeState.jsx";
@@ -48,6 +48,10 @@ export function PropertyPage({ canEdit = false }) {
   const prefilledRef = useRef(false);
   const locationSyncRef = useRef("");
   const [pointHistory, setPointHistory] = useState({});
+  const [proposal, setProposal] = useState(null);
+  const [conformingKey, setConformingKey] = useState("");
+  const proposalRef = useRef(null);
+  const proposalDragRef = useRef(false);
   const serverLayout = JSON.stringify(appConfig?.property ? {
     cameras: appConfig.property.cameras || [],
     zones: appConfig.property.zones || [],
@@ -177,6 +181,10 @@ export function PropertyPage({ canEdit = false }) {
   }
 
   async function commitLayout() {
+    if (proposalDragRef.current) {
+      proposalDragRef.current = false;
+      return;
+    }
     try {
       await saveLayout(layoutRef.current);
       setError("");
@@ -195,12 +203,31 @@ export function PropertyPage({ canEdit = false }) {
   }
 
   function changeZone(key, patch) {
+    if (proposalRef.current?.key === key && Object.hasOwn(patch, "points")) {
+      proposalDragRef.current = true;
+      const next = { key, points: patch.points };
+      proposalRef.current = next;
+      setProposal(next);
+      return;
+    }
     updateLayout((current) => ({
       ...current,
       zones: current.zones.map((zone) => (
         zoneActivityKey(zone.camera_id, zone.zone_name) === key ? { ...zone, ...patch } : zone
       )),
     }));
+  }
+
+  function clearProposal() {
+    proposalRef.current = null;
+    setProposal(null);
+  }
+
+  function selectItem(next) {
+    setSelected((current) => {
+      if (current?.kind !== next?.kind || current?.id !== next?.id) clearProposal();
+      return next;
+    });
   }
 
   async function downloadImage(event) {
@@ -365,6 +392,61 @@ export function PropertyPage({ canEdit = false }) {
     void saveLayout(next).catch((saveError) => setError(saveError.message));
   }
 
+  async function conformZone(cameraId, zoneName) {
+    const key = zoneActivityKey(cameraId, zoneName);
+    const zone = layoutRef.current.zones.find((item) => zoneActivityKey(item.camera_id, item.zone_name) === key);
+    const points = zone?.points || [];
+    if (points.length < 3) {
+      setError("Add at least three points before conforming this zone.");
+      return;
+    }
+    setConformingKey(key);
+    setError("");
+    try {
+      const response = await fetch("/api/property/zones/conform", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ camera_id: cameraId, zone_name: zoneName, points }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(typeof payload.detail === "string" ? payload.detail : "Could not conform this zone");
+      }
+      const next = { key, points: payload.points || [] };
+      proposalRef.current = next;
+      setProposal(next);
+    } catch (conformError) {
+      setError(conformError.message);
+    } finally {
+      setConformingKey("");
+    }
+  }
+
+  async function acceptProposal() {
+    const pending = proposalRef.current;
+    if (!pending) return;
+    const previous = layoutRef.current;
+    const next = {
+      ...previous,
+      zones: previous.zones.map((zone) => (
+        zoneActivityKey(zone.camera_id, zone.zone_name) === pending.key
+          ? { ...zone, points: pending.points.map((point) => ({ x: point.x, y: point.y })) }
+          : zone
+      )),
+    };
+    rememberLayout(next);
+    try {
+      await saveLayout(next);
+    } catch (saveError) {
+      rememberLayout(previous);
+      setError(saveError.message);
+      return;
+    }
+    setPointHistory((current) => ({ ...current, [pending.key]: [] }));
+    clearProposal();
+    setError("");
+  }
+
   async function saveLocation() {
     if (!canEdit) return;
     const lat = latitude.trim() === "" ? null : Number(latitude);
@@ -401,6 +483,7 @@ export function PropertyPage({ canEdit = false }) {
   }
 
   function chooseSelection(next) {
+    clearProposal();
     setSelected((current) => (
       current?.kind === next.kind && current.id === next.id ? null : next
     ));
@@ -417,6 +500,7 @@ export function PropertyPage({ canEdit = false }) {
 
   function removeZone(cameraId, zoneName) {
     const key = zoneActivityKey(cameraId, zoneName);
+    if (proposalRef.current?.key === key) clearProposal();
     setSelected((current) => (current?.kind === "zone" && current.id === key ? null : current));
     const next = rememberLayout({
       ...layoutRef.current,
@@ -426,13 +510,17 @@ export function PropertyPage({ canEdit = false }) {
   }
 
   const canvasZones = layout.zones.map((zone) => {
+    const key = zoneActivityKey(zone.camera_id, zone.zone_name);
     const presentation = overlayPresentation(zone, configuredZones);
-    const activity = highlights[zoneActivityKey(zone.camera_id, zone.zone_name)];
+    const activity = highlights[key];
     const opacity = activity ? highlightOpacity(activity.detectedAt, now) : 0;
     const icons = [...new Set((activity?.classes || []).map(detectionIcon))];
+    const preview = proposal?.key === key;
     return {
       ...zone,
-      key: zoneActivityKey(zone.camera_id, zone.zone_name),
+      key,
+      points: preview ? proposal.points : zone.points,
+      preview,
       ...presentation,
       opacity,
       icons,
@@ -462,7 +550,8 @@ export function PropertyPage({ canEdit = false }) {
               showCameras={showCameras}
               showZones={showZones}
               selected={selected}
-              onSelect={setSelected}
+              reviewing={Boolean(proposal)}
+              onSelect={selectItem}
               onShowCameras={setShowCameras}
               onShowZones={setShowZones}
               onChangeCamera={changeCamera}
@@ -575,10 +664,32 @@ export function PropertyPage({ canEdit = false }) {
                       <input type="checkbox" checked={notifications} disabled={!canEdit} onChange={(event) => void toggleZoneNotifications(zone.cameraId, zone.zoneName, event.target.checked)} />
                       Notifications
                     </label>
-                    <button type="button" className="property-undo" onClick={() => undoZonePoint(zoneKey)} disabled={!canEdit || !(pointHistory[zoneKey]?.length)}>
-                      <Undo2 size={15} /> Undo Point
-                    </button>
-                    <p className="property-hint">Click the photo to add points in order. Drag a point to move it.</p>
+                    {proposal?.key === zoneKey ? (
+                      <>
+                        <div className="property-card-actions">
+                          <button type="button" className="property-undo" onClick={() => void acceptProposal()}>Accept outline</button>
+                          <button type="button" className="property-undo" onClick={clearProposal}>Discard</button>
+                        </div>
+                        <p className="property-hint">This outline is not saved yet. Drag a point to adjust it, then accept.</p>
+                      </>
+                    ) : (
+                      <>
+                        <div className="property-card-actions">
+                          <button
+                            type="button"
+                            className="property-undo"
+                            onClick={() => void conformZone(zone.cameraId, zone.zoneName)}
+                            disabled={!canEdit || !image || Boolean(conformingKey) || (layout.zones.find((item) => item.camera_id === zone.cameraId && item.zone_name === zone.zoneName)?.points?.length || 0) < 3}
+                          >
+                            <Sparkles size={15} /> {conformingKey === zoneKey ? "Conforming…" : "Conform"}
+                          </button>
+                          <button type="button" className="property-undo" onClick={() => undoZonePoint(zoneKey)} disabled={!canEdit || !(pointHistory[zoneKey]?.length)}>
+                            <Undo2 size={15} /> Undo Point
+                          </button>
+                        </div>
+                        <p className="property-hint">Click the photo to add points in order. Drag a point to move it.</p>
+                      </>
+                    )}
                   </>
                 ) : null}
               </article>
