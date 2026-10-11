@@ -9,8 +9,11 @@ import {
   HIGHLIGHT_FADE_MS,
   HIGHLIGHT_PEAK_OPACITY,
   overlayPresentation,
+  panPropertyView,
+  PROPERTY_ZOOM_MAX,
   pruneHighlights,
   rotationFromPointer,
+  zoomPropertyView,
 } from "../src/property/propertyView.mjs";
 
 const now = Date.parse("2026-10-11T12:00:00Z");
@@ -71,5 +74,21 @@ assert.equal(aim.range_m, 20);
 const east = aimFromPointer({ x: 0.5, y: 0.5 }, { x: 0.7, y: 0.5 }, 100, 100);
 assert.ok(Math.abs(east.heading_deg - 90) < 0.001);
 assert.equal(rotationFromPointer({ x: 0.5, y: 0.5 }, { x: 0.7, y: 0.5 }), 90);
+
+const frame = { width: 400, height: 400 };
+const centered = zoomPropertyView({ scale: 1, x: 0, y: 0 }, frame, { x: 0, y: 0 }, 2);
+assert.equal(centered.scale, 2);
+assert.equal(centered.x, 0);
+assert.equal(centered.y, 0);
+const towardRight = zoomPropertyView({ scale: 1, x: 0, y: 0 }, frame, { x: 100, y: 0 }, 2);
+assert.equal(towardRight.scale, 2);
+assert.equal(towardRight.x, -100);
+assert.equal(zoomPropertyView(towardRight, frame, { x: 100, y: 0 }, 0.5).scale, 1);
+assert.deepEqual(zoomPropertyView({ scale: 1, x: 40, y: 20 }, frame, { x: 0, y: 0 }, 0.5), { scale: 1, x: 0, y: 0 });
+assert.equal(zoomPropertyView({ scale: 1, x: 0, y: 0 }, frame, { x: 0, y: 0 }, 100).scale, PROPERTY_ZOOM_MAX);
+const shoved = panPropertyView({ scale: 2, x: 0, y: 0 }, frame, -1000, 40);
+assert.equal(shoved.x, -200);
+assert.equal(shoved.y, 40);
+assert.deepEqual(panPropertyView({ scale: 1, x: 0, y: 0 }, frame, 30, 30), { scale: 1, x: 0, y: 0 });
 
 console.log("property view tests passed");

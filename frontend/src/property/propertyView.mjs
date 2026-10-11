@@ -1,5 +1,46 @@
 export const HIGHLIGHT_FADE_MS = 90_000;
 export const HIGHLIGHT_PEAK_OPACITY = 0.72;
+export const PROPERTY_ZOOM_MIN = 1;
+export const PROPERTY_ZOOM_MAX = 8;
+export const PROPERTY_ZOOM_FACTOR = 1.25;
+
+export function propertyViewAtRest() {
+  return { scale: 1, x: 0, y: 0 };
+}
+
+export function clampPropertyView(view, frame) {
+  const scale = Math.max(PROPERTY_ZOOM_MIN, Math.min(PROPERTY_ZOOM_MAX, Number(view?.scale) || 1));
+  if (scale <= 1) return propertyViewAtRest();
+  const limitX = (Number(frame?.width) || 0) * (scale - 1) / 2;
+  const limitY = (Number(frame?.height) || 0) * (scale - 1) / 2;
+  return {
+    scale,
+    x: Math.max(-limitX, Math.min(limitX, Number(view?.x) || 0)),
+    y: Math.max(-limitY, Math.min(limitY, Number(view?.y) || 0)),
+  };
+}
+
+export function zoomPropertyView(view, frame, anchor, factor) {
+  const currentScale = Number(view?.scale) > 0 ? Number(view.scale) : 1;
+  const nextScale = Math.max(PROPERTY_ZOOM_MIN, Math.min(PROPERTY_ZOOM_MAX, currentScale * factor));
+  if (nextScale <= 1) return propertyViewAtRest();
+  const scaleRatio = nextScale / currentScale;
+  const anchorX = Number(anchor?.x) || 0;
+  const anchorY = Number(anchor?.y) || 0;
+  return clampPropertyView({
+    scale: nextScale,
+    x: anchorX - (anchorX - (Number(view?.x) || 0)) * scaleRatio,
+    y: anchorY - (anchorY - (Number(view?.y) || 0)) * scaleRatio,
+  }, frame);
+}
+
+export function panPropertyView(view, frame, dx, dy) {
+  return clampPropertyView({
+    scale: view?.scale,
+    x: (Number(view?.x) || 0) + dx,
+    y: (Number(view?.y) || 0) + dy,
+  }, frame);
+}
 
 const PERSON = new Set(["person", "people", "human", "pedestrian"]);
 const VEHICLE = new Set(["car", "vehicle", "truck", "bus", "suv", "van", "motorcycle", "motorbike"]);
