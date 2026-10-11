@@ -36,8 +36,24 @@ _NAIP_QUERY = "https://imagery.nationalmap.gov/arcgis/rest/services/USGSNAIPImag
 _NAIP_EXPORT = "https://imagery.nationalmap.gov/arcgis/rest/services/USGSNAIPImagery/ImageServer/exportImage"
 _ESRI_ATTRIBUTION = "Esri, Maxar, Earthstar Geographics, and the GIS User Community"
 _NAIP_ATTRIBUTION = "USGS National Agriculture Imagery Program"
-_DATE_FIELDS = ("SRC_DATE", "Date", "SOURCE_DATE", "AcquisitionDate", "acquisition_date", "SRC_DATE2")
-_RESOLUTION_FIELDS = ("SRC_RES", "Resolution", "RESOLUTION", "LowPS", "HighPS")
+_DATE_FIELDS = (
+    "DATE (YYYYMMDD)",
+    "SRC_DATE",
+    "Date",
+    "SOURCE_DATE",
+    "AcquisitionDate",
+    "acquisition_date",
+    "SRC_DATE2",
+)
+_RESOLUTION_FIELDS = (
+    "RESOLUTION (M)",
+    "SRC_RES",
+    "Resolution",
+    "RESOLUTION",
+    "resolution_value",
+    "LowPS",
+    "HighPS",
+)
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -151,6 +167,23 @@ def web_mercator(latitude: float, longitude: float) -> tuple[float, float]:
     return x, y
 
 
+def export_pixels(bbox: tuple[float, float, float, float], resolution_m: float | None) -> int:
+    """Pixel count Esri will actually render for this box.
+
+    World Imagery returns an empty image, and then HTTP 500 for ``f=image``,
+    when the request is finer than the source sample distance. A 120 m box at
+    1024 px is about 0.14 m/px, which is finer than the 0.15 m imagery covering
+    much of the US.
+    """
+    span = max(bbox[2] - bbox[0], bbox[3] - bbox[1], 1.0)
+    if resolution_m is not None and 0.05 <= resolution_m <= 5:
+        ground = resolution_m
+    else:
+        ground = 0.30
+    pixels = int(span / (ground * 1.08))
+    return max(64, min(EXPORT_PIXELS, pixels))
+
+
 def mercator_bbox(
     latitude: float,
     longitude: float,
@@ -182,7 +215,7 @@ def parse_esri_identify(payload: object, latitude: float) -> tuple[datetime | No
             continue
         captured = _first_date(attributes)
         resolution = _first_resolution(attributes, latitude)
-        name = _text_attribute(attributes, ("NICE_NAME", "Source", "DATA_SRC"))
+        name = _text_attribute(attributes, ("NICE_NAME", "Source", "SOURCE", "SOURCE_INFO", "DATA_SRC"))
         if resolution is not None and (best_resolution is None or resolution < best_resolution):
             best_resolution = resolution
             if captured is not None:
@@ -210,6 +243,7 @@ def parse_naip_query(payload: object, latitude: float) -> tuple[datetime | None,
         attributes = feature.get("attributes")
         if not isinstance(attributes, dict):
             continue
+        attributes = _naip_attributes(attributes)
         captured = _first_date(attributes)
         resolution = _first_resolution(attributes, latitude)
         if resolution is None:
@@ -395,7 +429,7 @@ def _candidates(client: ImageryHttp, latitude: float, longitude: float, bbox: tu
             captured,
             resolution,
             attribution[:300],
-            _export_url(_ESRI_EXPORT, bbox),
+            _export_url(_ESRI_EXPORT, bbox, None if resolution >= 5 else resolution),
         ))
     naip_payload = _optional_json(client, _naip_query_url(longitude, latitude))
     if naip_payload is not None:
@@ -406,7 +440,7 @@ def _candidates(client: ImageryHttp, latitude: float, longitude: float, bbox: tu
                 captured,
                 resolution,
                 _NAIP_ATTRIBUTION,
-                _export_url(_NAIP_EXPORT, bbox),
+                _export_url(_NAIP_EXPORT, bbox, resolution),
             ))
     return found
 
@@ -447,21 +481,33 @@ def _naip_query_url(longitude: float, latitude: float) -> str:
         "geometryType": "esriGeometryPoint",
         "inSR": "4326",
         "spatialRel": "esriSpatialRelIntersects",
-        "outFields": "AcquisitionDate,LowPS,HighPS,Name,SRC_DATE,SRC_RES",
+        "outFields": "acquisition_date,resolution_value,resolution_units,Year,Name",
         "returnGeometry": "false",
         "f": "json",
     })
 
 
-def _export_url(base: str, bbox: tuple[float, float, float, float]) -> str:
+def _export_url(base: str, bbox: tuple[float, float, float, float], resolution_m: float | None) -> str:
+    pixels = export_pixels(bbox, resolution_m)
     return base + "?" + urlencode({
         "bbox": ",".join(f"{value:.3f}" for value in bbox),
         "bboxSR": "3857",
         "imageSR": "3857",
-        "size": f"{EXPORT_PIXELS},{EXPORT_PIXELS}",
+        "size": f"{pixels},{pixels}",
         "format": "jpg",
         "f": "image",
     })
+
+
+def _naip_attributes(attributes: dict) -> dict:
+    normalized = dict(attributes)
+    units = str(attributes.get("resolution_units") or "").strip().upper()
+    value = attributes.get("resolution_value")
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and units in {"FOOT", "FEET", "FT", "USFT"}:
+        normalized["resolution_value"] = float(value) * 0.3048
+    if attributes.get("acquisition_date") in (None, "") and attributes.get("Year") not in (None, ""):
+        normalized["acquisition_date"] = f"{attributes['Year']}-01-01"
+    return normalized
 
 
 def _read(url: str, limit: int, accept: str) -> bytes:

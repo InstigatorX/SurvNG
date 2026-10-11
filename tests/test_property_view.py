@@ -21,6 +21,7 @@ from survng.app.property_imagery import (
     ImageryCandidate,
     fetch_property_image,
     mercator_bbox,
+    export_pixels,
     parse_esri_identify,
     parse_geocode,
     parse_naip_query,
@@ -76,6 +77,19 @@ def test_geocode_and_provider_metadata_parsing():
     assert resolution == 0.3
     assert captured == datetime(2024, 5, 2, tzinfo=timezone.utc)
     assert credit == "Maxar"
+    live_date, live_resolution, live_credit = parse_esri_identify({
+        "results": [{
+            "attributes": {
+                "DATE (YYYYMMDD)": "20250201",
+                "RESOLUTION (M)": "0.1524",
+                "SRC_DATE2": "2/1/2025",
+                "SOURCE": "NC Collaboratory at UNCCH",
+            },
+        }],
+    }, 35.45)
+    assert live_resolution == pytest.approx(0.1524)
+    assert live_date == datetime(2025, 2, 1, tzinfo=timezone.utc)
+    assert live_credit == "NC Collaboratory at UNCCH"
     assert parse_naip_query({"features": []}, 40.0) == (None, None, "")
     naip_date, naip_resolution, _credit = parse_naip_query({
         "features": [
@@ -85,6 +99,32 @@ def test_geocode_and_provider_metadata_parsing():
     }, 40.0)
     assert naip_resolution == 0.6
     assert naip_date is not None and naip_date.year == 2024
+    usgs_date, usgs_resolution, _credit = parse_naip_query({
+        "features": [{
+            "attributes": {
+                "acquisition_date": 1663200000000,
+                "resolution_value": 0.6,
+                "resolution_units": "METER",
+                "Year": 2022,
+            },
+        }],
+    }, 35.45)
+    assert usgs_resolution == 0.6
+    assert usgs_date is not None and usgs_date.year == 2022
+    foot_date, foot_resolution, _credit = parse_naip_query({
+        "features": [{"attributes": {"resolution_value": 2.0, "resolution_units": "FOOT", "Year": 2021}}],
+    }, 35.45)
+    assert foot_resolution == pytest.approx(0.6096)
+    assert foot_date == datetime(2021, 1, 1, tzinfo=timezone.utc)
+
+
+def test_export_stays_coarser_than_the_source_sample():
+    bbox = mercator_bbox(35.451111, -82.560556, 120, 120)
+    pixels = export_pixels(bbox, 0.1524)
+    span = bbox[2] - bbox[0]
+    assert pixels < 1024
+    assert span / pixels > 0.1524
+    assert export_pixels(bbox, None) >= 64
 
 
 def test_mercator_box_matches_ground_meters_at_the_equator():
