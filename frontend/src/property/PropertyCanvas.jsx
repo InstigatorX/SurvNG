@@ -22,9 +22,7 @@ import {
   PROPERTY_ZOOM_MAX,
   PROPERTY_ZOOM_MIN,
   propertyViewAtRest,
-  removeZonePoint,
   stackPropertyOverlays,
-  translateZonePoints,
   zoneCentroid,
   zonePolygon,
   zoomPropertyView,
@@ -58,6 +56,7 @@ export function PropertyCanvas({
   onShowZones,
   onChangeCamera,
   onChangeZone,
+  onAddPoint,
   onGestureEnd,
 }) {
   const stageRef = useRef(null);
@@ -138,7 +137,7 @@ export function PropertyCanvas({
     if (dragRef.current?.kind === "pinch") return;
     event.stopPropagation();
     if (drag.kind === "move-camera" || drag.kind === "aim-camera") onSelect?.({ kind: "camera", id: drag.cameraId });
-    if (drag.kind === "move-zone" || drag.kind === "move-point") onSelect?.({ kind: "zone", id: drag.key });
+    if (drag.kind === "move-point") onSelect?.({ kind: "zone", id: drag.key });
     if (drag.kind !== "pan" && !canEdit) return;
     dragRef.current = { ...drag, origin: pointer(event), lastX: event.clientX, lastY: event.clientY };
     try {
@@ -164,10 +163,6 @@ export function PropertyCanvas({
       onChangeCamera(drag.cameraId, { x: clampUnit(point.x), y: clampUnit(point.y) });
     } else if (drag.kind === "aim-camera") {
       onChangeCamera(drag.cameraId, aimFromPointer(drag.anchor, point, widthM, heightM));
-    } else if (drag.kind === "move-zone") {
-      onChangeZone(drag.key, {
-        points: translateZonePoints(drag.points, point.x - drag.origin.x, point.y - drag.origin.y),
-      });
     } else if (drag.kind === "move-point") {
       onChangeZone(drag.key, { points: moveZonePoint(drag.points, drag.index, point) });
     }
@@ -186,23 +181,22 @@ export function PropertyCanvas({
   const visibleZones = showZones ? zones : [];
   const stack = stackPropertyOverlays(visibleCameras, visibleZones, selected);
 
-  function addZonePoint(event, zone, points) {
-    event.stopPropagation();
-    event.preventDefault();
-    if (!canEdit) return;
-    const inserted = insertZonePointWithIndex(points, pointer(event));
-    onSelect?.({ kind: "zone", id: zone.key });
-    onChangeZone(zone.key, { points: inserted.points });
-    onGestureEnd();
+  function addSelectedPoint(event) {
+    if (!canEdit || selected?.kind !== "zone" || event.target !== event.currentTarget) return false;
+    const zone = visibleZones.find((item) => item.key === selected.id);
+    if (!zone || zonePolygon(zone).length >= 32) return false;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const inserted = insertZonePointWithIndex(zonePolygon(zone), pointer(event), {
+      x: rect.width,
+      y: rect.height,
+    });
+    onAddPoint?.(zone.key, inserted.points, inserted.insertionIndex);
+    return true;
   }
 
-  function deleteZonePoint(event, zone, points, index) {
-    event.stopPropagation();
-    event.preventDefault();
-    if (!canEdit || points.length <= 3) return;
-    onChangeZone(zone.key, { points: removeZonePoint(points, index) });
-    onGestureEnd();
-  }
+  const selectedZone = selected?.kind === "zone"
+    ? visibleZones.find((zone) => zone.key === selected.id)
+    : null;
 
   return (
     <div className={`property-stage${zoomed ? " is-zoomed" : ""}`} ref={stageRef}>
@@ -221,6 +215,7 @@ export function PropertyCanvas({
         preserveAspectRatio="none"
         onPointerDown={(event) => {
           if (dragRef.current?.kind === "pinch") return;
+          if (addSelectedPoint(event)) return;
           if (event.target !== event.currentTarget || !zoomed) return;
           beginDrag(event, { kind: "pan" });
         }}
@@ -272,39 +267,52 @@ export function PropertyCanvas({
           const points = zonePolygon(zone);
           const opacity = zone.opacity || 0;
           const active = selected?.kind === "zone" && selected.id === zone.key;
+          const outline = pointList(points);
           return (
             <g key={`zone:${zone.key}`}>
-              <polygon
-                points={pointList(points)}
-                fill={zone.color}
-                fillOpacity={Math.max(opacity, zone.stale ? 0.08 : 0.16)}
-                stroke={zone.color}
-                strokeWidth={0.004 * mark}
-                strokeDasharray={zone.stale ? `${0.02 * mark} ${0.012 * mark}` : undefined}
-                onPointerDown={(event) => beginDrag(event, { kind: "move-zone", key: zone.key, points })}
-                onDoubleClick={(event) => addZonePoint(event, zone, points)}
-              >
-                <title>{zone.label}. Drag to move. Double-click the outline to add a point.</title>
-              </polygon>
+              {points.length >= 3 ? (
+                <polygon
+                  points={outline}
+                  fill={zone.color}
+                  fillOpacity={Math.max(opacity, zone.stale ? 0.08 : 0.16)}
+                  stroke={zone.color}
+                  strokeWidth={0.004 * mark}
+                  strokeDasharray={zone.stale ? `${0.02 * mark} ${0.012 * mark}` : undefined}
+                  pointerEvents="none"
+                >
+                  <title>{zone.label}</title>
+                </polygon>
+              ) : null}
+              {points.length === 2 ? (
+                <polyline
+                  points={outline}
+                  fill="none"
+                  stroke={zone.color}
+                  strokeWidth={0.004 * mark}
+                  pointerEvents="none"
+                />
+              ) : null}
               {canEdit && active ? points.map((point, index) => (
                 <circle
                   key={index}
                   cx={point.x}
                   cy={point.y}
-                  r={0.006 * mark}
+                  r={0.008 * mark}
                   fill="#ffffff"
                   stroke={zone.color}
                   strokeWidth={0.002 * mark}
                   onPointerDown={(event) => beginDrag(event, { kind: "move-point", key: zone.key, index, points })}
-                  onDoubleClick={(event) => deleteZonePoint(event, zone, points, index)}
                 >
-                  <title>{points.length > 3 ? "Drag point. Double-click to remove." : "Drag point."}</title>
+                  <title>Drag point</title>
                 </circle>
               )) : null}
             </g>
           );
         })}
       </svg>
+      {canEdit && selectedZone && zonePolygon(selectedZone).length < 3 ? (
+        <p className="property-canvas-hint">Click at least three points</p>
+      ) : null}
       <div className="property-icons">
         {visibleZones.filter((zone) => zone.opacity > 0 && zone.icons?.length).map((zone) => {
           const center = zoneCentroid(zonePolygon(zone));

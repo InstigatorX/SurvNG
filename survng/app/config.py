@@ -1171,7 +1171,7 @@ class PropertyZoneOverlay(BaseModel):
 
     camera_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     zone_name: str = Field(min_length=1, max_length=128)
-    points: list[ZonePoint] = Field(min_length=3, max_length=32)
+    points: list[ZonePoint] = Field(default_factory=list, max_length=32)
 
     @model_validator(mode="before")
     @classmethod
@@ -1207,6 +1207,10 @@ class PropertyZoneOverlay(BaseModel):
 
 class PropertyViewConfig(BaseModel):
     image: PropertyImageConfig | None = None
+    address: str = Field(default="", max_length=300)
+    latitude: float | None = Field(default=None, ge=-85, le=85, allow_inf_nan=False)
+    longitude: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
+    width_m: float | None = Field(default=None, ge=20, le=2000, allow_inf_nan=False)
     cameras: list[PropertyCameraPlacement] = Field(default_factory=list)
     zones: list[PropertyZoneOverlay] = Field(default_factory=list)
 

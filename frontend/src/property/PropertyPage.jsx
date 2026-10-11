@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Undo2 } from "lucide-react";
 import { appUrl, fetch } from "../shared/api.js";
 import { useAppEvents } from "../shared/events.js";
 import { useRuntimeState } from "../shared/runtimeState.jsx";
@@ -7,10 +8,12 @@ import {
   applyDetection,
   configuredZoneRows,
   detectionIcon,
-  defaultZonePoints,
   highlightOpacity,
   overlayPresentation,
+  propertyLocationFields,
   pruneHighlights,
+  recordZonePointInsertion,
+  undoZonePointInsertion,
   zoneActivityKey,
 } from "./propertyView.mjs";
 
@@ -43,6 +46,8 @@ export function PropertyPage({ canEdit = false }) {
   const dirtyRef = useRef(false);
   const layoutRef = useRef(layout);
   const prefilledRef = useRef(false);
+  const locationSyncRef = useRef("");
+  const [pointHistory, setPointHistory] = useState({});
   const serverLayout = JSON.stringify(appConfig?.property ? {
     cameras: appConfig.property.cameras || [],
     zones: appConfig.property.zones || [],
@@ -55,14 +60,27 @@ export function PropertyPage({ canEdit = false }) {
     setLayout(layoutRef.current);
   }, [serverLayout]);
 
+  const locationFields = propertyLocationFields(appConfig);
+  const locationSignature = `${locationFields.source}|${locationFields.latitude}|${locationFields.longitude}|${locationFields.address}|${locationFields.widthM}`;
   useEffect(() => {
-    if (prefilledRef.current || latitude || longitude) return;
-    const weather = appConfig?.weather;
-    if (weather?.latitude == null || weather?.longitude == null) return;
-    setLatitude(numberOrBlank(weather.latitude));
-    setLongitude(numberOrBlank(weather.longitude));
-    prefilledRef.current = true;
-  }, [appConfig, latitude, longitude]);
+    if (!locationFields.source) return undefined;
+    if (locationFields.source === "weather") {
+      if (prefilledRef.current) return undefined;
+      prefilledRef.current = true;
+    } else if (locationSyncRef.current === locationSignature) {
+      return undefined;
+    }
+    const active = document.activeElement;
+    if (active && active.closest("[data-property-location]")) return undefined;
+    locationSyncRef.current = locationSignature;
+    setLatitude(numberOrBlank(locationFields.latitude));
+    setLongitude(numberOrBlank(locationFields.longitude));
+    if (locationFields.source !== "weather") {
+      setAddress(locationFields.address || "");
+      setWidthM(numberOrBlank(locationFields.widthM) || "120");
+    }
+    return undefined;
+  }, [locationFields, locationSignature]);
 
   useEffect(() => {
     let cancelled = false;
@@ -311,11 +329,75 @@ export function PropertyPage({ canEdit = false }) {
       zones: [...layoutRef.current.zones, {
         camera_id: zone.cameraId,
         zone_name: zone.zoneName,
-        points: defaultZonePoints(),
+        points: [],
       }],
     });
     setSelected({ kind: "zone", id: zoneActivityKey(zone.cameraId, zone.zoneName) });
     void saveLayout(next).catch((saveError) => setError(saveError.message));
+  }
+
+  function replaceZonePoints(key, points) {
+    const next = {
+      ...layoutRef.current,
+      zones: layoutRef.current.zones.map((zone) => (
+        zoneActivityKey(zone.camera_id, zone.zone_name) === key ? { ...zone, points } : zone
+      )),
+    };
+    rememberLayout(next);
+    return next;
+  }
+
+  function addZonePoint(key, points, insertionIndex) {
+    setPointHistory((current) => ({
+      ...current,
+      [key]: recordZonePointInsertion(current[key], insertionIndex),
+    }));
+    const next = replaceZonePoints(key, points);
+    void saveLayout(next).catch((saveError) => setError(saveError.message));
+  }
+
+  function undoZonePoint(key) {
+    const zone = layoutRef.current.zones.find((item) => zoneActivityKey(item.camera_id, item.zone_name) === key);
+    const undone = undoZonePointInsertion(zone?.points || [], pointHistory[key]);
+    setPointHistory((current) => ({ ...current, [key]: undone.history }));
+    if (!zone || undone.points === zone.points) return;
+    const next = replaceZonePoints(key, undone.points);
+    void saveLayout(next).catch((saveError) => setError(saveError.message));
+  }
+
+  async function saveLocation() {
+    if (!canEdit) return;
+    const lat = latitude.trim() === "" ? null : Number(latitude);
+    const lon = longitude.trim() === "" ? null : Number(longitude);
+    if (lat === null || lon === null || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    const saved = propertyLocationFields(appConfig);
+    const width = Number(widthM) || 120;
+    if (
+      saved.source !== "weather"
+      && saved.source !== ""
+      && Number(saved.latitude) === lat
+      && Number(saved.longitude) === lon
+      && (saved.address || "") === address.trim()
+      && Number(saved.widthM) === width
+    ) return;
+    const response = await fetch("/api/property/location", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        address: address.trim(),
+        latitude: lat,
+        longitude: lon,
+        width_m: width,
+        height_m: width,
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      setError(payload.detail || "Could not save latitude and longitude");
+      return;
+    }
+    setError("");
+    if (typeof refresh === "function") await refresh();
   }
 
   function chooseSelection(next) {
@@ -385,6 +467,7 @@ export function PropertyPage({ canEdit = false }) {
               onShowZones={setShowZones}
               onChangeCamera={changeCamera}
               onChangeZone={changeZone}
+              onAddPoint={addZonePoint}
               onGestureEnd={() => void commitLayout()}
             />
             <p className="property-meta">
@@ -404,18 +487,18 @@ export function PropertyPage({ canEdit = false }) {
       <aside className="property-panel">
         <section>
           <h2>Aerial photo</h2>
-          <form onSubmit={downloadImage}>
+          <form onSubmit={downloadImage} data-property-location="">
             <label>Address
-              <input value={address} onChange={(event) => setAddress(event.target.value)} disabled={!canEdit || busy} placeholder="123 Main St, Springfield" />
+              <input value={address} onChange={(event) => setAddress(event.target.value)} onBlur={() => void saveLocation()} disabled={!canEdit || busy} placeholder="123 Main St, Springfield" />
             </label>
             <label>Latitude
-              <input value={latitude} onChange={(event) => setLatitude(event.target.value)} disabled={!canEdit || busy} inputMode="decimal" />
+              <input value={latitude} onChange={(event) => setLatitude(event.target.value)} onBlur={() => void saveLocation()} disabled={!canEdit || busy} inputMode="decimal" />
             </label>
             <label>Longitude
-              <input value={longitude} onChange={(event) => setLongitude(event.target.value)} disabled={!canEdit || busy} inputMode="decimal" />
+              <input value={longitude} onChange={(event) => setLongitude(event.target.value)} onBlur={() => void saveLocation()} disabled={!canEdit || busy} inputMode="decimal" />
             </label>
             <label>Width and height (meters)
-              <input value={widthM} onChange={(event) => setWidthM(event.target.value)} disabled={!canEdit || busy} inputMode="decimal" />
+              <input value={widthM} onChange={(event) => setWidthM(event.target.value)} onBlur={() => void saveLocation()} disabled={!canEdit || busy} inputMode="decimal" />
             </label>
             <button type="submit" disabled={!canEdit || busy}>{busy ? "Downloading…" : "Download image"}</button>
           </form>
@@ -492,7 +575,10 @@ export function PropertyPage({ canEdit = false }) {
                       <input type="checkbox" checked={notifications} disabled={!canEdit} onChange={(event) => void toggleZoneNotifications(zone.cameraId, zone.zoneName, event.target.checked)} />
                       Notifications
                     </label>
-                    <p className="property-hint">Drag the points to fit the property. Double-click the outline to add a point, or a point to remove it.</p>
+                    <button type="button" className="property-undo" onClick={() => undoZonePoint(zoneKey)} disabled={!canEdit || !(pointHistory[zoneKey]?.length)}>
+                      <Undo2 size={15} /> Undo Point
+                    </button>
+                    <p className="property-hint">Click the photo to add points in order. Drag a point to move it.</p>
                   </>
                 ) : null}
               </article>

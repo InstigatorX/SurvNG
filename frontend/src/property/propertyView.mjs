@@ -177,7 +177,7 @@ export function rectangleZonePoints(zone) {
 }
 
 export function zonePolygon(zone) {
-  if (Array.isArray(zone?.points) && zone.points.length >= 3) {
+  if (Array.isArray(zone?.points)) {
     return zone.points.map((point) => ({ x: Number(point.x), y: Number(point.y) }));
   }
   return rectangleZonePoints(zone);
@@ -214,13 +214,56 @@ export function removeZonePoint(points, index) {
   return list.filter((_, itemIndex) => itemIndex !== index).map((point) => ({ x: point.x, y: point.y }));
 }
 
-export function defaultZonePoints() {
-  return [
-    { x: 0.42, y: 0.52 },
-    { x: 0.64, y: 0.52 },
-    { x: 0.64, y: 0.7 },
-    { x: 0.42, y: 0.7 },
-  ];
+export function recordZonePointInsertion(history, insertionIndex) {
+  const shifted = (history || []).map((index) => (index >= insertionIndex ? index + 1 : index));
+  return [...shifted, insertionIndex];
+}
+
+export function undoZonePointInsertion(points, history) {
+  const list = Array.isArray(points) ? points : [];
+  const previous = Array.isArray(history) ? history : [];
+  const insertionIndex = previous.at(-1);
+  if (insertionIndex == null || insertionIndex >= list.length) {
+    return { points: list, history: previous };
+  }
+  return {
+    points: list.filter((_, index) => index !== insertionIndex),
+    history: previous.slice(0, -1).map((index) => (index > insertionIndex ? index - 1 : index)),
+  };
+}
+
+export function propertyLocationFields(appConfig) {
+  const property = appConfig?.property || {};
+  const image = property.image;
+  const weather = appConfig?.weather || {};
+  if (image && image.latitude != null && image.longitude != null) {
+    return {
+      source: "image",
+      address: image.address || "",
+      latitude: image.latitude,
+      longitude: image.longitude,
+      widthM: image.width_m,
+    };
+  }
+  if (property.latitude != null && property.longitude != null) {
+    return {
+      source: "property",
+      address: property.address || "",
+      latitude: property.latitude,
+      longitude: property.longitude,
+      widthM: property.width_m || 120,
+    };
+  }
+  if (weather.latitude != null && weather.longitude != null) {
+    return {
+      source: "weather",
+      address: "",
+      latitude: weather.latitude,
+      longitude: weather.longitude,
+      widthM: 120,
+    };
+  }
+  return { source: "", address: "", latitude: "", longitude: "", widthM: 120 };
 }
 
 export function stackPropertyOverlays(cameras, zones, selected) {

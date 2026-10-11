@@ -59,6 +59,14 @@ class PropertyLayoutRequest(BaseModel):
     zones: list[PropertyZoneOverlay] = Field(default_factory=list)
 
 
+class PropertyLocationRequest(BaseModel):
+    address: str = Field(default="", max_length=300)
+    latitude: float = Field(ge=-85, le=85, allow_inf_nan=False)
+    longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
+    width_m: float = Field(default=120, ge=20, le=2000, allow_inf_nan=False)
+    height_m: float = Field(default=120, ge=20, le=2000, allow_inf_nan=False)
+
+
 @dataclass(frozen=True, slots=True)
 class PropertyRouteDependencies:
     get_config: Callable[[], AppConfig]
@@ -126,6 +134,10 @@ def create_property_router(deps: PropertyRouteDependencies) -> APIRouter:
                 with deps.lock:
                     latest = deps.get_config().model_copy(deep=True)
                     latest.property.image = image
+                    latest.property.address = image.address
+                    latest.property.latitude = image.latitude
+                    latest.property.longitude = image.longitude
+                    latest.property.width_m = image.width_m
                     effective, result = deps.apply_config(latest, assign_ids=False)
             except Exception:
                 restore_property_image(storage_dir, previous_bytes)
@@ -148,6 +160,10 @@ def create_property_router(deps: PropertyRouteDependencies) -> APIRouter:
             try:
                 layout = PropertyViewConfig(
                     image=current.property.image,
+                    address=current.property.address,
+                    latitude=current.property.latitude,
+                    longitude=current.property.longitude,
+                    width_m=current.property.width_m,
                     cameras=body.cameras,
                     zones=body.zones,
                 )
@@ -161,6 +177,31 @@ def create_property_router(deps: PropertyRouteDependencies) -> APIRouter:
             "property": effective.property.model_dump(mode="json"),
             "camera_workers_restarted": bool(result.get("camera_workers_restarted")),
             "apply_mode": result.get("apply_mode"),
+        }
+
+    @router.put("/api/property/location")
+    def put_property_location(body: PropertyLocationRequest) -> dict:
+        with deps.lock:
+            current = deps.get_config()
+            next_config = current.model_copy(deep=True)
+            next_config.property.address = body.address.strip()
+            next_config.property.latitude = body.latitude
+            next_config.property.longitude = body.longitude
+            next_config.property.width_m = body.width_m
+            if next_config.property.image is not None:
+                next_config.property.image.address = body.address.strip()
+                next_config.property.image.latitude = body.latitude
+                next_config.property.image.longitude = body.longitude
+                next_config.property.image.width_m = body.width_m
+                next_config.property.image.height_m = body.height_m
+            effective, result = deps.apply_config(next_config, assign_ids=False)
+        return {
+            "ok": True,
+            "latitude": effective.property.latitude,
+            "longitude": effective.property.longitude,
+            "address": effective.property.address,
+            "width_m": effective.property.width_m,
+            "camera_workers_restarted": bool(result.get("camera_workers_restarted")),
         }
 
     @router.get("/api/property/fov")

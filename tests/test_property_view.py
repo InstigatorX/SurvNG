@@ -253,12 +253,12 @@ def test_property_zone_accepts_points_and_legacy_rectangles():
         "points": [{"x": 0.1, "y": 0.2}, {"x": 0.3, "y": 0.2}, {"x": 0.2, "y": 0.4}],
     })
     assert len(direct.points) == 3
-    with pytest.raises(ValidationError):
-        PropertyZoneOverlay.model_validate({
-            "camera_id": "gate",
-            "zone_name": "yard",
-            "points": [{"x": 0.1, "y": 0.2}, {"x": 0.3, "y": 0.2}],
-        })
+    empty = PropertyZoneOverlay.model_validate({
+        "camera_id": "gate",
+        "zone_name": "porch",
+        "points": [],
+    })
+    assert empty.points == []
 
 
 def test_property_routes_save_layout_without_reloading_workers(tmp_path: Path):
@@ -309,6 +309,10 @@ def test_property_routes_save_layout_without_reloading_workers(tmp_path: Path):
         assert body["camera_workers_restarted"] is False
         assert body["image"]["source"] == "esri"
         assert body["image"]["address"] == "House"
+        assert body["image"]["latitude"] == pytest.approx(41)
+        assert body["image"]["longitude"] == pytest.approx(-72)
+        assert config.property.latitude == pytest.approx(41)
+        assert config.property.longitude == pytest.approx(-72)
         assert client.get("/api/property/imagery").content.startswith(b"\xff\xd8\xff")
         layout = client.put("/api/property/layout", json={
             "cameras": [{
@@ -341,9 +345,23 @@ def test_property_routes_save_layout_without_reloading_workers(tmp_path: Path):
         activity = client.get("/api/property/activity").json()
         assert activity["events"][0]["zones"] == ["drive"]
         assert activity["events"][0]["classes"] == ["person"]
+        located = client.put("/api/property/location", json={
+            "address": "1 Road",
+            "latitude": 35.451111,
+            "longitude": -82.560556,
+            "width_m": 120,
+            "height_m": 120,
+        })
+        assert located.status_code == 200
+        assert located.json()["latitude"] == pytest.approx(35.451111)
+        assert located.json()["longitude"] == pytest.approx(-82.560556)
+        assert config.property.image.latitude == pytest.approx(35.451111)
+        assert config.property.image.longitude == pytest.approx(-82.560556)
+        assert layout.json()["property"]["latitude"] == pytest.approx(41)
 
     assert required_api_scope("GET", "/api/property/imagery") == "read"
     assert required_api_scope("GET", "/api/property/activity") == "read"
     assert required_api_scope("POST", "/api/property/imagery") == "admin"
     assert required_api_scope("PUT", "/api/property/layout") == "admin"
+    assert required_api_scope("PUT", "/api/property/location") == "admin"
     assert rank_imagery([]) == []

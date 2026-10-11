@@ -12,12 +12,15 @@ import {
   overlayPresentation,
   panPropertyView,
   PROPERTY_ZOOM_MAX,
+  propertyLocationFields,
   pruneHighlights,
+  recordZonePointInsertion,
   rectangleZonePoints,
   removeZonePoint,
   rotationFromPointer,
   stackPropertyOverlays,
   translateZonePoints,
+  undoZonePointInsertion,
   zoneCentroid,
   zoomPropertyView,
 } from "../src/property/propertyView.mjs";
@@ -120,5 +123,19 @@ const zoneOnTop = stackPropertyOverlays(
   { kind: "zone", id: "drive" },
 );
 assert.equal(zoneOnTop.at(-1).id, "drive");
+
+const history = recordZonePointInsertion(recordZonePointInsertion([], 0), 1);
+assert.deepEqual(history, [0, 1]);
+const undone = undoZonePointInsertion([{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 0.2, y: 0.2 }], [0, 2]);
+assert.equal(undone.points.length, 2);
+assert.deepEqual(undone.history, [0]);
+assert.equal(propertyLocationFields({
+  property: { latitude: 1, longitude: 2, image: { latitude: 35.451111, longitude: -82.560556, address: "Home", width_m: 120 } },
+  weather: { latitude: 9, longitude: 9 },
+}).source, "image");
+assert.equal(propertyLocationFields({
+  property: { latitude: 35.1, longitude: -82.5, address: "Saved" },
+  weather: { latitude: 9, longitude: 9 },
+}).address, "Saved");
 
 console.log("property view tests passed");
