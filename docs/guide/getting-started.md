@@ -17,7 +17,7 @@ http://127.0.0.1:8088/survng/
 
 On another device on the same network, use the server’s LAN address instead of `127.0.0.1`.
 
-You should land on **Live**. The left side lists the main workspaces: Live, Incidents, Timeline, Exports, Search, People, and Admin.
+You should land on **Live**. The left side lists the main workspaces: Live, Property, Incidents, Timeline, Exports, Search, People, and Admin.
 
 If the host already requires sign-in, use the account an administrator created for you.
 

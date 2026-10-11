@@ -44,6 +44,7 @@ class FrontendRouteTest(unittest.TestCase):
         self.assertIn("/timeline/exports", paths)
         self.assertIn("/exports", paths)
         self.assertIn("/people", paths)
+        self.assertIn("/property", paths)
         self.assertIn("/admin", paths)
 
     def test_canonical_timeline_routes_serve_the_recordings_application(self) -> None:
@@ -56,7 +57,7 @@ class FrontendRouteTest(unittest.TestCase):
     def test_frontend_routes_do_not_expose_template_paths_as_parameters(self) -> None:
         paths = app.openapi()["paths"]
 
-        for path in ("/", "/recordings", "/recordings/search", "/config", "/timeline", "/exports", "/search", "/admin", "/people"):
+        for path in ("/", "/recordings", "/recordings/search", "/config", "/timeline", "/exports", "/search", "/admin", "/people", "/property"):
             self.assertEqual(paths[path]["get"].get("parameters", []), [])
 
     def test_progressive_web_app_routes_are_registered(self) -> None:

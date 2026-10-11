@@ -88,6 +88,7 @@ def create_frontend_router(
         "observations_page": ("/observations", "index.html"),
         "faces_page": ("/faces", "index.html"),
         "people_page": ("/people", "index.html"),
+        "property_page": ("/property", "index.html"),
         "live_page": ("/live", "index.html"),
         "onvif_page": ("/onvif", "onvif.html"),
     }

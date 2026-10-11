@@ -1,0 +1,487 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { appUrl, fetch } from "../shared/api.js";
+import { useAppEvents } from "../shared/events.js";
+import { useRuntimeState } from "../shared/runtimeState.jsx";
+import { PropertyCanvas } from "./PropertyCanvas.jsx";
+import {
+  applyDetection,
+  configuredZoneRows,
+  detectionIcon,
+  highlightOpacity,
+  overlayPresentation,
+  pruneHighlights,
+  zoneActivityKey,
+} from "./propertyView.mjs";
+
+function numberOrBlank(value) {
+  return value === null || value === undefined || value === "" ? "" : String(value);
+}
+
+export function PropertyPage({ canEdit = false }) {
+  const runtime = useRuntimeState();
+  const appConfig = runtime?.appConfig;
+  const refresh = runtime?.refresh;
+  const image = appConfig?.property?.image || null;
+  const configuredZones = useMemo(() => configuredZoneRows(appConfig), [appConfig]);
+  const cameras = appConfig?.cameras || [];
+  const [layout, setLayout] = useState({ cameras: [], zones: [] });
+  const [address, setAddress] = useState("");
+  const [latitude, setLatitude] = useState("");
+  const [longitude, setLongitude] = useState("");
+  const [widthM, setWidthM] = useState("120");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [warning, setWarning] = useState("");
+  const [candidates, setCandidates] = useState([]);
+  const [highlights, setHighlights] = useState({});
+  const [now, setNow] = useState(() => Date.now());
+  const [overrides, setOverrides] = useState({});
+  const dirtyRef = useRef(false);
+  const layoutRef = useRef(layout);
+  const prefilledRef = useRef(false);
+  const serverLayout = JSON.stringify(appConfig?.property ? {
+    cameras: appConfig.property.cameras || [],
+    zones: appConfig.property.zones || [],
+  } : null);
+
+  useEffect(() => {
+    if (dirtyRef.current) return;
+    const parsed = serverLayout ? JSON.parse(serverLayout) : { cameras: [], zones: [] };
+    layoutRef.current = parsed || { cameras: [], zones: [] };
+    setLayout(layoutRef.current);
+  }, [serverLayout]);
+
+  useEffect(() => {
+    if (prefilledRef.current || latitude || longitude) return;
+    const weather = appConfig?.weather;
+    if (weather?.latitude == null || weather?.longitude == null) return;
+    setLatitude(numberOrBlank(weather.latitude));
+    setLongitude(numberOrBlank(weather.longitude));
+    prefilledRef.current = true;
+  }, [appConfig, latitude, longitude]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadActivity() {
+      try {
+        const response = await fetch("/api/property/activity");
+        if (!response.ok) return;
+        const payload = await response.json();
+        if (cancelled) return;
+        const stamped = Date.now();
+        setHighlights((current) => (payload.events || []).reduce(
+          (next, event) => applyDetection(next, event, stamped),
+          current,
+        ));
+        setNow(stamped);
+      } catch {
+        // Live events still update the view if the seed request fails.
+      }
+    }
+    void loadActivity();
+    return () => {
+      cancelled = true;
+    };
+  }, [image?.fetched_at]);
+
+  useAppEvents(({ type, data }) => {
+    if (type === "resync") {
+      fetch("/api/property/activity")
+        .then((response) => (response.ok ? response.json() : null))
+        .then((payload) => {
+          if (!payload) return;
+          const stamped = Date.now();
+          setHighlights((payload.events || []).reduce(
+            (next, event) => applyDetection(next, event, stamped),
+            {},
+          ));
+          setNow(stamped);
+        })
+        .catch(() => {});
+      return;
+    }
+    if (type !== "object") return;
+    const stamped = Date.now();
+    setHighlights((current) => applyDetection(current, data, stamped));
+    setNow(stamped);
+  });
+
+  const highlightCount = Object.keys(highlights).length;
+  useEffect(() => {
+    if (!highlightCount) return undefined;
+    const timer = window.setInterval(() => {
+      const stamped = Date.now();
+      setNow(stamped);
+      setHighlights((current) => {
+        const next = pruneHighlights(current, stamped);
+        const same = Object.keys(current).length === Object.keys(next).length
+          && Object.entries(next).every(([key, value]) => current[key]?.detectedAt === value.detectedAt);
+        return same ? current : next;
+      });
+    }, 200);
+    return () => window.clearInterval(timer);
+  }, [highlightCount]);
+
+  async function saveLayout(nextLayout) {
+    if (!canEdit) return;
+    dirtyRef.current = true;
+    const response = await fetch("/api/property/layout", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cameras: nextLayout.cameras, zones: nextLayout.zones }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.detail || "Could not save the property layout");
+    }
+    dirtyRef.current = false;
+    if (typeof refresh === "function") await refresh();
+  }
+
+  function rememberLayout(next) {
+    layoutRef.current = next;
+    dirtyRef.current = true;
+    setLayout(next);
+    return next;
+  }
+
+  function updateLayout(recipe) {
+    setLayout((current) => {
+      const next = recipe(current);
+      layoutRef.current = next;
+      dirtyRef.current = true;
+      return next;
+    });
+  }
+
+  async function commitLayout() {
+    try {
+      await saveLayout(layoutRef.current);
+      setError("");
+    } catch (saveError) {
+      setError(saveError.message);
+    }
+  }
+
+  function changeCamera(cameraId, patch) {
+    updateLayout((current) => ({
+      ...current,
+      cameras: current.cameras.map((camera) => (
+        camera.camera_id === cameraId ? { ...camera, ...patch } : camera
+      )),
+    }));
+  }
+
+  function changeZone(key, patch) {
+    updateLayout((current) => ({
+      ...current,
+      zones: current.zones.map((zone) => (
+        zoneActivityKey(zone.camera_id, zone.zone_name) === key ? { ...zone, ...patch } : zone
+      )),
+    }));
+  }
+
+  async function downloadImage(event) {
+    event.preventDefault();
+    if (!canEdit) return;
+    setBusy(true);
+    setError("");
+    try {
+      const lat = latitude.trim() === "" ? null : Number(latitude);
+      const lon = longitude.trim() === "" ? null : Number(longitude);
+      const body = {
+        address: address.trim(),
+        width_m: Number(widthM) || 120,
+        height_m: Number(widthM) || 120,
+      };
+      if (lat !== null || lon !== null) {
+        body.latitude = lat;
+        body.longitude = lon;
+      }
+      const response = await fetch("/api/property/imagery", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Could not download an aerial image");
+      setCandidates(payload.candidates || []);
+      setWarning(payload.placement_warning
+        ? "The photo moved or changed size. Camera and zone placements were kept and may need to be moved."
+        : "");
+      if (typeof refresh === "function") await refresh();
+    } catch (downloadError) {
+      setError(downloadError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function lookupFov(cameraId, make, model) {
+    if (!model.trim()) return;
+    const response = await fetch(`/api/property/fov?make=${encodeURIComponent(make)}&model=${encodeURIComponent(model)}`);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload.matched) {
+      setError(payload.reason || "No field of view is listed for that make and model. Enter the angle yourself.");
+      return;
+    }
+    setError("");
+    const next = rememberLayout({
+      ...layoutRef.current,
+      cameras: layoutRef.current.cameras.map((camera) => (
+        camera.camera_id === cameraId
+          ? { ...camera, make: payload.make, model: payload.model, hfov_deg: payload.hfov_deg }
+          : camera
+      )),
+    });
+    try {
+      await saveLayout(next);
+    } catch (saveError) {
+      setError(saveError.message);
+    }
+  }
+
+  async function toggleCameraNotifications(cameraId, enabled) {
+    const key = `camera:${cameraId}`;
+    setOverrides((current) => ({ ...current, [key]: enabled }));
+    const response = await fetch(`/api/cameras/${encodeURIComponent(cameraId)}/incident-notifications`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    if (!response.ok) {
+      setOverrides((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      setError("Could not update camera notifications");
+      return;
+    }
+    if (typeof refresh === "function") await refresh();
+  }
+
+  async function toggleZoneNotifications(cameraId, zoneName, enabled) {
+    const key = `zone:${cameraId}:${zoneName}`;
+    setOverrides((current) => ({ ...current, [key]: enabled }));
+    const response = await fetch(`/api/cameras/${encodeURIComponent(cameraId)}/zone-notifications`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ zone: zoneName, enabled }),
+    });
+    if (!response.ok) {
+      setOverrides((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      setError("Could not update zone notifications");
+      return;
+    }
+    if (typeof refresh === "function") await refresh();
+  }
+
+  function placeCamera(camera) {
+    if (layoutRef.current.cameras.some((item) => item.camera_id === camera.id)) return;
+    const next = rememberLayout({
+      ...layoutRef.current,
+      cameras: [...layoutRef.current.cameras, {
+        camera_id: camera.id,
+        make: "",
+        model: "",
+        hfov_deg: 80,
+        x: 0.5,
+        y: 0.5,
+        heading_deg: 0,
+        range_m: 20,
+      }],
+    });
+    void saveLayout(next).catch((saveError) => setError(saveError.message));
+  }
+
+  function placeZone(zone) {
+    if (layoutRef.current.zones.some((item) => item.camera_id === zone.cameraId && item.zone_name === zone.zoneName)) return;
+    const next = rememberLayout({
+      ...layoutRef.current,
+      zones: [...layoutRef.current.zones, {
+        camera_id: zone.cameraId,
+        zone_name: zone.zoneName,
+        x: 0.5,
+        y: 0.58,
+        width: 0.22,
+        height: 0.14,
+        rotation_deg: 0,
+      }],
+    });
+    void saveLayout(next).catch((saveError) => setError(saveError.message));
+  }
+
+  function removeCamera(cameraId) {
+    const next = rememberLayout({
+      cameras: layoutRef.current.cameras.filter((camera) => camera.camera_id !== cameraId),
+      zones: layoutRef.current.zones.filter((zone) => zone.camera_id !== cameraId),
+    });
+    void saveLayout(next).catch((saveError) => setError(saveError.message));
+  }
+
+  function removeZone(cameraId, zoneName) {
+    const next = rememberLayout({
+      ...layoutRef.current,
+      zones: layoutRef.current.zones.filter((zone) => !(zone.camera_id === cameraId && zone.zone_name === zoneName)),
+    });
+    void saveLayout(next).catch((saveError) => setError(saveError.message));
+  }
+
+  const canvasZones = layout.zones.map((zone) => {
+    const presentation = overlayPresentation(zone, configuredZones);
+    const activity = highlights[zoneActivityKey(zone.camera_id, zone.zone_name)];
+    const opacity = activity ? highlightOpacity(activity.detectedAt, now) : 0;
+    const icons = [...new Set((activity?.classes || []).map(detectionIcon))];
+    return {
+      ...zone,
+      key: zoneActivityKey(zone.camera_id, zone.zone_name),
+      ...presentation,
+      opacity,
+      icons,
+    };
+  });
+  const imageUrl = image ? appUrl(`/api/property/imagery?v=${encodeURIComponent(image.fetched_at || "")}`) : "";
+  const groundWidth = Number(image?.width_m) || 120;
+  const groundHeight = Number(image?.height_m) || groundWidth;
+
+  return (
+    <main className="property-page">
+      <div className="property-stage-wrap">
+        {warning ? <p className="property-banner" role="status">{warning}</p> : null}
+        {error ? <p className="property-error" role="alert">{error}</p> : null}
+        {image ? (
+          <>
+            <PropertyCanvas
+              imageUrl={imageUrl}
+              widthM={groundWidth}
+              heightM={groundHeight}
+              cameras={layout.cameras.map((camera) => ({
+                ...camera,
+                name: cameras.find((item) => item.id === camera.camera_id)?.name || camera.camera_id,
+              }))}
+              zones={canvasZones}
+              canEdit={canEdit}
+              onChangeCamera={changeCamera}
+              onChangeZone={changeZone}
+              onGestureEnd={() => void commitLayout()}
+            />
+            <p className="property-meta">
+              {image.source === "naip" ? "USGS NAIP" : "Esri World Imagery"}
+              {image.captured_at ? ` · ${image.captured_at.slice(0, 10)}` : ""}
+              {image.resolution_m ? ` · ${Number(image.resolution_m).toFixed(2)} m/pixel` : ""}
+              {image.attribution ? ` · ${image.attribution}` : ""}
+            </p>
+          </>
+        ) : (
+          <div className="property-empty">
+            <h2>No aerial photo yet</h2>
+            <p>Download one from an address or latitude and longitude. SurvNG keeps the sharpest recent image.</p>
+          </div>
+        )}
+      </div>
+      <aside className="property-panel">
+        <section>
+          <h2>Aerial photo</h2>
+          <form onSubmit={downloadImage}>
+            <label>Address
+              <input value={address} onChange={(event) => setAddress(event.target.value)} disabled={!canEdit || busy} placeholder="123 Main St, Springfield" />
+            </label>
+            <label>Latitude
+              <input value={latitude} onChange={(event) => setLatitude(event.target.value)} disabled={!canEdit || busy} inputMode="decimal" />
+            </label>
+            <label>Longitude
+              <input value={longitude} onChange={(event) => setLongitude(event.target.value)} disabled={!canEdit || busy} inputMode="decimal" />
+            </label>
+            <label>Width and height (meters)
+              <input value={widthM} onChange={(event) => setWidthM(event.target.value)} disabled={!canEdit || busy} inputMode="decimal" />
+            </label>
+            <button type="submit" disabled={!canEdit || busy}>{busy ? "Downloading…" : "Download image"}</button>
+          </form>
+          {candidates.length ? (
+            <ul className="property-candidates">
+              {candidates.map((candidate) => (
+                <li key={candidate.source} className={candidate.selected ? "selected" : ""}>
+                  {candidate.selected ? "Kept" : "Passed"} · {candidate.source === "naip" ? "USGS NAIP" : "Esri"}
+                  {candidate.captured_at ? ` · ${candidate.captured_at.slice(0, 10)}` : ""}
+                  {` · ${Number(candidate.resolution_m).toFixed(2)} m/pixel`}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </section>
+        <section>
+          <h2>Cameras</h2>
+          {cameras.length ? cameras.map((camera) => {
+            const placement = layout.cameras.find((item) => item.camera_id === camera.id);
+            const notifications = Object.hasOwn(overrides, `camera:${camera.id}`)
+              ? overrides[`camera:${camera.id}`]
+              : camera.incident_notifications_enabled !== false;
+            return (
+              <article className="property-card" key={camera.id}>
+                <header>
+                  <strong>{camera.name || camera.id}</strong>
+                  {placement ? <button type="button" disabled={!canEdit} onClick={() => removeCamera(camera.id)}>Remove</button> : <button type="button" disabled={!canEdit || !image} onClick={() => placeCamera(camera)}>Place</button>}
+                </header>
+                {placement ? (
+                  <>
+                    <label>Make
+                      <input value={placement.make} disabled={!canEdit} onChange={(event) => changeCamera(camera.id, { make: event.target.value })} onBlur={() => void lookupFov(camera.id, placement.make, placement.model)} />
+                    </label>
+                    <label>Model
+                      <input value={placement.model} disabled={!canEdit} onChange={(event) => changeCamera(camera.id, { model: event.target.value })} onBlur={() => void lookupFov(camera.id, placement.make, placement.model)} />
+                    </label>
+                    <label>Horizontal field of view (degrees)
+                      <input type="number" min="1" max="180" value={placement.hfov_deg} disabled={!canEdit} onChange={(event) => changeCamera(camera.id, { hfov_deg: Number(event.target.value) })} onBlur={() => void commitLayout()} />
+                    </label>
+                    <label className="property-check">
+                      <input type="checkbox" checked={notifications} disabled={!canEdit} onChange={(event) => void toggleCameraNotifications(camera.id, event.target.checked)} />
+                      Notifications
+                    </label>
+                  </>
+                ) : null}
+              </article>
+            );
+          }) : <p>No cameras are configured.</p>}
+        </section>
+        <section>
+          <h2>Zones</h2>
+          {configuredZones.length ? configuredZones.map((zone) => {
+            const placed = layout.zones.some((item) => item.camera_id === zone.cameraId && item.zone_name === zone.zoneName);
+            const key = `zone:${zone.cameraId}:${zone.zoneName}`;
+            const notifications = Object.hasOwn(overrides, key) ? overrides[key] : zone.notificationsEnabled;
+            return (
+              <article className="property-card" key={`${zone.cameraId}:${zone.zoneName}`}>
+                <header>
+                  <strong><span className="property-swatch" style={{ background: zone.color }} />{zone.cameraName} · {zone.zoneName}</strong>
+                  {placed
+                    ? <button type="button" disabled={!canEdit} onClick={() => removeZone(zone.cameraId, zone.zoneName)}>Remove</button>
+                    : <button type="button" disabled={!canEdit || !image} onClick={() => placeZone(zone)}>Place</button>}
+                </header>
+                {placed ? (
+                  <label className="property-check">
+                    <input type="checkbox" checked={notifications} disabled={!canEdit} onChange={(event) => void toggleZoneNotifications(zone.cameraId, zone.zoneName, event.target.checked)} />
+                    Notifications
+                  </label>
+                ) : null}
+              </article>
+            );
+          }) : <p>Configure detection zones on a camera before placing them here.</p>}
+          {layout.zones.filter((zone) => overlayPresentation(zone, configuredZones).stale).map((zone) => (
+            <article className="property-card" key={`stale:${zone.camera_id}:${zone.zone_name}`}>
+              <header>
+                <strong>{zone.camera_id} · {zone.zone_name}</strong>
+                <button type="button" disabled={!canEdit} onClick={() => removeZone(zone.camera_id, zone.zone_name)}>Remove</button>
+              </header>
+              <p className="property-stale">This zone is no longer configured.</p>
+            </article>
+          ))}
+        </section>
+      </aside>
+    </main>
+  );
+}

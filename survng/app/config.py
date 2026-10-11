@@ -1116,8 +1116,79 @@ class WeatherConfig(BaseModel):
         return self
 
 
+class PropertyImageConfig(BaseModel):
+    """One downloaded north-up aerial photo. Bytes live under storage, not in config."""
+
+    latitude: float = Field(ge=-85, le=85, allow_inf_nan=False)
+    longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
+    address: str = Field(default="", max_length=300)
+    width_m: float = Field(ge=20, le=2000, allow_inf_nan=False)
+    height_m: float = Field(ge=20, le=2000, allow_inf_nan=False)
+    image_path: Literal["property/aerial.jpg"] = "property/aerial.jpg"
+    source: Literal["esri", "naip"]
+    attribution: str = Field(default="", max_length=300)
+    captured_at: str = Field(default="", max_length=40)
+    resolution_m: float = Field(gt=0, le=50, allow_inf_nan=False)
+    fetched_at: str = Field(min_length=1, max_length=40)
+
+
+class PropertyCameraPlacement(BaseModel):
+    camera_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+    make: str = Field(default="", max_length=80)
+    model: str = Field(default="", max_length=80)
+    hfov_deg: float = Field(ge=1, le=180, allow_inf_nan=False)
+    x: float = Field(ge=0, le=1, allow_inf_nan=False)
+    y: float = Field(ge=0, le=1, allow_inf_nan=False)
+    heading_deg: float = Field(ge=0, le=360, allow_inf_nan=False)
+    range_m: float = Field(default=20, ge=1, le=500, allow_inf_nan=False)
+
+    @field_validator("heading_deg")
+    @classmethod
+    def normalize_heading(cls, value: float) -> float:
+        if value >= 360:
+            return 0.0
+        return value
+
+
+class PropertyZoneOverlay(BaseModel):
+    """Visual stand-in for a configured detection zone. It does not edit that zone."""
+
+    camera_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+    zone_name: str = Field(min_length=1, max_length=128)
+    x: float = Field(ge=0, le=1, allow_inf_nan=False)
+    y: float = Field(ge=0, le=1, allow_inf_nan=False)
+    width: float = Field(gt=0, le=1, allow_inf_nan=False)
+    height: float = Field(gt=0, le=1, allow_inf_nan=False)
+    rotation_deg: float = Field(default=0, ge=-180, le=180, allow_inf_nan=False)
+
+    @field_validator("zone_name")
+    @classmethod
+    def strip_zone_name(cls, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise ValueError("zone name is required")
+        return name
+
+
+class PropertyViewConfig(BaseModel):
+    image: PropertyImageConfig | None = None
+    cameras: list[PropertyCameraPlacement] = Field(default_factory=list)
+    zones: list[PropertyZoneOverlay] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def unique_placements(self) -> "PropertyViewConfig":
+        camera_ids = [item.camera_id for item in self.cameras]
+        if len(camera_ids) != len(set(camera_ids)):
+            raise ValueError("property camera placements must be unique")
+        zone_keys = [(item.camera_id, item.zone_name) for item in self.zones]
+        if len(zone_keys) != len(set(zone_keys)):
+            raise ValueError("property zone overlays must be unique")
+        return self
+
+
 class AppConfig(BaseModel):
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
+    property: PropertyViewConfig = Field(default_factory=PropertyViewConfig)
     base_path: str = "/survng"
     storage_dir: str = "survng/storage"
     database_dir: str = ""
