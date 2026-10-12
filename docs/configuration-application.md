@@ -10,6 +10,7 @@ can explain what was interrupted.
 These settings do not restart cameras, ONVIF subscriptions, capture, or
 recording processes:
 
+- property bird's-eye image metadata and camera or zone placement;
 - web base path and incident-thumbnail display;
 - incident-thumbnail object crop/zoom mode and zoom factor;
 - event-clip before/after windows;

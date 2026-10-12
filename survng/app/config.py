@@ -1116,8 +1116,118 @@ class WeatherConfig(BaseModel):
         return self
 
 
+class PropertyImageConfig(BaseModel):
+    """One downloaded north-up aerial photo. Bytes live under storage, not in config."""
+
+    latitude: float = Field(ge=-85, le=85, allow_inf_nan=False)
+    longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
+    address: str = Field(default="", max_length=300)
+    width_m: float = Field(ge=20, le=2000, allow_inf_nan=False)
+    height_m: float = Field(ge=20, le=2000, allow_inf_nan=False)
+    image_path: Literal["property/aerial.jpg"] = "property/aerial.jpg"
+    source: Literal["esri", "naip"]
+    attribution: str = Field(default="", max_length=300)
+    captured_at: str = Field(default="", max_length=40)
+    resolution_m: float = Field(gt=0, le=50, allow_inf_nan=False)
+    fetched_at: str = Field(min_length=1, max_length=40)
+
+
+class PropertyCameraPlacement(BaseModel):
+    camera_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+    make: str = Field(default="", max_length=80)
+    model: str = Field(default="", max_length=80)
+    hfov_deg: float = Field(ge=1, le=180, allow_inf_nan=False)
+    x: float = Field(ge=0, le=1, allow_inf_nan=False)
+    y: float = Field(ge=0, le=1, allow_inf_nan=False)
+    heading_deg: float = Field(ge=0, le=360, allow_inf_nan=False)
+    range_m: float = Field(default=20, ge=1, le=500, allow_inf_nan=False)
+
+    @field_validator("heading_deg")
+    @classmethod
+    def normalize_heading(cls, value: float) -> float:
+        if value >= 360:
+            return 0.0
+        return value
+
+
+def property_rectangle_points(x: float, y: float, width: float, height: float, rotation_deg: float = 0) -> list[dict[str, float]]:
+    """Four corners of a rotated rectangle, in the same y-down space as the canvas."""
+    half_w = width / 2
+    half_h = height / 2
+    radians = math.radians(rotation_deg)
+    cosine = math.cos(radians)
+    sine = math.sin(radians)
+    points = []
+    for dx, dy in ((-half_w, -half_h), (half_w, -half_h), (half_w, half_h), (-half_w, half_h)):
+        points.append({
+            "x": min(1.0, max(0.0, x + dx * cosine - dy * sine)),
+            "y": min(1.0, max(0.0, y + dx * sine + dy * cosine)),
+        })
+    return points
+
+
+class PropertyZoneOverlay(BaseModel):
+    """Visual stand-in for a configured detection zone. It does not edit that zone."""
+
+    camera_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+    zone_name: str = Field(min_length=1, max_length=128)
+    points: list[ZonePoint] = Field(default_factory=list, max_length=32)
+
+    @model_validator(mode="before")
+    @classmethod
+    def rectangle_to_points(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "points" in value:
+            return value
+        required = ("x", "y", "width", "height")
+        if not all(key in value for key in required):
+            return value
+        try:
+            rotation = float(value.get("rotation_deg") or 0)
+            points = property_rectangle_points(
+                float(value["x"]),
+                float(value["y"]),
+                float(value["width"]),
+                float(value["height"]),
+                rotation,
+            )
+        except (TypeError, ValueError):
+            return value
+        converted = dict(value)
+        converted["points"] = points
+        return converted
+
+    @field_validator("zone_name")
+    @classmethod
+    def strip_zone_name(cls, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise ValueError("zone name is required")
+        return name
+
+
+class PropertyViewConfig(BaseModel):
+    image: PropertyImageConfig | None = None
+    address: str = Field(default="", max_length=300)
+    latitude: float | None = Field(default=None, ge=-85, le=85, allow_inf_nan=False)
+    longitude: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
+    width_m: float | None = Field(default=None, ge=20, le=2000, allow_inf_nan=False)
+    cameras: list[PropertyCameraPlacement] = Field(default_factory=list)
+    zones: list[PropertyZoneOverlay] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def unique_placements(self) -> "PropertyViewConfig":
+        camera_ids = [item.camera_id for item in self.cameras]
+        if len(camera_ids) != len(set(camera_ids)):
+            raise ValueError("property camera placements must be unique")
+        zone_keys = [(item.camera_id, item.zone_name) for item in self.zones]
+        if len(zone_keys) != len(set(zone_keys)):
+            raise ValueError("property zone overlays must be unique")
+        return self
+
+
 class AppConfig(BaseModel):
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
+    property: PropertyViewConfig = Field(default_factory=PropertyViewConfig)
     base_path: str = "/survng"
     storage_dir: str = "survng/storage"
     database_dir: str = ""

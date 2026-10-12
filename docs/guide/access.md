@@ -9,7 +9,7 @@ Sign-in is optional and off by default, matching SurvNG’s LAN-first install. W
 | Role | Can do |
 | --- | --- |
 | **Admin** | Everything in the browser, including cameras, detection, storage, users, and HTTPS |
-| **Viewer** | Live, Incidents, Timeline, Exports, Search, and People. Admin and the assistant are hidden |
+| **Viewer** | Live, Property, Incidents, Timeline, Exports, Search, and People. Admin and the assistant are hidden. Property placement and imagery download stay with Admin |
 
 Home Assistant and other automations still use **API tokens** under [Integrations](integrations.md). Those bearer tokens are separate from browser users.
 

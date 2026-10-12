@@ -33,7 +33,7 @@ from survng.app.config import AppConfig, AuditAiConfig, CameraConfig
 class AssistantModelsTest(unittest.TestCase):
     def test_request_accepts_canonical_and_legacy_workspace_contexts(self) -> None:
         for page in (
-            "live", "incidents", "timeline", "search", "people", "admin", "exports",
+            "live", "incidents", "timeline", "search", "people", "property", "admin", "exports",
             "recordings", "faces", "config",
         ):
             request = AssistantChatRequest.model_validate({"message": "help", "context": {"page": page}})

@@ -1,0 +1,23 @@
+{
+  "cameras": [
+    {"make": "Reolink", "model": "RLC-810A", "hfov_deg": 87},
+    {"make": "Reolink", "model": "RLC-811A", "hfov_deg": 105},
+    {"make": "Reolink", "model": "RLC-812A", "hfov_deg": 87},
+    {"make": "Reolink", "model": "RLC-510A", "hfov_deg": 80},
+    {"make": "Reolink", "model": "RLC-520A", "hfov_deg": 80},
+    {"make": "Reolink", "model": "RLC-410W", "hfov_deg": 80},
+    {"make": "Reolink", "model": "Argus 3 Pro", "hfov_deg": 122},
+    {"make": "Reolink", "model": "Duo 2 PoE", "hfov_deg": 180},
+    {"make": "Amcrest", "model": "IP8M-2496EB", "hfov_deg": 110},
+    {"make": "Amcrest", "model": "IP5M-T1179EW", "hfov_deg": 103},
+    {"make": "Hikvision", "model": "DS-2CD2347G2-LU", "hfov_deg": 102},
+    {"make": "Dahua", "model": "IPC-HDW3849H-AS-PV", "hfov_deg": 106},
+    {"make": "Ubiquiti", "model": "UVC-G4-Bullet", "hfov_deg": 86},
+    {"make": "Ubiquiti", "model": "UVC-G4-Instant", "hfov_deg": 102},
+    {"make": "Ubiquiti", "model": "UVC-G5-Bullet", "hfov_deg": 84.4},
+    {"make": "Ubiquiti", "model": "UVC-G5-Turret-Ultra", "hfov_deg": 102.4},
+    {"make": "Ubiquiti", "model": "UVC-G5-Dome-Ultra", "hfov_deg": 102.4},
+    {"make": "Ubiquiti", "model": "UVC-G5-Flex", "hfov_deg": 102.4},
+    {"make": "Ubiquiti", "model": "UVC-AI-Pro", "hfov_deg": 109.9}
+  ]
+}
