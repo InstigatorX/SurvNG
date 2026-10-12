@@ -119,8 +119,15 @@
 
 @media (max-width: 760px) {
   .faces-page.faces-mode-finding {
+    height: auto;
+    overflow: visible;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: auto auto;
+  }
+
+  .faces-page.faces-mode-finding > .face-finding {
+    min-height: auto;
+    overflow: visible;
   }
 
   .people-mode-tabs { grid-column: 1; min-height: 44px; padding: 0 6px; }
@@ -193,11 +200,22 @@
   outline: 2px solid var(--accent);
 }
 
+.face-finding-draw-toggle {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  justify-self: start;
+}
+
 .face-finding-stage {
   position: relative;
   max-width: 720px;
   background: #111;
   touch-action: none;
+}
+
+.face-finding-stage.can-scroll {
+  touch-action: pan-y;
 }
 
 .face-finding-stage img {
@@ -235,4 +253,15 @@
 
 @media (max-width: 760px) {
   .face-finding { grid-template-columns: 1fr; }
+
+  .face-finding-queue ul {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .face-finding-score input,
+  .face-finding-actions input {
+    min-width: 0;
+    flex: 1 1 100%;
+  }
 }

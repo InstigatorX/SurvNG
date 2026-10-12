@@ -348,7 +348,19 @@
 @media (max-width: 900px) {
   .page-property .workspace-content {
     height: auto;
-    overflow: auto;
+    overflow: visible;
+  }
+
+  .property-page,
+  .property-stage-wrap,
+  .property-panel {
+    height: auto;
+    overflow: visible;
+  }
+
+  .property-stage:not(.is-zoomed),
+  .property-stage:not(.is-zoomed) .property-view > svg {
+    touch-action: pan-y;
   }
 
   .property-page {

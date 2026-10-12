@@ -33,8 +33,11 @@ export function FaceFindingPanel({ timeZone = "UTC" }) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches);
+  const [drawMode, setDrawMode] = useState(false);
   const stageRef = useRef(null);
   const drag = useRef(null);
+  const drawing = !narrow || drawMode;
   const selected = samples.find((sample) => sample.id === selectedId) || samples[0] || null;
 
   async function loadQueue() {
@@ -69,6 +72,17 @@ export function FaceFindingPanel({ timeZone = "UTC" }) {
     setDropReason("");
   }, [selected?.id]);
 
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 760px)");
+    const sync = () => {
+      setNarrow(media.matches);
+      if (!media.matches) setDrawMode(false);
+    };
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
+
   async function run(action) {
     setBusy(true);
     setError("");
@@ -95,7 +109,7 @@ export function FaceFindingPanel({ timeZone = "UTC" }) {
   }
 
   function beginDraw(event) {
-    if (event.button !== 0) return;
+    if (!drawing || event.button !== 0) return;
     const point = pointFromEvent(event);
     if (!point) return;
     drag.current = point;
@@ -166,9 +180,10 @@ export function FaceFindingPanel({ timeZone = "UTC" }) {
       <div className="face-finding-work">
         {error ? <div className="face-load-error" role="alert">{error}</div> : null}
         {message ? <div className="save-status" role="status">{message}</div> : null}
+        {narrow ? <button type="button" className="face-finding-draw-toggle" aria-pressed={drawMode} onClick={() => setDrawMode((current) => !current)}>{drawMode ? "Done drawing" : "Draw face"}</button> : null}
         {selected ? (
           <div
-            className="face-finding-stage"
+            className={drawing ? "face-finding-stage" : "face-finding-stage can-scroll"}
             ref={stageRef}
             onPointerDown={beginDraw}
             onPointerMove={moveDraw}

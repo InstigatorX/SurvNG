@@ -39,6 +39,10 @@ assert.deepEqual(peopleObservationRequestPlan({
 });
 
 const facesPageSource = readFileSync(new URL("../src/people/FacesPage.jsx", import.meta.url), "utf8");
+const findingSource = readFileSync(new URL("../src/people/FaceFindingPanel.jsx", import.meta.url), "utf8");
+assert.match(findingSource, /Draw face/);
+assert.match(findingSource, /face-finding-stage can-scroll/);
+assert.match(findingSource, /if \(!drawing \|\| event\.button !== 0\) return/);
 assert.match(facesPageSource, /className="faces-page faces-mode-finding"/);
 assert.match(facesPageSource, /<FaceFindingPanel timeZone=\{timeZone\} \/>/);
 assert.doesNotMatch(facesPageSource, /people-mode-tabs|PEOPLE_WORKSPACE_MODES|Review identities|peopleLoadError/);
