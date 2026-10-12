@@ -183,7 +183,7 @@ AssistantToolName = Literal[
 
 class AssistantPageContext(BaseModel):
     page: Literal[
-        "live", "incidents", "timeline", "search", "people", "admin", "exports",
+        "live", "incidents", "timeline", "search", "people", "property", "admin", "exports",
         "recordings", "faces", "config",
     ] = "live"
     camera_id: str = Field(default="", max_length=128)

@@ -10,6 +10,7 @@ import "./timeline/investigation.css";
 import "./incidents/incidents.css";
 import "./search/search.css";
 import "./people/people.css";
+import "./property/property.css";
 import "./admin/admin.css";
 import "./shell/responsive.css";
 import "./admin/workspace.css";
@@ -41,6 +42,7 @@ const RecordingsPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), 
 const SemanticSearchPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "SemanticSearchPage");
 const ConfigPage = lazyExport(() => import("./admin/ConfigPage.jsx"), "ConfigPage");
 const FacesPage = lazyExport(() => import("./people/FacesPage.jsx"), "FacesPage");
+const PropertyPage = lazyExport(() => import("./property/PropertyPage.jsx"), "PropertyPage");
 
 function WorkspaceFallback() {
   return <main className="workspace-not-found" aria-busy="true"><p>Loading workspace…</p></main>;
@@ -131,7 +133,9 @@ function App() {
                   ? <IncidentsPage timeZone={timeZone} canCorrectIncident={!viewer} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
                   : workspacePage === "people"
                     ? <FacesPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
-                    : workspacePage === "live"
+                    : workspacePage === "property"
+                      ? <PropertyPage canEdit={!viewer} />
+                      : workspacePage === "live"
                       ? <LivePage timeZone={timeZone} canCorrectIncident={!viewer} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
                       : <main className="workspace-not-found"><CircleAlert size={30} /><h2>Page not found</h2><p>This SurvNG workspace does not exist.</p><a className="nav-button" href={appUrl("/")}>Return to Live</a></main>}
       </Suspense>

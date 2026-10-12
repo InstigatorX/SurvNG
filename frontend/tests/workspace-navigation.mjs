@@ -12,6 +12,7 @@ import {
 } from "../src/workspaceNavigation.mjs";
 
 assert.equal(resolveWorkspace("/").id, "live");
+assert.equal(resolveWorkspace("/property").id, "property");
 assert.equal(resolveWorkspace("/incidents").id, "incidents");
 assert.equal(resolveWorkspace("/timeline").id, "timeline");
 assert.equal(resolveWorkspace("/exports").id, "exports");
@@ -45,6 +46,8 @@ assert.equal(
 );
 assert.equal(canonicalWorkspaceUrl("/faces", "status=unknown"), "/people?status=unknown");
 
+assert.equal(workspaceDefinition("property").label, "Property");
+assert.equal(workspaceHref("property"), "/property");
 assert.equal(workspaceDefinition("timeline").label, "Timeline");
 assert.equal(workspaceDefinition("exports").label, "Exports");
 assert.equal(workspaceDefinition("unknown"), null);
@@ -64,7 +67,7 @@ assert.equal(
 );
 assert.equal(timelineHref({ epoch: Number.NaN }), "/timeline");
 
-assert.deepEqual(DESKTOP_PRIMARY_WORKSPACES, ["live", "incidents", "timeline", "exports", "search", "people"]);
+assert.deepEqual(DESKTOP_PRIMARY_WORKSPACES, ["live", "property", "incidents", "timeline", "exports", "search", "people"]);
 assert.deepEqual(MOBILE_PRIMARY_WORKSPACES, ["live", "incidents", "timeline", "search", "more"]);
 
 const stylesSource = [

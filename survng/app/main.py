@@ -33,6 +33,7 @@ from .config_application import (
     TargetedConfigApplication,
     manager_owned_config,
 )
+from .property_routes import PropertyRouteDependencies, create_property_router
 from .config_routes import (
     ConfigRouteDependencies,
     create_config_router,
@@ -1022,6 +1023,16 @@ app.include_router(
     )
 )
 app.include_router(
+    create_property_router(
+        PropertyRouteDependencies(
+            get_config=lambda: config,
+            apply_config=apply_config_update,
+            recent_object_events=lambda limit: get_manager().events.recent_object_events(limit),
+            lock=MANAGER_RELOAD_LOCK,
+        )
+    )
+)
+app.include_router(
     create_auth_router(
         AuthRouteDependencies(
             get_config=lambda: config,
@@ -1190,6 +1201,7 @@ admin_page = _frontend_route_bundle.handlers["admin_page"]
 incidents_page = _frontend_route_bundle.handlers["incidents_page"]
 faces_page = _frontend_route_bundle.handlers["faces_page"]
 people_page = _frontend_route_bundle.handlers["people_page"]
+property_page = _frontend_route_bundle.handlers["property_page"]
 live_page = _frontend_route_bundle.handlers["live_page"]
 onvif_page = _frontend_route_bundle.handlers["onvif_page"]
 

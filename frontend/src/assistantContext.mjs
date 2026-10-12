@@ -1,4 +1,4 @@
-const CANONICAL_PAGES = new Set(["live", "incidents", "timeline", "search", "people", "admin", "exports"]);
+const CANONICAL_PAGES = new Set(["live", "incidents", "timeline", "search", "people", "property", "admin", "exports"]);
 
 const LEGACY_PAGE_MAP = Object.freeze({
   recordings: "timeline",
@@ -12,6 +12,7 @@ const PAGE_LABELS = Object.freeze({
   timeline: "Timeline",
   search: "Search",
   people: "People",
+  property: "Property",
   admin: "Admin",
   exports: "Export Center",
 });
@@ -66,6 +67,7 @@ export function assistantContextPrompts(value = {}) {
   if (context.page === "timeline") return ["Summarize activity around this time", `Create a timelapse for ${camera}`, "Find related incidents"];
   if (context.page === "search") return ["Find person incidents from the last 24 hours", "Summarize recent activity", "Is everything healthy?"];
   if (context.page === "people") return ["Summarize recent person activity", "Is everything healthy?", "Find person incidents from the last 24 hours"];
+  if (context.page === "property") return ["Summarize recent activity", "Is everything healthy?", "Which cameras reported a person?"];
   if (context.page === "admin") return ["Explain these settings", "Is everything healthy?", "What needs attention?"];
   if (context.page === "exports") return ["Create a recording export", "Create a timelapse", "Is everything healthy?"];
   if (context.page === "live" && context.camera_id) return [`Is ${camera} healthy?`, `Summarize recent activity for ${camera}`, `Create a timelapse for ${camera}`];

@@ -19,6 +19,7 @@ GUIDE_PAGES = (
     ("concepts", "Concepts"),
     ("getting-started", "Getting started"),
     ("live", "Live view"),
+    ("property", "Property"),
     ("incidents", "Incidents"),
     ("timeline", "Timeline & exports"),
     ("search", "Search"),
