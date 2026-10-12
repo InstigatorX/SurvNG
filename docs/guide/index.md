@@ -14,23 +14,24 @@ SurvNG watches your cameras, keeps continuous video history, and helps you find 
 ### Workspaces
 
 3. [Live view](live.md) — what is happening right now
-4. [Incidents](incidents.md) — activity SurvNG kept for review
-5. [Timeline & exports](timeline.md) — scrub recorded video and save clips
-6. [Search](search.md) — find activity with filters, a short description, or Find similar
-7. [People](people.md) — faces SurvNG has seen and people you name
-8. [Admin](admin.md) — configure cameras, detection, storage, and health
+4. [Property](property.md) — bird's-eye coverage of the home
+5. [Incidents](incidents.md) — activity SurvNG kept for review
+6. [Timeline & exports](timeline.md) — scrub recorded video and save clips
+7. [Search](search.md) — find activity with filters, a short description, or Find similar
+8. [People](people.md) — faces SurvNG has seen and people you name
+9. [Admin](admin.md) — configure cameras, detection, storage, and health
 
 ### Configuration topics
 
-9. [Cameras](cameras.md) — connect streams and camera motion notices
-10. [Motion & detection](motion-detection.md) — when SurvNG looks closer at a frame
-11. [Zones](zones.md) — watch the parts of the picture that matter
-12. [Recordings & storage](storage.md) — how long video is kept and where it lives
-13. [AI assistant](assistant.md) — ask questions about health and incidents
-14. [Integrations](integrations.md) — Home Assistant, MQTT, and API tokens
-15. [Access](access.md) — sign-in roles and HTTPS certificates
-16. [Reverse proxy](reverse-proxy.md) — nginx, trusted proxies, and internet exposure
-17. [HTTP API](api.md) — endpoints, authentication, and examples
+10. [Cameras](cameras.md) — connect streams and camera motion notices
+11. [Motion & detection](motion-detection.md) — when SurvNG looks closer at a frame
+12. [Zones](zones.md) — watch the parts of the picture that matter
+13. [Recordings & storage](storage.md) — how long video is kept and where it lives
+14. [AI assistant](assistant.md) — ask questions about health and incidents
+15. [Integrations](integrations.md) — Home Assistant, MQTT, and API tokens
+16. [Access](access.md) — sign-in roles and HTTPS certificates
+17. [Reverse proxy](reverse-proxy.md) — nginx, trusted proxies, and internet exposure
+18. [HTTP API](api.md) — endpoints, authentication, and examples
 
 ## Related technical notes
 

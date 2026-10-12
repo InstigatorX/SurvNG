@@ -5,6 +5,7 @@ import {
   Clock3,
   Cog,
   Download,
+  Map,
   Gauge,
   Search,
   LogOut,
@@ -24,6 +25,7 @@ import { RecordingHealthBar } from "./RecordingHealthBar.jsx";
 
 export const WORKSPACE_ICONS = Object.freeze({
   live: Video,
+  property: Map,
   incidents: Siren,
   timeline: Clock3,
   exports: Download,

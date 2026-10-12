@@ -696,6 +696,22 @@ class EventStore(
             ).fetchall()
         return self._event_views(rows)
 
+    def recent_object_events(self, limit: int = 400) -> list[dict[str, Any]]:
+        """Newest object events, bounded for the property view's short highlight window."""
+        bounded_limit = max(1, min(int(limit), 1000))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select id, camera_id, objects_json, created_at
+                from events
+                where kind = 'object'
+                order by id desc
+                limit ?
+                """,
+                (bounded_limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def recent_compact(
         self,
         limit: int = 500,
