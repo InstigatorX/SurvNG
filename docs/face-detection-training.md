@@ -29,7 +29,7 @@ side are skipped. Only the `person` label is used.
 
 ## Label, export, score
 
-Open **People → Face finding**.
+Open **People**.
 
 1. **Materialize** reads recorded `person` observations with an exact frame
    time, cuts the upper-body window, and runs the current face detector at 0.60

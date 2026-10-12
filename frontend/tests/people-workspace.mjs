@@ -39,8 +39,9 @@ assert.deepEqual(peopleObservationRequestPlan({
 });
 
 const facesPageSource = readFileSync(new URL("../src/people/FacesPage.jsx", import.meta.url), "utf8");
-assert.match(facesPageSource, /const \[peopleLoadError, setPeopleLoadError\] = useState\(""\)/);
-assert.match(facesPageSource, /peopleLoadError[\s\S]*?onClick=\{\(\) => void loadPeople\(\)\}>Retry people/);
+assert.match(facesPageSource, /className="faces-page faces-mode-finding"/);
+assert.match(facesPageSource, /<FaceFindingPanel timeZone=\{timeZone\} \/>/);
+assert.doesNotMatch(facesPageSource, /people-mode-tabs|PEOPLE_WORKSPACE_MODES|Review identities|peopleLoadError/);
 
 assert.equal(PEOPLE_REVIEW_FILTERS.pending, "Pending");
 assert.equal(peopleRecognitionLabel({ recognition: { enabled: false }, recognition_ready: true }), "Recognition disabled");

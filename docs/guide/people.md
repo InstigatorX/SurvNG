@@ -1,45 +1,24 @@
 # People
 
-**People** answers: who was seen?
+**People** labels the upper-body crop this installation's face detector already sees.
 
-When face recognition is enabled, SurvNG stores face sightings separately from ordinary object detections. You review suggestions, name people, and later search their history.
+A label is a face box, a crop with no face, a region that is not a face, or a drop. Labels stay out of the face gallery. They do not name anyone.
 
-![People workspace with face review](images/people-workspace.png)
+Naming a detected face still happens from an incident. Those confirmed crops are faces the current detector already found, so they cannot teach it to find faces it missed.
 
-## First-time face setup
-
-1. Install the face model package on the server (see the project README face section).
-2. Enable face recognition under **Admin → Detection**.
-3. Confirm the embedding, landmark, and face-detector model paths.
-4. Wait for new incidents that include clear faces.
-
-Face recognition needs reasonably clear, front-facing faces. Distant blobs and heavy motion blur will not identify well.
-
-## Review queue
-
-New matches usually appear as suggestions. Confirm good matches so SurvNG can build a trusted gallery for that person. Automatic identification, if you enable it, still keeps a high bar and does not silently teach the gallery from unverified guesses.
-
-## Naming a person
+## Label crops
 
 1. Open **People**.
-2. Review an unknown cluster or suggestion.
-3. Create or select a person record.
-4. Confirm the best reference images.
+2. Choose **Materialize** to cut upper-body crops from recorded person observations.
+3. Draw a face, click an orange baseline box to mark it as not a face, choose **No face**, or **Drop** with a reason.
+4. **Freeze splits**, then **Export**. Train the detector outside SurvNG.
+5. **Score IR** with the candidate and baseline XML paths before changing **Admin → Detection → Face Detector Model**.
 
-Pin an especially clear reference when you have one. SurvNG prefers a diverse, quality-weighted gallery over simply keeping the newest crop.
-
-## Example
-
-A neighbor’s regular walker keeps appearing at the sidewalk:
-
-1. Open the latest porch incident and note the face suggestion.
-2. In **People**, confirm several clear crops of the same person.
-3. Name the person `Alex Walker`.
-4. Later, ask the assistant to trace that person across cameras, or filter history for that identity.
+The export format, day splits, and promotion gate are in [Camera-specific face detector](../face-detection-training.md).
 
 ## Privacy note
 
-Face data stays on your SurvNG installation. Treat People records as sensitive household or workplace information.
+Face crops stay on your SurvNG installation. Treat them as sensitive household or workplace information.
 
 ## Related
 
