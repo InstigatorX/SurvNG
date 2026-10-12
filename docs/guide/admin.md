@@ -11,7 +11,7 @@ Admin is grouped into practical jobs.
 | Area | What you do there |
 | --- | --- |
 | **Cameras** | Add, edit, clone, and order cameras; motion behavior; zones |
-| **Detection** | Object detection, face recognition, Smart Search, AI analysis models |
+| **Detection** | Object detection, face detection, Smart Search, AI analysis models |
 | **Storage** | Retention days, free-space watermarks, evidence image format |
 | **Integrations** | MQTT and Home Assistant discovery |
 | **Access** | Browser users, admin/viewer roles, HTTPS, and trusted reverse proxies |
@@ -86,6 +86,17 @@ against known distances before using a distance limit for incident decisions.
 Under **Health → Telemetry → Object activity**, **Depth-shadow health** is
 informational: it shows how depth would have affected motion attribution and
 does not itself change admission.
+
+## Face detection
+
+**Detection → Face detection** configures the live face detector. It runs on the upper-body crop of a detected person.
+
+- **Face detection enabled** starts that detector.
+- **Face Detector Model** is the OpenVINO XML. Score a candidate on **People** before replacing a model that is already running.
+- **Face Detection Confidence** is the live threshold. The default is 0.60.
+- **Face detector device** selects the OpenVINO device for that model.
+
+Labeling, export, and scoring stay on **People**.
 
 ## Detection at a glance
 

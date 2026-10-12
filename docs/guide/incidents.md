@@ -77,7 +77,6 @@ monocular estimates; use them as scene context rather than precise measurements.
 3. Open the latest incident.
 4. Confirm the picture matches what you expect.
 5. Play the incident. The recording opens in the center of the viewer, already at the incident, and you can scrub across it. Choose **View in Timeline** when you want the surrounding day.
-6. If face recognition is enabled, check whether a person suggestion appeared under **People**.
 
 ## What is not an incident
 
