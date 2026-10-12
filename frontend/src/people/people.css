@@ -166,6 +166,12 @@
   padding: 12px;
 }
 
+.face-finding .queue-toolbar-copy small {
+  overflow: visible;
+  text-overflow: unset;
+  white-space: normal;
+}
+
 .face-finding-queue ul {
   list-style: none;
   margin: 8px 0 0;
