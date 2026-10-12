@@ -1026,26 +1026,36 @@
     z-index: 8;
     top: 0;
     display: grid;
-    min-height: 56px;
+    min-height: 45px;
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     border-bottom: 1px solid var(--line);
     background: color-mix(in srgb, var(--topbar) 96%, transparent);
-    padding: 6px 9px;
+    padding: 0 8px;
     backdrop-filter: blur(14px);
   }
 
   .admin-command-bar {
     position: sticky;
     z-index: 7;
-    top: 56px;
+    top: 45px;
     display: flex;
     flex-direction: column;
     align-items: stretch;
     gap: 8px;
-    min-height: 52px;
+    min-height: 0;
     padding: 8px 10px;
+  }
+
+  /* Telemetry used a full row for the camera scope and another for Refresh.
+     Those controls sit together; continuity keeps the row beneath them. */
+  .admin-command-bar.admin-command-inline {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
   }
 
   .admin-command-scope,
@@ -1054,6 +1064,32 @@
     width: 100%;
     margin-left: 0;
     justify-content: flex-start;
+  }
+
+  .admin-command-bar.admin-command-inline .admin-command-scope,
+  .admin-command-bar.admin-command-inline .admin-command-actions {
+    width: auto;
+    min-width: 0;
+  }
+
+  .admin-command-bar.admin-command-inline .admin-command-scope {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .admin-command-bar.admin-command-inline .admin-command-actions {
+    grid-column: 2;
+    grid-row: 1;
+    justify-content: flex-end;
+  }
+
+  .admin-command-bar.admin-command-inline .admin-command-meta {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .admin-command-bar.admin-command-inline .telemetry-header-continuity {
+    padding: 4px 8px;
   }
 
   .admin-command-meta {
@@ -1068,7 +1104,9 @@
   .admin-mobile-toolbar>span {
     display: flex;
     min-width: 0;
-    flex-direction: column;
+    flex-direction: row;
+    align-items: baseline;
+    gap: 6px;
   }
 
   .admin-mobile-toolbar small {
@@ -1163,11 +1201,14 @@
 
   .admin-workspace-surface>.config-tree .tree-list {
     display: flex;
+    max-width: 100%;
+    min-width: 0;
     gap: 6px;
     overflow-x: auto;
     overflow-y: hidden;
     padding: 7px;
     scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
   }
 
   .admin-workspace-surface>.config-tree .tree-list::-webkit-scrollbar {
@@ -1215,10 +1256,28 @@
     padding: 12px;
   }
 
+  /* Tab rows are grid items. Without a zero minimum they grow to their
+     labels, and portrait then clips the rest instead of scrolling. */
+  .settings-grid .general-settings-content,
+  .settings-grid .detection-settings-content,
+  .settings-grid .detection-settings,
+  .settings-grid .subsection-workspace,
+  .settings-grid .subsection-workspace-content,
+  .settings-grid .sub-panel,
+  .settings-grid .config-form,
+  .settings-grid .detection-settings-content > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+
   .camera-section-tabs,
   .detection-subsection-tabs {
+    max-width: 100%;
+    min-width: 0;
     overflow-x: auto;
+    overflow-y: hidden;
     overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
   }
 
   .camera-section-tabs button,
