@@ -1583,6 +1583,50 @@ class AppManager:
                 retain=True,
             )
 
+    def _zone_notification_targets(self, camera) -> list[dict]:
+        return [
+            {
+                "name": zone.name,
+                "enabled": zone.enabled,
+                "notifications_enabled": zone.notifications_enabled,
+                "object_classes": zone.object_classes or self.detector.labels,
+            }
+            for zone in camera.zones
+        ]
+
+    def zone_activity(self, payload: dict) -> dict | None:
+        """Compact zone occupancy for the native HA stream.
+
+        Uses the same zone and notification gates as MQTT zone object topics.
+        The stream already carries the object event; this does not add one.
+        """
+        from .mqtt import zone_object_messages
+
+        camera_id = str(payload.get("camera_id") or "")
+        camera = next((item for item in self.config.cameras if item.id == camera_id), None)
+        if camera is None:
+            return None
+        raw_objects = payload.get("incident_objects")
+        if not isinstance(raw_objects, list):
+            raw_objects = payload.get("objects") or []
+        messages = zone_object_messages(
+            camera_id,
+            self._zone_notification_targets(camera),
+            {**payload, "objects": raw_objects},
+        )
+        zones = [
+            {"zone": item["zone"], "classes": list(item.get("classes") or [])}
+            for suffix, item in messages
+            if suffix.endswith("/object")
+        ]
+        if not zones:
+            return None
+        return {
+            "camera_id": camera_id,
+            "timestamp": payload.get("timestamp") or payload.get("created_at"),
+            "zones": zones,
+        }
+
     def incident_notification_allowed(self, payload: dict) -> bool:
         if not self.config.integration_notifications.enabled or payload.get("historical"):
             return False
@@ -1814,15 +1858,7 @@ class AppManager:
             if camera is not None:
                 self.mqtt.publish_zone_objects(
                     camera_id,
-                    [
-                        {
-                            "name": zone.name,
-                            "enabled": zone.enabled,
-                            "notifications_enabled": zone.notifications_enabled,
-                            "object_classes": zone.object_classes or self.detector.labels,
-                        }
-                        for zone in camera.zones
-                    ],
+                    self._zone_notification_targets(camera),
                     {**payload, "objects": alert_objects},
                 )
 

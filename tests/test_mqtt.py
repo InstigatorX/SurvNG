@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from survng.app.config import MqttConfig
-from survng.app.mqtt import MqttService
+from survng.app.mqtt import MqttService, zone_object_messages
 
 
 class FakePublishResult:
@@ -30,6 +30,24 @@ class FakeClient:
 
     def loop_stop(self) -> None:
         pass
+
+
+class ZoneObjectMessageTest(unittest.TestCase):
+    def test_notification_gate_matches_mqtt_zone_topics(self):
+        zones = [
+            {"name": "Driveway", "enabled": True, "notifications_enabled": True, "object_classes": ["car"]},
+            {"name": "Road", "enabled": True, "notifications_enabled": False, "object_classes": ["car"]},
+        ]
+        payload = {"event_id": 103052, "timestamp": "2026-10-16T19:32:27+00:00", "objects": [
+            {"label": "car", "zones": ["Driveway"]},
+            {"label": "car", "zones": ["Road"]},
+        ]}
+        messages = dict(zone_object_messages("lower-garage", zones, payload))
+        driveway = messages["zone/lower-garage/driveway/object"]
+        self.assertEqual(driveway["classes"], ["car"])
+        self.assertEqual(driveway["zone"], "Driveway")
+        self.assertNotIn("zone/lower-garage/road/object", messages)
+        self.assertIn("zone/lower-garage/driveway/class/car", messages)
 
 
 class MqttServiceTest(unittest.TestCase):
