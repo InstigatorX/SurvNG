@@ -595,7 +595,10 @@ class MotionIncidentService:
         evidence_ready_at: Callable[[datetime, dict[str, Any]], float | None] | None = None,
         scene_analysis_pending: Callable[[], bool] | None = None,
         close_out_scene_analysis: Callable[[str], int] | None = None,
+        recorded_analysis_available: Callable[[], bool] | None = None,
     ) -> None:
+        self.recorded_analysis_available = recorded_analysis_available or (lambda: False)
+        self._recorded_review = False
         self.camera_id = camera_id
         self.decision_processor = decision_processor
         self.evidence_ready_at = evidence_ready_at
@@ -737,6 +740,7 @@ class MotionIncidentService:
         with self._status_lock:
             if self._refinement_thread is not None and self._refinement_thread.is_alive():
                 return
+            self._recorded_review = False
             self._refinement_stop = stop_event
             self._refinement_accepting = not stop_event.is_set() and self._drain_deadline is None
             thread = threading.Thread(
@@ -776,7 +780,7 @@ class MotionIncidentService:
     def stop_drain(self, timeout: float) -> bool:
         """Yield to a fresh detection generation; durable work stays queued."""
         with self._status_lock:
-            draining = self._drain_deadline is not None
+            draining = self._drain_deadline is not None or self._recorded_review
         if not draining:
             return True
         self.request_stop()
@@ -807,7 +811,7 @@ class MotionIncidentService:
             self._refinement_accepting = False
             self._security_work_pending.set()
             # A drain owns its stop event; the motion runtime does not set it.
-            if self._drain_deadline is not None and self._refinement_stop is not None:
+            if (self._drain_deadline is not None or self._recorded_review) and self._refinement_stop is not None:
                 self._refinement_stop.set()
         try:
             self._refinement_queue.put_nowait(True)
@@ -819,7 +823,7 @@ class MotionIncidentService:
         with self._status_lock:
             stop = self._refinement_stop
             if not (
-                self._refinement_accepting
+                (self._refinement_accepting or self._recorded_review or self._drain_deadline is not None)
                 and stop is not None
                 and not stop.is_set()
                 and self._refinement_thread is not None
@@ -1238,6 +1242,18 @@ class MotionIncidentService:
                 self._refinement_accepting = False
                 self._drain_deadline = self._drain_cutoff = None
 
+    def _enter_recorded_review(self) -> bool:
+        """Keep the existing owner alive for explicit saved-evidence requests."""
+        if not self.recorded_analysis_available():
+            return False
+        with self._status_lock:
+            if self._refinement_stop is None or self._refinement_stop.is_set():
+                return False
+            self._drain_deadline = self._drain_cutoff = None
+            self._recorded_review = True
+            self._refinement_accepting = False
+        return True
+
     def _drain_finished(self) -> bool:
         """End a drain once its work is done or its bound has passed."""
         with self._status_lock:
@@ -1433,7 +1449,8 @@ class MotionIncidentService:
                     self._scene_analysis_wake.clear()
             draining = drain_deadline is not None
             if drain_deadline is not None and time.monotonic() >= drain_deadline:
-                self._drain_finished()
+                if self._drain_finished() and self._enter_recorded_review():
+                    continue
                 return
             prune = getattr(self.refinement_store, "prune_detection_jobs", None)
             now = time.monotonic()
@@ -1457,6 +1474,14 @@ class MotionIncidentService:
                 next_scene_recovery = time.monotonic() + self._scene_recovery_delay_seconds(
                     draining=draining,
                 )
+            if self._recorded_review:
+                # No discovery, detection, cover acquisition or refinement is
+                # admitted here. Tracking claims only explicit recorded demand.
+                try:
+                    self._refinement_queue.get(timeout=max(0.05, next_scene_recovery - time.monotonic()))
+                except queue.Empty:
+                    pass
+                continue
             if callable(prune) and now - last_prune >= 60.0:
                 last_prune = now
                 try:
@@ -1524,6 +1549,8 @@ class MotionIncidentService:
                     self._record_worker_stage("discovery", started)
                     continue
                 if draining and self._drain_finished():
+                    if self._enter_recorded_review():
+                        continue
                     return
                 try:
                     self._refinement_queue.get(

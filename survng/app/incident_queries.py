@@ -469,7 +469,8 @@ class IncidentQueryService:
             worker = manager.workers.get(camera_id)
             if (tracking.enabled and worker is not None
                     and worker.tracking_lifecycle.enabled()
-                    and worker.tracking_lifecycle.accepting()):
+                    and (worker.tracking_lifecycle.accepting()
+                         or worker.tracking_lifecycle.recorded_available())):
                 available_ids.add(camera_id)
         enabled = bool(available_ids) and (
             tracking.analysis_mode == "on_demand"
@@ -503,7 +504,9 @@ class IncidentQueryService:
                             camera_id,
                         )
         result = {**status, "mode": tracking.analysis_mode, "enabled": enabled}
-        if camera_ids - available_ids:
+        if any(episode["camera_id"] not in available_ids
+               and episode["status"] not in {"complete", "partial"}
+               for episode in status["episodes"]):
             episodes = [{**episode, "status": "unavailable"}
                         if episode["camera_id"] not in available_ids and episode["status"] not in {"complete", "partial"}
                         else episode for episode in status["episodes"]]
@@ -513,7 +516,7 @@ class IncidentQueryService:
                              "complete" if states == {"complete"} else "unavailable")
             result.update(episodes=episodes, status=aggregate,
                           remaining=sum(episode["status"] == "deferred" for episode in episodes),
-                          message="Some detailed analysis is unavailable while camera detection or tracking is off.")
+                          message="Extra analysis is currently unavailable because tracking is off or a camera worker is unavailable.")
         return result
 
     def cross_camera_trace(

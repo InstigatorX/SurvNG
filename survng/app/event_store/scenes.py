@@ -1315,6 +1315,15 @@ class EventStoreSceneMixin:
                 "from scene_objects s join scene_episodes p on p.id=s.episode_id "
                 f"where p.incident_id in ({placeholders}) and exists(select 1 from scene_observations o "
                 "where o.object_id=s.id and " + _DISPLAY_CONFIDENCE_SQL + ")", ids).fetchall()
+            # Zone names are scalar labels. Keep observation history off the card,
+            # but use the same displayed observations as the full incident payload.
+            zone_rows=conn.execute(
+                "select p.incident_id, z.value zone "
+                "from scene_observations o join scene_episodes p on p.id=o.episode_id "
+                "join json_each(case when json_type(o.payload_json,'$.zones')='array' "
+                "then json_extract(o.payload_json,'$.zones') else '[]' end) z "
+                f"where p.incident_id in ({placeholders}) and " + _DISPLAY_CONFIDENCE_SQL +
+                " and z.value is not null", ids).fetchall()
             event_rows=conn.execute(
                 "select p.incident_id,e.id,e.camera_id,e.kind,e.topic,e.created_at,e.snapshot_path,e.evidence_revision,e.objects_json "
                 "from events e join scene_event_membership m on m.event_id=e.id "
@@ -1352,6 +1361,9 @@ class EventStoreSceneMixin:
         for row in label_rows:
             if row["label"]:
                 labels_by.setdefault(row["incident_id"], set()).add(row["label"])
+        zones_by={}
+        for row in zone_rows:
+            zones_by.setdefault(row["incident_id"], set()).add(str(row["zone"]))
         events_by={}
         for row in event_rows:
             events_by.setdefault(row["incident_id"], []).append(row)
@@ -1422,7 +1434,7 @@ class EventStoreSceneMixin:
                 "snapshot_url":snapshot_url,
                 "snapshot_observation_id":snapshot_observation_id,
                 "labels":labels,
-                "zones":[],
+                "zones":sorted(zones_by.get(incident_id, ())),
                 "has_objects":bool(labels),
                 "kind":"object" if labels else "motion",
                 "trigger_source":trigger,

@@ -86,6 +86,32 @@ def _sse_message(event_type: str, payload: object, event_id: str | None = None) 
     return "\n".join(lines) + "\n\n"
 
 
+def _zone_stream_payload(manager, data: object) -> dict | None:
+    build = getattr(manager, "zone_activity", None)
+    if not callable(build) or not isinstance(data, dict):
+        return None
+    payload = build(data)
+    if not isinstance(payload, dict) or not payload.get("zones"):
+        return None
+    return payload
+
+
+def _incidents_stream_chunk(manager, event) -> str | None:
+    """Native HA events: incident lifecycle, plus zone occupancy from object events."""
+    if event.type == "object":
+        payload = _zone_stream_payload(manager, event.data)
+        if payload is None:
+            return None
+        return _sse_message("zone_object", payload, event.id)
+    if event.type != "incident_lifecycle" or not manager.incident_notification_allowed(event.data):
+        return None
+    return _sse_message(
+        event.type,
+        manager.incident_notification_payload(event.data),
+        event.id,
+    )
+
+
 def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
     router = APIRouter()
 
@@ -173,10 +199,10 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                 else:
                     for event in replay:
                         replayed_ids.add(event.id)
-                        if incidents_only and (
-                            event.type != "incident_lifecycle"
-                            or not active_manager.incident_notification_allowed(event.data)
-                        ):
+                        if incidents_only:
+                            chunk = _incidents_stream_chunk(active_manager, event)
+                            if chunk is not None:
+                                yield chunk
                             continue
                         yield _sse_message(event.type, (
                             active_manager.incident_notification_payload(event.data)
@@ -222,10 +248,10 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                         # from the last delivered cursor instead of skipping data.
                         return
                     last_sequence = event_sequence
-                    if incidents_only and (
-                        event.type != "incident_lifecycle"
-                        or not active_manager.incident_notification_allowed(event.data)
-                    ):
+                    if incidents_only:
+                        chunk = _incidents_stream_chunk(active_manager, event)
+                        if chunk is not None:
+                            yield chunk
                         continue
                     yield _sse_message(event.type, (
                         active_manager.incident_notification_payload(event.data)

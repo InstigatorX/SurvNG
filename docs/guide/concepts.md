@@ -47,7 +47,7 @@ A **zone** is a shape you draw on the camera picture. Use zones to focus on a do
 
 ## People
 
-When face recognition is enabled, SurvNG can group face sightings and let you name a person. Matches stay reviewable until you confirm them.
+**People** labels the upper-body crop this installation's face detector already sees. Those labels train a replacement detector. They do not name anyone.
 
 ## Admin
 

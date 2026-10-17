@@ -6,7 +6,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from survng.app.main_database import connect_main_database
+from survng.app.main_database import ClosingDatabaseConnection, connect_main_database
 
 
 class MainDatabaseConnectionTest(unittest.TestCase):
@@ -63,6 +63,34 @@ class MainDatabaseConnectionTest(unittest.TestCase):
             values = connection.execute("select value from values_table").fetchall()
 
         self.assertEqual(values, [(3,)])
+
+    def test_main_connection_context_closes_after_commit(self) -> None:
+        connection = self._connect()
+
+        with connection:
+            connection.execute("insert into values_table(value) values (1)")
+
+        with self.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
+            connection.execute("select 1")
+
+    def test_owned_connection_context_closes_after_rollback(self) -> None:
+        connection = sqlite3.connect(
+            self.path,
+            factory=ClosingDatabaseConnection,
+        )
+
+        with self.assertRaises(sqlite3.OperationalError):
+            with connection:
+                connection.execute("insert into values_table(value) values (1)")
+                connection.execute("insert into missing_table(value) values (2)")
+
+        with self.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
+            connection.execute("select 1")
+        with sqlite3.connect(self.path) as verification:
+            self.assertEqual(
+                verification.execute("select count(*) from values_table").fetchone()[0],
+                0,
+            )
 
 
 if __name__ == "__main__":

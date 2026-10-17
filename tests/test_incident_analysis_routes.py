@@ -10,14 +10,14 @@ from survng.app.incident_queries import IncidentQueryService
 from survng.app.security import required_api_scope
 
 
-def manager_for_analysis(*, enabled=True, accepting=True, mode="on_demand"):
+def manager_for_analysis(*, enabled=True, accepting=True, recorded=False, mode="on_demand"):
     status = {"camera_id": "gate", "status": "deferred", "episodes": [{"camera_id": "gate", "admission": "deferred", "status": "deferred"}], "remaining": 1}
     events = Mock()
     events.incident_analysis_status.return_value = status
     events.request_incident_analysis.return_value = {**status, "status": "queued"}
     worker = SimpleNamespace(
         tracking_lifecycle=SimpleNamespace(
-            enabled=lambda: enabled, accepting=lambda: accepting,
+            enabled=lambda: enabled, accepting=lambda: accepting, recorded_available=lambda: recorded,
         ),
         motion_incidents=SimpleNamespace(notify_scene_analysis_requested=Mock()),
     )
@@ -110,3 +110,19 @@ def test_viewer_can_request_only_exact_bounded_analysis_endpoint():
                  "/api/incidents/abc/episodes/analysis", "/api/incidents//analysis"):
         assert required_api_scope("POST", path) == "admin"
     assert required_api_scope("DELETE", "/api/incidents/abc/analysis") == "admin"
+
+
+def test_saved_evidence_can_be_requested_with_live_detection_off():
+    manager = manager_for_analysis(accepting=False, recorded=True)
+    result = IncidentQueryService.analysis(manager, "incident", request=True)
+    assert result["enabled"] is True
+    assert result["status"] == "queued"
+    assert "message" not in result
+    manager.events.request_incident_analysis.assert_called_once_with("incident", camera_ids={"gate"})
+
+
+def test_completed_analysis_does_not_warn_about_current_camera_state():
+    manager = manager_for_analysis(accepting=False)
+    status = manager.events.incident_analysis_status.return_value
+    status["status"] = status["episodes"][0]["status"] = "complete"
+    assert "message" not in IncidentQueryService.analysis(manager, "incident")

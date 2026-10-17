@@ -13,6 +13,64 @@ from .security import redact_secret_text
 
 LOGGER = logging.getLogger(__name__)
 MQTT_COMMAND_QUEUE_SIZE = 64
+
+
+def zone_object_messages(
+    camera_id: str,
+    zones: list[dict[str, Any]],
+    payload: dict[str, Any],
+    *,
+    slug: Callable[[str, str], str] | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Zone occupancy messages shared by MQTT and the native HA stream."""
+    slug = slug or MqttService._slug
+    objects = payload.get("objects") or []
+    messages: list[tuple[str, dict[str, Any]]] = []
+    for zone in zones:
+        zone_name = str(zone.get("name") or "").strip()
+        if not zone_name or zone.get("enabled") is False or zone.get("notifications_enabled") is False:
+            continue
+        zone_objects = [
+            item for item in objects
+            if isinstance(item, dict) and zone_name in (item.get("zones") or [])
+        ]
+        if not zone_objects:
+            continue
+        zone_slug = slug(zone_name, "zone")
+        zone_classes = sorted({
+            str(item.get("label")) for item in zone_objects if item.get("label")
+        })
+        zone_payload = {
+            "detected": True,
+            "camera_id": camera_id,
+            "zone": zone_name,
+            "event_id": payload.get("event_id"),
+            "created_at": payload.get("created_at") or payload.get("timestamp"),
+            "classes": zone_classes,
+            "objects": zone_objects,
+        }
+        base_topic = f"zone/{camera_id}/{zone_slug}"
+        messages.append((f"{base_topic}/object", zone_payload))
+        configured_classes = {
+            str(value).strip().lower()
+            for value in (zone.get("object_classes") or [])
+            if str(value).strip()
+        }
+        for class_name in zone_classes:
+            if configured_classes and class_name.lower() not in configured_classes:
+                continue
+            class_slug = slug(class_name, "object")
+            class_objects = [
+                item for item in zone_objects
+                if str(item.get("label") or "").lower() == class_name.lower()
+            ]
+            messages.append((
+                f"{base_topic}/class/{class_slug}",
+                {**zone_payload, "class": class_name, "objects": class_objects},
+            ))
+    return messages
+
+
 MQTT_COMMAND_STOP_TIMEOUT_SECONDS = 5.0
 MQTT_COMMAND_MAX_PAYLOAD_BYTES = 4096
 MQTT_SERVER_MONITOR_STOP_TIMEOUT_SECONDS = 5.0
@@ -720,49 +778,8 @@ class MqttService:
         zones: list[dict[str, Any]],
         payload: dict[str, Any],
     ) -> None:
-        objects = payload.get("objects") or []
-        for zone in zones:
-            zone_name = str(zone.get("name") or "").strip()
-            if not zone_name or zone.get("enabled") is False or zone.get("notifications_enabled") is False:
-                continue
-            zone_objects = [
-                item for item in objects
-                if zone_name in (item.get("zones") or [])
-            ]
-            if not zone_objects:
-                continue
-            zone_slug = self._slug(zone_name, "zone")
-            zone_classes = sorted({
-                str(item.get("label")) for item in zone_objects if item.get("label")
-            })
-            zone_payload = {
-                "detected": True,
-                "camera_id": camera_id,
-                "zone": zone_name,
-                "event_id": payload.get("event_id"),
-                "created_at": payload.get("created_at"),
-                "classes": zone_classes,
-                "objects": zone_objects,
-            }
-            base_topic = f"zone/{camera_id}/{zone_slug}"
-            self.publish(f"{base_topic}/object", zone_payload)
-            configured_classes = {
-                str(value).strip().lower()
-                for value in (zone.get("object_classes") or [])
-                if str(value).strip()
-            }
-            for class_name in zone_classes:
-                if configured_classes and class_name.lower() not in configured_classes:
-                    continue
-                class_slug = self._slug(class_name, "object")
-                class_objects = [
-                    item for item in zone_objects
-                    if str(item.get("label") or "").lower() == class_name.lower()
-                ]
-                self.publish(
-                    f"{base_topic}/class/{class_slug}",
-                    {**zone_payload, "class": class_name, "objects": class_objects},
-                )
+        for suffix, zone_payload in zone_object_messages(camera_id, zones, payload, slug=self._slug):
+            self.publish(suffix, zone_payload)
 
     def publish_camera_state(self, camera_id: str, running: bool) -> None:
         self.publish(

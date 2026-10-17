@@ -377,3 +377,39 @@ def test_compatibility_binding_rejects_replacement_of_active_session() -> None:
 
     with pytest.raises(RuntimeError, match="cannot replace active"):
         lifecycle.bind_for_compatibility(_session())
+
+
+def test_recorded_review_after_drain_never_admits_live_tracking():
+    session = _session()
+    lifecycle, _, frame_provider, _ = _lifecycle(session, accepting=[False])
+    lifecycle.recorded_available = lambda: True
+    lifecycle.scene_job_store = Mock()
+    lifecycle.scene_job_store.claim_scene_tracking.return_value = {
+        "event_id": 8, "event_epoch": 1000, "start_epoch": 1000, "end_epoch": 1002,
+        "cursor_epoch": None, "episode_id": "saved", "admission": "demand",
+    }
+    # A completed detection-off drain fences automatic admission, but should
+    # not fence future explicit review of evidence that already exists.
+    lifecycle._scene_abort_in_progress = True
+    assert lifecycle.resume_pending_scene()
+    assert lifecycle.scene_job_store.claim_scene_tracking.call_args.kwargs["demand_only"] is True
+    session.set_accepting.assert_called_once_with(True, recorded_only=True)
+    assert session.start.call_args.kwargs["recorded_window"] == (1000, 1002)
+    frame_provider.assert_not_called()
+    lifecycle.recorded_available = lambda: False
+    session.start.reset_mock()
+    assert lifecycle.resume_pending_scene() is False
+    session.start.assert_not_called()
+
+
+@pytest.mark.parametrize("fence", ["_scene_abort_waiting", "_scene_abort_failed"])
+def test_recorded_review_cannot_bypass_incomplete_shutdown(fence):
+    session = _session()
+    lifecycle, _, _, _ = _lifecycle(session, accepting=[False])
+    lifecycle.recorded_available = lambda: True
+    lifecycle.scene_job_store = Mock()
+    lifecycle._scene_abort_in_progress = True
+    setattr(lifecycle, fence, True)
+    assert lifecycle.resume_pending_scene() is False
+    lifecycle.scene_job_store.claim_scene_tracking.assert_not_called()
+    session.start.assert_not_called()

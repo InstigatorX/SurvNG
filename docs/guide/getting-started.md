@@ -108,7 +108,7 @@ See [Zones](zones.md).
 | Scrub recorded video | [Timeline](timeline.md) |
 | Save a clip | [Timeline & exports](timeline.md) |
 | Find “person in a red jacket” | [Search](search.md) |
-| Name a recurring face | [People](people.md) |
+| Label face-detector crops | [People](people.md) |
 | Ask about an incident | [AI assistant](assistant.md) |
 
 ## Security reminder

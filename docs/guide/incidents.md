@@ -35,6 +35,11 @@ Open an incident to see:
 - Related activity nearby in time
 - Actions to jump into Timeline at the same moment
 
+Deferred extra analysis can process retained incident recordings even after camera
+detection is switched off. Tracking must remain enabled and the camera worker
+must be running. Missing or expired footage remains unavailable; saved evidence
+and completed analysis remain visible.
+
 ## Focus vs mosaic
 
 Incidents can show one primary piece of evidence at a time (**Focus**) or a denser mosaic of thumbnails. Pick whichever helps you review faster; SurvNG remembers the preference for the session.
@@ -77,7 +82,6 @@ monocular estimates; use them as scene context rather than precise measurements.
 3. Open the latest incident.
 4. Confirm the picture matches what you expect.
 5. Play the incident. The recording opens in the center of the viewer, already at the incident, and you can scrub across it. Choose **View in Timeline** when you want the surrounding day.
-6. If face recognition is enabled, check whether a person suggestion appeared under **People**.
 
 ## What is not an incident
 

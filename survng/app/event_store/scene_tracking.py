@@ -184,8 +184,8 @@ class EventStoreSceneTrackingMixin:
             return self._incident_analysis_status(conn, incident_id)
 
     def claim_scene_tracking(self, camera_id, lease_owner, lease_seconds=60.0, end_limit=None,
-                             demand_lease_seconds=None):
-        """Lease the camera's next recorded window; ``end_limit`` caps windows first."""
+                             demand_lease_seconds=None, demand_only=False):
+        """Lease recorded work; drain limits apply only to automatic windows."""
         now = time.time()
         # Idle recovery runs once per second per camera. It must not take the
         # shared writer just to discover there is no claimable work. Draining
@@ -196,7 +196,7 @@ class EventStoreSceneTrackingMixin:
                     "select 1 from scene_analysis_jobs where camera_id=? and "
                     "((state='queued' and retry_at<=?) or (state='running' and lease_expires<=?)) "
                     "and (admission='automatic' or (requested_until>? and request_end_epoch>start_epoch)) "
-                    "limit 1", (camera_id, now, now, now),
+                    "and (?=0 or admission='demand') limit 1", (camera_id, now, now, now, int(demand_only)),
                 ).fetchone()
             if due is None:
                 return None
@@ -204,10 +204,11 @@ class EventStoreSceneTrackingMixin:
             conn.execute("begin immediate")
             if end_limit is not None:
                 conn.execute("update scene_analysis_jobs set end_limit_epoch=?,end_epoch=max(start_epoch,min(end_epoch,?)) "
-                             "where camera_id=? and state='queued' and (end_limit_epoch is null or end_limit_epoch!=? or end_epoch>?)",
+                             "where camera_id=? and state='queued' and admission='automatic' "
+                             "and (end_limit_epoch is null or end_limit_epoch!=? or end_epoch>?)",
                              (end_limit,end_limit,camera_id,end_limit,end_limit))
                 ended = [r[0] for r in conn.execute("select episode_id from scene_analysis_jobs where camera_id=? "
-                         "and state='queued' and (cursor_epoch>=end_epoch or end_epoch<=start_epoch)", (camera_id,))]
+                         "and state='queued' and admission='automatic' and (cursor_epoch>=end_epoch or end_epoch<=start_epoch)", (camera_id,))]
                 self._end_scene_tracking(conn, ended, "", "recorded analysis ended when detection turned off")
             if conn.execute("select 1 from scene_analysis_jobs where camera_id=? and state='running' "
                             "and lease_expires>? limit 1",(camera_id,now)).fetchone():
@@ -217,7 +218,8 @@ class EventStoreSceneTrackingMixin:
                 and (admission='automatic' or (requested_until>? and request_end_epoch>start_epoch
                     and not exists(select 1 from scene_analysis_jobs active where active.admission='demand'
                         and active.state='running' and active.lease_expires>?)))
-                order by (admission!='automatic'),start_epoch,episode_id limit 1""", (camera_id,now,now,now,now)).fetchone()
+                and (?=0 or admission='demand')
+                order by (admission!='automatic'),start_epoch,episode_id limit 1""", (camera_id,now,now,now,now,int(demand_only))).fetchone()
             if job is None:
                 return None
             if job["admission"] == "demand" and demand_lease_seconds is not None:
@@ -373,11 +375,11 @@ class EventStoreSceneTrackingMixin:
                                 "limit 1", (camera_id,now,now)).fetchone() is not None
 
     def close_scene_tracking(self, camera_id, reason):
-        """End the camera's unfinished recorded analysis; returns jobs closed."""
+        """Close unfinished work, preserving explicit review on detection-off drains."""
         with self._lock, self._connect() as conn:
             conn.execute("begin immediate")
             ids = [r[0] for r in conn.execute("select episode_id from scene_analysis_jobs where camera_id=? "
-                                              "and state in ('queued','running')", (camera_id,))]
+                                              "and state in ('queued','running') and (?!='camera_disabled' or admission='automatic')", (camera_id,reason))]
             self._end_scene_tracking(conn, ids, str(reason)[:160],
                                      "detection turned off before recorded analysis finished")
             return len(ids)

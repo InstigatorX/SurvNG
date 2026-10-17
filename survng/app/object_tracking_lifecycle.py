@@ -47,7 +47,9 @@ class ObjectTrackingLifecycle:
         snapshot_writer: TrackingSnapshotWriter | None = None,
         scene_job_store: Any | None = None,
         drain_cutoff: Callable[[], float | None] | None = None,
+        recorded_available: Callable[[], bool] | None = None,
     ) -> None:
+        self.recorded_available = recorded_available or (lambda: False)
         self.camera = camera
         self.drain_cutoff = drain_cutoff or (lambda: None)
         self.frame_provider = frame_provider
@@ -161,18 +163,22 @@ class ObjectTrackingLifecycle:
         if self.scene_job_store is None:
             return False
         with self.lifecycle_lock:
-            if self._scene_abort_in_progress:
+            recorded = self.recorded_available()
+            if self._scene_abort_in_progress and (
+                not recorded or self._scene_abort_waiting or self._scene_abort_failed
+            ):
                 return False
             session = self._session
             live = self.accepting()
             cutoff = None if live else self.drain_cutoff()
-            if (not live and cutoff is None) or not session.config.enabled or session.running():
+            if (not live and cutoff is None and not recorded) or not session.config.enabled or session.running():
                 return False
-            if cutoff is not None:
-                # Detection is off: only footage recorded before it turned off.
+            if not live:
+                # Explicit demand uses saved windows only; never admit live frames.
                 session.set_accepting(True, recorded_only=True)
             job = self.scene_job_store.claim_scene_tracking(
                 self.camera.id, self._scene_lease_owner, end_limit=cutoff,
+                demand_only=not live and cutoff is None,
                 demand_lease_seconds=max(60.0,
                     float(getattr(session.config, "recorded_processing_budget_seconds", 60.0))
                     + float(getattr(session.config, "capacity_wait_seconds", 0.0)) + 30.0),
