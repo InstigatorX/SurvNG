@@ -22,7 +22,22 @@ _WRITE_PREFIXES = (
 )
 
 
-class MainDatabaseConnection(sqlite3.Connection):
+class ClosingDatabaseConnection(sqlite3.Connection):
+    """A transaction context that also owns and closes its connection."""
+
+    def __exit__(
+        self,
+        exc_type: object,
+        exc_value: object,
+        traceback: object,
+    ) -> bool:
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
+class MainDatabaseConnection(ClosingDatabaseConnection):
     """Serialize only write transactions while preserving concurrent WAL reads."""
 
     _write_lock: threading.RLock | None = None
@@ -73,12 +88,6 @@ class MainDatabaseConnection(sqlite3.Connection):
     def close(self) -> None:
         try:
             super().close()
-        finally:
-            self._release_write_lock()
-
-    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool:
-        try:
-            return super().__exit__(exc_type, exc_value, traceback)
         finally:
             self._release_write_lock()
 

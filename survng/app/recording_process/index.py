@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..config import CameraConfig, RecordingRetentionConfig
+from ..main_database import ClosingDatabaseConnection
 from ..media_storage import path_presence
 from ..recording_media import mp4_playback_metadata, mp4_stream_fingerprint
 
@@ -30,7 +31,11 @@ RECORDING_LOCATION_BACKFILL_CURSOR_KEY = "recording_location_backfill_cursor"
 
 class RecordingIndexMixin:
     def _index_connection(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.index_path, timeout=10)
+        connection = sqlite3.connect(
+            self.index_path,
+            timeout=10,
+            factory=ClosingDatabaseConnection,
+        )
         connection.row_factory = sqlite3.Row
         return connection
 
