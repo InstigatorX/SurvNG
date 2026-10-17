@@ -356,6 +356,23 @@ class RecordingIndexMixin:
         )
         return [str(path) for path in files[-limit:]][::-1]
 
+    @staticmethod
+    def _bound_recording_availability(row: dict) -> dict:
+        """Do not advertise wall-clock coverage beyond known playable media."""
+        try:
+            start_epoch = float(row["start_epoch"])
+            end_epoch = float(row["end_epoch"])
+            playback_duration = float(row["playback_duration_seconds"])
+        except (KeyError, TypeError, ValueError):
+            return row
+        if not math.isfinite(playback_duration) or playback_duration <= 0:
+            return row
+        bounded_end = min(end_epoch, start_epoch + playback_duration)
+        if bounded_end < end_epoch:
+            row["end_epoch"] = bounded_end
+            row["duration_seconds"] = max(0.0, bounded_end - start_epoch)
+        return row
+
     def recording_rows(self, camera_id: str, limit: int = 1000, source: str = "main") -> list[dict]:
         """Return recent playable recordings from the local index only."""
         source = "main" if source == "main" else "live"
@@ -373,6 +390,7 @@ class RecordingIndexMixin:
             ).fetchall()
         payloads = [dict(row) for row in reversed(rows)]
         for row in payloads:
+            self._bound_recording_availability(row)
             row["start_at"] = datetime.fromtimestamp(
                 float(row["start_epoch"]), timezone.utc
             ).isoformat()
@@ -401,7 +419,13 @@ class RecordingIndexMixin:
                     """,
                     (camera_id, source, start_epoch, end_epoch),
                 ).fetchall()
-            return [dict(row) for row in indexed]
+            rows = [self._bound_recording_availability(dict(row)) for row in indexed]
+            return [
+                row
+                for row in rows
+                if float(row["end_epoch"]) > start_epoch
+                and float(row["start_epoch"]) < end_epoch
+            ]
 
         rows = indexed_rows()
         if not discover_missing:
@@ -638,7 +662,8 @@ class RecordingIndexMixin:
         with self._index_connection() as connection:
             indexed = connection.execute(
                 f"""
-                SELECT camera_id, source, start_epoch, end_epoch
+                SELECT camera_id, source, start_epoch, end_epoch,
+                       duration_seconds, playback_duration_seconds
                 FROM recordings
                 WHERE camera_id IN ({placeholders})
                     AND source IN ('main', 'live')
@@ -651,9 +676,12 @@ class RecordingIndexMixin:
                 (*unique_camera_ids, start_epoch, end_epoch),
             ).fetchall()
         grouped: dict[tuple[str, str], list[dict]] = {}
-        for row in indexed:
+        for indexed_row in indexed:
+            row = self._bound_recording_availability(dict(indexed_row))
+            if float(row["end_epoch"]) <= start_epoch:
+                continue
             key = (str(row["camera_id"]), str(row["source"]))
-            grouped.setdefault(key, []).append(dict(row))
+            grouped.setdefault(key, []).append(row)
         gap_tolerance = min(5.0, max(0.25, self.segment_seconds / 2))
         for (camera_id, source), rows in grouped.items():
             result[camera_id][source] = {
@@ -1686,24 +1714,26 @@ class RecordingIndexMixin:
         """Return an indexed recording without scanning media storage on the request path."""
         del limit  # Retained for API compatibility with older callers.
         source = "main" if source == "main" else "live"
+        maximum_duration = max(60.0, self.segment_seconds * 3)
         with self._index_connection() as connection:
-            row = connection.execute(
+            rows = connection.execute(
                 """
                 SELECT path, name, size_bytes, modified_at, start_epoch, duration_seconds,
                        end_epoch, source, playable, health_error, validated,
-                       stream_fingerprint, fingerprint_checked
+                       stream_fingerprint, fingerprint_checked, playback_duration_seconds
                 FROM recordings
                 WHERE camera_id = ? AND source = ? AND playable = 1
-                  AND start_epoch <= ? AND end_epoch >= ?
-                ORDER BY start_epoch DESC LIMIT 1
+                  AND start_epoch > ? AND start_epoch <= ? AND end_epoch > ?
+                ORDER BY start_epoch DESC
                 """,
-                (camera_id, source, epoch, epoch),
-            ).fetchone()
-        if row is not None:
-            payload = dict(row)
-            if Path(str(payload["path"])).is_file():
-                return payload
-            self._delete_index_paths([str(payload["path"])])
+                (camera_id, source, epoch - maximum_duration, epoch, epoch),
+            ).fetchall()
+        for row in rows:
+            payload = self._bound_recording_availability(dict(row))
+            if float(payload["start_epoch"]) <= epoch < float(payload["end_epoch"]):
+                if Path(str(payload["path"])).is_file():
+                    return payload
+                self._delete_index_paths([str(payload["path"])])
         if abs(time.time() - epoch) <= max(60.0, self.segment_seconds * 6):
             self.request_recording_edge_refresh(camera_id, source, epoch)
         return None
