@@ -170,6 +170,20 @@ class SceneIncidentTest(unittest.TestCase):
         self.assertEqual(self.store.scene_incident_facets(),
                          {"camera_ids":["gate", "upper-garage"], "labels":["car", "cat", "dog"], "zones":["front", "road", "side"]})
 
+    def test_incident_cards_keep_zones_that_are_not_on_the_cover(self):
+        driveway = self.add(objects=[person(label="car", zones=["Driveway"], confidence=.9, temporal_observations=2)])
+        self.add(15, objects=[person(80, label="car", zones=["Road"], confidence=.9, temporal_observations=2)])
+        self.add(30, objects=[person(
+            120, label="car", zones=["Yard"], confidence=.2,
+            confidence_threshold=.7, confidence_eligible=False,
+        )])
+        detail = self.store.scene_incident(event_id=driveway["id"])
+        card = self.store.list_scene_incident_cards()[0]
+        self.assertEqual(detail["zones"], ["Driveway", "Road"])
+        self.assertEqual(card["zones"], detail["zones"])
+        self.assertNotIn("Yard", card["zones"])
+        self.assertNotIn("scene_objects", card)
+
     def test_incident_cards_skip_observation_history(self):
         event = self.add(snapshot_path="snapshots/cover.webp", objects=[person(zones=["front"])])
         incident = self.store.scene_incident(event_id=event["id"])

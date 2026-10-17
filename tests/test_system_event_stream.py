@@ -194,6 +194,42 @@ def test_motion_filter_applies_to_recovery_snapshot():
     assert '"incident_id":"person"' in chunks[1]
 
 
+def test_native_stream_forwards_zone_occupancy_from_object_events():
+    manager = notification_manager()
+
+    def zone_activity(payload):
+        if "Driveway" not in (payload.get("zones") or []):
+            return None
+        return {
+            "camera_id": payload["camera_id"],
+            "timestamp": payload["timestamp"],
+            "zones": [{"zone": "Driveway", "classes": ["car"]}],
+        }
+
+    manager.zone_activity = zone_activity
+    ignored = manager.state_events.publish("camera_state", {"running": True})
+    zone = manager.state_events.publish("object", {
+        "camera_id": "lower-garage",
+        "timestamp": "2026-10-16T19:32:27+00:00",
+        "zones": ["Driveway"],
+    })
+    quiet = manager.state_events.publish("object", {
+        "camera_id": "lower-garage",
+        "timestamp": "2026-10-16T19:32:28+00:00",
+        "zones": ["Road"],
+    })
+    request = StreamRequest(header_cursor=ignored.id)
+    request.query_params["incidents_only"] = "1"
+    chunks = asyncio.run(read_chunks(stream_handler(manager, Mock()), request, 3))
+    assert chunks[0] == "retry: 3000\n\n"
+    assert "event: zone_object" in chunks[1]
+    assert "Driveway" in chunks[1]
+    assert f"id: {zone.id}" in chunks[1]
+    assert "Road" not in chunks[1]
+    assert f"id: {quiet.id}" in chunks[2]
+    assert "event: connected" in chunks[2]
+
+
 def test_motion_filter_applies_to_replay_and_advances_past_skipped_events():
     manager = notification_manager()
     first = manager.state_events.publish("camera_state", {})
