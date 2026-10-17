@@ -35,6 +35,11 @@ Open an incident to see:
 - Related activity nearby in time
 - Actions to jump into Timeline at the same moment
 
+Deferred extra analysis can process retained incident recordings even after camera
+detection is switched off. Tracking must remain enabled and the camera worker
+must be running. Missing or expired footage remains unavailable; saved evidence
+and completed analysis remain visible.
+
 ## Focus vs mosaic
 
 Incidents can show one primary piece of evidence at a time (**Focus**) or a denser mosaic of thumbnails. Pick whichever helps you review faster; SurvNG remembers the preference for the session.

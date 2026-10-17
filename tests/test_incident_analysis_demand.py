@@ -295,3 +295,37 @@ def test_on_demand_lifecycle_skips_prewarm_and_preserves_bookmark(tmp_path):
     assert lifecycle.start_incident(event["id"], datetime.fromtimestamp(1000, timezone.utc), [])
     session.start.assert_not_called()
     assert store.incident_analysis_status(incident)["status"] == "deferred"
+
+
+def test_detection_off_review_claims_only_requested_saved_evidence(tmp_path):
+    store = EventStore(tmp_path)
+    _, automatic, _ = bookmark(store, epoch=900, deferred=False)
+    _, deferred, incident = bookmark(store, epoch=1100)
+    assert store.claim_scene_tracking("gate", "review", demand_only=True) is None
+    store.request_incident_analysis(incident)
+    job = store.claim_scene_tracking("gate", "review", demand_only=True)
+    assert job["episode_id"] == deferred["episode_id"]
+    assert job["end_epoch"] <= job["request_end_epoch"]
+    checkpoint(store, job, cursor=1120)
+    assert store.incident_analysis_status(incident)["status"] == "complete"
+    assert store.claim_scene_tracking("gate", "review", demand_only=True) is None
+    assert store.claim_scene_tracking("gate", "live")["episode_id"] == automatic["episode_id"]
+
+
+def test_detection_off_drain_does_not_terminalize_requested_analysis(tmp_path):
+    store = EventStore(tmp_path)
+    bookmark(store, epoch=900, deferred=False)
+    _, deferred, incident = bookmark(store, epoch=1100)
+    store.request_incident_analysis(incident)
+    assert store.close_scene_tracking("gate", "camera_disabled") == 1
+    assert store.incident_analysis_status(incident)["status"] == "queued"
+    assert store.claim_scene_tracking("gate", "review", demand_only=True)["episode_id"] == deferred["episode_id"]
+
+
+def test_detection_off_drain_does_not_truncate_requested_evidence(tmp_path):
+    store = EventStore(tmp_path)
+    _, _, incident = bookmark(store)
+    store.request_incident_analysis(incident)
+    job = store.claim_scene_tracking("gate", "drain", end_limit=1010)
+    assert job["end_epoch"] == 1020
+    assert job["end_limit_epoch"] is None

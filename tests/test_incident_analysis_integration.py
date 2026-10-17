@@ -16,7 +16,8 @@ from survng.app.object_tracking_lifecycle import ObjectTrackingLifecycle
 
 
 @pytest.mark.parametrize("missing_media", [False, True])
-def test_bookmark_open_analyze_and_reopen_without_extra_inference(tmp_path, missing_media):
+@pytest.mark.parametrize("detection_off", [False, True])
+def test_bookmark_open_analyze_and_reopen_without_extra_inference(tmp_path, missing_media, detection_off):
     store = EventStore(tmp_path)
     at = datetime.fromtimestamp(1000, timezone.utc)
     person = {"label": "person", "confidence": .9, "incident_eligible": True,
@@ -41,9 +42,11 @@ def test_bookmark_open_analyze_and_reopen_without_extra_inference(tmp_path, miss
     session.set_accepting(True)
     factory = Mock()
     factory.create.return_value = session
+    live_detection = [True]
     lifecycle = ObjectTrackingLifecycle(
         camera=camera, factory=factory, frame_provider=Mock(), catchup_frame_provider=decode,
-        prewarm_frame_provider=Mock(), history=Mock(), accepting=lambda: True,
+        prewarm_frame_provider=Mock(), history=Mock(), accepting=lambda: live_detection[0],
+        recorded_available=lambda: True,
         lifecycle_lock=threading.RLock(), scene_job_store=store,
     )
     # Old footage must not contaminate the live stationary-subject memory.
@@ -51,6 +54,9 @@ def test_bookmark_open_analyze_and_reopen_without_extra_inference(tmp_path, miss
     manager = SimpleNamespace(events=store, workers={"gate": SimpleNamespace(tracking_lifecycle=lifecycle)},
                               config=SimpleNamespace(detector=SimpleNamespace(tracking=config)))
     assert lifecycle.start_incident(event["id"], at, [person])
+    if detection_off:
+        live_detection[0] = False
+        lifecycle.sync_accepting()
     assert IncidentQueryService.analysis(manager, incident_id)["status"] == "deferred"
     assert lifecycle.resume_pending_scene() is False
     detect.assert_not_called()
@@ -69,6 +75,7 @@ def test_bookmark_open_analyze_and_reopen_without_extra_inference(tmp_path, miss
     assert IncidentQueryService.analysis(manager, incident_id)["status"] == expected
     assert (detect.call_count == 0) if missing_media else (detect.call_count > 0)
     assert decode.call_count > 0
+    session.frame_provider.assert_not_called()
     assert store.scene_pending_notifications() == []
     session.activity_attributor.stamp_recorded.assert_not_called()
     assert publisher.call_args.args[1]["scene_analysis_job"]["admission"] == "demand"

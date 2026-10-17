@@ -2051,3 +2051,38 @@ def test_refinement_timeout_identifies_job_and_stage(caplog):
         release.set()
         service.request_stop()
         assert service.wait_stopped(2)
+
+
+@pytest.mark.parametrize("drain_seconds", [0, 30])
+def test_detection_off_worker_survives_drain_for_explicit_recorded_review(drain_seconds):
+    service, decision = _queued_service()
+    service.recorded_analysis_available = lambda: True
+    service.close_out_scene_analysis = lambda reason: 0
+    service.scene_analysis_pending = lambda: False
+    resumed = threading.Event()
+    service.resume_scene_analysis = lambda: resumed.set()
+    try:
+        assert service.start_drain(time.time(), seconds=drain_seconds)
+        deadline = time.monotonic() + 3
+        while not service._recorded_review and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert service.running()
+        assert service._recorded_review
+        assert not service._refinement_worker_accepting()
+        service._run_scene_discovery = Mock()
+        service._run_scene_candidate = Mock()
+        resumed.clear()
+        assert service.notify_scene_analysis_requested()
+        assert resumed.wait(2)
+        service._run_scene_discovery.assert_not_called()
+        service._run_scene_candidate.assert_not_called()
+        assert service.stop_drain(2)
+        # The same owner can subsequently start a live generation.
+        stop = threading.Event()
+        service.start(stop)
+        assert service._refinement_worker_accepting()
+        assert not service._recorded_review
+        stop.set()
+    finally:
+        service.request_stop()
+        assert service.wait_stopped(2)

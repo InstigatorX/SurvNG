@@ -408,6 +408,7 @@ class CameraWorker:
                 self.motion_state.detection_enabled() and not self._stop.is_set()
             ),
             lifecycle_lock=self._lifecycle_lock,
+            recorded_available=self.recorded_analysis_available,
             cover_frame_provider=lambda captured_at, width, reference: (
                 self.tracking_frames.recorded_frame_at(
                     captured_at,
@@ -480,6 +481,7 @@ class CameraWorker:
                 self.motion_object_detector, "recorded_evidence_ready_at", None,
             ),
             scene_analysis_pending=self.tracking_lifecycle.scene_work_pending,
+            recorded_analysis_available=self.recorded_analysis_available,
             close_out_scene_analysis=self.tracking_lifecycle.abort_scene_work,
             has_trackable_objects=self.tracking_lifecycle.has_trackable_objects,
             start_tracking=self.tracking_lifecycle.start_incident,
@@ -1068,6 +1070,12 @@ class CameraWorker:
             self._request_spatial_alignment_calibration(reason="detection_enabled")
         elif not enabled and previously_enabled and running:
             self._drain_pending_detection_work()
+
+    def recorded_analysis_available(self) -> bool:
+        """Saved evidence can be reviewed without enabling live detection."""
+        with self.runtime_state.lock:
+            return (self.runtime_state.phase is CameraLifecyclePhase.RUNNING
+                    and not self._stop.is_set())
 
     def _drain_pending_detection_work(self) -> None:
         """Finish work for footage recorded before detection turned off."""
