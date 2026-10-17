@@ -153,7 +153,7 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
   return (
     <main className="faces-page faces-mode-finding">
       <header className="faces-commandbar">
-        <div><Crosshair size={18} /><span><strong>People</strong><small>Label upper-body crops for this install&apos;s face detector</small></span></div>
+        <div><Crosshair size={18} /><span><strong>People</strong><small>Mark faces in these crops, then export them to train this install&apos;s detector</small></span></div>
       </header>
       <FaceFindingPanel timeZone={timeZone} />
     </main>

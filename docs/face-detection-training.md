@@ -31,21 +31,22 @@ side are skipped. Only the `person` label is used.
 
 Open **People**.
 
-1. **Materialize** reads recorded `person` observations with an exact frame
+1. **Load crops** reads recorded `person` observations with an exact frame
    time, cuts the upper-body window, and runs the current face detector at 0.60
-   when a model path is configured. Crops with no baseline face are queued
-   first. A portion of crops that already have a baseline face stay in the
-   queue so false boxes can be marked.
-2. Draw a face, click an orange baseline box to mark it as not a face, choose
+   when a model path is configured. Crops the detector missed are queued
+   first. A portion of crops that already have a detector box stay in the
+   queue so false boxes can be marked. The list does not fill itself; load
+   again to copy newer days.
+2. Draw a face, click an orange detector box to mark it as not a face, choose
    **No face**, or **Drop** with a reason. `no_face` cannot sit on a crop that
    has a face box.
-3. **Freeze splits** assigns whole calendar days, about 70% train, 15%
+3. **Freeze days** assigns whole calendar days, about 70% train, 15%
    calibration, and 15% held out. At least three labeled days are required.
    The same decoded pixels cannot land in two splits. Frozen days stay put.
 4. **Export** writes `manifest.json` and `crops/*.png` under the database
    directory. The manifest stores crop hashes and boxes. It does not store
    person names.
-5. Train outside SurvNG. **Score IR** loads both OpenVINO XML files through
+5. Train outside SurvNG. **Score model** loads both OpenVINO XML files through
    the same detector class and applies the promotion gate.
 
 Set **Admin → Detection → Face Detector Model** to a passing XML. Compare the

@@ -9,10 +9,10 @@ Naming a detected face still happens from an incident. Those confirmed crops are
 ## Label crops
 
 1. Open **People**.
-2. Choose **Materialize** to cut upper-body crops from recorded person observations.
-3. Draw a face, click an orange baseline box to mark it as not a face, choose **No face**, or **Drop** with a reason.
-4. **Freeze splits**, then **Export**. Train the detector outside SurvNG.
-5. **Score IR** with the candidate and baseline XML paths before changing **Admin → Detection → Face Detector Model**.
+2. Choose **Load crops**. That copies recent recorded people into the list. Newer days appear only after you load again.
+3. Draw a face, click an orange box to mark it as not a face, choose **No face**, or **Drop** with a reason.
+4. After labels exist on at least three days, choose **Freeze days**, then **Export**. Train the detector outside SurvNG.
+5. **Score model** with the candidate and baseline XML paths before changing **Admin → Detection → Face Detector Model**.
 
 The export format, day splits, and promotion gate are in [Camera-specific face detector](../face-detection-training.md).
 

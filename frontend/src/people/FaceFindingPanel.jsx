@@ -42,6 +42,49 @@ function ActionButton({ idle, pending, running, className = "", disabled = false
   );
 }
 
+function formatCropWhen(epoch, timeZone) {
+  const date = new Date(Number(epoch) * 1000);
+  if (Number.isNaN(date.getTime())) return "Unknown time";
+  const options = { hour: "numeric", minute: "2-digit" };
+  try {
+    return new Intl.DateTimeFormat("en-US", timeZone ? { ...options, timeZone } : options).format(date);
+  } catch {
+    return new Intl.DateTimeFormat("en-US", options).format(date);
+  }
+}
+
+function formatCropDay(day) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day || ""));
+  if (!match) return day || "Unknown day";
+  return new Intl.DateTimeFormat("en-US", { month: "long", day: "numeric", year: "numeric" }).format(
+    new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])),
+  );
+}
+
+function detectorLabel(sample) {
+  const count = Array.isArray(sample.baseline_predictions) ? sample.baseline_predictions.length : 0;
+  if (sample.baseline_ran && !sample.baseline_miss && count > 0) {
+    return count === 1 ? "Detector marked a face" : `Detector marked ${count} faces`;
+  }
+  if (!sample.baseline_ran) return "Detector did not run";
+  return "Detector marked nothing";
+}
+
+function groupSamples(samples) {
+  const groups = new Map();
+  for (const sample of samples) {
+    const day = sample.calendar_day || "Unknown day";
+    if (!groups.has(day)) groups.set(day, []);
+    groups.get(day).push(sample);
+  }
+  return [...groups.entries()]
+    .sort((left, right) => right[0].localeCompare(left[0]))
+    .map(([day, items]) => ({
+      day,
+      samples: items.slice().sort((left, right) => Number(right.captured_epoch) - Number(left.captured_epoch)),
+    }));
+}
+
 function FaceFindingStatus({ busy, activity, message, error }) {
   const text = activityText(activity);
   const percent = activity?.total > 0 && activity.current > 0
@@ -245,26 +288,69 @@ export function FaceFindingPanel({ timeZone = "UTC" }) {
     });
   }
 
+  const groups = groupSamples(samples);
   return (
     <div className="face-finding">
+      <ol className="face-finding-steps">
+        <li className={samples.length ? "" : "is-current"}>
+          <strong>1. Load crops</strong>
+          <span>Copy recent recorded people into the list. Newer days appear only after you load again.</span>
+        </li>
+        <li className={samples.length ? "is-current" : ""}>
+          <strong>2. Mark each crop</strong>
+          <span>Draw a box around every face, or choose No face. Drop a crop that should not train the detector.</span>
+        </li>
+        <li>
+          <strong>3. Export after three days</strong>
+          <span>Freeze those days, export, train outside SurvNG, then score the new model.</span>
+        </li>
+      </ol>
       <div className="face-finding-queue">
         <div className="queue-toolbar-copy">
-          <strong>Face finding</strong>
-          <small>Label the upper-body crop. This does not enroll or name anyone.</small>
+          <strong>Unlabeled crops</strong>
+          <small>{samples.length ? `${samples.length} waiting. These labels do not name anyone.` : "None loaded yet."}</small>
+          <ActionButton idle="Load crops" pending="Loading…" running={working("Loading crops")} disabled={busy} onClick={() => run("Loading crops", async () => {
+            const response = await fetch("/api/face-detection/samples/materialize", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ timezone: timeZone || "UTC", limit: 50 }),
+            });
+            if (!response.ok) throw new Error(await readError(response, "Unable to load crops"));
+            const payload = await response.json();
+            const stored = Number(payload.stored || 0);
+            if (!stored) {
+              return `Loaded 0 new crops. ${payload.already || 0} already saved, ${payload.skipped || 0} had no recording, ${payload.undecoded || 0} could not be decoded.`;
+            }
+            return `Loaded ${stored} upper-body crops.`;
+          })} />
         </div>
-        <ul>
-          {samples.map((sample) => (
-            <li key={sample.id}>
-              <button type="button" className={sample.id === selected?.id ? "active" : ""} onClick={() => setSelectedId(sample.id)}>
-                <strong>{sample.camera_id}</strong>
-                <small>{sample.calendar_day} · {sample.baseline_miss || !sample.baseline_ran ? "no baseline face" : "baseline face"}</small>
-              </button>
-            </li>
-          ))}
-        </ul>
-        {!samples.length ? <p className="empty-state">No unlabeled upper-body crops yet.</p> : null}
+        {groups.map((group) => (
+          <section key={group.day} className="face-finding-day">
+            <h3>{formatCropDay(group.day)} <span>{group.samples.length}</span></h3>
+            <ul>
+              {group.samples.map((sample) => {
+                const missed = sample.baseline_miss || !sample.baseline_ran;
+                return (
+                  <li key={sample.id}>
+                    <button type="button" className={sample.id === selected?.id ? "face-finding-row active" : "face-finding-row"} onClick={() => setSelectedId(sample.id)}>
+                      <img src={appUrl(sample.crop_url)} alt="" />
+                      <span>
+                        <strong>{formatCropWhen(sample.captured_epoch, timeZone)}</strong>
+                        <small>{sample.camera_id}</small>
+                        <small><i className={missed ? "face-finding-mark miss" : "face-finding-mark hit"} aria-hidden="true" />{detectorLabel(sample)}</small>
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        ))}
+        {!samples.length ? <p className="empty-state">Choose Load crops. This list does not fill itself.</p> : null}
       </div>
       <div className="face-finding-work" aria-busy={busy || undefined}>
+        {selected ? <p className="face-finding-hint">{narrow ? "Choose Draw face, then drag a box around every face in this crop." : "Drag a box around every face. Click an orange box when the current detector marked something that is not a face."}</p> : null}
+        {selected ? <p className="face-finding-key"><span><i className="face-finding-swatch face" />Your face box</span><span><i className="face-finding-swatch false" />Not a face</span><span><i className="face-finding-swatch baseline" />Current detector</span></p> : null}
         {narrow ? <button type="button" className="face-finding-draw-toggle" aria-pressed={drawMode} onClick={() => setDrawMode((current) => !current)}>{drawMode ? "Done drawing" : "Draw face"}</button> : null}
         {selected ? (
           <div
@@ -294,7 +380,7 @@ export function FaceFindingPanel({ timeZone = "UTC" }) {
             {falseBoxes.map((box, index) => <span key={`false-${index}`} className="face-finding-box false" style={boxStyle(box, selected.crop_width, selected.crop_height)} />)}
             {draft ? <span className="face-finding-box face" style={boxStyle(draft, selected.crop_width, selected.crop_height)} /> : null}
           </div>
-        ) : <div className="empty-state">Materialize crops from recorded person observations.</div>}
+        ) : <div className="empty-state">Load crops, then mark the faces in each one.</div>}
         <FaceFindingStatus busy={busy} activity={activity} message={message} error={error} />
         <div className="face-finding-actions">
           <ActionButton idle="Save boxes" pending="Saving…" running={working("Saving boxes")} disabled={busy || !selected || (!faces.length && !falseBoxes.length)} onClick={() => saveLabel({
@@ -307,53 +393,45 @@ export function FaceFindingPanel({ timeZone = "UTC" }) {
           <button type="button" className="subtle" disabled={busy || (!faces.length && !falseBoxes.length)} onClick={() => { setFaces([]); setFalseBoxes([]); setError(""); setMessage("Cleared the boxes on this crop."); }}>Clear boxes</button>
           <input value={dropReason} onChange={(event) => setDropReason(event.target.value)} placeholder="Drop reason" aria-label="Drop reason" disabled={busy} />
           <ActionButton className="subtle" idle="Drop" pending="Dropping…" running={working("Dropping this crop")} disabled={busy || !selected || !dropReason.trim()} onClick={() => saveLabel({ annotations: [{ kind: "drop" }], drop_reason: dropReason.trim() }, "Dropping this crop")} />
-          <ActionButton className="subtle" idle="Materialize" pending="Materializing…" running={working("Materializing crops")} disabled={busy} onClick={() => run("Materializing crops", async () => {
-            const response = await fetch("/api/face-detection/samples/materialize", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ timezone: timeZone || "UTC", limit: 50 }),
-            });
-            if (!response.ok) throw new Error(await readError(response, "Unable to materialize crops"));
-            const payload = await response.json();
-            const stored = Number(payload.stored || 0);
-            if (!stored) {
-              return `Stored 0 new crops. ${payload.already || 0} already saved, ${payload.skipped || 0} had no recording, ${payload.undecoded || 0} could not be decoded.`;
-            }
-            return `Stored ${stored} upper-body crops.`;
-          })} />
-          <ActionButton className="subtle" idle="Freeze splits" pending="Freezing…" running={working("Freezing day splits")} disabled={busy} onClick={() => run("Freezing day splits", async () => {
-            const response = await fetch("/api/face-detection/splits", { method: "POST" });
-            if (!response.ok) throw new Error(await readError(response, "Unable to freeze day splits"));
-            return "Day splits frozen.";
-          })} />
-          <ActionButton className="subtle" idle="Export" pending="Exporting…" running={working("Exporting crops")} disabled={busy} onClick={() => run("Exporting crops", async () => {
-            const response = await fetch("/api/face-detection/export", { method: "POST" });
-            if (!response.ok) throw new Error(await readError(response, "Unable to export detection crops"));
-            const payload = await response.json();
-            return `Exported ${payload.samples || 0} crops to ${payload.directory}.`;
-          })} />
         </div>
-        <form className="face-finding-score" onSubmit={(event) => {
-          event.preventDefault();
-          void run("Scoring models", async () => {
-            const response = await fetch("/api/face-detection/score", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                candidate_model_path: candidatePath,
-                baseline_model_path: baselinePath,
-              }),
+        <details className="face-finding-later">
+          <summary>After at least three labeled days</summary>
+          <p>Freeze the days so the same day stays in one split. Export writes the crops for training outside SurvNG. Score a finished OpenVINO model before replacing the one that is running.</p>
+          <div className="face-finding-actions">
+            <ActionButton className="subtle" idle="Freeze days" pending="Freezing…" running={working("Freezing days")} disabled={busy} onClick={() => run("Freezing days", async () => {
+              const response = await fetch("/api/face-detection/splits", { method: "POST" });
+              if (!response.ok) throw new Error(await readError(response, "Unable to freeze day splits"));
+              return "Days frozen into train, calibration, and held-out splits.";
+            })} />
+            <ActionButton className="subtle" idle="Export" pending="Exporting…" running={working("Exporting crops")} disabled={busy} onClick={() => run("Exporting crops", async () => {
+              const response = await fetch("/api/face-detection/export", { method: "POST" });
+              if (!response.ok) throw new Error(await readError(response, "Unable to export detection crops"));
+              const payload = await response.json();
+              return `Exported ${payload.samples || 0} crops to ${payload.directory}.`;
+            })} />
+          </div>
+          <form className="face-finding-score" onSubmit={(event) => {
+            event.preventDefault();
+            void run("Scoring models", async () => {
+              const response = await fetch("/api/face-detection/score", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  candidate_model_path: candidatePath,
+                  baseline_model_path: baselinePath,
+                }),
+              });
+              if (!response.ok) throw new Error(await readError(response, "Unable to score the face detector"));
+              const payload = await response.json();
+              const reasons = payload.gate?.reasons?.length ? payload.gate.reasons.join(" ") : "Promotion gate passed.";
+              return `${reasons} Embedding fingerprint ${payload.embedding_fingerprint || "is unset"}. ${payload.activation || ""}`;
             });
-            if (!response.ok) throw new Error(await readError(response, "Unable to score the face detector"));
-            const payload = await response.json();
-            const reasons = payload.gate?.reasons?.length ? payload.gate.reasons.join(" ") : "Promotion gate passed.";
-            return `${reasons} Embedding fingerprint ${payload.embedding_fingerprint || "is unset"}. ${payload.activation || ""}`;
-          });
-        }}>
-          <input value={candidatePath} onChange={(event) => setCandidatePath(event.target.value)} placeholder="Candidate detector .xml" aria-label="Candidate face detector model" disabled={busy} />
-          <input value={baselinePath} onChange={(event) => setBaselinePath(event.target.value)} placeholder="Baseline detector .xml" aria-label="Baseline face detector model" disabled={busy} />
-          <ActionButton type="submit" idle="Score IR" pending="Scoring…" running={working("Scoring models")} disabled={busy || !candidatePath || !baselinePath} />
-        </form>
+          }}>
+            <input value={candidatePath} onChange={(event) => setCandidatePath(event.target.value)} placeholder="Candidate detector .xml" aria-label="Candidate face detector model" disabled={busy} />
+            <input value={baselinePath} onChange={(event) => setBaselinePath(event.target.value)} placeholder="Baseline detector .xml" aria-label="Baseline face detector model" disabled={busy} />
+            <ActionButton type="submit" idle="Score model" pending="Scoring…" running={working("Scoring models")} disabled={busy || !candidatePath || !baselinePath} />
+          </form>
+        </details>
       </div>
     </div>
   );

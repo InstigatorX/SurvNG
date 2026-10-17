@@ -167,10 +167,85 @@
 
 .face-finding {
   display: grid;
-  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
   gap: 12px;
   min-height: 0;
   padding: 12px;
+}
+
+.face-finding-steps {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.face-finding-steps li {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 8px 10px;
+}
+
+.face-finding-steps li.is-current {
+  border-color: var(--accent);
+}
+
+.face-finding-steps strong {
+  font-size: 13px;
+}
+
+.face-finding-steps span,
+.face-finding-later p,
+.face-finding-hint,
+.face-finding-key {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.face-finding-hint,
+.face-finding-key,
+.face-finding-later p {
+  margin: 8px 0 0;
+}
+
+.face-finding-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.face-finding-swatch,
+.face-finding-mark {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 99px;
+  vertical-align: baseline;
+}
+
+.face-finding-swatch {
+  border: 2px solid transparent;
+  border-radius: 2px;
+}
+
+.face-finding-swatch.face { border-color: #3dd68c; }
+.face-finding-swatch.false { border-color: #ff5d5d; }
+.face-finding-swatch.baseline { border-color: #f5a524; }
+.face-finding-mark.miss { background: #f5a524; }
+.face-finding-mark.hit { background: #3dd68c; }
+
+.face-finding .queue-toolbar-copy {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
 }
 
 .face-finding .queue-toolbar-copy small {
@@ -179,25 +254,90 @@
   white-space: normal;
 }
 
+.face-finding-queue {
+  min-height: 0;
+  overflow: auto;
+  align-content: start;
+}
+
+.face-finding-day {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.face-finding-day h3 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.face-finding-day h3 span {
+  color: var(--ink);
+}
+
 .face-finding-queue ul {
   list-style: none;
-  margin: 8px 0 0;
+  margin: 0;
   padding: 0;
   display: grid;
   gap: 6px;
-  max-height: 50vh;
-  overflow: auto;
+  max-height: none;
+  overflow: visible;
 }
 
-.face-finding-queue button {
+.face-finding-queue button.face-finding-row {
   display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
   width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 4px;
   text-align: left;
-  gap: 2px;
 }
 
-.face-finding-queue button.active {
+.face-finding-queue button.face-finding-row img {
+  width: 48px;
+  height: 64px;
+  object-fit: cover;
+  object-position: center top;
+  border-radius: 4px;
+  background: #111;
+}
+
+.face-finding-queue button.face-finding-row span {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.face-finding-queue button.face-finding-row small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.face-finding-queue button.face-finding-row.active {
   outline: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--control));
+}
+
+.face-finding-later {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.face-finding-later summary {
+  cursor: pointer;
+  font-weight: 650;
 }
 
 .face-finding-draw-toggle {
@@ -310,6 +450,8 @@
 
 @media (max-width: 760px) {
   .face-finding { grid-template-columns: 1fr; }
+  .face-finding-steps { grid-template-columns: 1fr; }
+  .face-finding-queue { overflow: visible; }
 
   .face-finding-queue ul {
     max-height: none;
