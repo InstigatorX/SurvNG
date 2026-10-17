@@ -28,6 +28,7 @@ from survng.app.face_detection_evaluation import (
 from survng.app.face_detection_geometry import upper_body_window
 from survng.app.face_detection_routes import (
     FaceDetectionRouteDependencies,
+    activity_snapshot,
     create_face_detection_router,
     embedding_fingerprint_unchanged,
 )
@@ -221,6 +222,44 @@ def test_scene_observations_require_an_exact_person_frame(tmp_path: Path) -> Non
     connection.close()
     rows = load_person_observations(database)
     assert [row["source_observation_id"] for row in rows] == ["exact"]
+
+
+def test_materialize_publishes_decode_progress(tmp_path: Path) -> None:
+    frame = np.full((160, 120, 3), 8, dtype=np.uint8)
+    seen: list[dict] = []
+
+    def reader(_path: str, _seek: float) -> np.ndarray:
+        seen.append(activity_snapshot())
+        return frame
+
+    manager = SimpleNamespace(
+        database_dir=tmp_path,
+        events=SimpleNamespace(db_path=tmp_path / "missing.sqlite3"),
+        recorder=SimpleNamespace(recording_at=lambda camera_id, epoch: {
+            "path": "clip.mp4",
+            "start_epoch": epoch - 1,
+        }),
+        faces=SimpleNamespace(recognition_status=lambda: {"model_fingerprint": "embed-1"}),
+    )
+    app = FastAPI()
+    app.include_router(create_face_detection_router(FaceDetectionRouteDependencies(
+        get_manager=lambda: manager,
+        get_config=lambda: SimpleNamespace(
+            ffmpeg_path="ffmpeg",
+            detector=SimpleNamespace(face_detection_model_path=""),
+        ),
+        frame_reader=reader,
+        fingerprint_reader=lambda: "embed-1",
+    )))
+    client = TestClient(app)
+    database = tmp_path / "events.sqlite3"
+    _write_exact_observation(database)
+    manager.events.db_path = database
+    stored = client.post("/api/face-detection/samples/materialize", json={"timezone": "UTC", "limit": 5})
+    assert stored.status_code == 200
+    assert stored.json()["stored"] == 1
+    assert any(item.get("active") and item.get("phase") == "Decoding recordings" and item.get("current", 0) >= 1 for item in seen)
+    assert client.get("/api/face-detection/activity").json()["active"] is False
 
 
 def test_face_finding_route_rejects_a_mixed_no_face_label(tmp_path: Path) -> None:

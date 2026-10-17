@@ -21,6 +21,61 @@ async function readError(response, fallback) {
   return fallback;
 }
 
+function activityText(activity) {
+  if (!activity) return "";
+  const counts = activity.total > 0 ? ` ${activity.current} of ${activity.total}` : "";
+  const detail = activity.detail ? ` · ${activity.detail}` : "";
+  return `${activity.phase || activity.label}${counts}${detail}`;
+}
+
+function ActionButton({ idle, pending, running, className = "", disabled = false, onClick, type = "button" }) {
+  return (
+    <button
+      type={type}
+      className={[className, running ? "is-running" : ""].filter(Boolean).join(" ")}
+      disabled={disabled}
+      aria-busy={running || undefined}
+      onClick={onClick}
+    >
+      {running ? pending : idle}
+    </button>
+  );
+}
+
+function FaceFindingStatus({ busy, activity, message, error }) {
+  const text = activityText(activity);
+  const percent = activity?.total > 0 && activity.current > 0
+    ? Math.max(0, Math.min(100, Math.round((activity.current / activity.total) * 100)))
+    : null;
+  return (
+    <div className="face-finding-status" aria-live="polite">
+      {busy ? (
+        <>
+          <div className="face-finding-status-line">
+            <span className="face-finding-spinner" aria-hidden="true" />
+            <span>{text}</span>
+          </div>
+          <div
+            className="face-finding-progress-track"
+            role="progressbar"
+            aria-label={text}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            {...(percent == null ? {} : { "aria-valuenow": percent })}
+          >
+            <div
+              className={percent == null ? "face-finding-progress-bar" : "face-finding-progress-bar is-determinate"}
+              style={percent == null ? undefined : { width: `${Math.max(percent, 4)}%` }}
+            />
+          </div>
+        </>
+      ) : null}
+      {!busy && message ? <div className="save-status" role="status">{message}</div> : null}
+      {error ? <div className="face-load-error" role="alert">{error}</div> : null}
+    </div>
+  );
+}
+
 export function FaceFindingPanel({ timeZone = "UTC" }) {
   const [samples, setSamples] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
@@ -33,6 +88,7 @@ export function FaceFindingPanel({ timeZone = "UTC" }) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [activity, setActivity] = useState(null);
   const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches);
   const [drawMode, setDrawMode] = useState(false);
   const stageRef = useRef(null);
@@ -83,9 +139,33 @@ export function FaceFindingPanel({ timeZone = "UTC" }) {
     return () => media.removeEventListener("change", sync);
   }, []);
 
-  async function run(action) {
+  async function run(label, action) {
     setBusy(true);
+    setActivity({ label, phase: label, current: 0, total: 0, detail: "" });
     setError("");
+    setMessage("");
+    let stopped = false;
+    const poll = (async () => {
+      while (!stopped) {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        if (stopped) return;
+        try {
+          const response = await fetch("/api/face-detection/activity");
+          if (!response.ok || stopped) continue;
+          const payload = await response.json();
+          if (!payload?.active || stopped) continue;
+          setActivity((current) => ({
+            label: current?.label || label,
+            phase: payload.phase || label,
+            current: Number(payload.current || 0),
+            total: Number(payload.total || 0),
+            detail: payload.detail || "",
+          }));
+        } catch {
+          // Keep the label from the button press if the progress read fails.
+        }
+      }
+    })();
     try {
       const result = await action();
       if (typeof result === "string") setMessage(result);
@@ -93,8 +173,15 @@ export function FaceFindingPanel({ timeZone = "UTC" }) {
     } catch (actionError) {
       setError(actionError.message || "Face finding request failed");
     } finally {
+      stopped = true;
+      await poll;
       setBusy(false);
+      setActivity(null);
     }
+  }
+
+  function working(label) {
+    return busy && activity?.label === label;
   }
 
   function pointFromEvent(event) {
@@ -145,9 +232,9 @@ export function FaceFindingPanel({ timeZone = "UTC" }) {
     setFaces((current) => [...current, box]);
   }
 
-  async function saveLabel(body) {
+  async function saveLabel(body, label) {
     if (!selected) return;
-    await run(async () => {
+    await run(label, async () => {
       const response = await fetch(`/api/face-detection/samples/${selected.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -177,9 +264,7 @@ export function FaceFindingPanel({ timeZone = "UTC" }) {
         </ul>
         {!samples.length ? <p className="empty-state">No unlabeled upper-body crops yet.</p> : null}
       </div>
-      <div className="face-finding-work">
-        {error ? <div className="face-load-error" role="alert">{error}</div> : null}
-        {message ? <div className="save-status" role="status">{message}</div> : null}
+      <div className="face-finding-work" aria-busy={busy || undefined}>
         {narrow ? <button type="button" className="face-finding-draw-toggle" aria-pressed={drawMode} onClick={() => setDrawMode((current) => !current)}>{drawMode ? "Done drawing" : "Draw face"}</button> : null}
         {selected ? (
           <div
@@ -210,18 +295,19 @@ export function FaceFindingPanel({ timeZone = "UTC" }) {
             {draft ? <span className="face-finding-box face" style={boxStyle(draft, selected.crop_width, selected.crop_height)} /> : null}
           </div>
         ) : <div className="empty-state">Materialize crops from recorded person observations.</div>}
+        <FaceFindingStatus busy={busy} activity={activity} message={message} error={error} />
         <div className="face-finding-actions">
-          <button type="button" disabled={busy || !selected || (!faces.length && !falseBoxes.length)} onClick={() => saveLabel({
+          <ActionButton idle="Save boxes" pending="Saving…" running={working("Saving boxes")} disabled={busy || !selected || (!faces.length && !falseBoxes.length)} onClick={() => saveLabel({
             annotations: [
               ...faces.map((box) => ({ kind: "face", box })),
               ...falseBoxes.map((box) => ({ kind: "not_a_face", box })),
             ],
-          })}>Save boxes</button>
-          <button type="button" className="subtle" disabled={busy || !selected} onClick={() => saveLabel({ annotations: [{ kind: "no_face" }] })}>No face</button>
-          <button type="button" className="subtle" disabled={!faces.length && !falseBoxes.length} onClick={() => { setFaces([]); setFalseBoxes([]); }}>Clear boxes</button>
-          <input value={dropReason} onChange={(event) => setDropReason(event.target.value)} placeholder="Drop reason" aria-label="Drop reason" />
-          <button type="button" className="subtle" disabled={busy || !selected || !dropReason.trim()} onClick={() => saveLabel({ annotations: [{ kind: "drop" }], drop_reason: dropReason.trim() })}>Drop</button>
-          <button type="button" className="subtle" disabled={busy} onClick={() => run(async () => {
+          }, "Saving boxes")} />
+          <ActionButton className="subtle" idle="No face" pending="Saving…" running={working("Saving the no-face label")} disabled={busy || !selected} onClick={() => saveLabel({ annotations: [{ kind: "no_face" }] }, "Saving the no-face label")} />
+          <button type="button" className="subtle" disabled={busy || (!faces.length && !falseBoxes.length)} onClick={() => { setFaces([]); setFalseBoxes([]); setError(""); setMessage("Cleared the boxes on this crop."); }}>Clear boxes</button>
+          <input value={dropReason} onChange={(event) => setDropReason(event.target.value)} placeholder="Drop reason" aria-label="Drop reason" disabled={busy} />
+          <ActionButton className="subtle" idle="Drop" pending="Dropping…" running={working("Dropping this crop")} disabled={busy || !selected || !dropReason.trim()} onClick={() => saveLabel({ annotations: [{ kind: "drop" }], drop_reason: dropReason.trim() }, "Dropping this crop")} />
+          <ActionButton className="subtle" idle="Materialize" pending="Materializing…" running={working("Materializing crops")} disabled={busy} onClick={() => run("Materializing crops", async () => {
             const response = await fetch("/api/face-detection/samples/materialize", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -229,23 +315,27 @@ export function FaceFindingPanel({ timeZone = "UTC" }) {
             });
             if (!response.ok) throw new Error(await readError(response, "Unable to materialize crops"));
             const payload = await response.json();
-            return `Stored ${payload.stored || 0} upper-body crops.`;
-          })}>Materialize</button>
-          <button type="button" className="subtle" disabled={busy} onClick={() => run(async () => {
+            const stored = Number(payload.stored || 0);
+            if (!stored) {
+              return `Stored 0 new crops. ${payload.already || 0} already saved, ${payload.skipped || 0} had no recording, ${payload.undecoded || 0} could not be decoded.`;
+            }
+            return `Stored ${stored} upper-body crops.`;
+          })} />
+          <ActionButton className="subtle" idle="Freeze splits" pending="Freezing…" running={working("Freezing day splits")} disabled={busy} onClick={() => run("Freezing day splits", async () => {
             const response = await fetch("/api/face-detection/splits", { method: "POST" });
             if (!response.ok) throw new Error(await readError(response, "Unable to freeze day splits"));
             return "Day splits frozen.";
-          })}>Freeze splits</button>
-          <button type="button" className="subtle" disabled={busy} onClick={() => run(async () => {
+          })} />
+          <ActionButton className="subtle" idle="Export" pending="Exporting…" running={working("Exporting crops")} disabled={busy} onClick={() => run("Exporting crops", async () => {
             const response = await fetch("/api/face-detection/export", { method: "POST" });
             if (!response.ok) throw new Error(await readError(response, "Unable to export detection crops"));
             const payload = await response.json();
             return `Exported ${payload.samples || 0} crops to ${payload.directory}.`;
-          })}>Export</button>
+          })} />
         </div>
         <form className="face-finding-score" onSubmit={(event) => {
           event.preventDefault();
-          void run(async () => {
+          void run("Scoring models", async () => {
             const response = await fetch("/api/face-detection/score", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -260,9 +350,9 @@ export function FaceFindingPanel({ timeZone = "UTC" }) {
             return `${reasons} Embedding fingerprint ${payload.embedding_fingerprint || "is unset"}. ${payload.activation || ""}`;
           });
         }}>
-          <input value={candidatePath} onChange={(event) => setCandidatePath(event.target.value)} placeholder="Candidate detector .xml" aria-label="Candidate face detector model" />
-          <input value={baselinePath} onChange={(event) => setBaselinePath(event.target.value)} placeholder="Baseline detector .xml" aria-label="Baseline face detector model" />
-          <button type="submit" disabled={busy || !candidatePath || !baselinePath}>Score IR</button>
+          <input value={candidatePath} onChange={(event) => setCandidatePath(event.target.value)} placeholder="Candidate detector .xml" aria-label="Candidate face detector model" disabled={busy} />
+          <input value={baselinePath} onChange={(event) => setBaselinePath(event.target.value)} placeholder="Baseline detector .xml" aria-label="Baseline face detector model" disabled={busy} />
+          <ActionButton type="submit" idle="Score IR" pending="Scoring…" running={working("Scoring models")} disabled={busy || !candidatePath || !baselinePath} />
         </form>
       </div>
     </div>

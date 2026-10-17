@@ -252,6 +252,7 @@ class FaceDetectionDataset:
         limit: int = 50,
         baseline_model_sha256: str = "",
         scan_multiplier: int = 4,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, int]:
         limit = max(1, min(int(limit), 200))
         scan_cap = max(limit, min(limit * max(1, scan_multiplier), 800))
@@ -264,12 +265,26 @@ class FaceDetectionDataset:
             "skipped": 0,
             "scanned": 0,
         }
+        total = len(observations)
+
+        def report(phase: str, current: int, total_count: int, detail: str = "") -> None:
+            if on_progress is None:
+                return
+            on_progress({
+                "phase": phase,
+                "current": current,
+                "total": total_count,
+                "detail": detail,
+            })
+
         with self._lock:
             known = self._known_sources()
+            report("Decoding recordings", 0, total, "0 ready")
             for observation in observations:
                 if len(decoded) >= scan_cap:
                     break
                 stats["scanned"] += 1
+                report("Decoding recordings", stats["scanned"], total, f"{len(decoded)} ready")
                 source_id = str(observation.get("source_observation_id") or "")
                 if not source_id:
                     stats["skipped"] += 1
@@ -292,11 +307,14 @@ class FaceDetectionDataset:
                         stats["skipped"] += 1
                     continue
                 decoded.append(prepared)
+                report("Decoding recordings", stats["scanned"], total, f"{len(decoded)} ready")
             selected = _select_materialized(decoded, limit)
             written = []
+            report("Saving crops", 0, len(selected))
             for item in selected:
                 if self._write_crop(item):
                     written.append(item)
+                    report("Saving crops", len(written), len(selected))
             with self._connect() as connection:
                 for item in written:
                     connection.execute(
@@ -596,7 +614,11 @@ class FaceDetectionDataset:
             ).fetchall()
             return [self._public(connection, row) for row in rows]
 
-    def export(self, destination: Path) -> dict[str, Any]:
+    def export(
+        self,
+        destination: Path,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         destination = Path(destination)
         with self._lock, self._connect() as connection:
             pending = connection.execute(
@@ -621,7 +643,9 @@ class FaceDetectionDataset:
         crop_dir = destination / "crops"
         crop_dir.mkdir(parents=True)
         manifest_samples = []
-        for sample in samples:
+        if on_progress is not None:
+            on_progress({"phase": "Copying crops", "current": 0, "total": len(samples), "detail": ""})
+        for index, sample in enumerate(samples, start=1):
             source = Path(str(self.crop_file(int(sample["id"])) or ""))
             if not source.is_file():
                 raise FaceDetectionDatasetError(f"Crop for sample {sample['id']} is missing")
@@ -633,6 +657,13 @@ class FaceDetectionDataset:
                 raise FaceDetectionDatasetError(
                     f"Crop bytes for sample {sample['id']} no longer match the stored hash"
                 )
+            if on_progress is not None:
+                on_progress({
+                    "phase": "Copying crops",
+                    "current": index,
+                    "total": len(samples),
+                    "detail": "",
+                })
             manifest_samples.append(
                 {
                     "id": str(sample["id"]),

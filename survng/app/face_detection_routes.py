@@ -5,6 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import threading
 from typing import Any
 
 import cv2
@@ -54,6 +55,55 @@ class DetectionScoreRequest(BaseModel):
     threshold: float | None = Field(default=None, ge=0.01, le=0.99)
 
 
+_ACTIVITY_LOCK = threading.Lock()
+_ACTIVITY: dict[str, Any] = {
+    "active": False,
+    "action": "",
+    "phase": "",
+    "current": 0,
+    "total": 0,
+    "detail": "",
+}
+
+
+def publish_activity(
+    *,
+    active: bool,
+    action: str = "",
+    phase: str = "",
+    current: int = 0,
+    total: int = 0,
+    detail: str = "",
+) -> None:
+    """Publish the face-finding job the People page polls while a button works."""
+    with _ACTIVITY_LOCK:
+        _ACTIVITY.clear()
+        _ACTIVITY.update({
+            "active": bool(active),
+            "action": action,
+            "phase": phase,
+            "current": int(current),
+            "total": int(total),
+            "detail": detail,
+        })
+
+
+def activity_snapshot() -> dict[str, Any]:
+    with _ACTIVITY_LOCK:
+        return dict(_ACTIVITY)
+
+
+def _publish_progress(action: str, payload: dict[str, Any]) -> None:
+    publish_activity(
+        active=True,
+        action=action,
+        phase=str(payload.get("phase") or "Working"),
+        current=int(payload.get("current") or 0),
+        total=int(payload.get("total") or 0),
+        detail=str(payload.get("detail") or ""),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class FaceDetectionRouteDependencies:
     get_manager: Callable[[], AppManager]
@@ -100,6 +150,10 @@ def create_face_detection_router(dependencies: FaceDetectionRouteDependencies) -
         status = faces.recognition_status() if faces is not None and hasattr(faces, "recognition_status") else {}
         return str(status.get("model_fingerprint") or "")
 
+    @router.get("/api/face-detection/activity")
+    def face_detection_activity() -> dict[str, Any]:
+        return activity_snapshot()
+
     @router.get("/api/face-detection/samples")
     def face_detection_queue(limit: int = 20) -> dict[str, Any]:
         samples = dataset().queue(limit=limit)
@@ -117,31 +171,52 @@ def create_face_detection_router(dependencies: FaceDetectionRouteDependencies) -
     @router.post("/api/face-detection/samples/materialize")
     def face_detection_materialize(request: DetectionMaterializeRequest) -> dict[str, int]:
         manager = dependencies.get_manager()
-        observations = load_person_observations(manager.events.db_path, limit=max(request.limit * 4, request.limit))
-        resolved, skipped = _attach_recordings(manager, observations)
-        detector = None
-        model_path = str(dependencies.get_config().detector.face_detection_model_path or "")
-        model_hash = ""
-        if model_path and Path(model_path).is_file():
-            model_hash = file_sha256(Path(model_path))
-            runner = make_detector(model_path)
-
-            def detector(image: np.ndarray, _runner: Callable = runner) -> list[dict[str, Any]]:
-                return _runner(image, 0.60)
-
+        publish_activity(active=True, action="materialize", phase="Reading person observations")
         try:
-            stats = dataset().materialize(
-                resolved,
-                frame_reader=frame_reader(),
-                detector=detector,
-                timezone_name=request.timezone,
-                limit=request.limit,
-                baseline_model_sha256=model_hash,
+            observations = load_person_observations(manager.events.db_path, limit=max(request.limit * 4, request.limit))
+            publish_activity(
+                active=True,
+                action="materialize",
+                phase="Matching recordings",
+                total=len(observations),
             )
-        except FaceDetectionDatasetError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        stats["skipped"] += skipped
-        return stats
+            resolved, skipped = _attach_recordings(
+                manager,
+                observations,
+                on_progress=lambda current, total: publish_activity(
+                    active=True,
+                    action="materialize",
+                    phase="Matching recordings",
+                    current=current,
+                    total=total,
+                ),
+            )
+            detector = None
+            model_path = str(dependencies.get_config().detector.face_detection_model_path or "")
+            model_hash = ""
+            if model_path and Path(model_path).is_file():
+                model_hash = file_sha256(Path(model_path))
+                runner = make_detector(model_path)
+
+                def detector(image: np.ndarray, _runner: Callable = runner) -> list[dict[str, Any]]:
+                    return _runner(image, 0.60)
+
+            try:
+                stats = dataset().materialize(
+                    resolved,
+                    frame_reader=frame_reader(),
+                    detector=detector,
+                    timezone_name=request.timezone,
+                    limit=request.limit,
+                    baseline_model_sha256=model_hash,
+                    on_progress=lambda payload: _publish_progress("materialize", payload),
+                )
+            except FaceDetectionDatasetError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            stats["skipped"] += skipped
+            return stats
+        finally:
+            publish_activity(active=False)
 
     @router.put("/api/face-detection/samples/{sample_id}")
     def face_detection_label(sample_id: int, request: DetectionLabelRequest) -> dict[str, Any]:
@@ -175,10 +250,16 @@ def create_face_detection_router(dependencies: FaceDetectionRouteDependencies) -
         while destination.exists():
             destination = root / f"{stamp}-{suffix}"
             suffix += 1
+        publish_activity(active=True, action="export", phase="Copying crops")
         try:
-            manifest = dataset().export(destination)
+            manifest = dataset().export(
+                destination,
+                on_progress=lambda payload: _publish_progress("export", payload),
+            )
         except FaceDetectionDatasetError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        finally:
+            publish_activity(active=False)
         return {
             "directory": str(destination),
             "manifest": str(destination / "manifest.json"),
@@ -189,23 +270,44 @@ def create_face_detection_router(dependencies: FaceDetectionRouteDependencies) -
     @router.post("/api/face-detection/score")
     def face_detection_score(request: DetectionScoreRequest) -> dict[str, Any]:
         store = dataset()
-        samples = store.reviewed_samples()
-        if not samples:
-            raise HTTPException(status_code=422, detail="Freeze splits on reviewed crops before scoring")
-        candidate_path = Path(request.candidate_model_path).expanduser()
-        baseline_path = Path(request.baseline_model_path).expanduser()
+        publish_activity(active=True, action="score", phase="Loading reviewed crops")
         try:
-            candidate_contract = validate_ir_contract(candidate_path)
-            baseline_contract = validate_ir_contract(baseline_path)
-            report = evaluate_samples(
-                samples,
-                make_detector(str(candidate_path)),
-                make_detector(str(baseline_path)),
-                image_reader=lambda sample: _read_crop(store, int(sample["id"])),
-                threshold=request.threshold,
-            )
-        except (FaceDetectionDatasetError, ValueError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            samples = store.reviewed_samples()
+            if not samples:
+                raise HTTPException(status_code=422, detail="Freeze splits on reviewed crops before scoring")
+            candidate_path = Path(request.candidate_model_path).expanduser()
+            baseline_path = Path(request.baseline_model_path).expanduser()
+            try:
+                publish_activity(active=True, action="score", phase="Checking model files")
+                candidate_contract = validate_ir_contract(candidate_path)
+                baseline_contract = validate_ir_contract(baseline_path)
+                scored = {"count": 0}
+                total_calls = len(samples) * 2
+
+                def tracked(label: str, detector: Callable[..., list[dict[str, Any]]]) -> Callable[..., list[dict[str, Any]]]:
+                    def run(image: np.ndarray, threshold: float = 0.01) -> list[dict[str, Any]]:
+                        scored["count"] += 1
+                        publish_activity(
+                            active=True,
+                            action="score",
+                            phase=label,
+                            current=scored["count"],
+                            total=max(total_calls, scored["count"]),
+                        )
+                        return detector(image, threshold)
+                    return run
+
+                report = evaluate_samples(
+                    samples,
+                    tracked("Scoring candidate", make_detector(str(candidate_path))),
+                    tracked("Scoring baseline", make_detector(str(baseline_path))),
+                    image_reader=lambda sample: _read_crop(store, int(sample["id"])),
+                    threshold=request.threshold,
+                )
+            except (FaceDetectionDatasetError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        finally:
+            publish_activity(active=False)
         report["candidate_contract"] = candidate_contract
         report["baseline_contract"] = baseline_contract
         report["embedding_fingerprint"] = fingerprint()
@@ -223,11 +325,15 @@ def create_face_detection_router(dependencies: FaceDetectionRouteDependencies) -
 def _attach_recordings(
     manager: AppManager,
     observations: list[dict[str, Any]],
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     recorder = getattr(manager, "recorder", None)
     resolved = []
     skipped = 0
-    for observation in observations:
+    total = len(observations)
+    for index, observation in enumerate(observations, start=1):
+        if on_progress is not None:
+            on_progress(index, total)
         recording = None
         if recorder is not None and hasattr(recorder, "recording_at"):
             recording = recorder.recording_at(observation["camera_id"], observation["captured_epoch"])

@@ -43,6 +43,9 @@ const findingSource = readFileSync(new URL("../src/people/FaceFindingPanel.jsx",
 assert.match(findingSource, /Draw face/);
 assert.match(findingSource, /face-finding-stage can-scroll/);
 assert.match(findingSource, /if \(!drawing \|\| event\.button !== 0\) return/);
+assert.match(findingSource, /role="progressbar"/);
+assert.match(findingSource, /Materializing…/);
+assert.match(findingSource, /face-finding-status/);
 assert.match(facesPageSource, /className="faces-page faces-mode-finding"/);
 assert.match(facesPageSource, /<FaceFindingPanel timeZone=\{timeZone\} \/>/);
 assert.doesNotMatch(facesPageSource, /people-mode-tabs|PEOPLE_WORKSPACE_MODES|Review identities|peopleLoadError/);
