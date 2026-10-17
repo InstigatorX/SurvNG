@@ -8,6 +8,7 @@ from typing import Any
 
 from ..database_polling import polling_connection
 from ..durable_payload import durable_json_dumps
+from ..main_database import ClosingDatabaseConnection
 
 DETECTION_JOB_MAXIMUM_AGE_SECONDS = 20.0
 # Security inference keeps its existing freshness window. Optional cover
@@ -129,7 +130,11 @@ class EventStoreJobsMixin:
     """Durable detection-job and motion-trigger ledger on detection-jobs.sqlite3."""
 
     def _connect_jobs(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.jobs_db_path, timeout=10.0)
+        conn = sqlite3.connect(
+            self.jobs_db_path,
+            timeout=10.0,
+            factory=ClosingDatabaseConnection,
+        )
         conn.row_factory = sqlite3.Row
         conn.execute("pragma busy_timeout = 10000")
         conn.execute("pragma synchronous = full")

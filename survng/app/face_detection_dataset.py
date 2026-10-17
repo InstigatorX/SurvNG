@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import cv2
 import numpy as np
 
+from .main_database import ClosingDatabaseConnection
 from .face_detection_geometry import (
     box_tuple,
     scale_box_to_frame,
@@ -237,7 +238,11 @@ class FaceDetectionDataset:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=10.0)
+        connection = sqlite3.connect(
+            self.database_path,
+            timeout=10.0,
+            factory=ClosingDatabaseConnection,
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("pragma foreign_keys = on")
         return connection
