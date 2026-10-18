@@ -41,6 +41,7 @@ class ObjectTrack:
     confirmed: bool = False
     velocity: Box = (0.0, 0.0, 0.0, 0.0)
     zones: set[str] = field(default_factory=set)
+    current_zones: set[str] = field(default_factory=set)
     trajectory: list[tuple[float, float, float]] = field(default_factory=list)
     box_history: list[tuple[float, float, float, float, float]] = field(default_factory=list)
     appearance: np.ndarray | None = field(default=None, repr=False)
@@ -79,7 +80,7 @@ class ObjectTrack:
         self.hits += 1
         self.missed = 0
         self.seeded = False
-        self.zones.update(str(zone) for zone in detection.get("zones", []) if zone)
+        self.remember_zones(detection)
         depth_sample = _depth_sample(detection, captured_at)
         if depth_sample is not None:
             self.depth_history.append(depth_sample)
@@ -104,6 +105,12 @@ class ObjectTrack:
             del self.trajectory[:-60]
         if len(self.box_history) > 60:
             del self.box_history[:-60]
+
+    def remember_zones(self, detection: dict[str, Any]) -> None:
+        """Keep the latest zone match separate from the track's lifetime union."""
+        current = {str(zone) for zone in detection.get("zones", []) if zone}
+        self.current_zones = current
+        self.zones.update(current)
 
     def summary(self, *, active: bool) -> dict[str, Any]:
         depth_median_m = None
@@ -134,6 +141,7 @@ class ObjectTrack:
                 "y2": round(self.box[3], 1),
             },
             "zones": sorted(self.zones),
+            "current_zones": sorted(self.current_zones),
             "trajectory": [list(point) for point in self.trajectory],
             "box_history": [list(sample) for sample in self.box_history],
             "reid_matches": self.reid_matches,
@@ -199,6 +207,7 @@ class ByteTrackObjectTracker:
             if len(self._tracks) + len(self._completed) >= self.config.max_tracks_per_session:
                 break
             confidence = _confidence(detection)
+            current_zones = {str(zone) for zone in detection.get("zones", []) if zone}
             try:
                 candidate_first_seen = float(detection.get("_tracking_first_seen_at"))
                 first_seen = (
@@ -225,7 +234,8 @@ class ByteTrackObjectTracker:
                 confidence=confidence,
                 max_confidence=confidence,
                 confirmed=confirm_new or self.config.min_confirmations <= 1,
-                zones={str(zone) for zone in detection.get("zones", []) if zone},
+                zones=set(current_zones),
+                current_zones=set(current_zones),
                 trajectory=[(
                     round(captured_at, 3),
                     round((box[0] + box[2]) / 2.0, 1),

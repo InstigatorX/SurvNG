@@ -13,6 +13,8 @@ assert.deepEqual(readPeopleWorkspaceQuery("?mode=clusters&cluster=12"), {
   mode: "clusters", status: "unknown", cameraId: "", personId: "", page: 0, faceId: "", clusterId: "12",
 });
 assert.equal(readPeopleWorkspaceQuery("?mode=invalid").mode, "review");
+assert.equal(readPeopleWorkspaceQuery("?mode=finding").mode, "finding");
+assert.equal(peopleWorkspaceSearch({ mode: "finding" }), "?mode=finding");
 assert.equal(peopleWorkspaceSearch({ status: "known", cameraId: "front-door", page: 1, faceId: 92 }), "?status=known&camera=front-door&page=2&face=92");
 assert.equal(peopleWorkspaceSearch(), "");
 assert.equal(peopleWorkspaceSearch({ mode: "clusters", clusterId: 4 }), "?mode=clusters&cluster=4");
@@ -25,6 +27,10 @@ assert.deepEqual(peopleObservationRequestPlan({ mode: "clusters", pageSize: 24 }
   observations: "",
   count: "",
 });
+assert.deepEqual(peopleObservationRequestPlan({ mode: "finding", pageSize: 24 }), {
+  observations: "",
+  count: "",
+});
 assert.deepEqual(peopleObservationRequestPlan({
   mode: "people", status: "known", cameraId: "gate", personId: "4", page: 2, pageSize: 24,
 }), {
@@ -33,8 +39,19 @@ assert.deepEqual(peopleObservationRequestPlan({
 });
 
 const facesPageSource = readFileSync(new URL("../src/people/FacesPage.jsx", import.meta.url), "utf8");
-assert.match(facesPageSource, /const \[peopleLoadError, setPeopleLoadError\] = useState\(""\)/);
-assert.match(facesPageSource, /peopleLoadError[\s\S]*?onClick=\{\(\) => void loadPeople\(\)\}>Retry people/);
+const findingSource = readFileSync(new URL("../src/people/FaceFindingPanel.jsx", import.meta.url), "utf8");
+assert.match(findingSource, /Draw face/);
+assert.match(findingSource, /face-finding-stage can-scroll/);
+assert.match(findingSource, /if \(!drawing \|\| event\.button !== 0\) return/);
+assert.match(findingSource, /role="progressbar"/);
+assert.match(findingSource, /Loading…/);
+assert.match(findingSource, /Unlabeled crops/);
+assert.match(findingSource, /Detector marked nothing/);
+assert.match(findingSource, /face-finding-row/);
+assert.match(findingSource, /face-finding-status/);
+assert.match(facesPageSource, /className="faces-page faces-mode-finding"/);
+assert.match(facesPageSource, /<FaceFindingPanel timeZone=\{timeZone\} \/>/);
+assert.doesNotMatch(facesPageSource, /people-mode-tabs|PEOPLE_WORKSPACE_MODES|Review identities|peopleLoadError/);
 
 assert.equal(PEOPLE_REVIEW_FILTERS.pending, "Pending");
 assert.equal(peopleRecognitionLabel({ recognition: { enabled: false }, recognition_ready: true }), "Recognition disabled");

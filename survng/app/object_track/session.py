@@ -2091,6 +2091,7 @@ class ObjectTrackingSession:
         )
         if state in {"complete", "interrupted"}:
             self._publish_safely(event_id, payload)
+        self._publish_zone_occupancy(tracker, captured_at, state == "active")
 
     def _index_track_appearances(
         self,
@@ -2183,6 +2184,40 @@ class ObjectTrackingSession:
                 event_id,
             )
         self._publish_safely(event_id, payload)
+        self._publish_zone_occupancy(tracker, captured_at, False)
+
+    def _publish_zone_occupancy(
+        self,
+        tracker: ObjectTrackerBackend | None,
+        captured_at: float,
+        active: bool,
+    ) -> None:
+        """Publish the live occupied set. A recorded review must not drive it."""
+        if self.publisher is None or self._recorded_window is not None:
+            return
+        tracks = []
+        if tracker is not None:
+            for item in tracker.summaries(captured_at):
+                if item.get("state") != "confirmed":
+                    continue
+                tracks.append({
+                    "label": item.get("label"),
+                    "zones": list(item.get("zones") or []),
+                    "current_zones": list(item.get("current_zones") or []),
+                })
+        try:
+            self.publisher("zone_occupancy_source", {
+                "camera_id": self.camera.id,
+                "timestamp": datetime.fromtimestamp(captured_at, timezone.utc).isoformat(),
+                "source": "track",
+                "active": active,
+                "tracks": tracks,
+            })
+        except Exception:
+            LOGGER.exception(
+                "zone occupancy notification failed for %s",
+                self.camera.id,
+            )
 
     def _publish_safely(self, event_id: int, payload: dict[str, Any]) -> None:
         if self.publisher is None:

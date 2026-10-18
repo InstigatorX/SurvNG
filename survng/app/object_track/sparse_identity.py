@@ -537,6 +537,7 @@ class SparseIdentityObjectTracker(HybridObjectTracker):
             confidence = float(detection.get("confidence") or 0.0)
             from .bytetrack import ObjectTrack
 
+            current_zones = {str(zone) for zone in detection.get("zones", []) if zone}
             track = ObjectTrack(
                 track_id=self._next_track_id,
                 label=str(detection["label"]),
@@ -546,6 +547,8 @@ class SparseIdentityObjectTracker(HybridObjectTracker):
                 confidence=confidence,
                 max_confidence=confidence,
                 confirmed=True,
+                zones=set(current_zones),
+                current_zones=set(current_zones),
                 appearance=_appearance(embedding),
                 seeded=False,
             )
@@ -624,7 +627,7 @@ class SparseIdentityObjectTracker(HybridObjectTracker):
             track.hits += 1
             track.missed = 0
             track.seeded = False
-            track.zones.update(str(zone) for zone in detection.get("zones", []) if zone)
+            track.remember_zones(detection)
             center_x = (box[0] + box[2]) / 2.0
             center_y = (box[1] + box[3]) / 2.0
             track.trajectory.append((round(captured_at, 3), round(center_x, 1), round(center_y, 1)))

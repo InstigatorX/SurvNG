@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, adminHomeDestinations, adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, preferredStoredValue, readAdminSubsection, readAdminWorkspace, telemetryLocationOptions } from "../src/adminWorkspace.mjs";
 
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS.map((group) => group.label), ["Configure", "Observe", "Act"]);
@@ -59,5 +60,15 @@ assert.equal(nextTabId(["one", "two", "three"], "one", "ArrowLeft"), "three");
 assert.equal(nextTabId(["one", "two", "three"], "two", "Home"), "one");
 assert.equal(nextTabId(["one", "two", "three"], "two", "End"), "three");
 assert.equal(nextTabId(["one"], "one", "Tab"), null);
+
+const configPageSource = readFileSync(new URL("../src/admin/ConfigPage.jsx", import.meta.url), "utf8");
+const facesBlock = configPageSource.match(/detectionSection === "faces"[\s\S]*?: null\}/);
+assert.ok(facesBlock, "face detection settings block is present");
+assert.match(facesBlock[0], /Face detection enabled/);
+assert.match(facesBlock[0], /Face Detector Model/);
+assert.match(facesBlock[0], /Face Detection Confidence/);
+assert.doesNotMatch(facesBlock[0], /Embedding Model|Landmark Model|Suggestion Threshold|References Per Person|Automatically identify|visit_auto_link|Model input profile|Recognition enabled/);
+assert.doesNotMatch(configPageSource, /<h3>Face recognition<\/h3>/);
+assert.match(configPageSource, /\["faces", "Face detection"/);
 
 console.log("admin workspace tests passed");

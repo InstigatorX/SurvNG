@@ -476,7 +476,6 @@ export function TelemetryViewer({ data, cameraId, timeZone }) {
   const runtime = data.detector?.runtime || {};
   const objectWorkers = data.detector?.workers?.object || data.detector?.isolation || {};
   const semantic = data.semantic_search || {};
-  const faceRecognition = data.face_recognition || {};
   const gpu = data.gpu || {};
   const storage = data.system?.storage || {};
   const memory = data.system?.memory || {};
@@ -679,16 +678,6 @@ export function TelemetryViewer({ data, cameraId, timeZone }) {
               <div><dt>Search evidence</dt><dd>{Number(semantic.evidence_count || 0).toLocaleString()} <small>whole images and object crops</small></dd></div>
               <div><dt>Queue / added since restart</dt><dd>{Number(semantic.queue_depth || 0).toLocaleString()} / {Number(semantic.indexed_since_start || 0).toLocaleString()}</dd></div>
               {semantic.error || semantic.reason ? <div><dt>Last issue</dt><dd>{semantic.error || semantic.reason}</dd></div> : null}
-            </dl>
-          </section> : null}
-          {!selected ? <section className="telemetry-section">
-            <div className="telemetry-section-head"><div><h3>Face recognition</h3></div></div>
-            <dl className="telemetry-details">
-              <div><dt>Recognizable faces</dt><dd>{Number(faceRecognition.actionable_observations || 0).toLocaleString()} <small>{Number(faceRecognition.known || 0).toLocaleString()} identified · {Number(faceRecognition.unknown || 0).toLocaleString()} unknown</small></dd></div>
-              <div><dt>Identification rate</dt><dd>{Number(faceRecognition.identified_percent || 0).toFixed(1)}%</dd></div>
-              <div><dt>Unusable faces</dt><dd>{Number(faceRecognition.too_small || 0).toLocaleString()} <small>{Number(faceRecognition.processing_failed || 0).toLocaleString()} failures</small></dd></div>
-              <div><dt>Candidate frames / multi-frame tracks</dt><dd>{Number(faceRecognition.candidate_frames || 0).toLocaleString()} / {Number(faceRecognition.multi_frame_tracks || 0).toLocaleString()}</dd></div>
-              <div><dt>Recognition queue</dt><dd>{Number(faceRecognition.recognition?.queue_depth || 0).toLocaleString()} <small>{Number(faceRecognition.recognition?.pending || 0).toLocaleString()} pending · {Number(faceRecognition.recognition?.failed || 0).toLocaleString()} failed</small></dd></div>
             </dl>
           </section> : null}
         </div>
@@ -4215,7 +4204,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       {section === "detection" ? (
         <div className="detection-settings subsection-workspace">
           <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="Intelligence and detection settings">
-            {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["depth", "Depth Estimation", Layers], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face Recognition", ScanFace]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
+            {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["depth", "Depth Estimation", Layers], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face detection", ScanFace]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
           </nav>
           <div className="detection-settings-content">
           {detectionSection === "object" ? <section className="detection-settings-card primary">
@@ -4337,7 +4326,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                     })}
                   </div>
                 </details>
-                <small>Select classes to exclude. Face detection and recognition continue normally; excluded classes simply do not receive track IDs.</small>
+                <small>Select classes to exclude. Face detection continues normally; excluded classes simply do not receive track IDs.</small>
               </div>
               <label>Maximum duration<input type="number" min="3" max="120" step="1" value={config.detector?.tracking?.max_session_seconds ?? 15} onChange={(event) => updateConfig(["detector", "tracking", "max_session_seconds"], Number(event.target.value))} /><small>Seconds after initial detection.</small></label>
               <label>Lost-object grace<input type="number" min="0.5" max="15" step="0.5" value={config.detector?.tracking?.lost_timeout_seconds ?? 3} onChange={(event) => updateConfig(["detector", "tracking", "lost_timeout_seconds"], Number(event.target.value))} /><small>Seconds to retain an obstructed object.</small></label>
@@ -4514,28 +4503,14 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
           </details> : null}
 
           {detectionSection === "faces" ? <details className="detection-settings-card detection-feature-card wide-card" open>
-            <summary><span className="detection-settings-card-icon"><ScanFace size={18} /></span><span><strong>Face recognition</strong><small>Identify detected faces using a separate embedding model.</small></span></summary>
+            <summary><span className="detection-settings-card-icon"><ScanFace size={18} /></span><span><strong>Face detection</strong><small>Run the face detector on upper-body person crops.</small></span></summary>
             <div className="detection-feature-body detection-field-grid">
-              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.face_recognition_enabled ?? false} onChange={(event) => updateConfig(["detector", "face_recognition_enabled"], event.target.checked)} /><span>Recognition enabled</span></label>
-              <label>Embedding Model<input value={config.detector?.face_embedding_model_path || ""} onChange={(event) => updateConfig(["detector", "face_embedding_model_path"], event.target.value)} placeholder="face_model/model.xml" /></label>
-              <label>Model input profile<select value={config.detector?.face_embedding_profile || "legacy_openvino"} onChange={(event) => updateConfig(["detector", "face_embedding_profile"], event.target.value)}><option value="legacy_openvino">Existing OpenVINO package</option><option value="adaface">AdaFace · BGR, normalized 112×112</option><option value="arcface">ArcFace · RGB, normalized 112×112</option></select><small>Match the exported model's input contract. A profile change requires new embeddings and calibration.</small></label>
-              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.face_evidence_enabled ?? true} onChange={(event) => updateConfig(["detector", "face_evidence_enabled"], event.target.checked)} /><span>Find better face evidence in recordings</span></label>
-              <label>Additional face frames<input type="number" min="0" max="8" value={config.detector?.face_evidence_max_extra_frames ?? 4} onChange={(event) => updateConfig(["detector", "face_evidence_max_extra_frames"], Number(event.target.value))} /></label>
-              <label>Face evidence budget (seconds)<input type="number" min="0.5" max="10" step="0.5" value={config.detector?.face_evidence_timeout_seconds ?? 4} onChange={(event) => updateConfig(["detector", "face_evidence_timeout_seconds"], Number(event.target.value))} /></label>
-              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.visit_auto_link_enabled ?? false} onChange={(event) => updateConfig(["detector", "tracking", "visit_auto_link_enabled"], event.target.checked)} /><span>Automatically link calibrated visit matches</span></label>
-              <label>Landmark Model<input value={config.detector?.face_landmark_model_path || ""} onChange={(event) => updateConfig(["detector", "face_landmark_model_path"], event.target.value)} placeholder="face_model/landmarks.xml" /></label>
-              <label>Face Detector Model<input value={config.detector?.face_detection_model_path || ""} onChange={(event) => updateConfig(["detector", "face_detection_model_path"], event.target.value)} placeholder="face_detector/model.xml" /></label>
-              <label>Recognition Device<select value={config.detector?.face_recognition_device || "AUTO"} onChange={(event) => updateConfig(["detector", "face_recognition_device"], event.target.value)}>
+              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.face_recognition_enabled ?? false} onChange={(event) => updateConfig(["detector", "face_recognition_enabled"], event.target.checked)} /><span>Face detection enabled</span></label>
+              <label>Face Detector Model<input value={config.detector?.face_detection_model_path || ""} onChange={(event) => updateConfig(["detector", "face_detection_model_path"], event.target.value)} placeholder="face_detector/model.xml" /><small>OpenVINO XML. Score a candidate on People before replacing a model that is already running.</small></label>
+              <label>Face detector device<select value={config.detector?.face_recognition_device || "AUTO"} onChange={(event) => updateConfig(["detector", "face_recognition_device"], event.target.value)}>
                 {deviceOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select></label>
-              <label>Face Detection Confidence<input type="number" min="0.01" max="0.99" step="0.01" value={config.detector?.face_detection_threshold ?? 0.6} onChange={(event) => updateConfig(["detector", "face_detection_threshold"], Number(event.target.value))} /></label>
-              <label>Suggestion Threshold<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_match_threshold ?? 0.4} onChange={(event) => updateConfig(["detector", "face_match_threshold"], Number(event.target.value))} /></label>
-              <label>Minimum Face Size<input type="number" min="16" max="1024" step="8" value={config.detector?.face_min_size ?? 48} onChange={(event) => updateConfig(["detector", "face_min_size"], Number(event.target.value))} /></label>
-              <label>References Per Person<input type="number" min="1" max="200" step="1" value={config.detector?.face_max_references ?? 20} onChange={(event) => updateConfig(["detector", "face_max_references"], Number(event.target.value))} /><small>SurvNG chooses the clearest, most varied confirmed faces; pinned references are always retained.</small></label>
-              <label>Saved face limit<input type="number" min="100" max="100000" step="100" value={config.detector?.face_max_observations ?? 1000} onChange={(event) => updateConfig(["detector", "face_max_observations"], Number(event.target.value))} /><small>Oldest observations are removed first.</small></label>
-              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.face_auto_identify_enabled ?? false} onChange={(event) => updateConfig(["detector", "face_auto_identify_enabled"], event.target.checked)} /><span>Automatically identify very strong matches</span></label>
-              <label>Automatic Match Threshold<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_auto_identify_threshold ?? 0.55} onChange={(event) => updateConfig(["detector", "face_auto_identify_threshold"], Number(event.target.value))} /></label>
-              <label>Minimum Lead Over Next Person<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_auto_identify_margin ?? 0.12} onChange={(event) => updateConfig(["detector", "face_auto_identify_margin"], Number(event.target.value))} /></label>
+              <label>Face Detection Confidence<input type="number" min="0.01" max="0.99" step="0.01" value={config.detector?.face_detection_threshold ?? 0.6} onChange={(event) => updateConfig(["detector", "face_detection_threshold"], Number(event.target.value))} /><small>Live detections use this confidence. The default is 0.60.</small></label>
             </div>
           </details> : null}
           </div>

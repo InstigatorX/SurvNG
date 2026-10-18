@@ -532,6 +532,10 @@ class MotionDecisionHandler:
         }
 
         detection_completed = frame is not None and not detection_failure(objects)
+        scene_look = bool(
+            (qualification.get("scene_discovery") or qualification.get("scene_confirmation"))
+            and not qualification.get("historical")
+        )
         acquisition = None
         if (qualification.get("scene_discovery") or qualification.get("scene_confirmation")) and callable(
             getattr(self.events, "acquire_scene_sample", None)
@@ -543,13 +547,18 @@ class MotionDecisionHandler:
             )
             for update in acquisition.get("context_updates") or []:
                 self._publish("incident_update", {**update, "reason":"scene_context_acquired"})
-            if acquisition["assessment"]["status"] != "supported":
+            verdict = str((acquisition.get("assessment") or {}).get("status") or "")
+            if scene_look:
+                self._publish_scene_occupancy(objects, normalized_event_at, verdict, detection_completed)
+            if verdict != "supported":
                 return MotionDecisionOutcome(
                     event_id=existing_event_id, snapshot_path=acquisition["snapshot_path"],
                     object_detected=False, rejection_reason="scene_activity_" + acquisition["assessment"]["status"],
                     processing_timing=processing_timing,
                     scene_activity_decision_id=acquisition["decision_id"],
                 )
+        elif scene_look:
+            self._publish_scene_occupancy(objects, normalized_event_at, None, detection_completed)
 
         if existing_event_id is not None and not detection_completed:
             # Refinement is additive. A transient decoder/detector failure must
@@ -1099,6 +1108,25 @@ class MotionDecisionHandler:
         if self.event_callback:
             self._publish("motion_audit", audit)
         return audit
+
+    def _publish_scene_occupancy(
+        self,
+        objects: list[dict[str, Any]],
+        observed_at: datetime,
+        verdict: str | None,
+        detection_completed: bool,
+    ) -> None:
+        """Report zones on a finished scene sample without opening an incident."""
+        from ..zone_occupancy import labeled_zone_observations, scene_look_publishes
+
+        if not scene_look_publishes(verdict, detection_completed=detection_completed):
+            return
+        self._publish("zone_occupancy_source", {
+            "camera_id": self.camera_id,
+            "timestamp": observed_at.isoformat(),
+            "source": "scene",
+            "objects": labeled_zone_observations(objects),
+        })
 
     def _publish(self, event_type: str, payload: dict[str, Any]) -> None:
         if self.event_callback is None:

@@ -1583,6 +1583,40 @@ class AppManager:
                 retain=True,
             )
 
+    def _zone_notification_targets(self, camera) -> list[dict]:
+        return [
+            {
+                "name": zone.name,
+                "enabled": zone.enabled,
+                "notifications_enabled": zone.notifications_enabled,
+                "object_classes": zone.object_classes or self.detector.labels,
+            }
+            for zone in camera.zones
+        ]
+
+    def _publish_zone_occupancy(self, payload: dict) -> None:
+        from .zone_occupancy import ZoneOccupancyBook
+
+        camera_id = str(payload.get("camera_id") or "")
+        camera = next((item for item in self.config.cameras if item.id == camera_id), None)
+        if camera is None:
+            return
+        book = getattr(self, "zone_occupancy", None)
+        if book is None:
+            book = ZoneOccupancyBook()
+            self.zone_occupancy = book
+        heartbeat = float(getattr(
+            self.config.detector, "scene_discovery_heartbeat_seconds", 120.0,
+        ) or 120.0)
+        snapshot = book.observe(
+            camera,
+            payload,
+            fail_safe_seconds=heartbeat * 2,
+        )
+        if snapshot is None:
+            return
+        self.state_events.publish("zone_occupancy", snapshot)
+
     def incident_notification_allowed(self, payload: dict) -> bool:
         if not self.config.integration_notifications.enabled or payload.get("historical"):
             return False
@@ -1696,6 +1730,9 @@ class AppManager:
     def publish_event(self, event_type: str, payload: dict) -> None:
         camera_id = str(payload.get("camera_id") or "")
         if not camera_id:
+            return
+        if event_type == "zone_occupancy_source":
+            self._publish_zone_occupancy(payload)
             return
         if (event_type == "object_tracking"
                 and (payload.get("scene_analysis_job") or {}).get("admission") == "demand"):
@@ -1814,15 +1851,7 @@ class AppManager:
             if camera is not None:
                 self.mqtt.publish_zone_objects(
                     camera_id,
-                    [
-                        {
-                            "name": zone.name,
-                            "enabled": zone.enabled,
-                            "notifications_enabled": zone.notifications_enabled,
-                            "object_classes": zone.object_classes or self.detector.labels,
-                        }
-                        for zone in camera.zones
-                    ],
+                    self._zone_notification_targets(camera),
                     {**payload, "objects": alert_objects},
                 )
 

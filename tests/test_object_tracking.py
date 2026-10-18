@@ -124,6 +124,32 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
         self.assertEqual([item["observations"] for item in summaries], [2, 2])
         self.assertTrue(all(item["state"] == "confirmed" for item in summaries))
 
+    def test_current_zones_follow_the_latest_detection(self) -> None:
+        tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
+        first = detection("car", 0.9, (10, 10, 40, 40))
+        first["zones"] = ["Driveway"]
+        later = detection("car", 0.9, (12, 10, 42, 40))
+        later["zones"] = ["Road"]
+        tracker.update([first], 10.0, confirm_new=True)
+        tracker.update([later], 10.5)
+        summary = tracker.summaries(10.5)[0]
+        self.assertEqual(summary["current_zones"], ["Road"])
+        self.assertEqual(summary["zones"], ["Driveway", "Road"])
+
+    def test_sparse_recovery_replaces_current_zones(self) -> None:
+        tracker = SparseIdentityObjectTracker(self.config, high_confidence_threshold=0.7)
+        first = detection("car", 0.9, (10, 10, 40, 40))
+        first["zones"] = ["Driveway"]
+        tracker.update([first], 10.0, confirm_new=True)
+        track = next(iter(tracker._tracks.values()))
+        moved = detection("car", 0.9, (12, 10, 42, 40))
+        moved["zones"] = ["Road"]
+        tracker._observe_geometry(
+            track, moved, 12.0, track.box, observation_centric=True,
+        )
+        self.assertEqual(track.current_zones, {"Road"})
+        self.assertEqual(track.zones, {"Driveway", "Road"})
+
     def test_resume_seed_keeps_track_id_and_appearance(self) -> None:
         tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
         seed = detection("car", 0.9, (10, 10, 40, 40))

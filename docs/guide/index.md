@@ -18,7 +18,7 @@ SurvNG watches your cameras, keeps continuous video history, and helps you find 
 5. [Incidents](incidents.md) — activity SurvNG kept for review
 6. [Timeline & exports](timeline.md) — scrub recorded video and save clips
 7. [Search](search.md) — find activity with filters, a short description, or Find similar
-8. [People](people.md) — faces SurvNG has seen and people you name
+8. [People](people.md) — label upper-body crops for this install's face detector
 9. [Admin](admin.md) — configure cameras, detection, storage, and health
 
 ### Configuration topics

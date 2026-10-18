@@ -1295,6 +1295,70 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(availability["ranges"][1]["segment_count"], 1)
         self.assertNotIn("path", availability["ranges"][0])
 
+    def test_known_short_media_bounds_recording_availability_and_epoch_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            first = Path(tmpdir) / "first.mp4"
+            second = Path(tmpdir) / "second.mp4"
+            for clip in (first, second):
+                clip.write_bytes(b"x" * 2048)
+            recorder._store_recording_rows(
+                "front-door",
+                "main",
+                [
+                    self._row(first, start_epoch=1_784_000_000.0),
+                    self._row(second, start_epoch=1_784_000_015.0),
+                ],
+            )
+            with recorder._index_connection() as connection:
+                connection.executemany(
+                    "UPDATE recordings SET playback_duration_seconds = ? WHERE path = ?",
+                    ((2, str(first)), (20, str(second))),
+                )
+
+            availability = recorder.recording_availability_between(
+                "front-door",
+                1_784_000_000.0,
+                1_784_000_030.0,
+                discover_missing=False,
+            )
+            rows_after_media = recorder.recording_rows_between(
+                "front-door",
+                1_784_000_005.0,
+                1_784_000_006.0,
+                discover_missing=False,
+            )
+            recording_after_media = recorder.recording_at(
+                "front-door",
+                1_784_000_005.0,
+            )
+            with recorder._index_connection() as connection:
+                retained = connection.execute(
+                    "SELECT COUNT(*) FROM recordings WHERE path = ?",
+                    (str(first),),
+                ).fetchone()[0]
+
+        self.assertEqual(
+            availability["ranges"],
+            [
+                {
+                    "start_epoch": 1_784_000_000.0,
+                    "end_epoch": 1_784_000_002.0,
+                    "duration_seconds": 2.0,
+                    "segment_count": 1,
+                },
+                {
+                    "start_epoch": 1_784_000_015.0,
+                    "end_epoch": 1_784_000_025.0,
+                    "duration_seconds": 10.0,
+                    "segment_count": 1,
+                },
+            ],
+        )
+        self.assertEqual(rows_after_media, [])
+        self.assertIsNone(recording_after_media)
+        self.assertEqual(retained, 1)
+
     def test_index_only_availability_does_not_touch_recording_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
@@ -1345,6 +1409,51 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(availability["gate"]["live"]["segment_count"], 1)
         self.assertEqual(availability["gate"]["main"]["segment_count"], 0)
         self.assertEqual(availability["missing"]["live"]["ranges"], [])
+
+    def test_grid_availability_bounds_short_restart_tail_to_playable_media(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            first = Path(tmpdir) / "first.mp4"
+            second = Path(tmpdir) / "second.mp4"
+            for clip in (first, second):
+                clip.write_bytes(b"x" * 2048)
+            recorder._store_recording_rows(
+                "front-door",
+                "main",
+                [
+                    self._row(first, start_epoch=1_784_000_000.0),
+                    self._row(second, start_epoch=1_784_000_015.0),
+                ],
+            )
+            with recorder._index_connection() as connection:
+                connection.execute(
+                    "UPDATE recordings SET playback_duration_seconds = 2 WHERE path = ?",
+                    (str(first),),
+                )
+
+            availability = recorder.recording_grid_availability_between(
+                ["front-door"],
+                1_784_000_000.0,
+                1_784_000_030.0,
+            )
+
+        self.assertEqual(
+            availability["front-door"]["main"]["ranges"],
+            [
+                {
+                    "start_epoch": 1_784_000_000.0,
+                    "end_epoch": 1_784_000_002.0,
+                    "duration_seconds": 2.0,
+                    "segment_count": 1,
+                },
+                {
+                    "start_epoch": 1_784_000_015.0,
+                    "end_epoch": 1_784_000_025.0,
+                    "duration_seconds": 10.0,
+                    "segment_count": 1,
+                },
+            ],
+        )
 
     def test_refresh_recording_edge_indexes_only_completed_recent_segments(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
