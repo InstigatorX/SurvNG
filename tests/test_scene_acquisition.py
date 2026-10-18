@@ -105,13 +105,19 @@ def test_cover_only_pass_persists_scene_evidence_before_presentation_rejection()
 def test_discovery_persists_observations_without_creating_an_incident(tmp_path):
     from survng.app.events import EventStore
     events = EventStore(tmp_path)
-    processor = handler(events, [person()])
+    published = []
+    processor = handler(events, [person(zones=["Driveway"])])
+    processor.event_callback = lambda kind, payload: published.append((kind, payload))
     outcome = processor.refine("scene/discovery", "", datetime.fromtimestamp(1000, timezone.utc),
                                {"scene_discovery": True}, existing_event_id=None)
     assert outcome.event_id is None
     assert outcome.rejection_reason == "scene_activity_pending"
     assert events.list_scene_incidents() == []
     assert len(events.scene_acquired_observations("gate", 999, 1001)) == 1
+    occupancy = [payload for kind, payload in published if kind == "zone_occupancy_source"]
+    assert len(occupancy) == 1
+    assert occupancy[0]["source"] == "scene"
+    assert {"label": "person", "zones": ["Driveway"]} in occupancy[0]["objects"]
 
 
 def test_discovery_is_one_bounded_full_scene_sample():
@@ -232,13 +238,29 @@ def test_discovery_uses_fresh_live_scene_before_recordings_finalize():
     assert all(item['incident_eligible'] is False for item in detected.values())
 
 
-def test_empty_live_discovery_is_successful_analysis():
+def test_empty_live_discovery_is_successful_analysis(tmp_path):
     backend, sample = discovery_backend([])
     with patch('survng.app.motion_pipeline.object_detection.time.time', return_value=1000.2):
         result = backend.detect(datetime.fromtimestamp(1000, timezone.utc), {'scene_discovery': True})
     assert result.frame is sample.frame
     assert scene_batches(result.objects) == []
     assert not any(item.get('status') == 'no_recorded_frame' for item in result.objects)
+    from survng.app.events import EventStore
+    events = EventStore(tmp_path)
+    published = []
+    processor = MotionDecisionHandler(
+        camera_id='gate', events=events, detection_provider=lambda _: result,
+        snapshot_writer=lambda *_: 'cover.webp', object_serializer=json.dumps,
+        event_callback=lambda kind, payload: published.append((kind, payload)),
+    )
+    outcome = processor.refine('scene/discovery', '', datetime.fromtimestamp(1000, timezone.utc),
+                               {'scene_discovery': True}, existing_event_id=None)
+    assert outcome.event_id is None
+    assert events.list_scene_incidents() == []
+    occupancy = [payload for kind, payload in published if kind == 'zone_occupancy_source']
+    assert outcome.rejection_reason == 'scene_activity_pending'
+    assert len(occupancy) == 1
+    assert occupancy[0]['objects'] == []
 
 
 @pytest.mark.parametrize('changes', [
@@ -288,14 +310,17 @@ def test_live_discovery_inference_failure_is_retained_as_incomplete(tmp_path):
         result = backend.detect(datetime.fromtimestamp(1000, timezone.utc), {'scene_discovery': True})
     from survng.app.events import EventStore
     events = EventStore(tmp_path)
+    published = []
     processor = MotionDecisionHandler(
         camera_id='gate', events=events, detection_provider=lambda _: result,
         snapshot_writer=lambda *_: 'cover.webp', object_serializer=json.dumps,
+        event_callback=lambda kind, payload: published.append((kind, payload)),
     )
     outcome = processor.refine('scene/discovery', '', datetime.fromtimestamp(1000, timezone.utc),
                                {'scene_discovery': True}, existing_event_id=None)
     assert outcome.rejection_reason == 'scene_activity_incomplete'
     assert events.list_scene_incidents() == []
+    assert [kind for kind, _payload in published] == []
     with events._connect() as conn:
         assert conn.execute('select status from acquired_samples').fetchone()[0] == 'failed'
 

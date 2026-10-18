@@ -276,7 +276,10 @@ def test_confirmation_with_background_level_change_keeps_evidence_without_incide
                            normalized_displacement=0.0007)
         for observation in sample["observations"]:
             observation.update(activity_role="indeterminate", confidence=0.93)
-    outcome = processor(store, result, tmp_path).refine(
+    published = []
+    decision = processor(store, result, tmp_path)
+    decision.event_callback = lambda kind, payload: published.append(kind)
+    outcome = decision.refine(
         "scene/confirmation", "", datetime.fromtimestamp(1000, timezone.utc),
         {"scene_confirmation": True,
          "establishment_zone_policy": policy(zone("Entry", "incident", 0, 1), confidence_threshold=0.7)},
@@ -284,6 +287,7 @@ def test_confirmation_with_background_level_change_keeps_evidence_without_incide
     )
     assert outcome.event_id is None
     assert outcome.rejection_reason == "scene_activity_unsupported"
+    assert "zone_occupancy_source" not in published
     with store._connect() as conn:
         assert conn.execute("select count(*) from acquired_observations").fetchone()[0] == 3
         assert conn.execute("select count(*) from scene_incidents").fetchone()[0] == 0
