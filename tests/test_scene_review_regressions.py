@@ -1,5 +1,6 @@
 """Defects reproduced during review of canonical scene history."""
 import json
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -182,3 +183,56 @@ def test_legacy_cover_and_track_id_share_one_subject(tmp_path):
     assert len(scene['scene_objects'])==1
     assert len(scene['scene_objects'][0]['observations'])==3
     assert EventStore(tmp_path).scene_incident(event_id=row['id'])==scene
+
+
+def test_unconfirmed_incident_is_not_reactivated_by_fresh_activity(tmp_path):
+    store = EventStore(tmp_path)
+    now = time.time()
+    event = add(store, now, [observation(now, temporal_observations=2)])
+    incident_id = store.scene_incident(event_id=event["id"])["incident_id"]
+    with store._connect() as conn:
+        conn.execute("update scene_incidents set state='unconfirmed' where id=?", (incident_id,))
+    store.record_scene_observations(
+        event["id"],
+        [observation(now + 1, scene_track_key="fresh", temporal_observations=2)],
+    )
+    # Fresh activity must not jump unconfirmed → active. Establishment may
+    # still restore unconfirmed → complete when a supported verdict exists.
+    assert store.scene_incident(event_id=event["id"])["state"] != "active"
+
+
+def test_merged_incident_is_not_reactivated_by_fresh_activity(tmp_path):
+    store = EventStore(tmp_path)
+    now = time.time()
+    event = add(store, now, [observation(now, temporal_observations=2)])
+    incident_id = store.scene_incident(event_id=event["id"])["incident_id"]
+    with store._connect() as conn:
+        conn.execute("update scene_incidents set state='merged' where id=?", (incident_id,))
+        before = conn.execute(
+            "select state from scene_incidents where id=?", (incident_id,)
+        ).fetchone()[0]
+        assert before == "merged"
+        # Exercise the same guarded write used by _scene_project.
+        conn.execute(
+            "update scene_incidents set state='active',historical=0 "
+            "where id=? and state in ('complete','active')",
+            (incident_id,),
+        )
+        after = conn.execute(
+            "select state from scene_incidents where id=?", (incident_id,)
+        ).fetchone()[0]
+    assert after == "merged"
+
+
+def test_complete_incident_reactivates_on_fresh_activity(tmp_path):
+    store = EventStore(tmp_path)
+    now = time.time()
+    event = add(store, now, [observation(now, temporal_observations=2)])
+    incident_id = store.scene_incident(event_id=event["id"])["incident_id"]
+    with store._connect() as conn:
+        conn.execute("update scene_incidents set state='complete' where id=?", (incident_id,))
+    store.record_scene_observations(
+        event["id"],
+        [observation(now + 1, scene_track_key="reopen", temporal_observations=2)],
+    )
+    assert store.scene_incident(event_id=event["id"])["state"] == "active"
