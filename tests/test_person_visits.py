@@ -220,6 +220,31 @@ def test_people_outside_alert_zone_are_retained_as_sightings(stores):
     assert {item["event_id"] for item in sightings} == {event["id"]}
 
 
+def test_person_visit_read_batches_appearance_and_face_lookups(stores):
+    for offset in range(4):
+        seed(stores, "gate", 10000 + offset, person=7 if offset == 0 else None)
+    visits = stores[3]
+    calls = {"appearance": 0, "faces": 0}
+    original_appearance = visits._appearance_rows_by_event
+    original_faces = visits._face_rows_by_event
+
+    def count_appearance(db, event_ids):
+        calls["appearance"] += 1
+        assert len(event_ids) == 4
+        return original_appearance(db, event_ids)
+
+    def count_faces(db, event_ids):
+        calls["faces"] += 1
+        assert len(event_ids) == 4
+        return original_faces(db, event_ids)
+
+    visits._appearance_rows_by_event = count_appearance  # type: ignore[method-assign]
+    visits._face_rows_by_event = count_faces  # type: ignore[method-assign]
+    payload = visits.list(9990, 10100, config())
+    assert calls == {"appearance": 1, "faces": 1}
+    assert len(payload["visits"]) >= 4
+
+
 def test_excluded_person_still_makes_face_assignment_ambiguous(stores):
     events, _, _, visits = stores
     event_id = seed(stores, "gate", 10000, person=7, people_count=2)

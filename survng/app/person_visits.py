@@ -11,6 +11,7 @@ import json
 import math
 import sqlite3
 import threading
+from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -201,6 +202,47 @@ class PersonVisitStore:
         finally:
             db.close()
 
+    def _appearance_rows_by_event(
+        self, db, event_ids: list[int]
+    ) -> dict[int, list[sqlite3.Row]]:
+        grouped: dict[int, list[sqlite3.Row]] = defaultdict(list)
+        if not event_ids:
+            return grouped
+        placeholders = ",".join("?" for _ in event_ids)
+        for row in db.execute(
+            f"""select * from appearance_embeddings
+                where event_id in ({placeholders}) and model_kind='person'
+                  and label in ('person','pedestrian')
+                order by id desc""",
+            tuple(event_ids),
+        ):
+            bucket = grouped[int(row["event_id"])]
+            if len(bucket) <= self.MAX_SIGHTINGS:
+                bucket.append(row)
+        return grouped
+
+    def _face_rows_by_event(
+        self, db, event_ids: list[int]
+    ) -> dict[int, list[sqlite3.Row]]:
+        grouped: dict[int, list[sqlite3.Row]] = defaultdict(list)
+        if not event_ids:
+            return grouped
+        placeholders = ",".join("?" for _ in event_ids)
+        for row in db.execute(
+            f"""select f.id,f.event_id,f.candidate_track_id,f.person_id,f.review_status,
+                       f.observed_at,f.candidate_offset_seconds,f.box_json,f.snapshot_path,
+                       f.embedding_model,p.name
+                from face_observations f
+                left join face_people p on p.id=f.person_id
+                where f.event_id in ({placeholders}) and f.canonical=1
+                order by f.id""",
+            tuple(event_ids),
+        ):
+            bucket = grouped[int(row["event_id"])]
+            if len(bucket) <= self.MAX_SIGHTINGS:
+                bucket.append(row)
+        return grouped
+
     def _read(self, db, start: float, end: float) -> tuple[list[dict], bool]:
         events = db.execute("""select id,camera_id,created_at,objects_json from events
             where created_at >= ? and created_at < ?
@@ -211,17 +253,20 @@ class PersonVisitStore:
             order by julianday(created_at) desc,id desc limit ?""", (iso(start - 86400)[:10], iso(end + 172800)[:10], iso(start), iso(end), self.MAX_SIGHTINGS + 1)).fetchall()
         result = []
         truncated = len(events) > self.MAX_SIGHTINGS
-        for event in events[:self.MAX_SIGHTINGS]:
+        selected = []
+        for event in events[: self.MAX_SIGHTINGS]:
             at = epoch(event["created_at"])
             if at is None:
                 continue
-            rows = db.execute("""select * from appearance_embeddings where event_id=? and model_kind='person'
-                and label in ('person','pedestrian') order by id desc limit ?""", (event["id"], self.MAX_SIGHTINGS + 1)).fetchall()
+            selected.append((event, at))
+        event_ids = [int(event["id"]) for event, _at in selected]
+        appearances_by_event = self._appearance_rows_by_event(db, event_ids)
+        faces_by_event = self._face_rows_by_event(db, event_ids)
+        for event, at in selected:
+            rows = appearances_by_event.get(int(event["id"]), [])
             truncated = truncated or len(rows) > self.MAX_SIGHTINGS
-            faces = db.execute("""select f.id,f.candidate_track_id,f.person_id,f.review_status,f.observed_at,
-                f.candidate_offset_seconds,f.box_json,f.snapshot_path,f.embedding_model,p.name from face_observations f
-                left join face_people p on p.id=f.person_id where f.event_id=? and f.canonical=1
-                order by f.id limit ?""", (event["id"], self.MAX_SIGHTINGS + 1)).fetchall()
+            faces = faces_by_event.get(int(event["id"]), [])
+            truncated = truncated or len(faces) > self.MAX_SIGHTINGS
             tracks = {}
             for row in rows:
                 if row["track_id"] in tracks:
