@@ -62,6 +62,10 @@ class RecordingMediaDependencies:
 
 
 class RecordingMediaRuntime:
+    # Timeline scrubbing can mint many distinct day-window keys; TTL alone does
+    # not bound peak memory under long-uptime interactive use.
+    RECORDING_DAY_CACHE_MAX_ENTRIES = 256
+
     def __init__(self, deps: RecordingMediaDependencies) -> None:
         self.deps = deps
         self.recording_fmp4_locks: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
@@ -72,6 +76,7 @@ class RecordingMediaRuntime:
         self.recording_day_cache_lock = threading.Lock()
         self.recording_day_cache_seconds = 30.0
         self.recording_near_live_cache_seconds = 2.0
+        self.recording_day_cache_max_entries = self.RECORDING_DAY_CACHE_MAX_ENTRIES
         self.recording_preview_interval_seconds = 5.0
         self.recording_preview_max_age_seconds = 7 * 24 * 60 * 60
         self.recording_preview_max_bytes = 256 * 1024 * 1024
@@ -634,9 +639,21 @@ class RecordingMediaRuntime:
         selected_manager.recorder.queue_stream_fingerprints(rows)
         with self.recording_day_cache_lock:
             self.recording_day_cache[cache_key] = (now, rows)
-            expired = [key for key, value in self.recording_day_cache.items() if now - value[0] >= self.recording_day_cache_seconds]
+            expired = [
+                key
+                for key, value in self.recording_day_cache.items()
+                if now - value[0] >= self.recording_day_cache_seconds
+            ]
             for key in expired:
                 self.recording_day_cache.pop(key, None)
+            overflow = len(self.recording_day_cache) - self.recording_day_cache_max_entries
+            if overflow > 0:
+                oldest = sorted(
+                    self.recording_day_cache.items(),
+                    key=lambda item: item[1][0],
+                )[:overflow]
+                for key, _value in oldest:
+                    self.recording_day_cache.pop(key, None)
         return rows
 
     def _recording_cache_metric(self, origin: str, metric: str, value: float=1.0) -> None:
