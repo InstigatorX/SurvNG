@@ -3,14 +3,29 @@
 Guidance only — does not change process architecture. When tracking is
 enabled, DetectorConfig raises object_worker_count to at least 2 so live
 incident inference keeps a protected lane.
+
+Also owns the inference-subprocess BLAS/OMP/OpenVINO thread budget so
+multiple workers do not oversubscribe host cores.
 """
 
 from __future__ import annotations
 
+import os
+from collections.abc import MutableMapping
 from typing import Any, Mapping
 
 MIN_OBJECT_WORKERS = 1
 MAX_OBJECT_WORKERS = 4
+# Face + reid + depth workers accompany the object pool on a typical host.
+SPECIALIST_INFERENCE_WORKERS = 3
+MAX_INFERENCE_THREADS_PER_PROCESS = 4
+INFERENCE_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "OV_CPU_THREADS_NUM",
+)
 
 # Initial admission timeout is 750ms; sustained p95 above HIGH suggests backlog.
 HIGH_ADMISSION_WAIT_MS_P95 = 100.0
@@ -26,6 +41,101 @@ def clamp_object_worker_count(value: object) -> int:
     except (TypeError, ValueError):
         count = MIN_OBJECT_WORKERS
     return max(MIN_OBJECT_WORKERS, min(MAX_OBJECT_WORKERS, count))
+
+
+def recommended_inference_threads(
+    *,
+    role: str = "object",
+    object_worker_count: int = 2,
+    cpu_count: int | None = None,
+) -> int:
+    """Recommend intra-op threads for one inference subprocess.
+
+    Splits most of the host CPU budget across the object worker pool plus the
+    specialist face/reid/depth processes, leaving headroom for capture/FFmpeg
+    in the parent. Caps per process so LATENCY + NUM_STREAMS=1 workers do not
+    spawn large BLAS/OpenVINO pools.
+    """
+    del role  # Reserved for role-specific budgets; policy is shared today.
+    cpus = max(1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 2)))
+    siblings = clamp_object_worker_count(object_worker_count) + SPECIALIST_INFERENCE_WORKERS
+    inference_budget = max(1, (cpus * 3) // 4)
+    per_process = max(1, inference_budget // max(1, siblings))
+    return max(1, min(MAX_INFERENCE_THREADS_PER_PROCESS, per_process))
+
+
+def apply_inference_thread_limits(
+    *,
+    role: str = "object",
+    object_worker_count: int = 2,
+    cpu_count: int | None = None,
+    environ: MutableMapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Pin BLAS/OMP/OpenVINO thread env vars unless already operator-set."""
+    env = os.environ if environ is None else environ
+    threads = recommended_inference_threads(
+        role=role,
+        object_worker_count=object_worker_count,
+        cpu_count=cpu_count,
+    )
+    # An explicit OMP/OV override becomes the budget for any unset siblings.
+    for key in ("OMP_NUM_THREADS", "OV_CPU_THREADS_NUM"):
+        existing = str(env.get(key) or "").strip()
+        if not existing:
+            continue
+        try:
+            threads = max(1, int(existing))
+            break
+        except ValueError:
+            continue
+    applied: dict[str, str] = {}
+    preserved: list[str] = []
+    thread_text = str(threads)
+    for key in INFERENCE_THREAD_ENV_VARS:
+        existing = env.get(key)
+        if existing is not None and str(existing).strip() != "":
+            applied[key] = str(existing)
+            preserved.append(key)
+            continue
+        env[key] = thread_text
+        applied[key] = thread_text
+    return {
+        "role": str(role or "object"),
+        "threads": threads,
+        "object_worker_count": clamp_object_worker_count(object_worker_count),
+        "cpu_count": max(
+            1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 2))
+        ),
+        "env": applied,
+        "preserved": preserved,
+    }
+
+
+def openvino_latency_compile_config(
+    device: object,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Build the shared LATENCY compile config, honoring pinned CPU threads."""
+    device_text = str(device or "").strip()
+    device_upper = device_text.upper()
+    config: dict[str, str] = {"PERFORMANCE_HINT": "LATENCY"}
+    if device_upper != "AUTO":
+        config["NUM_STREAMS"] = "1"
+    env = os.environ if environ is None else environ
+    thread_text = str(
+        env.get("OMP_NUM_THREADS") or env.get("OV_CPU_THREADS_NUM") or ""
+    ).strip()
+    if thread_text and (
+        device_upper == "CPU" or device_upper.startswith("CPU:")
+    ):
+        try:
+            threads = max(1, int(thread_text))
+        except ValueError:
+            threads = 0
+        if threads > 0:
+            config["INFERENCE_NUM_THREADS"] = str(threads)
+    return config
 
 
 def classify_device_class(device: object) -> str:

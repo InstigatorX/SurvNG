@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 
 from .config import DetectorConfig
+from .inference_runtime.worker_topology import openvino_latency_compile_config
 
 
 LOGGER = logging.getLogger(__name__)
@@ -95,9 +96,7 @@ class OpenVinoFaceDetector:
                 raise ValueError(f"expected NCHW face detector input, got {shape}")
             self.input_shape = (shape[3], shape[2])
             device = self.config.face_recognition_device or "AUTO"
-            compile_config = {"PERFORMANCE_HINT": "LATENCY"}
-            if device.upper() != "AUTO":
-                compile_config["NUM_STREAMS"] = "1"
+            compile_config = openvino_latency_compile_config(device)
             try:
                 compiled = core.compile_model(model, device, compile_config)
                 self.loaded_device = device
@@ -108,7 +107,7 @@ class OpenVinoFaceDetector:
                 compiled = core.compile_model(
                     model,
                     "CPU",
-                    {"PERFORMANCE_HINT": "LATENCY", "NUM_STREAMS": "1"},
+                    openvino_latency_compile_config("CPU"),
                 )
                 self.loaded_device = "CPU"
             self._request = compiled.create_infer_request()

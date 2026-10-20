@@ -119,6 +119,13 @@ def _inference_worker_main(
     _disable_worker_core_dumps()
     try:
         config = DetectorConfig.model_validate(config_payload)
+        from .worker_topology import apply_inference_thread_limits
+
+        # Pin BLAS/OMP/OpenVINO pools before importing engines that create Core().
+        apply_inference_thread_limits(
+            role=role,
+            object_worker_count=config.effective_object_worker_count(),
+        )
         if role == "object":
             from ..detector import OpenVinoDetector
 
