@@ -233,6 +233,8 @@ class EventStoreSceneMixin:
                 create index if not exists scene_observation_event_time on scene_observations(event_id,captured_epoch);
                 drop index if exists scene_observation_event;
                 create index if not exists scene_observation_media on scene_observations(snapshot_path);
+                create index if not exists scene_observation_recording
+                    on scene_observations(recording_path) where recording_path != '';
                 create table if not exists scene_alert_decisions (
                     event_id integer primary key references events(id) on delete cascade,
                     payload_json text not null
@@ -355,6 +357,10 @@ class EventStoreSceneMixin:
                 conn.execute("alter table scene_objects add column facet_label text not null default ''")
             conn.execute("create index if not exists scene_object_facet_label on scene_objects(facet_label)")
             conn.execute("create index if not exists scene_observation_source on scene_observations(source_observation_id)")
+            conn.execute(
+                "create index if not exists scene_observation_recording "
+                "on scene_observations(recording_path) where recording_path != ''"
+            )
             self._scene_outbox_legacy_rowid = self._mark_legacy_scene_notifications(conn)
         # Bounded transactions, resumable and silent. Never infer historical
         # video or replay notifications during migration.
