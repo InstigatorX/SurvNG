@@ -90,6 +90,11 @@
     "discovery_prefix": "homeassistant",
     "incident_events_enabled": true
   },
+  "web_auth": {
+    "enabled": true,
+    "session_days": 14,
+    "users": []
+  },
   "detector": {
     "enabled": false,
     "object_worker_count": 2,

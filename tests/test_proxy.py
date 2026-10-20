@@ -9,6 +9,7 @@ from survng.app.main import app
 from survng.app.proxy import (
     apply_trusted_proxy_headers,
     ip_is_local,
+    ip_is_loopback_peer,
     ip_is_trusted,
 )
 
@@ -19,16 +20,36 @@ def test_ip_is_local_covers_loopback_and_private() -> None:
     assert ip_is_local("10.0.0.5")
     assert ip_is_local("192.168.1.9")
     assert ip_is_local("testclient")
+    assert not ip_is_local("")
     assert not ip_is_local("8.8.8.8")
     assert not ip_is_local("1.1.1.1")
+
+
+def test_ip_is_loopback_peer_excludes_private_and_empty() -> None:
+    assert ip_is_loopback_peer("127.0.0.1")
+    assert ip_is_loopback_peer("::1")
+    assert ip_is_loopback_peer("testclient")
+    assert ip_is_loopback_peer("localhost")
+    assert not ip_is_loopback_peer("")
+    assert not ip_is_loopback_peer("10.0.0.5")
+    assert not ip_is_loopback_peer("192.168.1.9")
+    assert not ip_is_loopback_peer("8.8.8.8")
 
 
 def test_trusted_proxy_match() -> None:
     assert ip_is_trusted("127.0.0.1", ["127.0.0.1", "::1"])
     assert ip_is_trusted("10.0.0.9", ["10.0.0.0/8"])
-    assert ip_is_trusted("1.2.3.4", ["*"])
     assert not ip_is_trusted("1.2.3.4", ["127.0.0.1"])
     assert not ip_is_trusted("1.2.3.4", [])
+
+
+def test_wildcard_trusted_proxy_is_rejected() -> None:
+    from pydantic import ValidationError
+
+    from survng.app.proxy import ProxyConfig
+
+    with pytest.raises(ValidationError, match="cannot include"):
+        ProxyConfig(trusted_proxies=["*"])
 
 
 def test_untrusted_peer_cannot_set_https_via_header() -> None:
@@ -79,10 +100,18 @@ def test_invalid_trusted_proxy_is_rejected() -> None:
 
 def test_server_disables_uvicorn_proxy_header_processing(monkeypatch: pytest.MonkeyPatch) -> None:
     import survng.app.__main__ as server_main
+    from types import SimpleNamespace
 
     captured: dict[str, object] = {}
     monkeypatch.setattr(sys, "argv", ["survng", "--port", "8088"])
-    monkeypatch.setattr(server_main, "load_config", lambda: object())
+    monkeypatch.setattr(
+        server_main,
+        "load_config",
+        lambda: SimpleNamespace(
+            api_auth=SimpleNamespace(enabled=False),
+            web_auth=SimpleNamespace(enabled=True),
+        ),
+    )
     monkeypatch.setattr(
         server_main,
         "uvicorn_tls_kwargs",

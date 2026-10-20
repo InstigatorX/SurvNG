@@ -325,7 +325,7 @@ class AuthRouteTest(unittest.TestCase):
         self.assertEqual(response.json()["bootstrap_required"], True)
         self.assertTrue(response.json()["enabled"])
         self.assertFalse(response.json()["bootstrap_token_required"])
-        with patch("survng.app.auth_routes.ip_is_local", return_value=False):
+        with patch("survng.app.auth_routes.ip_is_loopback_peer", return_value=False):
             remote = self.client.get("/api/auth/session")
         self.assertTrue(remote.json()["bootstrap_token_required"])
 
@@ -407,7 +407,24 @@ class AuthRouteTest(unittest.TestCase):
 
     def test_public_bootstrap_requires_the_server_setup_token(self) -> None:
         self.config.web_auth = WebAuthConfig()
-        with patch("survng.app.auth_routes.ip_is_local", return_value=False):
+        with patch("survng.app.auth_routes.ip_is_loopback_peer", return_value=False):
+            denied = self.client.post("/api/auth/bootstrap", json={
+                "username": "rootadmin",
+                "password": "bootstrap-secret",
+            })
+            self.assertEqual(denied.status_code, 403)
+            token = load_or_create_bootstrap_token(self.config)
+            allowed = self.client.post("/api/auth/bootstrap", json={
+                "username": "rootadmin",
+                "password": "bootstrap-secret",
+                "bootstrap_token": token,
+            })
+        self.assertEqual(allowed.status_code, 201)
+        self.assertEqual(self.config.web_auth.users[0].username, "rootadmin")
+
+    def test_lan_bootstrap_requires_the_server_setup_token(self) -> None:
+        self.config.web_auth = WebAuthConfig()
+        with patch("survng.app.auth_routes._client_ip", return_value="10.0.0.55"):
             denied = self.client.post("/api/auth/bootstrap", json={
                 "username": "rootadmin",
                 "password": "bootstrap-secret",

@@ -28,7 +28,7 @@ sudo cat /path/to/survng/storage/bootstrap.token
 
 The path is `{storage_dir}/bootstrap.token` (often `survng/storage/bootstrap.token`, or `docker-data/storage/bootstrap.token` in Docker). SurvNG also writes a log line when it creates the file. Paste the token into the create-administrator screen.
 
-Requests from private addresses (`192.168.x.x`, `10.x.x.x`, localhost) do not need the token. After the first admin exists, SurvNG deletes the file.
+Only **loopback** clients (`127.0.0.1`, `::1`, or the same host) may create the first administrator without the token. Other LAN addresses (`192.168.x.x`, `10.x.x.x`, …) need the setup token. After the first admin exists, SurvNG deletes the file.
 
 ## 2. Tell SurvNG which proxy to trust
 
@@ -54,7 +54,7 @@ That is correct when nginx runs **on the same computer** as SurvNG.
 | Docker Compose, nginx container → SurvNG container | the Docker network, often `172.16.0.0/12` plus `127.0.0.1` |
 | nginx on a **different server** | the nginx host’s IP as SurvNG sees it (or that host’s CIDR). Not `127.0.0.1`. |
 
-Do **not** set `*` unless SurvNG listens only on localhost and nothing else can reach port 8088. `*` means any client can fake HTTPS and client IPs.
+Do **not** use `*`. SurvNG rejects a wildcard trusted-proxy list because any client could then fake HTTPS and client IPs.
 
 Save settings after you change the list. SurvNG applies it immediately (no restart).
 

@@ -19,6 +19,8 @@ services:
       SURVNG_GO2RTC_CONFIG: ${SURVNG_GO2RTC_CONFIG:-/config/go2rtc.yaml}
       SURVNG_UID: ${SURVNG_UID:-1000}
       SURVNG_GID: ${SURVNG_GID:-1000}
+      # Lab-only: allow host bind with auth off. Prefer enabling web_auth instead.
+      SURVNG_ALLOW_OPEN_BIND: ${SURVNG_ALLOW_OPEN_BIND:-}
       MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-16}
       OPENBLAS_NUM_THREADS: ${OPENBLAS_NUM_THREADS:-1}
     volumes:
