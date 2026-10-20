@@ -23,6 +23,7 @@ from .ffmpeg_hw import (
     hardware_mode,
     resolve_capture_decode_plans,
 )
+from .ffmpeg_input import ffmpeg_url_input_args
 from .ffmpeg_process import named_ffmpeg_executable
 from .media_sessions import (
     MediaResourceClass,
@@ -756,7 +757,7 @@ class FfmpegCaptureBackend:
             if (failed, next_plan) in self._logged_decode_fallbacks:
                 return
             self._logged_decode_fallbacks.add((failed, next_plan))
-        summary = " ".join(detail.split())[:400] if detail else "no frame"
+        summary = " ".join(redact_secret_text(detail).split())[:400] if detail else "no frame"
         LOGGER.warning(
             "capture decode plan %s failed; trying %s: %s",
             failed,
@@ -805,22 +806,22 @@ class FfmpegCaptureBackend:
             command.extend(["-nostats", "-filter_threads", "1"])
         command.extend(
             [
-                "-fflags",
-                "+genpts",
-                "-dts_error_threshold",
-                "10",
                 "-threads:v",
                 str(max(1, int(self.options.decoder_threads))),
             ]
         )
-        if source_url.lower().startswith(("rtsp://", "rtsps://")):
-            command.extend(["-rtsp_transport", self.options.rtsp_transport])
+        input_args = ffmpeg_url_input_args(
+            source_url,
+            rtsp_transport=self.options.rtsp_transport,
+        )
+        input_at = input_args.index("-i")
+        command.extend(input_args[:input_at])
+        # Hardware decode options must sit immediately before `-i`.
         if plan.input_args:
             command.extend(plan.input_args)
+        command.extend(input_args[input_at:])
         command.extend(
             [
-                "-i",
-                source_url,
                 "-map",
                 "0:v:0",
                 "-an",

@@ -18,6 +18,7 @@ from ..ffmpeg_input import ffmpeg_input_args, ffmpeg_timestamp_repair_args
 from ..ffmpeg_process import named_ffmpeg_executable
 from ..go2rtc import Go2RtcAdapter, Go2RtcError
 from ..media_storage import MediaStorageRegistry
+from ..security import redact_secret_text
 from ..recording_retention import RecordingRetentionService
 from .index import RecordingIndexMixin
 
@@ -318,7 +319,12 @@ class Recorder(RecordingIndexMixin):
                         warning_kind,
                     )
                 continue
-            LOGGER.warning("Recorder FFmpeg %s/%s: %s", key[0], key[1], line)
+            LOGGER.warning(
+                "Recorder FFmpeg %s/%s: %s",
+                key[0],
+                key[1],
+                redact_secret_text(line),
+            )
 
     @staticmethod
     def _timestamp_warning_kind(line: str) -> str | None:
