@@ -344,6 +344,8 @@ class EventStoreSceneMixin:
                     snapshot_path text primary key,camera_id text not null,created_at text not null,
                     snapshot_size_bytes integer not null default 0
                 );
+                create index if not exists scene_snapshot_assets_created_at
+                    on scene_snapshot_assets(created_at);
             """)
             self._init_scene_tracking_schema(conn)
             self._init_scene_admission_schema(conn)

@@ -1507,6 +1507,47 @@ class EventStore(
                 )
         return len(updates)
 
+    @staticmethod
+    def _latest_snapshot_refs_cte() -> str:
+        """Build SQL that yields one latest row per snapshot_path.
+
+        Event rows are deduplicated first (aligned with
+        ``idx_events_snapshot_retention``), then merged with
+        ``scene_snapshot_assets`` (already unique by path). A second narrow
+        ranking picks the newer of the two sources. This avoids window-sorting
+        the full events∪assets bag when many events share a path or when assets
+        only add one extra row per path.
+        """
+        return """
+            with event_latest as (
+                select id, camera_id, snapshot_path, snapshot_size_bytes, created_at
+                from (
+                    select id, camera_id, snapshot_path, snapshot_size_bytes, created_at,
+                           row_number() over (
+                               partition by snapshot_path
+                               order by created_at desc, id desc
+                           ) as event_rank
+                    from events
+                    where snapshot_path != ''
+                )
+                where event_rank = 1
+            ),
+            ranked as (
+                select id, camera_id, snapshot_path, snapshot_size_bytes, created_at,
+                       row_number() over (
+                           partition by snapshot_path
+                           order by created_at desc, id desc
+                       ) as snapshot_rank
+                from (
+                    select id, camera_id, snapshot_path, snapshot_size_bytes, created_at
+                    from event_latest
+                    union all
+                    select 0, camera_id, snapshot_path, snapshot_size_bytes, created_at
+                    from scene_snapshot_assets
+                )
+            )
+        """
+
     def snapshot_retention_plan(self, cutoff_epoch: float) -> dict[str, Any]:
         """Report database-indexed incident snapshot use and age expiry.
 
@@ -1514,16 +1555,7 @@ class EventStore(
         incident writers, so it must not acquire the EventStore writer mutex.
         """
         cutoff = datetime.fromtimestamp(float(cutoff_epoch), timezone.utc).isoformat()
-        ranked = """
-            with ranked as (
-                select id, camera_id, snapshot_path, snapshot_size_bytes, created_at,
-                       row_number() over (
-                           partition by snapshot_path order by created_at desc, id desc
-                       ) as snapshot_rank
-                from (select id,camera_id,snapshot_path,snapshot_size_bytes,created_at from events where snapshot_path != ''
-                      union all select 0,camera_id,snapshot_path,snapshot_size_bytes,created_at from scene_snapshot_assets)
-            )
-        """
+        ranked = self._latest_snapshot_refs_cte()
         with self._connect() as conn:
             has_faces = conn.execute(
                 "select 1 from sqlite_master where type = 'table' and name = 'face_observations'"
@@ -1681,16 +1713,7 @@ class EventStore(
     def _snapshot_retention_candidates(self, cutoff: str, limit: int) -> list[sqlite3.Row]:
         # WAL readers do not need either writer mutex. Candidate discovery may
         # scan all retained history; eligibility is rechecked when claiming.
-        ranked = """
-            with ranked as (
-                select id, snapshot_path, snapshot_size_bytes, created_at,
-                       row_number() over (
-                           partition by snapshot_path order by created_at desc, id desc
-                       ) as snapshot_rank
-                from (select id,camera_id,snapshot_path,snapshot_size_bytes,created_at from events where snapshot_path != ''
-                      union all select 0,camera_id,snapshot_path,snapshot_size_bytes,created_at from scene_snapshot_assets)
-            )
-        """
+        ranked = self._latest_snapshot_refs_cte()
         with self._connect() as conn:
             has_faces = conn.execute(
                 "select 1 from sqlite_master where type = 'table' and name = 'face_observations'"
