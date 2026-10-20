@@ -37,6 +37,7 @@ class RecordingIndexMixin:
             factory=ClosingDatabaseConnection,
         )
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 10000")
         return connection
 
     def _init_recording_index(self) -> None:

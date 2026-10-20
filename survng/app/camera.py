@@ -1117,8 +1117,10 @@ class CameraWorker:
         topic: str = "manual",
         message: str = "",
         event_at: datetime | None = None,
+        *,
+        active: bool = True,
     ) -> None:
-        self.motion_runtime.handle_event(topic, message, event_at)
+        self.motion_runtime.handle_event(topic, message, event_at, active=active)
 
     def set_motion_debug_enabled(self, enabled: bool) -> None:
         self.motion_qualification.set_debug_enabled(enabled)

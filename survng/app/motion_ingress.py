@@ -148,6 +148,8 @@ class MotionEventIngressService:
         topic: str = "manual",
         message: str = "",
         event_at: datetime | None = None,
+        *,
+        active: bool = True,
     ) -> None:
         generation = self.state.begin_ingress()
         if generation is None:
@@ -168,6 +170,13 @@ class MotionEventIngressService:
             else:
                 event_timing = self.event_clock.resolve(event_at, received_at)
                 normalized_event_at = event_timing.sampling_at
+
+            if not active:
+                self.events.episode_controller.note_motion_inactive(
+                    observed_monotonic=time.monotonic(),
+                    generation=generation,
+                )
+                return
 
             self.qualification.observe_event(
                 topic, message, normalized_event_at, received_at

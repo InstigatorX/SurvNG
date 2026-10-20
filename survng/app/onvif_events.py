@@ -142,7 +142,7 @@ class OnvifEventListener:
     def __init__(
         self,
         camera: CameraConfig,
-        on_motion: Callable[[str, str, datetime | None], None],
+        on_motion: Callable[..., None],
         *,
         cache_dir: Path | None = None,
     ) -> None:
@@ -496,6 +496,7 @@ class OnvifEventListener:
                                     topic[:1024],
                                     message[:MAX_EVENT_MESSAGE_CHARACTERS],
                                     event_at,
+                                    active=True,
                                 )
                             except Exception:
                                 self.callback_errors += 1
@@ -505,6 +506,19 @@ class OnvifEventListener:
                                 )
                         elif motion_state is False:
                             self.inactive_motion_events += 1
+                            try:
+                                self.on_motion(
+                                    topic[:1024],
+                                    message[:MAX_EVENT_MESSAGE_CHARACTERS],
+                                    event_at,
+                                    active=False,
+                                )
+                            except Exception:
+                                self.callback_errors += 1
+                                LOGGER.exception(
+                                    "ONVIF motion-end callback failed for %s",
+                                    self.camera.id,
+                                )
                         else:
                             self.unrecognized_notifications += 1
                             self._record_unknown_notification(

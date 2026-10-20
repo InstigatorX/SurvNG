@@ -490,8 +490,10 @@ class MotionRuntimeService:
         topic: str = "manual",
         message: str = "",
         event_at: datetime | None = None,
+        *,
+        active: bool = True,
     ) -> None:
-        self.ingress.handle(topic, message, event_at)
+        self.ingress.handle(topic, message, event_at, active=active)
 
     def submit_frame(
         self,
