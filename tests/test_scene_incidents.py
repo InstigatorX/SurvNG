@@ -184,6 +184,29 @@ class SceneIncidentTest(unittest.TestCase):
         self.assertNotIn("Yard", card["zones"])
         self.assertNotIn("scene_objects", card)
 
+    def test_card_zones_stay_indexed_when_observation_payloads_change(self):
+        self.add(objects=[person(label="car", zones=["Driveway"], confidence=.9, temporal_observations=2)])
+        self.add(15, objects=[person(
+            80, label="car", zones=["Yard"], confidence=.2,
+            confidence_threshold=.7, confidence_eligible=False,
+        )])
+        with self.store._connect() as conn:
+            conn.execute("delete from scene_observation_zones")
+            conn.execute("delete from scene_migrations where name='scene_observation_zones_v1'")
+        self.store._backfill_observation_zones()
+        card = self.store.list_scene_incident_cards()[0]
+        self.assertEqual(card["zones"], ["Driveway"])
+        day = self.store.scene_incident_facets(start_epoch=1780000000, end_epoch=1780000100)
+        self.assertEqual(day["zones"], ["Driveway", "Yard"])
+        with self.store._connect() as conn:
+            conn.execute("update scene_observations set payload_json='{}'")
+        self.assertEqual(self.store.list_scene_incident_cards()[0]["zones"], ["Driveway"])
+        self.store._scene_facet_cache = {}
+        self.assertEqual(
+            self.store.scene_incident_facets(start_epoch=1780000000, end_epoch=1780000100)["zones"],
+            ["Driveway", "Yard"],
+        )
+
     def test_incident_cards_skip_observation_history(self):
         event = self.add(snapshot_path="snapshots/cover.webp", objects=[person(zones=["front"])])
         incident = self.store.scene_incident(event_id=event["id"])
