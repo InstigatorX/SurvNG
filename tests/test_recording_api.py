@@ -774,6 +774,37 @@ class RecordingApiTest(unittest.TestCase):
         recorder.recording_rows_between.assert_called_once()
         recorder.lease_recordings_for_playback.assert_called_once_with(current)
 
+    def test_recording_day_cache_evicts_oldest_entries_at_cap(self) -> None:
+        runtime = main._recording_media_runtime
+        recorder = Mock(segment_seconds=10.0)
+        recorder.recording_rows_between.return_value = [
+            {"path": "/recordings/current.mp4", "size_bytes": 4096}
+        ]
+        manager = SimpleNamespace(recorder=recorder)
+        previous_cap = runtime.recording_day_cache_max_entries
+        previous_cache = runtime.recording_day_cache
+        runtime.recording_day_cache_max_entries = 3
+        runtime.recording_day_cache = {
+            ("gate", "main", 1, 2): (10.0, []),
+            ("gate", "main", 3, 4): (20.0, []),
+            ("gate", "main", 5, 6): (30.0, []),
+        }
+
+        try:
+            with (
+                patch.object(main, "manager", manager),
+                patch("survng.app.recording_media_runtime.time.monotonic", return_value=40.0),
+                patch("survng.app.recording_media_runtime.time.time", return_value=1_000.0),
+            ):
+                runtime._recording_day_rows("gate", 7.0, 8.0, "main")
+
+            self.assertEqual(len(runtime.recording_day_cache), 3)
+            self.assertNotIn(("gate", "main", 1, 2), runtime.recording_day_cache)
+            self.assertIn(("gate", "main", 7, 8), runtime.recording_day_cache)
+        finally:
+            runtime.recording_day_cache_max_entries = previous_cap
+            runtime.recording_day_cache = previous_cache
+
 
 if __name__ == "__main__":
     unittest.main()
