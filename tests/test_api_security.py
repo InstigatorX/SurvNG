@@ -31,7 +31,15 @@ from survng.app.config_routes import (
 from survng.app.face_routes import _public_face_observation
 from survng.app.incident_presenter import _event_row
 from survng.app.recording_routes import _public_recording_row
-from survng.app.security import encode_session, hash_api_token, hash_password, redact_secret_text
+from survng.app.security import (
+    CSRF_COOKIE_NAME,
+    CSRF_HEADER_NAME,
+    encode_session,
+    hash_api_token,
+    hash_password,
+    issue_csrf_token,
+    redact_secret_text,
+)
 
 
 def camera(camera_id: str = "gate", name: str = "Gate") -> CameraConfig:
@@ -310,13 +318,18 @@ class SameOriginMiddlewareTest(unittest.IsolatedAsyncioTestCase):
         )
         web_auth = WebAuthConfig(enabled=True, session_key="a" * 64, users=[admin, user])
         token = encode_session("pat", web_auth.session_key)
+        csrf = issue_csrf_token()
         with patch.object(main.config, "web_auth", web_auth):
             await middleware({
                 "type": "http", "scheme": "http", "method": "PUT",
                 "path": "/api/config",
                 "headers": [
                     (b"host", b"survng.local"),
-                    (b"cookie", f"survng_session={token}".encode("ascii")),
+                    (
+                        b"cookie",
+                        f"survng_session={token}; {CSRF_COOKIE_NAME}={csrf}".encode("ascii"),
+                    ),
+                    (CSRF_HEADER_NAME.encode("ascii"), csrf.encode("ascii")),
                 ],
             }, self._receive, self._collector(messages))
 
@@ -331,6 +344,7 @@ class SameOriginMiddlewareTest(unittest.IsolatedAsyncioTestCase):
         viewer = WebUserConfig(id="viewer", username="viewer", role="viewer", password_hash=hash_password("viewer-pass"))
         auth = WebAuthConfig(enabled=True, session_key="a" * 64, users=[admin, viewer])
         token = encode_session("viewer", auth.session_key)
+        csrf = issue_csrf_token()
         middleware = main.SecurityBoundaryMiddleware(inner)
         for logged_in, origin, expected in ((False, "http://survng.local", 401),
                                             (True, "http://evil.example", 403),
@@ -338,13 +352,97 @@ class SameOriginMiddlewareTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(logged_in=logged_in, origin=origin):
                 headers = [(b"host", b"survng.local"), (b"origin", origin.encode())]
                 if logged_in:
-                    headers.append((b"cookie", f"survng_session={token}".encode()))
+                    headers.append((
+                        b"cookie",
+                        f"survng_session={token}; {CSRF_COOKIE_NAME}={csrf}".encode(),
+                    ))
+                    headers.append((CSRF_HEADER_NAME.encode("ascii"), csrf.encode("ascii")))
                 messages = []
                 with patch.object(main.config, "web_auth", auth):
                     await middleware({"type": "http", "scheme": "http", "method": "POST",
                                       "path": "/api/incidents/example/analysis", "headers": headers},
                                      self._receive, self._collector(messages))
                 self.assertEqual(messages[0]["status"], expected)
+
+    async def test_session_mutation_requires_csrf_token(self) -> None:
+        async def inner(_scope, _receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        admin = WebUserConfig(
+            id="alex",
+            username="alex",
+            role="admin",
+            password_hash=hash_password("correct-horse"),
+        )
+        web_auth = WebAuthConfig(enabled=True, session_key="a" * 64, users=[admin])
+        token = encode_session("alex", web_auth.session_key)
+        csrf = issue_csrf_token()
+        middleware = main.SecurityBoundaryMiddleware(inner)
+
+        denied: list[dict] = []
+        with patch.object(main.config, "web_auth", web_auth):
+            await middleware({
+                "type": "http",
+                "scheme": "http",
+                "method": "PUT",
+                "path": "/api/config",
+                "headers": [
+                    (b"host", b"survng.local"),
+                    (b"cookie", f"survng_session={token}".encode("ascii")),
+                ],
+            }, self._receive, self._collector(denied))
+        self.assertEqual(denied[0]["status"], 403)
+
+        allowed: list[dict] = []
+        with patch.object(main.config, "web_auth", web_auth):
+            await middleware({
+                "type": "http",
+                "scheme": "http",
+                "method": "PUT",
+                "path": "/api/config",
+                "headers": [
+                    (b"host", b"survng.local"),
+                    (
+                        b"cookie",
+                        f"survng_session={token}; {CSRF_COOKIE_NAME}={csrf}".encode("ascii"),
+                    ),
+                    (CSRF_HEADER_NAME.encode("ascii"), csrf.encode("ascii")),
+                ],
+            }, self._receive, self._collector(allowed))
+        self.assertEqual(allowed[0]["status"], 200)
+
+    async def test_bearer_mutation_does_not_require_csrf_token(self) -> None:
+        called = False
+
+        async def inner(_scope, _receive, send) -> None:
+            nonlocal called
+            called = True
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        middleware = main.SecurityBoundaryMiddleware(inner)
+        auth = ApiAuthConfig(enabled=True, tokens=[ApiTokenConfig(
+            id="ha",
+            name="Home Assistant",
+            token_hash=hash_api_token("control-token"),
+            scopes=["read", "camera:control", "admin"],
+        )])
+        with patch.object(main.config, "api_auth", auth), patch.object(
+            main.config, "web_auth", WebAuthConfig(enabled=False)
+        ):
+            await middleware({
+                "type": "http",
+                "scheme": "http",
+                "method": "PUT",
+                "path": "/api/config",
+                "headers": [
+                    (b"host", b"survng.local"),
+                    (b"authorization", b"Bearer control-token"),
+                ],
+            }, self._receive, self._collector([]))
+
+        self.assertTrue(called)
 
     async def test_sign_in_route_remains_public_when_web_auth_is_enabled(self) -> None:
         called = False

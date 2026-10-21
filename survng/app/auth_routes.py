@@ -21,11 +21,14 @@ from pydantic import BaseModel, Field
 from .config import AppConfig, WebRole, WebUserConfig
 from .proxy import ip_is_loopback_peer
 from .security import (
+    CSRF_COOKIE_NAME,
     SESSION_COOKIE_NAME,
     authenticate_password,
     authenticate_session,
+    csrf_cookie_value,
     encode_session,
     hash_password,
+    issue_csrf_token,
     public_user_payload,
     register_web_session,
     revoke_web_session,
@@ -195,6 +198,26 @@ def _attach_session_cookie(
     )
 
 
+def _attach_csrf_cookie(
+    response: Response,
+    request: Request,
+    token: str,
+    *,
+    ttl_seconds: int,
+    config: AppConfig,
+) -> None:
+    # Readable by the SPA so it can mirror the value into X-SurvNG-CSRF.
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=token,
+        max_age=ttl_seconds,
+        httponly=False,
+        samesite="lax",
+        secure=_request_is_secure(request),
+        path=_cookie_path(config),
+    )
+
+
 def _clear_session_cookie(response: Response, request: Request, config: AppConfig) -> None:
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
@@ -203,6 +226,31 @@ def _clear_session_cookie(response: Response, request: Request, config: AppConfi
         samesite="lax",
         secure=_request_is_secure(request),
     )
+
+
+def _clear_csrf_cookie(response: Response, request: Request, config: AppConfig) -> None:
+    response.delete_cookie(
+        key=CSRF_COOKIE_NAME,
+        path=_cookie_path(config),
+        httponly=False,
+        samesite="lax",
+        secure=_request_is_secure(request),
+    )
+
+
+def _issue_csrf_for_response(
+    response: Response,
+    request: Request,
+    *,
+    ttl_seconds: int,
+    config: AppConfig,
+    existing: str = "",
+) -> str:
+    token = existing.strip() or issue_csrf_token()
+    _attach_csrf_cookie(
+        response, request, token, ttl_seconds=ttl_seconds, config=config
+    )
+    return token
 
 
 def _ensure_session_key(config: AppConfig) -> AppConfig:
@@ -275,14 +323,18 @@ def session_payload(
     user: WebUserConfig | None,
     *,
     client_ip: str = "",
+    csrf_token: str = "",
 ) -> dict[str, Any]:
     bootstrap_required = bool(config.web_auth.enabled) and not config.web_auth.users
-    return {
+    payload: dict[str, Any] = {
         "enabled": config.web_auth.enabled,
         "bootstrap_required": bootstrap_required,
         "bootstrap_token_required": bootstrap_required and not ip_is_loopback_peer(client_ip),
         "user": public_user_payload(user) if user is not None else None,
     }
+    if csrf_token:
+        payload["csrf_token"] = csrf_token
+    return payload
 
 
 def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
@@ -333,8 +385,26 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
             deps.apply_config(next_config, assign_ids=False)
 
     @router.get("/api/auth/session")
-    def get_session(request: Request) -> dict[str, Any]:
-        return session_payload(deps.get_config(), current_user(request), client_ip=_client_ip(request))
+    def get_session(request: Request) -> JSONResponse:
+        config = deps.get_config()
+        user = current_user(request)
+        csrf = ""
+        if user is not None:
+            csrf = csrf_cookie_value(request.headers.get("cookie", "")) or issue_csrf_token()
+        response = JSONResponse(
+            session_payload(
+                config, user, client_ip=_client_ip(request), csrf_token=csrf
+            )
+        )
+        if user is not None:
+            _issue_csrf_for_response(
+                response,
+                request,
+                ttl_seconds=session_ttl_seconds(config.web_auth.session_days),
+                config=config,
+                existing=csrf,
+            )
+        return response
 
     @router.post("/api/auth/login")
     def login(request: Request, body: AuthCredentials) -> JSONResponse:
@@ -359,8 +429,12 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
         )
         issued, expires = session_times(token) or (int(time.time()), int(time.time()) + ttl)
         register_web_session(token, user.id, issued, expires, ip)
-        response = JSONResponse(session_payload(config, user, client_ip=ip))
+        csrf = issue_csrf_token()
+        response = JSONResponse(
+            session_payload(config, user, client_ip=ip, csrf_token=csrf)
+        )
         _attach_session_cookie(response, request, token, ttl_seconds=ttl, config=config)
+        _attach_csrf_cookie(response, request, csrf, ttl_seconds=ttl, config=config)
         return response
 
     @router.post("/api/auth/logout")
@@ -378,7 +452,9 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
                 _persist_revocation(digest, times[1])
                 revoke_web_session(digest)
         response = JSONResponse({"ok": True})
-        _clear_session_cookie(response, request, deps.get_config())
+        cleared = deps.get_config()
+        _clear_session_cookie(response, request, cleared)
+        _clear_csrf_cookie(response, request, cleared)
         return response
 
     @router.post("/api/auth/bootstrap", status_code=201)
@@ -416,10 +492,12 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
         )
         issued, expires = session_times(token) or (int(time.time()), int(time.time()) + ttl)
         register_web_session(token, user.id, issued, expires, client_ip)
-        payload = session_payload(effective, user, client_ip=client_ip)
+        csrf = issue_csrf_token()
+        payload = session_payload(effective, user, client_ip=client_ip, csrf_token=csrf)
         payload.update(result)
         response = JSONResponse(payload, status_code=201)
         _attach_session_cookie(response, request, token, ttl_seconds=ttl, config=effective)
+        _attach_csrf_cookie(response, request, csrf, ttl_seconds=ttl, config=effective)
         return response
 
     @router.get("/api/auth/users")
@@ -532,7 +610,7 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
             revoke_web_sessions_for_user(user.id)
             effective, result = deps.apply_config(next_config, assign_ids=False)
         updated = next(item for item in effective.web_auth.users if item.id == user_id)
-        payload = {"ok": True, "id": user_id, **result}
+        payload: dict[str, Any] = {"ok": True, "id": user_id, **result}
         response = JSONResponse(payload)
         if actor is not None and actor.id == user_id:
             ttl = session_ttl_seconds(effective.web_auth.session_days)
@@ -544,7 +622,11 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
             )
             issued, expires = session_times(token) or (int(time.time()), int(time.time()) + ttl)
             register_web_session(token, updated.id, issued, expires, _client_ip(request))
+            csrf = issue_csrf_token()
+            payload["csrf_token"] = csrf
+            response = JSONResponse(payload)
             _attach_session_cookie(response, request, token, ttl_seconds=ttl, config=effective)
+            _attach_csrf_cookie(response, request, csrf, ttl_seconds=ttl, config=effective)
         return response
 
     @router.delete("/api/auth/users/{user_id}")

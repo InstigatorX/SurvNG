@@ -53,6 +53,10 @@ def redact_secret_text(value: object) -> str:
 
 
 SESSION_COOKIE_NAME = "survng_session"
+CSRF_COOKIE_NAME = "survng_csrf"
+CSRF_HEADER_NAME = "x-survng-csrf"
+CSRF_EXEMPT_PATHS = frozenset({"/api/auth/login", "/api/auth/bootstrap"})
+UNSAFE_HTTP_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 DEFAULT_SESSION_DAYS = 14
 SESSION_TTL_SECONDS = DEFAULT_SESSION_DAYS * 24 * 60 * 60
 _SESSION_REGISTRY_LIMIT = 1000
@@ -341,6 +345,33 @@ def session_cookie_value(cookie_header: str) -> str:
         if separator and name == SESSION_COOKIE_NAME:
             return unquote(value.strip())
     return ""
+
+
+def issue_csrf_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def csrf_cookie_value(cookie_header: str) -> str:
+    for part in cookie_header.split(";"):
+        name, separator, value = part.strip().partition("=")
+        if separator and name == CSRF_COOKIE_NAME:
+            return unquote(value.strip())
+    return ""
+
+
+def csrf_request_valid(cookie_header: str, header_value: str) -> bool:
+    """Double-submit CSRF: header must match the readable CSRF cookie."""
+    cookie = csrf_cookie_value(cookie_header)
+    header = str(header_value or "").strip()
+    if not cookie or not header:
+        return False
+    return secrets.compare_digest(cookie, header)
+
+
+def session_mutation_requires_csrf(method: str, path: str) -> bool:
+    if method.upper() not in UNSAFE_HTTP_METHODS:
+        return False
+    return path not in CSRF_EXEMPT_PATHS
 
 
 def session_times(token: str) -> tuple[int, int] | None:
