@@ -35,6 +35,8 @@ SUBSCRIPTION_MANAGER_BINDING = "{http://www.onvif.org/ver10/events/wsdl}Subscrip
 SUBSCRIPTION_DURATION = "PT1H"
 SUBSCRIPTION_RENEW_MAX_MARGIN_SECONDS = 300.0
 SUBSCRIPTION_RENEW_MIN_MARGIN_SECONDS = 5.0
+SUBSCRIPTION_RENEW_RETRY_ATTEMPTS = 3
+SUBSCRIPTION_RENEW_RETRY_SECONDS = 0.5
 MAX_EVENT_MESSAGE_CHARACTERS = 16_384
 EFFECTIVENESS_WINDOW_SECONDS = 3600.0
 EFFECTIVENESS_MINIMUM_OBSERVATIONS = 3
@@ -403,13 +405,27 @@ class OnvifEventListener:
             planned_resubscription = False
             while not stop_event.is_set() and self._generation_matches(generation):
                 if self._subscription_renewal_due():
-                    if self._renew_subscription(generation, stop_event):
+                    if self._renew_subscription_with_retries(generation, stop_event):
                         continue
-                    planned_resubscription = True
+                    if stop_event.is_set() or not self._generation_matches(generation):
+                        break
                     LOGGER.info(
                         "proactively re-subscribing to ONVIF events for %s",
                         self.camera.id,
                     )
+                    overlapped = self._overlap_resubscribe(
+                        SingleSubscriptionCamera,
+                        Transport,
+                        SqliteCache,
+                        generation=generation,
+                        stop_event=stop_event,
+                    )
+                    if overlapped is not None:
+                        pullpoint = overlapped
+                        failures = 0
+                        retry_delay = RETRY_INITIAL_SECONDS
+                        continue
+                    planned_resubscription = True
                     break
                 try:
                     capture = self._pullmessages_capture
@@ -741,6 +757,112 @@ class OnvifEventListener:
             )
             return False
 
+    def _renew_subscription_with_retries(
+        self,
+        generation: int | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> bool:
+        generation = self._generation if generation is None else generation
+        stop_event = self._stop if stop_event is None else stop_event
+        for attempt in range(SUBSCRIPTION_RENEW_RETRY_ATTEMPTS):
+            if stop_event.is_set() or not self._generation_matches(generation):
+                return False
+            if self._renew_subscription(generation, stop_event):
+                return True
+            if stop_event.is_set() or not self._generation_matches(generation):
+                return False
+            if attempt + 1 >= SUBSCRIPTION_RENEW_RETRY_ATTEMPTS:
+                break
+            if stop_event.wait(SUBSCRIPTION_RENEW_RETRY_SECONDS):
+                return False
+        return False
+
+    def _detach_subscription_resources(
+        self, generation: int | None = None
+    ) -> tuple[Any, Any]:
+        with self._lifecycle_lock:
+            manager = (
+                self._subscription_manager
+                if generation is None
+                or self._subscription_generation in {None, generation}
+                else None
+            )
+            transport = (
+                self._transport
+                if generation is None
+                or self._transport_generation in {None, generation}
+                else None
+            )
+            if manager is not None:
+                self._subscription_manager = None
+                self._subscription_generation = None
+            if transport is not None:
+                self._transport = None
+                self._transport_generation = None
+        return manager, transport
+
+    def _release_detached_resources(self, manager: Any, transport: Any) -> None:
+        if manager is not None:
+            try:
+                manager.Unsubscribe()
+                LOGGER.info("released ONVIF subscription for %s", self.camera.id)
+            except Exception:
+                LOGGER.debug(
+                    "failed to release ONVIF subscription for %s",
+                    self.camera.id,
+                    exc_info=True,
+                )
+        if transport is not None:
+            try:
+                transport.session.close()
+            except Exception:
+                LOGGER.debug(
+                    "failed to close ONVIF transport for %s",
+                    self.camera.id,
+                    exc_info=True,
+                )
+
+    def _overlap_resubscribe(
+        self,
+        ONVIFCamera: Any,
+        Transport: Any,
+        SqliteCache: Any,
+        *,
+        generation: int | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> Any | None:
+        """Create a replacement PullPoint before tearing down the old one."""
+        generation = self._generation if generation is None else generation
+        stop_event = self._stop if stop_event is None else stop_event
+        if stop_event.is_set() or not self._generation_matches(generation):
+            return None
+        old_manager, old_transport = self._detach_subscription_resources(generation)
+        try:
+            pullpoint = self._subscribe(
+                ONVIFCamera,
+                Transport,
+                SqliteCache,
+                generation=generation,
+                stop_event=stop_event,
+            )
+        except Exception as exc:
+            self._release_detached_resources(old_manager, old_transport)
+            self.last_error = (
+                f"overlap resubscribe failed: {self._error_text(exc)[:200]}"
+            )
+            LOGGER.warning(
+                "overlap ONVIF resubscribe failed for %s: %s",
+                self.camera.id,
+                self._error_text(exc),
+            )
+            return None
+        self._release_detached_resources(old_manager, old_transport)
+        self.connected = True
+        self.last_connected_at = datetime.now(timezone.utc).isoformat()
+        self.last_error = ""
+        self.resubscriptions += 1
+        return pullpoint
+
     def _unsubscribe(self, generation: int | None = None) -> None:
         with self._lifecycle_lock:
             if (
@@ -1064,7 +1186,8 @@ class OnvifEventListener:
                 return True
             if all(value in inactive for value in state_values):
                 return False
-        return True
+        # Missing or ambiguous state is not a motion start.
+        return None
 
     def _extract_event(
         self,
@@ -1126,7 +1249,10 @@ class OnvifEventListener:
             return True
         if explicit_false:
             return False
-        return True
+        # Semantic camera notices remain starts; bare topic/keyword matches do not.
+        if active_camera_semantic_kind(topic, message) is not None:
+            return True
+        return None
 
     def _is_motion_event(self, topic: str, message: str) -> bool:
         return self._motion_event_state(topic, message) is True

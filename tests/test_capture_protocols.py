@@ -141,7 +141,10 @@ class CaptureProtocolTest(unittest.TestCase):
     def test_onvif_callback_failure_does_not_force_resubscription(self) -> None:
         listener = OnvifEventListener(camera(onvif=True), Mock())
         listener._stop.clear()
-        notification = SimpleNamespace(Topic="motion", Message="motion")
+        notification = SimpleNamespace(
+            Topic="tns1:RuleEngine/CellMotionDetector/Motion",
+            Message='<tt:SimpleItem Name="IsMotion" Value="true"/>',
+        )
         pullpoint = Mock()
         pullpoint.PullMessages.return_value = SimpleNamespace(
             NotificationMessage=[notification]
@@ -443,6 +446,36 @@ class CaptureProtocolTest(unittest.TestCase):
         )
         self.assertIsNone(listener._motion_event_state("tns1:VideoSource", "signal ok"))
 
+    def test_onvif_motion_topic_without_explicit_state_is_not_a_start(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        ambiguous_xml = """
+        <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
+                xmlns:tev="http://www.onvif.org/ver10/events/wsdl"
+                xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2"
+                xmlns:tt="http://www.onvif.org/ver10/schema">
+            <SOAP-ENV:Body>
+                <tev:PullMessagesResponse>
+                    <wsnt:NotificationMessage>
+                        <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:VideoSource/MotionAlarm</wsnt:Topic>
+                        <wsnt:Message><tt:Message><tt:Data/></tt:Message></wsnt:Message>
+                    </wsnt:NotificationMessage>
+                </tev:PullMessagesResponse>
+            </SOAP-ENV:Body>
+        </SOAP-ENV:Envelope>
+        """
+
+        self.assertIsNone(
+            listener._motion_event_state(
+                "tns1:RuleEngine/CellMotionDetector/Motion",
+                "<tt:Message><tt:Data/></tt:Message>",
+            )
+        )
+        self.assertIsNone(
+            listener._motion_event_state("tns1:VideoSource/MotionAlarm", "motion alarm")
+        )
+        raw = listener._raw_pullmessages_notifications(ambiguous_xml)[0]
+        self.assertIsNone(listener._raw_notification_motion_state(raw))
+
     def test_reolink_pullmessages_parser_uses_raw_topic_and_simple_items(self) -> None:
         listener = OnvifEventListener(camera(onvif=True), Mock())
         notifications = listener._raw_pullmessages_notifications(
@@ -621,6 +654,133 @@ class CaptureProtocolTest(unittest.TestCase):
         self.assertEqual(listener.renewals, 1)
         self.assertEqual(listener.renewal_errors, 0)
         self.assertEqual(listener.subscription_lifetime_seconds, 3600)
+
+    def test_onvif_renew_retries_before_giving_up(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        manager = Mock()
+        manager.Renew.side_effect = [
+            RuntimeError("temporary"),
+            RuntimeError("temporary"),
+            SimpleNamespace(
+                CurrentTime="2026-07-26T12:00:00Z",
+                TerminationTime="2026-07-26T13:00:00Z",
+            ),
+        ]
+        listener._subscription_manager = manager
+        listener._stop.clear()
+
+        with patch("survng.app.onvif_events.SUBSCRIPTION_RENEW_RETRY_SECONDS", 0):
+            self.assertTrue(listener._renew_subscription_with_retries())
+
+        self.assertEqual(manager.Renew.call_count, 3)
+        self.assertEqual(listener.renewal_attempts, 3)
+        self.assertEqual(listener.renewals, 1)
+        self.assertEqual(listener.renewal_errors, 2)
+
+    def test_onvif_overlap_resubscribe_creates_before_destroy(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        listener._stop.clear()
+        old_manager = Mock()
+        old_transport = SimpleNamespace(session=Mock())
+        new_pullpoint = Mock()
+        order: list[str] = []
+
+        with listener._lifecycle_lock:
+            listener._subscription_manager = old_manager
+            listener._subscription_generation = listener._generation
+            listener._transport = old_transport
+            listener._transport_generation = listener._generation
+        listener.last_connected_at = "2026-07-26T11:00:00+00:00"
+
+        def subscribe(*_args, **_kwargs):
+            order.append("subscribe")
+            self.assertIsNone(listener._subscription_manager)
+            self.assertIsNone(listener._transport)
+            with listener._lifecycle_lock:
+                listener._subscription_manager = Mock()
+                listener._subscription_generation = listener._generation
+                listener._transport = SimpleNamespace(session=Mock())
+                listener._transport_generation = listener._generation
+            return new_pullpoint
+
+        old_manager.Unsubscribe.side_effect = lambda: order.append("unsubscribe")
+        old_transport.session.close.side_effect = lambda: order.append("close")
+
+        with patch.object(listener, "_subscribe", side_effect=subscribe):
+            pullpoint = listener._overlap_resubscribe(object, object, object)
+
+        self.assertIs(pullpoint, new_pullpoint)
+        self.assertEqual(order, ["subscribe", "unsubscribe", "close"])
+        self.assertEqual(listener.resubscriptions, 1)
+        old_manager.Unsubscribe.assert_called_once_with()
+        old_transport.session.close.assert_called_once_with()
+
+    def test_onvif_renew_failure_overlap_resubscribes_without_gap_teardown_first(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        listener._stop.clear()
+        first_pullpoint = Mock()
+        second_pullpoint = Mock()
+        manager = Mock()
+        manager.Renew.side_effect = RuntimeError("renew refused")
+        order: list[str] = []
+        subscribe_calls = {"count": 0}
+
+        def pull_messages(_request):
+            listener._stop.set()
+            return SimpleNamespace(NotificationMessage=[])
+
+        first_pullpoint.PullMessages.side_effect = pull_messages
+        second_pullpoint.PullMessages.side_effect = pull_messages
+
+        def subscribe(*_args, **_kwargs):
+            subscribe_calls["count"] += 1
+            order.append(f"subscribe-{subscribe_calls['count']}")
+            with listener._lifecycle_lock:
+                generation = listener._generation
+                listener._subscription_manager = manager
+                listener._subscription_generation = generation
+                listener._transport = SimpleNamespace(session=Mock())
+                listener._transport_generation = generation
+            listener._subscription_granted_lifetime_seconds = 60.0
+            if subscribe_calls["count"] == 1:
+                # Force immediate renew so the failure/overlap path runs.
+                listener._subscription_expires_monotonic = time.monotonic()
+                return first_pullpoint
+            listener._subscription_expires_monotonic = time.monotonic() + 3600
+            return second_pullpoint
+
+        def unsubscribe(*_args, **_kwargs):
+            order.append("unsubscribe")
+
+        def close_transport(*_args, **_kwargs):
+            order.append("close")
+
+        fake_onvif = type("FakeOnvifCamera", (), {})
+        modules = {
+            "onvif": SimpleNamespace(ONVIFCamera=fake_onvif),
+            "zeep": SimpleNamespace(Transport=object),
+            "zeep.cache": SimpleNamespace(SqliteCache=object),
+        }
+        with (
+            patch.dict(sys.modules, modules),
+            patch.object(listener, "_subscribe", side_effect=subscribe),
+            patch.object(listener, "_unsubscribe", side_effect=unsubscribe),
+            patch.object(listener, "_close_transport", side_effect=close_transport),
+            patch.object(
+                listener,
+                "_release_detached_resources",
+                side_effect=lambda manager, transport: order.append("release-old"),
+            ),
+            patch("survng.app.onvif_events.SUBSCRIPTION_RENEW_RETRY_SECONDS", 0),
+            patch("survng.app.onvif_events.SUBSCRIPTION_RENEW_RETRY_ATTEMPTS", 2),
+        ):
+            listener._run_until_stopped()
+
+        self.assertGreaterEqual(subscribe_calls["count"], 2)
+        self.assertIn("subscribe-2", order)
+        self.assertLess(order.index("subscribe-2"), order.index("release-old"))
+        self.assertEqual(listener.renewal_errors, 2)
+        self.assertEqual(listener.resubscriptions, 1)
 
     def test_onvif_poll_without_subscription_times_preserves_renewal_deadline(self) -> None:
         listener = OnvifEventListener(camera(onvif=True), Mock())
