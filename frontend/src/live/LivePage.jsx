@@ -128,7 +128,11 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
 
   useEffect(() => () => {
     window.clearTimeout(hoverTimerRef.current);
-    window.clearTimeout(holdPreviewRef.current?.timer);
+    const hold = holdPreviewRef.current;
+    if (!hold) return;
+    window.clearTimeout(hold.timer);
+    if (hold.selectionTimer) window.clearInterval(hold.selectionTimer);
+    holdPreviewRef.current = null;
   }, []);
 
   useEffect(() => {

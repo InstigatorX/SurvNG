@@ -48,6 +48,10 @@ assert.doesNotMatch(styles, /\.camera-tile \.video-frame,\s*\n\.camera-tile \.ca
 assert.match(livePageSource, /onContextMenu=\{blockBrowserHoldMenu\}/);
 assert.match(livePageSource, /selectstart/);
 assert.match(livePageSource, /selectionTimer/);
+assert.match(
+  livePageSource,
+  /useEffect\(\(\) => \(\) => \{[\s\S]*?selectionTimer[\s\S]*?\}, \[\]\)/,
+);
 assert.match(livePageSource, /draggable=\{false\}/);
 assert.doesNotMatch(livePageSource, /onOpenTargetTouchStart/);
 assert.match(contract, /Press-and-hold/);
