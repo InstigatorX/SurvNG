@@ -44,3 +44,30 @@ export function insertZonePointWithIndex(points, point, scale = { x: 1, y: 1 }) 
     insertionIndex,
   };
 }
+
+export function clampZoneView(view, frame, { min = 1, max = 8 } = {}) {
+  const scale = Math.max(min, Math.min(max, Number(view?.scale) || 1));
+  if (scale <= 1) return { scale: 1, x: 0, y: 0 };
+  const width = Math.max(0, Number(frame?.width) || 0);
+  const height = Math.max(0, Number(frame?.height) || 0);
+  const xLimit = width * (scale - 1) / 2;
+  const yLimit = height * (scale - 1) / 2;
+  return {
+    scale,
+    x: Math.max(-xLimit, Math.min(xLimit, Number(view?.x) || 0)),
+    y: Math.max(-yLimit, Math.min(yLimit, Number(view?.y) || 0)),
+  };
+}
+
+export function zoomZoneView(view, frame, anchor, nextScale) {
+  const currentScale = Number(view?.scale) > 0 ? Number(view.scale) : 1;
+  const scale = Math.max(1, Math.min(8, Number(nextScale) || 1));
+  const ratio = scale / currentScale;
+  const anchorX = Number(anchor?.x) || 0;
+  const anchorY = Number(anchor?.y) || 0;
+  return clampZoneView({
+    scale,
+    x: anchorX - (anchorX - (Number(view?.x) || 0)) * ratio,
+    y: anchorY - (anchorY - (Number(view?.y) || 0)) * ratio,
+  }, frame);
+}

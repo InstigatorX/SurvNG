@@ -43,6 +43,8 @@ import {
   Trash2,
   Undo2,
   Wrench,
+  ZoomIn,
+  ZoomOut,
   X,
 } from "lucide-react";
 import { buildMotionDecisionFusion, MOTION_BEHAVIOR_OPTIONS, motionBehaviorOption, motionBehaviorSettings, motionBehaviorValue, motionModeInfo, readMotionDecisionFusion } from "../motionDecisionConfig.mjs";
@@ -53,7 +55,7 @@ import { browserStorage, readStoredValue } from "../storage.mjs";
 import { logPayloadSignature } from "../pollingPolicy.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { motionAuditRegions } from "../motionAudit.mjs";
-import { insertZonePointWithIndex } from "../zoneGeometry.mjs";
+import { clampZoneView, insertZonePointWithIndex, zoomZoneView } from "../zoneGeometry.mjs";
 import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminHomeDestinations, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, readAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
 import { appUrl, mediaUrl, fetch } from "../shared/api.js";
 import { MEDIA_STORAGE_ROLES, CAMERA_ADMIN_SECTIONS, TELEMETRY_ADMIN_SECTIONS, HEALTH_TELEMETRY_SECTIONS, GENERAL_ADMIN_SECTIONS, US_TIME_ZONES, THEMES } from "../shared/constants.js";
@@ -2488,51 +2490,51 @@ export function ZoneEditor({ camera, classOptions = [], onChange }) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [dragPoint, setDragPoint] = useState(null);
   const [pointAddHistory, setPointAddHistory] = useState({});
-  const [snapshotSize, setSnapshotSize] = useState(null);
-  const [canvasSize, setCanvasSize] = useState(null);
+  const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
   const canvasRef = useRef(null);
+  const viewRef = useRef(view);
+  const gestureRef = useRef(null);
   const snapshotUrl = useMemo(() => appUrl(`/api/cameras/${camera.id}/zone-snapshot.jpg?source=live&t=${Date.now()}`), [camera.id]);
   const selectedZone = zones[selectedIndex] || null;
+  viewRef.current = view;
 
   useEffect(() => {
     setSelectedIndex(0);
     setDragPoint(null);
     setPointAddHistory({});
-    setSnapshotSize(null);
+    const reset = { scale: 1, x: 0, y: 0 };
+    viewRef.current = reset;
+    setView(reset);
+    gestureRef.current = null;
   }, [camera.id]);
 
-  useLayoutEffect(() => {
+  function frameSize() {
     const canvas = canvasRef.current;
-    if (!canvas) return undefined;
-    const updateSize = () => {
-      setCanvasSize((current) => {
-        const next = {
-          width: Math.max(0, canvas.clientWidth),
-          height: Math.max(0, canvas.clientHeight),
-        };
-        return current && Math.abs(current.width - next.width) < 0.5 && Math.abs(current.height - next.height) < 0.5
-          ? current
-          : next;
-      });
-    };
-    updateSize();
-    if (typeof ResizeObserver === "undefined") {
-      window.addEventListener("resize", updateSize);
-      return () => window.removeEventListener("resize", updateSize);
-    }
-    const observer = new ResizeObserver(updateSize);
-    observer.observe(canvas);
-    return () => observer.disconnect();
-  }, [camera.id]);
+    return { width: canvas?.clientWidth || 0, height: canvas?.clientHeight || 0 };
+  }
 
-  const mediaSize = useMemo(() => {
-    if (!snapshotSize?.width || !snapshotSize?.height || !canvasSize?.width || !canvasSize?.height) return null;
-    const scale = Math.min(canvasSize.width / snapshotSize.width, canvasSize.height / snapshotSize.height);
-    return {
-      width: Math.max(1, Math.floor(snapshotSize.width * scale)),
-      height: Math.max(1, Math.floor(snapshotSize.height * scale)),
-    };
-  }, [canvasSize, snapshotSize]);
+  function applyView(next) {
+    const value = clampZoneView(next, frameSize());
+    viewRef.current = value;
+    setView(value);
+  }
+
+  function zoomAt(clientX, clientY, scale) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    applyView(zoomZoneView(viewRef.current, frameSize(), {
+      x: clientX - rect.left - rect.width / 2,
+      y: clientY - rect.top - rect.height / 2,
+    }, scale));
+  }
+
+  function zoomCentered(factor) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, viewRef.current.scale * factor);
+  }
 
   useEffect(() => {
     if (!dragPoint) return undefined;
@@ -2545,6 +2547,17 @@ export function ZoneEditor({ camera, classOptions = [], onChange }) {
       window.getSelection()?.removeAllRanges();
     };
   }, [dragPoint]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+    const onWheel = (event) => {
+      event.preventDefault();
+      zoomAt(event.clientX, event.clientY, viewRef.current.scale * Math.exp(-event.deltaY * 0.0015));
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, [camera.id]);
 
   function replaceZone(index, patch) {
     onChange(zones.map((zone, zoneIndex) => zoneIndex === index ? { ...zone, ...patch } : zone));
@@ -2604,7 +2617,7 @@ export function ZoneEditor({ camera, classOptions = [], onChange }) {
   }
 
   function addPoint(event) {
-    if (!selectedZone || event.target !== event.currentTarget) return;
+    if (!selectedZone || event.target !== event.currentTarget || gestureRef.current?.moved) return;
     const rect = event.currentTarget.getBoundingClientRect();
     const point = pointerPosition(event);
     const inserted = insertZonePointWithIndex(
@@ -2629,6 +2642,30 @@ export function ZoneEditor({ camera, classOptions = [], onChange }) {
     replaceZone(selectedIndex, { points });
   }
 
+  function beginGesture(event) {
+    if (event.target !== event.currentTarget) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    gestureRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      panX: viewRef.current.x,
+      panY: viewRef.current.y,
+      moved: false,
+    };
+  }
+
+  function moveGesture(event) {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId || dragPoint) return;
+    const dx = event.clientX - gesture.x;
+    const dy = event.clientY - gesture.y;
+    if (!gesture.moved && Math.hypot(dx, dy) < 5) return;
+    gesture.moved = true;
+    if (viewRef.current.scale <= 1) return;
+    applyView({ scale: viewRef.current.scale, x: gesture.panX + dx, y: gesture.panY + dy });
+  }
+
   return (
     <div className="sub-panel zone-settings">
       <div className="zone-settings-head">
@@ -2639,26 +2676,30 @@ export function ZoneEditor({ camera, classOptions = [], onChange }) {
         </div>
       </div>
       <div className="zone-editor-layout">
-        <div className="zone-canvas" ref={canvasRef}>
-          <div className="zone-canvas-media" style={mediaSize || undefined}>
-            <img
-              src={snapshotUrl}
-              alt={`${camera.name} zone editor`}
-              onLoad={(event) => setSnapshotSize({
-                width: event.currentTarget.naturalWidth,
-                height: event.currentTarget.naturalHeight,
-              })}
-            />
+        <div className={`zone-canvas${view.scale > 1 ? " is-zoomed" : ""}`} ref={canvasRef}>
+          <div
+            className="zone-canvas-media"
+            style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}
+          >
+            <img src={snapshotUrl} alt={`${camera.name} zone editor`} draggable="false" />
             <svg
               viewBox="0 0 100 100"
               preserveAspectRatio="none"
-              onPointerDown={addPoint}
-              onPointerMove={movePoint}
+              onPointerDown={beginGesture}
+              onPointerMove={(event) => {
+                movePoint(event);
+                moveGesture(event);
+              }}
               onPointerUp={(event) => {
                 movePoint(event);
+                addPoint(event);
                 setDragPoint(null);
+                if (gestureRef.current?.pointerId === event.pointerId) gestureRef.current = null;
               }}
-              onPointerCancel={() => setDragPoint(null)}
+              onPointerCancel={() => {
+                setDragPoint(null);
+                gestureRef.current = null;
+              }}
               onDragStart={(event) => event.preventDefault()}
               aria-label="Zone polygon editor"
             >
@@ -2689,6 +2730,11 @@ export function ZoneEditor({ camera, classOptions = [], onChange }) {
                 );
               })}
             </svg>
+          </div>
+          <div className="zone-zoom" role="group" aria-label="Zone zoom">
+            <button type="button" aria-label="Zoom in" onClick={() => zoomCentered(1.25)} disabled={view.scale >= 8}><ZoomIn size={16} /></button>
+            <button type="button" aria-label="Reset zoom" onClick={() => applyView({ scale: 1, x: 0, y: 0 })} disabled={view.scale <= 1}>{Math.round(view.scale * 100)}%</button>
+            <button type="button" aria-label="Zoom out" onClick={() => zoomCentered(1 / 1.25)} disabled={view.scale <= 1}><ZoomOut size={16} /></button>
           </div>
           {!selectedZone ? <div className="zone-canvas-empty">Add a zone to begin</div> : selectedZone.points?.length < 3 ? <div className="zone-canvas-hint">Click at least three points</div> : null}
         </div>

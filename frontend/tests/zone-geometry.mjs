@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { insertZonePointWithIndex } from "../src/zoneGeometry.mjs";
+import { clampZoneView, insertZonePointWithIndex, zoomZoneView } from "../src/zoneGeometry.mjs";
 
 const square = [
   { x: 0.1, y: 0.1 },
@@ -39,5 +39,11 @@ assert.deepEqual(square, [
   { x: 0.9, y: 0.9 },
   { x: 0.1, y: 0.9 },
 ]);
+
+const frame = { width: 800, height: 450 };
+assert.deepEqual(clampZoneView({ scale: 1, x: 40, y: 20 }, frame), { scale: 1, x: 0, y: 0 });
+assert.deepEqual(zoomZoneView({ scale: 1, x: 0, y: 0 }, frame, { x: 100, y: 0 }, 2), { scale: 2, x: -100, y: 0 });
+assert.equal(zoomZoneView({ scale: 4, x: 0, y: 0 }, frame, { x: 0, y: 0 }, 20).scale, 8);
+assert.equal(clampZoneView({ scale: 2, x: 900, y: -900 }, frame).x, 400);
 
 console.log("zone geometry tests passed");
