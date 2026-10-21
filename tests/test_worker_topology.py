@@ -6,10 +6,13 @@ from survng.app.config import DetectorConfig
 from survng.app.inference_runtime.worker_topology import (
     MAX_OBJECT_WORKERS,
     MIN_OBJECT_WORKERS,
+    apply_inference_thread_limits,
     classify_device_class,
     clamp_object_worker_count,
     object_worker_recommendation_from_status,
+    openvino_latency_compile_config,
     recommend_object_worker_count,
+    recommended_inference_threads,
 )
 
 
@@ -165,6 +168,37 @@ class WorkerTopologyTests(unittest.TestCase):
         self.assertEqual(result["signals"]["decode_waiting"], 1)
         self.assertEqual(result["signals"]["device_class"], "cpu")
         self.assertEqual(result["signals"]["initial_admission_wait_ms_p95"], 175.0)
+
+    def test_inference_thread_budget_shrinks_with_more_workers(self) -> None:
+        single = recommended_inference_threads(
+            role="object", object_worker_count=1, cpu_count=16
+        )
+        multi = recommended_inference_threads(
+            role="object", object_worker_count=4, cpu_count=16
+        )
+        self.assertGreaterEqual(single, multi)
+        self.assertGreaterEqual(multi, 1)
+        self.assertLessEqual(single, 4)
+
+    def test_apply_inference_thread_limits_preserves_operator_overrides(self) -> None:
+        environ = {"OMP_NUM_THREADS": "7"}
+        result = apply_inference_thread_limits(
+            role="object",
+            object_worker_count=2,
+            cpu_count=8,
+            environ=environ,
+        )
+        self.assertEqual(environ["OMP_NUM_THREADS"], "7")
+        self.assertEqual(environ["OPENBLAS_NUM_THREADS"], str(result["threads"]))
+        self.assertIn("OMP_NUM_THREADS", result["preserved"])
+        self.assertEqual(
+            openvino_latency_compile_config("CPU", environ=environ)["INFERENCE_NUM_THREADS"],
+            "7",
+        )
+        self.assertNotIn(
+            "INFERENCE_NUM_THREADS",
+            openvino_latency_compile_config("GPU", environ=environ),
+        )
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 from .config import DetectorConfig
+from .inference_runtime.worker_topology import openvino_latency_compile_config
 
 
 LOGGER = logging.getLogger(__name__)
@@ -95,9 +96,7 @@ class OpenVinoFaceRecognizer:
                 landmark_model.input(0).shape
             )
             device = self.config.face_recognition_device or "AUTO"
-            compile_config = {"PERFORMANCE_HINT": "LATENCY"}
-            if device.upper() != "AUTO":
-                compile_config["NUM_STREAMS"] = "1"
+            compile_config = openvino_latency_compile_config(device)
             try:
                 self._compiled_model = core.compile_model(model, device, compile_config)
                 self.loaded_device = device
@@ -106,20 +105,24 @@ class OpenVinoFaceRecognizer:
                     raise
                 LOGGER.warning("Face embedding model failed on %s; retrying on CPU", device)
                 self._compiled_model = core.compile_model(
-                    model, "CPU", {"PERFORMANCE_HINT": "LATENCY", "NUM_STREAMS": "1"}
+                    model, "CPU", openvino_latency_compile_config("CPU")
                 )
                 self.loaded_device = "CPU"
             self._infer_request = self._compiled_model.create_infer_request()
             self._input = self._compiled_model.input(0)
             self._output = self._compiled_model.output(0)
             try:
-                compiled_landmarks = core.compile_model(landmark_model, self.loaded_device, compile_config)
+                compiled_landmarks = core.compile_model(
+                    landmark_model,
+                    self.loaded_device,
+                    openvino_latency_compile_config(self.loaded_device),
+                )
             except Exception:
                 if self.loaded_device.upper() == "CPU":
                     raise
                 LOGGER.warning("Face landmark model failed on %s; retrying on CPU", self.loaded_device)
                 compiled_landmarks = core.compile_model(
-                    landmark_model, "CPU", {"PERFORMANCE_HINT": "LATENCY", "NUM_STREAMS": "1"}
+                    landmark_model, "CPU", openvino_latency_compile_config("CPU")
                 )
             self._landmark_request = compiled_landmarks.create_infer_request()
             self._landmark_input = compiled_landmarks.input(0)

@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 
 from .config import DepthConfig, DetectorConfig
+from .inference_runtime.worker_topology import openvino_latency_compile_config
 
 LOGGER = logging.getLogger(__name__)
 
@@ -184,9 +185,7 @@ class OpenVinoDepthEstimator:
                 elif shape[-1] == 3:
                     self.input_shape = (shape[2], shape[1])
             device = self.depth_config.device or "AUTO"
-            compile_config = {"PERFORMANCE_HINT": "LATENCY"}
-            if device.upper() != "AUTO":
-                compile_config["NUM_STREAMS"] = "1"
+            compile_config = openvino_latency_compile_config(device)
             try:
                 compiled = core.compile_model(model, device, compile_config)
                 self.loaded_device = device
@@ -197,7 +196,7 @@ class OpenVinoDepthEstimator:
                 compiled = core.compile_model(
                     model,
                     "CPU",
-                    {"PERFORMANCE_HINT": "LATENCY", "NUM_STREAMS": "1"},
+                    openvino_latency_compile_config("CPU"),
                 )
                 self.loaded_device = "CPU"
             self._request = compiled.create_infer_request()

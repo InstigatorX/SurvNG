@@ -15,6 +15,7 @@ import numpy as np
 from .config import DetectorConfig
 from .detector_labels import load_detector_labels
 from .detector_model_settings import ModelSettingsError, read_model_metadata, resolve_output_format
+from .inference_runtime.worker_topology import openvino_latency_compile_config
 
 LOGGER = logging.getLogger(__name__)
 DETECTION_FAILURE_STATUSES = frozenset({"detector_unavailable", "inference_error"})
@@ -336,9 +337,7 @@ class OpenVinoDetector:
             model = preprocessor.build()
             self._openvino_embedded_preprocess = True
             device = self.config.device.upper()
-            compile_config: dict[str, Any] = {"PERFORMANCE_HINT": "LATENCY"}
-            if device != "AUTO":
-                compile_config["NUM_STREAMS"] = "1"
+            compile_config = openvino_latency_compile_config(self.config.device)
             try:
                 self.compiled_model = core.compile_model(model=model, device_name=self.config.device, config=compile_config)
             except Exception:
@@ -348,7 +347,7 @@ class OpenVinoDetector:
                 self.compiled_model = core.compile_model(
                     model=model,
                     device_name="CPU",
-                    config={"PERFORMANCE_HINT": "LATENCY", "NUM_STREAMS": "1"},
+                    config=openvino_latency_compile_config("CPU"),
                 )
                 self.loaded_device = "CPU"
             if not self.loaded_device:

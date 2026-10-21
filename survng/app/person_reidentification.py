@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 from .config import DetectorConfig
+from .inference_runtime.worker_topology import openvino_latency_compile_config
 
 
 LOGGER = logging.getLogger(__name__)
@@ -86,9 +87,7 @@ class OpenVinoPersonReidentifier:
                 model.reshape({model.input(0).any_name: [1, 3, height, width]})
             self.input_layout, self.input_shape = self._image_input(model.input(0).shape)
             device = self.configured_device or "AUTO"
-            compile_config = {"PERFORMANCE_HINT": "LATENCY"}
-            if device.upper() != "AUTO":
-                compile_config["NUM_STREAMS"] = "1"
+            compile_config = openvino_latency_compile_config(device)
             try:
                 compiled = core.compile_model(model, device, compile_config)
                 self.loaded_device = device
@@ -99,7 +98,7 @@ class OpenVinoPersonReidentifier:
                 compiled = core.compile_model(
                     model,
                     "CPU",
-                    {"PERFORMANCE_HINT": "LATENCY", "NUM_STREAMS": "1"},
+                    openvino_latency_compile_config("CPU"),
                 )
                 self.loaded_device = "CPU"
             self._infer_request = compiled.create_infer_request()
