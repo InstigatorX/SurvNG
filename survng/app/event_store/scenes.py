@@ -888,8 +888,14 @@ class EventStoreSceneMixin:
                      "last_activity_epoch=max(last_activity_epoch,?),coverage_json=? where id=?",
                      (earliest,latest,active_at if activity else episode["last_activity_epoch"],_json(coverage),episode_id))
         conn.execute("update scene_incidents set start_epoch=min(start_epoch,?),end_epoch=max(end_epoch,?) where id=?",(earliest,latest,incident_id))
+        # Reopen settled incidents for fresh activity. Do not resurrect
+        # unconfirmed or merged rows — establishment policy owns those states.
         if activity and not historical and active_at>=time.time()-45:
-            conn.execute("update scene_incidents set state='active',historical=0 where id=?",(incident_id,))
+            conn.execute(
+                "update scene_incidents set state='active',historical=0 "
+                "where id=? and state in ('complete','active')",
+                (incident_id,),
+            )
         if changed or coverage_changed:
             self._scene_changed(conn,incident_id,notify=notify)
         semantic_media_after = int(conn.execute(
