@@ -2,7 +2,7 @@
 
 **Access** covers who can open SurvNG in a browser and whether the console is served over HTTPS.
 
-Sign-in is optional and off by default, matching SurvNG’s LAN-first install. When you are ready to lock the console, require sign-in and create an administrator.
+Sign-in is optional in the saved config, but SurvNG **refuses to listen on a remote-facing address** (`0.0.0.0`, LAN IPs, etc.) while both browser sign-in and API authentication are off. Use `--host 127.0.0.1`, turn sign-in (or an API token) on, or set `SURVNG_ALLOW_OPEN_BIND=1` only on a trusted lab network.
 
 ## Roles
 

@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .config import AppConfig, WebRole, WebUserConfig
-from .proxy import ip_is_local
+from .proxy import ip_is_loopback_peer
 from .security import (
     SESSION_COOKIE_NAME,
     authenticate_password,
@@ -280,7 +280,7 @@ def session_payload(
     return {
         "enabled": config.web_auth.enabled,
         "bootstrap_required": bootstrap_required,
-        "bootstrap_token_required": bootstrap_required and not ip_is_local(client_ip),
+        "bootstrap_token_required": bootstrap_required and not ip_is_loopback_peer(client_ip),
         "user": public_user_payload(user) if user is not None else None,
     }
 
@@ -388,7 +388,9 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
             current = deps.get_config()
             if current.web_auth.users:
                 raise HTTPException(status_code=409, detail="an administrator already exists")
-            if not ip_is_local(client_ip) and not _bootstrap_token_matches(current, body.bootstrap_token):
+            if not ip_is_loopback_peer(client_ip) and not _bootstrap_token_matches(
+                current, body.bootstrap_token
+            ):
                 raise HTTPException(
                     status_code=403,
                     detail="a setup token from this server is required to create the first administrator",

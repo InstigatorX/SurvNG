@@ -113,4 +113,4 @@ See [Zones](zones.md).
 
 ## Security reminder
 
-On a private LAN you can leave sign-in off. If this host will be on the internet, turn sign-in on first, put HTTPS on nginx (or another reverse proxy), and do not publish port `8088`. Full steps: [Reverse proxy](reverse-proxy.md).
+On a private LAN you can leave sign-in off only if SurvNG binds to loopback (`--host 127.0.0.1`) or you intentionally set `SURVNG_ALLOW_OPEN_BIND=1`. Otherwise enable sign-in (or an API token) before binding `0.0.0.0`. If this host will be on the internet, turn sign-in on first, put HTTPS on nginx (or another reverse proxy), and do not publish port `8088`. Full steps: [Reverse proxy](reverse-proxy.md).

@@ -22,12 +22,13 @@ class ProxyConfig(BaseModel):
             if not item:
                 continue
             if item == "*":
-                networks.append("*")
-                continue
+                raise ValueError(
+                    "trusted_proxies cannot include '*'; list explicit proxy IPs or CIDRs"
+                )
             try:
                 ipaddress.ip_network(item, strict=False)
             except ValueError as error:
-                raise ValueError(f"trusted proxy must be an IP, CIDR, or *: {item}") from error
+                raise ValueError(f"trusted proxy must be an IP or CIDR: {item}") from error
             networks.append(item)
         return networks
 
@@ -49,8 +50,6 @@ def ip_is_trusted(ip: str, trusted_proxies: list[str]) -> bool:
     if address is None:
         return False
     for item in trusted_proxies:
-        if item.strip() == "*":
-            return True
         try:
             network = ipaddress.ip_network(item.strip(), strict=False)
         except ValueError:
@@ -61,8 +60,9 @@ def ip_is_trusted(ip: str, trusted_proxies: list[str]) -> bool:
 
 
 def ip_is_local(ip: str) -> bool:
+    """Return True for private/link-local networks (not used for bootstrap enrollment)."""
     text = str(ip or "").strip().lower()
-    if text in {"", "testclient", "localhost"}:
+    if text in {"testclient", "localhost"}:
         return True
     address = parse_ip(text)
     if address is None:
@@ -72,6 +72,21 @@ def ip_is_local(ip: str) -> bool:
         or address.is_private
         or address.is_link_local
     )
+
+
+def ip_is_loopback_peer(ip: str) -> bool:
+    """Return True only for loopback peers allowed to bootstrap without a setup token.
+
+    Empty or unparseable addresses are not trusted: enrollment must use the
+    server setup token whenever the peer is not clearly this machine.
+    """
+    text = str(ip or "").strip().lower()
+    if text in {"testclient", "localhost"}:
+        return True
+    address = parse_ip(text)
+    if address is None:
+        return False
+    return bool(address.is_loopback)
 
 
 def scope_header(scope: dict[str, Any], name: bytes) -> str:
@@ -107,7 +122,7 @@ def _forwarded_client_ip(forwarded_for: str, trusted_proxies: list[str]) -> str 
         assert address is not None  # guarded above
         if not ip_is_trusted(str(address), trusted_proxies):
             return value
-    # Every supplied hop is trusted (including the wildcard configuration).
+    # Every supplied hop matched a configured trusted proxy network.
     # In that case the leftmost value is the only available client address.
     return values[0]
 
