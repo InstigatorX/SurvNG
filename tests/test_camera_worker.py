@@ -2510,11 +2510,13 @@ class CameraWorkerTest(unittest.TestCase):
                     time.sleep(0.01)
 
             self.assertTrue(thread.is_alive())
-            self.assertEqual(process_event.call_count, 2)
+            # Failure + retry of the first notice, then a second camera notice
+            # reserves again after the terminal FAILED/COMPLETED episode.
+            self.assertEqual(process_event.call_count, 3)
             self.assertEqual(worker.motion_state._stats["event_worker_errors"], 1)
             self.assertEqual(worker.motion_state._stats["event_retries"], 1)
-            self.assertEqual(worker.motion_state._stats["bursts"], 1)
-            self.assertEqual(worker.motion_state._stats["passed"], 1)
+            self.assertEqual(worker.motion_state._stats["bursts"], 2)
+            self.assertEqual(worker.motion_state._stats["passed"], 2)
             worker._stop.set()
             worker.motion_events.queue.put_nowait(None)
             thread.join(timeout=1)
