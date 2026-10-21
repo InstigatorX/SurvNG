@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
@@ -231,6 +232,19 @@ class EventStoreSceneMixin:
                 create index if not exists scene_observation_object on scene_observations(object_id,captured_epoch);
                 create index if not exists scene_observation_episode on scene_observations(episode_id,captured_epoch);
                 create index if not exists scene_observation_event_time on scene_observations(event_id,captured_epoch);
+                -- Zone names for cards and day filters. Reading them from payload_json
+                -- parses every observation document on each incident-rail refresh.
+                create table if not exists scene_observation_zones (
+                    observation_id text not null references scene_observations(id) on delete cascade,
+                    episode_id text not null references scene_episodes(id) on delete cascade,
+                    zone text not null,
+                    displayable integer not null,
+                    primary key (observation_id, zone)
+                );
+                create index if not exists scene_observation_zones_episode
+                    on scene_observation_zones(episode_id, displayable);
+                create index if not exists scene_observation_zones_zone
+                    on scene_observation_zones(zone, episode_id);
                 drop index if exists scene_observation_event;
                 create index if not exists scene_observation_media on scene_observations(snapshot_path);
                 create table if not exists scene_alert_decisions (
@@ -384,6 +398,7 @@ class EventStoreSceneMixin:
                         self._scene_ingest(conn,row,historical=True,notify=False,activity=False)
                 conn.execute("insert into scene_migrations values('legacy_tracks_v1',?) on conflict(name) do update set cursor_event_id=excluded.cursor_event_id",(rows[-1]["id"],))
         self._backfill_scene_facets()
+        self._backfill_observation_zones()
 
     def _backfill_scene_facets(self):
         """Build feed filters once. Later observations maintain them as they are stored."""
@@ -498,6 +513,60 @@ class EventStoreSceneMixin:
             "insert or ignore into scene_facet_zones(value) values(?)",
             [(str(zone),) for zone in zones if isinstance(zone, str) and zone],
         )
+
+    def _record_observation_zones(self, conn, observation_id, episode_id, item):
+        """Copy zone names so later card reads do not parse the observation document."""
+        zones = item.get("zones") if isinstance(item, dict) else None
+        if not isinstance(zones, list) or not observation_id or not episode_id:
+            return
+        displayable = 1 if _display_confidence(item) else 0
+        rows = []
+        seen: set[str] = set()
+        for zone in zones:
+            if not isinstance(zone, str) or not zone or zone in seen:
+                continue
+            seen.add(zone)
+            rows.append((observation_id, episode_id, zone, displayable))
+        if not rows:
+            return
+        conn.executemany(
+            "insert into scene_observation_zones(observation_id,episode_id,zone,displayable) "
+            "values(?,?,?,?) on conflict(observation_id,zone) do update set "
+            "displayable=max(scene_observation_zones.displayable,excluded.displayable)",
+            rows,
+        )
+
+    def _backfill_observation_zones(self):
+        """Index zones already stored in observation documents, one bounded batch at a time."""
+        with self._lock, self._connect() as conn:
+            if conn.execute(
+                "select 1 from scene_migrations where name='scene_observation_zones_v1'"
+            ).fetchone():
+                return
+        last_id = ""
+        while True:
+            with self._lock, self._connect() as conn:
+                conn.execute("begin immediate")
+                rows = conn.execute(
+                    "select id,episode_id,payload_json from scene_observations "
+                    "where id>? order by id limit 400",
+                    (last_id,),
+                ).fetchall()
+                if not rows:
+                    conn.execute(
+                        "insert into scene_migrations values('scene_observation_zones_v1',0)"
+                    )
+                    return
+                for row in rows:
+                    try:
+                        item = json.loads(row["payload_json"])
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    try:
+                        self._record_observation_zones(conn, row["id"], row["episode_id"], item)
+                    except sqlite3.IntegrityError:
+                        continue
+                last_id = rows[-1]["id"]
 
     def _scene_resolve(self, conn, incident_id):
         seen = set()
@@ -768,6 +837,7 @@ class EventStoreSceneMixin:
             existing=conn.execute("select o.snapshot_path,o.object_id,s.association_locked,s.label_override "
                                   "from scene_observations o join scene_objects s on s.id=o.object_id where o.id=?", (observation_id,)).fetchone()
             if existing:
+                self._record_observation_zones(conn, observation_id, episode_id, item)
                 changed = self._scene_record_decision(conn, observation_id, item, legacy=index is not None) or changed
                 if track_key:
                     prior_track=conn.execute("select object_id from scene_track_aliases where episode_id=? and track_key=?",(episode_id,track_key)).fetchone()
@@ -838,6 +908,7 @@ class EventStoreSceneMixin:
             conn.execute("insert into scene_observations(id,event_id,episode_id,object_id,camera_id,captured_epoch,track_key,object_index,payload_json,snapshot_path,recording_path,source_observation_id) values(?,?,?,?,?,?,?,?,?,?,?,?)",
                          (observation_id,event_id,episode_id,object_id,camera_id,captured,track_key,index,_json(item),snapshot,recording,source_observation_id))
             self._note_scene_zones(conn, item)
+            self._record_observation_zones(conn, observation_id, episode_id, item)
             self._scene_record_decision(conn, observation_id, item, legacy=index is not None)
             changed = True
         for index, cover in presentation:
@@ -1211,9 +1282,9 @@ class EventStoreSceneMixin:
                            "join scene_episodes p on p.id=o.episode_id where p.incident_id=i.id and "+_DISPLAY_CONFIDENCE_SQL+" and "+EventStoreSceneMixin._scene_label_sql()+"=?)")
             args.append(object_label)
         if zone:
-            clauses.append("exists(select 1 from scene_observations o join scene_episodes p on p.id=o.episode_id "
-                           "join json_each(coalesce(json_extract(o.payload_json,'$.zones'),'[]')) z "
-                           "where p.incident_id=i.id and z.value=?)")
+            clauses.append("exists(select 1 from scene_observation_zones z "
+                           "join scene_episodes p on p.id=z.episode_id "
+                           "where p.incident_id=i.id and z.zone=?)")
             args.append(zone)
         return " and ".join(clauses),args
 
@@ -1252,8 +1323,10 @@ class EventStoreSceneMixin:
                     scope+"select distinct coalesce(nullif(s.label_override,''), nullif(s.facet_label,'')) "
                     "from episodes p cross join scene_objects s on s.episode_id=p.id "
                     "where coalesce(nullif(s.label_override,''), nullif(s.facet_label,''))!='' order by 1", args) if r[0]]
-                zones=[r[0] for r in conn.execute(scope+"select distinct z.value from episodes p cross join scene_observations o on o.episode_id=p.id "
-                        "join json_each(coalesce(json_extract(o.payload_json,'$.zones'),'[]')) z order by z.value",args) if r[0]]
+                zones=[r[0] for r in conn.execute(
+                    scope+"select distinct z.zone from episodes p "
+                    "join scene_observation_zones z on z.episode_id=p.id "
+                    "where z.zone!='' order by z.zone", args) if r[0]]
                 return {"camera_ids":cameras,"labels":labels,"zones":zones}
             cameras=[r[0] for r in conn.execute("select value from scene_facet_cameras order by value") if r[0]]
             # The live feed asks for every incident. Display labels live on the
@@ -1321,15 +1394,15 @@ class EventStoreSceneMixin:
                 "from scene_objects s join scene_episodes p on p.id=s.episode_id "
                 f"where p.incident_id in ({placeholders}) and exists(select 1 from scene_observations o "
                 "where o.object_id=s.id and " + _DISPLAY_CONFIDENCE_SQL + ")", ids).fetchall()
-            # Zone names are scalar labels. Keep observation history off the card,
-            # but use the same displayed observations as the full incident payload.
+            # Zones were indexed at ingest. Parsing payload_json here retained each
+            # observation document for every rail refresh as history grew.
             zone_rows=conn.execute(
-                "select p.incident_id, z.value zone "
-                "from scene_observations o join scene_episodes p on p.id=o.episode_id "
-                "join json_each(case when json_type(o.payload_json,'$.zones')='array' "
-                "then json_extract(o.payload_json,'$.zones') else '[]' end) z "
-                f"where p.incident_id in ({placeholders}) and " + _DISPLAY_CONFIDENCE_SQL +
-                " and z.value is not null", ids).fetchall()
+                "select p.incident_id, z.zone zone "
+                "from scene_episodes p join scene_observation_zones z "
+                "on z.episode_id=p.id and z.displayable=1 "
+                f"where p.incident_id in ({placeholders})",
+                ids,
+            ).fetchall()
             event_rows=conn.execute(
                 "select p.incident_id,e.id,e.camera_id,e.kind,e.topic,e.created_at,e.snapshot_path,e.evidence_revision,e.objects_json "
                 "from events e join scene_event_membership m on m.event_id=e.id "
