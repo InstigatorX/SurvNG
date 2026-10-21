@@ -451,9 +451,11 @@ def test_cooldown_starts_only_after_completed_detection() -> None:
         generation=1,
     )
 
-    # It remains the same completed request, so the observation merges rather
-    # than manufacturing another request or treating raw notice as completion.
-    assert during.reason is EpisodeDecisionReason.MERGED_WITH_REQUEST
+    # Camera-only notices after completion reserve follow-up work so a second
+    # intrusion is not swallowed while EMA is quiet.
+    assert during.reason is EpisodeDecisionReason.FOLLOWUP_RESERVED
+    assert during.intent is not None
+    assert during.intent.intent_id != first.intent.intent_id
 
 
 def test_completed_camera_request_cools_down_only_ema_rescue() -> None:
@@ -798,3 +800,54 @@ def test_aborted_live_probe_refunds_probe_budget() -> None:
     )
 
     assert controller.snapshot()["live_probe_count"] == 0
+
+
+def test_camera_only_notice_after_completion_reserves_followup() -> None:
+    controller = MotionEpisodeController("gate", episode_gap_seconds=30.0)
+    controller.start_generation(1)
+    first = controller.observe_camera(
+        CameraNotice("gate", 10.0, 1010.0, "motion"), generation=1
+    )
+    assert first.intent is not None
+    controller.acknowledge_admission(
+        first.intent.intent_id, admitted=True, occurred_monotonic=1010.1
+    )
+    controller.complete(first.intent.intent_id, occurred_monotonic=1010.2)
+
+    second = controller.observe_camera(
+        CameraNotice("gate", 11.0, 1011.0, "motion"), generation=1
+    )
+    third = controller.observe_camera(
+        CameraNotice("gate", 11.5, 1011.5, "motion"), generation=1
+    )
+
+    assert second.reason is EpisodeDecisionReason.FOLLOWUP_RESERVED
+    assert second.intent is not None
+    assert second.intent.intent_id != first.intent.intent_id
+    assert third.reason is EpisodeDecisionReason.MERGED_WITH_REQUEST
+    assert third.intent is not None
+    assert third.intent.intent_id == second.intent.intent_id
+
+
+def test_motion_inactive_clears_terminal_episode() -> None:
+    controller = MotionEpisodeController("gate", episode_gap_seconds=30.0)
+    controller.start_generation(1)
+    first = controller.observe_camera(
+        CameraNotice("gate", 10.0, 1010.0, "motion"), generation=1
+    )
+    assert first.intent is not None
+    controller.acknowledge_admission(
+        first.intent.intent_id, admitted=True, occurred_monotonic=1010.1
+    )
+    controller.complete(first.intent.intent_id, occurred_monotonic=1010.2)
+    controller.note_motion_inactive(observed_monotonic=1010.3, generation=1)
+
+    with controller._lock:
+        assert controller._episode is None
+
+    second = controller.observe_camera(
+        CameraNotice("gate", 10.4, 1010.4, "motion"), generation=1
+    )
+    assert second.reason is EpisodeDecisionReason.REQUEST_RESERVED
+    assert second.intent is not None
+    assert second.intent.followup is False

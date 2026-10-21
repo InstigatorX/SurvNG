@@ -147,7 +147,7 @@ class CaptureProtocolTest(unittest.TestCase):
             NotificationMessage=[notification]
         )
 
-        def callback(*_args):
+        def callback(*_args, **_kwargs):
             listener._stop.set()
             raise RuntimeError("application failure")
 

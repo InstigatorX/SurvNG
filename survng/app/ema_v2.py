@@ -543,12 +543,15 @@ class MotionEpisodeController:
                 DetectionRequestStatus.FAILED,
             }:
                 if ema is None:
-                    return self._decision(
-                        EpisodeDecisionReason.MERGED_WITH_REQUEST,
-                        source,
-                        observed_monotonic,
+                    # Camera-only notices after a terminal request must be able
+                    # to reserve new work. Merging them only refreshed the gap
+                    # clock and swallowed later intrusions while EMA was quiet.
+                    return self._reserve_intent(
                         episode,
-                        episode.intent,
+                        source=source,
+                        event_at=event_at,
+                        observed_monotonic=observed_monotonic,
+                        generation=generation,
                     )
                 live_probe_allowed = self._live_probe_allowed(
                     episode, observed_monotonic
@@ -984,6 +987,32 @@ class MotionEpisodeController:
             self._last_completed_monotonic = None
             self._ema_admitted_times.clear()
             self._transitions.clear()
+
+    def note_motion_inactive(
+        self,
+        *,
+        observed_monotonic: float,
+        generation: int,
+    ) -> None:
+        """Apply an ONVIF motion-end without reserving detection work.
+
+        Terminal episodes are cleared so the next motion start opens a fresh
+        episode instead of extending a completed request's gap window.
+        In-flight requests are left alone; their lifecycle owns completion.
+        """
+        del observed_monotonic  # reserved for future end-signal telemetry
+        with self._lock:
+            if generation != self._generation:
+                return
+            episode = self._episode
+            if episode is None:
+                return
+            if episode.status in {
+                DetectionRequestStatus.COMPLETED,
+                DetectionRequestStatus.FAILED,
+                DetectionRequestStatus.ABORTED,
+            }:
+                self._episode = None
 
     def _episode_for(self, observed_monotonic: float) -> _Episode:
         episode = self._episode
