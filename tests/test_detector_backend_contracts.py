@@ -74,6 +74,51 @@ def test_opencv_fallback_discards_partial_openvino_state(tmp_path, failure_stage
     np.testing.assert_allclose(net.tensor[0, :, 0, 0], [0, 128 / 255, 1])
 
 
+def test_opencv_fallback_reinspects_graph_nms(tmp_path, monkeypatch):
+    class Preprocessor:
+        def __getattr__(self, _name):
+            return lambda *args, **kwargs: self
+
+    class Core:
+        def set_property(self, *_args):
+            pass
+
+        def read_model(self, **_kwargs):
+            raise RuntimeError("simulated early openvino failure")
+
+        def compile_model(self, **_kwargs):
+            raise RuntimeError("unused")
+
+    fake_openvino = SimpleNamespace(
+        Core=Core, Layout=lambda value: value,
+        Type=SimpleNamespace(u8="u8", f32="f32"),
+    )
+    fake_preprocess = SimpleNamespace(
+        PrePostProcessor=lambda _model: Preprocessor(),
+        ColorFormat=SimpleNamespace(BGR="BGR", RGB="RGB"),
+    )
+    model_path = tmp_path / "detector.onnx"
+    model_path.touch()
+    net = CaptureNet(np.zeros((1, 300, 6), dtype=np.float32))
+    monkeypatch.setattr(
+        "survng.app.detector.onnx_graph_has_nms",
+        lambda _path: True,
+    )
+    with (
+        patch.dict(sys.modules, {"openvino": fake_openvino, "openvino.preprocess": fake_preprocess}),
+        patch("cv2.dnn.readNetFromONNX", return_value=net),
+    ):
+        detector = OpenVinoDetector(DetectorConfig(
+            enabled=True, model_path=str(model_path), labels=["person"],
+            cache_enabled=False, warmup_enabled=False,
+        ))
+    assert detector.status()["loaded_backend"] == "opencv-dnn"
+    assert detector._model_has_nms is True
+    assert any("graph NMS inspection" in warning for warning in detector.model_settings["warnings"])
+    # Format resolution should treat graph NMS as final detections.
+    assert detector._resolve_output_format([[1, 300, 6]]) == "yolo-e2e"
+
+
 @pytest.mark.parametrize("backend", ["ssd", "coreml"])
 @pytest.mark.parametrize("frame_size", [(1920, 1080), (1080, 1920)])
 def test_letterboxed_normalized_boxes_reach_source_zone(backend, frame_size, monkeypatch):
