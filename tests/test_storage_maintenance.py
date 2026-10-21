@@ -12,7 +12,11 @@ from unittest.mock import patch
 from survng.app.events import EventStore
 from survng.app.faces import FaceStore
 from survng.app.recorder import Recorder
-from survng.app.storage_maintenance import StorageMaintenanceRunner, StorageReconciler
+from survng.app.storage_maintenance import (
+    DEFAULT_ORPHAN_MIN_AGE_SECONDS,
+    StorageMaintenanceRunner,
+    StorageReconciler,
+)
 from survng.app.config import MediaStorageConfig, MediaStorageLocationConfig
 from survng.app.media_storage import MediaStorageRegistry
 
@@ -151,7 +155,7 @@ class StorageReconcilerTest(unittest.TestCase):
         blocker = __import__("threading").Event()
 
         class BlockingReconciler:
-            def run(self, *, apply: bool = False, full: bool = False) -> dict[str, object]:
+            def run(self, *, apply: bool = False, full: bool = False, **_kwargs) -> dict[str, object]:
                 blocker.wait(1)
                 return {"mode": "repair" if apply else "scan"}
 
@@ -172,7 +176,7 @@ class StorageReconcilerTest(unittest.TestCase):
             def __init__(self, cancelled) -> None:
                 self.cancelled = cancelled
 
-            def run(self, *, apply: bool = False, full: bool = False) -> dict[str, object]:
+            def run(self, *, apply: bool = False, full: bool = False, **_kwargs) -> dict[str, object]:
                 while not self.cancelled.wait(0.01):
                     pass
                 raise InterruptedError("cancelled")
@@ -192,7 +196,7 @@ class StorageReconcilerTest(unittest.TestCase):
             def __init__(self, cancelled) -> None:
                 self.cancelled = cancelled
 
-            def run(self, *, apply: bool = False, full: bool = False) -> dict[str, object]:
+            def run(self, *, apply: bool = False, full: bool = False, **_kwargs) -> dict[str, object]:
                 self.cancelled.wait(1)
                 raise InterruptedError("cancelled")
 
@@ -209,7 +213,7 @@ class StorageReconcilerTest(unittest.TestCase):
         blocker = threading.Event()
 
         class BlockingReconciler:
-            def run(self, *, apply: bool = False, full: bool = False) -> dict[str, object]:
+            def run(self, *, apply: bool = False, full: bool = False, **_kwargs) -> dict[str, object]:
                 blocker.wait(1)
                 return {}
 
@@ -373,6 +377,157 @@ class StorageReconcilerTest(unittest.TestCase):
             with sqlite3.connect(events.db_path) as connection:
                 row = connection.execute("SELECT snapshot_path FROM events").fetchone()
                 self.assertEqual(row[0], str(missing))
+
+    def test_orphan_reclaim_dry_run_counts_without_deleting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            storage = root / "media"
+            storage.mkdir()
+            events = EventStore(storage, database_dir=root / "database")
+            recorder = Recorder(
+                "ffmpeg", storage, segment_seconds=10, index_dir=root / "index"
+            )
+            known = storage / "snapshots" / "gate" / "known.jpg"
+            known.parent.mkdir(parents=True)
+            known.write_bytes(b"image")
+            events.add_event("gate", "object", snapshot_path=str(known))
+            orphan = storage / "snapshots" / "gate" / "orphan.jpg"
+            orphan.write_bytes(b"orphan")
+            old = time.time() - DEFAULT_ORPHAN_MIN_AGE_SECONDS - 60
+            os.utime(orphan, (old, old))
+
+            result = StorageReconciler(storage, events.db_path, recorder).run(
+                apply=True,
+                full=True,
+                reclaim_orphans=True,
+                reclaim_dry_run=True,
+            )
+
+            self.assertEqual(result["repairs"]["orphan_media_reclaim_candidates"], 1)
+            self.assertEqual(result["repairs"]["orphan_media_deleted"], 0)
+            self.assertTrue(orphan.is_file())
+            self.assertIn("dry-run", result["note"])
+
+    def test_orphan_reclaim_deletes_only_old_unreferenced_incident_media(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            storage = root / "media"
+            storage.mkdir()
+            events = EventStore(storage, database_dir=root / "database")
+            recorder = Recorder(
+                "ffmpeg", storage, segment_seconds=10, index_dir=root / "index"
+            )
+            known = storage / "snapshots" / "gate" / "known.jpg"
+            known.parent.mkdir(parents=True)
+            known.write_bytes(b"image")
+            events.add_event("gate", "object", snapshot_path=str(known))
+            old_orphan = storage / "snapshots" / "gate" / "old-orphan.jpg"
+            old_orphan.write_bytes(b"old")
+            young_orphan = storage / "motion_samples" / "gate" / "young.webp"
+            young_orphan.parent.mkdir(parents=True)
+            young_orphan.write_bytes(b"young")
+            recording_orphan = (
+                storage / "recordings" / "gate" / "main" / "2026-01-01" / "00" / "loose.mp4"
+            )
+            recording_orphan.parent.mkdir(parents=True)
+            recording_orphan.write_bytes(b"segment")
+            old = time.time() - 3600
+            young = time.time() - 120
+            os.utime(old_orphan, (old, old))
+            os.utime(young_orphan, (young, young))
+            os.utime(recording_orphan, (old, old))
+
+            result = StorageReconciler(storage, events.db_path, recorder).run(
+                apply=True,
+                full=True,
+                reclaim_orphans=True,
+                reclaim_dry_run=False,
+                orphan_min_age_seconds=600,
+            )
+
+            self.assertEqual(result["repairs"]["orphan_media_deleted"], 1)
+            self.assertFalse(old_orphan.exists())
+            self.assertTrue(known.is_file())
+            self.assertTrue(young_orphan.is_file())
+            self.assertTrue(recording_orphan.is_file())
+            self.assertEqual(result["summary"]["orphan_media_files"], 1)
+
+    def test_orphan_reclaim_skips_when_media_location_is_offline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            storage = root / "media"
+            external = root / "external"
+            storage.mkdir()
+            external.mkdir()
+            registry = MediaStorageRegistry(
+                storage,
+                MediaStorageConfig(locations=[MediaStorageLocationConfig(
+                    id="archive",
+                    path=str(external),
+                    roles=["snapshots", "motion_audits"],
+                )]),
+            )
+            events = EventStore(
+                storage, database_dir=root / "database", media_storage=registry
+            )
+            recorder = Recorder(
+                "ffmpeg", storage, segment_seconds=10, index_dir=root / "index"
+            )
+            orphan = external / "snapshots" / "gate" / "orphan.jpg"
+            orphan.parent.mkdir(parents=True)
+            orphan.write_bytes(b"orphan")
+            old = time.time() - 3600
+            os.utime(orphan, (old, old))
+            offline = registry.status("archive")
+            offline_status = type(offline)(
+                **{
+                    **{field: getattr(offline, field) for field in offline.__dataclass_fields__},
+                    "state": "not_mounted",
+                    "error": "required mount is absent",
+                }
+            )
+
+            with patch.object(registry, "status", return_value=offline_status):
+                result = StorageReconciler(
+                    storage,
+                    events.db_path,
+                    recorder,
+                    media_storage=registry,
+                ).run(
+                    apply=True,
+                    full=True,
+                    reclaim_orphans=True,
+                    reclaim_dry_run=False,
+                    orphan_min_age_seconds=600,
+                )
+
+            self.assertEqual(result["repairs"]["orphan_media_deleted"], 0)
+            self.assertGreaterEqual(result["repairs"]["orphan_media_reclaim_skipped"], 1)
+            self.assertTrue(orphan.is_file())
+
+    def test_orphan_reclaim_requires_apply_and_full(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            storage = root / "media"
+            storage.mkdir()
+            events = EventStore(storage, database_dir=root / "database")
+            recorder = Recorder(
+                "ffmpeg", storage, segment_seconds=10, index_dir=root / "index"
+            )
+            orphan = storage / "snapshots" / "gate" / "orphan.jpg"
+            orphan.parent.mkdir(parents=True)
+            orphan.write_bytes(b"orphan")
+            old = time.time() - DEFAULT_ORPHAN_MIN_AGE_SECONDS - 60
+            os.utime(orphan, (old, old))
+
+            scan = StorageReconciler(storage, events.db_path, recorder).run(
+                reclaim_orphans=True,
+                reclaim_dry_run=False,
+                full=True,
+            )
+            self.assertEqual(scan["repairs"]["orphan_media_deleted"], 0)
+            self.assertTrue(orphan.is_file())
+            self.assertIn("requires apply=true and full=true", scan["note"])
 
 
 if __name__ == "__main__":

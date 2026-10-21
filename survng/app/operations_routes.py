@@ -8,16 +8,31 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .manager import AppManager
 from .product_update import ProductUpdateService
-from .storage_maintenance import StorageMaintenanceRunner, StorageReconciler
+from .storage_maintenance import (
+    DEFAULT_ORPHAN_MIN_AGE_SECONDS,
+    RECENT_MEDIA_SECONDS,
+    StorageMaintenanceRunner,
+    StorageReconciler,
+)
 
 
 class StorageMaintenanceRequest(BaseModel):
     apply: bool = False
     full: bool = False
+    reclaim_orphans: bool = False
+    reclaim_dry_run: bool = True
+    orphan_min_age_seconds: float | None = Field(
+        default=None,
+        ge=RECENT_MEDIA_SECONDS,
+        description=(
+            "Minimum age in seconds before an unreferenced incident snapshot "
+            f"or motion sample may be reclaimed (default {DEFAULT_ORPHAN_MIN_AGE_SECONDS})."
+        ),
+    )
 
 
 class RecordingRetentionRequest(BaseModel):
@@ -106,6 +121,9 @@ def create_operations_router(deps: OperationsRouteDependencies) -> APIRouter:
                 ),
                 apply=request.apply,
                 full=request.full,
+                reclaim_orphans=request.reclaim_orphans,
+                reclaim_dry_run=request.reclaim_dry_run,
+                orphan_min_age_seconds=request.orphan_min_age_seconds,
             )
         except RuntimeError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
