@@ -358,6 +358,10 @@ class EventStoreJobsMixin:
                 "on events(snapshot_path, created_at desc, id desc) where snapshot_path != ''"
             )
             conn.execute(
+                "create index if not exists idx_events_recording_retention "
+                "on events(recording_path) where recording_path != ''"
+            )
+            conn.execute(
                 "create table if not exists survng_metadata (key text primary key, value text not null)"
             )
             conn.execute(

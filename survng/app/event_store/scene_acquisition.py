@@ -52,6 +52,8 @@ class EventStoreSceneAcquisitionMixin:
                 );
                 create index if not exists acquired_observation_camera on acquired_observations(camera_id,captured_epoch,id);
                 create index if not exists acquired_observation_snapshot on acquired_observations(snapshot_path);
+                create index if not exists acquired_observation_recording
+                    on acquired_observations(recording_path) where recording_path != '';
                 create table if not exists acquired_sample_observations (
                     sample_id text not null references acquired_samples(id),
                     observation_id text not null references acquired_observations(id),
