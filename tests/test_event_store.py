@@ -1383,6 +1383,66 @@ class EventStoreTest(unittest.TestCase):
                 ).fetchone()
             self.assertEqual(row["snapshot_path"], "")
 
+    def test_snapshot_retention_dedupes_shared_paths_across_events_and_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot = root / "snapshots" / "gate" / "shared.webp"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_bytes(b"shared-bytes")
+            store = EventStore(root)
+            first = store.add_event(
+                camera_id="gate",
+                kind="object",
+                snapshot_path=str(snapshot),
+                created_at="2020-01-01T00:00:00+00:00",
+            )
+            portable = first["snapshot_path"]
+            store.add_event(
+                camera_id="gate",
+                kind="object",
+                snapshot_path=str(snapshot),
+                created_at="2020-06-01T00:00:00+00:00",
+            )
+            with store._connect() as connection:
+                connection.execute(
+                    "insert into scene_snapshot_assets values (?,?,?,?)",
+                    (portable, "gate", "2021-01-01T00:00:00+00:00", len(b"shared-bytes")),
+                )
+                indexes = {
+                    str(row["name"])
+                    for row in connection.execute("pragma index_list('scene_snapshot_assets')")
+                }
+
+            plan = store.snapshot_retention_plan(
+                datetime(2023, 1, 1, tzinfo=timezone.utc).timestamp()
+            )
+            candidates = store._snapshot_retention_candidates(
+                "2023-01-01T00:00:00+00:00", 100
+            )
+
+            self.assertIn("scene_snapshot_assets_created_at", indexes)
+            self.assertEqual(plan["file_count"], 1)
+            self.assertEqual(plan["expired_files"], 1)
+            self.assertEqual(plan["bytes"], len(b"shared-bytes"))
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0]["snapshot_path"], portable)
+
+            # A fresher event reference must keep the path out of candidates.
+            with store._connect() as connection:
+                connection.execute(
+                    "update events set created_at=? where snapshot_path=?",
+                    ("2024-01-01T00:00:00+00:00", portable),
+                )
+            fresh_plan = store.snapshot_retention_plan(
+                datetime(2023, 1, 1, tzinfo=timezone.utc).timestamp()
+            )
+            fresh_candidates = store._snapshot_retention_candidates(
+                "2023-01-01T00:00:00+00:00", 100
+            )
+            self.assertEqual(fresh_plan["file_count"], 1)
+            self.assertEqual(fresh_plan["expired_files"], 0)
+            self.assertEqual(fresh_candidates, [])
+
     def test_snapshot_retention_protects_pinned_face_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
