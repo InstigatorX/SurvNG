@@ -15,6 +15,7 @@ from survng.app.detector_model_settings import ModelSettingsError, read_model_me
     ({}, True, [1, -1, 6], "yolo-e2e"),
     ({}, False, [1, 84, 8400], "yolo"),
     ({}, False, [1, 6, 8400], "yolo"),
+    ({}, False, [1, 6, 300], "yolo"),
     ({}, False, [1, 8400, 7], "yolo"),
     ({"args": {"nms": False}}, False, [1, 8400, 7], "yolo"),
     ({}, False, [1, 300, 6], "yolo-e2e"),
@@ -27,7 +28,14 @@ def test_output_contract(metadata, graph, shape, expected):
 
 def test_manual_override_resolves_two_class_ambiguity():
     shape = [[1, 6, 300]]
-    assert resolve_output_format(shape, "auto", {})[2]
+    selected, _source, warnings = resolve_output_format(shape, "auto", {})
+    assert selected == "yolo"
+    assert warnings
+    assert resolve_output_format(shape, "yolo-e2e", {}) == (
+        "yolo-e2e",
+        "manual override",
+        [],
+    )
     assert resolve_output_format(shape, "yolo", {}) == ("yolo", "manual override", [])
 
 
@@ -123,7 +131,23 @@ def test_final_segmentation_does_not_apply_nms_twice():
     assert detector.output_format == "yolo-seg-e2e"
     _, metadata = detector._preprocess(np.zeros((300, 300, 3), np.uint8))
     detections = np.zeros((1, 2, 38), dtype=np.float32)
-    detections[0, :, :6] = [10, 10, 20, 20, .9, 0]
+    # IoU ~0.80: SurvNG NMS at 0.45 would merge these, near-dupe at 0.90 keeps both.
+    detections[0, 0, :6] = [10, 10, 20, 20, .9, 0]
+    detections[0, 1, :6] = [10, 10, 18, 20, .85, 0]
     objects = detector._parse_yolo_seg_outputs([detections, np.zeros((1, 32, 8, 8))], metadata)
     assert len(objects) == 2
     assert detector.status()["model_settings"]["nms"] == "model final detections"
+
+
+def test_final_segmentation_suppresses_near_duplicate_same_class_boxes():
+    detector = OpenVinoDetector(DetectorConfig(enabled=False, labels=["person"]))
+    detector.model_metadata = {"nms": True}
+    detector.output_format = detector._resolve_output_format([[1, 2, 38], [1, 32, 8, 8]])
+    assert detector.output_format == "yolo-seg-e2e"
+    _, metadata = detector._preprocess(np.zeros((300, 300, 3), np.uint8))
+    detections = np.zeros((1, 2, 38), dtype=np.float32)
+    detections[0, 0, :6] = [10, 10, 20, 20, .9, 0]
+    detections[0, 1, :6] = [10, 10, 20, 20, .82, 0]
+    objects = detector._parse_yolo_seg_outputs([detections, np.zeros((1, 32, 8, 8))], metadata)
+    assert len(objects) == 1
+    assert objects[0]["confidence"] == 0.9
