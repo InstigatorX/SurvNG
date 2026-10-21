@@ -835,6 +835,23 @@ class MotionEpisodeController:
             episode.intent,
         )
 
+    def _transition_request_status(
+        self,
+        episode: MotionEpisode,
+        new_status: DetectionRequestStatus,
+        *,
+        allowed_from: frozenset[DetectionRequestStatus],
+    ) -> None:
+        """Apply a detection-request status change with predecessor guards."""
+        current = episode.status
+        if current is new_status:
+            return
+        if current not in allowed_from:
+            raise ValueError(
+                f"invalid detection request transition {current} -> {new_status}"
+            )
+        episode.status = new_status
+
     def abort(
         self, intent_id: str, *, occurred_monotonic: float
     ) -> EpisodeDecision:
@@ -842,7 +859,15 @@ class MotionEpisodeController:
             episode = self._require_intent(intent_id)
             intent = episode.intent
             source = intent.primary_source
-            episode.status = DetectionRequestStatus.ABORTED
+            self._transition_request_status(
+                episode,
+                DetectionRequestStatus.ABORTED,
+                allowed_from=frozenset({
+                    DetectionRequestStatus.RESERVED,
+                    DetectionRequestStatus.ADMITTED,
+                    DetectionRequestStatus.RUNNING,
+                }),
+            )
             episode.intent = None
             self._refund_reservation(episode, intent)
             return self._decision(
@@ -857,7 +882,14 @@ class MotionEpisodeController:
     ) -> EpisodeDecision:
         with self._lock:
             episode = self._require_intent(intent_id)
-            episode.status = DetectionRequestStatus.RUNNING
+            self._transition_request_status(
+                episode,
+                DetectionRequestStatus.RUNNING,
+                allowed_from=frozenset({
+                    DetectionRequestStatus.RESERVED,
+                    DetectionRequestStatus.ADMITTED,
+                }),
+            )
             return self._decision(
                 EpisodeDecisionReason.REQUEST_RUNNING,
                 episode.intent.primary_source,
@@ -871,7 +903,14 @@ class MotionEpisodeController:
     ) -> EpisodeDecision:
         with self._lock:
             episode = self._require_intent(intent_id)
-            episode.status = DetectionRequestStatus.COMPLETED
+            self._transition_request_status(
+                episode,
+                DetectionRequestStatus.COMPLETED,
+                allowed_from=frozenset({
+                    DetectionRequestStatus.ADMITTED,
+                    DetectionRequestStatus.RUNNING,
+                }),
+            )
             episode.completed_monotonic = occurred_monotonic
             self._last_completed_monotonic = occurred_monotonic
             return self._decision(
@@ -887,7 +926,14 @@ class MotionEpisodeController:
     ) -> EpisodeDecision:
         with self._lock:
             episode = self._require_intent(intent_id)
-            episode.status = DetectionRequestStatus.FAILED
+            self._transition_request_status(
+                episode,
+                DetectionRequestStatus.FAILED,
+                allowed_from=frozenset({
+                    DetectionRequestStatus.ADMITTED,
+                    DetectionRequestStatus.RUNNING,
+                }),
+            )
             episode.completed_monotonic = occurred_monotonic
             self._last_completed_monotonic = occurred_monotonic
             return self._decision(
