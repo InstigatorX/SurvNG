@@ -104,8 +104,21 @@ def resolve_output_format(shapes: list[list[int]], override: str, metadata: dict
         elif final is False:
             selected = "yolo"
         elif channels == 6 and 6 < anchors <= 1000:
-            selected = "yolo-e2e"
-            warnings.append("Six-column output inferred as final detections. Use the output-format override if this is a raw two-class model.")
+            # Channel-first [1, 6, N] is the classic raw two-class YOLO layout
+            # (4 box + 2 class scores × anchors). Detection-major [1, N, 6] is
+            # the usual end-to-end export. Prefer SurvNG NMS when ambiguous.
+            if shape[1] == 6 and shape[-1] != 6:
+                selected = "yolo"
+                warnings.append(
+                    "Channel-first six-row output inferred as raw two-class YOLO. "
+                    "Use the yolo-e2e output-format override if this export is final detections."
+                )
+            else:
+                selected = "yolo-e2e"
+                warnings.append(
+                    "Six-column output inferred as final detections. "
+                    "Use the output-format override if this is a raw two-class model."
+                )
         elif channels >= 5 and anchors > channels:
             selected = "yolo"
         elif channels == -1 and anchors > 6:

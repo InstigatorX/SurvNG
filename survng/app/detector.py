@@ -1011,6 +1011,10 @@ class OpenVinoDetector:
                 if polygon:
                     item["mask_polygon"] = polygon
             objects.append(item)
+        if self.output_format == "yolo-seg-e2e":
+            # Keep model NMS intact; only collapse pathological same-class
+            # duplicates that still share nearly identical boxes.
+            return _suppress_e2e_near_duplicates(objects)
         return objects
 
     def _segmentation_polygon(
