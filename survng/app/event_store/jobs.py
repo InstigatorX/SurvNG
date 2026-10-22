@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -9,6 +10,8 @@ from typing import Any
 from ..database_polling import polling_connection
 from ..durable_payload import durable_json_dumps
 from ..main_database import ClosingDatabaseConnection
+
+LOGGER = logging.getLogger(__name__)
 
 DETECTION_JOB_MAXIMUM_AGE_SECONDS = 20.0
 # Security inference keeps its existing freshness window. Optional cover
@@ -390,7 +393,9 @@ class EventStoreJobsMixin:
                     object_detected integer,
                     trigger_count integer not null default 1,
                     features_json text not null default '{}',
-                    category text not null default 'qualification'
+                    category text not null default 'qualification',
+                    foreign key(event_id) references events(id) on delete set null,
+                    foreign key(related_event_id) references events(id) on delete set null
                 )
                 """
             )
@@ -547,7 +552,8 @@ class EventStoreJobsMixin:
                     result_json text not null,
                     verdict text not null default '',
                     reviewed_at text,
-                    created_at text not null
+                    created_at text not null,
+                    foreign key(event_id) references events(id) on delete cascade
                 )
                 """
             )
@@ -619,6 +625,82 @@ class EventStoreJobsMixin:
                     "motion_audit_backfill_event_id",
                     str(latest_event_id),
                 )
+            repaired = self._repair_orphan_event_references(conn)
+            if any(repaired.values()):
+                LOGGER.info(
+                    "Repaired orphan event references: %s",
+                    ", ".join(
+                        f"{key}={value}" for key, value in repaired.items() if value
+                    ),
+                )
+
+    def _repair_orphan_event_references(
+        self, conn: sqlite3.Connection
+    ) -> dict[str, int]:
+        """Clear soft-linked child rows whose parent events no longer exist.
+
+        Deployed databases grew without hard FKs on face/audit/tracking tables.
+        New CREATE TABLE statements declare FKs for fresh installs; this repair
+        covers legacy rows left by event deletes (for example route-admission
+        rollback). Motion-audit links are nulled so training negatives survive.
+        """
+        counts = {
+            "tracking_comparisons_deleted": 0,
+            "face_observations_deleted": 0,
+            "motion_audits_event_nulled": 0,
+            "motion_audits_related_nulled": 0,
+        }
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "select name from sqlite_master where type = 'table'"
+            )
+        }
+        if "tracking_comparisons" in tables:
+            cursor = conn.execute(
+                """
+                delete from tracking_comparisons
+                where not exists (
+                    select 1 from events where events.id = tracking_comparisons.event_id
+                )
+                """
+            )
+            counts["tracking_comparisons_deleted"] = max(0, int(cursor.rowcount))
+        if "face_observations" in tables:
+            cursor = conn.execute(
+                """
+                delete from face_observations
+                where not exists (
+                    select 1 from events where events.id = face_observations.event_id
+                )
+                """
+            )
+            counts["face_observations_deleted"] = max(0, int(cursor.rowcount))
+        if "motion_audits" in tables:
+            cursor = conn.execute(
+                """
+                update motion_audits
+                set event_id = null
+                where event_id is not null
+                  and not exists (
+                    select 1 from events where events.id = motion_audits.event_id
+                  )
+                """
+            )
+            counts["motion_audits_event_nulled"] = max(0, int(cursor.rowcount))
+            cursor = conn.execute(
+                """
+                update motion_audits
+                set related_event_id = null
+                where related_event_id is not null
+                  and not exists (
+                    select 1 from events
+                    where events.id = motion_audits.related_event_id
+                  )
+                """
+            )
+            counts["motion_audits_related_nulled"] = max(0, int(cursor.rowcount))
+        return counts
 
     def enqueue_detection_job(
         self,
