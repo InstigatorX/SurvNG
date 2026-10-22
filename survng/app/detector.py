@@ -14,7 +14,12 @@ import numpy as np
 
 from .config import DetectorConfig
 from .detector_labels import load_detector_labels
-from .detector_model_settings import ModelSettingsError, read_model_metadata, resolve_output_format
+from .detector_model_settings import (
+    ModelSettingsError,
+    onnx_graph_has_nms,
+    read_model_metadata,
+    resolve_output_format,
+)
 from .inference_runtime.worker_topology import openvino_latency_compile_config
 
 LOGGER = logging.getLogger(__name__)
@@ -317,7 +322,10 @@ class OpenVinoDetector:
             if precision not in {"f16", "f32"}:
                 raise ModelSettingsError("Detector requires FP16 or FP32 image input; integer input preprocessing is not supported.")
             ops = model.get_ops() if hasattr(model, "get_ops") else []
-            self._model_has_nms = any(op.get_type_name() in {"NonMaxSuppression", "MulticlassNms", "MatrixNms"} for op in ops)
+            self._model_has_nms = any(
+                op.get_type_name() in {"NonMaxSuppression", "MulticlassNms", "MatrixNms"}
+                for op in ops
+            )
             self.model_settings.update({
                 "input_precision": precision, "input_layout": layout,
                 "constant_precisions": sorted({op.get_output_element_type(0).get_type_name() for op in ops
@@ -403,8 +411,23 @@ class OpenVinoDetector:
                 self.cv_net = None
                 return False
             self.input_shape = original_input_shape or (640, 640)
+            # Preserve NMS discovery from a partial OpenVINO load; otherwise
+            # re-inspect the ONNX graph so format resolution does not treat an
+            # embedded-NMS export as raw YOLO.
+            if not self._model_has_nms:
+                self._model_has_nms = onnx_graph_has_nms(model_path)
             self.output_format = "unknown"
-            self.model_settings["warnings"].append("OpenCV fallback uses FP32 NCHW input; OpenVINO model inspection may be incomplete.")
+            self.model_settings["warnings"].append(
+                "OpenCV fallback uses FP32 NCHW input; OpenVINO runtime compile may be incomplete."
+            )
+            if self._model_has_nms:
+                self.model_settings["warnings"].append(
+                    "OpenCV fallback retained graph NMS inspection for output-format selection."
+                )
+            else:
+                self.model_settings["warnings"].append(
+                    "OpenCV fallback could not confirm graph NMS; SurvNG NMS may still apply."
+                )
             self.backend = "opencv-dnn"
             self.loaded_device = "CPU"
             return True

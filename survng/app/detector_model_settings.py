@@ -45,6 +45,24 @@ def read_model_metadata(path: Path, model: Any = None) -> tuple[dict, list[str]]
     return metadata, warnings
 
 
+_GRAPH_NMS_OPS = frozenset({"NonMaxSuppression", "MulticlassNms", "MatrixNms"})
+
+
+def onnx_graph_has_nms(model_path: Path) -> bool:
+    """Best-effort graph NMS discovery for ONNX OpenCV-DNN fallback loads."""
+    try:
+        try:
+            from openvino import Core
+        except ImportError:
+            from openvino.runtime import Core
+
+        model = Core().read_model(model=str(model_path))
+        ops = model.get_ops() if hasattr(model, "get_ops") else []
+        return any(op.get_type_name() in _GRAPH_NMS_OPS for op in ops)
+    except Exception:
+        return False
+
+
 def final_detection_hint(metadata: dict, has_nms: bool) -> tuple[bool | None, str]:
     args = metadata_value(metadata.get("args", {}))
     args = args if isinstance(args, dict) else {}

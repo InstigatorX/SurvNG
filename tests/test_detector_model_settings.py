@@ -5,7 +5,12 @@ import pytest
 
 from survng.app.config import DetectorConfig
 from survng.app.detector import OpenVinoDetector
-from survng.app.detector_model_settings import ModelSettingsError, read_model_metadata, resolve_output_format
+from survng.app.detector_model_settings import (
+    ModelSettingsError,
+    onnx_graph_has_nms,
+    read_model_metadata,
+    resolve_output_format,
+)
 
 
 @pytest.mark.parametrize("metadata,graph,shape,expected", [
@@ -59,6 +64,33 @@ def test_malformed_metadata_is_reported(tmp_path):
     metadata, warnings = read_model_metadata(tmp_path / "model.xml")
     assert metadata == {}
     assert warnings
+
+
+def test_onnx_graph_has_nms_reads_ops(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    import sys
+
+    path = tmp_path / "model.onnx"
+    path.write_bytes(b"unused")
+
+    class FakeCore:
+        def read_model(self, **_kwargs):
+            return SimpleNamespace(
+                get_ops=lambda: [
+                    SimpleNamespace(get_type_name=lambda: "Convolution"),
+                    SimpleNamespace(get_type_name=lambda: "NonMaxSuppression"),
+                ]
+            )
+
+    monkeypatch.setitem(sys.modules, "openvino", SimpleNamespace(Core=FakeCore))
+    assert onnx_graph_has_nms(path) is True
+
+    class EmptyCore:
+        def read_model(self, **_kwargs):
+            raise RuntimeError("unreadable")
+
+    monkeypatch.setitem(sys.modules, "openvino", SimpleNamespace(Core=EmptyCore))
+    assert onnx_graph_has_nms(path) is False
 
 
 def export_test_model(tmp_path: Path, precision="f32", layout="NCHW", compressed=False):
