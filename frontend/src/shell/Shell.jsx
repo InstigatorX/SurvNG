@@ -124,6 +124,7 @@ export function Shell({ page, theme, recordingContext, session = null, onSignOut
   }, []);
   return (
     <div ref={shellRef} className={`app-shell page-${page}${railCollapsed ? " workspace-rail-collapsed" : ""}`}>
+      <a className="skip-link" href="#main-content">Skip to main content</a>
       <aside className="workspace-sidebar" aria-label="SurvNG navigation">
         <a className="workspace-brand" href={appUrl("/")} aria-label="SurvNG Live">
           <span className="brand-mark"><img src={appUrl("/static/favicon.svg")} alt="" aria-hidden="true" /></span>
@@ -159,7 +160,10 @@ export function Shell({ page, theme, recordingContext, session = null, onSignOut
         </form>
         <div className="workspace-system-bar" aria-label="System status"><RecordingHealthBar /></div>
       </header>
-      <div className="workspace-content"><h1 ref={workspaceHeadingRef} className="sr-only" tabIndex={-1}>SurvNG — {workspaceDefinition(page)?.label || "Workspace"}</h1>{children}</div>
+      <div id="main-content" className="workspace-content" tabIndex={-1}>
+        <h1 ref={workspaceHeadingRef} className="sr-only" tabIndex={-1}>SurvNG — {workspaceDefinition(page)?.label || "Workspace"}</h1>
+        {children}
+      </div>
       <nav className="mobile-workspace-nav" aria-label="Primary">
         {mobileLinks.map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} aria-label={label} href={href} key={id}><Icon size={21} /><span>{label}</span></a>)}
         <button ref={mobileMoreButtonRef} type="button" className={!mobilePrimaryIds.has(page) || mobileMoreOpen ? "active" : ""} onClick={() => setMobileMoreOpen((current) => !current)} aria-expanded={mobileMoreOpen} aria-controls="mobile-more-panel"><Rows3 size={21} /><span>More</span></button>
