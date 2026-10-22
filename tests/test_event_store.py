@@ -2929,8 +2929,13 @@ class EventStoreTest(unittest.TestCase):
     def test_tracking_comparison_history_persists_verdict_and_compact_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
+            event = store.add_event(
+                "foyer",
+                "object",
+                created_at="2026-07-27T19:19:50+00:00",
+            )
             comparison = store.save_tracking_comparison(
-                event_id=17,
+                event_id=int(event["id"]),
                 camera_id="foyer",
                 event_created_at="2026-07-27T19:19:50+00:00",
                 result={"frames_processed": 12, "engines": {"survng_hybrid": {"track_count": 2}}},
@@ -2955,27 +2960,49 @@ class EventStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
             store.TRACKING_COMPARISON_HISTORY_PER_CAMERA = 2
+            first_event = store.add_event(
+                "gate", "object", created_at="2026-07-27T19:19:50+00:00"
+            )
+            second_event = store.add_event(
+                "gate", "object", created_at="2026-07-27T19:20:50+00:00"
+            )
+            third_event = store.add_event(
+                "gate", "object", created_at="2026-07-27T19:21:50+00:00"
+            )
             first = store.save_tracking_comparison(
-                event_id=1,
+                event_id=int(first_event["id"]),
                 camera_id="gate",
-                event_created_at="one",
+                event_created_at=str(first_event["created_at"]),
                 result={"frames_processed": 1},
             )
             store.set_tracking_comparison_verdict(first["id"], "inconclusive")
             rerun = store.save_tracking_comparison(
-                event_id=1,
+                event_id=int(first_event["id"]),
                 camera_id="gate",
-                event_created_at="one",
+                event_created_at=str(first_event["created_at"]),
                 result={"frames_processed": 2},
             )
-            store.save_tracking_comparison(event_id=2, camera_id="gate", event_created_at="two", result={})
-            store.save_tracking_comparison(event_id=3, camera_id="gate", event_created_at="three", result={})
+            store.save_tracking_comparison(
+                event_id=int(second_event["id"]),
+                camera_id="gate",
+                event_created_at=str(second_event["created_at"]),
+                result={},
+            )
+            store.save_tracking_comparison(
+                event_id=int(third_event["id"]),
+                camera_id="gate",
+                event_created_at=str(third_event["created_at"]),
+                result={},
+            )
 
             history = store.tracking_comparison_history(camera_id="gate")
 
             self.assertEqual(rerun["verdict"], "")
             self.assertIsNone(rerun["reviewed_at"])
-            self.assertEqual([row["event_id"] for row in history], [3, 2])
+            self.assertEqual(
+                [row["event_id"] for row in history],
+                [int(third_event["id"]), int(second_event["id"])],
+            )
 
             with self.assertRaisesRegex(ValueError, "invalid tracking comparison verdict"):
                 store.set_tracking_comparison_verdict(history[0]["id"], "automatic")
@@ -2983,8 +3010,22 @@ class EventStoreTest(unittest.TestCase):
     def test_tracking_comparison_rejects_failed_or_absent_engine_verdict(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
-            result = store.save_tracking_comparison(event_id=1, camera_id="gate", event_created_at="now",
-                result={"engines": {"survng_hybrid": {}, "ultralytics_tracktrack": {"error": "unavailable"}}})
+            event = store.add_event(
+                "gate",
+                "object",
+                created_at="2026-07-27T19:19:50+00:00",
+            )
+            result = store.save_tracking_comparison(
+                event_id=int(event["id"]),
+                camera_id="gate",
+                event_created_at="2026-07-27T19:19:50+00:00",
+                result={
+                    "engines": {
+                        "survng_hybrid": {},
+                        "ultralytics_tracktrack": {"error": "unavailable"},
+                    }
+                },
+            )
             for verdict in ("ultralytics_tracktrack", "ultralytics_botsort"):
                 with self.assertRaisesRegex(ValueError, "successful engine"):
                     store.set_tracking_comparison_verdict(result["id"], verdict)
@@ -2993,16 +3034,22 @@ class EventStoreTest(unittest.TestCase):
     def test_tracking_comparison_accepts_deep_ocsort_and_historic_botsort_verdicts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
+            current_event = store.add_event(
+                "gate", "object", created_at="2026-07-27T19:19:50+00:00"
+            )
+            historic_event = store.add_event(
+                "gate", "object", created_at="2026-07-26T19:19:50+00:00"
+            )
             current = store.save_tracking_comparison(
-                event_id=1,
+                event_id=int(current_event["id"]),
                 camera_id="gate",
-                event_created_at="current",
+                event_created_at=str(current_event["created_at"]),
                 result={"engines": {"ultralytics_deepocsort": {}}},
             )
             historic = store.save_tracking_comparison(
-                event_id=2,
+                event_id=int(historic_event["id"]),
                 camera_id="gate",
-                event_created_at="historic",
+                event_created_at=str(historic_event["created_at"]),
                 result={"engines": {"ultralytics_botsort": {}}},
             )
 
