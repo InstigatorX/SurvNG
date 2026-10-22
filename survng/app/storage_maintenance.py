@@ -18,6 +18,8 @@ from .recorder import Recorder
 LOGGER = logging.getLogger(__name__)
 MEDIA_SAMPLE_LIMIT = 20
 RECENT_MEDIA_SECONDS = 60.0
+# Age gate for opt-in orphan reclaim (crash debris between write and DB commit).
+DEFAULT_ORPHAN_MIN_AGE_SECONDS = 86400 * 7
 QUICK_MEDIA_REFERENCE_LIMIT = 500
 HEALTHY_MEDIA_LOCATION_STATES = frozenset({"online", "full", "read_only"})
 
@@ -27,7 +29,13 @@ def _utc_now() -> str:
 
 
 class StorageReconciler:
-    """Audit media references and repair indexes without deleting user media."""
+    """Audit media references and repair indexes.
+
+    Default repair clears confirmed-missing database links and reconciles the
+    recording index. Opt-in orphan reclaim may delete unreferenced incident
+    snapshots / motion samples that are older than the configured age gate;
+    recordings and regenerable caches are never deleted here.
+    """
 
     def __init__(
         self,
@@ -48,7 +56,24 @@ class StorageReconciler:
         self.progress = progress
         self._database_write_lock = database_write_lock or threading.RLock()
 
-    def run(self, *, apply: bool = False, full: bool = False) -> dict[str, object]:
+    def run(
+        self,
+        *,
+        apply: bool = False,
+        full: bool = False,
+        reclaim_orphans: bool = False,
+        reclaim_dry_run: bool = True,
+        orphan_min_age_seconds: float | None = None,
+    ) -> dict[str, object]:
+        min_age = (
+            DEFAULT_ORPHAN_MIN_AGE_SECONDS
+            if orphan_min_age_seconds is None
+            else float(orphan_min_age_seconds)
+        )
+        if min_age < RECENT_MEDIA_SECONDS:
+            raise ValueError(
+                f"orphan_min_age_seconds must be >= {RECENT_MEDIA_SECONDS}"
+            )
         repairs = {
             "stale_index_rows_removed": 0,
             "stale_index_rows_skipped": 0,
@@ -59,6 +84,11 @@ class StorageReconciler:
             "motion_sample_references_cleared": 0,
             "face_media_references_cleared": 0,
             "media_references_skipped": 0,
+            "orphan_media_reclaim_candidates": 0,
+            "orphan_media_reclaim_candidate_bytes": 0,
+            "orphan_media_deleted": 0,
+            "orphan_media_bytes_deleted": 0,
+            "orphan_media_reclaim_skipped": 0,
         }
         repaired_recording_health: dict[str, object] | None = None
         if apply:
@@ -95,20 +125,61 @@ class StorageReconciler:
             )
             repairs.update(self._clear_missing_references(full=full))
         summary = self._scan(full=full, recording_health=repaired_recording_health)
-        return {
-            "mode": "repair" if apply else "scan",
-            "full": full,
-            "generated_at": _utc_now(),
-            "summary": summary,
-            "repairs": repairs,
-            "note": (
+        if apply and reclaim_orphans and full:
+            repairs.update(
+                self._reclaim_orphan_media(
+                    min_age_seconds=min_age,
+                    dry_run=reclaim_dry_run,
+                )
+            )
+            if not reclaim_dry_run:
+                deleted = int(repairs.get("orphan_media_deleted", 0) or 0)
+                deleted_bytes = int(repairs.get("orphan_media_bytes_deleted", 0) or 0)
+                summary = {
+                    **summary,
+                    "orphan_media_files": max(
+                        0, int(summary.get("orphan_media_files", 0) or 0) - deleted
+                    ),
+                    "orphan_media_bytes": max(
+                        0, int(summary.get("orphan_media_bytes", 0) or 0) - deleted_bytes
+                    ),
+                }
+        note = (
+            "No changes were made. Run Repair to reconcile the local databases."
+            if not apply
+            else (
                 "Repairs completed from one recording-library snapshot. Only confirmed-missing "
                 "index rows and media links were cleared. Recordings created or removed after "
                 "that snapshot are reconciled continuously. Incident, motion-audit, and face "
                 "history was preserved."
-                if apply
-                else "No changes were made. Run Repair to reconcile the local databases."
-            ),
+            )
+        )
+        if apply and reclaim_orphans and full:
+            if reclaim_dry_run:
+                note += (
+                    " Orphan media reclaim was requested in dry-run mode; "
+                    "candidates were counted but no files were deleted."
+                )
+            else:
+                note += (
+                    " Age-gated unreferenced incident snapshots and motion samples "
+                    "were deleted when reclaim_orphans was applied."
+                )
+        elif reclaim_orphans and not (apply and full):
+            note += (
+                " Orphan media reclaim requires apply=true and full=true; "
+                "it was skipped."
+            )
+        return {
+            "mode": "repair" if apply else "scan",
+            "full": full,
+            "reclaim_orphans": reclaim_orphans,
+            "reclaim_dry_run": reclaim_dry_run,
+            "orphan_min_age_seconds": min_age,
+            "generated_at": _utc_now(),
+            "summary": summary,
+            "repairs": repairs,
+            "note": note,
         }
 
     @staticmethod
@@ -265,19 +336,7 @@ class StorageReconciler:
         unindexed_files = list(recording_health.pop("unindexed_files", []))
         media_files: list[Path] = []
         if full:
-            media_roots = [
-                *self._role_roots("snapshots", "snapshots"),
-                *self._role_roots("motion_audits", "motion_samples"),
-            ]
-            for directory in dict.fromkeys(media_roots):
-                if not directory.exists():
-                    continue
-                for index, path in enumerate(directory.rglob("*"), start=1):
-                    self._raise_if_cancelled()
-                    if path.is_file():
-                        media_files.append(path)
-                    if index % 500 == 0:
-                        self._report("Scanning all incident media", index, None)
+            media_files = self._walk_incident_media_files()
             media_paths = {self._path_key(path) for path in media_files}
             candidate_references = [
                 reference for reference in all_references
@@ -324,17 +383,11 @@ class StorageReconciler:
                 camera_counts = per_camera.setdefault(camera_id, {})
                 camera_counts[kind] = camera_counts.get(kind, 0) + 1
 
-        orphan_files: list[Path] = []
-        now = datetime.now(timezone.utc).timestamp()
-        for path in media_files:
-            if self._path_key(path) in known_paths:
-                continue
-            try:
-                if now - path.stat().st_mtime < RECENT_MEDIA_SECONDS:
-                    continue
-            except OSError:
-                continue
-            orphan_files.append(path)
+        orphan_files = self._filter_orphan_media(
+            media_files,
+            known_paths,
+            min_age_seconds=RECENT_MEDIA_SECONDS,
+        )
         orphan_bytes = sum(self._file_size(path) for path in orphan_files)
         cache_bytes = None
         if full:
@@ -388,6 +441,92 @@ class StorageReconciler:
         except ValueError:
             return "Unknown camera"
         return parts[0] if parts else "Unknown camera"
+
+    def _walk_incident_media_files(self) -> list[Path]:
+        """Walk snapshot and motion-sample roots only (never recordings/caches)."""
+        media_files: list[Path] = []
+        media_roots = [
+            *self._role_roots("snapshots", "snapshots"),
+            *self._role_roots("motion_audits", "motion_samples"),
+        ]
+        for directory in dict.fromkeys(media_roots):
+            if not directory.exists():
+                continue
+            for index, path in enumerate(directory.rglob("*"), start=1):
+                self._raise_if_cancelled()
+                if path.is_file():
+                    media_files.append(path)
+                if index % 500 == 0:
+                    self._report("Scanning all incident media", index, None)
+        return media_files
+
+    def _filter_orphan_media(
+        self,
+        media_files: list[Path],
+        known_paths: set[str],
+        *,
+        min_age_seconds: float,
+    ) -> list[Path]:
+        orphan_files: list[Path] = []
+        now = datetime.now(timezone.utc).timestamp()
+        for path in media_files:
+            if self._path_key(path) in known_paths:
+                continue
+            try:
+                if now - path.stat().st_mtime < min_age_seconds:
+                    continue
+            except OSError:
+                continue
+            orphan_files.append(path)
+        return orphan_files
+
+    def _reclaim_orphan_media(
+        self,
+        *,
+        min_age_seconds: float,
+        dry_run: bool,
+    ) -> dict[str, int]:
+        """Delete or count age-gated unreferenced incident media files."""
+        self._report("Reclaiming orphan incident media", 0, None)
+        _, known_paths = self._media_references(limit=None)
+        media_files = self._walk_incident_media_files()
+        candidates = self._filter_orphan_media(
+            media_files,
+            known_paths,
+            min_age_seconds=min_age_seconds,
+        )
+        candidate_count = 0
+        candidate_bytes = 0
+        deleted = 0
+        deleted_bytes = 0
+        skipped = 0
+        for index, path in enumerate(candidates, start=1):
+            self._raise_if_cancelled()
+            if index % 100 == 0:
+                self._report("Reclaiming orphan incident media", index, len(candidates))
+            presence = path_presence(path)
+            if presence != "present" or self._media_location_blocks_clear(path):
+                skipped += 1
+                continue
+            size = self._file_size(path)
+            candidate_count += 1
+            candidate_bytes += size
+            if dry_run:
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                skipped += 1
+                continue
+            deleted += 1
+            deleted_bytes += size
+        return {
+            "orphan_media_reclaim_candidates": candidate_count,
+            "orphan_media_reclaim_candidate_bytes": candidate_bytes,
+            "orphan_media_deleted": deleted,
+            "orphan_media_bytes_deleted": deleted_bytes,
+            "orphan_media_reclaim_skipped": skipped,
+        }
 
     def _clear_missing_references(self, *, full: bool) -> dict[str, int]:
         references, _ = self._media_references(limit=None if full else QUICK_MEDIA_REFERENCE_LIMIT)
@@ -464,6 +603,9 @@ class StorageMaintenanceRunner:
         *,
         apply: bool,
         full: bool = False,
+        reclaim_orphans: bool = False,
+        reclaim_dry_run: bool = True,
+        orphan_min_age_seconds: float | None = None,
     ) -> dict[str, object]:
         with self._lock:
             if self._state.get("status") in {"running", "cancelling"}:
@@ -474,12 +616,27 @@ class StorageMaintenanceRunner:
                 "status": "running",
                 "mode": "repair" if apply else "scan",
                 "full": full,
+                "reclaim_orphans": reclaim_orphans,
+                "reclaim_dry_run": reclaim_dry_run,
+                "orphan_min_age_seconds": (
+                    DEFAULT_ORPHAN_MIN_AGE_SECONDS
+                    if orphan_min_age_seconds is None
+                    else float(orphan_min_age_seconds)
+                ),
                 "started_at": _utc_now(),
                 "progress": {"phase": "Starting", "current": 0, "total": None},
             }
             thread = threading.Thread(
                 target=self._run,
-                args=(factory, apply, full, cancel_event),
+                args=(
+                    factory,
+                    apply,
+                    full,
+                    reclaim_orphans,
+                    reclaim_dry_run,
+                    orphan_min_age_seconds,
+                    cancel_event,
+                ),
                 name="storage-maintenance",
                 daemon=True,
             )
@@ -533,25 +690,56 @@ class StorageMaintenanceRunner:
         factory: Callable[[threading.Event, Callable[[str, int, int | None], None]], StorageReconciler],
         apply: bool,
         full: bool,
+        reclaim_orphans: bool,
+        reclaim_dry_run: bool,
+        orphan_min_age_seconds: float | None,
         cancel_event: threading.Event,
     ) -> None:
+        min_age = (
+            DEFAULT_ORPHAN_MIN_AGE_SECONDS
+            if orphan_min_age_seconds is None
+            else float(orphan_min_age_seconds)
+        )
         try:
-            result = factory(cancel_event, self._update_progress).run(apply=apply, full=full)
+            result = factory(cancel_event, self._update_progress).run(
+                apply=apply,
+                full=full,
+                reclaim_orphans=reclaim_orphans,
+                reclaim_dry_run=reclaim_dry_run,
+                orphan_min_age_seconds=orphan_min_age_seconds,
+            )
         except InterruptedError:
             state: dict[str, object] = {
-                "status": "cancelled", "mode": "repair" if apply else "scan", "full": full,
+                "status": "cancelled",
+                "mode": "repair" if apply else "scan",
+                "full": full,
+                "reclaim_orphans": reclaim_orphans,
+                "reclaim_dry_run": reclaim_dry_run,
+                "orphan_min_age_seconds": min_age,
                 "finished_at": _utc_now(),
             }
         except BaseException as error:
             LOGGER.exception("Storage maintenance failed")
             state = {
-                "status": "failed", "mode": "repair" if apply else "scan",
-                "full": full, "finished_at": _utc_now(), "error": str(error),
+                "status": "failed",
+                "mode": "repair" if apply else "scan",
+                "full": full,
+                "reclaim_orphans": reclaim_orphans,
+                "reclaim_dry_run": reclaim_dry_run,
+                "orphan_min_age_seconds": min_age,
+                "finished_at": _utc_now(),
+                "error": str(error),
             }
         else:
             state = {
-                "status": "complete", "mode": "repair" if apply else "scan",
-                "full": full, "finished_at": _utc_now(), "result": result,
+                "status": "complete",
+                "mode": "repair" if apply else "scan",
+                "full": full,
+                "reclaim_orphans": reclaim_orphans,
+                "reclaim_dry_run": reclaim_dry_run,
+                "orphan_min_age_seconds": min_age,
+                "finished_at": _utc_now(),
+                "result": result,
             }
         with self._lock:
             if self._cancel_event is cancel_event:
