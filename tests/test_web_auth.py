@@ -204,10 +204,23 @@ class AuthRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["user"]["role"], "admin")
         self.assertIn("survng_session", response.cookies)
+        self.assertIn("survng_csrf", response.cookies)
+        self.assertTrue(response.json().get("csrf_token"))
+        self.assertEqual(response.json()["csrf_token"], response.cookies.get("survng_csrf"))
         cookie = response.headers.get("set-cookie") or ""
         self.assertIn("HttpOnly", cookie)
         self.assertIn("samesite=lax", cookie.lower())
         self.assertIn("max-age=1209600", cookie.lower())
+        # CSRF cookie must be readable by the SPA (not HttpOnly).
+        csrf_parts = [
+            part for part in cookie.split(",")
+            if "survng_csrf=" in part
+        ] or [
+            part for part in cookie.split("\n")
+            if "survng_csrf=" in part
+        ]
+        self.assertTrue(csrf_parts)
+        self.assertNotIn("httponly", csrf_parts[0].lower())
 
     def test_login_cookie_uses_configured_session_days(self) -> None:
         self.config.web_auth.session_days = 2

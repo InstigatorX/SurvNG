@@ -107,7 +107,9 @@ from .proxy import apply_trusted_proxy_headers, request_is_secure, scope_header
 from .security import (
     authenticate_api_token,
     authenticate_session,
+    csrf_request_valid,
     session_cookie_value,
+    session_mutation_requires_csrf,
     touch_web_session,
     is_public_api_path,
     redact_secret_text,
@@ -411,6 +413,27 @@ class SecurityBoundaryMiddleware:
         ):
             response = JSONResponse(
                 {"detail": "cross-origin API requests are not allowed"},
+                status_code=403,
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-Content-Type-Options": "nosniff",
+                    "Referrer-Policy": "same-origin",
+                },
+            )
+            await response(scope, receive, send)
+            return
+        if (
+            scope_type == "http"
+            and api_path.startswith("/api/")
+            and session_mutation_requires_csrf(method, api_path)
+            and getattr(scope.get("survng_principal"), "kind", None) == "user"
+            and not csrf_request_valid(
+                scope_header(scope, b"cookie"),
+                scope_header(scope, b"x-survng-csrf"),
+            )
+        ):
+            response = JSONResponse(
+                {"detail": "CSRF token missing or invalid"},
                 status_code=403,
                 headers={
                     "Cache-Control": "no-store",

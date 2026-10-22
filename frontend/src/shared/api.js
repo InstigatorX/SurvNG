@@ -44,12 +44,44 @@ export function recordingsHref(context, options = {}) {
   }));
 }
 
-export const fetch = async (resource, options) => {
+const CSRF_COOKIE_NAME = "survng_csrf";
+const CSRF_HEADER_NAME = "X-SurvNG-CSRF";
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+function csrfTokenFromCookie() {
+  const cookies = String(document.cookie || "").split(";");
+  for (const part of cookies) {
+    const [name, ...rest] = part.trim().split("=");
+    if (name === CSRF_COOKIE_NAME) {
+      try {
+        return decodeURIComponent(rest.join("="));
+      } catch {
+        return rest.join("=");
+      }
+    }
+  }
+  return "";
+}
+
+export const fetch = async (resource, options = {}) => {
+  const path = typeof resource === "string" ? resource : "";
+  const method = String(options.method || "GET").toUpperCase();
+  const headers = new Headers(options.headers || undefined);
+  if (
+    path.startsWith("/api/")
+    && path !== "/api/auth/login"
+    && path !== "/api/auth/bootstrap"
+    && UNSAFE_METHODS.has(method)
+  ) {
+    const csrf = csrfTokenFromCookie();
+    if (csrf && !headers.has(CSRF_HEADER_NAME)) {
+      headers.set(CSRF_HEADER_NAME, csrf);
+    }
+  }
   const response = await window.fetch(
     typeof resource === "string" ? appUrl(resource) : resource,
-    options,
+    { ...options, headers },
   );
-  const path = typeof resource === "string" ? resource : "";
   if (
     response.status === 401
     && path.startsWith("/api/")
