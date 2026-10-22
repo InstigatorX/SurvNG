@@ -550,6 +550,33 @@ class AppConfigTest(unittest.TestCase):
             self.assertEqual(saved.base_path, "/docker")
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_save_config_forces_owner_only_mode_on_existing_world_readable_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.json"
+            path.write_text('{"base_path": "/old"}\n', encoding="utf-8")
+            path.chmod(0o644)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+
+            save_config(AppConfig(base_path="/new"), str(path), assign_ids=False)
+
+            self.assertEqual(load_config(str(path)).base_path, "/new")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_save_config_persists_when_final_chmod_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.json"
+            real_chmod = os.chmod
+
+            def chmod_after_replace(target, mode, *args, **kwargs):
+                if Path(target) == path:
+                    raise OSError("chmod unsupported")
+                return real_chmod(target, mode, *args, **kwargs)
+
+            with patch("survng.app.config.os.chmod", side_effect=chmod_after_replace):
+                save_config(AppConfig(base_path="/kept"), str(path), assign_ids=False)
+
+            self.assertEqual(load_config(str(path)).base_path, "/kept")
+
     def test_missing_environment_config_path_does_not_fall_back(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "missing.json"
