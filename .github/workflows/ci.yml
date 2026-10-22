@@ -65,6 +65,24 @@ jobs:
             tests/test_timeline_identity.py
       - name: Run local observability regression tests
         run: scripts/run-tests.sh tests/test_local_observability.py tests/test_camera_status.py
+      - name: Run security and auth regression tests
+        run: |
+          scripts/run-tests.sh \
+            tests/test_bind_policy.py \
+            tests/test_api_security.py \
+            tests/test_proxy.py \
+            tests/test_ffmpeg_input.py \
+            tests/test_worker_topology.py \
+            tests/test_recording_path_indexes.py \
+            tests/test_main_database.py
+      - name: Run scene and evidence regression tests
+        run: |
+          scripts/run-tests.sh \
+            tests/test_scene_incidents.py \
+            tests/test_scene_history_extent.py \
+            tests/test_evidence_gallery.py \
+            tests/test_face_reference_retention.py \
+            tests/test_face_review_decisions.py
       - name: Run motion subsystem regression tests
         run: |
           scripts/run-tests.sh \
@@ -73,6 +91,7 @@ jobs:
             tests/test_adaptive_motion.py \
             tests/test_capture_protocols.py \
             tests/test_onvif_inspector.py \
+            tests/test_onvif_addressing.py \
             tests/test_recorded_object_detection.py \
             tests/test_recorded_decode_budget.py \
             tests/test_object_motion.py \

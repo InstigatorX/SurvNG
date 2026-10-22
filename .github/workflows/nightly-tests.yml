@@ -1,0 +1,57 @@
+name: Nightly tests
+
+on:
+  schedule:
+    # After runner maintenance (05:00 UTC); avoid overlapping heavy jobs.
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  full-python:
+    # Node 24 actions require Actions Runner >= 2.327.1.
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Free runner disk space
+        run: scripts/github-runner-cleanup.sh --publish
+      - name: Install frontend dependencies
+        run: npm --prefix frontend ci
+      - name: Build frontend static assets
+        run: npm --prefix frontend run build
+      - name: Install Python test dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt pytest anyio httpx2
+      - name: Run full Python test suite
+        env:
+          SURVNG_TEST_TIMEOUT_SECONDS: "5400"
+        run: scripts/run-tests.sh tests/test_*.py
+      - name: Install optional CPU tracking test runtime
+        run: |
+          .venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          .venv/bin/pip install -r requirements-ultralytics-tracking.txt
+      - name: Run optional tracker adapter tests
+        env:
+          SURVNG_TEST_TIMEOUT_SECONDS: "1800"
+        run: |
+          scripts/run-tests.sh \
+            tests/test_ultralytics_replacement_adapters.py \
+            tests/test_ultralytics_tracking.py
+      - name: Run frontend unit tests
+        run: node frontend/tests/run-tests.mjs unit
+      - name: Post-job cleanup
+        if: always()
+        run: scripts/github-runner-cleanup.sh --publish
