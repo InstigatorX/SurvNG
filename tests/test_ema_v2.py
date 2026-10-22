@@ -557,6 +557,29 @@ def test_terminal_detector_failure_is_distinct_from_policy_abort() -> None:
     assert snapshot["decision_counts"]["detector_failed"] == 1
 
 
+def test_request_status_transitions_reject_illegal_predecessors() -> None:
+    controller = MotionEpisodeController("gate")
+    decision = controller.observe_ema(_qualified("gate"), generation=0)
+    assert decision.intent is not None
+    intent_id = decision.intent.intent_id
+    controller.acknowledge_admission(
+        intent_id, admitted=True, occurred_monotonic=1011.1
+    )
+    controller.mark_running(intent_id, occurred_monotonic=1011.2)
+    controller.complete(intent_id, occurred_monotonic=1012.0)
+
+    # Idempotent terminal completion remains allowed.
+    again = controller.complete(intent_id, occurred_monotonic=1012.5)
+    assert again.reason is EpisodeDecisionReason.REQUEST_COMPLETED
+    assert controller.snapshot()["request_status"] == "completed"
+
+    with pytest.raises(ValueError, match="invalid detection request transition"):
+        controller.mark_running(intent_id, occurred_monotonic=1013.0)
+    with pytest.raises(ValueError, match="invalid detection request transition"):
+        controller.fail(intent_id, occurred_monotonic=1013.1)
+    assert controller.snapshot()["request_status"] == "completed"
+
+
 def test_distinct_later_track_reserves_bounded_followup_in_same_episode() -> None:
     controller = MotionEpisodeController("gate", minimum_followup_interval_seconds=1.0)
     controller.start_generation(1)
