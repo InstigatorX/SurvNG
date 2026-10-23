@@ -753,6 +753,27 @@
   white-space: nowrap !important;
 }
 
+.skip-link {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  z-index: 10000;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--workspace-control-radius, 4px);
+  background: var(--control);
+  color: var(--ink);
+  text-decoration: none;
+  transform: translateY(calc(-100% - 16px));
+}
+
+.skip-link:focus,
+.skip-link:focus-visible {
+  transform: translateY(0);
+  outline: 2px solid color-mix(in srgb, var(--accent) 76%, white);
+  outline-offset: 2px;
+}
+
 button:hover:not(:disabled),
 .nav-button:hover,
 select:hover,
