@@ -13,7 +13,7 @@ The image is immutable. All installation-specific state lives outside it:
 
 | Container path | Contents | Storage recommendation |
 | --- | --- | --- |
-| `/config` | Writable `config.json`, including camera and service credentials | Local filesystem, private and backed up |
+| `/config` | Writable `config.json` plus private `secrets.json` for credentials | Local filesystem, private and backed up |
 | `/data` | SQLite databases, recording index, image cache, ONVIF cache, and OpenVINO cache | Local SSD/filesystem |
 | `/media` | Recordings, snapshots, event clips, HLS, and playback cache | Existing host-mounted NFS or local recording disk |
 | `/models` | Detection, face, and ReID models | Read-only local bind mount |
@@ -41,12 +41,17 @@ so Linux host networking is recommended for an NVR.
 The repository, Docker build context, and image exclude the live config,
 databases, media, certificates, environment files, and model binaries. The
 checked-in Docker config contains no cameras or credentials. On first start the
-container creates `/config/config.json` with mode `0600`.
+container creates `/config/config.json` with mode `0600`. After the first
+admin save, SurvNG also writes `/config/secrets.json` (`0600`) for camera,
+MQTT, AI, API-token, and web-auth secret material; `config.json` keeps
+placeholders instead. Legacy single-file installs still load until the next
+save. Override the sidecar path with `SURVNG_SECRETS_PATH` when needed.
 
 SurvNG must be able to read the plaintext camera, MQTT, and AI credentials in
 order to connect to those services. Protect them by limiting host access to the
 config directory, using an encrypted host disk or secret-backed filesystem when
-required, and backing the file up only to an encrypted destination. Do not put
+required, and backing **both** `config.json` and `secrets.json` only to an
+encrypted destination. Do not put
 credentials in `.env`: Docker environment variables are easier to expose
 through process and container inspection. The Admin API masks stored secrets,
 and SurvNG redacts recognized secret values from its in-memory logs.
