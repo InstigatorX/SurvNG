@@ -452,6 +452,82 @@ class StorageReconcilerTest(unittest.TestCase):
             self.assertTrue(recording_orphan.is_file())
             self.assertEqual(result["summary"]["orphan_media_files"], 1)
 
+    def test_orphan_reclaim_keeps_scene_gallery_and_acquisition_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            storage = root / "media"
+            storage.mkdir()
+            events = EventStore(storage, database_dir=root / "database")
+            recorder = Recorder(
+                "ffmpeg", storage, segment_seconds=10, index_dir=root / "index"
+            )
+            cover = storage / "snapshots" / "gate" / "cover.jpg"
+            cover.parent.mkdir(parents=True)
+            cover.write_bytes(b"cover")
+            event_id = events.add_event("gate", "object", snapshot_path=str(cover))["id"]
+            gallery = storage / "snapshots" / "gate" / "gallery.jpg"
+            asset = storage / "snapshots" / "gate" / "supporting.jpg"
+            acquired = storage / "snapshots" / "gate" / "acquired.jpg"
+            pending_cover = storage / "snapshots" / "gate" / "pending-cover.jpg"
+            orphan = storage / "snapshots" / "gate" / "orphan.jpg"
+            for path, payload in (
+                (gallery, b"gallery"),
+                (asset, b"asset"),
+                (acquired, b"acquired"),
+                (pending_cover, b"pending"),
+                (orphan, b"orphan"),
+            ):
+                path.write_bytes(payload)
+            old = time.time() - 3600
+            for path in (gallery, asset, acquired, pending_cover, orphan):
+                os.utime(path, (old, old))
+            with sqlite3.connect(events.db_path) as connection:
+                connection.execute(
+                    "INSERT INTO scene_evidence_images("
+                    "id, event_id, frame_key, captured_epoch, snapshot_path, payload_json, state"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    ("gallery-1", event_id, "frame-1", old, str(gallery), "{}", "ready"),
+                )
+                connection.execute(
+                    "INSERT INTO scene_snapshot_assets("
+                    "snapshot_path, camera_id, created_at, snapshot_size_bytes"
+                    ") VALUES (?, ?, ?, ?)",
+                    (str(asset), "gate", "2026-01-01T00:00:00+00:00", asset.stat().st_size),
+                )
+                connection.execute(
+                    "INSERT INTO acquired_samples("
+                    "id, camera_id, captured_epoch, source, status, metadata_json, "
+                    "snapshot_path, recording_path, created_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "sample-1", "gate", old, "test", "complete", "{}",
+                        str(acquired), "", old,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO event_cover_requirements("
+                    "event_id, state, deadline_epoch, available_at_epoch, payload_json, "
+                    "created_at, updated_at"
+                    ") VALUES (?, 'pending', ?, ?, json_object('snapshot_path', ?), ?, ?)",
+                    (event_id, old + 86400, old, str(pending_cover), old, old),
+                )
+
+            result = StorageReconciler(storage, events.db_path, recorder).run(
+                apply=True,
+                full=True,
+                reclaim_orphans=True,
+                reclaim_dry_run=False,
+                orphan_min_age_seconds=600,
+            )
+
+            self.assertEqual(result["repairs"]["orphan_media_deleted"], 1)
+            self.assertFalse(orphan.exists())
+            self.assertTrue(cover.is_file())
+            self.assertTrue(gallery.is_file())
+            self.assertTrue(asset.is_file())
+            self.assertTrue(acquired.is_file())
+            self.assertTrue(pending_cover.is_file())
+
     def test_orphan_reclaim_skips_when_media_location_is_offline(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
