@@ -1407,11 +1407,9 @@ def save_config(
     config = normalize_config(config.model_copy(deep=True), assign_ids=assign_ids)
     config_path = _config_path(path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    existing_mode = 0o600
-    try:
-        existing_mode = config_path.stat().st_mode & 0o777
-    except FileNotFoundError:
-        pass
+    # Owner-only: config.json holds camera/MQTT/AI/session secrets in plaintext.
+    # Never preserve a looser mode from an earlier copy of the file.
+    private_mode = 0o600
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -1423,13 +1421,20 @@ def save_config(
             delete=False,
         ) as handle:
             temporary_path = Path(handle.name)
-            os.chmod(temporary_path, existing_mode)
+            try:
+                os.chmod(temporary_path, private_mode)
+            except OSError:
+                pass
             json.dump(config.model_dump(mode="json"), handle, indent=2)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, config_path)
         temporary_path = None
+        try:
+            os.chmod(config_path, private_mode)
+        except OSError:
+            pass
         try:
             directory_fd = os.open(config_path.parent, os.O_RDONLY)
             try:
