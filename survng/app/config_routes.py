@@ -15,9 +15,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from .config import ApiScope, ApiTokenConfig, AppConfig, CameraConfig, DetectionZone, camera_by_id, slugify_camera_id
+from .config_secrets import SECRET_PLACEHOLDER, mask_url_password
 from .security import hash_api_token, redact_secret_text
 
-SECRET_PLACEHOLDER = "__SURVNG_SECRET_SET__"
 LOGGER = logging.getLogger(__name__)
 _URL_SECRET_KEYS = frozenset({
     "password", "passwd", "pass", "pwd", "token", "accesstoken", "refreshtoken",
@@ -27,6 +27,10 @@ _URL_SECRET_KEYS = frozenset({
 
 def _url_secret_key(key: str) -> bool:
     return unquote_plus(key).casefold().replace("_", "").replace("-", "") in _URL_SECRET_KEYS
+
+
+def _mask_url_password(value: str | None) -> str | None:
+    return mask_url_password(value)
 
 
 def _query_secrets(query: str) -> dict[str, list[str]]:
@@ -87,25 +91,6 @@ class ConfigRouteDependencies:
     validate_config: Callable[[AppConfig], None]
     lock: threading.RLock
     probe_limiter: threading.BoundedSemaphore
-
-
-def _mask_url_password(value: str | None) -> str | None:
-    if not value:
-        return value
-    try:
-        parsed = urlsplit(value)
-    except ValueError:
-        return value
-    userinfo, separator, host = parsed.netloc.rpartition("@")
-    if separator and ":" in userinfo:
-        username, _password = userinfo.split(":", 1)
-        parsed = parsed._replace(netloc=f"{username}:{SECRET_PLACEHOLDER}@{host}")
-    # Keep non-secret values and their encoding byte-for-byte (some cameras sign URLs).
-    parts = []
-    for part in parsed.query.split("&"):
-        key, separator, value = part.partition("=")
-        parts.append(f"{key}={SECRET_PLACEHOLDER}" if separator and value and _url_secret_key(key) else part)
-    return urlunsplit(parsed._replace(query="&".join(parts)))
 
 
 def _encoded_url_password(value: str | None) -> str | None:

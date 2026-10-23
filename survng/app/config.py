@@ -1388,6 +1388,8 @@ def config_path(path: str | Path | None = None) -> Path:
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:
+    from .config_secrets import apply_secrets_to_raw_config, load_secrets_file, secrets_path
+
     config_path = _config_path(path)
     if not config_path.exists():
         if path is None and os.environ.get(CONFIG_PATH_ENV, "").strip():
@@ -1396,7 +1398,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             )
         config_path = Path("config.example.json")
     with config_path.open("r", encoding="utf-8") as handle:
-        return normalize_config(AppConfig.model_validate(json.load(handle)), assign_ids=False)
+        raw = json.load(handle)
+    # Prefer sidecar secrets when present; legacy monolithic config.json still loads.
+    sidecar = load_secrets_file(secrets_path(config_path))
+    if sidecar is not None:
+        raw = apply_secrets_to_raw_config(raw, sidecar)
+    return normalize_config(AppConfig.model_validate(raw), assign_ids=False)
 
 
 def save_config(
@@ -1404,12 +1411,22 @@ def save_config(
     path: str | Path | None = None,
     assign_ids: bool = True,
 ) -> None:
+    from .config_secrets import (
+        PRIVATE_FILE_MODE,
+        extract_secrets,
+        public_config_dict,
+        save_secrets_file,
+        secrets_path,
+    )
+
     config = normalize_config(config.model_copy(deep=True), assign_ids=assign_ids)
     config_path = _config_path(path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    # Owner-only: config.json holds camera/MQTT/AI/session secrets in plaintext.
-    # Never preserve a looser mode from an earlier copy of the file.
-    private_mode = 0o600
+    # Write secrets first so a crash mid-save never leaves redacted config.json
+    # without a matching secrets.json. Legacy plaintext configs remain readable
+    # until this save completes and replaces them. Both files are forced 0600.
+    save_secrets_file(extract_secrets(config), secrets_path(config_path))
+    public_payload = public_config_dict(config)
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -1422,17 +1439,17 @@ def save_config(
         ) as handle:
             temporary_path = Path(handle.name)
             try:
-                os.chmod(temporary_path, private_mode)
+                os.chmod(temporary_path, PRIVATE_FILE_MODE)
             except OSError:
                 pass
-            json.dump(config.model_dump(mode="json"), handle, indent=2)
+            json.dump(public_payload, handle, indent=2)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, config_path)
         temporary_path = None
         try:
-            os.chmod(config_path, private_mode)
+            os.chmod(config_path, PRIVATE_FILE_MODE)
         except OSError:
             pass
         try:
