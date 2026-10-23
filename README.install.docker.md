@@ -218,8 +218,9 @@ curl -fsS http://127.0.0.1:8088/api/health
 ```
 
 First start writes `/var/lib/survng/config/config.json` (mode `0600`) and seeds
-`go2rtc.yaml` if missing. Detection stays off until models are installed and
-enabled in Admin.
+`go2rtc.yaml` if missing. After the first Admin save, credentials also live in
+`/var/lib/survng/config/secrets.json` (`0600`) — back up both files together.
+Detection stays off until models are installed and enabled in Admin.
 
 ## 6. Open SurvNG
 

@@ -112,7 +112,9 @@ PY
 ```
 
 Camera, MQTT, and AI credentials belong in this file (or Admin), not in the
-systemd unit.
+systemd unit. After the first Admin save, SurvNG also writes a colocated
+`secrets.json` (`0600`) for those credentials and keeps placeholders in
+`config.json` — back up both files together.
 
 ## 6. Optional: go2rtc restreamer
 
@@ -376,7 +378,7 @@ curl -fsS http://127.0.0.1:8088/api/health
 
 ```bash
 sudo systemctl stop survng.service
-sudo tar -C "$SURVNG_ROOT" -czf /root/survng-native-backup.tgz config.json models
+sudo tar -C "$SURVNG_ROOT" -czf /root/survng-native-backup.tgz config.json secrets.json models
 sudo tar -C /var/lib/survng -czf /root/survng-go2rtc-backup.tgz go2rtc.yaml 2>/dev/null || true
 sudo systemctl start survng.service
 ```
