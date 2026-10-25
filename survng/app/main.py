@@ -97,6 +97,7 @@ from .proxy import apply_trusted_proxy_headers, request_is_secure
 from .security import (
     authenticate_api_token,
     authenticate_session,
+    configure_web_session_revocations,
     session_cookie_value,
     touch_web_session,
     is_public_api_path,
@@ -106,6 +107,7 @@ from .security import (
 from .storage_maintenance import StorageMaintenanceRunner
 
 config = load_config()
+configure_web_session_revocations(Path(config.storage_dir) / "web_session_revocations.json")
 LOGGER = logging.getLogger(__name__)
 LOG_LINES: deque[dict] = deque(maxlen=1000)
 FACE_OBSERVATIONS_SYNCED = False
@@ -961,6 +963,7 @@ def _publish_config_runtime(next_config: AppConfig) -> None:
     global config
     config = next_config
     get_manager().config = next_config
+    configure_web_session_revocations(Path(next_config.storage_dir) / "web_session_revocations.json")
 
 
 app.include_router(

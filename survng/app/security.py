@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
+import logging
 import os
 import re
 import secrets
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
-
 from urllib.parse import unquote
 
 from .config import ApiAuthConfig, ApiScope, WebAuthConfig, WebRole, WebUserConfig
@@ -57,6 +60,8 @@ DEFAULT_SESSION_DAYS = 14
 SESSION_TTL_SECONDS = DEFAULT_SESSION_DAYS * 24 * 60 * 60
 _SESSION_REGISTRY_LIMIT = 1000
 _SESSION_REGISTRY_LOCK = threading.RLock()
+_REVOCATION_PATH: Path | None = None
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -79,11 +84,106 @@ def _session_digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def configure_web_session_revocations(path: Path | None) -> None:
+    """Load the durable logout denylist. Safe to call again after config reload."""
+    global _REVOCATION_PATH
+    with _SESSION_REGISTRY_LOCK:
+        _REVOCATION_PATH = Path(path) if path is not None else None
+        if _REVOCATION_PATH is not None:
+            _load_revocations_locked()
+
+
+def _remember_revocation_locked(digest: str, expires_at: int) -> None:
+    current = _REVOKED_WEB_SESSIONS.get(digest, 0)
+    _REVOKED_WEB_SESSIONS[digest] = max(current, int(expires_at))
+
+
+def _load_revocations_locked() -> None:
+    path = _REVOCATION_PATH
+    if path is None or not path.is_file():
+        return
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        LOGGER.warning("could not read revoked web sessions from %s", path, exc_info=True)
+        return
+    if not isinstance(raw, dict):
+        LOGGER.warning("revoked web session store %s was not an object", path)
+        return
+    now = int(time.time())
+    for key, value in raw.items():
+        digest = str(key).strip().lower()
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            continue
+        try:
+            expires_at = int(value)
+        except (TypeError, ValueError):
+            continue
+        if expires_at <= now:
+            continue
+        _remember_revocation_locked(digest, expires_at)
+
+
+def _persist_revocations_locked() -> None:
+    path = _REVOCATION_PATH
+    if path is None:
+        return
+    payload = {
+        digest: int(expires_at)
+        for digest, expires_at in _REVOKED_WEB_SESSIONS.items()
+    }
+    temporary_path: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            os.chmod(temporary_path, 0o600)
+            json.dump(payload, handle, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+    except OSError:
+        LOGGER.warning("could not persist revoked web sessions to %s", path, exc_info=True)
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _trim_web_sessions_locked() -> None:
+    while len(_WEB_SESSIONS) > _SESSION_REGISTRY_LIMIT:
+        oldest = min(_WEB_SESSIONS.values(), key=lambda item: item.last_seen_at)
+        removed = _WEB_SESSIONS.pop(oldest.token_digest, None)
+        if removed is None:
+            break
+
+
 def register_web_session(token: str, user_id: str, issued_at: int, expires_at: int, client_ip: str = "") -> None:
     digest = _session_digest(token)
     now = int(time.time())
     with _SESSION_REGISTRY_LOCK:
         _prune_web_sessions(now)
+        if digest in _REVOKED_WEB_SESSIONS:
+            return
         _WEB_SESSIONS[digest] = WebSessionRecord(
             token_digest=digest,
             user_id=user_id,
@@ -92,9 +192,7 @@ def register_web_session(token: str, user_id: str, issued_at: int, expires_at: i
             last_seen_at=now,
             client_ip=client_ip,
         )
-        if len(_WEB_SESSIONS) > _SESSION_REGISTRY_LIMIT:
-            oldest = min(_WEB_SESSIONS.values(), key=lambda item: item.last_seen_at)
-            _WEB_SESSIONS.pop(oldest.token_digest, None)
+        _trim_web_sessions_locked()
 
 
 def touch_web_session(token: str, client_ip: str = "") -> None:
@@ -102,29 +200,80 @@ def touch_web_session(token: str, client_ip: str = "") -> None:
     digest = _session_digest(token)
     with _SESSION_REGISTRY_LOCK:
         _prune_web_sessions(now)
+        if digest in _REVOKED_WEB_SESSIONS:
+            return
         record = _WEB_SESSIONS.get(digest)
-        if record is not None:
-            record.last_seen_at = now
-            if client_ip:
-                record.client_ip = client_ip
+        if record is None:
+            identity = _session_registry_identity(token)
+            if identity is None:
+                return
+            user_id, issued, expires = identity
+            if expires <= now:
+                return
+            _WEB_SESSIONS[digest] = WebSessionRecord(
+                token_digest=digest,
+                user_id=user_id,
+                issued_at=issued,
+                expires_at=expires,
+                last_seen_at=now,
+                client_ip=client_ip,
+            )
+            _trim_web_sessions_locked()
+            return
+        record.last_seen_at = now
+        if client_ip:
+            record.client_ip = client_ip
 
 
 def revoke_web_session(session_id: str) -> bool:
+    if not session_id:
+        return False
     with _SESSION_REGISTRY_LOCK:
         for digest, record in tuple(_WEB_SESSIONS.items()):
             if digest == session_id or digest.startswith(session_id):
                 _WEB_SESSIONS.pop(digest, None)
-                _REVOKED_WEB_SESSIONS[digest] = record.expires_at
+                _remember_revocation_locked(digest, record.expires_at)
+                _persist_revocations_locked()
                 return True
     return False
+
+
+def revoke_presented_web_session(token: str, session_key: str) -> bool:
+    """Denylist one cookie even when this process has lost its session list.
+
+    Logout used to no-op unless the token was still in the in-memory registry.
+    A restart clears that registry while the signed cookie stays valid, so a
+    copied session kept working after logout. Unsigned cookies are ignored so
+    the public logout route cannot fill the denylist.
+    """
+    if not token or not session_key:
+        return False
+    digest = _session_digest(token)
+    now = int(time.time())
+    verified = decode_session(token, session_key, now=now) is not None
+    identity = _session_registry_identity(token)
+    with _SESSION_REGISTRY_LOCK:
+        _prune_web_sessions(now)
+        record = _WEB_SESSIONS.pop(digest, None)
+        if record is None and not verified:
+            return False
+        expires_at = record.expires_at if record is not None else (identity[2] if identity else 0)
+        if expires_at <= now:
+            return record is not None
+        _remember_revocation_locked(digest, expires_at)
+        _persist_revocations_locked()
+        return True
 
 
 def revoke_web_sessions_for_user(user_id: str) -> int:
     with _SESSION_REGISTRY_LOCK:
         matching = [digest for digest, record in _WEB_SESSIONS.items() if record.user_id == user_id]
+        if not matching:
+            return 0
         for digest in matching:
             record = _WEB_SESSIONS.pop(digest)
-            _REVOKED_WEB_SESSIONS[digest] = record.expires_at
+            _remember_revocation_locked(digest, record.expires_at)
+        _persist_revocations_locked()
         return len(matching)
 
 
@@ -150,9 +299,13 @@ def _prune_web_sessions(now: int) -> None:
     for digest, record in tuple(_WEB_SESSIONS.items()):
         if record.expires_at <= now:
             _WEB_SESSIONS.pop(digest, None)
+    removed_revocation = False
     for digest, expires_at in tuple(_REVOKED_WEB_SESSIONS.items()):
         if expires_at <= now:
             _REVOKED_WEB_SESSIONS.pop(digest, None)
+            removed_revocation = True
+    if removed_revocation:
+        _persist_revocations_locked()
 
 
 def is_web_session_revoked(token: str) -> bool:
@@ -160,6 +313,8 @@ def is_web_session_revoked(token: str) -> bool:
     with _SESSION_REGISTRY_LOCK:
         _prune_web_sessions(int(time.time()))
         return digest in _REVOKED_WEB_SESSIONS
+
+
 _SCRYPT_N = 2**14
 _SCRYPT_R = 8
 _SCRYPT_P = 1
@@ -347,6 +502,17 @@ def session_times(token: str) -> tuple[int, int] | None:
     if not parts[0] or issued > expires:
         return None
     return issued, expires
+
+
+def _session_registry_identity(token: str) -> tuple[str, int, int] | None:
+    times = session_times(token)
+    if times is None:
+        return None
+    user_id = token.split(":", 1)[0]
+    if not user_id:
+        return None
+    issued, expires = times
+    return user_id, issued, expires
 
 
 def principal_for_web_user(user: WebUserConfig) -> ApiPrincipal:
