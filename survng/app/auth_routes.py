@@ -27,6 +27,7 @@ from .security import (
     hash_password,
     public_user_payload,
     register_web_session,
+    revoke_presented_web_session,
     revoke_web_session,
     revoke_web_sessions_for_user,
     session_cookie_value,
@@ -298,7 +299,7 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
     def logout(request: Request) -> JSONResponse:
         token = session_cookie_value(request.headers.get("cookie", ""))
         if token:
-            revoke_web_session(hashlib.sha256(token.encode("utf-8")).hexdigest())
+            revoke_presented_web_session(token, deps.get_config().web_auth.session_key)
         response = JSONResponse({"ok": True})
         _clear_session_cookie(response, request, deps.get_config())
         return response

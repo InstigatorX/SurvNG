@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from fastapi import FastAPI
@@ -15,10 +17,12 @@ from survng.app.auth_routes import (
 )
 from survng.app.config import AppConfig, WebAuthConfig, WebUserConfig
 from survng.app.config_routes import restore_config_secrets
+from survng.app import security
 from survng.app.security import (
     SESSION_COOKIE_NAME,
     authenticate_password,
     authenticate_session,
+    configure_web_session_revocations,
     decode_session,
     encode_session,
     hash_password,
@@ -26,9 +30,11 @@ from survng.app.security import (
     required_api_scope,
     list_web_sessions,
     register_web_session,
+    revoke_presented_web_session,
     revoke_web_session,
     session_times,
     scopes_for_web_role,
+    touch_web_session,
     verify_password,
 )
 
@@ -219,6 +225,16 @@ class AuthRouteTest(unittest.TestCase):
         self.assertEqual(ended.status_code, 200)
         self.assertIsNone(authenticate_session(f"{SESSION_COOKIE_NAME}={token}", self.config.web_auth))
 
+    def test_logout_invalidates_a_cookie_missing_from_the_registry(self) -> None:
+        login = self.client.post("/api/auth/login", json={"username": "alex", "password": "correct-horse"})
+        token = login.cookies.get(SESSION_COOKIE_NAME)
+        self.assertTrue(token)
+        security._WEB_SESSIONS.pop(security._session_digest(token), None)
+        self.client.cookies.set(SESSION_COOKIE_NAME, token)
+        response = self.client.post("/api/auth/logout")
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(authenticate_session(f"{SESSION_COOKIE_NAME}={token}", self.config.web_auth))
+
     def test_login_rejects_bad_password(self) -> None:
         response = self.client.post("/api/auth/login", json={"username": "alex", "password": "nope-nope"})
         self.assertEqual(response.status_code, 401)
@@ -345,6 +361,66 @@ class AuthRouteTest(unittest.TestCase):
             })
         self.assertEqual(allowed.status_code, 201)
         self.assertEqual(self.config.web_auth.users[0].username, "rootadmin")
+
+
+class SessionRevocationPersistenceTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._sessions = dict(security._WEB_SESSIONS)
+        self._revoked = dict(security._REVOKED_WEB_SESSIONS)
+        self._path = security._REVOCATION_PATH
+        security._WEB_SESSIONS.clear()
+        security._REVOKED_WEB_SESSIONS.clear()
+        configure_web_session_revocations(None)
+        self.auth = WebAuthConfig(enabled=True, session_key="b" * 64, users=[make_user("rowan")])
+        self.token = encode_session("rowan", self.auth.session_key, now=1_800_000_000, ttl_seconds=3600)
+        issued, expires = session_times(self.token) or (0, 0)
+        register_web_session(self.token, "rowan", issued, expires, "198.51.100.10")
+
+    def tearDown(self) -> None:
+        security._WEB_SESSIONS.clear()
+        security._WEB_SESSIONS.update(self._sessions)
+        security._REVOKED_WEB_SESSIONS.clear()
+        security._REVOKED_WEB_SESSIONS.update(self._revoked)
+        security._REVOCATION_PATH = self._path
+
+    def _forget_process_memory(self) -> None:
+        security._WEB_SESSIONS.clear()
+        security._REVOKED_WEB_SESSIONS.clear()
+
+    def test_logout_rejects_a_cookie_missing_from_the_memory_registry(self) -> None:
+        self._forget_process_memory()
+        self.assertIsNotNone(authenticate_session(f"{SESSION_COOKIE_NAME}={self.token}", self.auth))
+        self.assertTrue(revoke_presented_web_session(self.token, self.auth.session_key))
+        self.assertIsNone(authenticate_session(f"{SESSION_COOKIE_NAME}={self.token}", self.auth))
+
+    def test_forged_cookie_does_not_grow_the_denylist(self) -> None:
+        forged = "rowan:1800000000:1800003600:0:not-a-real-nonce:deadbeef"
+        self.assertFalse(revoke_presented_web_session(forged, self.auth.session_key))
+        self.assertEqual(security._REVOKED_WEB_SESSIONS, {})
+
+    def test_revocation_survives_process_restart_and_live_sessions_do_not(self) -> None:
+        other = encode_session("rowan", self.auth.session_key, now=1_800_000_100, ttl_seconds=3600)
+        other_issued, other_expires = session_times(other) or (0, 0)
+        register_web_session(other, "rowan", other_issued, other_expires, "198.51.100.11")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "web_session_revocations.json"
+            configure_web_session_revocations(path)
+            self.assertTrue(revoke_web_session(security._session_digest(self.token)))
+            self.assertTrue(path.is_file())
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self._forget_process_memory()
+            configure_web_session_revocations(path)
+            self.assertIsNone(authenticate_session(f"{SESSION_COOKIE_NAME}={self.token}", self.auth))
+            self.assertIsNotNone(authenticate_session(f"{SESSION_COOKIE_NAME}={other}", self.auth))
+
+    def test_touch_restores_a_session_the_admin_can_terminate(self) -> None:
+        self._forget_process_memory()
+        touch_web_session(self.token, "203.0.113.8")
+        visible = [item for item in list_web_sessions() if item["user_id"] == "rowan"]
+        self.assertEqual(len(visible), 1)
+        self.assertEqual(visible[0]["client_ip"], "203.0.113.8")
+        self.assertTrue(revoke_web_session(visible[0]["id"]))
+        self.assertIsNone(authenticate_session(f"{SESSION_COOKIE_NAME}={self.token}", self.auth))
 
 
 class SessionPrincipalTest(unittest.TestCase):
