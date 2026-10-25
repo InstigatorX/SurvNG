@@ -24,7 +24,9 @@ from survng.app.config_secrets import (
     SECRET_PLACEHOLDER,
     apply_secrets_to_raw_config,
     extract_secrets,
+    load_secrets_file,
     public_config_dict,
+    secrets_key_path,
     secrets_path,
 )
 from survng.app.security import hash_api_token, hash_password
@@ -93,13 +95,21 @@ class ConfigSecretsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "config.json"
             sidecar = Path(tmpdir) / "secrets.json"
+            key_file = Path(tmpdir) / "secrets.key"
             config = _secret_config()
             save_config(config, str(path), assign_ids=False)
 
             public = json.loads(path.read_text(encoding="utf-8"))
-            secrets = json.loads(sidecar.read_text(encoding="utf-8"))
+            envelope = json.loads(sidecar.read_text(encoding="utf-8"))
+            secrets = load_secrets_file(sidecar)
+            assert secrets is not None
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(sidecar.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(key_file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(envelope["version"], 2)
+            self.assertEqual(envelope["alg"], "AESGCM")
+            self.assertNotIn("mqtt", envelope)
+            self.assertNotIn("mqtt-secret", sidecar.read_text(encoding="utf-8"))
             self.assertEqual(public["mqtt"]["password"], SECRET_PLACEHOLDER)
             self.assertEqual(public["audit_ai"]["api_key"], SECRET_PLACEHOLDER)
             self.assertEqual(public["api_auth"]["tokens"][0]["token_hash"], SECRET_PLACEHOLDER)
@@ -127,14 +137,56 @@ class ConfigSecretsTest(unittest.TestCase):
             self.assertEqual(loaded.cameras[0].live_stream_url, config.cameras[0].live_stream_url)
             self.assertEqual(loaded.cameras[0].onvif.password, config.cameras[0].onvif.password)
 
+    def test_plaintext_sidecar_still_loads_until_next_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.json"
+            sidecar = Path(tmpdir) / "secrets.json"
+            config = _secret_config()
+            public = public_config_dict(config)
+            path.write_text(json.dumps(public, indent=2) + "\n", encoding="utf-8")
+            sidecar.write_text(
+                json.dumps(extract_secrets(config), indent=2) + "\n",
+                encoding="utf-8",
+            )
+            loaded = load_config(str(path))
+            self.assertEqual(loaded.mqtt.password, "mqtt-secret")
+            self.assertFalse((Path(tmpdir) / "secrets.key").exists())
+
+            save_config(loaded, str(path), assign_ids=False)
+            envelope = json.loads(sidecar.read_text(encoding="utf-8"))
+            self.assertEqual(envelope["version"], 2)
+            self.assertNotIn("mqtt-secret", sidecar.read_text(encoding="utf-8"))
+            self.assertTrue((Path(tmpdir) / "secrets.key").is_file())
+            reloaded = load_config(str(path))
+            self.assertEqual(reloaded.mqtt.password, "mqtt-secret")
+
+    def test_wrong_key_rejects_encrypted_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.json"
+            sidecar = Path(tmpdir) / "secrets.json"
+            key_file = Path(tmpdir) / "secrets.key"
+            save_config(_secret_config(), str(path), assign_ids=False)
+            key_file.write_bytes(b"A" * 32)
+            with self.assertRaises(ValueError):
+                load_secrets_file(sidecar)
+
     def test_secrets_path_env_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_file = Path(tmpdir) / "config.json"
             sidecar = Path(tmpdir) / "private" / "creds.json"
-            with patch.dict(os.environ, {"SURVNG_SECRETS_PATH": str(sidecar)}):
+            key_file = Path(tmpdir) / "private" / "creds.key"
+            with patch.dict(
+                os.environ,
+                {
+                    "SURVNG_SECRETS_PATH": str(sidecar),
+                    "SURVNG_SECRETS_KEY_PATH": str(key_file),
+                },
+            ):
                 self.assertEqual(secrets_path(config_file), sidecar)
+                self.assertEqual(secrets_key_path(sidecar), key_file)
                 save_config(_secret_config(), str(config_file), assign_ids=False)
                 self.assertTrue(sidecar.is_file())
+                self.assertTrue(key_file.is_file())
                 self.assertFalse((Path(tmpdir) / "secrets.json").exists())
 
     def test_merge_prefers_sidecar_secret_fields(self) -> None:
