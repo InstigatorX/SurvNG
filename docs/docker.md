@@ -13,7 +13,7 @@ The image is immutable. All installation-specific state lives outside it:
 
 | Container path | Contents | Storage recommendation |
 | --- | --- | --- |
-| `/config` | Writable `config.json`, including camera and service credentials | Local filesystem, private and backed up |
+| `/config` | Writable `config.json` plus encrypted `secrets.json` / `secrets.key` | Local filesystem, private and backed up |
 | `/data` | SQLite databases, recording index, image cache, ONVIF cache, and OpenVINO cache | Local SSD/filesystem |
 | `/media` | Recordings, snapshots, event clips, HLS, and playback cache | Existing host-mounted NFS or local recording disk |
 | `/models` | Detection, face, and ReID models | Read-only local bind mount |
@@ -41,12 +41,19 @@ so Linux host networking is recommended for an NVR.
 The repository, Docker build context, and image exclude the live config,
 databases, media, certificates, environment files, and model binaries. The
 checked-in Docker config contains no cameras or credentials. On first start the
-container creates `/config/config.json` with mode `0600`.
+container creates `/config/config.json` with mode `0600`. After the first
+admin save, SurvNG also writes AES-GCM-encrypted `/config/secrets.json`
+(`0600`) plus a colocated `/config/secrets.key` (`0600`) for camera, MQTT, AI,
+API-token, and web-auth secret material; `config.json` keeps placeholders
+instead. Legacy single-file installs and plaintext sidecars still load until
+the next save. Override paths with `SURVNG_SECRETS_PATH` /
+`SURVNG_SECRETS_KEY_PATH` when needed.
 
-SurvNG must be able to read the plaintext camera, MQTT, and AI credentials in
-order to connect to those services. Protect them by limiting host access to the
-config directory, using an encrypted host disk or secret-backed filesystem when
-required, and backing the file up only to an encrypted destination. Do not put
+SurvNG decrypts credentials in process memory to connect to cameras, MQTT, and
+AI services. Protect them by limiting host access to the config directory,
+using an encrypted host disk when required, and backing **`config.json`,
+`secrets.json`, and `secrets.key`** together only to an encrypted destination.
+Losing `secrets.key` makes the encrypted sidecar unreadable. Do not put
 credentials in `.env`: Docker environment variables are easier to expose
 through process and container inspection. The Admin API masks stored secrets,
 and SurvNG redacts recognized secret values from its in-memory logs.
