@@ -177,7 +177,7 @@ class FaceStoreRecognitionMixin:
                 (model_fingerprint, self.max_observations),
             ).fetchall()
         # Only capture group keys above. Re-read each complete group while
-        # holding the lock so intervening operator decisions and deletions win.
+        # holding the FaceStore lock so intervening operator decisions win.
         groups = dict.fromkeys(
             (
                 int(row["event_id"]), str(row["candidate_track_id"]),
@@ -185,15 +185,18 @@ class FaceStoreRecognitionMixin:
             )
             for row in [*embedded_rows, *pending_rows, *stale_tracks]
         )
+        # Warm the reference gallery with read-only statements so NumPy gallery
+        # selection never extends a main-DB write-lock hold (AUD-015).
+        self._warm_reference_gallery(model_fingerprint)
         for event_id, track_id, observation_id in groups:
             # Give waiting API requests a turn between bounded transactions.
             # Reacquiring a Python lock in a tight loop does not ensure fairness.
             if self._recognition_stop.wait(0.001):
                 return
-            identity_updates: list[dict[str, Any]] = []
-            with self._lock, closing(self._connect()) as connection, connection:
-                selector = "event_id = ? and candidate_track_id = ?" if track_id else "id = ?"
-                parameters = (event_id, track_id) if track_id else (observation_id,)
+            selector = "event_id = ? and candidate_track_id = ?" if track_id else "id = ?"
+            parameters = (event_id, track_id) if track_id else (observation_id,)
+            match_updates: list[tuple[int, FaceMatch]] = []
+            with self._lock, self._connect() as connection:
                 rows = connection.execute(
                     f"""select id, embedding_blob from face_observations
                     where {selector}
@@ -216,12 +219,20 @@ class FaceStoreRecognitionMixin:
                         or norm <= 1e-9
                     ):
                         continue
+                    # Match against the warmed in-memory gallery. SELECT-only
+                    # rejection checks do not acquire the process write lock.
                     match = self._match_result(
                         connection,
                         int(row["id"]),
                         embedding / norm,
                         model_fingerprint,
                     )
+                    match_updates.append((int(row["id"]), match))
+            if not match_updates and not track_id:
+                continue
+            identity_updates: list[dict[str, Any]] = []
+            with self._lock, closing(self._connect()) as connection, connection:
+                for row_id, match in match_updates:
                     connection.execute(
                         """
                         update face_observations
@@ -243,14 +254,32 @@ class FaceStoreRecognitionMixin:
                                 },
                                 separators=(",", ":"),
                             ),
-                            int(row["id"]),
+                            row_id,
                         ),
                     )
                 if track_id:
-                    identity_updates = self._reconcile_candidate_track(connection, event_id, track_id)
+                    identity_updates = self._reconcile_candidate_track(
+                        connection, event_id, track_id
+                    )
             self._emit_reconciled_identity_updates(identity_updates)
         for row in pending_rows:
             self._queue_recognition(int(row["id"]))
+
+    def _warm_reference_gallery(self, model_fingerprint: str) -> None:
+        """Load the confirmed reference gallery without starting a write txn."""
+        recognizer = self.recognizer
+        if recognizer is None or not recognizer.enabled:
+            return
+        embedding_size = int(recognizer.status().get("embedding_size") or 0)
+        if embedding_size <= 0:
+            return
+        with self._lock, self._connect() as connection:
+            self._reference_gallery(
+                connection,
+                model_fingerprint,
+                max(1, int(recognizer.config.face_max_references)),
+                (embedding_size,),
+            )
 
     def _try_refresh_unknown_recognition(self) -> bool:
         try:
