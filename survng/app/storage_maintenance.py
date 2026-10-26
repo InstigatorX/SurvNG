@@ -21,6 +21,17 @@ RECENT_MEDIA_SECONDS = 60.0
 # Age gate for opt-in orphan reclaim (crash debris between write and DB commit).
 DEFAULT_ORPHAN_MIN_AGE_SECONDS = 86400 * 7
 QUICK_MEDIA_REFERENCE_LIMIT = 500
+# Owners of snapshot files that are not always copied onto events.snapshot_path.
+# This matches EventStore._delete_snapshot_if_unreferenced, plus the retention
+# registry (scene_snapshot_assets), which can be the only row for a supporting
+# frame. Orphan reclaim must keep every file one of these rows still names.
+_DURABLE_SNAPSHOT_TABLES = (
+    "scene_observations",
+    "scene_evidence_images",
+    "acquired_observations",
+    "acquired_samples",
+    "scene_snapshot_assets",
+)
 HEALTHY_MEDIA_LOCATION_STATES = frozenset({"online", "full", "read_only"})
 
 
@@ -301,7 +312,50 @@ class StorageReconciler:
                         "table": "face_observations", "id": int(row["id"]), "camera_id": str(row["camera_id"]),
                         "kind": "face_snapshot", "column": "snapshot_path", "path": path,
                     })
+            self._add_durable_snapshot_paths(connection, known_paths)
         return references, known_paths
+
+    def _add_durable_snapshot_paths(
+        self,
+        connection: sqlite3.Connection,
+        known_paths: set[str],
+    ) -> None:
+        """Keep scene, gallery, and acquisition images out of orphan reclaim.
+
+        Repair candidate lists stay limited to events, motion audits, and
+        faces. These extra tables only protect files from deletion.
+        """
+        existing = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        for table in _DURABLE_SNAPSHOT_TABLES:
+            if table not in existing:
+                continue
+            for row in connection.execute(
+                f"SELECT snapshot_path FROM {table} WHERE snapshot_path != ''"
+            ):
+                self._raise_if_cancelled()
+                path = str(row[0] or "")
+                if path:
+                    known_paths.add(self._path_key(path))
+        if "event_cover_requirements" not in existing:
+            return
+        for row in connection.execute(
+            """
+            SELECT json_extract(payload_json, '$.snapshot_path')
+            FROM event_cover_requirements
+            WHERE state = 'pending'
+              AND deadline_epoch > unixepoch()
+              AND json_extract(payload_json, '$.snapshot_path') IS NOT NULL
+            """
+        ):
+            self._raise_if_cancelled()
+            path = str(row[0] or "")
+            if path:
+                known_paths.add(self._path_key(path))
 
     def _scan(
         self,
