@@ -1,11 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { fetch } from "../shared/api.js";
 
-function basePath() {
-  const path = window.location.pathname.replace(/\/+$/, "");
-  return path.endsWith("/onvif") ? path.slice(0, -"/onvif".length) : "";
-}
-
-const API = `${basePath()}/api/onvif-inspector`;
+const API = "/api/onvif-inspector";
 
 function fmtTime(value) {
   if (!value) return "—";
