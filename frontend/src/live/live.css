@@ -296,6 +296,62 @@
   border-right: 1px solid var(--line);
 }
 
+.live-camera-zone {
+  position: relative;
+}
+
+.live-stream-pause-banner,
+.live-stream-paused-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel-solid) 94%, transparent);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.live-stream-pause-banner {
+  position: absolute;
+  z-index: 6;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(440px, calc(100% - 24px));
+  border-radius: 12px;
+  padding: 6px 8px 6px 12px;
+  box-shadow: var(--shadow);
+}
+
+.live-stream-paused-bar {
+  position: absolute;
+  z-index: 4;
+  right: 10px;
+  bottom: 10px;
+  left: 10px;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.live-stream-paused-bar p {
+  margin: 0;
+}
+
+.live-stream-pause-banner button,
+.live-stream-paused-bar button {
+  flex: 0 0 auto;
+  min-height: 44px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--control);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 0 12px;
+}
+
 .live-camera-grid.viewport-layout .camera-tile.viewport-layout .video-frame,
 .live-camera-grid .camera-tile .video-frame {
   border-radius: 2px;

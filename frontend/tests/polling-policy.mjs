@@ -7,6 +7,8 @@ assert.equal(liveSnapshotRefreshMs({ ...base, mobile: true, primary: true }), 20
 assert.equal(liveSnapshotRefreshMs({ ...base, mobile: true, primary: false }), 12000);
 assert.equal(liveSnapshotRefreshMs({ ...base, visible: false, mobile: true, primary: false }), null);
 assert.equal(liveSnapshotRefreshMs({ ...base, documentVisible: false, mobile: false, primary: true }), null);
+assert.equal(liveSnapshotRefreshMs({ ...base, userActive: false, mobile: false, primary: true }), null);
+assert.equal(liveSnapshotRefreshMs({ ...base, userActive: true, mobile: false, primary: false }), 2000);
 assert.equal(liveSnapshotRefreshMs({ ...base, transport: "webrtc", mobile: false, primary: true }), null);
 assert.equal(liveMediaShouldRun({ running: true, streamReady: true, mediaActive: true, transport: "webrtc" }), true);
 assert.equal(liveMediaShouldRun({ running: true, streamReady: true, mediaActive: false, transport: "webrtc" }), false);
