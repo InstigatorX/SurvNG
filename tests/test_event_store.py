@@ -1534,6 +1534,36 @@ class EventStoreTest(unittest.TestCase):
 
             self.assertEqual(protected, {str(root / "secondary" / "recordings" / "gate" / "segment.mp4")})
 
+    def test_protected_recording_paths_include_resolved_storage_root(self) -> None:
+        """Retention compares these keys to the resolved recording index.
+
+        A symlinked storage directory is the usual way to move recordings onto
+        another disk. The index stores the real path; a lexical key alone does
+        not match, so retention deletes segments incidents still reference.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            real = root / "disk"
+            link = root / "storage"
+            real.mkdir()
+            link.symlink_to(real, target_is_directory=True)
+            store = EventStore(link)
+            recording = real / "recordings" / "gate" / "main" / "segment.mp4"
+            recording.parent.mkdir(parents=True)
+            recording.write_bytes(b"mp4")
+            store.add_event(
+                camera_id="gate",
+                kind="object",
+                snapshot_path="",
+                recording_path=str(recording),
+                objects_json="[]",
+            )
+
+            protected = store.protected_recording_paths()
+
+            self.assertIn(str(recording.resolve()), protected)
+            self.assertIn(str(link / "recordings" / "gate" / "main" / "segment.mp4"), protected)
+
     def test_refinement_removes_replaced_snapshot_when_unreferenced(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
