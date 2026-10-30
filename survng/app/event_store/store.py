@@ -130,6 +130,18 @@ class EventStore(
                 "UNION SELECT recording_path FROM acquired_observations WHERE recording_path != ''"
             ).fetchall()
         protected: set[str] = set()
+        # The recording index stores paths under the resolved media root.
+        # Incidents store a storage-relative reference, and lexical abspath()
+        # turns that back into the configured path without following a
+        # symlinked storage_dir. Retention then treats the real segment as
+        # unprotected and deletes it. One realpath() of the storage root
+        # covers every row; resolving each recording would stat the media
+        # tree, including on NFS. Extra keys can only prevent deletion.
+        configured_root = os.path.normpath(
+            os.path.abspath(os.path.expanduser(str(self.storage_dir)))
+        )
+        resolved_root = os.path.realpath(configured_root)
+        configured_prefix = configured_root + os.sep
         for row in rows:
             raw_path = str(row["recording_path"] or "")
             if not raw_path:
@@ -137,11 +149,13 @@ class EventStore(
             path = Path(raw_path)
             if not path.is_absolute():
                 path = self.storage_dir / path
-            # Protection is a string-key lookup against the recording index.
-            # Lexical normalization avoids an NFS metadata round trip for every
-            # retained incident while remaining harmless for an out-of-pool
-            # value: protection can only prevent deletion, never authorize it.
-            protected.add(os.path.normpath(os.path.abspath(str(path))))
+            lexical = os.path.normpath(os.path.abspath(os.path.expanduser(str(path))))
+            protected.add(lexical)
+            if resolved_root != configured_root and (
+                lexical == configured_root or lexical.startswith(configured_prefix)
+            ):
+                suffix = lexical[len(configured_root):].lstrip(os.sep)
+                protected.add(os.path.normpath(os.path.join(resolved_root, suffix)))
         return protected
 
     @staticmethod
