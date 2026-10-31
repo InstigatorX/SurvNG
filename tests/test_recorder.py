@@ -662,6 +662,27 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(indexed, 0)
         self.assertEqual(requests, {("gate", "main"): event_epoch})
 
+    def test_recording_at_keeps_index_row_when_stat_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "retained.mp4"
+            clip.write_bytes(b"recording")
+            event_epoch = time.time() - 2
+            row = self._row(clip, start_epoch=event_epoch - 5)
+            recorder._store_recording_rows("gate", "main", [row])
+
+            with patch(
+                "survng.app.recording_process.index.path_presence",
+                return_value="unknown",
+            ):
+                result = recorder.recording_at("gate", event_epoch)
+            with recorder._index_connection() as connection:
+                indexed = connection.execute("SELECT COUNT(*) FROM recordings").fetchone()[0]
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["path"], str(clip))
+        self.assertEqual(indexed, 1)
+
     def test_recording_range_can_discover_legacy_main_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
@@ -695,6 +716,29 @@ class RecorderTest(unittest.TestCase):
 
         self.assertEqual(rows, [])
         self.assertEqual(indexed, 0)
+
+    def test_recording_range_keeps_rows_when_stat_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "retained.mp4"
+            clip.write_bytes(b"recording")
+            row = self._row(clip)
+            recorder._store_recording_rows("front-door", "main", [row])
+
+            with patch(
+                "survng.app.recording_process.index.path_presence",
+                return_value="unknown",
+            ):
+                rows = recorder.recording_rows_between(
+                    "front-door",
+                    row["start_epoch"] - 1,
+                    row["end_epoch"] + 1,
+                )
+            with recorder._index_connection() as connection:
+                indexed = connection.execute("SELECT COUNT(*) FROM recordings").fetchone()[0]
+
+        self.assertEqual([item["path"] for item in rows], [str(clip)])
+        self.assertEqual(indexed, 1)
 
     def test_recording_range_discovers_files_missing_from_partial_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -802,6 +846,29 @@ class RecorderTest(unittest.TestCase):
 
         self.assertEqual(filtered, [rows[0]])
         self.assertEqual(indexed, [str(present)])
+
+    def test_manifest_validation_keeps_rows_when_stat_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "recordings" / "gate" / "main" / "retained.mp4"
+            clip.parent.mkdir(parents=True)
+            clip.write_bytes(b"recording")
+            rows = [self._row(clip)]
+            recorder._store_recording_rows("gate", "main", rows)
+
+            with patch(
+                "survng.app.recording_process.index.path_presence",
+                return_value="unknown",
+            ):
+                filtered = recorder.discard_missing_recording_rows(rows)
+            with recorder._index_connection() as connection:
+                indexed = [
+                    str(row["path"])
+                    for row in connection.execute("SELECT path FROM recordings")
+                ]
+
+        self.assertEqual(filtered, rows)
+        self.assertEqual(indexed, [str(clip)])
 
     def test_recording_index_paths_rebase_when_storage_mount_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1426,6 +1493,43 @@ class RecorderTest(unittest.TestCase):
 
         self.assertEqual(removed, 0)
         self.assertEqual(remaining, 1)
+
+    def test_validation_and_fingerprint_keep_rows_when_stat_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "retained.mp4"
+            clip.write_bytes(b"recording")
+            self._age_file(clip)
+            row = self._row(clip)
+            recorder._store_recording_rows("front-door", "main", [row])
+            recorder.queue_recording_validation([row])
+            recorder.queue_stream_fingerprints([row])
+
+            with (
+                patch(
+                    "survng.app.recording_process.index.path_presence",
+                    return_value="unknown",
+                ),
+                patch.object(recorder, "_probe_recording") as probe,
+                patch("survng.app.recording_process.index.mp4_stream_fingerprint") as fingerprint,
+            ):
+                validated = recorder._validate_index_batch(limit=1)
+                fingerprinted = recorder._backfill_stream_fingerprints(limit=1)
+            with recorder._index_connection() as connection:
+                indexed = dict(connection.execute(
+                    "SELECT playable, validated, fingerprint_checked FROM recordings WHERE path = ?",
+                    (str(clip),),
+                ).fetchone())
+
+        self.assertEqual(validated, 0)
+        self.assertEqual(fingerprinted, 0)
+        probe.assert_not_called()
+        fingerprint.assert_not_called()
+        self.assertEqual(indexed["playable"], 1)
+        self.assertEqual(indexed["validated"], 0)
+        self.assertEqual(indexed["fingerprint_checked"], 0)
+        self.assertIn(str(clip), recorder._validation_pending_set)
+        self.assertIn(str(clip), recorder._fingerprint_pending_set)
 
     def test_index_can_be_stored_outside_recording_storage(self) -> None:
         with tempfile.TemporaryDirectory() as storage, tempfile.TemporaryDirectory() as index:
