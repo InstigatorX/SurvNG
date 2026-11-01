@@ -14,7 +14,7 @@ from typing import Any
 
 from ..durable_payload import durable_json_dumps
 from ..incident_utils import event_snapshot_path, portable_media_path
-from ..media_storage import MediaStorageRegistry
+from ..media_storage import MediaStorageRegistry, path_presence
 from .calibration import EventStoreCalibrationMixin
 from .jobs import EventStoreJobsMixin
 from .motion_intelligence import EventStoreMotionIntelligenceMixin
@@ -29,6 +29,9 @@ class EventStore(
 ):
     SNAPSHOT_SIZE_WRITE_BATCH = 50
     SNAPSHOT_REFERENCE_WRITE_BATCH = 50
+    # Match storage repair: full and read-only locations can still prove a file
+    # is gone. Offline, unmounted, or unavailable locations cannot.
+    _HEALTHY_SNAPSHOT_LOCATION_STATES = frozenset({"online", "full", "read_only"})
     SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY = "snapshot_size_backfill_cursor"
     COMPACT_COLUMNS = (
         "id, camera_id, kind, snapshot_path, recording_path, objects_json, created_at"
@@ -1304,6 +1307,24 @@ class EventStore(
                 ((path,) for path in paths),
             )
 
+    def _snapshot_location_unreliable(self, path: Path) -> bool:
+        """Return whether this snapshot location can prove a file is gone.
+
+        A missing path on an unmounted or unreachable disk is not evidence the
+        image was deleted. Clearing the incident link in that state orphans a
+        file that reappears when the location returns.
+        """
+        if self.media_storage is None:
+            return False
+        location_id = self.media_storage.location_id_for(path, role="snapshots")
+        if location_id is None:
+            return True
+        try:
+            status = self.media_storage.status(location_id)
+        except (KeyError, OSError):
+            return True
+        return status.state not in self._HEALTHY_SNAPSHOT_LOCATION_STATES
+
     def _recover_snapshot_deletion_claims(self) -> None:
         """Finish or release snapshot deletion claims left by a process crash."""
         with self._lock, self._connect() as conn:
@@ -1319,8 +1340,14 @@ class EventStore(
                 except (OSError, RuntimeError, ValueError, PermissionError):
                     # A malformed claim must never authorize a reference wipe.
                     continue
+                # Path.exists() is false for both a deleted file and a transient
+                # stat failure (ESTALE, EIO, EACCES). Only a confirmed absence
+                # on a readable location may drop incident snapshot links.
+                presence = path_presence(path)
+                if presence == "unknown" or self._snapshot_location_unreliable(path):
+                    continue
                 releasable.append(raw_path)
-                if not path.exists():
+                if presence == "missing":
                     missing.append(raw_path)
             self._clear_snapshot_references(conn, missing)
             conn.executemany(
@@ -1385,6 +1412,7 @@ class EventStore(
         failed_files = 0
         for row in rows:
             raw_path = str(row["snapshot_path"] or "")
+            path: Path | None = None
             try:
                 path = self._snapshot_path_for_retention(raw_path)
                 actual_size = max(
@@ -1395,8 +1423,13 @@ class EventStore(
                 deleted_bytes += actual_size
                 removed.append(raw_path)
             except FileNotFoundError:
-                missing_files += 1
-                removed.append(raw_path)
+                # An empty mountpoint raises FileNotFoundError for every image
+                # that still exists on the unmounted disk. Keep those links.
+                if path is not None and self._snapshot_location_unreliable(path):
+                    failed_files += 1
+                else:
+                    missing_files += 1
+                    removed.append(raw_path)
             except (PermissionError, OSError, RuntimeError, ValueError):
                 failed_files += 1
         for offset in range(0, len(removed), self.SNAPSHOT_REFERENCE_WRITE_BATCH):
