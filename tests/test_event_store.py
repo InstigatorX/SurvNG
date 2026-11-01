@@ -12,7 +12,9 @@ from unittest.mock import patch
 
 import numpy as np
 
+from survng.app.config import MediaStorageConfig, MediaStorageLocationConfig
 from survng.app.events import EventStore
+from survng.app.media_storage import MediaStorageRegistry
 
 
 class EventStoreTest(unittest.TestCase):
@@ -836,6 +838,136 @@ class EventStoreTest(unittest.TestCase):
                 ).fetchone()[0]
             self.assertEqual(row["snapshot_path"], "")
             self.assertEqual(claims, 0)
+
+    def test_reopening_store_keeps_snapshot_claim_when_stat_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot = root / "snapshots" / "gate" / "old.webp"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_bytes(b"snapshot")
+            store = EventStore(root)
+            event = store.add_event(
+                camera_id="gate",
+                kind="object",
+                snapshot_path=str(snapshot),
+                created_at="2020-01-01T00:00:00+00:00",
+            )
+            with store._connect() as connection:
+                connection.execute(
+                    "insert into media_deletion_claims(path, role, claimed_at) values (?, 'snapshot', ?)",
+                    (event["snapshot_path"], "2026-01-01T00:00:00+00:00"),
+                )
+
+            with patch(
+                "survng.app.event_store.store.path_presence",
+                return_value="unknown",
+            ):
+                recovered = EventStore(root)
+
+            with recovered._connect() as connection:
+                row = connection.execute(
+                    "select snapshot_path from events where id = ?", (event["id"],)
+                ).fetchone()
+                claims = connection.execute(
+                    "select count(*) from media_deletion_claims where role = 'snapshot'"
+                ).fetchone()[0]
+            self.assertEqual(row["snapshot_path"], event["snapshot_path"])
+            self.assertEqual(claims, 1)
+            self.assertTrue(snapshot.exists())
+
+    def test_reopening_store_releases_claim_when_snapshot_still_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot = root / "snapshots" / "gate" / "old.webp"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_bytes(b"snapshot")
+            store = EventStore(root)
+            event = store.add_event(
+                camera_id="gate",
+                kind="object",
+                snapshot_path=str(snapshot),
+                created_at="2020-01-01T00:00:00+00:00",
+            )
+            with store._connect() as connection:
+                connection.execute(
+                    "insert into media_deletion_claims(path, role, claimed_at) values (?, 'snapshot', ?)",
+                    (event["snapshot_path"], "2026-01-01T00:00:00+00:00"),
+                )
+
+            recovered = EventStore(root)
+
+            with recovered._connect() as connection:
+                row = connection.execute(
+                    "select snapshot_path from events where id = ?", (event["id"],)
+                ).fetchone()
+                claims = connection.execute(
+                    "select count(*) from media_deletion_claims where role = 'snapshot'"
+                ).fetchone()[0]
+            self.assertEqual(row["snapshot_path"], event["snapshot_path"])
+            self.assertEqual(claims, 0)
+            self.assertTrue(snapshot.exists())
+
+    def test_snapshot_retention_keeps_reference_when_location_is_offline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            evidence = root / "evidence"
+            snapshot = evidence / "snapshots" / "gate" / "old.webp"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_bytes(b"snapshot")
+            registry = MediaStorageRegistry(
+                root / "metadata",
+                MediaStorageConfig(locations=[
+                    MediaStorageLocationConfig(
+                        id="evidence",
+                        path=str(evidence),
+                        roles=["snapshots"],
+                        require_mount=True,
+                    ),
+                ]),
+            )
+            self.assertEqual(registry.status("evidence").state, "not_mounted")
+            store = EventStore(root / "metadata", media_storage=registry)
+            event = store.add_event(
+                camera_id="gate",
+                kind="object",
+                snapshot_path=str(snapshot),
+                created_at="2020-01-01T00:00:00+00:00",
+            )
+            snapshot.unlink()
+
+            result = store.apply_snapshot_retention(
+                datetime(2023, 1, 1, tzinfo=timezone.utc).timestamp(),
+                100,
+            )
+
+            self.assertEqual(result["deleted_files"], 0)
+            self.assertEqual(result["missing_files"], 0)
+            self.assertEqual(result["failed_files"], 1)
+            with store._connect() as connection:
+                row = connection.execute(
+                    "select snapshot_path from events where id = ?", (event["id"],)
+                ).fetchone()
+                claims = connection.execute(
+                    "select count(*) from media_deletion_claims where role = 'snapshot'"
+                ).fetchone()[0]
+                connection.execute(
+                    "insert into media_deletion_claims(path, role, claimed_at) values (?, 'snapshot', ?)",
+                    (event["snapshot_path"], "2026-01-01T00:00:00+00:00"),
+                )
+            self.assertEqual(row["snapshot_path"], event["snapshot_path"])
+            self.assertEqual(claims, 0)
+
+            recovered = EventStore(root / "metadata", media_storage=registry)
+            with recovered._connect() as connection:
+                row = connection.execute(
+                    "select snapshot_path from events where id = ?", (event["id"],)
+                ).fetchone()
+                claims = connection.execute(
+                    "select count(*) from media_deletion_claims where role = 'snapshot'"
+                ).fetchone()[0]
+            self.assertEqual(row["snapshot_path"], event["snapshot_path"])
+            self.assertEqual(claims, 1)
+
     def test_protected_recording_paths_use_lexical_normalization(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
