@@ -29,6 +29,9 @@ RETENTION_RETRY_SECONDS = 10
 RETENTION_INITIAL_DELAY_SECONDS = 5
 RETENTION_BATCH_TIME_BUDGET_SECONDS = 10.0
 RETENTION_FAILURE_RETRY_MAX_SECONDS = 15 * 60
+# Match storage repair: a full or read-only location can still prove a file is
+# gone. Offline, unmounted, or unavailable locations cannot.
+_HEALTHY_RECORDING_LOCATION_STATES = frozenset({"online", "full", "read_only"})
 
 
 class RecordingRetentionService:
@@ -530,6 +533,14 @@ class RecordingRetentionService:
                     result["failed_files"] += 1
                     LOGGER.error("Retention rejected recording path outside storage: %s", raw_path)
                     continue
+                if self._recording_location_unreliable(path):
+                    result["failed_files"] += 1
+                    self._record_delete_failure(raw_path)
+                    LOGGER.warning(
+                        "Retention skipped %s because its storage location cannot confirm the file is present",
+                        path,
+                    )
+                    continue
                 try:
                     if self.delete_recording_provider is not None:
                         if not self.delete_recording_provider(path):
@@ -554,9 +565,19 @@ class RecordingRetentionService:
                     removed_paths.append(raw_path)
                     self._clear_delete_failure(raw_path)
                 except FileNotFoundError:
-                    result["missing_files"] += 1
-                    removed_paths.append(raw_path)
-                    self._clear_delete_failure(raw_path)
+                    # An empty mountpoint raises FileNotFoundError for every
+                    # segment that still exists on the unmounted disk.
+                    if self._recording_location_unreliable(path):
+                        result["failed_files"] += 1
+                        self._record_delete_failure(raw_path)
+                        LOGGER.warning(
+                            "Retention kept index row for %s because its storage location is offline",
+                            path,
+                        )
+                    else:
+                        result["missing_files"] += 1
+                        removed_paths.append(raw_path)
+                        self._clear_delete_failure(raw_path)
                 except OSError as error:
                     result["failed_files"] += 1
                     self._record_delete_failure(raw_path)
@@ -1229,6 +1250,25 @@ class RecordingRetentionService:
                     if len(candidates) >= limit or selected_bytes >= quota_remaining:
                         break
         return sorted(candidates.values(), key=lambda row: float(row["start_epoch"] or 0))[:limit]
+
+    def _recording_location_unreliable(self, path: Path) -> bool:
+        """Return whether this location can prove a recording file is gone.
+
+        A missing path on an unmounted or unreachable disk is not evidence the
+        segment was deleted. Dropping the index row in that state hides footage
+        that reappears when the location returns, and the incremental indexer
+        does not rediscover historical segments.
+        """
+        if self.media_storage is None:
+            return False
+        location_id = self.media_storage.location_id_for(path, "recordings")
+        if location_id is None:
+            return True
+        try:
+            status = self.media_storage.status(location_id)
+        except (KeyError, OSError):
+            return True
+        return status.state not in _HEALTHY_RECORDING_LOCATION_STATES
 
     def _safe_recording_path(self, raw_path: str) -> Path:
         path = Path(raw_path).resolve(strict=False)
