@@ -50,10 +50,11 @@ Details and roadmap: [Forensic visual search](../forensic-visual-search.md).
 
 ### Setup summary
 
-1. Build or install the Smart Search model package, or pull EmbeddingGemma 2
-   into Ollama with `ollama pull embeddinggemma-2`.
-2. Enable Smart Search under **Admin → Detection** and choose OpenVINO or
-   Ollama.
+1. Build or install the Smart Search model package, pull EmbeddingGemma 2
+   into Ollama with `ollama pull embeddinggemma-2`, or choose SigLIP 2 and
+   let SurvNG download it.
+2. Enable Smart Search under **Admin → Detection** and choose OpenVINO,
+   Ollama, or SigLIP 2.
 3. Allow SurvNG time to index existing incident pictures.
 4. Open **Search**, type a description, and review the ranked results — or
    click an object on an incident or select an area on a Timeline frame and
