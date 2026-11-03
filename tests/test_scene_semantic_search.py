@@ -75,6 +75,12 @@ def test_ollama_indexes_scene_crops_together(tmp_path):
     assert encoder.batches == [6, 5]
 
 
+def test_siglip2_indexes_scene_crops_together(tmp_path):
+    _store, event, service, encoder = _multi_object_service(tmp_path, "siglip2")
+    assert service.index_event(event) == 11
+    assert encoder.batches == [6, 5]
+
+
 def test_openvino_indexes_scene_crops_one_at_a_time(tmp_path):
     _store, event, service, encoder = _multi_object_service(tmp_path, "mobileclip2_openvino")
     assert service.index_event(event) == 11

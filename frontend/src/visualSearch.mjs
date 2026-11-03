@@ -1,3 +1,8 @@
+import {
+  normalizeIncidentThumbnailObjectFocus,
+  normalizeIncidentThumbnailObjectFocusZoom,
+} from "./incidentNavigation.mjs";
+
 const DEFAULT_VEHICLE_REID_LABELS = ["car", "truck", "bus", "motorcycle"];
 
 /** True only for an explicit object index. `Number(null) === 0`, so null must not count. */
@@ -125,6 +130,35 @@ export function drawContainedCropPreview(canvas, image, crop) {
     drawWidth,
     drawHeight,
   );
+}
+
+export function semanticSearchResultImageUrl(result, {
+  objectFocus = "off",
+  focused = false,
+  zoom = 1,
+  width = 960,
+  quality = 82,
+  aspectWidth = 16,
+  aspectHeight = 9,
+} = {}) {
+  const snapshotUrl = String(result?.snapshot_url || "");
+  const observationId = String(result?.evidence?.observation_id || "").trim();
+  if (observationId) return snapshotUrl;
+  const mode = normalizeIncidentThumbnailObjectFocus(objectFocus);
+  const crop = mode === "auto" || (mode === "button" && focused);
+  const eventId = Number(result?.event?.id);
+  if (!crop || !Number.isInteger(eventId) || eventId <= 0) return snapshotUrl;
+  const params = new URLSearchParams({
+    width: String(Math.max(160, Math.min(2560, Math.round(Number(width) || 960)))),
+    quality: String(Math.max(50, Math.min(95, Math.round(Number(quality) || 82)))),
+    object_focus: "true",
+    zoom: String(normalizeIncidentThumbnailObjectFocusZoom(zoom)),
+    aspect_w: String(aspectWidth),
+    aspect_h: String(aspectHeight),
+  });
+  const revision = result?.event?.evidence_revision;
+  if (revision != null && revision !== "") params.set("v", String(revision));
+  return `/api/events/${eventId}/thumbnail.jpg?${params.toString()}`;
 }
 
 export function semanticResultThumbnailUrl(result, width = 240, quality = 72) {

@@ -15,8 +15,9 @@ dual-encoder package can build a new index without deleting or mixing the
 previous generation.
 
 Smart Search is disabled by default. Put a self-contained model package on a
-local filesystem, or point Smart Search at an Ollama server that already has
-EmbeddingGemma 2, then enable it under **Admin → Detection → Smart Search**.
+local filesystem, point Smart Search at an Ollama server that already has
+EmbeddingGemma 2, or choose SigLIP 2 and let SurvNG download that checkpoint.
+Enable it under **Admin → Detection → Smart Search**.
 Docker installations should mount an OpenVINO package read-only beneath
 `/config/models`.
 
@@ -50,6 +51,21 @@ one request and asks Ollama to keep the model loaded. `embeddinggemma-2:740m`
 still spends more time on each picture than `embeddinggemma-2:440m`. A lower
 crop limit reduces how many pictures are embedded; changing the model name or
 vector size starts a new generation.
+
+## SigLIP 2
+
+Choose **SigLIP 2** to keep a second local index beside the MobileCLIP package
+and any Ollama generation. SurvNG downloads the pinned fp16 ONNX export of
+`google/siglip2-base-patch16-224` the first time this provider starts. The
+files are about 765 MB and are stored under the storage directory at
+`models/siglip2-base-patch16-224`, unless **Model cache** is set. Each file is
+checked against its pinned size and SHA-256 before it is used.
+
+Pictures stay on this host. Text queries are lowercased and limited to 64
+tokens. Images are resized to 224×224.
+The vector size is 768. Switching to SigLIP 2 starts its own index generation
+and leaves the MobileCLIP and EmbeddingGemma generations in place. Switching
+back does not rebuild a generation that already finished.
 
 ## Build the official Apple model
 
