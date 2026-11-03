@@ -593,7 +593,7 @@ class McpEndpoint:
             raise McpProtocolError(_INVALID_REQUEST, "request is too large", status_code=400)
         try:
             message = json.loads(raw)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise McpProtocolError(_PARSE_ERROR, "parse error", status_code=400) from exc
         if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
             raise McpProtocolError(_INVALID_REQUEST, "invalid request", status_code=400)

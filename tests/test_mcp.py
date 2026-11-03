@@ -241,6 +241,23 @@ def test_mcp_requires_an_enabled_api_token(tmp_path, enabled, token) -> None:
     assert response.status_code == 401
 
 
+def test_non_utf8_body_is_a_parse_error(tmp_path) -> None:
+    client, _manager = build_client(tmp_path, token_config("read"))
+    response = client.post(
+        "/api/mcp",
+        content=b"\xff",
+        headers={
+            "Authorization": f"Bearer {SECRET}",
+            "Content-Type": "application/json",
+        },
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["id"] is None
+    assert body["error"]["code"] == -32700
+    assert body["error"]["message"] == "parse error"
+
+
 def test_initialize_rejects_a_body_over_the_cap_without_reading_the_rest(tmp_path) -> None:
     client, _manager = build_client(tmp_path, token_config("read"))
     response = client.post(
