@@ -101,6 +101,7 @@
     "ollama_model": "embeddinggemma-2",
     "ollama_dimensions": 768,
     "ollama_timeout_seconds": 60.0,
+    "siglip2_model_dir": "",
     "index_full_frame": true,
     "index_object_crops": true,
     "max_object_crops_per_event": 24,

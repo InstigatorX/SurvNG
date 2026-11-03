@@ -4088,7 +4088,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <option value="auto">Auto crop to objects</option>
               <option value="button">Manual crop button</option>
             </select></label>
-            <label>Object focus zoom<input type="number" min="0.25" max="5.5" step="0.05" value={config.incident_thumbnail_object_focus_zoom ?? 1} disabled={(config.incident_thumbnail_object_focus || "off") === "off"} onChange={(event) => updateConfig(["incident_thumbnail_object_focus_zoom"], Number(event.target.value))} /><small>1 fits objects with padding; below 1 shows more context; above 1 zooms tighter. Compact thumbs are cropped server-side near tile size.</small></label>
+            <label>Object focus zoom<input type="number" min="0.25" max="5.5" step="0.05" value={config.incident_thumbnail_object_focus_zoom ?? 1} disabled={(config.incident_thumbnail_object_focus || "off") === "off"} onChange={(event) => updateConfig(["incident_thumbnail_object_focus_zoom"], Number(event.target.value))} /><small>1 fits objects with padding; below 1 shows more context; above 1 zooms tighter. Compact incident thumbs and Smart Search results use this crop.</small></label>
             <label>Playback Cache GB<input type="number" min="0.5" max="100" step="0.5" value={config.recording_cache_max_gb ?? 5} onChange={(event) => updateConfig(["recording_cache_max_gb"], Number(event.target.value))} /></label>
             <label>Playback Cache Days<input type="number" min="1" max="90" step="1" value={config.recording_cache_max_days ?? 7} onChange={(event) => updateConfig(["recording_cache_max_days"], Number(event.target.value))} /></label>
           </div>
@@ -4456,10 +4456,17 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             <summary><span className="detection-settings-card-icon"><Search size={18} /></span><span><strong>Smart Search</strong><small>Find indexed incidents by describing visible details in plain language.</small></span></summary>
             <div className="detection-feature-body detection-field-grid">
               <label className="compact-toggle"><input type="checkbox" checked={config.semantic_search?.enabled ?? false} onChange={(event) => updateConfig(["semantic_search", "enabled"], event.target.checked)} /><span>Smart Search enabled</span></label>
-              <label>Provider<select value={(config.semantic_search?.implementation || "mobileclip2_openvino") === "ollama" ? "ollama" : "openvino"} onChange={(event) => updateConfig(["semantic_search", "implementation"], event.target.value === "ollama" ? "ollama" : ((config.semantic_search?.implementation || "mobileclip2_openvino") === "ollama" ? "mobileclip2_openvino" : config.semantic_search?.implementation || "mobileclip2_openvino"))}>
+              <label>Provider<select value={config.semantic_search?.implementation === "ollama" ? "ollama" : config.semantic_search?.implementation === "siglip2" ? "siglip2" : "openvino"} onChange={(event) => {
+                const current = config.semantic_search?.implementation || "mobileclip2_openvino";
+                const next = event.target.value === "openvino"
+                  ? (current === "openvino_manifest" ? current : "mobileclip2_openvino")
+                  : event.target.value;
+                updateConfig(["semantic_search", "implementation"], next);
+              }}>
                 <option value="openvino">OpenVINO model package</option>
                 <option value="ollama">Ollama</option>
-              </select><small>OpenVINO runs a local MobileCLIP package. Ollama embeds incident images with a model such as EmbeddingGemma 2.</small></label>
+                <option value="siglip2">SigLIP 2</option>
+              </select><small>OpenVINO runs a local MobileCLIP package. Ollama uses EmbeddingGemma 2. SigLIP 2 downloads its own weights and keeps pictures on this host.</small></label>
               {(config.semantic_search?.implementation || "mobileclip2_openvino") === "ollama" ? <>
                 <label>Ollama URL<input value={config.semantic_search?.ollama_base_url ?? "http://127.0.0.1:11434"} onChange={(event) => updateConfig(["semantic_search", "ollama_base_url"], event.target.value)} placeholder="http://127.0.0.1:11434" /><small>Incident images are sent to this Ollama server. The default localhost address keeps them on this host. A remote address sends them there.</small></label>
                 <label>Embedding model<input value={config.semantic_search?.ollama_model ?? "embeddinggemma-2"} onChange={(event) => updateConfig(["semantic_search", "ollama_model"], event.target.value)} placeholder="embeddinggemma-2" /><small>Pull it first with ollama pull embeddinggemma-2. embeddinggemma-2:440m is the smaller text-and-vision tag.</small></label>
@@ -4469,6 +4476,9 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                   <option value="256">256 · smaller index</option>
                   <option value="128">128 · text-first shortlist</option>
                 </select><small>Queries and stored images must use the same size. Changing it starts a new search index.</small></label>
+              </> : config.semantic_search?.implementation === "siglip2" ? <>
+                <label>Model cache<input value={config.semantic_search?.siglip2_model_dir ?? ""} onChange={(event) => updateConfig(["semantic_search", "siglip2_model_dir"], event.target.value)} placeholder="models/siglip2-base-patch16-224" /><small>Leave this empty and SurvNG downloads SigLIP 2 base (224) into the storage models directory the first time Smart Search starts. The download is about 765 MB. Pictures stay on this host, and this provider keeps its own index.</small></label>
+                <label>Inference device<input value={config.semantic_search?.device ?? "GPU"} onChange={(event) => updateConfig(["semantic_search", "device"], event.target.value)} /><small>GPU is recommended on Intel systems. This does not share the object detector queue.</small></label>
               </> : <>
                 <label>Model package<input value={config.semantic_search?.model_dir ?? ""} onChange={(event) => updateConfig(["semantic_search", "model_dir"], event.target.value)} placeholder="/path/to/SurvNG/models/mobileclip2-b-openvino-fp16" /><small>Use the host path for systemd or the mounted container path for Docker. The package contains semantic_model.json, both encoders, and tokenizer assets.</small></label>
                 <label>Inference device<input value={config.semantic_search?.device ?? "GPU"} onChange={(event) => updateConfig(["semantic_search", "device"], event.target.value)} /><small>GPU is recommended on Intel systems. This does not share the object detector queue.</small></label>

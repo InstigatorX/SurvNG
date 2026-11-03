@@ -1334,9 +1334,12 @@ class SemanticIndex:
             ).fetchall()
         return {int(row["event_id"]) for row in rows}
 
-    def resolve_ollama_identity(self, config: SemanticSearchConfig) -> SemanticModelIdentity:
-        """Record and reuse the generation for this Ollama embedding contract."""
-        identity, contract = ollama_semantic_contract(config)
+    def resolve_declared_identity(
+        self,
+        identity: SemanticModelIdentity,
+        contract: str,
+    ) -> SemanticModelIdentity:
+        """Record and reuse a generation whose contract is independent of a package path."""
         bound = self._generation_source(contract)
         if bound is not None:
             return bound
@@ -1364,6 +1367,18 @@ class SemanticIndex:
         if row is None:
             raise RuntimeError("semantic generation source was not recorded")
         return self._identity_from_source(row)
+
+    def resolve_ollama_identity(self, config: SemanticSearchConfig) -> SemanticModelIdentity:
+        """Record and reuse the generation for this Ollama embedding contract."""
+        identity, contract = ollama_semantic_contract(config)
+        return self.resolve_declared_identity(identity, contract)
+
+    def resolve_siglip2_identity(self) -> SemanticModelIdentity:
+        """Record and reuse the generation for the pinned SigLIP 2 checkpoint."""
+        from .siglip2_search import siglip2_semantic_contract
+
+        identity, contract = siglip2_semantic_contract()
+        return self.resolve_declared_identity(identity, contract)
 
     def resolve_model_identity(self, model_dir: Path, manifest: dict[str, Any]) -> SemanticModelIdentity:
         """Reuse the generation whose declared joint embedding space matches.
@@ -1782,7 +1797,7 @@ def build_semantic_search(
     """Build safely; semantic failures must never prevent camera startup."""
     if not config.enabled:
         return DisabledSemanticSearch(config, index)
-    if config.implementation == "ollama":
+    if config.implementation in {"ollama", "siglip2"}:
         return SemanticSearchService(config, index, Path(), {})
     model_dir = Path(config.model_dir)
     if not config.model_dir:
@@ -1855,6 +1870,17 @@ def _semantic_tokenizer(
             path,
             max_length=int(text_spec.get("max_length") or 77),
         )
+    if tokenizer_kind == "siglip2":
+        from .siglip2_search import Siglip2Tokenizer
+
+        path = _semantic_package_path(
+            model_dir,
+            text_spec.get("tokenizer_path"),
+            "tokenizer.json",
+        )
+        if not path.is_file():
+            raise RuntimeError("semantic tokenizer file is missing")
+        return Siglip2Tokenizer(path)
     raise RuntimeError(f"unsupported semantic tokenizer: {tokenizer_kind}")
 
 
@@ -1954,11 +1980,13 @@ class OpenVinoManifestEncoder:
         prepared = []
         for image in images:
             height, width = image.shape[:2]
-            interpolation = (
-                cv2.INTER_CUBIC
-                if str(spec.get("interpolation") or "bicubic").lower() == "bicubic"
-                else cv2.INTER_AREA
-            )
+            interpolation_name = str(spec.get("interpolation") or "bicubic").lower()
+            if interpolation_name == "linear":
+                interpolation = cv2.INTER_LINEAR
+            elif interpolation_name == "bicubic":
+                interpolation = cv2.INTER_CUBIC
+            else:
+                interpolation = cv2.INTER_AREA
             resize_mode = str(spec.get("resize_mode") or "shortest_center_crop")
             if resize_mode == "fixed":
                 resized = cv2.resize(image, (size, size), interpolation=interpolation)
@@ -2521,6 +2549,32 @@ class SemanticSearchService(DisabledSemanticSearch):
                     identity = resolved
                     encoder = OllamaEmbeddingEncoder(self.config, resolved)
                     encoder.probe()
+                elif self.config.implementation == "siglip2":
+                    from .siglip2_search import (
+                        Siglip2DownloadInterrupted,
+                        ensure_siglip2_package,
+                        siglip2_package_dir,
+                    )
+
+                    try:
+                        package = ensure_siglip2_package(
+                            siglip2_package_dir(self.config.siglip2_model_dir, self._storage_dir),
+                            should_stop=self._stop.is_set,
+                        )
+                    except Siglip2DownloadInterrupted:
+                        if self._stop.is_set():
+                            return
+                        raise
+                    self.model_dir = package
+                    self.manifest = load_semantic_manifest(package)
+                    resolved = identity or self.index.resolve_siglip2_identity()
+                    identity = resolved
+                    encoder = IsolatedOpenVinoManifestEncoder(
+                        self.model_dir,
+                        self.manifest,
+                        target_device,
+                        resolved,
+                    )
                 else:
                     resolved = identity
                     if resolved is None:
@@ -2541,10 +2595,12 @@ class SemanticSearchService(DisabledSemanticSearch):
                     )
             except Exception as exc:
                 reason = str(exc).strip() or "semantic inference worker exited during startup"
-                if target_device == configured_device:
+                download_failure = reason.startswith("SigLIP 2 ")
+                if target_device == configured_device and not download_failure:
                     configured_device_failures += 1
                 use_cpu_fallback = bool(
                     self.config.implementation != "ollama"
+                    and not download_failure
                     and target_device == configured_device
                     and configured_device.strip().upper() != "CPU"
                     and configured_device_failures
@@ -3082,7 +3138,14 @@ class SemanticSearchService(DisabledSemanticSearch):
         }
         completed = True
         pending: list[tuple[np.ndarray, SemanticEvidence, dict[str, Any]]] = []
-        batch_limit = OLLAMA_IMAGE_BATCH_SIZE if self.config.implementation == "ollama" else 1
+        if self.config.implementation == "ollama":
+            batch_limit = OLLAMA_IMAGE_BATCH_SIZE
+        elif self.config.implementation == "siglip2":
+            from .siglip2_search import SIGLIP2_IMAGE_BATCH_SIZE
+
+            batch_limit = SIGLIP2_IMAGE_BATCH_SIZE
+        else:
+            batch_limit = 1
 
         def flush_pending() -> bool:
             nonlocal written, completed
@@ -3401,7 +3464,11 @@ class SemanticSearchService(DisabledSemanticSearch):
             "enabled": True, "state": state,
             "backfill_active": backfill_active,
             "implementation": self.config.implementation,
-            "model": self.config.ollama_model if self.config.implementation == "ollama" else "",
+            "model": (
+                self.config.ollama_model if self.config.implementation == "ollama"
+                else "siglip2-base-patch16-224" if self.config.implementation == "siglip2"
+                else ""
+            ),
             "device": self._active_device,
             "configured_device": self.config.device,
             "fallback_active": self._fallback_active,
