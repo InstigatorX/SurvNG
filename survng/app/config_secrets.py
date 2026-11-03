@@ -186,20 +186,66 @@ def apply_secrets_to_raw_config(
     return merged
 
 
+def unresolved_secret_fields(config: AppConfig) -> list[str]:
+    """Return redacted credential fields that were not restored from the sidecar."""
+    fields: list[str] = []
+    if config.mqtt.password == SECRET_PLACEHOLDER:
+        fields.append("mqtt.password")
+    if config.audit_ai.api_key == SECRET_PLACEHOLDER:
+        fields.append("audit_ai.api_key")
+    for token in config.api_auth.tokens:
+        if token.token_hash == SECRET_PLACEHOLDER:
+            fields.append(f"api_auth.tokens.{token.id}.token_hash")
+    if config.web_auth.session_key == SECRET_PLACEHOLDER:
+        fields.append("web_auth.session_key")
+    for user in config.web_auth.users:
+        if user.password_hash == SECRET_PLACEHOLDER:
+            fields.append(f"web_auth.users.{user.id}.password_hash")
+    for camera in config.cameras:
+        for name in ("stream_url", "live_stream_url"):
+            if SECRET_PLACEHOLDER in str(getattr(camera, name) or ""):
+                fields.append(f"cameras.{camera.id}.{name}")
+        if camera.onvif.password == SECRET_PLACEHOLDER:
+            fields.append(f"cameras.{camera.id}.onvif.password")
+    return fields
+
+
+def assert_secrets_materialized(config: AppConfig) -> None:
+    """Refuse to run when config.json still holds the public secret placeholder.
+
+    The placeholder is a well-known string. Using it as ``web_auth.session_key``
+    lets anyone forge an administrator session for a known user id.
+    """
+    fields = unresolved_secret_fields(config)
+    if not fields:
+        return
+    raise ValueError(
+        "redacted secrets in config.json were not restored from secrets.json: "
+        + ", ".join(fields)
+    )
+
+
+def _decode_key_bytes(raw: bytes, path: Path) -> bytes:
+    if len(raw) == _KEY_BYTES:
+        return raw
+    try:
+        decoded = base64.urlsafe_b64decode(raw)
+    except Exception as exc:  # noqa: BLE001 — surface as ValueError below
+        raise ValueError(f"secrets key file is not valid base64: {path}") from exc
+    if len(decoded) != _KEY_BYTES:
+        raise ValueError(
+            f"secrets key must be {_KEY_BYTES} bytes (raw or urlsafe base64): {path}"
+        )
+    return decoded
+
+
+def _read_key(path: Path) -> bytes:
+    return _decode_key_bytes(path.read_bytes().strip(), path)
+
+
 def _load_or_create_key(path: Path) -> bytes:
     if path.is_file():
-        raw = path.read_bytes().strip()
-        if len(raw) == _KEY_BYTES:
-            return raw
-        try:
-            decoded = base64.urlsafe_b64decode(raw)
-        except Exception as exc:  # noqa: BLE001 — surface as ValueError below
-            raise ValueError(f"secrets key file is not valid base64: {path}") from exc
-        if len(decoded) != _KEY_BYTES:
-            raise ValueError(
-                f"secrets key must be {_KEY_BYTES} bytes (raw or urlsafe base64): {path}"
-            )
-        return decoded
+        return _read_key(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     key = secrets.token_bytes(_KEY_BYTES)
     temporary_path: Path | None = None
@@ -280,7 +326,15 @@ def load_secrets_file(path: Path) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         raise ValueError(f"secrets file must be a JSON object: {path}")
     if _is_encrypted_envelope(payload):
-        key = _load_or_create_key(secrets_key_path(path))
+        # Reading must not mint a key. A missing key is a failed load; planting
+        # a new key would no longer decrypt this ciphertext.
+        key_path = secrets_key_path(path)
+        try:
+            key = _read_key(key_path)
+        except FileNotFoundError as exc:
+            raise ValueError(
+                f"encrypted secrets.json requires the key file, which is missing: {key_path}"
+            ) from exc
         return _decrypt_secrets(payload, key)
     # Legacy plaintext sidecar (schema v1) remains readable until the next save.
     return payload
