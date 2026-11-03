@@ -136,6 +136,7 @@ APPLICATION_STOPPING = threading.Event()
 CONFIG_PROBE_LIMITER = threading.BoundedSemaphore(2)
 AUDIT_AI_LIMITER = threading.BoundedSemaphore(1)
 ASSISTANT_LIMITER = threading.BoundedSemaphore(2)
+MCP_CALL_LIMITER = threading.BoundedSemaphore(2)
 AI_ACTIVITY_LOCK = threading.Lock()
 AI_ACTIVITY_CONDITION = threading.Condition(AI_ACTIVITY_LOCK)
 AI_ACTIVE_OPERATIONS: dict[str, int] = {}
@@ -1354,6 +1355,7 @@ app.include_router(create_mcp_router(McpDependencies(
     manager_lock=MANAGER_RELOAD_LOCK,
     intelligence=_intelligence_route_bundle.service,
     application_stopping=APPLICATION_STOPPING,
+    call_limiter=MCP_CALL_LIMITER,
 )))
 
 

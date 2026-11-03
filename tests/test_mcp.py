@@ -9,6 +9,7 @@ import threading
 from types import SimpleNamespace
 
 import cv2
+import httpx2 as httpx
 import numpy as np
 import pytest
 from fastapi import FastAPI
@@ -17,6 +18,7 @@ from fastapi.testclient import TestClient
 from survng.app import main
 from survng.app.config import ApiAuthConfig, ApiTokenConfig, AppConfig, WebAuthConfig, WebUserConfig
 from survng.app.intelligence_routes import IntelligenceDependencies, IntelligenceService
+from survng.app import mcp_routes
 from survng.app.mcp_routes import MCP_PROTOCOL_VERSION, McpDependencies, create_mcp_router
 from survng.app.security import (
     SESSION_COOKIE_NAME,
@@ -60,7 +62,24 @@ def token_config(*scopes: str, enabled: bool = True, secret: str = SECRET) -> Ap
     ))
 
 
-def build_client(tmp_path, config: AppConfig):
+def _health_status(_active):
+    return {
+        "cameras": {"total": 1, "online": 0},
+        "detector": {"runtime": {}, "reid": {}},
+        "storage": {"recordings": STORAGE_PATH},
+        "mqtt": {"stream_url": STREAM_URL},
+        "go2rtc": {},
+    }
+
+
+def build_client(
+    tmp_path,
+    config: AppConfig,
+    *,
+    call_limiter: threading.BoundedSemaphore | None = None,
+    system_status=None,
+    manager_lock: threading.RLock | None = None,
+):
     storage = tmp_path / "media"
     storage.mkdir()
     frame = np.zeros((100, 2000, 3), dtype=np.uint8)
@@ -140,21 +159,16 @@ def build_client(tmp_path, config: AppConfig):
         with_faces=lambda _manager, items: items,
         resolve_event=lambda _manager, _event_id: None,
     )
+    lock = manager_lock or threading.RLock()
     service = IntelligenceService(IntelligenceDependencies(
         get_config=lambda: config,
         get_manager=lambda: manager,
-        manager_lock=threading.RLock(),
+        manager_lock=lock,
         get_audit_ai_limiter=lambda: None,
         get_assistant_limiter=lambda: None,
         application_stopping=threading.Event(),
         incident_queries=queries,
-        system_telemetry=SimpleNamespace(system_status=lambda _active: {
-            "cameras": {"total": 1, "online": 0},
-            "detector": {"runtime": {}, "reid": {}},
-            "storage": {"recordings": STORAGE_PATH},
-            "mqtt": {"stream_url": STREAM_URL},
-            "go2rtc": {},
-        }),
+        system_telemetry=SimpleNamespace(system_status=system_status or _health_status),
         apply_config_update=lambda *_args, **_kwargs: None,
         begin_ai_operation=lambda *_args, **_kwargs: None,
         end_ai_operation=lambda *_args, **_kwargs: None,
@@ -164,9 +178,10 @@ def build_client(tmp_path, config: AppConfig):
     app.include_router(create_mcp_router(McpDependencies(
         get_config=lambda: config,
         get_manager=lambda: manager,
-        manager_lock=threading.RLock(),
+        manager_lock=lock,
         intelligence=service,
         application_stopping=threading.Event(),
+        call_limiter=call_limiter or threading.BoundedSemaphore(2),
     )))
     return TestClient(app), manager
 
@@ -273,6 +288,125 @@ def test_incident_image_returns_a_bounded_jpeg_or_not_found(tmp_path) -> None:
     missing = post_rpc(client, "tools/call", {"name": "get_incident_image", "arguments": {"event_id": 99}})
     assert missing.json()["result"]["isError"] is True
     assert "not found" in tool_text(missing.json())
+
+
+def test_incident_image_refuses_oversized_frames_outside_the_manager_lock(tmp_path, monkeypatch) -> None:
+    lock = threading.RLock()
+    client, manager = build_client(tmp_path, token_config("read"), manager_lock=lock)
+    decoded_outside_lock = threading.Event()
+    original = mcp_routes._bounded_jpeg
+
+    def bounded(path):
+        assert lock.acquire(blocking=False)
+        lock.release()
+        decoded_outside_lock.set()
+        return original(path)
+
+    monkeypatch.setattr(mcp_routes, "_bounded_jpeg", bounded)
+    found = post_rpc(client, "tools/call", {"name": "get_incident_image", "arguments": {"event_id": 5}})
+    assert found.json()["result"]["isError"] is False
+    assert decoded_outside_lock.is_set()
+
+    snapshot = manager.storage_dir / "snap.jpg"
+    snapshot.write_bytes(b"\xff\xd8" + (b"\x00" * 64) + b"\xff\xd9")
+    monkeypatch.setattr(mcp_routes, "_MAX_SNAPSHOT_BYTES", 32)
+    oversized = post_rpc(client, "tools/call", {"name": "get_incident_image", "arguments": {"event_id": 5}})
+    assert oversized.json()["result"]["isError"] is True
+    assert "unavailable" in tool_text(oversized.json())
+
+    monkeypatch.setattr(mcp_routes, "_MAX_SNAPSHOT_BYTES", 12 * 1024 * 1024)
+    snapshot.write_bytes(bytes([
+        0xFF, 0xD8,
+        0xFF, 0xC0, 0x00, 0x0B, 0x08,
+        0x4E, 0x20,
+        0x4E, 0x20,
+        0x01, 0x01, 0x11, 0x00,
+        0xFF, 0xD9,
+    ]))
+    huge = post_rpc(client, "tools/call", {"name": "get_incident_image", "arguments": {"event_id": 5}})
+    assert huge.json()["result"]["isError"] is True
+    assert "unavailable" in tool_text(huge.json())
+
+
+def test_tool_text_drops_embedded_paths_urls_and_vectors(tmp_path) -> None:
+    client, manager = build_client(tmp_path, token_config("read"))
+    leaked_path = "/var/lib/survng/models/image.xml"
+    manager.semantic_search = SimpleNamespace(
+        search_text=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError(
+            f"semantic image model artifact is missing: {leaked_path}; open failed {STREAM_URL}"
+        )),
+    )
+    manager.semantic_search_status = lambda: {
+        "enabled": True,
+        "state": "unavailable",
+        "error": f"model directory does not exist: {leaked_path}",
+    }
+    manager.events.incidents[0]["events"][0]["faces"] = [{
+        "name": "Ada",
+        "embedding": [0.25] * 48,
+    }]
+
+    search = post_rpc(client, "tools/call", {"name": "search_incidents", "arguments": {}})
+    semantic = post_rpc(client, "tools/call", {
+        "name": "semantic_search_recordings",
+        "arguments": {"query": "red jacket"},
+    })
+    combined = search.text + semantic.text
+    assert search.status_code == 200
+    assert semantic.status_code == 200
+    assert leaked_path not in combined
+    assert STREAM_URL not in combined
+    assert "secret" not in combined
+    assert "0.25" not in combined
+    assert "Ada" in search.text
+    assert "/recordings/search" in semantic.text
+    assert "[filesystem path omitted]" in semantic.text
+    assert "[URL omitted]" in semantic.text
+
+
+def test_parallel_tool_calls_receive_429(tmp_path) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_status(_active):
+        entered.set()
+        assert release.wait(3)
+        return _health_status(_active)
+
+    client, _manager = build_client(
+        tmp_path,
+        token_config("read"),
+        call_limiter=threading.BoundedSemaphore(1),
+        system_status=blocking_status,
+    )
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            async def call():
+                return await http.post(
+                    "/api/mcp",
+                    headers={"Authorization": f"Bearer {SECRET}"},
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {"name": "get_system_health", "arguments": {}},
+                    },
+                )
+
+            first = asyncio.create_task(call())
+            assert await asyncio.to_thread(entered.wait, 3)
+            second = await call()
+            release.set()
+            first_response = await first
+            return first_response, second
+
+    first_response, second = asyncio.run(scenario())
+    assert first_response.status_code == 200
+    assert second.status_code == 429
+    assert second.headers["retry-after"] == "2"
+    assert second.json()["error"]["message"] == "SurvNG is busy; try again shortly"
 
 
 def test_recent_incidents_keep_the_app_href_and_drop_urls(tmp_path) -> None:

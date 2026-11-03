@@ -126,9 +126,26 @@ Point the bot's MCP configuration at that URL and send the bearer token in the `
 }
 ```
 
-The token lives on the shared Grok Bot computer, so every bot on that account can use it. Keep the standing token at `read`.
+The token lives on the shared Grok Bot computer, so every bot on that account can use it. Keep the standing token at `read`. A `camera:control` token can start and stop cameras. An `admin` token can queue clip exports. Leave both off the bot that uses the public URL.
 
-Leave port `8088` unpublished. Publish SurvNG only through the existing HTTPS reverse proxy, the same way browser sign-in is published.
+### Publish through the HTTPS proxy
+
+Use the existing reverse-proxy location. With the default base path the bot URL is:
+
+```text
+https://<your-host>/survng/api/mcp
+```
+
+Before that URL is reachable from the internet:
+
+1. Enable API authentication and create a `read` token. The endpoint accepts that bearer token only while API authentication is on.
+2. Put the proxy in **Admin → Access → Trusted reverse proxies** and send `X-Forwarded-Proto: https`. The sample nginx site already forwards `POST /survng/api/mcp` with the rest of `/survng/`.
+3. Leave the `Authorization` header out of proxy and application logs. The sample nginx access log does this.
+4. Leave port `8088` unpublished. Bind SurvNG to loopback when the proxy is on the same computer, or firewall `8088` so only the proxy host can connect. See [Reverse proxy](reverse-proxy.md).
+
+A read token can return incident snapshots, recognized names, and detection boxes. Those bytes leave the SurvNG host and are processed on the bot. Treat a public bot as access to that camera evidence for whoever can use the bot.
+
+SurvNG runs at most two MCP tool calls at once. A further call receives HTTP 429 and `Retry-After: 2`. Request bodies over 256 KiB are rejected. Snapshots larger than 12 MB, wider or taller than 8192 pixels, or above 16 million pixels are refused before they are decoded.
 
 Useful standing jobs:
 
