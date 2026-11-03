@@ -50,3 +50,36 @@ def test_unadmitted_acquisition_image_is_available_at_original_and_thumbnail_siz
         with pytest.raises(HTTPException) as error:
             route(identifier)
         assert error.value.status_code==404
+
+
+def test_observation_snapshot_focus_bbox_crops_the_matched_object(tmp_path):
+    store, routes = endpoints(tmp_path)
+    frame = np.zeros((400, 2000, 3), dtype=np.uint8)
+    frame[:, :] = (10, 10, 10)
+    frame[150:250, 900:1100] = (0, 0, 255)
+    path = tmp_path / "wide.jpg"
+    assert cv2.imwrite(str(path), frame)
+    sample = store.acquire_scene_sample(
+        sample_id="wide", camera_id="gate", captured_epoch=1000, source="live_discovery",
+        status="complete", snapshot_path=str(path),
+        observations=[{"label": "person", "confidence": 0.9, "snapshot_path": str(path)}],
+    )
+    observation_id = sample["observation_ids"][0]
+    snapshot = routes["/api/incidents/observations/{observation_id}/snapshot"]
+    full = snapshot(observation_id, width=640, quality=90)
+    focused = snapshot(
+        observation_id, width=640, quality=90,
+        focus_bbox="900,150,1100,250", zoom=1, aspect_w=16, aspect_h=9,
+    )
+    tight = snapshot(
+        observation_id, width=640, quality=90,
+        focus_bbox="900,150,1100,250", zoom=3, aspect_w=16, aspect_h=9,
+    )
+    full_image = cv2.imread(str(full.path))
+    focused_image = cv2.imread(str(focused.path))
+    tight_image = cv2.imread(str(tight.path))
+    assert full_image.shape[1] == 640
+    assert focused_image.shape[1] < full_image.shape[1]
+    assert tight_image.shape[1] < focused_image.shape[1]
+    assert float(focused_image.mean()) > float(full_image.mean())
+    assert full.path != focused.path != tight.path

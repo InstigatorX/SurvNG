@@ -202,18 +202,34 @@ const cropped = new URL(semanticSearchResultImageUrl(searchResult, {
   zoom: 1.5,
 }), "http://localhost");
 assert.equal(cropped.pathname, "/api/events/7/thumbnail.jpg");
-assert.equal(cropped.searchParams.get("object_focus"), "true");
+assert.equal(cropped.searchParams.get("focus_bbox"), "4,5,40,50");
+assert.equal(cropped.searchParams.get("object_focus"), null);
 assert.equal(cropped.searchParams.get("zoom"), "1.5");
 assert.equal(cropped.searchParams.get("aspect_w"), "16");
 assert.equal(cropped.searchParams.get("aspect_h"), "9");
 assert.equal(cropped.searchParams.get("v"), "3");
-assert.equal(cropped.searchParams.has("focus_bbox"), false);
+const fullFrame = new URL(semanticSearchResultImageUrl({
+  snapshot_url: "/survng/api/events/7/snapshot.jpg",
+  event: { id: 7, evidence_revision: 3 },
+}, { objectFocus: "auto", zoom: 1.5 }), "http://localhost");
+assert.equal(fullFrame.searchParams.get("object_focus"), "true");
+assert.equal(fullFrame.searchParams.has("focus_bbox"), false);
+const observation = new URL(semanticSearchResultImageUrl({
+  snapshot_url: "/survng/api/incidents/observations/obs-1/snapshot",
+  event: { id: 7 },
+  evidence: { observation_id: "obs-1", bbox: [10, 20, 110, 220] },
+}, { objectFocus: "auto", zoom: 2 }), "http://localhost");
+assert.equal(observation.pathname, "/survng/api/incidents/observations/obs-1/snapshot");
+assert.equal(observation.searchParams.get("focus_bbox"), "10,20,110,220");
+assert.equal(observation.searchParams.get("zoom"), "2");
+assert.equal(observation.searchParams.get("aspect_w"), "16");
+assert.equal(observation.searchParams.get("aspect_h"), "9");
 assert.equal(
   semanticSearchResultImageUrl({
-    ...searchResult,
+    snapshot_url: "/survng/api/incidents/observations/obs-1/snapshot",
     evidence: { observation_id: "obs-1" },
   }, { objectFocus: "auto", zoom: 2 }),
-  "/survng/api/events/7/snapshot.jpg",
+  "/survng/api/incidents/observations/obs-1/snapshot",
 );
 
 const previewState = { cleared: false, drawArgs: null };

@@ -553,18 +553,21 @@ function SearchResultImage({ result, alt, objectFocus, objectFocusZoom }) {
   const mode = normalizeIncidentThumbnailObjectFocus(objectFocus);
   const zoom = normalizeIncidentThumbnailObjectFocusZoom(objectFocusZoom);
   const observationId = String(result?.evidence?.observation_id || "").trim();
+  const bboxKey = Array.isArray(result?.evidence?.bbox) ? result.evidence.bbox.join(",") : "";
   const [focused, setFocused] = useState(mode === "auto");
   useEffect(() => {
     setFocused(mode === "auto");
-  }, [mode, result?.event?.id, result?.snapshot_url, observationId]);
-  const src = mediaUrl(semanticSearchResultImageUrl(result, {
+  }, [mode, result?.event?.id, result?.snapshot_url, observationId, bboxKey]);
+  const imageOptions = {
     objectFocus: mode,
-    focused,
     zoom,
     aspectWidth: 16,
     aspectHeight: 9,
-  }));
-  const showButton = mode === "button" && !observationId && Boolean(result?.event?.id);
+  };
+  const src = mediaUrl(semanticSearchResultImageUrl(result, { ...imageOptions, focused }));
+  const canFocus = semanticSearchResultImageUrl(result, { ...imageOptions, objectFocus: "button", focused: true })
+    !== semanticSearchResultImageUrl(result, { ...imageOptions, objectFocus: "button", focused: false });
+  const showButton = mode === "button" && canFocus;
   return <>
     {src ? <img src={src} alt={alt} loading="lazy" /> : null}
     {showButton ? <button

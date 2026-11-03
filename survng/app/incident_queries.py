@@ -736,7 +736,15 @@ def create_incident_query_router(
 
     @router.get("/api/incidents/evidence/{observation_id}/snapshot")
     @router.get("/api/incidents/observations/{observation_id}/snapshot")
-    def observation_snapshot(observation_id: str, width: int = 0, quality: int = 82):
+    def observation_snapshot(
+        observation_id: str,
+        width: int = 0,
+        quality: int = 82,
+        zoom: float = 1.0,
+        aspect_w: float = 16.0,
+        aspect_h: float = 9.0,
+        focus_bbox: str = "",
+    ):
         def resolve(active):
             observation = (active.events.scene_evidence_image(observation_id)
                            if observation_id.startswith("gallery-")
@@ -749,16 +757,44 @@ def create_incident_query_router(
                 path = event_snapshot_path(active.storage_dir, observation, active.media_storage)
             except (FileNotFoundError, PermissionError):
                 raise HTTPException(status_code=404, detail="supporting image expired")
-            if width:
+            from .appearance_routes import _parse_focus_bbox
+            parsed_focus_bbox = _parse_focus_bbox(focus_bbox)
+            if width or parsed_focus_bbox is not None:
                 import cv2
-                from .appearance_routes import _jpeg_thumbnail
-                safe_width, safe_quality = max(160,min(2560,width)), max(50,min(95,quality))
+                from .appearance_routes import (
+                    _bbox_focus_thumbnail_frame,
+                    _clamp_object_focus_zoom,
+                    _jpeg_thumbnail,
+                )
+                safe_width, safe_quality = max(160, min(2560, width or 960)), max(50, min(95, quality))
+                focus_zoom = _clamp_object_focus_zoom(zoom)
+                try:
+                    focus_aspect_w = float(aspect_w)
+                    focus_aspect_h = float(aspect_h)
+                except (TypeError, ValueError):
+                    focus_aspect_w, focus_aspect_h = 16.0, 9.0
+                if (
+                    not math.isfinite(focus_aspect_w) or not math.isfinite(focus_aspect_h)
+                    or focus_aspect_w <= 0 or focus_aspect_h <= 0
+                ):
+                    focus_aspect_w, focus_aspect_h = 16.0, 9.0
                 stat = path.stat()
-                identity = f"{path}:{stat.st_mtime_ns}:{stat.st_size}:{safe_width}:{safe_quality}"
+                identity = (
+                    f"{path}:{stat.st_mtime_ns}:{stat.st_size}:{safe_width}:{safe_quality}:"
+                    f"{focus_bbox}:{focus_zoom:.3f}:{focus_aspect_w:.3f}:{focus_aspect_h:.3f}"
+                )
                 def build():
                     frame = cv2.imread(str(path))
                     if frame is None:
                         raise HTTPException(status_code=404, detail="supporting image unavailable")
+                    if parsed_focus_bbox is not None:
+                        frame = _bbox_focus_thumbnail_frame(
+                            frame,
+                            parsed_focus_bbox,
+                            focus_aspect_w,
+                            focus_aspect_h,
+                            focus_zoom,
+                        )
                     return _jpeg_thumbnail(frame, safe_width, safe_quality)
                 cached = active.image_cache.get_or_create("observations", identity, build)
                 return FileResponse(cached, media_type="image/jpeg", headers={"Cache-Control":"private, no-cache"})

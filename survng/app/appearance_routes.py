@@ -205,6 +205,7 @@ def _bbox_focus_thumbnail_frame(
     bbox: tuple[int, int, int, int],
     aspect_width: float = 16.0,
     aspect_height: float = 11.0,
+    zoom: float = 1.0,
 ) -> np.ndarray:
     frame_height, frame_width = frame.shape[:2]
     x1, y1, x2, y2 = bbox
@@ -218,7 +219,7 @@ def _bbox_focus_thumbnail_frame(
         frame_width,
         frame_height,
         [(x1, y1, x2, y2)],
-        1.0,
+        zoom,
         aspect_width,
         aspect_height,
     )
@@ -425,6 +426,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                         parsed_focus_bbox,
                         focus_aspect_w,
                         focus_aspect_h,
+                        focus_zoom,
                     )
                 elif focus_enabled:
                     frame = _object_focus_thumbnail_frame(
