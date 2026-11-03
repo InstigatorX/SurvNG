@@ -1,6 +1,33 @@
+import { resolveWorkspace } from "./workspaceNavigation.mjs";
+
 function sameEventId(left, right) {
   if (left == null || right == null) return false;
   return String(left) === String(right);
+}
+
+export function incidentReturnPath(search = "") {
+  const params = new URLSearchParams(String(search || "").replace(/^\?/, ""));
+  const value = String(params.get("return_to") || "").trim();
+  if (!value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return "";
+  let url;
+  try {
+    url = new URL(value, "http://survng.local");
+  } catch {
+    return "";
+  }
+  if (url.origin !== "http://survng.local") return "";
+  const pathname = url.pathname.length > 1 ? url.pathname.replace(/\/+$/, "") : url.pathname;
+  if (!resolveWorkspace(pathname || "/")) return "";
+  return `${pathname || "/"}${url.search}${url.hash}`;
+}
+
+export function incidentOpenedFromHref(eventId, returnPath = "") {
+  const id = Number(eventId);
+  if (!Number.isInteger(id) || id <= 0) return "/incidents";
+  const params = new URLSearchParams({ event_ids: String(id) });
+  const safeReturn = incidentReturnPath(`?return_to=${encodeURIComponent(String(returnPath || ""))}`);
+  if (safeReturn) params.set("return_to", safeReturn);
+  return `/incidents?${params.toString()}`;
 }
 
 export function incidentSelectionHref(currentHref, eventId, basePath = "") {

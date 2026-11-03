@@ -321,6 +321,12 @@
   font-weight: 550;
 }
 
+.incident-return-close {
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
+}
+
 .incident-desktop-focus .incident-card {
   border: 0;
   border-radius: 0;

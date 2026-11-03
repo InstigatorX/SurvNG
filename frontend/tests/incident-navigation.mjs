@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentGalleryFrames, incidentEvidenceTimeline, incidentFocusStep, incidentImageRenderRect, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentGalleryFrames, incidentEvidenceTimeline, incidentFocusStep, incidentImageRenderRect, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentOpenedFromHref, incidentProgressiveImageWidth, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -29,6 +29,21 @@ assert.equal(incidentSelectionHref("/survng/incidents", "bad", "/survng"), "/sur
 assert.equal(incidentSelectionHref("/incidents?day=2026-08-16", 42, "/survng"), "/survng/incidents?day=2026-08-16&event_ids=42");
 assert.equal(incidentSelectionHref("/incidents?event_ids=1", 42), "/incidents?event_ids=42");
 assert.equal(incidentSelectionHref("/incidents#focus", 7), "/incidents?event_ids=7#focus");
+const searchReturn = incidentReturnPath(`?event_ids=7&return_to=${encodeURIComponent("/search?q=red truck&camera=gate")}`);
+const searchReturnUrl = new URL(searchReturn, "http://survng.local");
+assert.equal(searchReturnUrl.pathname, "/search");
+assert.equal(searchReturnUrl.searchParams.get("q"), "red truck");
+assert.equal(searchReturnUrl.searchParams.get("camera"), "gate");
+assert.equal(incidentReturnPath("?return_to=https://evil.test/search"), "");
+assert.equal(incidentReturnPath("?return_to=//evil.test/search"), "");
+assert.equal(incidentReturnPath("?return_to=/not-a-page"), "");
+assert.equal(incidentReturnPath(""), "");
+const openedFromSearch = new URL(incidentOpenedFromHref(12, "/search?q=truck"), "http://survng.local");
+assert.equal(openedFromSearch.pathname, "/incidents");
+assert.equal(openedFromSearch.searchParams.get("event_ids"), "12");
+assert.equal(new URL(incidentReturnPath(openedFromSearch.search), "http://survng.local").pathname, "/search");
+assert.equal(incidentOpenedFromHref(12, "https://evil.test/search"), "/incidents?event_ids=12");
+assert.equal(incidentOpenedFromHref("bad", "/search"), "/incidents");
 assert.equal(incidentDetailQuery(incidents[0]), "event_ids=101%2C102&gap_seconds=45");
 assert.equal(incidentDetailQuery({ events: [{ id: 101 }, { id: 101 }, { id: "bad" }] }), "event_ids=101&gap_seconds=45");
 assert.equal(incidentDetailQuery({ events: [] }), "");
