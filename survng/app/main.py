@@ -75,6 +75,7 @@ from .intelligence_routes import (
     IntelligenceDependencies,
     create_intelligence_router,
 )
+from .mcp_routes import McpDependencies, create_mcp_router
 from .recording_media_runtime import (
     RecordingMediaDependencies,
     RecordingMediaRuntime,
@@ -135,6 +136,7 @@ APPLICATION_STOPPING = threading.Event()
 CONFIG_PROBE_LIMITER = threading.BoundedSemaphore(2)
 AUDIT_AI_LIMITER = threading.BoundedSemaphore(1)
 ASSISTANT_LIMITER = threading.BoundedSemaphore(2)
+MCP_CALL_LIMITER = threading.BoundedSemaphore(2)
 AI_ACTIVITY_LOCK = threading.Lock()
 AI_ACTIVITY_CONDITION = threading.Condition(AI_ACTIVITY_LOCK)
 AI_ACTIVE_OPERATIONS: dict[str, int] = {}
@@ -339,7 +341,30 @@ class SecurityBoundaryMiddleware:
             scope = apply_trusted_proxy_headers(scope, config.proxy.trusted_proxies)
         api_path = _api_scope_path(scope)
         method = str(scope.get("method") or "GET")
-        if scope_type in {"http", "websocket"} and api_path.startswith("/api/"):
+        if scope_type == "http" and api_path == "/api/mcp":
+            # Bearer tokens only. Any scope may open the endpoint; each tool
+            # checks its own scope. Browser sessions are not accepted, and the
+            # endpoint stays closed when API authentication is disabled.
+            authorization = scope_header(scope, b"authorization")
+            token_principal = (
+                authenticate_api_token(authorization, config.api_auth)
+                if config.api_auth.enabled
+                else None
+            )
+            if token_principal is None:
+                response = JSONResponse(
+                    {"detail": "valid bearer token required"},
+                    status_code=401,
+                    headers={
+                        "Cache-Control": "no-store",
+                        "WWW-Authenticate": 'Bearer realm="SurvNG"',
+                    },
+                )
+                await response(scope, receive, send)
+                return
+            scope = dict(scope)
+            scope["survng_principal"] = token_principal
+        elif scope_type in {"http", "websocket"} and api_path.startswith("/api/"):
             authorization = scope_header(scope, b"authorization")
             principal = None
             if config.api_auth.enabled:
@@ -1324,6 +1349,14 @@ _intelligence_route_bundle = create_intelligence_router(
     )
 )
 app.include_router(_intelligence_route_bundle.router)
+app.include_router(create_mcp_router(McpDependencies(
+    get_config=lambda: config,
+    get_manager=get_manager,
+    manager_lock=MANAGER_RELOAD_LOCK,
+    intelligence=_intelligence_route_bundle.service,
+    application_stopping=APPLICATION_STOPPING,
+    call_limiter=MCP_CALL_LIMITER,
+)))
 
 
 _camera_api_route_bundle = create_camera_api_router(

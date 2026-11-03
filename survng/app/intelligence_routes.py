@@ -21,7 +21,17 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from .assistant import AssistantAnswer, AssistantChatRequest, AssistantEvidence, AssistantProvider, AssistantToolCall, IncidentVisualReviewer, strip_assistant_citation_markers
+from .assistant import (
+    AssistantAnswer,
+    AssistantChatRequest,
+    AssistantEvidence,
+    AssistantPageContext,
+    AssistantProvider,
+    AssistantToolCall,
+    IncidentVisualReviewer,
+    sanitize_assistant_data,
+    strip_assistant_citation_markers,
+)
 from .audit_ai import AuditAiAdvisor, AuditAiChange, AuditAiError, ai_provider_configured, motion_audit_interpretation, motion_paradigm_context, validate_tuning_value
 from .cross_camera_trace import build_cross_camera_trace, prioritize_trace_candidates
 from .calibration import apply_calibration_changes, build_calibration_report, calibration_configuration_fingerprint, calibration_setting_value
@@ -2192,6 +2202,39 @@ class IntelligenceService:
         if call.name == 'create_media_export':
             return [self._assistant_media_export_evidence(call, request, active_config)]
         return []
+
+    def run_assistant_tool(self, call: AssistantToolCall, time_zone: str) -> list[dict[str, Any]]:
+        """Run one assistant tool and return its sanitized evidence.
+
+        Visual analysis is excluded: it spends the configured AI provider and
+        sends a frame to a second model. MCP callers look at images themselves.
+        """
+        if call.name == "analyze_incident_visual":
+            raise HTTPException(status_code=404, detail="unknown tool")
+        request = AssistantChatRequest(
+            message="mcp",
+            context=AssistantPageContext(
+                time_zone=time_zone or "America/New_York",
+                camera_id=call.camera_id,
+                incident_event_id=call.event_id,
+            ),
+        )
+        with self.deps.manager_lock:
+            if self.deps.application_stopping.is_set():
+                raise HTTPException(status_code=503, detail="SurvNG is shutting down")
+            active_config = self.deps.get_config()
+            active_manager = self.deps.get_manager()
+        evidence = self._assistant_execute_tool(call, request, active_config, active_manager)
+        payloads: list[dict[str, Any]] = []
+        for item in evidence:
+            payload = item.client_payload()
+            for key in ("title", "summary"):
+                sanitized_text = sanitize_assistant_data(payload.get(key) or "")
+                payload[key] = sanitized_text if isinstance(sanitized_text, str) else ""
+            sanitized = sanitize_assistant_data(item.data)
+            payload["data"] = sanitized if isinstance(sanitized, dict) else {}
+            payloads.append(payload)
+        return payloads
 
     def assistant_status(self) -> dict[str, Any]:
         ai = self.deps.get_config().audit_ai

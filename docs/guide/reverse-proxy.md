@@ -183,7 +183,7 @@ Replace `192.168.1.10` with the nginx server’s LAN IP. Prefer a private networ
 - Password hashes use scrypt; oversized hash parameters are rejected.
 - Certificate uploads are limited to 256 KB.
 
-API **bearer tokens** (Home Assistant) remain a separate integration path. Give tokens the smallest scope they need, and prefer them on the LAN or VPN.
+API **bearer tokens** (Home Assistant, Grok Bot) remain a separate integration path. Give tokens the smallest scope they need. The Grok Bot endpoint is `POST /survng/api/mcp` on the same `/survng/` location. Use a `read` token for a bot reached through this proxy. Keep `camera:control` and `admin` tokens off that bot. Leave the `Authorization` header out of the proxy access log. A read token can still return incident snapshots and recognized names, and those bytes leave the SurvNG host. See [Integrations](integrations.md).
 
 If the browser origin is not the Host SurvNG sees (uncommon with the nginx example above), set `SURVNG_TRUSTED_ORIGINS` to the public origin, for example `https://survng.example.com`. Leave it unset when Host and HTTPS already match the URL people type.
 

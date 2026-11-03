@@ -1,6 +1,6 @@
 # Integrations
 
-SurvNG can notify and be controlled by other systems on your network. The native **Home Assistant integration** uses the authenticated HTTP API and event stream. **MQTT** is an optional, independent transport.
+SurvNG can notify and be controlled by other systems on your network. The native **Home Assistant integration** uses the authenticated HTTP API and event stream. **MQTT** is an optional, independent transport. **Grok Bot** connects through the MCP endpoint below.
 
 ## Native Home Assistant incident notifications
 
@@ -95,6 +95,71 @@ Authorization: Bearer YOUR_TOKEN
 ```
 
 Important: browser users (Admin → Access) and API tokens can both be enabled. The UI uses a session cookie; automations keep using `Authorization: Bearer`.
+
+## Grok Bot
+
+Grok Bot reaches SurvNG through a stateless MCP endpoint on the same process:
+
+```text
+POST /api/mcp
+Authorization: Bearer YOUR_TOKEN
+```
+
+With the usual proxy prefix that is `https://<your-host>/survng/api/mcp`. The endpoint speaks JSON-RPC (`initialize`, `ping`, `tools/list`, `tools/call`) and returns one JSON result per call. It does not keep a session and it does not replace the incident event stream.
+
+Enable API authentication first. MCP answers 401 while API authentication is off, and it ignores browser session cookies. Create a token with the `read` scope for a standing bot. Add `camera:control` only on a separate token whose job is to start or stop a camera, recording, or detection. Clip export is available to an `admin` token.
+
+A read token can check health, explain configuration, search and inspect incidents, summarize recent activity, run Smart Search, trace an incident across cameras, fetch one snapshot, and poll the latest incident journal. `tools/list` hides camera control and export unless the token's scope includes them. The snapshot tool returns one JPEG with the long edge capped at 1280 pixels. Responses omit credentials, stream URLs, and filesystem paths.
+
+Point the bot's MCP configuration at that URL and send the bearer token in the `Authorization` header:
+
+```json
+{
+  "mcpServers": {
+    "survng": {
+      "url": "https://nvr.example/survng/api/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN"
+      }
+    }
+  }
+}
+```
+
+The token lives on the shared Grok Bot computer, so every bot on that account can use it. Keep the standing token at `read`. A `camera:control` token can start and stop cameras. An `admin` token can queue clip exports. Leave both off the bot that uses the public URL.
+
+### Publish through the HTTPS proxy
+
+Use the existing reverse-proxy location. With the default base path the bot URL is:
+
+```text
+https://<your-host>/survng/api/mcp
+```
+
+Before that URL is reachable from the internet:
+
+1. Enable API authentication and create a `read` token. The endpoint accepts that bearer token only while API authentication is on.
+2. Put the proxy in **Admin → Access → Trusted reverse proxies** and send `X-Forwarded-Proto: https`. The sample nginx site already forwards `POST /survng/api/mcp` with the rest of `/survng/`.
+3. Leave the `Authorization` header out of proxy and application logs. The sample nginx access log does this.
+4. Leave port `8088` unpublished. Bind SurvNG to loopback when the proxy is on the same computer, or firewall `8088` so only the proxy host can connect. See [Reverse proxy](reverse-proxy.md).
+
+A read token can return incident snapshots, recognized names, and detection boxes. Those bytes leave the SurvNG host and are processed on the bot. Treat a public bot as access to that camera evidence for whoever can use the bot.
+
+SurvNG runs at most two MCP tool calls at once. A further call receives HTTP 429 and `Retry-After: 2`. Request bodies over 256 KiB are rejected. Snapshots larger than 12 MB, wider or taller than 8192 pixels, or above 16 million pixels are refused before they are decoded.
+
+Useful standing jobs:
+
+- Morning health digest: `get_system_health` and `recent_incidents`.
+- Overnight summary: `summarize_recent_activity` or `search_incidents` for people and vehicles.
+- Follow-up on one event: `get_incident_image`, then `trace_across_cameras`.
+
+A starter handoff:
+
+```text
+Check SurvNG health, then summarize person and vehicle incidents since yesterday evening. For anything unusual, fetch the incident image and trace it across cameras. Leave a short list with camera, time, and what you saw. Leave camera settings unchanged.
+```
+
+Camera restart stays on the `camera:control` token, and only after you explicitly ask for that camera to start or stop.
 
 ## Stream sources for Home Assistant
 
