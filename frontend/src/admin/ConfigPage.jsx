@@ -2830,7 +2830,7 @@ export function LogViewer({ lines, filter, setFilter, order, setOrder, timeZone 
       <div className="log-lines" role="log" aria-live="polite">
         {displayedLines.length ? displayedLines.map((line, index) => (
           <div className={`log-line ${String(line.level || "").toLowerCase()}`} key={`${line.time}-${index}`}>
-            <time>{formatTimeOnly(line.time, timeZone)}</time>
+            <time dateTime={line.time || undefined}>{formatDateTime(line.time, timeZone)}</time>
             <span>{line.level}</span>
             <strong>{line.logger}</strong>
             <code>{line.message}</code>

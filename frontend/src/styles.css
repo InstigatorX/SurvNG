@@ -10131,7 +10131,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .log-line {
   display: grid;
-  grid-template-columns: 92px 72px minmax(120px, 190px) minmax(0, 1fr);
+  grid-template-columns: 14.5rem 4.5rem minmax(7.5rem, 11.875rem) minmax(0, 1fr);
   gap: 8px;
   align-items: start;
   border: 1px solid transparent;
@@ -10182,6 +10182,32 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   overflow-wrap: anywhere;
   color: var(--ink);
   font-family: inherit;
+}
+
+@media (max-width: 720px) {
+  .log-line {
+    grid-template-columns: minmax(0, max-content) auto;
+    grid-template-areas:
+      "time level"
+      "logger logger"
+      "message message";
+  }
+
+  .log-line time {
+    grid-area: time;
+  }
+
+  .log-line span {
+    grid-area: level;
+  }
+
+  .log-line strong {
+    grid-area: logger;
+  }
+
+  .log-line code {
+    grid-area: message;
+  }
 }
 
 .recordings-v2-page {
