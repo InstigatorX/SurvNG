@@ -15,10 +15,19 @@ export function incidentReturnPath(search = "") {
   } catch {
     return "";
   }
-  if (url.origin !== "http://survng.local") return "";
-  const pathname = url.pathname.length > 1 ? url.pathname.replace(/\/+$/, "") : url.pathname;
-  if (!resolveWorkspace(pathname || "/")) return "";
-  return `${pathname || "/"}${url.search}${url.hash}`;
+  if (url.origin !== "http://survng.local" || url.username || url.password) return "";
+  // Dot-segment normalization can turn "/.//host" into the protocol-relative
+  // path "//host". Workspace matching treats a leading "//" as Live, so the
+  // path has to be rejected before that comparison.
+  const pathname = url.pathname;
+  if (!pathname.startsWith("/") || pathname.startsWith("//") || pathname.includes("//") || pathname.includes("\\")) {
+    return "";
+  }
+  const normalized = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+  if (!resolveWorkspace(normalized)) return "";
+  const target = `${normalized}${url.search}${url.hash}`;
+  if (!target.startsWith("/") || target.startsWith("//")) return "";
+  return target;
 }
 
 export function incidentOpenedFromHref(eventId, returnPath = "") {
