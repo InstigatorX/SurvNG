@@ -28,7 +28,7 @@ SurvNG watches your cameras, keeps continuous video history, and helps you find 
 12. [Zones](zones.md) — watch the parts of the picture that matter
 13. [Recordings & storage](storage.md) — how long video is kept and where it lives
 14. [AI assistant](assistant.md) — ask questions about health and incidents
-15. [Integrations](integrations.md) — Home Assistant, MQTT, and API tokens
+15. [Integrations](integrations.md) — Home Assistant, MQTT, API tokens, and Grok Bot
 16. [Access](access.md) — sign-in roles and HTTPS certificates
 17. [Reverse proxy](reverse-proxy.md) — nginx, trusted proxies, and internet exposure
 18. [HTTP API](api.md) — endpoints, authentication, and examples
