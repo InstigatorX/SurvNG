@@ -2743,7 +2743,7 @@ class EventStoreTest(unittest.TestCase):
             event = store.add_event(
                 camera_id="gate",
                 kind="motion",
-                created_at="2026-07-31T16:02:07+00:00",
+                created_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
                 objects_json=json.dumps([
                     {"label": "car", "confidence": 0.88, "incident_eligible": True},
                     {
