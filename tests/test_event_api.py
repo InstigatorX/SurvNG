@@ -1273,14 +1273,27 @@ class EventApiSerializationTest(unittest.TestCase):
                     aspect_w=16,
                     aspect_h=11,
                 )
+                tight = main.event_thumbnail(
+                    1,
+                    width=640,
+                    quality=90,
+                    focus_bbox="900,150,1100,250",
+                    zoom=3,
+                    aspect_w=16,
+                    aspect_h=11,
+                )
 
             full_image = cv2.imread(str(full.path))
             focused_image = cv2.imread(str(focused.path))
+            tight_image = cv2.imread(str(tight.path))
             self.assertIsNotNone(full_image)
             self.assertIsNotNone(focused_image)
+            self.assertIsNotNone(tight_image)
             self.assertLess(focused_image.shape[1], full_image.shape[1])
+            self.assertLess(tight_image.shape[1], focused_image.shape[1])
             self.assertGreater(float(focused_image.mean()), float(full_image.mean()))
             self.assertNotEqual(full.path, focused.path)
+            self.assertNotEqual(focused.path, tight.path)
 
     def test_object_focus_crop_rect_tightens_with_zoom(self) -> None:
         from survng.app.appearance_routes import object_focus_crop_rect

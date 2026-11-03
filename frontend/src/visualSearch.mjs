@@ -132,6 +132,21 @@ export function drawContainedCropPreview(canvas, image, crop) {
   );
 }
 
+function evidenceFocusBbox(result) {
+  const bbox = result?.evidence?.bbox;
+  if (!Array.isArray(bbox) || bbox.length !== 4) return "";
+  const values = bbox.map((value) => Math.round(Number(value)));
+  if (values.some((value) => !Number.isInteger(value))) return "";
+  if (values[2] <= values[0] || values[3] <= values[1]) return "";
+  return values.join(",");
+}
+
+function withQuery(url, params) {
+  const query = params.toString();
+  if (!query) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}${query}`;
+}
+
 export function semanticSearchResultImageUrl(result, {
   objectFocus = "off",
   focused = false,
@@ -142,20 +157,38 @@ export function semanticSearchResultImageUrl(result, {
   aspectHeight = 9,
 } = {}) {
   const snapshotUrl = String(result?.snapshot_url || "");
-  const observationId = String(result?.evidence?.observation_id || "").trim();
-  if (observationId) return snapshotUrl;
   const mode = normalizeIncidentThumbnailObjectFocus(objectFocus);
   const crop = mode === "auto" || (mode === "button" && focused);
+  if (!crop) return snapshotUrl;
+  // Object-crop hits store the matched box in the displayed frame's pixels.
+  // Observation snapshots are that full frame, so they have to be cropped too.
+  const focusBbox = evidenceFocusBbox(result);
+  const observationId = String(result?.evidence?.observation_id || "").trim();
+  const zoomValue = String(normalizeIncidentThumbnailObjectFocusZoom(zoom));
+  const widthValue = String(Math.max(160, Math.min(2560, Math.round(Number(width) || 960))));
+  const qualityValue = String(Math.max(50, Math.min(95, Math.round(Number(quality) || 82))));
+  if (observationId) {
+    if (!snapshotUrl || !focusBbox) return snapshotUrl;
+    return withQuery(snapshotUrl, new URLSearchParams({
+      width: widthValue,
+      quality: qualityValue,
+      focus_bbox: focusBbox,
+      zoom: zoomValue,
+      aspect_w: String(aspectWidth),
+      aspect_h: String(aspectHeight),
+    }));
+  }
   const eventId = Number(result?.event?.id);
-  if (!crop || !Number.isInteger(eventId) || eventId <= 0) return snapshotUrl;
+  if (!Number.isInteger(eventId) || eventId <= 0) return snapshotUrl;
   const params = new URLSearchParams({
-    width: String(Math.max(160, Math.min(2560, Math.round(Number(width) || 960)))),
-    quality: String(Math.max(50, Math.min(95, Math.round(Number(quality) || 82)))),
-    object_focus: "true",
-    zoom: String(normalizeIncidentThumbnailObjectFocusZoom(zoom)),
+    width: widthValue,
+    quality: qualityValue,
+    zoom: zoomValue,
     aspect_w: String(aspectWidth),
     aspect_h: String(aspectHeight),
   });
+  if (focusBbox) params.set("focus_bbox", focusBbox);
+  else params.set("object_focus", "true");
   const revision = result?.event?.evidence_revision;
   if (revision != null && revision !== "") params.set("v", String(revision));
   return `/api/events/${eventId}/thumbnail.jpg?${params.toString()}`;
