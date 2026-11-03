@@ -8,11 +8,12 @@ import {
   Search,
   SlidersHorizontal,
   Rows3,
+  X,
 } from "lucide-react";
 import { loadRelatedIncident } from "../relatedIncidents.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { incidentReplayTracking, incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
-import { incidentDetailQuery, incidentFocusStep, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryPageSize, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
+import { incidentDetailQuery, incidentFocusStep, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryPageSize, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
 import { APP_BASE_PATH, appUrl, incidentRecordingContext, fetch } from "../shared/api.js";
 import { INCIDENT_REFRESH_FALLBACK_MS } from "../shared/constants.js";
@@ -125,6 +126,12 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   function closeTabletInspector({ restoreFocus = true } = {}) {
     setTabletInspectorOpen(false);
     if (restoreFocus) window.requestAnimationFrame(() => tabletInspectorToggleRef.current?.focus());
+  }
+
+  function closeOpenedIncident() {
+    const returnTo = incidentReturnPath(window.location.search);
+    closeIncidentOverlay();
+    if (returnTo) window.location.assign(appUrl(returnTo));
   }
 
   useEffect(() => {
@@ -903,6 +910,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
               <div className="incident-desktop-focus">
                 <div className="incident-focus-actions">
                   <button ref={tabletInspectorToggleRef} type="button" className="incident-inspector-toggle" onClick={() => setTabletInspectorOpen((open) => !open)} aria-expanded={tabletInspectorOpen} aria-controls="incident-inspector" disabled={!displayedIncident}>Details</button>
+                  {incidentReturnPath(window.location.search) ? <button type="button" className="incident-return-close" onClick={closeOpenedIncident} aria-label="Close incident"><X size={18} /></button> : null}
                 </div>
                 {focusedIncident ? (
                   <>
@@ -1090,7 +1098,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
           </div>
         ) : null}
       </section>
-      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} canCorrectIncident={canCorrectIncident} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refresh} /> : null}
+      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} canCorrectIncident={canCorrectIncident} onClose={closeOpenedIncident} onSelect={openIncidentOverlay} onRefresh={refresh} /> : null}
     </main>
   );
 }
