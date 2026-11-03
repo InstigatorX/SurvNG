@@ -10,6 +10,7 @@ import {
   normalizeVisualFrameCrop,
   resolveObjectTrackId,
   semanticResultThumbnailUrl,
+  semanticSearchResultImageUrl,
   visualFrameCropFromPoints,
   visualFrameSearchRequest,
   visualMatchLabel,
@@ -181,6 +182,38 @@ assert.match(
 assert.match(
   semanticResultThumbnailUrl({ event: { id: 7 } }),
   /^\/api\/events\/7\/thumbnail\.jpg\?.*object_focus=true/,
+);
+
+const searchResult = {
+  snapshot_url: "/survng/api/events/7/snapshot.jpg",
+  event: { id: 7, evidence_revision: 3 },
+  evidence: { bbox: [4, 5, 40, 50] },
+};
+assert.equal(
+  semanticSearchResultImageUrl(searchResult, { objectFocus: "off" }),
+  "/survng/api/events/7/snapshot.jpg",
+);
+assert.equal(
+  semanticSearchResultImageUrl(searchResult, { objectFocus: "button", focused: false, zoom: 1.5 }),
+  "/survng/api/events/7/snapshot.jpg",
+);
+const cropped = new URL(semanticSearchResultImageUrl(searchResult, {
+  objectFocus: "auto",
+  zoom: 1.5,
+}), "http://localhost");
+assert.equal(cropped.pathname, "/api/events/7/thumbnail.jpg");
+assert.equal(cropped.searchParams.get("object_focus"), "true");
+assert.equal(cropped.searchParams.get("zoom"), "1.5");
+assert.equal(cropped.searchParams.get("aspect_w"), "16");
+assert.equal(cropped.searchParams.get("aspect_h"), "9");
+assert.equal(cropped.searchParams.get("v"), "3");
+assert.equal(cropped.searchParams.has("focus_bbox"), false);
+assert.equal(
+  semanticSearchResultImageUrl({
+    ...searchResult,
+    evidence: { observation_id: "obs-1" },
+  }, { objectFocus: "auto", zoom: 2 }),
+  "/survng/api/events/7/snapshot.jpg",
 );
 
 const previewState = { cleared: false, drawArgs: null };

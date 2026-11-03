@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Camera,
   CarFront,
+  Crop,
   Check,
   CircleAlert,
   ChevronDown,
@@ -49,6 +50,7 @@ import {
 import {
   drawContainedCropPreview,
   semanticResultThumbnailUrl,
+  semanticSearchResultImageUrl,
   visualFrameCropFromPoints,
   visualFrameSearchRequest,
 } from "../visualSearch.mjs";
@@ -58,6 +60,10 @@ import { formatDateTime, formatTimeOnly, formatExportHandleTime, formatBytes, fo
 import { dateKeyForTimeZone, addDaysToDateKey, zonedDateSecondToEpoch } from "../shared/datetime.js";
 import { preferredStreamSource } from "../shared/cameras.js";
 import { IdentityChip } from "../shared/identity.jsx";
+import {
+  normalizeIncidentThumbnailObjectFocus,
+  normalizeIncidentThumbnailObjectFocusZoom,
+} from "../incidentNavigation.mjs";
 import { eventThumbnailUrl, recordingDayUrl, recordingWindowUrl, recordingUpdatesUrl, recordingDayHlsUrl, recordingGridDayUrl, recordingGridUpdatesUrl, recordingPreviewUrl, recordingSegmentUrl } from "../shared/mediaUrls.js";
 import { ShakaVideo } from "../shared/media.jsx";
 import { RecordingHlsVideo } from "../shared/RecordingHlsVideo.jsx";
@@ -546,6 +552,38 @@ export function TimelineDatePicker({ value, max, onChange }) {
   );
 }
 
+function SearchResultImage({ result, alt, objectFocus, objectFocusZoom }) {
+  const mode = normalizeIncidentThumbnailObjectFocus(objectFocus);
+  const zoom = normalizeIncidentThumbnailObjectFocusZoom(objectFocusZoom);
+  const observationId = String(result?.evidence?.observation_id || "").trim();
+  const [focused, setFocused] = useState(mode === "auto");
+  useEffect(() => {
+    setFocused(mode === "auto");
+  }, [mode, result?.event?.id, result?.snapshot_url, observationId]);
+  const src = mediaUrl(semanticSearchResultImageUrl(result, {
+    objectFocus: mode,
+    focused,
+    zoom,
+    aspectWidth: 16,
+    aspectHeight: 9,
+  }));
+  const showButton = mode === "button" && !observationId && Boolean(result?.event?.id);
+  return <>
+    {src ? <img src={src} alt={alt} loading="lazy" /> : null}
+    {showButton ? <button
+      type="button"
+      className={`snapshot-focus-button ${focused ? "active" : ""}`}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setFocused((value) => !value);
+      }}
+      title={focused ? "Show full snapshot" : "Focus detected objects"}
+      aria-label={focused ? "Show full snapshot" : "Focus detected objects"}
+    ><Crop size={14} /></button> : null}
+  </>;
+}
+
 export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
   const localStorage = useMemo(() => browserStorage(window), []);
@@ -571,6 +609,9 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
   const [setupError, setSetupError] = useState("");
   const searchRequestRef = useRef(null);
   const initialSearchRunRef = useRef(false);
+  const { appConfig } = usePollingData();
+  const thumbnailObjectFocus = appConfig?.incident_thumbnail_object_focus ?? "off";
+  const thumbnailObjectFocusZoom = appConfig?.incident_thumbnail_object_focus_zoom ?? 1;
   const visibleResults = useMemo(
     () => semanticSearchResultsForCamera(results, resultsCameraId),
     [results, resultsCameraId],
@@ -713,7 +754,7 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
           const matchLabel = ({ strong_match: "Strong match", possible_match: "Possible match" })[result.match_strength] || "Visually similar";
           const cameraName = cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id;
           const observedAt = formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone);
-          return <article key={item.id} aria-label={`${matchLabel} at ${cameraName}, ${observedAt}`}><div className="semantic-result-image"><img src={mediaUrl(result.snapshot_url)} alt={`${cameraName} search result`} loading="lazy" /><span title={`Raw visual similarity ${Number(result.score || 0).toFixed(3)}`}>{matchLabel}</span></div><footer><div><strong>{cameraName}</strong><small>{observedAt}</small><IdentityChip item={item} className="semantic-result-identity" /></div><nav aria-label={`Actions for ${cameraName} result`}><a href={appUrl(`/incidents?event_ids=${item.id}`)}>Open incident</a><a href={recordingsHref(context)}><Play size={14} />Timeline</a></nav></footer></article>;
+          return <article key={item.id} aria-label={`${matchLabel} at ${cameraName}, ${observedAt}`}><div className="semantic-result-image"><SearchResultImage result={result} alt={`${cameraName} search result`} objectFocus={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} /><span title={`Raw visual similarity ${Number(result.score || 0).toFixed(3)}`}>{matchLabel}</span></div><footer><div><strong>{cameraName}</strong><small>{observedAt}</small><IdentityChip item={item} className="semantic-result-identity" /></div><nav aria-label={`Actions for ${cameraName} result`}><a href={appUrl(`/incidents?event_ids=${item.id}`)}>Open incident</a><a href={recordingsHref(context)}><Play size={14} />Timeline</a></nav></footer></article>;
         })}
         {!loading && !error && !visibleResults.length ? <div className="semantic-search-empty"><Search size={28} /><strong>{results.length && cameraId ? "No matching results from this camera" : "Search indexed incidents by appearance"}</strong><span>{results.length && cameraId ? "Choose All cameras or another camera to widen the current results." : "Results link to the exact incident and recording time."}</span></div> : null}
       </div>
