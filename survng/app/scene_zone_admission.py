@@ -12,17 +12,19 @@ import math
 from typing import Any
 
 from .config import CameraConfig, DetectionZone
-from .motion_correlation import assess_motion_objects
+from .motion_correlation import _aligned_motion_regions, assess_motion_objects
 from .scene_activity import _number, evaluate_scene_activity
 from .scene_context_memory import normalized_box
 from .stationary_policy import stationary_object_policy
-from .zones import apply_depth_zone_filters, apply_detection_zones, class_confidence_threshold
+from .zones import _point_in_polygon, apply_depth_zone_filters, apply_detection_zones, class_confidence_threshold
 
 ESTABLISHMENT_ZONE_POLICY_VERSION = "establishment_zones_v1"
 ESTABLISHMENT_ZONE_POLICY_VERSION_V2 = "establishment_zones_v2"
 # A box verifies where a notice occurred. Only boxes this soon after the notice
 # date it; a stationary subject seen later is not further activity.
 NOTICE_VERIFICATION_SECONDS = 10.0
+# Motion the qualifier located, with no detector class that explains it.
+MOTION_REGION_EVIDENCE_KIND = "zone_located_motion"
 
 
 def effective_stationary_presence(camera: CameraConfig, detector_config: Any | None = None) -> str:
@@ -289,6 +291,94 @@ def interpret_establishment_observation(observation: dict[str, Any], policy: dic
     }
 
 
+def interpret_motion_region(region, policy: dict[str, Any] | None) -> dict[str, Any]:
+    """Spatial zone result for one normalized motion region with no label.
+
+    The region's bottom centre is tested like a detection's foot point. A zone
+    limited to listed object classes neither admits nor ignores motion that
+    names no class, and a class-limited incident zone still has to be met when
+    the policy requires an incident zone.
+    """
+    base = {"region": None, "establishment_eligible": False, "reason": "insufficient_spatial_evidence",
+            "zones": [], "behaviors": []}
+    try:
+        x1, y1, x2, y2 = (float(value) for value in region)
+    except (TypeError, ValueError):
+        return base
+    if not all(math.isfinite(value) for value in (x1, y1, x2, y2)) or not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
+        return base
+    base["region"] = [round(value, 5) for value in (x1, y1, x2, y2)]
+    if not isinstance(policy, dict):
+        return base
+    try:
+        camera = _camera_from_policy(policy)
+    except (TypeError, ValueError):
+        return base
+    zones = [zone for zone in camera.zones if zone.enabled and len(zone.points) >= 3 and zone.behavior != "none"]
+    unrestricted = [zone for zone in zones if not any(item.strip() for item in zone.object_classes)]
+    x, y = (x1 + x2) / 2.0, y2
+    matches = [zone for zone in unrestricted if _point_in_polygon(x, y, zone)]
+    behaviors = [zone.behavior for zone in matches]
+    if "ignore" in behaviors:
+        reason, eligible = "ignored_zone", False
+    elif "incident" in behaviors:
+        reason, eligible = "incident_zone", True
+    elif bool(policy.get("require_incident_zone")) and any(zone.behavior == "incident" for zone in zones):
+        reason, eligible = "outside_incident_zone", False
+    else:
+        reason, eligible = "full_frame", True
+    return {**base, "establishment_eligible": eligible, "reason": reason,
+            "zones": [zone.name for zone in matches], "behaviors": behaviors}
+
+
+def _notice_motion_regions(notice, policy: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Place the qualifier's motion regions, when it recorded any, against the zones.
+
+    Regions are in the motion frame. The alignment snapshotted with the notice
+    maps them onto the detection frame; an unverified alignment cannot place
+    them, so it establishes nothing.
+    """
+    features = notice.get("features") if isinstance(notice, dict) else None
+    regions = features.get("motion_regions") if isinstance(features, dict) else None
+    if not isinstance(regions, list) or not regions:
+        return None
+    activity_policy = notice.get("activity_policy")
+    alignment = dict((activity_policy or {}).get("alignment") or {}) if isinstance(activity_policy, dict) else {}
+    reliable = bool(alignment.get("reliable", True))
+    if reliable:
+        regions = _aligned_motion_regions(regions, alignment)
+    interpretations = [interpret_motion_region(region, policy) for region in regions]
+    interpretations = [item for item in interpretations if item["region"] is not None]
+    return {
+        "alignment_reliable": reliable,
+        "regions": interpretations,
+        "eligible": [item for item in interpretations if reliable and item["establishment_eligible"]],
+    }
+
+
+def _notice_camera_claim(notice) -> dict[str, Any] | None:
+    semantics = notice.get("camera_semantics") if isinstance(notice, dict) else None
+    reports = semantics.get("reports") if isinstance(semantics, dict) else None
+    for report in reports or []:
+        if isinstance(report, dict) and report.get("category"):
+            claim = {"category": str(report["category"])}
+            if report.get("reported_class"):
+                claim["reported_class"] = str(report["reported_class"])
+            return claim
+    return None
+
+
+def _motion_region_rejection(located: dict[str, Any] | None) -> str | None:
+    if not located or not located["alignment_reliable"] or not located["regions"]:
+        return None
+    reasons = {item["reason"] for item in located["regions"]}
+    if reasons == {"ignored_zone"}:
+        return "ignored_zone"
+    if reasons == {"outside_incident_zone"}:
+        return "outside_incident_zone"
+    return "ineligible_zone"
+
+
 def _iter_observations(samples):
     for sample in samples or []:
         if not isinstance(sample, dict):
@@ -529,6 +619,37 @@ def evaluate_scene_establishment(
             zone.update(establishment_eligible=True, reason="full_frame")
         return result
 
+    # Named apart from the witness loop below, which binds its own `located`.
+    region_placement = _notice_motion_regions(notice, policy) if notice else None
+    if region_placement is not None:
+        zone["motion_regions"] = region_placement["regions"]
+        zone["motion_alignment_reliable"] = region_placement["alignment_reliable"]
+
+    def establish_from_motion_regions():
+        # A region is only spatial evidence where some of the frame cannot
+        # establish an incident. On a full frame every valid region is
+        # eligible, which would turn an unexplained correlation notice into
+        # an incident.
+        if not restricting or not region_placement or not region_placement["eligible"]:
+            return False
+        # No detector class explained the notice, but the motion itself sits in
+        # an eligible zone. The incident stays unlabeled.
+        zone_reason = "incident_zone" if any(item["reason"] == "incident_zone" for item in region_placement["eligible"]) else "full_frame"
+        zone.update(establishment_eligible=True, reason=zone_reason)
+        claim = _notice_camera_claim(notice)
+        subject = f"{claim['category']} motion" if claim else "motion"
+        result.update(
+            status="supported",
+            reason="eligible_zone_motion",
+            summary=f"The camera reported {subject} in an eligible zone; no recognized object explained it.",
+            activity_epoch=notice.get("epoch"),
+            supporting_observation_ids=[],
+            evidence_kind=MOTION_REGION_EVIDENCE_KIND,
+        )
+        if claim:
+            result["camera_claim"] = claim
+        return True
+
     eligible_witnesses = []
     witness_interpretations = []
     for witness in activity.get("witnesses") or []:
@@ -552,10 +673,14 @@ def evaluate_scene_establishment(
         )
         return result
     if notice_activity is not None and not interpretations and activity["status"] in {"pending", "incomplete"}:
+        if establish_from_motion_regions():
+            return result
         return result
     if activity.get("status") == "supported" or notice:
         considered = witness_interpretations or interpretations
         reason = _rejection_reason(considered)
+        if restricting and not considered:
+            reason = _motion_region_rejection(region_placement) or reason
         # A notice must satisfy its recorded activity policy as well as the
         # zone policy. It cannot override an ineligible physical witness.
         if notice and activity.get("status") != "supported":
@@ -564,6 +689,8 @@ def evaluate_scene_establishment(
                 supporting = set(notice_activity["supporting_observation_ids"])
                 verified_ids = [identifier for identifier in eligible_ids if identifier in supporting]
                 if eligible_ids and not verified_ids:
+                    if establish_from_motion_regions():
+                        return result
                     result.update(
                         status=activity["status"] if activity["status"] in {"pending", "incomplete"} else "unsupported",
                         reason="object_not_motion_correlated",
@@ -594,6 +721,8 @@ def evaluate_scene_establishment(
                     evidence_kind="motion_correlated_object" if notice_activity is not None else "camera_reported",
                 )
                 return result
+        if establish_from_motion_regions():
+            return result
         zone.update(establishment_eligible=False, reason=reason)
         result.update(
             status="unsupported",

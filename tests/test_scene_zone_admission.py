@@ -200,6 +200,160 @@ def test_unlocalized_notice_and_measured_motion_cannot_bypass_ignore():
     assert verified["reason"] == "verified_camera_notice"
 
 
+def bare_sample():
+    return [{"id": "bare", "camera_id": "gate", "captured_epoch": 1000, "status": "complete", "observations": [], "metadata": {}}]
+
+
+def motion_notice(*regions, alignment=None, semantics=None, correlation=False):
+    notice = {"source": "camera", "epoch": 1000, "features": {"motion_regions": [list(region) for region in regions]}}
+    if alignment is not None or correlation:
+        notice["activity_policy"] = {"version": 1, "require_motion_correlation": correlation, "alignment": dict(alignment or {"reliable": True})}
+    if semantics:
+        notice["camera_semantics"] = {"reports": [{"topic": "RuleEngine/MyRuleDetector/DogCatDetect", "category": semantics}]}
+    return notice
+
+
+def test_located_motion_in_an_eligible_zone_establishes_an_unlabeled_incident():
+    decision = evaluate_scene_establishment(bare_sample(), policy=restricting(), notice=motion_notice([0.3, 0.6, 0.5, 0.9], semantics="animal"))
+    assert decision["status"] == "supported"
+    assert decision["reason"] == "eligible_zone_motion"
+    assert decision["evidence_kind"] == "zone_located_motion"
+    assert decision["supporting_observation_ids"] == []
+    assert decision["activity_epoch"] == 1000
+    assert decision["camera_claim"] == {"category": "animal"}
+    assert "animal motion" in decision["summary"]
+    assert decision["zone_interpretation"]["establishment_eligible"] is True
+    assert decision["zone_interpretation"]["reason"] == "incident_zone"
+    assert decision["zone_interpretation"]["motion_regions"][0]["zones"] == ["Yard"]
+    unnamed = evaluate_scene_establishment(bare_sample(), policy=restricting(), notice=motion_notice([0.3, 0.6, 0.5, 0.9]))
+    assert unnamed["reason"] == "eligible_zone_motion"
+    assert "camera_claim" not in unnamed
+
+
+def test_located_motion_outside_an_eligible_zone_stays_unconfirmed_with_its_zone_reason():
+    ignored = evaluate_scene_establishment(bare_sample(), policy=restricting(), notice=motion_notice([0.3, 0.1, 0.5, 0.4]))
+    assert ignored["status"] == "unsupported"
+    assert ignored["reason"] == "ignored_zone"
+    outside = evaluate_scene_establishment(
+        bare_sample(), policy=policy(zone("Corner", "incident", 0, 1, x0=0.9), require=True), notice=motion_notice([0.3, 0.6, 0.5, 0.9]),
+    )
+    assert outside["status"] == "unsupported"
+    assert outside["reason"] == "outside_incident_zone"
+    mixed = evaluate_scene_establishment(bare_sample(), policy=policy(zone("NoMotion", "ignore", 0, 0.4), zone("Yard", "incident", 0.7, 1)),
+                                         notice=motion_notice([0.3, 0.1, 0.5, 0.3], [0.3, 0.45, 0.5, 0.6]))
+    assert mixed["reason"] == "ineligible_zone"
+    # The pending branch for a correlation policy without boxes also establishes.
+    pending = evaluate_scene_establishment(bare_sample(), policy=restricting(), notice=motion_notice([0.3, 0.6, 0.5, 0.9], correlation=True))
+    assert pending["reason"] == "eligible_zone_motion"
+
+
+def test_unverified_alignment_and_class_limited_zones_do_not_place_motion():
+    unaligned = evaluate_scene_establishment(
+        bare_sample(), policy=restricting(), notice=motion_notice([0.3, 0.6, 0.5, 0.9], alignment={"reliable": False, "mode": "untrusted"}),
+    )
+    assert unaligned["status"] == "unsupported"
+    assert unaligned["reason"] == "insufficient_spatial_evidence"
+    assert unaligned["zone_interpretation"]["motion_alignment_reliable"] is False
+    shifted = evaluate_scene_establishment(
+        bare_sample(), policy=restricting(),
+        notice=motion_notice([0.3, 0.1, 0.5, 0.4], alignment={"reliable": True, "scale_x": 1.0, "scale_y": 1.0, "offset_x": 0.0, "offset_y": 0.5}),
+    )
+    assert shifted["reason"] == "eligible_zone_motion"
+    cars_only = policy(zone("Driveway", "incident", 0.5, 1, classes=["car"]), require=True)
+    assert evaluate_scene_establishment(bare_sample(), policy=cars_only, notice=motion_notice([0.3, 0.6, 0.5, 0.9]))["reason"] == "outside_incident_zone"
+    people_ignore = policy(zone("People", "ignore", 0, 1, classes=["person"]), require=False)
+    assert evaluate_scene_establishment(bare_sample(), policy=people_ignore, notice=motion_notice([0.3, 0.6, 0.5, 0.9]))["reason"] == "eligible_zone_motion"
+    malformed = evaluate_scene_establishment(bare_sample(), policy=restricting(), notice=motion_notice([0.5, 0.6, 0.3, 0.9], ["x", 1, 2, 3]))
+    assert malformed["reason"] == "insufficient_spatial_evidence"
+
+
+def test_full_frame_motion_regions_do_not_open_an_incident():
+    # Without a zone restriction every valid region is full-frame eligible.
+    # A correlation notice that nothing explains must stay unconfirmed.
+    for zones in (policy(require=False), policy()):
+        pending = evaluate_scene_establishment(
+            bare_sample(), policy=zones, notice=motion_notice([0.3, 0.6, 0.5, 0.9], correlation=True),
+        )
+        assert pending["zone_interpretation"]["restricting"] is False
+        assert pending["status"] == "pending"
+        assert pending["reason"] == "awaiting_activity_confirmation"
+        uncorrelated = evaluate_scene_establishment(
+            physical(["car"], [box(20, 80)], confidence=0.9),
+            policy=zones, notice=motion_notice([0.7, 0.05, 0.9, 0.3], correlation=True),
+        )
+        assert uncorrelated["reason"] == "object_not_motion_correlated"
+
+
+def test_activity_witnesses_do_not_clobber_eligible_zone_motion():
+    # Confirmation samples carry activity witnesses. Those used to overwrite the
+    # motion-region placement, so a later located["eligible"] read raised
+    # TypeError or skipped the motion incident.
+    samples = physical(["car", "car"], [box(20, 40), box(40, 40)], confidence=0.2)
+    decision = evaluate_scene_establishment(samples, policy=restricting(), notice=motion_notice([0.3, 0.6, 0.5, 0.9]))
+    assert decision["status"] == "supported"
+    assert decision["reason"] == "eligible_zone_motion"
+    assert samples[-1]["metadata"]["activity_witnesses"]
+    admitted = evaluate_scene_establishment(
+        physical(["car", "car"], [box(20, 80), box(40, 80)], confidence=0.9),
+        policy=restricting(), notice=motion_notice([0.3, 0.1, 0.5, 0.4]),
+    )
+    assert admitted["reason"] == "eligible_zone_activity"
+
+
+def test_a_recognized_object_keeps_precedence_over_located_motion():
+    verified = evaluate_scene_establishment(
+        physical(["car"], [box(20, 80)], alert=False), policy=restricting(), notice=motion_notice([0.3, 0.6, 0.5, 0.9]),
+    )
+    assert verified["reason"] == "verified_camera_notice"
+    assert verified["supporting_observation_ids"] == ["observation-0"]
+    # A parked car in the ignore zone does not stop the located motion from establishing.
+    around_ignored = evaluate_scene_establishment(
+        physical(["car"], [box(20, 40)], alert=False), policy=restricting(), notice=motion_notice([0.7, 0.6, 0.9, 0.95]),
+    )
+    assert around_ignored["reason"] == "eligible_zone_motion"
+    # Boxes that do not explain the motion yield to motion that sits in an eligible zone.
+    uncorrelated = evaluate_scene_establishment(
+        physical(["car"], [box(20, 80)], alert=False), policy=restricting(), notice=motion_notice([0.7, 0.6, 0.9, 0.95], correlation=True),
+    )
+    assert uncorrelated["reason"] == "eligible_zone_motion"
+    assert uncorrelated["notice_activity"]["supporting_observation_ids"] == []
+    still_unexplained = evaluate_scene_establishment(
+        physical(["car"], [box(20, 80)], alert=False), policy=restricting(), notice=motion_notice([0.7, 0.1, 0.9, 0.4], correlation=True),
+    )
+    assert still_unexplained["reason"] == "object_not_motion_correlated"
+
+
+def test_located_motion_creates_a_motion_incident_without_objects(tmp_path):
+    store = EventStore(tmp_path)
+    qualification = {
+        "trigger_source": "camera", "establishment_zone_policy": restricting(),
+        "features": {"motion_regions": [[0.3, 0.6, 0.5, 0.9]]},
+        "camera_semantics": {"reports": [{"topic": "RuleEngine/MyRuleDetector/DogCatDetect", "category": "animal", "candidate_model_classes": []}]},
+    }
+    event = store.add_event("gate", "motion", created_at=datetime.fromtimestamp(1000, timezone.utc).isoformat(), objects_json=json.dumps([
+        {"status": "motion_qualification", "motion_qualification": qualification},
+    ]))
+    incident = store.scene_incident(event_id=event["id"])
+    assert incident is not None
+    assert incident["establishment"]["status"] == "established"
+    assert incident["establishment"]["reason"] == "eligible_zone_motion"
+    assert incident["has_objects"] is False
+    assert incident["labels"] == []
+    assert incident["scene_objects"] == []
+    motion_cards = store.list_scene_incident_cards(event_type="motion")
+    assert [card["incident_id"] for card in motion_cards] == [incident["incident_id"]]
+    assert motion_cards[0]["kind"] == "motion"
+    assert store.list_scene_incident_cards(event_type="object") == []
+    ignored = {**qualification, "features": {"motion_regions": [[0.3, 0.1, 0.5, 0.4]]}}
+    event = store.add_event("gate", "motion", created_at=datetime.fromtimestamp(5000, timezone.utc).isoformat(), objects_json=json.dumps([
+        {"status": "motion_qualification", "motion_qualification": ignored},
+    ]))
+    assert store.scene_incident(event_id=event["id"]) is None
+    with store._connect() as conn:
+        reasons = {row[0] for row in conn.execute("select reason from scene_activity_decisions")}
+    assert reasons == {"eligible_zone_motion", "ignored_zone"}
+
+
 def _notice_samples(confidences, *, label="car", y2=80, median=None, track="subject"):
     observations = []
     for index, confidence in enumerate(confidences):
