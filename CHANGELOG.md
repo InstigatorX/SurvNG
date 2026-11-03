@@ -2,6 +2,11 @@
 
 ## SurvNG v1.2
 
+- Camera motion that no detector class explains now establishes a motion-only
+  incident when the qualifier located that motion inside an eligible zone, so
+  animals and other unmodelled subjects appear under **Incidents → Motion**.
+  Motion placed only in an Ignore zone, or outside a required incident zone,
+  still stays unconfirmed.
 - Added frame-crop and object-based **Find similar** searches with persistent
   forensic results, nearby-evidence navigation, and Timeline integration.
 - Added optional monocular-depth enrichment for incident objects, depth replay

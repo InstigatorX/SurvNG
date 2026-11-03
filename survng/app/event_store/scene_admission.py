@@ -139,9 +139,13 @@ class EventStoreSceneAdmissionMixin:
             notice = None
             if not qualification.get("scene_discovery") and not qualification.get("scene_confirmation"):
                 notice = {"source": "camera" if qualification.get("trigger_source", "camera") == "camera" else "motion", "epoch": at}
+                # Motion regions place an unexplained notice against the zones
+                # even when no motion-correlation policy was recorded.
+                notice["features"] = qualification.get("features") if isinstance(qualification.get("features"), dict) else {}
                 if isinstance(qualification.get("notice_activity_policy"), dict):
                     notice["activity_policy"] = qualification["notice_activity_policy"]
-                    notice["features"] = qualification.get("features") or {}
+                if isinstance(qualification.get("camera_semantics"), dict):
+                    notice["camera_semantics"] = qualification["camera_semantics"]
 
             memory = None
             if callable(getattr(type(self), "scene_context_snapshot", None)):
