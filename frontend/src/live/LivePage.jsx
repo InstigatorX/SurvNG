@@ -22,6 +22,8 @@ import { aspectFromDimensions, cameraSourceAspect, initialCameraAspect, liveAspe
 import { resetLiveDefaultsForServer } from "../liveDefaults.mjs";
 import { browserStorage, writeStoredValue } from "../storage.mjs";
 import { liveMediaShouldRun, liveSnapshotRefreshMs } from "../pollingPolicy.mjs";
+import { liveStreamIdleLabel } from "../liveStreamPresence.mjs";
+import { noteLiveStreamActivity, useLiveStreamPresence } from "../useLiveStreamPresence.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "../liveCustomLayout.mjs";
 import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus, uniformLiveGridLayout } from "../liveWorkspace.mjs";
@@ -92,7 +94,8 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
   const openTargetRef = useRef(null);
   const tileWasVisibleRef = useRef(true);
   const [tileVisible, setTileVisible] = useState(true);
-  const [documentVisible, setDocumentVisible] = useState(() => !document.hidden);
+  const presence = useLiveStreamPresence();
+  const presenceWasActiveRef = useRef(presence.active);
   const [mediaActive, setMediaActive] = useState(true);
   const sourceMode = "live";
   const [motionWindowNow, setMotionWindowNow] = useState(() => Date.now());
@@ -339,23 +342,27 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
   }, [tileVisible]);
 
   useEffect(() => {
-    const onVisibility = () => {
-      const visible = !document.hidden;
-      setDocumentVisible(visible);
-      if (visible && tileVisible) setSnapshotToken(String(Date.now()));
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => document.removeEventListener("visibilitychange", onVisibility);
-  }, [tileVisible]);
+    const wasActive = presenceWasActiveRef.current;
+    presenceWasActiveRef.current = presence.active;
+    if (!tileVisible || wasActive === presence.active) return;
+    if (presence.active || presence.documentVisible) setSnapshotToken(String(Date.now()));
+  }, [presence.active, presence.documentVisible, tileVisible]);
 
   useEffect(() => {
-    if (tileVisible && documentVisible) {
+    if (tileVisible && presence.active) {
       setMediaActive(true);
+      return undefined;
+    }
+    // A visible tab that has gone idle should drop WebRTC immediately.
+    // Hidden or offscreen tiles keep a short grace period so a glance away
+    // does not tear the peer connection down.
+    if (presence.documentVisible && !presence.active) {
+      setMediaActive(false);
       return undefined;
     }
     const timer = window.setTimeout(() => setMediaActive(false), 1500);
     return () => window.clearTimeout(timer);
-  }, [documentVisible, tileVisible]);
+  }, [presence.active, presence.documentVisible, tileVisible]);
 
   useEffect(() => {
     setMjpegToken(String(Date.now()));
@@ -401,7 +408,8 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
     const refreshMs = liveSnapshotRefreshMs({
       running: camera.running,
       visible: tileVisible,
-      documentVisible,
+      documentVisible: presence.documentVisible,
+      userActive: presence.active,
       streamReady,
       transport: activeTransport,
       mobile: mobileView,
@@ -413,7 +421,7 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
       refreshMs,
     );
     return () => window.clearInterval(timer);
-  }, [activeTransport, camera.running, documentVisible, mobilePrimary, mobileView, streamReady, tileVisible]);
+  }, [activeTransport, camera.running, mobilePrimary, mobileView, presence.active, presence.documentVisible, streamReady, tileVisible]);
 
   async function post(action) {
     if (cameraActionBusy) return;
@@ -479,6 +487,7 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
       className={`bento-card camera-tile ${layout ? "viewport-layout" : ""} ${customLayout ? "custom-layout-tile" : ""} ${motionActive ? "motion-active" : ""} ${resizing ? "resizing" : ""} ${aspectSnapped ? "aspect-snapped" : ""} ${mobilePrimary ? "mobile-primary" : ""} ${focusPrimary ? "focus-primary" : ""}`}
       data-motion-active={motionActive ? "true" : "false"}
       data-camera-id={camera.id}
+      data-live-paused={!presence.active && presence.documentVisible ? "true" : "false"}
       data-hover-preview={hoverPreview ? "true" : "false"}
       data-hold-preview={holdPreviewState || undefined}
       onPointerEnter={beginHoverPreview}
@@ -651,6 +660,10 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
 
 export function LiveCameraOverlay({ camera, timeZone, onClose, onClosed, mode = "sticky", phase = "open" }) {
   const preview = mode === "preview";
+  const presence = useLiveStreamPresence();
+  const [liveStreamActive, setLiveStreamActive] = useState(() => presence.active);
+  const wasStreamActiveRef = useRef(liveStreamActive);
+  const [pausedStillToken, setPausedStillToken] = useState(() => Date.now());
   const modalRef = useModalFocus(onClose, { trapFocus: !preview });
   const [source, setSource] = useStoredState(
     `survng.liveOverlaySource.${camera.id}`,
@@ -681,6 +694,19 @@ export function LiveCameraOverlay({ camera, timeZone, onClose, onClosed, mode = 
   }, [camera.id, mode]);
 
   useEffect(() => {
+    if (presence.active) {
+      setLiveStreamActive(true);
+      return undefined;
+    }
+    if (presence.documentVisible) {
+      setLiveStreamActive(false);
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setLiveStreamActive(false), 1500);
+    return () => window.clearTimeout(timer);
+  }, [presence.active, presence.documentVisible]);
+
+  useEffect(() => {
     if (phase !== "closing") return undefined;
     const timer = window.setTimeout(() => {
       if (closeFinishedRef.current) return;
@@ -689,6 +715,11 @@ export function LiveCameraOverlay({ camera, timeZone, onClose, onClosed, mode = 
     }, LIVE_CAMERA_OVERLAY_MOTION_MS);
     return () => window.clearTimeout(timer);
   }, [onClosed, phase]);
+
+  if (wasStreamActiveRef.current !== liveStreamActive) {
+    wasStreamActiveRef.current = liveStreamActive;
+    if (!liveStreamActive && presence.documentVisible) setPausedStillToken(Date.now());
+  }
 
   function rememberAspect(media, sourceName = activeSource) {
     const nextAspect = mediaAspect(media);
@@ -733,8 +764,8 @@ export function LiveCameraOverlay({ camera, timeZone, onClose, onClosed, mode = 
             <div className="live-overlay-subtitle">
               <span>{sourceLabel(activeSource)} stream</span>
               {deliveredSource !== activeSource ? <span>using {sourceLabel(deliveredSource)} fallback</span> : null}
-              <span className="live-transport-badge" aria-label={`Stream transport ${liveTransportLabel(transport)}`}>
-                {liveTransportLabel(transport)}
+              <span className="live-transport-badge" aria-label={`Stream transport ${liveStreamActive || !presence.documentVisible ? liveTransportLabel(transport) : "Paused"}`}>
+                {liveStreamActive || !presence.documentVisible ? liveTransportLabel(transport) : "Paused"}
               </span>
               {preview ? <span className="live-preview-hint">Release to close</span> : null}
             </div>
@@ -750,30 +781,45 @@ export function LiveCameraOverlay({ camera, timeZone, onClose, onClosed, mode = 
             </button>
           )}
         </div>
-        <div className="live-overlay-media" style={liveFramingStyle(camera, deliveredSource)}>
-          {!mediaReady ? (
-            <div className="live-media-status" role="status" aria-live="polite">
-              <RefreshCcw className="spin" size={20} />
-              <span>Connecting live stream...</span>
-            </div>
+        <div className="live-overlay-media" style={liveFramingStyle(camera, liveStreamActive ? deliveredSource : activeSource === "main" ? "live" : activeSource)}>
+          {liveStreamActive ? (
+            <>
+              {!mediaReady ? (
+                <div className="live-media-status" role="status" aria-live="polite">
+                  <RefreshCcw className="spin" size={20} />
+                  <span>Connecting live stream...</span>
+                </div>
+              ) : null}
+              <WebRtcLive
+                cameraId={camera.id}
+                source={activeSource}
+                timeZone={timeZone}
+                muted
+                controls={!preview}
+                onStageChange={(nextTransport, nextSource) => {
+                  setTransport(nextTransport);
+                  setDeliveredSource(nextSource);
+                  if (nextSource !== deliveredSource) setMediaReady(false);
+                }}
+                onReady={(media, readyTransport, readySource) => {
+                  rememberAspect(media, readySource || deliveredSource);
+                  setMediaReady(true);
+                  if (readyTransport) setTransport(readyTransport);
+                }}
+              />
+            </>
+          ) : presence.documentVisible ? (
+            <>
+              <img
+                src={appUrl(`/api/cameras/${camera.id}/snapshot.jpg?source=${activeSource === "main" ? "live" : activeSource}&t=${pausedStillToken}`)}
+                alt=""
+              />
+              <div className="live-stream-paused-bar" role="status">
+                <p>Live stream paused after {liveStreamIdleLabel()} without activity. Recording continues.</p>
+                <button type="button" onClick={noteLiveStreamActivity}>Resume live view</button>
+              </div>
+            </>
           ) : null}
-          <WebRtcLive
-            cameraId={camera.id}
-            source={activeSource}
-            timeZone={timeZone}
-            muted
-            controls={!preview}
-            onStageChange={(nextTransport, nextSource) => {
-              setTransport(nextTransport);
-              setDeliveredSource(nextSource);
-              if (nextSource !== deliveredSource) setMediaReady(false);
-            }}
-            onReady={(media, readyTransport, readySource) => {
-              rememberAspect(media, readySource || deliveredSource);
-              setMediaReady(true);
-              if (readyTransport) setTransport(readyTransport);
-            }}
-          />
         </div>
       </section>
     </div>
@@ -811,6 +857,8 @@ export function LiveCommandBar({ cameras = [], focusedCameraId = "", onFocusedCa
 
 export function LivePage({ timeZone, canCorrectIncident = false, onRecordingContextChange, onAssistantContextChange }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
+  const liveStreamPresence = useLiveStreamPresence();
+  const liveViewPaused = liveStreamPresence.documentVisible && !liveStreamPresence.active;
   const liveItems = useMemo(() => liveItemsWithWeather(cameras, appConfig?.weather), [cameras, appConfig?.weather]);
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? false;
   const thumbnailObjectFocus = appConfig?.incident_thumbnail_object_focus ?? "off";
@@ -1523,6 +1571,12 @@ export function LivePage({ timeZone, canCorrectIncident = false, onRecordingCont
       <LiveCommandBar cameras={orderedCameras} focusedCameraId={mobileFocusedCameraId} onFocusedCameraChange={setStoredMobileFocus} cameraCount={visibleLiveCameras.length} totalCameraCount={orderedCameras.length} density={effectiveLiveDensity} densityPage={densitySelection.page} densityPageCount={densitySelection.pageCount} layoutMode={effectiveLayoutMode} customAvailable={customLayoutAvailable} onDensityChange={changeLiveDensity} onDensityPageChange={setLiveDensityPageValue} onLayoutModeChange={setLiveLayoutMode} onResetLayout={resetCustomLayout} onFullscreen={openLiveFullscreen} />
       <div className="sr-only" role="status" aria-live="polite">{layoutAnnouncement}</div>
       <section className="bento-card camera-zone live-camera-zone">
+        {liveViewPaused ? (
+          <div className="live-stream-pause-banner" role="status">
+            <span>Live view paused after {liveStreamIdleLabel()} without activity. Recording continues.</span>
+            <button type="button" onClick={noteLiveStreamActivity}>Resume live view</button>
+          </div>
+        ) : null}
         <div className="mobile-camera-picker" role="group" aria-label="Primary live camera">
           {orderedCameras.map((camera) => {
             const connectivity = camera.kind === "weather" ? "weather" : cameraCaptureConnectivity(camera);
