@@ -406,6 +406,11 @@ def authenticate_session(
 ) -> ApiPrincipal | None:
     if not auth_config.enabled or not auth_config.session_key:
         return None
+    # The redacted config placeholder is public. It must never verify a cookie,
+    # including when secrets.json failed to load and the placeholder was left
+    # in place as the live session key.
+    if auth_config.session_key == "__SURVNG_SECRET_SET__":
+        return None
     token = session_cookie_value(cookie_header)
     if not token or is_web_session_revoked(token) or _session_digest(token) in auth_config.revoked_sessions:
         return None

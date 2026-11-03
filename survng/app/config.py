@@ -1389,7 +1389,12 @@ def config_path(path: str | Path | None = None) -> Path:
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:
-    from .config_secrets import apply_secrets_to_raw_config, load_secrets_file, secrets_path
+    from .config_secrets import (
+        apply_secrets_to_raw_config,
+        assert_secrets_materialized,
+        load_secrets_file,
+        secrets_path,
+    )
 
     config_path = _config_path(path)
     if not config_path.exists():
@@ -1404,7 +1409,9 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     sidecar = load_secrets_file(secrets_path(config_path))
     if sidecar is not None:
         raw = apply_secrets_to_raw_config(raw, sidecar)
-    return normalize_config(AppConfig.model_validate(raw), assign_ids=False)
+    config = normalize_config(AppConfig.model_validate(raw), assign_ids=False)
+    assert_secrets_materialized(config)
+    return config
 
 
 def save_config(

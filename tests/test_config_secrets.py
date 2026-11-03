@@ -29,7 +29,14 @@ from survng.app.config_secrets import (
     secrets_key_path,
     secrets_path,
 )
-from survng.app.security import hash_api_token, hash_password
+from survng.app.security import (
+    SESSION_COOKIE_NAME,
+    authenticate_session,
+    decode_session,
+    encode_session,
+    hash_api_token,
+    hash_password,
+)
 
 
 def _secret_config() -> AppConfig:
@@ -242,6 +249,48 @@ class ConfigSecretsTest(unittest.TestCase):
     def test_extract_omits_empty_secret_blocks(self) -> None:
         secrets = extract_secrets(AppConfig())
         self.assertEqual(secrets, {"version": 1})
+
+    def test_redacted_config_without_sidecar_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.json"
+            config = _secret_config()
+            path.write_text(
+                json.dumps(public_config_dict(config), indent=2) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as raised:
+                load_config(str(path))
+            message = str(raised.exception)
+            self.assertIn("web_auth.session_key", message)
+            self.assertIn("web_auth.users.alex.password_hash", message)
+            self.assertFalse((Path(tmpdir) / "secrets.key").exists())
+
+            forged = encode_session("alex", SECRET_PLACEHOLDER, session_epoch=0)
+            self.assertEqual(decode_session(forged, SECRET_PLACEHOLDER), ("alex", 0))
+            principal = authenticate_session(
+                f"{SESSION_COOKIE_NAME}={forged}",
+                WebAuthConfig(
+                    enabled=True,
+                    session_key=SECRET_PLACEHOLDER,
+                    users=config.web_auth.users,
+                ),
+            )
+            self.assertIsNone(principal)
+
+    def test_missing_encryption_key_does_not_mint_a_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.json"
+            sidecar = Path(tmpdir) / "secrets.json"
+            key_file = Path(tmpdir) / "secrets.key"
+            save_config(_secret_config(), str(path), assign_ids=False)
+            ciphertext = sidecar.read_text(encoding="utf-8")
+            key_file.unlink()
+            with self.assertRaises(ValueError) as raised:
+                load_config(str(path))
+            self.assertIn("missing", str(raised.exception))
+            self.assertFalse(key_file.exists())
+            self.assertEqual(sidecar.read_text(encoding="utf-8"), ciphertext)
+            self.assertNotIn("mqtt-secret", ciphertext)
 
 
 if __name__ == "__main__":
