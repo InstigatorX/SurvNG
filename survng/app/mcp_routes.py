@@ -17,6 +17,7 @@ import logging
 import re
 import threading
 from collections.abc import Callable
+from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
@@ -497,6 +498,46 @@ _TOOLS: tuple[_Tool, ...] = (
 _TOOLS_BY_NAME = {tool.name: tool for tool in _TOOLS}
 
 
+async def _read_capped_body(request: Request) -> bytes:
+    """Read at most _MAX_BODY_BYTES, and refuse a larger declared length first.
+
+    ``Request.body()`` joins every chunk before the caller can check the size.
+    A standing token could otherwise pin an arbitrary allocation on initialize,
+    ping, or tools/list, which do not take the tool-call limiter.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            length = int(declared)
+        except ValueError as exc:
+            raise McpProtocolError(
+                _INVALID_REQUEST,
+                "invalid request",
+                status_code=400,
+            ) from exc
+        if length < 0 or length > _MAX_BODY_BYTES:
+            raise McpProtocolError(
+                _INVALID_REQUEST,
+                "request is too large",
+                status_code=400,
+            )
+    chunks: list[bytes] = []
+    size = 0
+    async with aclosing(request.stream()) as stream:
+        async for chunk in stream:
+            if not chunk:
+                continue
+            size += len(chunk)
+            if size > _MAX_BODY_BYTES:
+                raise McpProtocolError(
+                    _INVALID_REQUEST,
+                    "request is too large",
+                    status_code=400,
+                )
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
 class McpEndpoint:
     def __init__(self, deps: McpDependencies) -> None:
         self.deps = deps
@@ -513,7 +554,7 @@ class McpEndpoint:
                 },
             )
         try:
-            message, rpc_id, notification = self._parse(await request.body())
+            message, rpc_id, notification = self._parse(await _read_capped_body(request))
         except McpProtocolError as exc:
             return self._error_response(None, exc)
         if notification:

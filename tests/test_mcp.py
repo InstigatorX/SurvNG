@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from survng.app import main
 from survng.app.config import ApiAuthConfig, ApiTokenConfig, AppConfig, WebAuthConfig, WebUserConfig
@@ -238,6 +239,57 @@ def test_mcp_requires_an_enabled_api_token(tmp_path, enabled, token) -> None:
     client, _manager = build_client(tmp_path, token_config("read", enabled=enabled))
     response = post_rpc(client, "tools/list", token=token)
     assert response.status_code == 401
+
+
+def test_initialize_rejects_a_body_over_the_cap_without_reading_the_rest(tmp_path) -> None:
+    client, _manager = build_client(tmp_path, token_config("read"))
+    response = client.post(
+        "/api/mcp",
+        content=b"{" + (b"x" * mcp_routes._MAX_BODY_BYTES),
+        headers={
+            "Authorization": f"Bearer {SECRET}",
+            "Content-Type": "application/json",
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "request is too large"
+
+    pulled = 0
+
+    async def receive() -> dict:
+        nonlocal pulled
+        pulled += 1
+        if pulled == 1:
+            return {
+                "type": "http.request",
+                "body": b"x" * (mcp_routes._MAX_BODY_BYTES + 1),
+                "more_body": True,
+            }
+        return {
+            "type": "http.request",
+            "body": b"y" * 4096,
+            "more_body": False,
+        }
+
+    request = Request({"type": "http", "method": "POST", "headers": []}, receive)
+    with pytest.raises(mcp_routes.McpProtocolError) as exc:
+        asyncio.run(mcp_routes._read_capped_body(request))
+    assert exc.value.status_code == 400
+    assert pulled == 1
+
+    declared = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "headers": [(b"content-length", b"999999999")],
+        },
+        receive,
+    )
+    pulled = 0
+    with pytest.raises(mcp_routes.McpProtocolError) as declared_error:
+        asyncio.run(mcp_routes._read_capped_body(declared))
+    assert declared_error.value.status_code == 400
+    assert pulled == 0
 
 
 def test_read_token_lists_investigation_tools_only(tmp_path) -> None:
