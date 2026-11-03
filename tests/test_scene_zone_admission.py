@@ -267,6 +267,23 @@ def test_unverified_alignment_and_class_limited_zones_do_not_place_motion():
     assert malformed["reason"] == "insufficient_spatial_evidence"
 
 
+def test_full_frame_motion_regions_do_not_open_an_incident():
+    # Without a zone restriction every valid region is full-frame eligible.
+    # A correlation notice that nothing explains must stay unconfirmed.
+    for zones in (policy(require=False), policy()):
+        pending = evaluate_scene_establishment(
+            bare_sample(), policy=zones, notice=motion_notice([0.3, 0.6, 0.5, 0.9], correlation=True),
+        )
+        assert pending["zone_interpretation"]["restricting"] is False
+        assert pending["status"] == "pending"
+        assert pending["reason"] == "awaiting_activity_confirmation"
+        uncorrelated = evaluate_scene_establishment(
+            physical(["car"], [box(20, 80)], confidence=0.9),
+            policy=zones, notice=motion_notice([0.7, 0.05, 0.9, 0.3], correlation=True),
+        )
+        assert uncorrelated["reason"] == "object_not_motion_correlated"
+
+
 def test_activity_witnesses_do_not_clobber_eligible_zone_motion():
     # Confirmation samples carry activity witnesses. Those used to overwrite the
     # motion-region placement, so a later located["eligible"] read raised

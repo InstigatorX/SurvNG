@@ -626,6 +626,12 @@ def evaluate_scene_establishment(
         zone["motion_alignment_reliable"] = region_placement["alignment_reliable"]
 
     def establish_from_motion_regions():
+        # A region is only spatial evidence where some of the frame cannot
+        # establish an incident. On a full frame every valid region is
+        # eligible, which would turn an unexplained correlation notice into
+        # an incident.
+        if not restricting or not region_placement or not region_placement["eligible"]:
+            return False
         # No detector class explained the notice, but the motion itself sits in
         # an eligible zone. The incident stays unlabeled.
         zone_reason = "incident_zone" if any(item["reason"] == "incident_zone" for item in region_placement["eligible"]) else "full_frame"
@@ -642,7 +648,7 @@ def evaluate_scene_establishment(
         )
         if claim:
             result["camera_claim"] = claim
-        return result
+        return True
 
     eligible_witnesses = []
     witness_interpretations = []
@@ -667,13 +673,13 @@ def evaluate_scene_establishment(
         )
         return result
     if notice_activity is not None and not interpretations and activity["status"] in {"pending", "incomplete"}:
-        if region_placement and region_placement["eligible"]:
-            return establish_from_motion_regions()
+        if establish_from_motion_regions():
+            return result
         return result
     if activity.get("status") == "supported" or notice:
         considered = witness_interpretations or interpretations
         reason = _rejection_reason(considered)
-        if not considered:
+        if restricting and not considered:
             reason = _motion_region_rejection(region_placement) or reason
         # A notice must satisfy its recorded activity policy as well as the
         # zone policy. It cannot override an ineligible physical witness.
@@ -683,8 +689,8 @@ def evaluate_scene_establishment(
                 supporting = set(notice_activity["supporting_observation_ids"])
                 verified_ids = [identifier for identifier in eligible_ids if identifier in supporting]
                 if eligible_ids and not verified_ids:
-                    if region_placement and region_placement["eligible"]:
-                        return establish_from_motion_regions()
+                    if establish_from_motion_regions():
+                        return result
                     result.update(
                         status=activity["status"] if activity["status"] in {"pending", "incomplete"} else "unsupported",
                         reason="object_not_motion_correlated",
@@ -715,8 +721,8 @@ def evaluate_scene_establishment(
                     evidence_kind="motion_correlated_object" if notice_activity is not None else "camera_reported",
                 )
                 return result
-        if notice and region_placement and region_placement["eligible"]:
-            return establish_from_motion_regions()
+        if establish_from_motion_regions():
+            return result
         zone.update(establishment_eligible=False, reason=reason)
         result.update(
             status="unsupported",
