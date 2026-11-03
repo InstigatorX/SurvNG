@@ -267,6 +267,22 @@ def test_unverified_alignment_and_class_limited_zones_do_not_place_motion():
     assert malformed["reason"] == "insufficient_spatial_evidence"
 
 
+def test_activity_witnesses_do_not_clobber_eligible_zone_motion():
+    # Confirmation samples carry activity witnesses. Those used to overwrite the
+    # motion-region placement, so a later located["eligible"] read raised
+    # TypeError or skipped the motion incident.
+    samples = physical(["car", "car"], [box(20, 40), box(40, 40)], confidence=0.2)
+    decision = evaluate_scene_establishment(samples, policy=restricting(), notice=motion_notice([0.3, 0.6, 0.5, 0.9]))
+    assert decision["status"] == "supported"
+    assert decision["reason"] == "eligible_zone_motion"
+    assert samples[-1]["metadata"]["activity_witnesses"]
+    admitted = evaluate_scene_establishment(
+        physical(["car", "car"], [box(20, 80), box(40, 80)], confidence=0.9),
+        policy=restricting(), notice=motion_notice([0.3, 0.1, 0.5, 0.4]),
+    )
+    assert admitted["reason"] == "eligible_zone_activity"
+
+
 def test_a_recognized_object_keeps_precedence_over_located_motion():
     verified = evaluate_scene_establishment(
         physical(["car"], [box(20, 80)], alert=False), policy=restricting(), notice=motion_notice([0.3, 0.6, 0.5, 0.9]),
