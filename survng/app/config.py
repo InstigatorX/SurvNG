@@ -251,10 +251,11 @@ class SemanticSearchConfig(BaseModel):
     """Optional local vision-language search runtime and indexing policy."""
 
     enabled: bool = False
-    implementation: Literal["mobileclip2_openvino", "openvino_manifest", "ollama"] = (
-        "mobileclip2_openvino"
-    )
+    implementation: Literal[
+        "mobileclip2_openvino", "openvino_manifest", "ollama", "siglip2"
+    ] = "mobileclip2_openvino"
     model_dir: str = Field(default="", max_length=4096)
+    siglip2_model_dir: str = Field(default="", max_length=4096)
     device: str = Field(default="GPU", min_length=1, max_length=64)
     ollama_base_url: str = Field(default="http://127.0.0.1:11434", max_length=2048)
     ollama_model: str = Field(default="embeddinggemma-2", max_length=256)
@@ -268,7 +269,7 @@ class SemanticSearchConfig(BaseModel):
     backfill_pause_seconds: float = Field(default=0.25, ge=0.01, le=5.0)
     worker_queue_size: int = Field(default=256, ge=16, le=4096)
 
-    @field_validator("model_dir", mode="before")
+    @field_validator("model_dir", "siglip2_model_dir", mode="before")
     @classmethod
     def normalize_model_dir(cls, value: object) -> str:
         return str(value or "").strip()
