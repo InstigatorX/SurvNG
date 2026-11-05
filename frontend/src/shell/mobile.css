@@ -7,6 +7,10 @@
 
 @media (max-width: 760px) {
 
+  .workspace-system-bar {
+    display: none !important;
+  }
+
   .mobile-camera-picker,
   .recordings-v2-cameras,
   .timeline-camera-picker,
@@ -55,48 +59,24 @@
     padding: 0 !important;
   }
 
-  .live-command-bar {
-    display: grid !important;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 6px !important;
-    min-height: 46px !important;
-    height: 46px !important;
-    border-width: 0 0 1px !important;
-    border-radius: 0 !important;
-    padding: 4px 6px !important;
+  .page-live .live-grid {
+    grid-template-rows: minmax(0, 1fr) !important;
   }
 
-  .live-command-context,
-  .live-density-control,
-  .live-layout-control {
-    display: none !important;
+  .page-live .live-grid>.camera-zone {
+    grid-row: 1 !important;
   }
 
+  /* The mobile command bar only held the camera dropdown. Drop the row. */
+  .live-command-bar,
   .live-mobile-camera-select {
-    grid-column: 1 !important;
-    width: min(210px, 66vw);
-  }
-
-  /* SMART SEARCH */
-  .search-commandbar {
-    display: grid !important;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 6px !important;
-    min-height: 46px !important;
-    height: 46px !important;
-    padding: 4px 6px !important;
-  }
-
-  .search-commandbar > div:first-child,
-  .search-commandbar .semantic-status {
     display: none !important;
   }
 
+  /* SMART SEARCH: the mobile bar only held the camera dropdown. Drop the row. */
+  .search-commandbar,
   .search-mobile-camera-select {
-    grid-column: 1 !important;
-    width: min(210px, 66vw);
+    display: none !important;
   }
 
   .search-scope-panel {
@@ -112,17 +92,29 @@
     display: none !important;
   }
 
-  /* Keep the query field under the camera select; do not leave a stretched empty row. */
+  /* The camera row is gone. Keep recent searches, then the query field, with no empty track. */
   .search-page {
     align-content: start !important;
   }
 
-  .search-page:not(:has(.search-history-panel)) {
+  .search-page {
     grid-template-rows: auto minmax(0, 1fr) !important;
   }
 
-  .search-page:not(:has(.search-history-panel)) .semantic-search-workspace {
+  .search-scope-panel {
+    grid-row: 1 !important;
+  }
+
+  .semantic-search-workspace {
     grid-row: 2 !important;
+  }
+
+  .search-page:not(:has(.search-history-panel)) {
+    grid-template-rows: minmax(0, 1fr) !important;
+  }
+
+  .search-page:not(:has(.search-history-panel)) .semantic-search-workspace {
+    grid-row: 1 !important;
   }
 
   .camera-tile,
@@ -270,7 +262,8 @@
     grid-column: 1 !important;
     grid-row: 1 !important;
     display: grid !important;
-    grid-template-columns: minmax(112px, 1fr) 108px auto !important;
+    grid-template-columns: auto auto !important;
+    justify-content: start !important;
     grid-template-rows: 38px !important;
     align-items: center !important;
     gap: 4px !important;
@@ -290,9 +283,7 @@
   }
 
   .timeline-mobile-camera-select {
-    grid-column: 1 !important;
-    width: 100%;
-    max-width: 210px;
+    display: none !important;
   }
 
   .recordings-commandbar-day-controls {
@@ -304,7 +295,7 @@
   }
 
   .recordings-commandbar-day-controls .recordings-v2-date {
-    grid-column: 2 !important;
+    grid-column: 1 !important;
     display: flex !important;
     min-width: 0;
     height: 38px;
@@ -326,7 +317,7 @@
   }
 
   .recordings-commandbar-day-controls .recordings-v2-player-source {
-    grid-column: 3 !important;
+    grid-column: 2 !important;
     display: flex !important;
     height: 38px !important;
     min-height: 38px !important;
@@ -556,24 +547,13 @@
 }
 
 @media (max-width: 430px) {
-  .timeline-mobile-camera-select {
-    max-width: 148px;
-  }
-
   .recordings-tabs.recordings-commandbar {
-    grid-template-columns: minmax(104px, 1fr) 104px auto !important;
+    grid-template-columns: auto auto !important;
+    justify-content: start !important;
   }
 
   .recordings-commandbar-day-controls .recordings-v2-date-toggle {
     padding-inline: 6px !important;
-  }
-
-  .live-mobile-camera-select {
-    width: min(190px, 66vw);
-  }
-
-  .search-mobile-camera-select {
-    width: min(190px, 66vw);
   }
 }
 
