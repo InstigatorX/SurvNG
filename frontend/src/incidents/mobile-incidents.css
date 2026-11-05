@@ -52,3 +52,32 @@
   gap: 10px;
 }
 .mobile-incidents .mobile-filter-actions button { min-height: 44px; }
+
+@media (max-width: 760px) {
+  /* Keep page controls over the list instead of in the scrolling flow. */
+  .mobile-incidents > .incident-pager {
+    position: fixed;
+    z-index: 40;
+    right: 72px;
+    bottom: calc(var(--mobile-nav-height, 62px) + 8px);
+    left: 12px;
+    width: auto;
+    min-height: 0;
+    border: 1px solid color-mix(in srgb, white 16%, var(--line));
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--panel-solid) 78%, transparent);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    padding: 4px;
+  }
+
+  .mobile-incidents > .incident-pager button {
+    min-height: 40px;
+    border-radius: 999px;
+  }
+
+  .mobile-incidents:has(> .incident-pager) .incident-gallery {
+    padding-bottom: 72px;
+  }
+}
