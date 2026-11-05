@@ -381,20 +381,7 @@
   }
 
   .workspace-system-bar {
-    width: auto;
-  }
-
-  .workspace-system-bar .header-stats {
-    display: flex;
-  }
-
-  .workspace-system-bar .header-stat:not(:first-child) {
     display: none;
-  }
-
-  .workspace-system-bar .header-stat {
-    min-width: 0;
-    max-width: 132px;
   }
 
   .workspace-content {
