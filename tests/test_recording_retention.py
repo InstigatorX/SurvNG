@@ -211,6 +211,89 @@ class RecordingRetentionServiceTest(unittest.TestCase):
             paths = {str(row[0]) for row in connection.execute("SELECT path FROM recordings")}
         self.assertEqual(paths, {str(recent)})
 
+    def test_unmounted_location_keeps_expired_recording_and_index_row(self) -> None:
+        evidence = self.storage / "evidence"
+        recordings = evidence / "recordings"
+        registry = MediaStorageRegistry(
+            self.storage / "metadata",
+            MediaStorageConfig(locations=[
+                MediaStorageLocationConfig(
+                    id="evidence",
+                    path=str(evidence),
+                    roles=["recordings"],
+                    require_mount=True,
+                ),
+            ]),
+        )
+        self.assertEqual(registry.status("evidence").state, "not_mounted")
+        old = self.insert_recording(
+            age_days=8,
+            path=recordings / "gate" / "main" / "2026-01-01" / "00" / "old.mp4",
+            location_id="evidence",
+        )
+        service = RecordingRetentionService(
+            self.storage,
+            recordings,
+            self.connection,
+            RecordingRetentionConfig(
+                storage_limit_tb=1, main_days=7, cleanup_batch_files=100
+            ),
+            media_storage=registry,
+        )
+        service._cameras = {
+            "gate": CameraConfig(
+                id="gate", name="Gate", stream_url="rtsp://camera/main"
+            ),
+        }
+
+        outcome = service.run_once(apply=True)
+
+        self.assertEqual(outcome["result"]["deleted_files"], 0)
+        self.assertEqual(outcome["result"]["missing_files"], 0)
+        self.assertEqual(outcome["result"]["failed_files"], 1)
+        self.assertTrue(old.exists())
+        with self.connection() as connection:
+            paths = {str(row[0]) for row in connection.execute("SELECT path FROM recordings")}
+        self.assertEqual(paths, {str(old)})
+
+    def test_missing_file_on_online_location_still_drops_index_row(self) -> None:
+        registry = MediaStorageRegistry(
+            self.storage / "metadata",
+            MediaStorageConfig(locations=[
+                MediaStorageLocationConfig(
+                    id="primary",
+                    path=str(self.storage),
+                    roles=["recordings"],
+                ),
+            ]),
+        )
+        self.assertEqual(registry.status("primary").state, "online")
+        old = self.insert_recording(age_days=8, location_id="primary")
+        old.unlink()
+        service = RecordingRetentionService(
+            self.storage,
+            self.recordings,
+            self.connection,
+            RecordingRetentionConfig(
+                storage_limit_tb=1, main_days=7, cleanup_batch_files=100
+            ),
+            media_storage=registry,
+        )
+        service._cameras = {
+            "gate": CameraConfig(
+                id="gate", name="Gate", stream_url="rtsp://camera/main"
+            ),
+        }
+
+        outcome = service.run_once(apply=True)
+
+        self.assertEqual(outcome["result"]["deleted_files"], 0)
+        self.assertEqual(outcome["result"]["missing_files"], 1)
+        self.assertEqual(outcome["result"]["failed_files"], 0)
+        with self.connection() as connection:
+            remaining = connection.execute("SELECT count(*) FROM recordings").fetchone()[0]
+        self.assertEqual(remaining, 0)
+
     def test_capacity_pressure_is_reported_per_recording_location(self) -> None:
         second = self.storage / "second"
         second.mkdir()
