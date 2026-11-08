@@ -76,7 +76,12 @@ class EvidenceProjection:
         if not searchable(event):
             # Removing searchable evidence does not require an available model.
             # The index checks the authoritative event revision in its transaction.
-            semantic.index.delete_event(int(event["id"]), expected_event=event)
+            # The service predicate includes scene media. When it says nothing
+            # remains searchable, observation vectors leave with the cover.
+            delete_kwargs: dict[str, Any] = {"expected_event": event}
+            if callable(getattr(semantic, "semantic_searchable", None)):
+                delete_kwargs["include_observations"] = True
+            semantic.index.delete_event(int(event["id"]), **delete_kwargs)
             return True
         if callable(getattr(semantic, "projection_current", None)) and semantic.projection_current(event):
             return True
