@@ -966,7 +966,96 @@ class SemanticIndexTest(unittest.TestCase):
 
         self.assertEqual(backfill.call_count, 2)
 
-    def test_status_reports_live_backfill_thread(self) -> None:
+    def test_evidence_field_changes_cancel_in_flight_indexing(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        stored = {
+            "id": 1,
+            "snapshot_path": "a.webp",
+            "evidence_revision": 1,
+            "scene_media_revision": 0,
+            "objects_json": "[]",
+            "cover_requirement": {"attempts": 1},
+        }
+
+        class Store:
+            def get(self, _event_id: int) -> dict[str, object]:
+                return dict(stored)
+
+        service._event_store = Store()
+        first = service._revision_event({"id": 1})
+        token = first["_semantic_revision"]
+        stored["cover_requirement"] = {"attempts": 2}
+        second = service._revision_event({"id": 1}, refresh=True)
+        self.assertIs(second["_semantic_revision"], token)
+        self.assertTrue(token.valid)
+        self.assertEqual(token.event["cover_requirement"], {"attempts": 2})
+        stored["snapshot_path"] = "b.webp"
+        third = service._revision_event({"id": 1}, refresh=True)
+        self.assertFalse(token.valid)
+        self.assertIsNot(third["_semantic_revision"], token)
+        self.assertEqual(third["snapshot_path"], "b.webp")
+
+    def test_cover_receipt_keeps_terminal_scene_skips_for_the_same_revision(self) -> None:
+        event = {"id": 1, "snapshot_path": "cover.webp", "scene_media_revision": 0}
+        self.index.record_skipped_observations(
+            event, self.identity, {("observation-empty", "scene.png")},
+        )
+        self.index.upsert(
+            [],
+            [],
+            self.identity,
+            expected_event=event,
+            projection_receipt={
+                "plan_key": "plan",
+                "indexed_crop_keys": [],
+                "skipped_crops": {"crop-1": "empty_after_clipping"},
+            },
+        )
+
+        self.assertEqual(
+            self.index.skipped_observation_keys(1, self.identity, 0),
+            {("observation-empty", "scene.png")},
+        )
+        receipt = self.index.projection_receipt(event, self.identity, "plan")
+        self.assertEqual(receipt["skipped_crops"], {"crop-1": "empty_after_clipping"})
+        advanced = {**event, "scene_media_revision": 1}
+        self.index.upsert(
+            [],
+            [],
+            self.identity,
+            expected_event=advanced,
+            projection_receipt={"plan_key": "plan", "indexed_crop_keys": [], "skipped_crops": {}},
+        )
+        self.assertEqual(self.index.skipped_observation_keys(1, self.identity, 1), set())
+
+    def test_unsearchable_event_without_scenes_drops_observation_vectors(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        self.index.upsert(
+            [SemanticEvidence(
+                1, "gate", "now", "object_crop", "scene:observation-1", "scene.png",
+                "car", (0, 0, 2, 2), observation_id="observation-1",
+            )],
+            [[1, 0, 0]],
+            self.identity,
+        )
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+
+        class Store:
+            def get(self, event_id: int) -> dict[str, object]:
+                return {"id": event_id, "objects": []}
+
+        service._event_store = Store()
+        self.assertTrue(service.queue_event({"id": 1, "objects": []}))
+        self.assertEqual(self.index.coverage(self.identity), {"evidence_count": 0, "event_count": 0})
+
+    def test_status_reports_backfill_work_not_an_idle_thread(self) -> None:
         from survng.app.config import SemanticSearchConfig
 
         service = SemanticSearchService(
@@ -976,8 +1065,198 @@ class SemanticIndexTest(unittest.TestCase):
         backfill.is_alive.return_value = True
         service._backfill_thread = backfill
 
+        self.assertFalse(service.status()["backfill_active"])
+        service._backfill_running = True
         self.assertTrue(service.status()["backfill_active"])
-        backfill.is_alive.assert_called_once_with()
+
+    def test_backfill_pass_clears_the_indexing_flag_before_quarantine_sleep(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        service.encoder = type("Encoder", (), {"identity": self.identity})()
+        observed: list[bool] = []
+
+        def backfill(_event_store: object) -> None:
+            observed.append(service.status()["backfill_active"])
+
+        with (
+            patch.object(service, "_retry_quarantined_media"),
+            patch.object(service, "_backfill", side_effect=backfill),
+            patch.object(service.index, "has_media_failures", return_value=False),
+            patch.object(service.index, "warm_search_cache"),
+        ):
+            service._run_backfill(object())
+
+        self.assertEqual(observed, [True])
+        self.assertFalse(service.status()["backfill_active"])
+
+    def test_quarantine_retry_defers_a_projection_that_makes_no_progress(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+        from survng.app.semantic_search import SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS
+
+        with sqlite3.connect(self.database_path) as connection:
+            connection.executemany(
+                "insert into events(id) values (?)",
+                [(event_id,) for event_id in range(3, 13)],
+            )
+        error = RuntimeError("retained image is unavailable")
+        recorded_at = time.time()
+        with patch("survng.app.semantic_search.time.time", return_value=recorded_at):
+            for event_id in range(1, 13):
+                self.assertFalse(self.index.record_media_failure(self.identity, event_id, error))
+                self.assertFalse(self.index.record_media_failure(self.identity, event_id, error))
+                self.assertTrue(self.index.record_media_failure(self.identity, event_id, error))
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        service.encoder = type("Encoder", (), {"identity": self.identity})()
+
+        class Store:
+            def get(self, event_id: int) -> dict[str, object]:
+                return {
+                    "id": event_id,
+                    "snapshot_path": "frame.webp",
+                    "objects": [{"label": "car", "box": [0, 0, 2, 2]}],
+                }
+
+        with (
+            patch(
+                "survng.app.semantic_search.time.time",
+                return_value=recorded_at + SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS + 1,
+            ),
+            patch.object(service, "index_event", return_value=0),
+            patch.object(service, "projection_current", return_value=False),
+        ):
+            service._retry_quarantined_media(Store())
+            self.assertEqual(self.index.due_media_failures(self.identity), [11, 12])
+
+    def test_quarantine_retry_drops_an_event_that_cannot_be_indexed(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+        from survng.app.semantic_search import SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS
+
+        error = RuntimeError("retained image is unavailable")
+        recorded_at = time.time()
+        with patch("survng.app.semantic_search.time.time", return_value=recorded_at):
+            self.assertFalse(self.index.record_media_failure(self.identity, 1, error))
+            self.assertFalse(self.index.record_media_failure(self.identity, 1, error))
+            self.assertTrue(self.index.record_media_failure(self.identity, 1, error))
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        service.encoder = type("Encoder", (), {"identity": self.identity})()
+
+        class Store:
+            def get(self, event_id: int) -> dict[str, object]:
+                return {"id": event_id}
+
+        with (
+            patch(
+                "survng.app.semantic_search.time.time",
+                return_value=recorded_at + SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS + 1,
+            ),
+            patch.object(service, "index_event", return_value=0),
+            patch.object(service, "projection_current", return_value=False),
+        ):
+            service._retry_quarantined_media(Store())
+
+        self.assertFalse(self.index.has_media_failures(self.identity))
+
+    def test_completed_backfill_does_not_load_every_embedding_id(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+        from survng.app.semantic_search import SemanticBackfillState
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        service.encoder = type("Encoder", (), {"identity": self.identity})()
+        self.index.save_backfill_state(self.identity, SemanticBackfillState(
+            before_created_at="2026-01-01T00:00:00+00:00",
+            before_id=1,
+            head_created_at="2026-01-01T00:00:00+00:00",
+            head_id=1,
+            complete=True,
+        ))
+
+        class Store:
+            def recent_compact_since(self, *_args: object) -> list[dict[str, object]]:
+                return []
+
+        with patch.object(self.index, "indexed_event_ids", side_effect=AssertionError("full scan")):
+            service._backfill(Store())
+
+    def test_vector_cache_budget_failure_is_logged_once(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        with (
+            self.assertLogs("uvicorn.error", level="WARNING") as logs,
+            patch.object(
+                self.index,
+                "_build_vector_cache_locked",
+                side_effect=MemoryError(
+                    "semantic generation exceeds the exact vector cache memory budget"
+                ),
+            ),
+        ):
+            self.index.warm_search_cache(self.identity)
+            self.index._vector_cache_disabled_until = 0
+            self.index.warm_search_cache(self.identity)
+
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("exact vector cache", logs.output[0])
+        self.assertEqual(service.status()["enabled"], True)
+
+    def test_empty_scene_crop_does_not_keep_projection_pending(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        image_path = Path(self.temporary.name) / "scene.png"
+        self.assertTrue(cv2.imwrite(str(image_path), np.zeros((4, 4, 3), dtype=np.uint8)))
+        observation = {
+            "id": "observation-empty",
+            "event_id": 1,
+            "camera_id": "gate",
+            "snapshot_path": "scene.png",
+            "captured_epoch": 1_000.0,
+            "payload_json": (
+                '{"label":"car","box":{"x1":900,"y1":1,"x2":950,"y2":2},'
+                '"detection_frame_width":1000,"detection_frame_height":1000}'
+            ),
+        }
+
+        class Store:
+            def scene_search_observations(self, event_id=None, after_id="", limit=100):
+                return [] if after_id else [observation]
+
+            def scene_observation_media(self, _event_id):
+                return [{"id": observation["id"], "snapshot_path": observation["snapshot_path"]}]
+
+            def scene_observation_payloads(self, _ids):
+                return [observation]
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True, index_full_frame=False),
+            self.index,
+            Path(self.temporary.name),
+            {},
+        )
+        service.encoder = type(
+            "Encoder",
+            (),
+            {"identity": self.identity, "encode_images": Mock(side_effect=AssertionError("encode"))},
+        )()
+        service._event_store = Store()
+        service._storage_dir = Path(self.temporary.name)
+        event = {"id": 1, "scene_media_revision": 0}
+        self.assertEqual(service._index_scene_observations(event, historical=True), 0)
+        self.assertFalse(service._scene_projection_missing(1, self.identity, event))
+        self.assertIn(
+            ("observation-empty", "scene.png"),
+            self.index.skipped_observation_keys(1, self.identity, 0),
+        )
 
     def test_missing_retained_snapshot_is_counted_without_faulting_service(self) -> None:
         from survng.app.config import SemanticSearchConfig

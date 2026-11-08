@@ -583,11 +583,43 @@ class SemanticIndex:
                         f"and source_kind = ? and observation_id=''{clause}", parameters,
                     )
             if projection_receipt is not None:
+                receipt = dict(projection_receipt)
+                previous = connection.execute(
+                    """
+                    select outcome_json from semantic_projection_receipts
+                    where event_id=? and model_fingerprint=? and preprocessing_fingerprint=?
+                    """,
+                    (
+                        int(expected_event["id"]),
+                        identity.model_fingerprint,
+                        identity.preprocessing_fingerprint,
+                    ),
+                ).fetchone()
+                if previous is not None:
+                    try:
+                        previous_outcome = json.loads(previous["outcome_json"])
+                    except (TypeError, json.JSONDecodeError):
+                        previous_outcome = None
+                    stored_revision = (
+                        previous_outcome.get("skipped_scene_media_revision")
+                        if isinstance(previous_outcome, dict) else None
+                    )
+                    # A cover rewrite shares this row. Keep terminal scene skips
+                    # for the same scene-media revision, and drop them once that
+                    # revision advances.
+                    if (
+                        isinstance(stored_revision, int)
+                        and not isinstance(stored_revision, bool)
+                        and stored_revision == int(expected_event.get("scene_media_revision") or 0)
+                        and previous_outcome.get("skipped_observation_keys")
+                    ):
+                        receipt["skipped_observation_keys"] = previous_outcome["skipped_observation_keys"]
+                        receipt["skipped_scene_media_revision"] = stored_revision
                 connection.execute(
                     "insert or replace into semantic_projection_receipts values(?,?,?,?,?,?,?)",
                     (int(expected_event["id"]), identity.model_fingerprint, identity.preprocessing_fingerprint,
                      int(expected_event.get("evidence_revision") or 0), str(expected_event.get("snapshot_path") or ""),
-                     projection_receipt["plan_key"], json.dumps(projection_receipt)),
+                     receipt["plan_key"], json.dumps(receipt)),
                 )
         self._record_cache_mutation(identity, mutation_event_ids)
         return len(prepared)
@@ -772,13 +804,18 @@ class SemanticIndex:
                 if len(cache.overrides) > self.VECTOR_CACHE_MAX_DELTA_ROWS:
                     cache = self._build_vector_cache_locked(connection, identity, signature)
         except (MemoryError, sqlite3.Error) as exc:
+            message = str(exc)
+            repeat = message == self._vector_cache_error
             self._vector_cache = None
-            self._vector_cache_error = str(exc)
+            self._vector_cache_error = message
             self._vector_cache_disabled_until = now + self.VECTOR_CACHE_RETRY_SECONDS
-            LOGGER.warning(
-                "semantic exact vector cache unavailable; using chunked full scan: %s",
-                exc,
-            )
+            # The quarantine supervisor retries this on a fixed interval. The
+            # budget decision does not change until the generation shrinks.
+            if not repeat:
+                LOGGER.warning(
+                    "semantic exact vector cache unavailable; using chunked full scan: %s",
+                    exc,
+                )
             return None
         return cache
 
@@ -1269,15 +1306,30 @@ class SemanticIndex:
             self._record_cache_mutation(identity, force_rebuild=True)
         return deleted
 
-    def delete_event(self, event_id: int, *, expected_event: dict[str, Any] | None = None) -> int:
-        """Remove semantic evidence for an event that is not object-searchable."""
+    def delete_event(
+        self,
+        event_id: int,
+        *,
+        expected_event: dict[str, Any] | None = None,
+        include_observations: bool = False,
+    ) -> int:
+        """Remove semantic evidence for an event that is not object-searchable.
+
+        A guarded delete keeps observation rows when scene media still has to
+        be reconciled. ``include_observations`` removes those rows too once
+        the event has no scene media left, so a retired observation cannot
+        stay searchable.
+        """
         with self._lock, self._connect() as connection:
             if expected_event is not None:
                 connection.execute("begin immediate")
                 if not self._event_matches(connection, expected_event):
                     return 0
+            # An unguarded delete removes every generation. A guarded delete
+            # keeps scene rows unless the caller has already seen that none remain.
+            observation_clause = "" if expected_event is None or include_observations else " and observation_id=''"
             cursor = connection.execute(
-                "delete from semantic_embeddings where event_id = ?" + (" and observation_id=''" if expected_event is not None else ""),
+                "delete from semantic_embeddings where event_id = ?" + observation_clause,
                 (int(event_id),),
             )
             connection.execute("delete from semantic_projection_receipts where event_id=?", (int(event_id),))
@@ -1333,6 +1385,17 @@ class SemanticIndex:
                 "select distinct event_id from semantic_embeddings"
             ).fetchall()
         return {int(row["event_id"]) for row in rows}
+
+    def has_event_evidence(self, event_id: int) -> bool:
+        """True when any generation still holds evidence for this event."""
+        if int(event_id) <= 0:
+            return False
+        with self._connect() as connection:
+            row = connection.execute(
+                "select 1 from semantic_embeddings where event_id=? limit 1",
+                (int(event_id),),
+            ).fetchone()
+        return row is not None
 
     def resolve_declared_identity(
         self,
@@ -1562,6 +1625,133 @@ class SemanticIndex:
                 "and preprocessing_fingerprint=?",
                 (int(event_id), identity.model_fingerprint, identity.preprocessing_fingerprint),
             )
+
+    def defer_media_failure(self, identity: SemanticModelIdentity, event_id: int) -> None:
+        """Move a no-progress quarantine back in line without counting another media miss.
+
+        A retry that neither finishes the projection nor reports missing media
+        used to leave ``next_attempt_at`` in the past. The same rows then won
+        the due query forever, and the rest of the quarantine never ran.
+        """
+        now = time.time()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                update semantic_media_failures
+                set last_attempt_at=?, next_attempt_at=?
+                where event_id=? and model_fingerprint=? and preprocessing_fingerprint=?
+                """,
+                (
+                    now,
+                    now + SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS,
+                    int(event_id),
+                    identity.model_fingerprint,
+                    identity.preprocessing_fingerprint,
+                ),
+            )
+
+    def record_skipped_observations(
+        self,
+        event: dict[str, Any],
+        identity: SemanticModelIdentity,
+        keys: set[tuple[str, str]],
+    ) -> None:
+        """Remember scene crops that cannot produce a vector for this media revision.
+
+        An empty clip is terminal for the current observation image. Leaving it
+        as required kept ``projection_current`` false and pinned the quarantine.
+        """
+        if not keys:
+            return
+        event_id = int(event.get("id") or 0)
+        revision = int(event.get("scene_media_revision") or 0)
+        with self._lock, self._connect() as connection:
+            connection.execute("begin immediate")
+            if not self._event_matches(connection, event):
+                return
+            row = connection.execute(
+                """
+                select plan_key, evidence_revision, image_path, outcome_json
+                from semantic_projection_receipts
+                where event_id=? and model_fingerprint=? and preprocessing_fingerprint=?
+                """,
+                (event_id, identity.model_fingerprint, identity.preprocessing_fingerprint),
+            ).fetchone()
+            payload: dict[str, Any] = {}
+            if row is not None:
+                try:
+                    loaded = json.loads(row["outcome_json"])
+                except (TypeError, json.JSONDecodeError):
+                    loaded = None
+                if isinstance(loaded, dict):
+                    payload = loaded
+            existing = {
+                (str(item[0]), str(item[1]))
+                for item in payload.get("skipped_observation_keys") or []
+                if isinstance(item, (list, tuple)) and len(item) == 2
+            }
+            payload["skipped_observation_keys"] = [
+                [observation_id, path]
+                for observation_id, path in sorted(existing | set(keys))
+            ]
+            payload["skipped_scene_media_revision"] = revision
+            if row is None:
+                connection.execute(
+                    "insert into semantic_projection_receipts values(?,?,?,?,?,?,?)",
+                    (
+                        event_id,
+                        identity.model_fingerprint,
+                        identity.preprocessing_fingerprint,
+                        int(event.get("evidence_revision") or 0),
+                        str(event.get("snapshot_path") or ""),
+                        "",
+                        json.dumps(payload, sort_keys=True),
+                    ),
+                )
+                return
+            connection.execute(
+                """
+                update semantic_projection_receipts
+                set outcome_json=?
+                where event_id=? and model_fingerprint=? and preprocessing_fingerprint=?
+                """,
+                (
+                    json.dumps(payload, sort_keys=True),
+                    event_id,
+                    identity.model_fingerprint,
+                    identity.preprocessing_fingerprint,
+                ),
+            )
+
+    def skipped_observation_keys(
+        self,
+        event_id: int,
+        identity: SemanticModelIdentity,
+        scene_media_revision: int,
+    ) -> set[tuple[str, str]]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select outcome_json from semantic_projection_receipts
+                where event_id=? and model_fingerprint=? and preprocessing_fingerprint=?
+                """,
+                (int(event_id), identity.model_fingerprint, identity.preprocessing_fingerprint),
+            ).fetchone()
+        if row is None:
+            return set()
+        try:
+            payload = json.loads(row["outcome_json"])
+        except (TypeError, json.JSONDecodeError):
+            return set()
+        if not isinstance(payload, dict):
+            return set()
+        if int(payload.get("skipped_scene_media_revision") or 0) != int(scene_media_revision):
+            return set()
+        return {
+            (str(item[0]), str(item[1]))
+            for item in payload.get("skipped_observation_keys") or []
+            if isinstance(item, (list, tuple)) and len(item) == 2
+        }
 
     def due_media_failures(
         self, identity: SemanticModelIdentity, *, limit: int = 10,
@@ -2281,6 +2471,39 @@ class _SemanticEventRevision:
     outcome: str = ""
 
 
+def _semantic_revision_value(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _semantic_evidence_identity(event: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Identity of the image and detections an in-flight embedding describes.
+
+    Operational fields such as cover-requirement attempts change without
+    changing that image. They must not cancel an encode that is already running.
+    """
+    objects = event.get("objects_json")
+    if not isinstance(objects, str):
+        try:
+            objects = json.dumps(
+                event.get("objects") or [],
+                sort_keys=True,
+                default=str,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError):
+            objects = ""
+    return (
+        _semantic_revision_value(event.get("id")),
+        _semantic_revision_value(event.get("evidence_revision")),
+        _semantic_revision_value(event.get("scene_media_revision")),
+        str(event.get("snapshot_path") or ""),
+        objects,
+    )
+
+
 def _ollama_jpeg_bytes(image: np.ndarray) -> bytes:
     if not isinstance(image, np.ndarray) or image.ndim != 3 or image.shape[2] != 3 or image.size == 0:
         raise RuntimeError("semantic image must be a BGR frame")
@@ -2493,6 +2716,7 @@ class SemanticSearchService(DisabledSemanticSearch):
         self._live_queue_reserve = max(1, min(16, config.worker_queue_size // 4))
         self._thread: threading.Thread | None = None
         self._backfill_thread: threading.Thread | None = None
+        self._backfill_running = False
         self._bootstrap_thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._storage_dir = Path()
@@ -2700,8 +2924,12 @@ class SemanticSearchService(DisabledSemanticSearch):
         """Retry transient failures and periodically revisit quarantined media."""
         while not self._stop.is_set():
             try:
-                self._retry_quarantined_media(event_store)
-                self._backfill(event_store)
+                self._set_backfill_running(True)
+                try:
+                    self._retry_quarantined_media(event_store)
+                    self._backfill(event_store)
+                finally:
+                    self._set_backfill_running(False)
                 encoder = self.encoder
                 if encoder is not None:
                     self.index.warm_search_cache(encoder.identity)
@@ -2710,10 +2938,15 @@ class SemanticSearchService(DisabledSemanticSearch):
                 if self._stop.wait(SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS):
                     return
             except Exception as exc:
+                self._set_backfill_running(False)
                 self._error = str(exc)
                 LOGGER.warning("semantic historical indexing interrupted: %s", exc)
                 if self._stop.wait(SEMANTIC_BACKFILL_RETRY_SECONDS):
                     return
+
+    def _set_backfill_running(self, running: bool) -> None:
+        with self._lifecycle_lock:
+            self._backfill_running = running
 
     def _retry_quarantined_media(self, event_store: Any) -> None:
         encoder = self.encoder
@@ -2736,8 +2969,16 @@ class SemanticSearchService(DisabledSemanticSearch):
             except SemanticMediaUnavailable as exc:
                 self.index.record_media_failure(encoder.identity, event_id, exc)
             else:
-                if self.projection_current(queued):
+                if self.projection_current(queued) or not self._quarantine_retry_useful(queued):
                     self.index.clear_media_failure(encoder.identity, event_id)
+                else:
+                    self.index.defer_media_failure(encoder.identity, event_id)
+
+    def _quarantine_retry_useful(self, event: dict[str, Any]) -> bool:
+        """False when another retry cannot create or remove semantic evidence."""
+        if semantic_event_searchable(event):
+            return True
+        return next(self._scene_observations(int(event.get("id") or 0)), None) is not None
 
     def _history_pending(self) -> bool:
         with self._event_revision_lock:
@@ -2776,13 +3017,11 @@ class SemanticSearchService(DisabledSemanticSearch):
         if not self.config.index_object_crops:
             self.index.delete_generation_source(identity, "object_crop")
         state = self.index.backfill_state(identity)
-        indexed_event_ids = self.index.indexed_event_ids()
         if state.complete and state.head_created_at is not None and state.head_id is not None:
             head = self._backfill_newer(
                 event_store,
                 state.head_created_at,
                 state.head_id,
-                indexed_event_ids,
             )
             if head is None:
                 return
@@ -2801,7 +3040,7 @@ class SemanticSearchService(DisabledSemanticSearch):
         head_id = state.head_id
         if head_created_at is not None and head_id is not None:
             head = self._backfill_newer(
-                event_store, head_created_at, head_id, indexed_event_ids,
+                event_store, head_created_at, head_id,
             )
             if head is None:
                 return
@@ -2824,7 +3063,7 @@ class SemanticSearchService(DisabledSemanticSearch):
             if head_created_at is None or head_id is None:
                 head_created_at = str(rows[0].get("created_at") or "")
                 head_id = int(rows[0].get("id") or 0)
-            tokens = self._consume_backfill_rows(event_store, rows, indexed_event_ids)
+            tokens = self._consume_backfill_rows(event_store, rows)
             if tokens is None or not self._finish_history_page(tokens):
                 return
             last = rows[-1]
@@ -2846,7 +3085,6 @@ class SemanticSearchService(DisabledSemanticSearch):
         event_store: Any,
         after_created_at: str,
         after_id: int,
-        indexed_event_ids: set[int],
     ) -> tuple[str, int] | None:
         """Index incidents admitted after the saved head. Return the new head."""
         newest = (after_created_at, after_id)
@@ -2869,7 +3107,7 @@ class SemanticSearchService(DisabledSemanticSearch):
             if first_page:
                 newest = (str(rows[0].get("created_at") or ""), int(rows[0].get("id") or 0))
                 first_page = False
-            tokens = self._consume_backfill_rows(event_store, rows, indexed_event_ids)
+            tokens = self._consume_backfill_rows(event_store, rows)
             if tokens is None or not self._finish_history_page(tokens):
                 return None
             if len(rows) < self.config.backfill_batch_size:
@@ -2883,7 +3121,6 @@ class SemanticSearchService(DisabledSemanticSearch):
         self,
         event_store: Any,
         rows: list[dict[str, Any]],
-        indexed_event_ids: set[int],
     ) -> list[_SemanticEventRevision] | None:
         tokens: list[_SemanticEventRevision] = []
         for event in reversed(rows):
@@ -2893,10 +3130,9 @@ class SemanticSearchService(DisabledSemanticSearch):
             has_scene = getattr(event_store, "scene_has_search_observation", None)
             scene_present = has_scene(event_id) if callable(has_scene) else next(self._scene_observations(event_id), None) is not None
             if not semantic_event_searchable(event) and not scene_present:
-                if event_id > 0 and event_id in indexed_event_ids:
+                if event_id > 0 and self.index.has_event_evidence(event_id):
                     # Resolve current evidence before acting on a historical snapshot.
                     self.index_event(event)
-                    indexed_event_ids.discard(event_id)
                 continue
             if self.encoder and self.projection_current(event):
                 continue
@@ -2927,6 +3163,13 @@ class SemanticSearchService(DisabledSemanticSearch):
         return tokens
 
     def _revision_event(self, event: dict[str, Any], *, refresh: bool = False) -> dict[str, Any]:
+        """Return the revision token for the latest stored evidence.
+
+        ``refresh`` is the caller contract for a store re-read. The read
+        already happens whenever an event store is attached. In-flight work
+        is cancelled only when the evidence identity changes.
+        """
+        del refresh
         with self._event_revision_lock:
             event_id = int(event.get("id") or 0)
             # Notifications and history pages can arrive out of order. The event
@@ -2937,15 +3180,18 @@ class SemanticSearchService(DisabledSemanticSearch):
                 latest = {"id": event_id}
             current = self._event_revisions.get(event_id)
             payload = {key: value for key, value in dict(latest).items() if key != "_semantic_revision"}
-            if current is None or refresh or current.event != payload:
+            identity = _semantic_evidence_identity(payload)
+            if current is None or _semantic_evidence_identity(current.event) != identity:
                 if current is not None:
                     current.valid = False
                 current = _SemanticEventRevision(payload)
                 self._event_revisions[event_id] = current
+            else:
+                current.event = payload
             return {**current.event, "_semantic_revision": current}
 
     def refresh_event(self, event: dict[str, Any]) -> bool:
-        """Invalidate queued and in-flight evidence before submitting its replacement."""
+        """Re-read stored evidence and replace an in-flight encode when it changed."""
         with self._event_revision_lock:
             event = self._revision_event(event, refresh=True)
             return self._queue_event_revision(event)
@@ -2963,8 +3209,13 @@ class SemanticSearchService(DisabledSemanticSearch):
         if not semantic_event_searchable(event):
             # A negative correction is complete without an encoder. Queued
             # work checks the same policy again before any image/model work.
-            self.index.delete_event(int(event["id"]), expected_event=event)
-            if not next(self._scene_observations(int(event["id"])), None):
+            scene = next(self._scene_observations(int(event["id"])), None)
+            self.index.delete_event(
+                int(event["id"]),
+                expected_event=event,
+                include_observations=scene is None,
+            )
+            if scene is None:
                 return True
         if self.encoder is None:
             return False
@@ -3001,7 +3252,7 @@ class SemanticSearchService(DisabledSemanticSearch):
         if encoder is None:
             return False
         event_id = int(event.get("id") or 0)
-        if self.config.index_object_crops and self._scene_projection_missing(event_id, encoder.identity):
+        if self.config.index_object_crops and self._scene_projection_missing(event_id, encoder.identity, event):
             return False
         objects = semantic_event_objects(event)
         if not semantic_event_searchable(event):
@@ -3061,18 +3312,25 @@ class SemanticSearchService(DisabledSemanticSearch):
                 if isinstance(revision, _SemanticEventRevision):
                     revision.pending = False
 
-    def _scene_projection_missing(self, event_id: int, identity) -> bool:
+    def _scene_projection_missing(self, event_id: int, identity, event: dict[str, Any] | None = None) -> bool:
         """True when an indexable observation has no embedding for this generation.
 
         Already indexed events are decided from ids and paths. Payloads are read
-        only for observations that are not in the index yet.
+        only for observations that are not in the index yet. Crops that clip to
+        an empty image are terminal for the current scene-media revision.
         """
+        skipped = self.index.skipped_observation_keys(
+            event_id,
+            identity,
+            int((event or {}).get("scene_media_revision") or 0),
+        )
         media = getattr(self._event_store, "scene_observation_media", None)
         payloads = getattr(self._event_store, "scene_observation_payloads", None)
         indexed = self.index.indexed_observation_keys(event_id, identity)
         if not callable(media) or not callable(payloads):
             return any(
                 (str(observation["id"]), str(observation.get("snapshot_path") or "")) not in indexed
+                and (str(observation["id"]), str(observation.get("snapshot_path") or "")) not in skipped
                 for observation in self._scene_observations(event_id)
             )
         current_media = {
@@ -3083,7 +3341,7 @@ class SemanticSearchService(DisabledSemanticSearch):
             return True
         missing = [
             observation_id for observation_id, path in current_media
-            if (observation_id, path) not in indexed
+            if (observation_id, path) not in indexed and (observation_id, path) not in skipped
         ]
         if not missing:
             return False
@@ -3136,6 +3394,7 @@ class SemanticSearchService(DisabledSemanticSearch):
             (str(observation["id"]), str(observation.get("snapshot_path") or ""))
             for observation in observations
         }
+        skipped_keys: set[tuple[str, str]] = set()
         completed = True
         pending: list[tuple[np.ndarray, SemanticEvidence, dict[str, Any]]] = []
         if self.config.implementation == "ollama":
@@ -3208,6 +3467,7 @@ class SemanticSearchService(DisabledSemanticSearch):
             box = (max(0, round(x1 * width / source_width)), max(0, round(y1 * height / source_height)),
                    min(width, round(x2 * width / source_width)), min(height, round(y2 * height / source_height)))
             if box[2] <= box[0] or box[3] <= box[1]:
+                skipped_keys.add(identity_key)
                 continue
             evidence = SemanticEvidence(
                 event_id, str(observation["camera_id"]),
@@ -3221,7 +3481,10 @@ class SemanticSearchService(DisabledSemanticSearch):
         else:
             flush_pending()
         if completed:
+            desired -= skipped_keys
             self.index.reconcile_observation_keys(event, identity, desired)
+            if skipped_keys:
+                self.index.record_skipped_observations(event, identity, skipped_keys)
         return written
 
     def index_event(self, event: dict[str, Any]) -> int:
@@ -3455,9 +3718,7 @@ class SemanticSearchService(DisabledSemanticSearch):
     def status(self) -> dict[str, Any]:
         with self._lifecycle_lock:
             state = self._state
-            backfill_active = bool(
-                self._backfill_thread and self._backfill_thread.is_alive()
-            )
+            backfill_active = self._backfill_running
         identity = self.encoder.identity if self.encoder else None
         retry_in_seconds = max(0.0, self._next_retry_at - time.monotonic())
         return {

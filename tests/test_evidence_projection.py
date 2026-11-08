@@ -126,6 +126,17 @@ def test_no_observed_objects_clear_old_cover_vectors_without_waiting_for_model()
     semantic.queue_event.assert_not_called()
 
 
+def test_service_clears_scene_vectors_when_nothing_remains_searchable():
+    worker, events, semantic, _, _ = setup_projection()
+    events.event["objects"] = []
+    semantic.semantic_searchable = Mock(return_value=False)
+    assert worker.run_once() == 1
+    semantic.index.delete_event.assert_called_once_with(
+        7, expected_event=events.event, include_observations=True,
+    )
+    semantic.queue_event.assert_not_called()
+
+
 def test_non_alerting_object_is_indexed_before_projection_is_acknowledged():
     worker, events, semantic, _, _ = setup_projection()
     events.event["objects"] = [{"label": "car", "confidence": .75, "incident_eligible": False}]
