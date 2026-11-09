@@ -987,7 +987,7 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(filtered, [rows[0]])
         self.assertEqual(indexed, [str(present)])
 
-    def test_manifest_validation_keeps_rows_when_stat_is_unknown(self) -> None:
+    def test_manifest_validation_keeps_index_when_stat_is_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             clip = Path(tmpdir) / "recordings" / "gate" / "main" / "retained.mp4"
@@ -1007,7 +1007,9 @@ class RecorderTest(unittest.TestCase):
                     for row in connection.execute("SELECT path FROM recordings")
                 ]
 
-        self.assertEqual(filtered, rows)
+        # Unknown presence is withheld from the playlist but must not delete
+        # the index row (same contract as an offline recording volume).
+        self.assertEqual(filtered, [])
         self.assertEqual(indexed, [str(clip)])
 
     def test_playback_retains_metadata_during_recording_volume_outage(self) -> None:

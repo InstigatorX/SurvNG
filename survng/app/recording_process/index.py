@@ -564,25 +564,23 @@ class RecordingIndexMixin:
             self._playback_active_leases.pop(str(token), None)
 
     def discard_missing_recording_rows(self, rows: list[dict]) -> list[dict]:
-        """Remove confirmed-missing indexed files before a playback manifest advertises them.
+        """Filter playback manifests without dropping index rows on flaky storage.
 
-        Day playlists and event streams call this on every fresh read. A
-        transient stat failure must not delete historical index rows: automatic
-        rediscovery only scans the last two hours. Unavailable recording roots
-        also keep rows even when presence looks missing.
+        Confirmed-missing files on a healthy root are removed from the index.
+        Unknown stats and missing paths under an unavailable recording root are
+        withheld from the manifest but left indexed so historical segments
+        reappear when the volume returns.
         """
         existing: list[dict] = []
         stale_paths: list[str] = []
         unavailable_roots = self._unavailable_recording_roots()
         for row in rows:
             path = str(row.get("path") or "")
-            if not path:
-                continue
-            presence = path_presence(path)
-            if presence == "missing" and not self._path_under_roots(path, unavailable_roots):
-                stale_paths.append(path)
-            else:
+            presence = path_presence(path) if path else "unknown"
+            if presence == "present":
                 existing.append(row)
+            elif presence == "missing" and not self._path_under_roots(path, unavailable_roots):
+                stale_paths.append(path)
         self._delete_index_paths(stale_paths)
         return existing
 
