@@ -1,4 +1,5 @@
 import { safeMediaUrl } from "../mediaUrl.mjs";
+import { mutationNeedsCsrf, requestApiPath } from "./requestPath.mjs";
 import { timelineHref as timelineWorkspaceHref, workspaceHref } from "../workspaceNavigation.mjs";
 
 export const APP_BASE_PATH = String(window.__SURVNG_BASE_PATH__ || "").replace(/\/+$/, "");
@@ -46,7 +47,6 @@ export function recordingsHref(context, options = {}) {
 
 const CSRF_COOKIE_NAME = "survng_csrf";
 const CSRF_HEADER_NAME = "X-SurvNG-CSRF";
-const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 function csrfTokenFromCookie() {
   const cookies = String(document.cookie || "").split(";");
@@ -64,15 +64,10 @@ function csrfTokenFromCookie() {
 }
 
 export const fetch = async (resource, options = {}) => {
-  const path = typeof resource === "string" ? resource : "";
+  const path = requestApiPath(resource, APP_BASE_PATH);
   const method = String(options.method || "GET").toUpperCase();
   const headers = new Headers(options.headers || undefined);
-  if (
-    path.startsWith("/api/")
-    && path !== "/api/auth/login"
-    && path !== "/api/auth/bootstrap"
-    && UNSAFE_METHODS.has(method)
-  ) {
+  if (mutationNeedsCsrf(resource, method, APP_BASE_PATH)) {
     const csrf = csrfTokenFromCookie();
     if (csrf && !headers.has(CSRF_HEADER_NAME)) {
       headers.set(CSRF_HEADER_NAME, csrf);
