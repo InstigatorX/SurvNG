@@ -434,7 +434,14 @@ class RecordingIndexMixin:
                 row["start_at"] = datetime.fromtimestamp(float(row["start_epoch"]), timezone.utc).isoformat()
             return rows
 
-        stale_paths = {str(row["path"]) for row in rows if not Path(str(row["path"])).is_file()}
+        # Path.is_file() is false for ESTALE/EIO as well as a real deletion.
+        # Only a confirmed absence may drop the index row; an unknown stat
+        # leaves the segment available for the next read.
+        stale_paths = {
+            str(row["path"])
+            for row in rows
+            if path_presence(str(row["path"])) == "missing"
+        }
         if stale_paths:
             self._delete_index_paths(list(stale_paths))
             rows = [row for row in rows if str(row["path"]) not in stale_paths]
@@ -557,7 +564,13 @@ class RecordingIndexMixin:
             self._playback_active_leases.pop(str(token), None)
 
     def discard_missing_recording_rows(self, rows: list[dict]) -> list[dict]:
-        """Remove missing indexed files before a playback manifest advertises them."""
+        """Filter playback manifests without dropping index rows on flaky storage.
+
+        Confirmed-missing files on a healthy root are removed from the index.
+        Unknown stats and missing paths under an unavailable recording root are
+        withheld from the manifest but left indexed so historical segments
+        reappear when the volume returns.
+        """
         existing: list[dict] = []
         stale_paths: list[str] = []
         unavailable_roots = self._unavailable_recording_roots()
@@ -1511,8 +1524,15 @@ class RecordingIndexMixin:
             if self._index_stop.is_set():
                 break
             path = Path(path_value)
-            if not path.is_file():
+            presence = path_presence(path)
+            if presence == "missing":
                 self._delete_index_paths([path_value])
+                continue
+            if presence != "present":
+                with self._fingerprint_lock:
+                    if path_value not in self._fingerprint_pending_set:
+                        self._fingerprint_pending.append(path_value)
+                        self._fingerprint_pending_set.add(path_value)
                 continue
             with self._index_connection() as connection:
                 indexed = connection.execute("SELECT * FROM recordings WHERE path = ?", (path_value,)).fetchone()
@@ -1596,8 +1616,15 @@ class RecordingIndexMixin:
             if self._index_stop.is_set():
                 break
             path = Path(path_value)
-            if not path.is_file():
-                self._delete_index_paths([str(path)])
+            presence = path_presence(path)
+            if presence == "missing":
+                self._delete_index_paths([path_value])
+                continue
+            if presence != "present":
+                with self._validation_lock:
+                    if path_value not in self._validation_pending_set:
+                        self._validation_pending.append(path_value)
+                        self._validation_pending_set.add(path_value)
                 continue
             if not self._recording_file_is_stable(path):
                 # Keep the row unvalidated. The maintenance loop will retry it
@@ -1732,7 +1759,7 @@ class RecordingIndexMixin:
         for row in rows:
             payload = self._bound_recording_availability(dict(row))
             if float(payload["start_epoch"]) <= epoch < float(payload["end_epoch"]):
-                if Path(str(payload["path"])).is_file():
+                if path_presence(str(payload["path"])) != "missing":
                     return payload
                 self._delete_index_paths([str(payload["path"])])
         if abs(time.time() - epoch) <= max(60.0, self.segment_seconds * 6):
