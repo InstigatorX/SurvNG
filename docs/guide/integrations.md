@@ -109,7 +109,7 @@ With the usual proxy prefix that is `https://<your-host>/survng/api/mcp`. The en
 
 Enable API authentication first. MCP answers 401 while API authentication is off, and it ignores browser session cookies. Create a token with the `read` scope for a standing bot. Add `camera:control` only on a separate token whose job is to start or stop a camera, recording, or detection. Clip export is available to an `admin` token.
 
-A read token can check health, explain configuration, search and inspect incidents, summarize recent activity, run Smart Search, trace an incident across cameras, fetch one snapshot, and poll the latest incident journal. `tools/list` hides camera control and export unless the token's scope includes them. The snapshot tool returns one JPEG with the long edge capped at 1280 pixels. Responses omit credentials, stream URLs, and filesystem paths.
+A read token can check health, explain configuration, search and inspect incidents, summarize recent activity, run Smart Search, trace an incident across cameras, fetch one stored snapshot, fetch one current camera frame, and poll the latest incident journal. `tools/list` hides camera control and export unless the token's scope includes them. Both image tools return one JPEG with the long edge capped at 1280 pixels. Responses omit credentials, stream URLs, and filesystem paths.
 
 Point the bot's MCP configuration at that URL and send the bearer token in the `Authorization` header:
 
@@ -143,7 +143,7 @@ Before that URL is reachable from the internet:
 3. Leave the `Authorization` header out of proxy and application logs. The sample nginx access log does this.
 4. Leave port `8088` unpublished. Bind SurvNG to loopback when the proxy is on the same computer, or firewall `8088` so only the proxy host can connect. See [Reverse proxy](reverse-proxy.md).
 
-A read token can return incident snapshots, recognized names, and detection boxes. Those bytes leave the SurvNG host and are processed on the bot. Treat a public bot as access to that camera evidence for whoever can use the bot.
+A read token can return incident snapshots, one current camera frame, recognized names, and detection boxes. Those bytes leave the SurvNG host and are processed on the bot. Treat a public bot as access to that camera evidence for whoever can use the bot.
 
 SurvNG runs at most two MCP tool calls at once. A further call receives HTTP 429 and `Retry-After: 2`. Request bodies over 256 KiB are rejected. Snapshots larger than 12 MB, wider or taller than 8192 pixels, or above 16 million pixels are refused before they are decoded.
 
@@ -152,6 +152,7 @@ Useful standing jobs:
 - Morning health digest: `get_system_health` and `recent_incidents`.
 - Overnight summary: `summarize_recent_activity` or `search_incidents` for people and vehicles.
 - Follow-up on one event: `get_incident_image`, then `trace_across_cameras`.
+- Look at a camera now: `get_live_frame` with `camera_id`. Use `source` `main` for the recording stream. The default is the live stream.
 
 A starter handoff:
 

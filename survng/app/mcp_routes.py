@@ -20,7 +20,7 @@ from collections.abc import Callable
 from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 import cv2
 import numpy as np
@@ -37,6 +37,7 @@ from .assistant import (
     sanitize_assistant_data,
 )
 from .config import ApiScope
+from .camera_api_routes import live_camera_jpeg
 from .incident_utils import event_snapshot_path
 from .intelligence_routes import IntelligenceService
 from .manager import AppManager
@@ -73,9 +74,10 @@ _INVALID_PARAMS = -32602
 _INTERNAL_ERROR = -32603
 
 _INSTRUCTIONS = (
-    "SurvNG investigation tools. Read tools report health, incidents, and one "
-    "snapshot. Camera control and clip export appear only when the token "
-    "allows them. Visual similarity is not confirmed identity."
+    "SurvNG investigation tools. Read tools report health, incidents, one "
+    "stored snapshot, or one current camera frame. Camera control and clip "
+    "export appear only when the token allows them. Visual similarity is not "
+    "confirmed identity."
 )
 
 _READ: ApiScope = "read"
@@ -98,6 +100,11 @@ class _CameraFeatureArgs(_StrictModel):
 
 class _IncidentImageArgs(_StrictModel):
     event_id: int = Field(gt=0)
+
+
+class _LiveFrameArgs(_StrictModel):
+    camera_id: str = Field(min_length=1, max_length=128)
+    source: Literal["live", "main"] = "live"
 
 
 class _RecentIncidentsArgs(_StrictModel):
@@ -214,6 +221,17 @@ def _redact_mcp_value(value: Any, *, _depth: int = 0) -> Any:
     return value
 
 
+def _image_outcome(payload: dict[str, Any], encoded: bytes) -> _ToolOutcome:
+    return _ToolOutcome([
+        {"type": "text", "text": json.dumps(payload, separators=(",", ":"))},
+        {
+            "type": "image",
+            "data": base64.b64encode(encoded).decode("ascii"),
+            "mimeType": "image/jpeg",
+        },
+    ])
+
+
 def _text_result(payload: Any, *, is_error: bool = False) -> _ToolOutcome:
     safe = _redact_mcp_value(payload)
     return _ToolOutcome(
@@ -299,9 +317,7 @@ def _source_dimensions_allowed(width: int, height: int) -> bool:
     return width * height <= _MAX_SOURCE_PIXELS
 
 
-def _bounded_jpeg(path: Path) -> bytes:
-    with path.open("rb") as handle:
-        data = handle.read(_MAX_SNAPSHOT_BYTES + 1)
+def _bounded_jpeg_bytes(data: bytes) -> bytes:
     if not data or len(data) > _MAX_SNAPSHOT_BYTES:
         raise FileNotFoundError("event snapshot is unavailable")
     declared = _declared_image_size(data)
@@ -329,6 +345,12 @@ def _bounded_jpeg(path: Path) -> bytes:
     if not ok:
         raise FileNotFoundError("event snapshot is unavailable")
     return encoded.tobytes()
+
+
+def _bounded_jpeg(path: Path) -> bytes:
+    with path.open("rb") as handle:
+        data = handle.read(_MAX_SNAPSHOT_BYTES + 1)
+    return _bounded_jpeg_bytes(data)
 
 
 def _validation_message(exc: ValidationError) -> str:
@@ -432,6 +454,19 @@ _TOOLS: tuple[_Tool, ...] = (
             ["event_id"],
         ),
         "image",
+    ),
+    _Tool(
+        "get_live_frame",
+        "One JPEG of the current camera frame, with the long edge capped at 1280 pixels. source is live or main.",
+        _READ,
+        _object_schema(
+            {
+                "camera_id": _CAMERA_ID,
+                "source": {"type": "string", "enum": ["live", "main"]},
+            },
+            ["camera_id"],
+        ),
+        "live_frame",
     ),
     _Tool(
         "recent_incidents",
@@ -684,6 +719,9 @@ class McpEndpoint:
         if tool.kind == "image":
             args = _IncidentImageArgs.model_validate(arguments)
             return self._incident_image(args.event_id)
+        if tool.kind == "live_frame":
+            args = _LiveFrameArgs.model_validate(arguments)
+            return self._live_frame(args.camera_id, args.source)
         if tool.kind == "recent":
             args = _RecentIncidentsArgs.model_validate(arguments)
             return self._recent_incidents(args.limit)
@@ -759,17 +797,24 @@ class McpEndpoint:
             encoded = _bounded_jpeg(located)
         except (FileNotFoundError, PermissionError, OSError, ValueError, cv2.error):
             return _text_result("event snapshot is unavailable", is_error=True)
-        return _ToolOutcome([
-            {
-                "type": "text",
-                "text": json.dumps({"event_id": event_id}, separators=(",", ":")),
-            },
-            {
-                "type": "image",
-                "data": base64.b64encode(encoded).decode("ascii"),
-                "mimeType": "image/jpeg",
-            },
-        ])
+        return _image_outcome({"event_id": event_id}, encoded)
+
+    def _live_frame(self, camera_id: str, source: str) -> _ToolOutcome:
+        def load(manager: AppManager) -> bytes | _ToolOutcome:
+            try:
+                return live_camera_jpeg(manager, camera_id, source)
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, str) else "no frame available"
+                return _text_result(detail, is_error=True)
+
+        located = self._with_manager(load)
+        if isinstance(located, _ToolOutcome):
+            return located
+        try:
+            encoded = _bounded_jpeg_bytes(located)
+        except (FileNotFoundError, PermissionError, OSError, ValueError, cv2.error):
+            return _text_result("no frame available", is_error=True)
+        return _image_outcome({"camera_id": camera_id, "source": source}, encoded)
 
     def _recent_incidents(self, limit: int) -> _ToolOutcome:
         def load(manager: AppManager) -> _ToolOutcome:

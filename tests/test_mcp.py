@@ -216,6 +216,7 @@ READ_TOOLS = {
     "summarize_recent_activity",
     "trace_across_cameras",
     "get_incident_image",
+    "get_live_frame",
     "recent_incidents",
 }
 CONTROL_TOOLS = {"start_camera", "stop_camera", "set_recording", "set_detection"}
@@ -357,6 +358,87 @@ def test_incident_image_returns_a_bounded_jpeg_or_not_found(tmp_path) -> None:
     missing = post_rpc(client, "tools/call", {"name": "get_incident_image", "arguments": {"event_id": 99}})
     assert missing.json()["result"]["isError"] is True
     assert "not found" in tool_text(missing.json())
+
+
+def test_live_frame_returns_the_current_jpeg_outside_the_manager_lock(tmp_path) -> None:
+    lock = threading.RLock()
+    client, manager = build_client(tmp_path, token_config("read"), manager_lock=lock)
+    frame = np.zeros((100, 2000, 3), dtype=np.uint8)
+    frame[:, :, 1] = 255
+    ok, encoded = cv2.imencode(".jpg", frame)
+    assert ok
+    jpeg = encoded.tobytes()
+    calls: list[str] = []
+
+    class Worker:
+        def __init__(self, running: bool = True, fresh: bool = True) -> None:
+            self.running = running
+            self.fresh = fresh
+
+        def status(self) -> dict:
+            return {"running": self.running, "frame_fresh": self.fresh, "main_frame_fresh": self.fresh}
+
+        def snapshot(self, source: str) -> bytes:
+            calls.append(source)
+            return jpeg
+
+    class Camera:
+        def normalized_source(self, source: str, default: str = "live") -> str:
+            return "main" if (source or default).lower() == "main" else "live"
+
+        def source_url(self, source: str = "live") -> str:
+            return "rtsp://camera/main" if source == "main" else "rtsp://camera/live"
+
+    worker = Worker()
+    manager.workers = {"gate": worker}
+    manager.camera = lambda camera_id: Camera() if camera_id == "gate" else None
+    def unavailable(*_args, **_kwargs):
+        raise AssertionError("go2rtc")
+
+    manager.go2rtc = SimpleNamespace(snapshot=unavailable)
+    decoded_outside_lock = threading.Event()
+    original = mcp_routes._bounded_jpeg_bytes
+
+    def bounded(data: bytes) -> bytes:
+        assert lock.acquire(blocking=False)
+        lock.release()
+        decoded_outside_lock.set()
+        return original(data)
+
+    mcp_routes._bounded_jpeg_bytes = bounded
+    try:
+        found = post_rpc(client, "tools/call", {"name": "get_live_frame", "arguments": {"camera_id": "gate"}})
+        assert found.status_code == 200
+        body = found.json()["result"]
+        assert body["isError"] is False
+        assert json.loads(tool_text(found.json())) == {"camera_id": "gate", "source": "live"}
+        image = next(item for item in body["content"] if item["type"] == "image")
+        decoded = cv2.imdecode(np.frombuffer(base64.b64decode(image["data"]), dtype=np.uint8), cv2.IMREAD_COLOR)
+        assert decoded is not None
+        assert decoded.shape[1] == 1280
+        assert decoded_outside_lock.is_set()
+        assert calls == ["live"]
+
+        calls.clear()
+        main = post_rpc(client, "tools/call", {"name": "get_live_frame", "arguments": {"camera_id": "gate", "source": "main"}})
+        assert json.loads(tool_text(main.json()))["source"] == "main"
+        assert calls == ["main"]
+
+        missing = post_rpc(client, "tools/call", {"name": "get_live_frame", "arguments": {"camera_id": "missing"}})
+        assert missing.json()["result"]["isError"] is True
+        assert "camera not found" in tool_text(missing.json())
+
+        worker.running = False
+        powered_off = post_rpc(client, "tools/call", {"name": "get_live_frame", "arguments": {"camera_id": "gate"}})
+        assert "powered off" in tool_text(powered_off.json())
+
+        worker.running = True
+        worker.fresh = False
+        stale = post_rpc(client, "tools/call", {"name": "get_live_frame", "arguments": {"camera_id": "gate"}})
+        assert stale.json()["result"]["isError"] is True
+        assert "no frame available" in tool_text(stale.json())
+    finally:
+        mcp_routes._bounded_jpeg_bytes = original
 
 
 def test_incident_image_refuses_oversized_frames_outside_the_manager_lock(tmp_path, monkeypatch) -> None:
