@@ -45,6 +45,47 @@ class CameraApiRouteBundle:
     handlers: dict[str, Callable[..., Any]]
 
 
+def cached_camera_snapshot(
+    worker: Any,
+    camera: Any,
+    source: str,
+    status: dict[str, Any],
+) -> tuple[bytes | None, bool]:
+    normalized = camera.normalized_source(source)
+    freshness_key = "main_frame_fresh" if normalized == "main" else "frame_fresh"
+    freshness_known = freshness_key in status
+    if freshness_known and not status.get(freshness_key):
+        return None, True
+    if status.get(freshness_key):
+        return worker.snapshot(normalized), False
+    return None, False
+
+
+def live_camera_jpeg(manager: AppManager, camera_id: str, source: str = "live") -> bytes:
+    """Return one current JPEG using the same path as the camera snapshot route."""
+    worker = manager.workers.get(camera_id)
+    camera = manager.camera(camera_id)
+    if worker is None or camera is None:
+        raise HTTPException(status_code=404, detail="camera not found")
+    status = worker.status()
+    if not status.get("running"):
+        raise HTTPException(status_code=503, detail="camera is powered off")
+    image, stale = cached_camera_snapshot(worker, camera, source, status)
+    if image is None and not stale:
+        try:
+            image = manager.go2rtc.snapshot(camera, source)
+        except Go2RtcError:
+            fallback = (
+                "live"
+                if source == "main" and camera.source_url("main") == camera.source_url("live")
+                else source
+            )
+            image = worker.snapshot(fallback)
+    if image is None:
+        raise HTTPException(status_code=503, detail="no frame available")
+    return image
+
+
 def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundle:
     router = APIRouter()
 
@@ -59,45 +100,10 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
         with deps.manager_lock:
             return operation(deps.get_manager())
 
-    def cached_snapshot(
-        worker: Any,
-        camera: Any,
-        source: str,
-        status: dict[str, Any],
-    ) -> tuple[bytes | None, bool]:
-        normalized = camera.normalized_source(source)
-        freshness_key = "main_frame_fresh" if normalized == "main" else "frame_fresh"
-        freshness_known = freshness_key in status
-        if freshness_known and not status.get(freshness_key):
-            return None, True
-        if status.get(freshness_key):
-            return worker.snapshot(normalized), False
-        return None, False
-
     @router.get("/api/cameras/{camera_id}/snapshot.jpg")
     def snapshot(camera_id: str, source: str = "live") -> Response:
         def response(active_manager: AppManager) -> Response:
-            worker = active_manager.workers.get(camera_id)
-            camera = active_manager.camera(camera_id)
-            if worker is None or camera is None:
-                raise HTTPException(status_code=404, detail="camera not found")
-            status = worker.status()
-            if not status.get("running"):
-                raise HTTPException(status_code=503, detail="camera is powered off")
-            image, stale = cached_snapshot(worker, camera, source, status)
-            if image is None and not stale:
-                try:
-                    image = active_manager.go2rtc.snapshot(camera, source)
-                except Go2RtcError:
-                    fallback = (
-                        "live"
-                        if source == "main"
-                        and camera.source_url("main") == camera.source_url("live")
-                        else source
-                    )
-                    image = worker.snapshot(fallback)
-            if image is None:
-                raise HTTPException(status_code=503, detail="no frame available")
+            image = live_camera_jpeg(active_manager, camera_id, source)
             return Response(
                 image,
                 media_type="image/jpeg",
@@ -114,7 +120,7 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
             if worker is None or camera is None:
                 raise HTTPException(status_code=404, detail="camera not found")
             status = worker.status()
-            image, stale = cached_snapshot(worker, camera, source, status)
+            image, stale = cached_camera_snapshot(worker, camera, source, status)
             if image is None and status.get("running") and not stale:
                 try:
                     image = active_manager.go2rtc.snapshot(camera, source)
