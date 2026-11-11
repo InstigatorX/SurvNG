@@ -1043,6 +1043,7 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         background_state = self.pipeline.runtime.stage_state["background"]
         tracker_state = self.pipeline.runtime.stage_state["tracking"]
         background_before = background_state.background.copy()
+        noise_before = background_state.noise_ema
         track_counts_before = {
             track_id: track.consecutive_frames
             for track_id, track in tracker_state.tracks.items()
@@ -1051,6 +1052,8 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         second = self.process_timed(frames, timestamps)
 
         np.testing.assert_array_equal(background_state.background, background_before)
+        self.assertEqual(background_state.noise_ema, noise_before)
+        self.assertEqual(second.debug.values["scene_noise"], round(noise_before, 4))
         self.assertEqual(
             {
                 track_id: track.consecutive_frames
@@ -1061,15 +1064,16 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         self.assertEqual(second.debug.values["background_stale_transitions_skipped"], 5)
         self.assertEqual(second.debug.values["tracker_stale_frames_skipped"], 5)
 
-    def test_partial_overlap_preserves_historical_noise_samples(self) -> None:
+    def test_partial_overlap_consumes_each_noise_sample_once(self) -> None:
         frames = [np.full((40, 60), 30, dtype=np.uint8) for _ in range(5)]
         self.process_timed(frames[:4], [100.0, 100.2, 100.4, 100.6])
 
         result = self.process_timed(frames[1:], [100.2, 100.4, 100.6, 100.8])
 
-        # Each four-frame window contributes three noise samples, even though
-        # two transitions in the second window are too old for scene learning.
-        expected_noise = 1.0 + (4.0 - 1.0) * 0.92 ** 6
+        # The first window contributes three noise samples; the second adds only
+        # its one new transition. Historical frames already consumed must not
+        # be re-fed into the noise estimate.
+        expected_noise = 1.0 + (4.0 - 1.0) * 0.92 ** 4
         state = self.pipeline.runtime.stage_state["background"]
         self.assertAlmostEqual(state.noise_ema, expected_noise)
         self.assertEqual(result.debug.values["scene_noise"], round(expected_noise, 4))

@@ -263,9 +263,6 @@ class AdaptiveEmaBackgroundStage:
             for frame_index, frame in enumerate(frames[1:], start=1):
                 current = frame.astype(np.float32, copy=False)
                 delta = cv2.absdiff(current, background)
-                median, mad = _background_statistics(delta)
-                robust_noise = max(1.0, median + 1.4826 * mad)
-                noise_ema = noise_ema * 0.92 + robust_noise * 0.08
 
                 current_at = (
                     timestamps[frame_index]
@@ -279,7 +276,8 @@ class AdaptiveEmaBackgroundStage:
                 if not is_new_transition:
                     # Overlapping continuous-analysis windows intentionally retain
                     # history for scoring, but stateful scene learning must consume
-                    # each captured frame exactly once.
+                    # each captured frame exactly once. That includes the noise
+                    # estimate, so skip its exact median/MAD for stale frames.
                     stale_transition_count += 1
                     differences.append(np.clip(delta, 0, 255).astype(np.uint8))
                     learning_rates.append(0.0)
@@ -293,6 +291,9 @@ class AdaptiveEmaBackgroundStage:
                     global_changes.append(0.0)
                     continue
 
+                median, mad = _background_statistics(delta)
+                robust_noise = max(1.0, median + 1.4826 * mad)
+                noise_ema = noise_ema * 0.92 + robust_noise * 0.08
                 stable_limit = max(6.0, noise_ema * 3.0)
                 changed = delta > stable_limit
                 changed_ratio = float(np.count_nonzero(changed)) / max(1, changed.size)
