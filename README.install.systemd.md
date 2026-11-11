@@ -241,6 +241,7 @@ Environment=SURVNG_CONFIG_PATH=${SURVNG_ROOT}/config.json
 Environment=SURVNG_OBSERVABILITY_SOCKET=/run/survng/observability.sock
 Environment=MALLOC_ARENA_MAX=16
 Environment=OPENBLAS_NUM_THREADS=1
+Environment=OPENCV_OPENCL_RUNTIME=disabled
 KillSignal=SIGTERM
 KillMode=mixed
 TimeoutStopSec=60
