@@ -99,13 +99,9 @@ def qsv_decode_args(value: str | None) -> list[str]:
 
 
 def recorded_frame_hw_args(value: str | None) -> tuple[list[str], list[str]]:
-    """Hardware decode for seeked recorded-frame reads.
-
-    Explicit QSV decodes through VAAPI on the same device: after an input
-    seek, the QSV decoder labels B-frame streams' images with the timestamp
-    of a later frame, so evidence would not match its reported offset.
-    """
-    if qsv_enabled(value) or vaapi_enabled(value):
+    if qsv_enabled(value):
+        return qsv_decode_args(value), ["-vf", "hwdownload,format=nv12"]
+    if vaapi_enabled(value):
         device = dri_render_device()
         return ["-vaapi_device", device, "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi"], ["-vf", "hwdownload,format=nv12"]
     return [], []

@@ -408,10 +408,10 @@ For each available target:
 1. Find the indexed main recording containing the target timestamp.
 2. Decode one frame with FFmpeg, using configured hardware decoding when
    available and CPU fallback otherwise. Samples that share a segment decode
-   in one process: it seeks to the whole second before the first sample, and
-   hardware surfaces are downloaded only after frame selection. Explicit `qsv`
-   decodes these seeked reads through VAAPI, because the QSV decoder returns an
-   earlier image under the requested timestamp after a seek on B-frame streams.
+   in one process, and hardware surfaces are downloaded only after frame
+   selection. Except under `qsv`, the batch seeks to the whole second before
+   the first sample; after a seek, the QSV decoder returns an earlier image
+   under the requested timestamp on B-frame streams.
 3. Nudge the requested offset when damaged timestamps or keyframe placement
    prevent an exact read.
 4. Run the configured OpenVINO/Core ML detector.
@@ -523,10 +523,8 @@ review the applicable license terms.
 
 Tracking runs only after an eligible object is found and recorded confirmation
 has completed (or been dropped). It samples the main camera source at
-`sample_fps`. With explicit `qsv` or `vaapi` hardware acceleration, recorded
-catch-up decodes and scales through VAAPI. `scale_qsv` is avoided because it
-re-times frames and would break exact source-PTS references. A hardware failure
-before the first frame falls back to software. `max_active_cameras` bounds simultaneous sessions so a burst
+`sample_fps`, decoding in software and scaling only the sampled frames.
+`max_active_cameras` bounds simultaneous sessions so a burst
 of camera activity cannot create unbounded inference and decode load. Track
 summaries, trajectories, zones, observation counts, and first/last-seen
 timestamps are stored with the originating incident.

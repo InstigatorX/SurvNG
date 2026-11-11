@@ -28,6 +28,7 @@ from ..face_detection_geometry import upper_body_window
 from ..ffmpeg_hw import (
     RECORDED_FRAME_INPUT_THREAD_ARGS,
     RECORDED_FRAME_OUTPUT_THREAD_ARGS,
+    qsv_enabled,
     recorded_frame_hw_args,
 )
 from ..object_activity import ObjectActivityAttributor
@@ -3228,8 +3229,12 @@ class RecordedMotionObjectDetector:
 
         # Input seeking skips decoding the segment prefix. A whole-second seek
         # shifts every timestamp by an exact number of time-base ticks, so the
-        # shifted select picks the same frames as an unseeked decode.
-        seek_seconds = max(0, math.floor(offsets[0] - RECORDED_BATCH_SEEK_MARGIN_SECONDS))
+        # shifted select picks the same frames as an unseeked decode. After a
+        # seek, QSV returns an earlier image under the selected timestamp on
+        # B-frame streams, so QSV decodes from the segment start.
+        seek_seconds = 0
+        if not qsv_enabled(self.recorder.hardware_acceleration):
+            seek_seconds = max(0, math.floor(offsets[0] - RECORDED_BATCH_SEEK_MARGIN_SECONDS))
         expression = "0"
         for index, offset in reversed(list(enumerate(offsets))):
             expression = (

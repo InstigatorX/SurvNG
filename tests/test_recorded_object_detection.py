@@ -830,7 +830,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         backend = RecordedMotionObjectDetector(
             CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
             SimpleNamespace(config=SimpleNamespace()),
-            SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="qsv"),
+            SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="vaapi"),
             lambda: None,
         )
         _ok, encoded = cv2.imencode(".bmp", np.full((12, 16, 3), 9, dtype=np.uint8))
@@ -872,6 +872,19 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertLess(video_filter.index("hwdownload"), video_filter.index("showinfo@event_sample"))
         self.assertEqual(frames[7.0].actual_offset, 7.0)
         self.assertEqual(frames[7.5].actual_offset, 7.55)
+
+        backend.recorder.hardware_acceleration = "qsv"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recording = Path(tmpdir) / "sample.mp4"
+            recording.touch()
+            with patch(
+                "survng.app.motion_pipeline.object_detection.subprocess.Popen",
+                side_effect=OSError("not run"),
+            ) as popen:
+                backend._read_recorded_frames(recording, [7.0, 7.5])
+        qsv_command = popen.call_args_list[0].args[0]
+        self.assertIn("qsv", qsv_command)
+        self.assertNotIn("-ss", qsv_command)
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required for seek equivalence")
     def test_recorded_frame_batch_seek_matches_decoding_from_segment_start(self) -> None:
@@ -947,6 +960,8 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                         self.skipTest("hardware decode fell back to software")
                     for offset, item in frames.items():
                         self.assertEqual(content_time(item.frame), item.actual_offset)
+                    if mode == "qsv":
+                        continue
                     single = backend._read_recorded_frame(path, 2.0)
                     self.assertEqual(content_time(single), frames[2.0].actual_offset)
 

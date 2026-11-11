@@ -381,9 +381,6 @@ class CameraFrameTimeline:
                         maximum_width=frame_width,
                         start_offset_seconds=max(0.0, sample_start - row_start),
                         probe_path=path,
-                        hardware_acceleration=getattr(
-                            self.recorder, "hardware_acceleration", None
-                        ),
                     ):
                         captured_at, _frame = sample
                         if self.stop_event.is_set():
@@ -499,9 +496,6 @@ class CameraFrameTimeline:
                         maximum_width=frame_width,
                         start_offset_seconds=max(0.0, sample_start - row_start),
                         probe_path=path,
-                        hardware_acceleration=getattr(
-                            self.recorder, "hardware_acceleration", None
-                        ),
                     ):
                         captured_at, _frame = sample
                         if self.stop_event.is_set():
