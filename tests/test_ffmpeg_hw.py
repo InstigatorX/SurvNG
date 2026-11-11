@@ -41,7 +41,8 @@ class FfmpegHardwareTest(unittest.TestCase):
 
         self.assertIn("vaapi", vaapi_input)
         self.assertEqual(vaapi_filter, ["-vf", "hwdownload,format=nv12"])
-        self.assertIn("qsv", qsv_input)
+        self.assertEqual(qsv_input, vaapi_input)
+        self.assertNotIn("qsv", qsv_input)
         self.assertEqual(qsv_filter, ["-vf", "hwdownload,format=nv12"])
         self.assertEqual(recorded_frame_hw_args("auto"), ([], []))
         self.assertEqual(recorded_frame_hw_args("off"), ([], []))

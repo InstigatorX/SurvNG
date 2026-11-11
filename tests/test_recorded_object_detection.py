@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -16,6 +17,7 @@ import cv2
 import numpy as np
 
 from survng.app.config import CameraConfig
+from survng.app.ffmpeg_hw import ffmpeg_hwaccels, render_device_available
 from survng.app.motion_pipeline.decision_handler import MotionDecisionHandler
 from survng.app.motion_pipeline.object_detection import (
     _EventRecordedSampler,
@@ -901,6 +903,52 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             for offset in offsets:
                 self.assertEqual(with_seek[offset].actual_offset, without_seek[offset].actual_offset)
                 self.assertTrue(np.array_equal(with_seek[offset].frame, without_seek[offset].frame))
+
+    @unittest.skipUnless(
+        shutil.which("ffmpeg") and render_device_available() and "vaapi" in ffmpeg_hwaccels("ffmpeg"),
+        "hardware decode is required for seek content regression",
+    )
+    def test_hardware_seeked_reads_return_the_image_at_the_reported_offset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "bframes.mp4"
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30000/1001",
+                "-t", "10", "-c:v", "libx264", "-g", "23", "-bf", "2",
+                "-pix_fmt", "yuv420p", str(path),
+            ], check=True, capture_output=True, timeout=30)
+            decoded = subprocess.run(
+                ["ffmpeg", "-v", "info", "-i", str(path), "-vf", "showinfo",
+                 "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"],
+                check=True, capture_output=True, timeout=30,
+            )
+            times = [float(value) for value in re.findall(rb"pts_time:([0-9.]+)", decoded.stderr)]
+            reference = np.frombuffer(decoded.stdout, dtype=np.uint8).reshape(-1, 240, 320, 3)
+
+            def content_time(image):
+                distances = [np.abs(frame.astype(int) - image.astype(int)).mean() for frame in reference]
+                return times[int(np.argmin(distances))]
+
+            for mode in ("qsv", "vaapi"):
+                with self.subTest(mode=mode):
+                    backend = RecordedMotionObjectDetector(
+                        CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+                        SimpleNamespace(config=SimpleNamespace()),
+                        SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration=mode),
+                        lambda: None,
+                    )
+                    real_popen = subprocess.Popen
+                    with patch(
+                        "survng.app.motion_pipeline.object_detection.subprocess.Popen",
+                        side_effect=real_popen,
+                    ) as popen:
+                        frames, _count = backend._read_recorded_frames(path, [2.0, 7.0])
+                    if popen.call_count != 1:
+                        self.skipTest("hardware decode fell back to software")
+                    for offset, item in frames.items():
+                        self.assertEqual(content_time(item.frame), item.actual_offset)
+                    single = backend._read_recorded_frame(path, 2.0)
+                    self.assertEqual(content_time(single), frames[2.0].actual_offset)
 
     def test_nonselected_recorded_frames_are_released(self) -> None:
         samples = [

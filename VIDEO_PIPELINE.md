@@ -409,7 +409,9 @@ For each available target:
 2. Decode one frame with FFmpeg, using configured hardware decoding when
    available and CPU fallback otherwise. Samples that share a segment decode
    in one process: it seeks to the whole second before the first sample, and
-   hardware surfaces are downloaded only after frame selection.
+   hardware surfaces are downloaded only after frame selection. Explicit `qsv`
+   decodes these seeked reads through VAAPI, because the QSV decoder returns an
+   earlier image under the requested timestamp after a seek on B-frame streams.
 3. Nudge the requested offset when damaged timestamps or keyframe placement
    prevent an exact read.
 4. Run the configured OpenVINO/Core ML detector.
