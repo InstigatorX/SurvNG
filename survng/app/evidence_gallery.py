@@ -14,9 +14,17 @@ from dataclasses import dataclass
 
 from .image_storage import DurableImageWriter, EncodedImage
 
-MAX_GALLERY_IMAGES = 2
+# Retained images per incident, from every source combined.
+MAX_GALLERY_IMAGES = 4
+# Recorded detection keeps at most this many per incident, and per pass, which
+# bounds its encode time and pending memory. The remaining slots are reserved
+# for object tracking: it runs later and sees the whole incident, so earlier
+# detection passes must not be able to fill the gallery first.
+MAX_DETECTION_IMAGES = 2
+TRACKING_SOURCE = "object_tracking"
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_IMAGE_PIXELS = 16_000_000
+GALLERY_JPEG_QUALITY = 85
 # At most 16 MiB of completed optional images can await persistence process-wide.
 _PENDING_BATCHES = threading.BoundedSemaphore(2)
 
@@ -90,8 +98,22 @@ def _distinct(candidate, previous):
     return True
 
 
+def gallery_image(frame, metadata):
+    """Encode one retained frame, or ``None`` when it cannot be kept."""
+    if frame is None or frame.shape[0] * frame.shape[1] > MAX_IMAGE_PIXELS:
+        return None
+    # A fixed, economical JPEG quality regardless of the snapshot format.
+    data = DurableImageWriter._encode('jpeg', frame, GALLERY_JPEG_QUALITY)
+    if not data or len(data) > MAX_IMAGE_BYTES:
+        return None
+    key = hashlib.sha256(
+        f'{metadata["camera_id"]}|{metadata["recording_path"]}|{metadata["captured_epoch"]:.6f}'.encode()
+    ).hexdigest()
+    return GalleryImage(key, metadata['captured_epoch'], EncodedImage(data), metadata)
+
+
 def encode_gallery(samples, selected, observations, *, camera_id, event_epoch, request, timing):
-    limit = min(MAX_GALLERY_IMAGES, max(0, int((request or {}).get('remaining', 0))))
+    limit = min(MAX_DETECTION_IMAGES, max(0, int((request or {}).get('remaining', 0))))
     if not limit:
         return None
     if not _PENDING_BATCHES.acquire(blocking=False):
@@ -132,13 +154,12 @@ def encode_gallery(samples, selected, observations, *, camera_id, event_epoch, r
                 break
             if not _distinct(metadata, previous):
                 continue
-            # Encode just the winners at a fixed, economical JPEG quality.
-            data = DurableImageWriter._encode('jpeg', sample.frame, 85)
-            if not data or len(data) > MAX_IMAGE_BYTES:
+            # Encode just the winners.
+            image = gallery_image(sample.frame, metadata)
+            if image is None:
                 timing['gallery_encode_skips'] = timing.get('gallery_encode_skips', 0) + 1
                 continue
-            key = hashlib.sha256(f'{camera_id}|{sample.recording_path}|{metadata["captured_epoch"]:.6f}'.encode()).hexdigest()
-            batch.images.append(GalleryImage(key, metadata['captured_epoch'], EncodedImage(data), metadata))
+            batch.images.append(image)
             previous.append(metadata)
         timing['gallery_encoded_images'] = len(batch.images)
         timing['gallery_encoded_bytes'] = sum(len(item.image.data) for item in batch.images)

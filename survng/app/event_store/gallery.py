@@ -7,7 +7,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from ..evidence_gallery import MAX_GALLERY_IMAGES, MAX_IMAGE_BYTES
+from ..evidence_gallery import MAX_DETECTION_IMAGES, MAX_GALLERY_IMAGES, MAX_IMAGE_BYTES, TRACKING_SOURCE
 
 
 class EventStoreGalleryMixin:
@@ -42,17 +42,26 @@ class EventStoreGalleryMixin:
             'join scene_episodes p on p.id=m.episode_id where p.incident_id=? '
             'order by g.captured_epoch,g.id', (incident_id,)).fetchall()
 
-    def scene_evidence_capacity(self, event_id=None):
+    @staticmethod
+    def _gallery_remaining(payloads, source):
+        """Free slots for one source. Detection may not use tracking's share."""
+        remaining = MAX_GALLERY_IMAGES - len(payloads)
+        if source != TRACKING_SOURCE:
+            detection = sum(payload.get('source') != TRACKING_SOURCE for payload in payloads)
+            remaining = min(remaining, MAX_DETECTION_IMAGES - detection)
+        return max(0, remaining)
+
+    def scene_evidence_capacity(self, event_id=None, *, source='detection'):
         if event_id is None:
-            return {'remaining':MAX_GALLERY_IMAGES, 'frames':[]}
+            return {'remaining':self._gallery_remaining([], source), 'frames':[]}
         with self._connect() as conn:
             incident = self._gallery_incident(conn, event_id)
             if not incident:
                 return {'remaining':0, 'frames':[]}
             rows = self._gallery_rows(conn, incident)
-            retained = [r for r in rows if r['state'] != 'pending' or r['lease_until'] > time.time()]
-            return {'remaining':max(0, MAX_GALLERY_IMAGES-len(retained)),
-                    'frames':[json.loads(r['payload_json']) for r in retained]}
+            retained = [json.loads(r['payload_json']) for r in rows
+                        if r['state'] != 'pending' or r['lease_until'] > time.time()]
+            return {'remaining':self._gallery_remaining(retained, source), 'frames':retained}
 
     def retain_scene_evidence_images(self, event_id, images, snapshot_writer):
         """Reserve a durable slot before I/O; finish only our own reservation.
@@ -75,7 +84,8 @@ class EventStoreGalleryMixin:
                     if row['state'] == 'pending' and row['lease_until'] <= now:
                         conn.execute('delete from scene_evidence_images where id=?', (row['id'],))
                 rows = [r for r in rows if r['state'] != 'pending' or r['lease_until'] > now]
-                if len(rows) >= MAX_GALLERY_IMAGES:
+                if not self._gallery_remaining([json.loads(r['payload_json']) for r in rows],
+                                               image.metadata.get('source')):
                     break
                 if any(r['frame_key'] == image.key for r in rows):
                     continue
