@@ -598,6 +598,15 @@ Snapshots are intentionally saved without burned-in boxes. The browser draws
 annotations from persisted object coordinates, preserving a clean image for
 export, zooming, and future reprocessing.
 
+An event's `created_at` is its trigger time. Its cover frame is chosen from
+samples around the trigger, so it can be captured seconds earlier or later.
+Event payloads therefore also report `snapshot_captured_at`, the cover
+frame's own time, and the UI labels and orders cover images by it. The value
+comes from the objects drawn on the cover, or, for a cover with no object,
+from the snapshot file name, which every writer stamps with the capture time.
+It is omitted when neither is available, and clients fall back to
+`created_at`.
+
 Incident grouping is a presentation/aggregation layer over events from the
 same camera and nearby time range. Object and zone eligibility determine which
 detections are promoted through incident, MQTT, and Home Assistant object

@@ -20,6 +20,8 @@
 - Incident cover images now show the subject that established the incident.
   A subject sampled too few times to confirm no longer loses the cover to a
   sharper empty frame, and cover choice weighs subject sharpness with size.
+- Incident evidence thumbnails now show when each cover frame was captured,
+  not when its event was triggered, and are ordered by that time.
 - Added browser sign-in, local users and API tokens, TLS certificate management,
   and trusted reverse-proxy configuration.
 - Added privacy-safe support bundle downloads for remote troubleshooting.

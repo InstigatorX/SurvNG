@@ -313,3 +313,30 @@ assert.notEqual(galleryFrames[0].event.evidence_image_id, galleryFrames[1].event
 assert.equal(galleryFrames[0].event.objects[0].confidence, .52);
 assert.deepEqual(incidentGalleryFrames({}), []);
 assert.equal(incidentGalleryFrames({ ...galleryIncident, evidence_images: [...galleryIncident.evidence_images, galleryIncident.evidence_images[0]] }).length, 2);
+
+// A cover frame is captured seconds away from the trigger. The strip must
+// order and label it by its capture time, not by created_at.
+import { eventCoverEpoch, eventCoverTime } from "../src/incidentNavigation.mjs";
+const lateCover = { id: 20, created_at: "2026-11-11T01:21:50Z", snapshot_captured_at: "2026-11-11T01:21:58.380Z" };
+assert.equal(eventCoverEpoch(lateCover), Date.parse("2026-11-11T01:21:58.380Z") / 1000);
+assert.equal(eventCoverTime(lateCover), "2026-11-11T01:21:58.380Z");
+assert.equal(eventCoverEpoch({ created_epoch: 77 }), 77, "trigger time remains the fallback");
+assert.equal(eventCoverEpoch({ created_epoch: 77, snapshot_captured_at: "bad" }), 77);
+assert.equal(eventCoverTime({ created_at: "2026-11-11T01:21:50Z" }), "2026-11-11T01:21:50Z");
+assert.equal(eventCoverTime({}, "fallback"), "fallback");
+const coverTimeline = incidentEvidenceTimeline({ id: "incident-cover", events: [
+  lateCover,
+  // Triggered later, but its cover was captured before the first event's.
+  { id: 21, created_at: "2026-11-11T01:21:57Z", snapshot_captured_at: "2026-11-11T01:21:56.500Z" },
+  { id: 22, created_at: "2026-11-11T01:21:59Z" },
+] });
+assert.deepEqual(coverTimeline.frames.map((frame) => frame.event.id), [21, 20, 22]);
+assert.equal(coverTimeline.frames[1].epoch, Date.parse("2026-11-11T01:21:58.380Z") / 1000);
+assert.equal(coverTimeline.frames[2].epoch, Date.parse("2026-11-11T01:21:59Z") / 1000);
+const coverFrames = incidentEvidenceFrames({
+  ...lateCover,
+  objects: [{ label: "car", confidence: 0.9, temporal_sample_offset_seconds: 4 }],
+});
+assert.equal(coverFrames.find((frame) => frame.key === "selected").epoch, Date.parse("2026-11-11T01:21:58.380Z") / 1000);
+assert.equal(coverFrames.find((frame) => frame.key === "trigger").epoch, Date.parse("2026-11-11T01:21:50Z") / 1000);
+console.log("incident cover time tests passed");
