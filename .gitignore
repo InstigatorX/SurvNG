@@ -21,6 +21,8 @@ build/
 
 # Runtime config and secrets
 config.json
+secrets.json
+secrets.key
 *.local.json
 .env
 .env.*
