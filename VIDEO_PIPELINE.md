@@ -446,9 +446,16 @@ On Linux, the children also set their kernel-visible process names to
 `survng-object` and `survng-face`, making GPU ownership identifiable in
 `intel_gpu_top`, `top`, `htop`, and `ps`.
 
-The frame with the strongest eligible object confidence is selected. If all
-sampled frames contain no eligible object, the frame nearest the event time is
-preferred. SurvNG retries briefly while newly written recording segments are
+The representative frame is the sample that best shows the active subject:
+one that contains it, in an incident zone, fully inside the frame, and with
+the most resolved detail. Detail combines subject size with the sharpness of
+the subject crop, so a blurred larger view does not beat a clear, slightly
+smaller one. When no object reaches its confirmation count, the best-supported
+zone-admitted detection still anchors the frame, so a subject that scene
+establishment accepts is never represented by an empty scene. That choice is
+presentation only and does not change which objects are incident-eligible.
+Only when no sampled frame holds a zone-admitted detection does overall image
+quality, then proximity to the event time, decide. SurvNG retries briefly while newly written recording segments are
 being finalized. If no recorded frame becomes readable, it fails over to the
 latest live frame and marks that source in event metadata.
 

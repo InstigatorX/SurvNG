@@ -1020,6 +1020,90 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                     single = backend._read_recorded_frame(recording, 2.0)
                     self.assertEqual(content_time(single), frames[2.0].actual_offset)
 
+    @staticmethod
+    def _textured_sample(
+        offset: float,
+        objects: list[dict],
+        *,
+        blur: int = 0,
+        seed: int = 0,
+    ) -> _RecordedDetectionSample:
+        frame = np.random.default_rng(seed).integers(40, 216, (216, 384, 3), dtype=np.uint8)
+        if blur:
+            frame = cv2.GaussianBlur(frame, (blur, blur), 0)
+        return _RecordedDetectionSample(
+            offset=offset,
+            frame=frame,
+            objects=objects,
+            recording_path=f"sample-{offset}.mp4",
+        )
+
+    def test_unconfirmed_zone_subject_outranks_sharper_empty_frames_for_cover(self) -> None:
+        # A subject that enters late is sampled only twice. With three required
+        # confirmations it stays unconfirmed, but scene establishment can still
+        # accept it, so the cover must not fall back to an empty frame.
+        empty = [
+            self._textured_sample(offset, [], seed=index)
+            for index, offset in enumerate((-1.0, -0.5, 0.0, 0.5, 1.0, 3.5, 4.0, 4.5))
+        ]
+        subject = [
+            self._textured_sample(8.0, [detected("car", 0.98, (113, 80, 241, 182))], blur=9, seed=20),
+            self._textured_sample(8.5, [detected("car", 0.98, (148, 68, 253, 148))], blur=9, seed=21),
+        ]
+
+        selected, objects = _temporal_consensus([*empty, *subject], minimum_confirmations=3)
+
+        self.assertIn(selected, subject)
+        # Presentation only: the subject is still not confirmed for admission.
+        cars = [item for item in objects if item.get("label") == "car"]
+        self.assertEqual(len(cars), 1)
+        self.assertFalse(cars[0]["temporal_consensus"])
+        self.assertFalse(cars[0]["incident_eligible"])
+        self.assertFalse(cars[0]["snapshot_primary_subject"])
+
+    def test_unconfirmed_cover_prefers_best_supported_zone_subject(self) -> None:
+        outside = {**detected("bicycle", 0.99, (10, 10, 200, 200)), "incident_eligible": False}
+        stray = detected("person", 0.95, (20, 20, 220, 210))
+        samples = [
+            self._textured_sample(0.0, [outside], seed=1),
+            self._textured_sample(2.0, [stray], seed=2),
+            self._textured_sample(8.0, [detected("car", 0.9, (260, 60, 330, 120))], blur=9, seed=3),
+            self._textured_sample(8.5, [detected("car", 0.9, (270, 60, 340, 120))], blur=9, seed=4),
+        ]
+
+        selected, _objects = _temporal_consensus(samples, minimum_confirmations=3)
+
+        # Larger boxes lose: one is outside the incident zone, the other was
+        # seen once while the small car has two admitted observations.
+        self.assertIn(selected.offset, (8.0, 8.5))
+
+    def test_cover_without_zone_admitted_candidates_still_uses_frame_quality(self) -> None:
+        outside = {**detected("car", 0.99, (10, 10, 200, 200)), "incident_eligible": False}
+        samples = [
+            self._textured_sample(0.0, [outside], blur=9, seed=1),
+            self._textured_sample(0.5, [], seed=2),
+        ]
+
+        selected, _objects = _temporal_consensus(samples, minimum_confirmations=2)
+
+        self.assertEqual(selected.offset, 0.5)
+
+    def test_cover_weighs_subject_sharpness_against_size(self) -> None:
+        large = (60, 40, 260, 180)
+        smaller = (150, 60, 310, 172)
+
+        def consensus(large_blur: int):
+            samples = [
+                self._textured_sample(0.0, [detected("car", 0.9, large)], blur=large_blur, seed=1),
+                self._textured_sample(0.5, [detected("car", 0.9, smaller)], seed=2),
+            ]
+            return _temporal_consensus(samples, minimum_confirmations=2)[0]
+
+        # Equally sharp views still order by subject size.
+        self.assertEqual(consensus(0).offset, 0.0)
+        # A heavily blurred larger view loses to the clear, slightly smaller one.
+        self.assertEqual(consensus(15).offset, 0.5)
+
     def test_nonselected_recorded_frames_are_released(self) -> None:
         samples = [
             sample(-0.5, [detected("car", 0.8, (2, 2, 12, 12))]),

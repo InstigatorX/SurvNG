@@ -17,6 +17,9 @@
 - Reduced detection contention by deferring tracking until recorded refinement
   completes, reserving detector capacity for tracking, and limiting simultaneous
   EMA analysis fairly across cameras.
+- Incident cover images now show the subject that established the incident.
+  A subject sampled too few times to confirm no longer loses the cover to a
+  sharper empty frame, and cover choice weighs subject sharpness with size.
 - Added browser sign-in, local users and API tokens, TLS certificate management,
   and trusted reverse-proxy configuration.
 - Added privacy-safe support bundle downloads for remote troubleshooting.

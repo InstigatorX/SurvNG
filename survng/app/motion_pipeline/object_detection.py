@@ -339,15 +339,15 @@ def _image_quality(frame: Frame) -> _ImageQuality:
     return image_quality(frame)
 
 
-def _sample_image_quality(
+def _track_image_qualities(
     sample: _RecordedDetectionSample,
     visible: list[_TemporalDetectionEvidence],
     sample_index: int,
-) -> _ImageQuality:
-    """Prefer object-crop quality so timestamps and static scenery cannot win."""
+) -> dict[int, _ImageQuality]:
+    """Crop quality of each visible track's box, keyed by ``id(track)``."""
+    qualities: dict[int, _ImageQuality] = {}
     if sample.frame is None:
-        return _ImageQuality(0.0, 0.0, 0.0, 0.0, 0.0)
-    regions: list[Frame] = []
+        return qualities
     height, width = sample.frame.shape[:2]
     for track in visible:
         detected = track.observations.get(sample_index)
@@ -360,8 +360,16 @@ def _sample_image_quality(
         right = max(left, min(width, int(math.ceil(x2))))
         bottom = max(top, min(height, int(math.ceil(y2))))
         if right - left >= 8 and bottom - top >= 8:
-            regions.append(sample.frame[top:bottom, left:right])
-    qualities = [_image_quality(region) for region in regions]
+            qualities[id(track)] = _image_quality(sample.frame[top:bottom, left:right])
+    return qualities
+
+
+def _combined_image_quality(
+    sample: _RecordedDetectionSample,
+    track_qualities: dict[int, _ImageQuality],
+) -> _ImageQuality:
+    """Prefer object-crop quality so timestamps and static scenery cannot win."""
+    qualities = list(track_qualities.values())
     if not qualities:
         return _image_quality(sample.frame)
     count = float(len(qualities))
@@ -552,6 +560,38 @@ def _normalized_box_metrics(
         max(0.0, min(0.5, clearance)),
         max(0.0, min(1.0, area)),
     )
+
+
+def _subject_view_score(area_ratio: float, quality_score: float) -> float:
+    """Rank a subject view by resolved detail rather than box size alone.
+
+    Linear subject size times crop quality: a blurred view must be much larger
+    than a sharp one to win, while equally sharp views still order by size.
+    """
+    return math.sqrt(max(0.0, area_ratio)) * max(0.0, min(1.0, quality_score))
+
+
+def _unconfirmed_cover_track_ids(
+    evidence: list[_TemporalDetectionEvidence],
+) -> set[int]:
+    """Tracks that may anchor the cover when no track met its confirmation count.
+
+    Scene establishment can accept a zone-admitted subject that was sampled too
+    few times to confirm. Presentation only: these ids never change admission.
+    The best-supported tracks win so one stray detection cannot outrank a
+    subject seen in several samples.
+    """
+    support = {
+        id(track): sum(
+            _eligible_detection(item) and _is_confirming_detection(item)
+            for item in track.winning_observations
+        )
+        for track in evidence
+    }
+    best = max(support.values(), default=0)
+    if best <= 0:
+        return set()
+    return {track_id for track_id, count in support.items() if count == best}
 
 
 def _representative_needs_refinement(objects: list[dict[str, Any]]) -> bool:
@@ -881,18 +921,26 @@ def _temporal_consensus(
     if not primary_ids:
         primary_ids = set(confirmed_ids)
 
+    # Without a confirmed track every object-based key below would tie and
+    # whole-frame quality would pick the cover, which can be an empty scene.
+    cover_ids = set(confirmed_ids)
+    cover_primary_ids = set(primary_ids)
+    if not cover_ids:
+        cover_ids = _unconfirmed_cover_track_ids(evidence)
+        cover_primary_ids = set(cover_ids)
+
     quality_by_sample: dict[int, _ImageQuality] = {}
 
     def sample_score(
         item: tuple[int, _RecordedDetectionSample],
-    ) -> tuple[int, int, float, float, int, int, float, float, float, float, float]:
+    ) -> tuple[int, int, int, float, float, float, int, float, float, float, float, float]:
         sample_index, sample = item
         if sample.frame is None:
             raise ValueError("recorded consensus samples must retain frames")
         visible = [
             track
             for track in evidence
-            if id(track) in confirmed_ids
+            if id(track) in cover_ids
             and sample_index in track.observations
             and str(track.observations[sample_index].get("label") or "").strip() == track.winning_label
         ]
@@ -900,7 +948,7 @@ def _temporal_consensus(
             track for track in visible
             if _eligible_detection(track.observations[sample_index])
         ]
-        primary_visible = [track for track in visible if id(track) in primary_ids]
+        primary_visible = [track for track in visible if id(track) in cover_primary_ids]
         primary_metrics = [
             _normalized_box_metrics(track.observations[sample_index], sample.frame)
             for track in primary_visible
@@ -913,12 +961,24 @@ def _temporal_consensus(
             (clearance for clearance, _area in primary_metrics),
             default=0.0,
         )
+        track_qualities = _track_image_qualities(sample, visible, sample_index)
+        quality = _combined_image_quality(sample, track_qualities)
+        quality_by_sample[sample_index] = quality
+        # A crop too small to measure borrows the sample's quality.
+        best_primary_view = max(
+            (
+                _subject_view_score(
+                    area,
+                    track_qualities.get(id(track), quality).score,
+                )
+                for track, (_clearance, area) in zip(primary_visible, primary_metrics)
+            ),
+            default=0.0,
+        )
         best_primary_area = max(
             (area for _clearance, area in primary_metrics),
             default=0.0,
         )
-        quality = _sample_image_quality(sample, visible, sample_index)
-        quality_by_sample[sample_index] = quality
         face_quality = max(
             (
                 float(track.observations[sample_index].get("face_quality_score") or 0.0)
@@ -932,6 +992,7 @@ def _temporal_consensus(
             int(bool(primary_visible)),
             len(admitted_visible),
             fully_framed_primary,
+            best_primary_view,
             best_primary_area,
             best_primary_clearance,
             len(visible),
