@@ -165,6 +165,41 @@ def test_system_report_requires_all_cameras_for_global_recommendation() -> None:
     )
 
 
+def test_detection_off_camera_is_excluded_from_site_agreement() -> None:
+    config = AppConfig(cameras=[
+        CameraConfig(id="gate", name="Gate", stream_url="rtsp://192.0.2.2/a"),
+        CameraConfig(id="yard", name="Yard", stream_url="rtsp://192.0.2.3/a"),
+    ])
+    common = {
+        "setting": "visual_backup_min_score",
+        "value": 0.75,
+        "support_count": 3,
+        "reasons": ["Repeated empty rescue attempts."],
+    }
+
+    reviewed = build_calibration_report(
+        config,
+        {"gate": {"analyzed": 12, "recommendations": [common]}},
+        mode="system_weekly",
+        eligible_camera_ids=["gate"],
+    )
+    withheld = build_calibration_report(
+        config,
+        {"gate": {"analyzed": 12, "recommendations": [common]}},
+        mode="system_weekly",
+        eligible_camera_ids=["gate", "yard"],
+    )
+
+    site_wide = [
+        item for item in reviewed["recommendations"]
+        if item["scope"] == "global" and item["proposed"] == 0.75
+    ]
+    assert site_wide
+    assert set(site_wide[0]["affected_cameras"]) == {"gate", "yard"}
+    assert reviewed["excluded_cameras"] == [{"camera_id": "yard", "camera_name": "Yard"}]
+    assert not any(item["scope"] == "global" for item in withheld["recommendations"])
+
+
 def test_global_recommendation_preserves_needed_explicit_override_change() -> None:
     config = AppConfig(cameras=[
         CameraConfig(id="gate", name="Gate", stream_url="rtsp://192.0.2.2/a"),

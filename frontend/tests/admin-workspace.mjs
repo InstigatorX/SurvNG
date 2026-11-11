@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, adminHomeDestinations, adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, preferredStoredValue, readAdminSubsection, readAdminWorkspace, telemetryLocationOptions } from "../src/adminWorkspace.mjs";
+import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, adminHomeDestinations, adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, preferredStoredValue, readAdminSubsection, readAdminWorkspace, resolveAdminWorkspace, telemetryLocationOptions } from "../src/adminWorkspace.mjs";
 
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS.map((group) => group.label), ["Configure", "Observe", "Act"]);
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS[0].items.slice(0, 5).map((item) => item.label), ["Cameras", "Detection", "Storage", "Integrations", "Access"]);
@@ -23,6 +23,8 @@ assert.equal(adminDestination("logs").id, "logs");
 assert.equal(adminWorkspaceId("telemetry"), "telemetry");
 assert.equal(adminWorkspaceId("invalid"), "general");
 assert.equal(readAdminWorkspace("?section=audit&audit_id=12", "logs"), "audit");
+assert.equal(resolveAdminWorkspace("?section=general&subsection=motion-review", "general"), "calibration");
+assert.equal(resolveAdminWorkspace("?section=audit", "general"), "audit");
 assert.equal(readAdminWorkspace("", "logs"), "logs");
 assert.equal(adminWorkspaceSearch("general", "?audit_id=12"), "");
 assert.equal(adminWorkspaceSearch("general", "", { subsection: "storage" }), "?section=general&subsection=storage");

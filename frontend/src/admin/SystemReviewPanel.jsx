@@ -6,15 +6,6 @@ import { fetch } from "../shared/api.js";
 
 const SECTIONS = ["briefing", "monitoring", "history"];
 
-const AUTOMATIC_CLASS_CATALOG = [
-  { id: "motion_sensitivity", label: "Motion sensitivity", detail: "How readily motion qualifies, including stationary-object tolerance." },
-  { id: "motion_analysis", label: "Motion analysis", detail: "Frame size, sample rate, and the timing windows around a trigger." },
-  { id: "visual_backup", label: "Visual backup", detail: "Rescue score, persistence, warmup, cooldown, and how often a rescue may fire." },
-  { id: "borderline_rescue", label: "Borderline rescue", detail: "Whether near-threshold motion is checked again, and how close it must be." },
-  { id: "tracking", label: "Tracking", detail: "Sample rate, how long a track is kept, how many cameras can track at once, and re-identification." },
-  { id: "restore_inherit", label: "Restore inheritance", detail: "Put a camera back on the system value when that does not change what is in effect." },
-];
-
 function classAllowed(classId, allowed) {
   const selected = new Set(allowed || []);
   if (selected.has(classId)) return true;
@@ -29,7 +20,9 @@ async function readPayload(response) {
       ? detail
       : Array.isArray(detail)
         ? detail.map((item) => item?.msg || item).filter(Boolean).join("; ")
-        : "";
+        : typeof detail?.message === "string"
+          ? detail.message
+          : "";
     throw new Error(message || `System review could not be updated (${response.status})`);
   }
   return payload;
@@ -37,6 +30,14 @@ async function readPayload(response) {
 
 function visibleNotes(notes) {
   return (notes || []).filter((note) => note?.kind !== "grace" && !String(note?.text || "").includes("45-second"));
+}
+
+function reviewAdvisories(result) {
+  const advisories = result?.advisories || {};
+  const lines = [];
+  if (advisories.object_safety && !String(advisories.object_safety).startsWith("No broad")) lines.push(advisories.object_safety);
+  if (advisories.manual_review && !String(advisories.manual_review).startsWith("No pipeline")) lines.push(advisories.manual_review);
+  return lines;
 }
 
 const FINDING_VERDICTS = {
@@ -113,9 +114,11 @@ export function SystemReviewPanel({ cameras = [], timeZone, onCommandBarChange =
   const result = briefing?.result || {};
   const suggestions = (result.recommendations || []).filter((item) => !item.dismissed);
   const findings = reviewFindings(result);
+  const advisories = reviewAdvisories(result);
+  const catalog = review?.automatic_class_catalog || [];
   const running = ["queued", "running", "cancelling"].includes(briefing?.status);
   const progress = running ? reviewProgress(briefing, cameras) : null;
-  const monitors = (review?.change_sets || []).filter((item) => item.action === "apply" && ["collecting", "reviewing", "evaluated", "evaluation_failed"].includes(item.status));
+  const monitors = (review?.change_sets || []).filter((item) => item.action === "apply" && ["collecting", "reviewing", "evaluated", "evaluation_failed", "rolled_back", "partially_rolled_back"].includes(item.status));
 
   useEffect(() => {
     let cancelled = false;
@@ -208,6 +211,24 @@ export function SystemReviewPanel({ cameras = [], timeZone, onCommandBarChange =
     }
   }
 
+  async function rollbackChangeSet(item) {
+    if (!window.confirm(`Restore the ${item.changes?.length || 0} settings this change set applied?`)) return;
+    setBusy(true);
+    try {
+      await readPayload(await fetch(`/api/calibration/change-sets/${item.id}/rollback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmed: true }),
+      }));
+      await load();
+      setError("");
+    } catch (rollbackError) {
+      setError(rollbackError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function toggleAutomatic(classId, enabled) {
     const current = new Set(review?.automatic_classes || []);
     if (classId === "visual_backup") current.delete("visual_backup_cooldown");
@@ -275,6 +296,7 @@ export function SystemReviewPanel({ cameras = [], timeZone, onCommandBarChange =
                 <span>{nextLabel(review, timeZone)}</span>
               </div>
               {visibleNotes(result.site_notes).length ? <div className="telemetry-health-event-list">{visibleNotes(result.site_notes).map((note) => <div key={note.text}><span>{note.text}</span></div>)}</div> : null}
+              {advisories.length ? <div className="telemetry-health-event-list">{advisories.map((text) => <div key={text}><span>{text}</span></div>)}</div> : null}
             </section>
             {findings.length ? <section className="telemetry-section">
               <div className="telemetry-section-head"><div><h3>What the samples showed</h3><p>These are the samples that were not a clean match. A suggestion appears only when the same setting change is repeated.</p></div></div>
@@ -288,7 +310,7 @@ export function SystemReviewPanel({ cameras = [], timeZone, onCommandBarChange =
               ))}</div>
             </section> : null}
             <section className="telemetry-section">
-              <div className="telemetry-section-head"><div><h3>Suggestions</h3><p>Nothing is written until you apply it. Allowed classes apply on the weekly run and roll back if the monitored outcome is worse.</p></div></div>
+              <div className="telemetry-section-head"><div><h3>Suggestions</h3><p>Nothing is written until you apply it. Classes you allow are applied on the weekly run. If monitoring shows they made results worse, SurvNG restores the previous values and turns that class off. A suggestion you apply yourself stays until you roll it back from Monitoring.</p></div></div>
               {review && !review.apply_enabled ? <p className="telemetry-diagnostic-empty">Applying stays off until AI recommendation changes are allowed in Server settings.</p> : null}
               {suggestions.length ? <div className="system-review-list">{suggestions.map((item) => {
                 const camera = cameras.find((entry) => entry.id === item.camera_id);
@@ -313,9 +335,9 @@ export function SystemReviewPanel({ cameras = [], timeZone, onCommandBarChange =
               })}</div> : <p className="telemetry-diagnostic-empty">{findings.length ? "No setting was repeated often enough to suggest a change." : "No suggestions in this briefing."}</p>}
             </section>
             <section className="telemetry-section">
-              <div className="telemetry-section-head"><div><h3>Automatic classes</h3><p>The review can tune motion and tracking across the site. Turn a class on to apply it during the weekly run. Confidence, zone requirements, and anything that changes what can open an incident stay manual.</p></div></div>
+              <div className="telemetry-section-head"><div><h3>Automatic classes</h3><p>The review can tune motion across the site. Turn a class on to apply it during the weekly run. Tracking, confidence, zone requirements, and anything that changes what can open an incident stay manual.</p></div></div>
               <div className="system-review-toggles">
-                {AUTOMATIC_CLASS_CATALOG.map((item) => (
+                {catalog.map((item) => (
                   <label className="compact-toggle system-review-class" key={item.id}>
                     <input type="checkbox" checked={classAllowed(item.id, review?.automatic_classes)} disabled={busy} onChange={(event) => toggleAutomatic(item.id, event.target.checked)} />
                     <span><strong>{item.label}</strong><small>{item.detail}</small></span>
@@ -329,14 +351,17 @@ export function SystemReviewPanel({ cameras = [], timeZone, onCommandBarChange =
           <section className="telemetry-section">
             <div className="telemetry-section-head"><div><h3>After a change</h3><p>Applied suggestions stay in the existing monitoring window.</p></div></div>
             {monitors.length ? <div className="telemetry-diagnostic-list">{monitors.map((item) => {
-              const [outcome, tone] = tuneupOutcome(item);
+              const rolledBack = item.status === "rolled_back" || item.evaluation?.rolled_back;
+              const [outcome, tone] = rolledBack ? ["Rolled back", "neutral"] : tuneupOutcome(item);
+              const canRollback = item.action === "apply" && !rolledBack && item.status !== "reviewing" && item.status !== "rolled_back";
               return (
                 <article className="telemetry-diagnostic-card" key={item.id}>
                   <div>
                     <strong>{item.status === "collecting" ? "Monitoring changes" : outcome}</strong>
-                    <span>{formatDateTime(item.created_at, timeZone)} · {item.evaluation?.summary || `${item.changes?.length || 0} changes`}</span>
+                    <span>{formatDateTime(item.created_at, timeZone)} · {item.evaluation?.summary || `${item.changes?.length || 0} changes`}{item.evaluation?.rollback_error ? ` · Rollback needs attention: ${item.evaluation.rollback_error}` : ""}</span>
                   </div>
                   <em className={tone}>{String(item.status).replaceAll("_", " ")}</em>
+                  {canRollback ? <button type="button" disabled={busy} onClick={() => void rollbackChangeSet(item)}>Roll back</button> : null}
                 </article>
               );
             })}</div> : <p className="telemetry-diagnostic-empty">No changes from these reviews are being monitored.</p>}

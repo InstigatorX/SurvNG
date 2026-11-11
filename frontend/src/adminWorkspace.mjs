@@ -123,7 +123,6 @@ export const GENERAL_SECTION_LABELS = Object.freeze({
   mqtt: "Integrations",
   access: "Access",
   detection: "Object Detection",
-  "motion-review": "System review",
 });
 
 export function nextTabId(ids, selected, key) {
@@ -144,6 +143,12 @@ export function adminWorkspaceId(value, fallback = "general") {
 export function readAdminWorkspace(search = "", stored = "general") {
   const params = new URLSearchParams(String(search || "").replace(/^\?/, ""));
   return adminWorkspaceId(params.get("section"), adminWorkspaceId(stored));
+}
+
+export function resolveAdminWorkspace(search = "", stored = "general") {
+  const params = new URLSearchParams(String(search || "").replace(/^\?/, ""));
+  if (params.get("subsection") === "motion-review") return "calibration";
+  return readAdminWorkspace(search, stored);
 }
 
 export function adminWorkspaceSearch(section, currentSearch = "", { subsection = "", camera = "" } = {}) {

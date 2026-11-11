@@ -56,7 +56,7 @@ import { logPayloadSignature } from "../pollingPolicy.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { motionAuditRegions } from "../motionAudit.mjs";
 import { clampZoneView, insertZonePointWithIndex, zoomZoneView } from "../zoneGeometry.mjs";
-import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminHomeDestinations, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, readAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
+import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminHomeDestinations, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, resolveAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
 import { appUrl, mediaUrl, fetch } from "../shared/api.js";
 import { MEDIA_STORAGE_ROLES, CAMERA_ADMIN_SECTIONS, TELEMETRY_ADMIN_SECTIONS, HEALTH_TELEMETRY_SECTIONS, GENERAL_ADMIN_SECTIONS, US_TIME_ZONES, THEMES } from "../shared/constants.js";
 import { CameraScopePicker } from "../shared/CameraScopePicker.jsx";
@@ -797,7 +797,7 @@ export function CalibrationLab(props) {
 export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContextChange }) {
   const initialAdminSearch = useMemo(() => window.location.search, []);
   const initialAdminParams = useMemo(() => new URLSearchParams(initialAdminSearch), [initialAdminSearch]);
-  const initialAdminWorkspace = useMemo(() => readAdminWorkspace(
+  const initialAdminWorkspace = useMemo(() => resolveAdminWorkspace(
     initialAdminSearch,
     readStoredValue(browserStorage(window), "survng.configTab", "general"),
   ), [initialAdminSearch]);
@@ -878,14 +878,19 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
 
   function adminLocationOptions(section = settingsTab) {
     if (section === "general") return {
-      subsection: generalSection === "general" ? "" : generalSection,
-      camera: generalSection === "motion-review" ? selectedId : "",
+      subsection: generalSection === "general" || generalSection === "motion-review" ? "" : generalSection,
     };
     if (section === "cameras") return { subsection: cameraSection === "settings" ? "" : cameraSection, camera: selectedId };
     if (section === "telemetry") return telemetryLocationOptions(telemetrySection, telemetryCamera);
     if (section === "audit") return { camera: auditCamera };
     return {};
   }
+
+  useEffect(() => {
+    if (generalSection !== "motion-review") return;
+    setGeneralSection("general");
+    if (settingsTab === "general") setSettingsTab("calibration");
+  }, [generalSection, settingsTab, setGeneralSection, setSettingsTab]);
 
   useEffect(() => {
     onAssistantContextChange?.({
@@ -923,7 +928,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
         if (adminDirtyRef.current) discardAdminChanges();
       }
       adminHistoryWriteRef.current = false;
-      const nextSection = readAdminWorkspace(window.location.search, settingsTab);
+      const nextSection = resolveAdminWorkspace(window.location.search, settingsTab);
       setSettingsTab(nextSection);
       if (nextSection === "general") setGeneralSection(readAdminSubsection(window.location.search, GENERAL_ADMIN_SECTIONS, generalSection));
       if (nextSection === "cameras") {
@@ -996,9 +1001,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       nextWorkspace === "general"
         ? nextSubsection === "detection"
           ? false
-          : nextSubsection === "motion-review"
-            ? generalSection === "motion-review" && selectedId === (cameras[0]?.id || "")
-            : (nextSubsection || "general") === generalSection
+        : (nextSubsection || "general") === generalSection
         : nextWorkspace === "cameras"
           ? cameraSection === "settings" && selectedId === (cameras[0]?.id || "")
         : nextWorkspace === "telemetry"
@@ -1022,7 +1025,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     if (nextWorkspace === "general") {
       setGeneralSection(nextSubsection || "general");
       if (nextSubsection === "detection") setGeneralViewNonce((current) => current + 1);
-      if (nextSubsection === "motion-review") setSelectedId(cameras[0]?.id || "");
     }
     if (nextWorkspace === "cameras") {
       setCameraSection("settings");
@@ -1048,7 +1050,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     const options = nextWorkspace === "general"
       ? {
         subsection: nextSubsection === "general" ? "" : nextSubsection,
-        camera: nextSubsection === "motion-review" ? cameras[0]?.id || "" : "",
       }
       : nextWorkspace === "cameras"
         ? { camera: cameras[0]?.id || "" }
@@ -1942,11 +1943,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       };
     }
     if (settingsTab === "general") {
-      if (generalSection === "motion-review") {
-        return {
-          scope: <AdminCommandLabel icon={Sparkles}>System review</AdminCommandLabel>,
-        };
-      }
       return {
         scope: <AdminCommandLabel icon={generalDestinationIcon}>{GENERAL_SECTION_LABELS[generalSection] || "Server"}</AdminCommandLabel>,
       };
@@ -4573,9 +4569,6 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
         </div>
       ) : null}
 
-      {section === "motion-review" ? (
-        <SystemReviewPanel cameras={config.cameras || []} timeZone={timeZone} />
-      ) : null}
     </div>
   );
 }

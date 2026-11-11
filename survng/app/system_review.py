@@ -11,67 +11,64 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
+# One registry: a weekly pass may propose these settings, and only at this scope.
+# Classes and the admin catalog are derived from it.
+_CAMERA_OR_GLOBAL = frozenset({"camera", "global"})
+AUTOMATIC_SETTING_SPECS: dict[str, dict[str, Any]] = {
+    "motion.sensitivity": {"class_id": "motion_sensitivity", "scopes": _CAMERA_OR_GLOBAL},
+    "motion.stationary_object_tolerance": {"class_id": "motion_sensitivity", "scopes": _CAMERA_OR_GLOBAL},
+    "motion.frame_width": {"class_id": "motion_analysis", "scopes": _CAMERA_OR_GLOBAL},
+    "motion.visual_backup_grace_seconds": {"class_id": "visual_backup", "scopes": _CAMERA_OR_GLOBAL},
+    "motion.visual_backup_min_score": {"class_id": "visual_backup", "scopes": _CAMERA_OR_GLOBAL},
+    "motion.visual_backup_min_consecutive": {"class_id": "visual_backup", "scopes": _CAMERA_OR_GLOBAL},
+    "motion.visual_backup_cooldown_seconds": {"class_id": "visual_backup", "scopes": _CAMERA_OR_GLOBAL},
+    "motion.visual_backup_max_triggers_5m": {"class_id": "visual_backup", "scopes": _CAMERA_OR_GLOBAL},
+    "motion.borderline_rescue_enabled": {"class_id": "borderline_rescue", "scopes": _CAMERA_OR_GLOBAL},
+    "motion.borderline_margin": {"class_id": "borderline_rescue", "scopes": _CAMERA_OR_GLOBAL},
+    "detector.tracking.sample_fps": {"class_id": "tracking", "scopes": frozenset({"global"})},
+}
+_CLASS_COPY: dict[str, tuple[str, str]] = {
+    "motion_sensitivity": (
+        "Motion sensitivity",
+        "How readily motion qualifies, including stationary-object tolerance.",
+    ),
+    "motion_analysis": (
+        "Motion analysis",
+        "Frame size used for visual motion analysis.",
+    ),
+    "visual_backup": (
+        "Visual backup",
+        "Rescue score, persistence, cooldown, and how often a rescue may fire.",
+    ),
+    "borderline_rescue": (
+        "Borderline rescue",
+        "Whether near-threshold motion is checked again, and how close it must be.",
+    ),
+    "restore_inherit": (
+        "Restore inheritance",
+        "Put a camera back on the system value when that does not change what is in effect.",
+    ),
+}
+# Applying these reloads the camera manager, which refuses while any AI work,
+# including the weekly review itself, is registered. They stay suggestions.
+SUGGESTION_ONLY_CLASSES = frozenset({"tracking"})
+_CLASS_SETTINGS: dict[str, set[str]] = {class_id: set() for class_id in _CLASS_COPY}
+for _setting, _spec in AUTOMATIC_SETTING_SPECS.items():
+    if _spec["class_id"] in _CLASS_SETTINGS:
+        _CLASS_SETTINGS[_spec["class_id"]].add(_setting)
 AUTOMATIC_CLASSES: dict[str, dict[str, Any]] = {
-    "motion_sensitivity": {
-        "label": "Motion sensitivity",
-        "detail": "How readily motion qualifies, including stationary-object tolerance.",
-        "settings": {
-            "motion.sensitivity",
-            "motion.stationary_object_tolerance",
-        },
-    },
-    "motion_analysis": {
-        "label": "Motion analysis",
-        "detail": "Frame size, sample rate, and the timing windows around a trigger.",
-        "settings": {
-            "motion.frame_width",
-            "motion.sample_fps",
-            "motion.window_seconds",
-            "motion.post_trigger_seconds",
-            "motion.burst_quiet_seconds",
-        },
-    },
-    "visual_backup": {
-        "label": "Visual backup",
-        "detail": "Rescue score, persistence, warmup, cooldown, and how often a rescue may fire.",
-        "settings": {
-            "motion.visual_backup_warmup_seconds",
-            "motion.visual_backup_grace_seconds",
-            "motion.visual_backup_min_score",
-            "motion.visual_backup_score_margin",
-            "motion.visual_backup_min_consecutive",
-            "motion.visual_backup_cooldown_seconds",
-            "motion.visual_backup_max_triggers_5m",
-        },
-    },
-    "borderline_rescue": {
-        "label": "Borderline rescue",
-        "detail": "Whether near-threshold motion is checked again, and how close it must be.",
-        "settings": {
-            "motion.borderline_rescue_enabled",
-            "motion.borderline_margin",
-        },
-    },
-    "tracking": {
-        "label": "Tracking",
-        "detail": "Sample rate, how long a track is kept, how many cameras can track at once, and re-identification.",
-        "settings": {
-            "detector.tracking.sample_fps",
-            "detector.tracking.lost_timeout_seconds",
-            "detector.tracking.capacity_wait_seconds",
-            "detector.tracking.reid_match_threshold",
-            "detector.tracking.vehicle_reid_match_threshold",
-            "detector.tracking.max_active_cameras",
-        },
-    },
-    "restore_inherit": {
-        "label": "Restore inheritance",
-        "detail": "Put a camera back on the system value when that does not change what is in effect.",
-        "settings": set(),
-    },
+    class_id: {
+        "label": label,
+        "detail": detail,
+        "settings": set(_CLASS_SETTINGS[class_id]),
+    }
+    for class_id, (label, detail) in _CLASS_COPY.items()
 }
 AUTOMATIC_CLASS_IDS = frozenset(AUTOMATIC_CLASSES)
 AUTOMATIC_CLASS_ALIASES = {"visual_backup_cooldown": "visual_backup"}
+# A single in-flight frame is ordinary. Backlog starts at the next queued item.
+QUEUE_BACKLOG_DEPTH = 2
+_POLICY_REASONS = ("ignored_zone", "depth_ignore_zone", "ineligible_zone", "below_confidence")
 
 NEVER_AUTOMATIC_SETTINGS = frozenset({
     "detector.confidence_threshold",
@@ -90,22 +87,32 @@ _LOAD_INCREASE_SETTINGS = frozenset({
 
 
 def suggestion_class(recommendation: dict[str, Any]) -> str | None:
-    """Return the automatic class for a recommendation, when one exists."""
+    """Return the automatic class for a recommendation the weekly pass can apply."""
     setting = str(recommendation.get("setting") or "")
     if not setting or setting in NEVER_AUTOMATIC_SETTINGS or "confidence" in setting or "require_incident_zone" in setting:
         return None
+    spec = AUTOMATIC_SETTING_SPECS.get(setting)
     proposed = recommendation.get("proposed")
+    scope = str(recommendation.get("scope") or "")
+    scopes = spec["scopes"] if spec else frozenset()
     if proposed in (None, "inherit"):
-        return "restore_inherit"
-    for class_id, spec in AUTOMATIC_CLASSES.items():
-        if setting in spec["settings"]:
-            return class_id
-    return None
+        if "camera" in scopes and scope in {"", "camera"}:
+            return "restore_inherit"
+        return None
+    if spec is None:
+        return None
+    if scope and scope not in scopes:
+        return None
+    return spec["class_id"]
 
 
 def normalize_automatic_classes(classes: list[str]) -> list[str]:
-    """Map retired class ids onto the current breakdown."""
-    return list(dict.fromkeys(AUTOMATIC_CLASS_ALIASES.get(item, item) for item in classes))
+    """Map retired class ids onto the current breakdown and drop suggestion-only ones."""
+    return list(dict.fromkeys(
+        AUTOMATIC_CLASS_ALIASES.get(item, item)
+        for item in classes
+        if item not in SUGGESTION_ONLY_CLASSES
+    ))
 
 
 def automatic_eligible(recommendation: dict[str, Any], allowed: set[str] | frozenset[str]) -> bool:
@@ -147,13 +154,18 @@ def daily_notes(signals: dict[str, Any]) -> list[dict[str, str]]:
     """Explain site patterns that are not setting changes."""
     reasons = signals.get("establishment_reasons") or {}
     notes: list[dict[str, str]] = []
-    ignored = int(reasons.get("ignored_zone") or 0) + int(reasons.get("ineligible_zone") or 0)
+    ignored = (
+        int(reasons.get("ignored_zone") or 0)
+        + int(reasons.get("depth_ignore_zone") or 0)
+        + int(reasons.get("ineligible_zone") or 0)
+    )
     if ignored:
         notes.append({
             "kind": "policy",
             "text": (
-                f"{ignored} establishment decisions were outside an eligible zone or in an Ignore zone. "
-                "Those observations stay in the incident. Loosening the detector would not make them eligible."
+                f"{ignored} establishment decisions were outside an eligible zone, past the depth limit, "
+                "or in an Ignore zone. Those observations stay in the incident. "
+                "Loosening the detector would not make them eligible."
             ),
         })
     below = int(reasons.get("below_confidence") or 0)
@@ -184,12 +196,25 @@ def rank_site_recommendations(
     tracking_saturated = bool(signals.get("tracking_saturated"))
     jobs_expiring = bool(signals.get("jobs_expiring"))
     detector_behind = bool(signals.get("detector_behind"))
-    policy_block = bool(int((signals.get("establishment_reasons") or {}).get("below_confidence") or 0) or int((signals.get("establishment_reasons") or {}).get("ignored_zone") or 0))
+    reason_counts = signals.get("establishment_reasons") or {}
+    policy_block = any(int(reason_counts.get(name) or 0) for name in _POLICY_REASONS)
 
     for item in recommendations:
         if item.get("dismissed"):
             continue
         setting = str(item.get("setting") or "")
+        if _loosens_confidence(item) and policy_block:
+            notes.append({
+                "kind": "dropped",
+                "text": "Detector confidence was not lowered. Zone and class thresholds explain the rejected activity.",
+            })
+            continue
+        if suggestion_class(item) is None:
+            notes.append({
+                "kind": "dropped",
+                "text": f"{setting} stays manual. This review does not apply it.",
+            })
+            continue
         if setting == "detector.tracking.sample_fps" and tracking_saturated and _increases_load(item):
             notes.append({
                 "kind": "dropped",
@@ -200,12 +225,6 @@ def rank_site_recommendations(
             notes.append({
                 "kind": "dropped",
                 "text": f"{setting} was not increased because analysis is already behind or jobs are being reclaimed.",
-            })
-            continue
-        if _loosens_confidence(item) and policy_block:
-            notes.append({
-                "kind": "dropped",
-                "text": "Detector confidence was not lowered. Zone and class thresholds explain the rejected activity.",
             })
             continue
         kept.append(item)
@@ -245,8 +264,9 @@ def collect_stored_signals(connection: sqlite3.Connection, since_epoch: float) -
             return []
 
     reasons: dict[str, int] = {}
+    # Rejected decisions store a null activity_epoch. created_at is set for every row.
     for row in rows(
-        "select reason, count(*) from scene_activity_decisions where activity_epoch >= ? group by reason",
+        "select reason, count(*) from scene_activity_decisions where created_at >= ? group by reason",
         (since_epoch,),
     ):
         reasons[str(row[0] or "")] = int(row[1] or 0)
@@ -257,13 +277,6 @@ def collect_stored_signals(connection: sqlite3.Connection, since_epoch: float) -
             (since_epoch,),
         )
     ]
-    grace = rows(
-        """
-        select count(*) from scene_episodes
-        where end_epoch >= ? and (end_epoch - last_activity_epoch) between 44.5 and 45.5
-        """,
-        (since_epoch,),
-    )
     reclaims = rows(
         "select count(*) from scene_analysis_jobs where attempts > 1 and end_epoch >= ?",
         (since_epoch,),
@@ -272,7 +285,6 @@ def collect_stored_signals(connection: sqlite3.Connection, since_epoch: float) -
     return {
         "establishment_reasons": reasons,
         "incidents_by_camera": incidents,
-        "grace_closures": int(grace[0][0]) if grace else 0,
         "reclaims": int(reclaims[0][0]) if reclaims else 0,
         "tracking_running": int(running[0][0]) if running else 0,
     }
@@ -292,7 +304,7 @@ def with_runtime_signals(
         "tracking_limit": limit,
         "tracking_saturated": running >= limit,
         "jobs_expiring": reclaims > 0,
-        "detector_behind": int(detector_queue or 0) > 0,
+        "detector_behind": int(detector_queue or 0) >= QUEUE_BACKLOG_DEPTH,
     }
 
 
@@ -313,7 +325,6 @@ def daily_briefing(signals: dict[str, Any]) -> dict[str, Any]:
         "signals": {
             "incidents_by_camera": signals.get("incidents_by_camera") or [],
             "establishment_reasons": signals.get("establishment_reasons") or {},
-            "grace_closures": int(signals.get("grace_closures") or 0),
             "reclaims": int(signals.get("reclaims") or 0),
             "tracking_saturated": bool(signals.get("tracking_saturated")),
             "detector_behind": bool(signals.get("detector_behind")),

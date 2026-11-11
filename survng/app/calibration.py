@@ -345,8 +345,13 @@ def build_calibration_report(
     *,
     mode: str,
     stream_health: dict[str, dict[str, Any]] | None = None,
+    eligible_camera_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Consolidate reviewed cameras without averaging away scene differences."""
+    """Consolidate reviewed cameras without averaging away scene differences.
+
+    eligible_camera_ids limits site-wide agreement to that population. Cameras
+    outside it are reported as excluded and do not block a global change.
+    """
     recommendations: list[dict[str, Any]] = []
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     camera_summaries: list[dict[str, Any]] = []
@@ -374,8 +379,17 @@ def build_calibration_report(
             })
 
     reviewed_camera_ids = set(camera_reports)
-    configured_camera_ids = {camera.id for camera in config.cameras}
-    all_cameras_reviewed = reviewed_camera_ids == configured_camera_ids
+    configured_ids = {camera.id for camera in config.cameras}
+    if eligible_camera_ids is None:
+        population = set(configured_ids)
+    else:
+        population = {camera_id for camera_id in eligible_camera_ids if camera_id in configured_ids}
+    excluded_cameras = [
+        {"camera_id": camera.id, "camera_name": camera.name}
+        for camera in config.cameras
+        if camera.id not in population
+    ]
+    population_reviewed = bool(population) and population <= reviewed_camera_ids
     globally_covered: set[tuple[str, str]] = set()
     for (setting, value_key), rows in grouped.items():
         proposed = json.loads(value_key)
@@ -383,13 +397,14 @@ def build_calibration_report(
         inheriting_camera_ids = {
             camera.id
             for camera in config.cameras
-            if getattr(camera.motion_qualification, setting, "__unsupported__")
+            if camera.id in population
+            and getattr(camera.motion_qualification, setting, "__unsupported__")
             in (None, "inherit")
         }
-        # A global change is safe only when every configured camera was reviewed and
-        # every camera that would inherit the value independently supported it.
+        # A global change is safe only when every camera in this review population
+        # was reviewed and every inheriting camera in that set supported it.
         global_consensus = (
-            all_cameras_reviewed
+            population_reviewed
             and bool(inheriting_camera_ids)
             and inheriting_camera_ids <= supporting_camera_ids
         )
@@ -516,9 +531,9 @@ def build_calibration_report(
         )
     tracking_issues = sum(
         count for name, count in tracking.items()
-        if name in {"late", "lost", "fragmented", "duplicate"}
+        if name in {"late", "lost", "duplicate"}
     )
-    if all_cameras_reviewed and total_analyzed >= 12 and tracking_issues >= 4:
+    if population_reviewed and total_analyzed >= 12 and tracking_issues >= 4:
         current = config.detector.tracking.sample_fps
         proposed = min(5.0, round(current + 0.5, 1))
         if proposed != current:
@@ -559,11 +574,15 @@ def build_calibration_report(
         "camera_summaries": camera_summaries,
         "camera_reports": camera_reports,
         "recommendations": validated_recommendations,
+        "excluded_cameras": excluded_cameras,
         "advisories": {
             "stream_health": "Stream recommendations are advisory and never modify camera URLs or firmware settings.",
             "object_safety": object_advisory,
             "scope_safety": (
-                "Global changes require unanimous support from every inheriting camera "
+                "Global changes require unanimous support from every inheriting camera in this review. "
+                "Cameras left out of the review are named separately and do not block agreement."
+                if excluded_cameras
+                else "Global changes require unanimous support from every inheriting camera "
                 "and are not proposed for partial-camera analyses."
             ),
             "manual_review": (

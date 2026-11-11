@@ -873,12 +873,28 @@ class IntelligenceService:
             publish('Ranking suggestions')
             statuses = {str(item.get('id') or ''): item for item in active_manager.statuses()}
             stream_health = {camera_id: {key: statuses.get(camera_id, {}).get(key) for key in ('running', 'live_fps', 'main_fps', 'capture_read_failures', 'analysis_frames_dropped', 'last_error') if key in statuses.get(camera_id, {})} for camera_id in reports}
-            result = build_calibration_report(active_config, reports, mode=mode if mode in CALIBRATION_MODE_LIMITS else 'standard', stream_health=stream_health)
+            result = build_calibration_report(
+                active_config,
+                reports,
+                mode=mode if mode in CALIBRATION_MODE_LIMITS else 'standard',
+                stream_health=stream_health,
+                eligible_camera_ids=list(camera_ids) if mode == 'system_weekly' else None,
+            )
             result['camera_errors'] = errors
             result['progress'] = review_progress(completed=len(camera_ids), total=len(camera_ids), phase='Complete')
             if mode == 'system_weekly':
                 signals = self._system_review_signals(active_manager, active_config)
                 ranked = rank_site_recommendations(result.get('recommendations') or [], signals)
+                excluded = result.get('excluded_cameras') or []
+                if excluded:
+                    names = ', '.join(str(item.get('camera_name') or item.get('camera_id') or '') for item in excluded)
+                    ranked['notes'].append({
+                        'kind': 'sample',
+                        'text': (
+                            f'{names} had detection turned off, so this review left '
+                            'them out of sampling and site-wide agreement.'
+                        ),
+                    })
                 result['recommendations'] = ranked['recommendations']
                 result['site_notes'] = ranked['notes']
                 result['review_type'] = 'system_review'
@@ -905,22 +921,22 @@ class IntelligenceService:
         except Exception:
             LOGGER.exception('system review could not read stored evidence')
             stored = {}
-        queued = 0
+        depths = [0]
         try:
             runtime = ((self.deps.system_telemetry.system_status(active_manager).get('detector') or {}).get('runtime') or {})
-            queued = int(runtime.get('queue_depth') or 0)
+            depths.append(int(runtime.get('queue_depth') or 0))
         except Exception:
             LOGGER.exception('system review could not read detector queue depth')
         for item in active_manager.statuses():
             motion = item.get('motion_qualification') or {}
             try:
-                queued += int(motion.get('queue_depth') or 0)
+                depths.append(int(motion.get('queue_depth') or 0))
             except (TypeError, ValueError):
                 continue
         return with_runtime_signals(
             stored,
             tracking_limit=int(active_config.detector.tracking.max_active_cameras),
-            detector_queue=queued,
+            detector_queue=max(depths),
         )
 
     @staticmethod
@@ -1049,7 +1065,7 @@ class IntelligenceService:
         if briefing and isinstance(briefing.get('result'), dict):
             result = dict(briefing['result'])
             result['recommendations'] = [
-                {**item, 'automatic_class': suggestion_class(item)}
+                {**item, 'automatic_class': class_id if (class_id := suggestion_class(item)) in AUTOMATIC_CLASSES else None}
                 for item in result.get('recommendations') or []
                 if isinstance(item, dict)
             ]
@@ -1136,13 +1152,48 @@ class IntelligenceService:
             if run.get('configuration_fingerprint') != fingerprint:
                 return
             try:
-                self.calibration_apply(run_id, CalibrationApplyRequest(
+                self._apply_calibration(run_id, CalibrationApplyRequest(
                     recommendation_ids=[str(item.get('id') or '') for item in selected],
                     confirmed=True,
                     configuration_fingerprint=fingerprint,
-                ))
+                ), automatic=True)
             except HTTPException:
                 LOGGER.info('automatic system review changes were not applied for run %s', run_id)
+
+    def _rollback_regressed_automatic_review(
+        self,
+        change_set_id: int,
+        change_set: dict,
+        evaluation: dict,
+        active_manager: AppManager,
+    ) -> None:
+        """Restore an automatic change that measured worse, then stop repeating it."""
+        rolled_back = False
+        rollback_error = ""
+        try:
+            self.calibration_rollback(change_set_id, CalibrationRollbackRequest(confirmed=True))
+            rolled_back = True
+        except HTTPException as exc:
+            detail = exc.detail
+            rollback_error = str(detail.get("message") or detail) if isinstance(detail, dict) else str(detail)
+            LOGGER.warning("automatic system review rollback was not applied for change set %s: %s", change_set_id, rollback_error)
+        except Exception as exc:
+            rollback_error = redact_secret_text(exc)
+            LOGGER.exception("automatic system review rollback failed for change set %s", change_set_id)
+        try:
+            self._revoke_regressed_automatic_classes(change_set)
+        except Exception:
+            LOGGER.exception("automatic system review could not turn off the regressed class for change set %s", change_set_id)
+        try:
+            updated = active_manager.events.get_calibration_change_set(change_set_id) or {}
+            status = str(updated.get("status") or ("rolled_back" if rolled_back else "evaluated"))
+            active_manager.events.update_calibration_evaluation(
+                change_set_id,
+                {**evaluation, "rolled_back": rolled_back, "rollback_error": rollback_error},
+                status=status,
+            )
+        except Exception:
+            LOGGER.exception("automatic system review could not record rollback for change set %s", change_set_id)
 
     def _revoke_regressed_automatic_classes(self, change_set: dict) -> None:
         classes = {
@@ -1230,6 +1281,9 @@ class IntelligenceService:
         return run
 
     def calibration_apply(self, run_id: int, request: CalibrationApplyRequest) -> dict:
+        return self._apply_calibration(run_id, request)
+
+    def _apply_calibration(self, run_id: int, request: CalibrationApplyRequest, *, automatic: bool = False) -> dict:
         if not request.confirmed:
             raise HTTPException(status_code=400, detail='explicit confirmation is required')
         with self.deps.manager_lock:
@@ -1261,6 +1315,8 @@ class IntelligenceService:
             before_config = self.deps.get_config().model_copy(deep=True)
             before_fingerprint = current_fingerprint
             _effective, apply_result = self.deps.apply_config_update(next_config)
+            if automatic:
+                apply_result = {**apply_result, 'automatic': True}
             after_fingerprint = calibration_configuration_fingerprint(self.deps.get_config())
             try:
                 change_set = active_events.create_calibration_change_set(run_id=run_id, parent_change_set_id=None, action='apply', status='collecting', evaluation_hours=request.evaluation_hours, configuration_fingerprint_before=before_fingerprint, configuration_fingerprint_after=after_fingerprint, changes=changes, apply_result=apply_result)
@@ -1386,7 +1442,13 @@ class IntelligenceService:
                 evaluation = {'outcome': 'inconclusive', 'summary': 'Calibration settings changed while follow-up evidence was being reviewed, so this result cannot be attributed to one change set.', 'comparison_basis': 'configuration_conflict', 'camera_errors': errors}
             active_manager.events.update_calibration_evaluation(change_set_id, evaluation, status='evaluated')
             if evaluation.get('outcome') == 'regressed':
-                self._revoke_regressed_automatic_classes(change_set)
+                if (change_set.get('apply_result') or {}).get('automatic'):
+                    self._rollback_regressed_automatic_review(change_set_id, change_set, evaluation, active_manager)
+                else:
+                    try:
+                        self._revoke_regressed_automatic_classes(change_set)
+                    except Exception:
+                        LOGGER.exception('could not turn off the automatic class for regressed change set %s', change_set_id)
         except Exception as exc:
             LOGGER.exception('calibration evaluation %s failed', change_set_id)
             active_manager.events.update_calibration_evaluation(change_set_id, {'outcome': 'failed', 'error': redact_secret_text(exc)}, status='evaluation_failed')
