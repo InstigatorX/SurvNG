@@ -424,11 +424,16 @@ class _InferenceWorker:
             "byte_count": byte_count,
         }
 
-    def _prepare_object_frame_locked(
+    def _prepare_object_frame(
         self,
         frame: np.ndarray,
     ) -> tuple[np.ndarray, tuple[float, float] | None]:
-        """Bound object-detection IPC while leaving backend preprocessing isolated."""
+        """Bound object-detection IPC while leaving backend preprocessing isolated.
+
+        Safe without the worker lock: ``_status`` is only ever replaced whole,
+        so this reads one consistent snapshot. Callers run it before admission
+        so the CPU resize overlaps another request's inference.
+        """
         if (
             self.role != "object"
             or not isinstance(frame, np.ndarray)
@@ -526,6 +531,10 @@ class _InferenceWorker:
         admitted = False
         completed = False
         timed_out = False
+        prepared_frame, box_scale = frame, None
+        if frame is not None and operation == "detect":
+            # Resize before admission so the worker is not idle during it.
+            prepared_frame, box_scale = self._prepare_object_frame(frame)
         with self._pending_lock:
             self._pending_requests += 1
         try:
@@ -589,11 +598,12 @@ class _InferenceWorker:
                     )
                 self._request_id += 1
                 request = {"id": self._request_id, "op": operation, **payload}
-                box_scale = None
                 if frame is not None:
-                    ipc_frame = frame
-                    if operation == "detect":
-                        ipc_frame, box_scale = self._prepare_object_frame_locked(frame)
+                    ipc_frame = prepared_frame
+                    if operation == "detect" and box_scale is None:
+                        # The model input shape is only known once the worker
+                        # has started; ipc_frame is still the original here.
+                        ipc_frame, box_scale = self._prepare_object_frame(ipc_frame)
                     request.update(self._write_frame_locked(ipc_frame))
                 try:
                     connection.send(request)

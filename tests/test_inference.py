@@ -1361,7 +1361,7 @@ class InferenceSupervisorTest(unittest.TestCase):
         )
         frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
 
-        ipc_frame, scale = worker._prepare_object_frame_locked(frame)
+        ipc_frame, scale = worker._prepare_object_frame(frame)
         result = worker._restore_object_boxes(
             [{"box": {"x1": 100, "y1": 50, "x2": 500, "y2": 300}}],
             scale,
@@ -1380,6 +1380,80 @@ class InferenceSupervisorTest(unittest.TestCase):
         )
         self.assertEqual(list_result[0]["box"], [300.0, 150.0, 1500.0, 900.0])
 
+    def test_object_frame_resize_runs_before_waiting_for_busy_worker(self) -> None:
+        worker = _InferenceWorker(
+            DetectorConfig(enabled=False),
+            "object",
+            {"input_shape": [640, 640]},
+            start_enabled=False,
+        )
+        sent: list[dict] = []
+
+        class Connection:
+            request_id = 0
+
+            def send(self, request):
+                self.request_id = int(request["id"])
+                sent.append(request)
+
+            @staticmethod
+            def poll(_timeout):
+                return True
+
+            def recv(self):
+                return {
+                    "id": self.request_id,
+                    "ok": True,
+                    "result": [{"box": {"x1": 100, "y1": 50, "x2": 500, "y2": 300}}],
+                }
+
+        worker._connection = Connection()
+        worker._ensure_worker_locked = Mock(return_value=True)
+        worker._frame_buffer = bytearray(1280 * 720 * 3)
+        prepared = threading.Event()
+        original_prepare = worker._prepare_object_frame
+
+        def recording_prepare(frame):
+            result = original_prepare(frame)
+            prepared.set()
+            return result
+
+        worker._prepare_object_frame = recording_prepare
+        lock_held = threading.Event()
+        release_lock = threading.Event()
+
+        def hold_worker_lock() -> None:
+            with worker._lock:
+                lock_held.set()
+                release_lock.wait(timeout=2.0)
+
+        holder = threading.Thread(target=hold_worker_lock)
+        holder.start()
+        self.assertTrue(lock_held.wait(timeout=1.0))
+        results: list = []
+        requester = threading.Thread(
+            target=lambda: results.append(worker.request(
+                "detect",
+                frame=np.zeros((2160, 3840, 3), dtype=np.uint8),
+                timeout=2.0,
+            )),
+        )
+        requester.start()
+        try:
+            # The resize must finish while another request still owns the worker.
+            self.assertTrue(prepared.wait(timeout=1.0))
+            self.assertEqual(sent, [])
+        finally:
+            release_lock.set()
+            holder.join(timeout=1.0)
+            requester.join(timeout=2.0)
+
+        self.assertEqual(sent[0]["shape"], [720, 1280, 3])
+        self.assertEqual(
+            results[0][0]["box"],
+            {"x1": 300.0, "y1": 150.0, "x2": 1500.0, "y2": 900.0},
+        )
+
     def test_object_worker_keeps_frame_when_model_shape_is_unknown(self) -> None:
         worker = _InferenceWorker(
             DetectorConfig(enabled=False),
@@ -1389,7 +1463,7 @@ class InferenceSupervisorTest(unittest.TestCase):
         )
         frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
 
-        ipc_frame, scale = worker._prepare_object_frame_locked(frame)
+        ipc_frame, scale = worker._prepare_object_frame(frame)
 
         self.assertIs(ipc_frame, frame)
         self.assertIsNone(scale)
