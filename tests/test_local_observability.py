@@ -15,6 +15,10 @@ from survng.app.local_observability import (
     MAX_RECENT_LOG_BYTES,
     MAX_RECENT_LOG_ROWS,
     MAX_MOTION_STAGES,
+    _process_gpu,
+    _process_memory,
+    _resource_processes,
+    _resources_snapshot,
     build_runtime_status,
     request_runtime_status,
 )
@@ -453,3 +457,94 @@ def test_ffmpeg_and_observer_share_private_runtime_across_restarts(tmp_path: Pat
             assert not server.socket_path.exists()
 
     asyncio.run(exercise())
+
+
+def test_resource_processes_map_live_worker_roles(monkeypatch) -> None:
+    monkeypatch.setattr("survng.app.local_observability.os.getpid", lambda: 10)
+    raw = {"workers": {
+        "object": {"worker_pids": [11, 12, None]},
+        "reid": {"worker_pid": 13},
+        "face": {"worker_pid": None},
+        "depth": {"worker_pid": "rtsp://secret"},
+    }}
+
+    assert _resource_processes(raw, 14) == [
+        ("main", 10), ("object", 11), ("object", 12),
+        ("reid", 13), ("semantic_search", 14),
+    ]
+    # A stopped semantic worker, or a PID already listed, is not repeated.
+    assert _resource_processes(raw, 13)[-1] == ("reid", 13)
+
+
+def _fake_proc(tmp_path: Path, pid: int, fds: dict[str, tuple[str, str]]) -> Path:
+    base = tmp_path / str(pid)
+    (base / "fd").mkdir(parents=True)
+    (base / "fdinfo").mkdir()
+    (base / "status").write_text("Name:\tpython\nVmRSS:\t   204800 kB\nThreads:\t52\n")
+    for name, (target, info) in fds.items():
+        (base / "fd" / name).symlink_to(target)
+        (base / "fdinfo" / name).write_text(info)
+    return tmp_path
+
+
+def test_process_gpu_sums_drm_clients_once(tmp_path: Path) -> None:
+    worker = (
+        "drm-client-id:\t7\n"
+        "drm-resident-system0:\t102 MiB\n"
+        "drm-resident-stolen-system0:\t512 KiB\n"
+        "drm-engine-render:\t2500000000 ns\n"
+        "drm-engine-video:\t0 ns\n"
+    )
+    proc = _fake_proc(tmp_path, 42, {
+        "7": ("/dev/dri/renderD128", worker),
+        "8": ("/dev/dri/renderD128", worker),  # same client, second descriptor
+        "9": ("/dev/null", "pos:\t0\n"),
+    })
+
+    assert _process_memory(42, proc) == {"rss_mb": 200.0, "threads": 52}
+    assert _process_gpu(42, proc) == {
+        "clients": 1,
+        "resident_mb": 102.5,
+        "busy_seconds": {"render": 2.5, "copy": 0.0, "video": 0.0, "video_enhance": 0.0},
+    }
+
+
+def test_idle_gpu_client_and_no_gpu_are_distinct(tmp_path: Path) -> None:
+    idle = _fake_proc(tmp_path / "idle", 1, {
+        "60": ("/dev/dri/renderD128", "drm-client-id:\t5\ndrm-resident-system0:\t12 KiB\ndrm-engine-render:\t0 ns\n"),
+    })
+    none = _fake_proc(tmp_path / "none", 2, {"3": ("/dev/null", "")})
+
+    assert _process_gpu(1, idle)["clients"] == 1
+    assert _process_gpu(1, idle)["busy_seconds"]["render"] == 0.0
+    assert _process_gpu(2, none) == {"clients": 0, "resident_mb": 0.0, "busy_seconds": {}}
+    assert _process_gpu(3, none) is None  # process gone
+
+
+def test_resources_report_semantic_usage_without_index_queries(monkeypatch) -> None:
+    semantic = SimpleNamespace(
+        config=SimpleNamespace(enabled=True),
+        worker_pid=None,
+        searches_served=Mock(return_value={"text": 3, "image": 1, "private": "secret"}),
+        status=Mock(side_effect=AssertionError("status() queries the index")),
+    )
+
+    snapshot = _resources_snapshot({}, semantic)
+
+    assert snapshot["semantic_search"] == {
+        "enabled": True,
+        "searches_since_start": {"text": 3, "image": 1},
+    }
+    assert [item["role"] for item in snapshot["processes"]] == ["main"]
+    semantic.status.assert_not_called()
+
+
+def test_runtime_status_includes_resources_without_semantic_service() -> None:
+    status = build_runtime_status(
+        AppConfig(), _manager(), instance_id="one", uptime_seconds=1.0, stopping=False,
+    )
+
+    assert status["resources"]["semantic_search"] == {
+        "enabled": False, "searches_since_start": {},
+    }
+    assert status["resources"]["processes"][0]["role"] == "main"

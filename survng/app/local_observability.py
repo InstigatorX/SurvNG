@@ -503,6 +503,131 @@ def _recent_log_snapshot(
     }
 
 
+MAX_RESOURCE_PROCESSES = 16
+MAX_SCANNED_FDS = 4096
+_DRM_ENGINES = ("render", "copy", "video", "video-enhance")
+_DRM_UNITS_KIB = {"KiB": 1, "MiB": 1024, "GiB": 1024 * 1024}
+
+
+_PROC = Path("/proc")
+
+
+def _process_memory(pid: int, proc: Path = _PROC) -> dict[str, Any]:
+    rss_mb: float | None = None
+    threads: int | None = None
+    try:
+        for line in (proc / str(pid) / "status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                rss_mb = round(int(line.split()[1]) / 1024.0, 1)
+            elif line.startswith("Threads:"):
+                threads = int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return {"rss_mb": rss_mb, "threads": threads}
+
+
+def _process_gpu(pid: int, proc: Path = _PROC) -> dict[str, Any] | None:
+    """Sum DRM fdinfo per client so idle GPU handles are visible.
+
+    One process may hold several descriptors for the same DRM client; the
+    kernel's drm-client-id deduplicates them.
+    """
+    fd_dir = proc / str(pid) / "fd"
+    try:
+        names = os.listdir(fd_dir)[:MAX_SCANNED_FDS]
+    except OSError:
+        return None
+    clients: dict[str, dict[str, float]] = {}
+    for name in names:
+        try:
+            if not os.readlink(fd_dir / name).startswith("/dev/dri/"):
+                continue
+            lines = (proc / str(pid) / "fdinfo" / name).read_text().splitlines()
+        except OSError:
+            continue
+        fields: dict[str, str] = {}
+        for line in lines:
+            key, _, value = line.partition(":")
+            fields[key.strip()] = value.strip()
+        client_id = fields.get("drm-client-id") or f"fd{name}"
+        totals = {"resident_kib": 0.0, **{engine: 0.0 for engine in _DRM_ENGINES}}
+        for key, value in fields.items():
+            parts = value.split()
+            try:
+                if key.startswith("drm-resident-") and len(parts) == 2:
+                    totals["resident_kib"] += float(parts[0]) * _DRM_UNITS_KIB.get(parts[1], 0)
+                elif key.startswith("drm-engine-") and parts and parts[-1] == "ns":
+                    engine = key[len("drm-engine-"):]
+                    if engine in totals:
+                        totals[engine] = float(parts[0])
+            except ValueError:
+                continue
+        clients[client_id] = totals
+    if not clients:
+        return {"clients": 0, "resident_mb": 0.0, "busy_seconds": {}}
+    return {
+        "clients": len(clients),
+        "resident_mb": round(sum(c["resident_kib"] for c in clients.values()) / 1024.0, 1),
+        "busy_seconds": {
+            engine.replace("-", "_"): round(sum(c[engine] for c in clients.values()) / 1e9, 1)
+            for engine in _DRM_ENGINES
+        },
+    }
+
+
+def _resource_processes(raw_detector: dict[str, Any], semantic_pid: object) -> list[tuple[str, int]]:
+    processes: list[tuple[str, int]] = [("main", os.getpid())]
+    workers = raw_detector.get("workers")
+    workers = workers if isinstance(workers, dict) else {}
+    objects = workers.get("object") if isinstance(workers.get("object"), dict) else {}
+    for pid in objects.get("worker_pids") or ():
+        processes.append(("object", pid))
+    for role in ("reid", "face", "depth"):
+        worker = workers.get(role)
+        if isinstance(worker, dict):
+            processes.append((role, worker.get("worker_pid")))
+    processes.append(("semantic_search", semantic_pid))
+    seen: set[int] = set()
+    result: list[tuple[str, int]] = []
+    for role, pid in processes:
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or pid in seen:
+            continue
+        seen.add(pid)
+        result.append((role, pid))
+    return result[:MAX_RESOURCE_PROCESSES]
+
+
+def _resources_snapshot(raw_detector: dict[str, Any], semantic: Any) -> dict[str, Any]:
+    """Per-process memory and GPU use, to spot loaded-but-idle consumers."""
+    semantic_pid = getattr(semantic, "worker_pid", None) if semantic is not None else None
+    searches: dict[str, int] = {}
+    counter = getattr(semantic, "searches_served", None)
+    if callable(counter):
+        try:
+            raw = counter()
+            searches = {
+                kind: int(_number(raw.get(kind)))
+                for kind in ("text", "image")
+            } if isinstance(raw, dict) else {}
+        except Exception as error:
+            LOGGER.debug("semantic search usage unavailable (%s)", type(error).__name__)
+    return {
+        "processes": [
+            {
+                "role": role,
+                "pid": pid,
+                **_process_memory(pid),
+                "gpu": _process_gpu(pid),
+            }
+            for role, pid in _resource_processes(raw_detector, semantic_pid)
+        ],
+        "semantic_search": {
+            "enabled": bool(getattr(getattr(semantic, "config", None), "enabled", False)),
+            "searches_since_start": searches,
+        },
+    }
+
+
 def build_runtime_status(
     config: AppConfig,
     manager: Any,
@@ -609,6 +734,10 @@ def build_runtime_status(
             },
         },
         "detector": _detector_snapshot(config, raw_detector),
+        "resources": _resources_snapshot(
+            raw_detector,
+            getattr(getattr(manager, "inference", None), "semantic_search", None),
+        ),
         "storage": _storage_snapshot(raw_retention),
         "cameras": cameras,
         "recent_logs": _recent_log_snapshot(log_rows),

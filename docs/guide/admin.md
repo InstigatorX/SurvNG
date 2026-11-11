@@ -61,6 +61,12 @@ After the service starts, run this on the SurvNG host:
 
 The snapshot includes effective tracking limits and current capacity, camera
 health, detector activity, storage status, and a recent in-memory log tail.
+`resources` lists each SurvNG process (main, object, ReID, face, depth, and
+semantic-search workers) with its memory, threads, and GPU use: DRM clients,
+resident GPU memory, and busy seconds per engine since the process started. A
+process with a GPU client but zero busy time holds the GPU without using it.
+`resources.semantic_search.searches_since_start` counts completed text and
+image searches, showing whether always-on semantic indexing is being used.
 The log tail contains only timestamp, level, logger, and message fields; it is
 size-limited, credential-redacted, and has URLs removed. Tracebacks and
 structured logging extras are not exposed. The default socket is

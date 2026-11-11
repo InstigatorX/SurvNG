@@ -49,6 +49,38 @@ class SemanticIndexTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_searches_served_counts_completed_text_and_image_searches(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        identity = self.identity
+
+        class Encoder:
+            def __init__(self) -> None:
+                self.identity = identity
+                self.worker_pid = 4242
+
+            def encode_text(self, prompts):
+                return np.asarray([[1, 0, 0]] * len(prompts), dtype=np.float32)
+
+            def encode_images(self, images):
+                return np.asarray([[1, 0, 0]], dtype=np.float32)
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index,
+            Path(self.temporary.name), {},
+        )
+        self.assertEqual(service.searches_served(), {"text": 0, "image": 0})
+        self.assertIsNone(service.worker_pid)
+        service.encoder = Encoder()
+
+        service.search_text("person at the gate")
+        service.search_image(np.ones((8, 8, 3), dtype=np.uint8))
+        with self.assertRaises(ValueError):
+            service.search_text("   ")
+
+        self.assertEqual(service.searches_served(), {"text": 1, "image": 1})
+        self.assertEqual(service.worker_pid, 4242)
+
     def test_observation_lookup_uses_the_observation_index(self) -> None:
         with self.index._connect() as connection:
             plan = connection.execute(

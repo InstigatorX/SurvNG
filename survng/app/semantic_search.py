@@ -1917,6 +1917,23 @@ class DisabledSemanticSearch:
     def __init__(self, config: SemanticSearchConfig, index: SemanticIndex) -> None:
         self.config = config.model_copy(deep=True)
         self.index = index
+        # Searches answered since this service started; shows whether the
+        # always-on indexing is actually being used.
+        self._searches_lock = threading.Lock()
+        self._searches_served = {"text": 0, "image": 0}
+
+    def _count_search(self, kind: str) -> None:
+        with self._searches_lock:
+            self._searches_served[kind] += 1
+
+    def searches_served(self) -> dict[str, int]:
+        """Cheap usage counters; unlike status(), this never touches the index."""
+        with self._searches_lock:
+            return dict(self._searches_served)
+
+    @property
+    def worker_pid(self) -> int | None:
+        return getattr(getattr(self, "encoder", None), "worker_pid", None)
 
     def status(self) -> dict[str, Any]:
         return {
@@ -3673,12 +3690,14 @@ class SemanticSearchService(DisabledSemanticSearch):
                 raise RuntimeError(self._error or "semantic search is unavailable")
             embedding = self.encoder.encode_images([image])
             identity = self.encoder.identity
-        return self.index.search(
+        hits = self.index.search(
             embedding,
             identity,
             query_plan=plan,
             **filters,
         )
+        self._count_search("image")
+        return hits
 
     def search_event_object(
         self,
@@ -3703,12 +3722,14 @@ class SemanticSearchService(DisabledSemanticSearch):
                 raise RuntimeError(self._error or "semantic search is unavailable")
             embedding = self.encoder.encode_text(list(plan.prompts.values()))
             identity = self.encoder.identity
-        return self.index.search(
+        hits = self.index.search(
             embedding,
             identity,
             query_plan=plan,
             **filters,
         )
+        self._count_search("text")
+        return hits
 
     def _reported_device(self, target_device: str) -> str:
         if self.config.implementation == "ollama":
