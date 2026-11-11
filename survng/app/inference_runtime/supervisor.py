@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from ..evidence_work import EvidenceWorkPreempted, check_evidence_cancellation, evidence_wait_timeout, optional_evidence_work_active
+from ..evidence_work import EvidenceWorkPreempted, check_evidence_cancellation, evidence_wait_timeout, inference_source, optional_evidence_work_active
 from ..config import DetectorConfig
 from ..perf_samples import RollingLatencySamples
 from .process import load_detector_labels, stop_multiprocessing_resource_tracker
@@ -25,6 +25,9 @@ from .types import (
     InferenceWorkload,
 )
 from .worker import _InferenceWorker
+
+# Source names are code constants; the cap only guards against misuse.
+MAX_ENRICHMENT_SOURCES = 16
 
 
 class InferenceSupervisor:
@@ -66,6 +69,9 @@ class InferenceSupervisor:
             workload: RollingLatencySamples()
             for workload in InferenceWorkload
         }
+        # Enrichment is one priority class shared by several jobs. Count each
+        # job's admissions so the class total can be attributed.
+        self._enrichment_source_stats: dict[str, dict[str, int]] = {}
         self._object_workers = self._build_object_workers(config)
         # Preserve the long-standing primary-worker handle for compatibility
         # with lifecycle diagnostics and focused tests.
@@ -142,6 +148,42 @@ class InferenceSupervisor:
         *,
         shed_optional: bool = True,
         timeout: float = INFERENCE_REQUEST_TIMEOUT_SECONDS,
+        source: str = "",
+    ) -> bool:
+        """Admit device work; attribute enrichment admissions to their job.
+
+        ``source`` names the operation; a job scope set by the caller (scene
+        confirmation, cover retry, backfill) takes precedence over it.
+        """
+        admitted = False
+        try:
+            admitted = self._admit_device_workload(
+                workload,
+                shed_optional=shed_optional,
+                timeout=timeout,
+            )
+            return admitted
+        finally:
+            if workload is InferenceWorkload.ENRICHMENT:
+                self._count_enrichment_source(
+                    inference_source() or source or "unattributed",
+                    admitted,
+                )
+
+    def _count_enrichment_source(self, source: str, admitted: bool) -> None:
+        with self._device_condition:
+            stats = self._enrichment_source_stats
+            if source not in stats and len(stats) >= MAX_ENRICHMENT_SOURCES:
+                source = "other"
+            counts = stats.setdefault(source, {"admitted": 0, "rejected": 0})
+            counts["admitted" if admitted else "rejected"] += 1
+
+    def _admit_device_workload(
+        self,
+        workload: InferenceWorkload,
+        *,
+        shed_optional: bool,
+        timeout: float,
     ) -> bool:
         """Cooperatively keep optional GPU work behind security inference."""
         check_evidence_cancellation()
@@ -293,6 +335,10 @@ class InferenceSupervisor:
                     "admission_wait_ms_p95": wait_samples.percentile(95),
                     "admission_wait_ms_p99": wait_samples.percentile(99),
                 }
+            result["enrichment_sources"] = {
+                name: dict(counts)
+                for name, counts in self._enrichment_source_stats.items()
+            }
             return result
 
     def _base_detector_status(self) -> dict[str, Any]:
@@ -810,6 +856,7 @@ class InferenceSupervisor:
             frame,
             confidence_threshold,
             InferenceWorkload.ENRICHMENT,
+            source="tracking_cover_verification",
         )
 
     def _detect_for_workload(
@@ -817,12 +864,15 @@ class InferenceSupervisor:
         frame: np.ndarray,
         confidence_threshold: float | None,
         workload: InferenceWorkload,
+        *,
+        source: str = "",
     ) -> list[dict[str, Any]]:
         recovering_cover = optional_evidence_work_active()
         if recovering_cover:
             # Cover recovery shares the sampler, but must yield to security
             # jobs from every camera at each inference admission boundary.
             workload = InferenceWorkload.ENRICHMENT
+            source = "evidence_unattributed"
         shed_optional = workload in {
             InferenceWorkload.INTERACTIVE,
             InferenceWorkload.TRACKING,
@@ -831,6 +881,7 @@ class InferenceSupervisor:
         if not self._enter_device_workload(
             workload,
             shed_optional=shed_optional,
+            source=source,
         ):
             if recovering_cover:
                 raise EvidenceWorkPreempted()
@@ -912,7 +963,7 @@ class InferenceSupervisor:
         if not self.config.face_recognition_enabled:
             raise InferenceUnavailable("Face recognition is disabled.")
         workload = InferenceWorkload.ENRICHMENT
-        if not self._enter_device_workload(workload):
+        if not self._enter_device_workload(workload, source="face_embedding"):
             raise InferenceUnavailable("face embedding shed for incident inference")
         try:
             result = self._face.request("embed", frame=face, workload=workload)
@@ -927,7 +978,7 @@ class InferenceSupervisor:
         ):
             return []
         workload = InferenceWorkload.ENRICHMENT
-        if not self._enter_device_workload(workload):
+        if not self._enter_device_workload(workload, source="face_detection"):
             return []
         try:
             return list(
@@ -951,7 +1002,7 @@ class InferenceSupervisor:
         if not self.config.tracking.reid_enabled:
             raise InferenceUnavailable("Person ReID is disabled.")
         workload = InferenceWorkload.ENRICHMENT
-        if not self._enter_device_workload(workload):
+        if not self._enter_device_workload(workload, source="person_reid"):
             raise InferenceUnavailable("person ReID shed for incident inference")
         try:
             result = self._reid.request(
@@ -969,7 +1020,8 @@ class InferenceSupervisor:
         if not self.config.tracking.reid_enabled_for_label(label):
             raise InferenceUnavailable(f"ReID is disabled for label {label!r}.")
         workload = InferenceWorkload.ENRICHMENT
-        if not self._enter_device_workload(workload):
+        source = "person_reid" if label == "person" else "vehicle_reid"
+        if not self._enter_device_workload(workload, source=source):
             raise InferenceUnavailable("object ReID shed for incident inference")
         try:
             result = self._reid.request(
@@ -1000,7 +1052,11 @@ class InferenceSupervisor:
         if optional_slot and not self._depth_optional_slot.acquire(blocking=False):
             return list(objects), {"status": "depth_deferred"}
         try:
-            entered = self._enter_device_workload(workload, shed_optional=True)
+            entered = self._enter_device_workload(
+                workload,
+                shed_optional=True,
+                source="depth",
+            )
         except BaseException:
             if optional_slot:
                 self._depth_optional_slot.release()

@@ -1007,7 +1007,10 @@ class MotionIncidentService:
             "detection_intent_id": f"scene:{self.camera_id}:{event_at.timestamp():.6f}",
         }
         try:
-            with cancellable_evidence_work(lambda: bool(self._refinement_stop and self._refinement_stop.is_set())):
+            with cancellable_evidence_work(
+                lambda: bool(self._refinement_stop and self._refinement_stop.is_set()),
+                source="scene_discovery",
+            ):
                 outcome = self.decision_processor.refine(
                     "scene/discovery", "Scene observation", event_at, qualification,
                     existing_event_id=None, require_eligible_object=False,
@@ -1344,7 +1347,10 @@ class MotionIncidentService:
                 )
                 event_at = datetime.fromisoformat(admitted["created_at"].replace("Z", "+00:00"))
             else:
-                with cancellable_evidence_work(lambda: bool(self._refinement_stop and self._refinement_stop.is_set())):
+                with cancellable_evidence_work(
+                    lambda: bool(self._refinement_stop and self._refinement_stop.is_set()),
+                    source="scene_confirmation",
+                ):
                     outcome = self.decision_processor.refine(
                         "scene/confirmation", "Verification of observed activity", event_at,
                         qualification, existing_event_id=None,
@@ -1406,7 +1412,7 @@ class MotionIncidentService:
                 "minimum_last_offset_seconds": min(12.0, 4.0 * int(requirement["attempts"])),
                 "timeout_seconds": max(0.1, min(20.0, float(requirement["deadline_epoch"]) - time.time())),
             }
-            with cancellable_evidence_work(preempted):
+            with cancellable_evidence_work(preempted, source="cover_retry"):
                 outcome = self.decision_processor.refine(
                     str(payload.get("topic") or ""),
                     str(payload.get("message") or ""),
@@ -1631,6 +1637,7 @@ class MotionIncidentService:
                         with cancellable_evidence_work(
                             stop.is_set, optional=False,
                             stage_reporter=self._set_refinement_stage,
+                            source="incident_refinement",
                         ):
                             outcome = self.decision_processor.refine(
                                 job.topic,

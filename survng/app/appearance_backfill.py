@@ -16,6 +16,7 @@ import numpy as np
 
 from .appearance_index import AppearanceIndex
 from .config import ObjectTrackingConfig
+from .evidence_work import attributed_inference
 from .incident_utils import event_snapshot_path
 from .inference import InferenceUnavailable
 from .main_database import connect_main_database
@@ -467,9 +468,10 @@ class DeferredAppearanceBackfill:
                 inference_attempted = True
 
             try:
-                state, indexed, reason = self.process_event(
-                    event_id, on_inference_attempt=mark_inference_attempt
-                )
+                with attributed_inference("appearance_backfill"):
+                    state, indexed, reason = self.process_event(
+                        event_id, on_inference_attempt=mark_inference_attempt
+                    )
                 if state in {"failed", "deferred"}:
                     self._retry(event_id, reason, attempts, deferred=state == "deferred")
                 else:

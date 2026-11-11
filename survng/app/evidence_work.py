@@ -24,6 +24,10 @@ _optional: ContextVar[bool] = ContextVar("evidence_optional", default=False)
 _cancelled: ContextVar[Callable[[], bool] | None] = ContextVar("evidence_cancelled", default=None)
 
 
+# Diagnostic-only caller name for optional inference admitted on this context.
+_inference_source: ContextVar[str] = ContextVar("inference_source", default="")
+
+
 def report_evidence_stage(stage: str) -> None:
     callback = _stage_reporter.get()
     if callback is not None:
@@ -36,6 +40,20 @@ def evidence_work_active() -> bool:
 
 def optional_evidence_work_active() -> bool:
     return _optional.get()
+
+
+def inference_source() -> str:
+    return _inference_source.get()
+
+
+@contextmanager
+def attributed_inference(source: str):
+    """Name the job behind optional inference for device-gate counters."""
+    token = _inference_source.set(source)
+    try:
+        yield
+    finally:
+        _inference_source.reset(token)
 
 
 def evidence_cancelled() -> bool:
@@ -57,10 +75,12 @@ def check_evidence_cancellation() -> None:
 def cancellable_evidence_work(
     cancelled: Callable[[], bool], *, optional: bool = True,
     stage_reporter: Callable[[str], None] | None = None,
+    source: str = "",
 ):
     token = _cancelled.set(cancelled)
     optional_token = _optional.set(optional)
     stage_token = _stage_reporter.set(stage_reporter)
+    source_token = _inference_source.set(source or _inference_source.get())
     try:
         check_evidence_cancellation()
         yield
@@ -69,6 +89,7 @@ def cancellable_evidence_work(
         _cancelled.reset(token)
         _optional.reset(optional_token)
         _stage_reporter.reset(stage_token)
+        _inference_source.reset(source_token)
 
 
 def run_evidence_process(command: list[str], *, timeout: float) -> subprocess.CompletedProcess:

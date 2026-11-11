@@ -426,7 +426,44 @@ class InferenceSupervisorTest(unittest.TestCase):
         with patch.object(self.supervisor, "_enter_device_workload", return_value=False) as enter:
             with cancellable_evidence_work(lambda: False, optional=False):
                 self.supervisor.detect_refinement(np.zeros((12, 12, 3), dtype=np.uint8))
-        enter.assert_called_once_with(InferenceWorkload.INCIDENT_REFINEMENT, shed_optional=False)
+        enter.assert_called_once_with(
+            InferenceWorkload.INCIDENT_REFINEMENT, shed_optional=False, source=""
+        )
+
+    def test_enrichment_admissions_are_attributed_to_their_job(self) -> None:
+        from survng.app.evidence_work import attributed_inference, cancellable_evidence_work
+        worker = self.supervisor._object_workers[0]
+        worker.request = Mock(return_value=[])
+        frame = np.zeros((12, 12, 3), dtype=np.uint8)
+
+        self.supervisor.detect_enrichment(frame)
+        with cancellable_evidence_work(lambda: False, source="cover_retry"):
+            self.supervisor.detect_refinement(frame)
+            self.supervisor.detect_refinement(frame)
+        with attributed_inference("appearance_backfill"):
+            self.assertTrue(self.supervisor._enter_device_workload(
+                InferenceWorkload.ENRICHMENT, source="person_reid",
+            ))
+        self.supervisor._leave_device_workload(InferenceWorkload.ENRICHMENT)
+        # Security work and other classes are not attributed.
+        self.supervisor.detect_refinement(frame)
+
+        self.assertTrue(self.supervisor._enter_device_workload(
+            InferenceWorkload.INCIDENT_REFINEMENT
+        ))
+        try:
+            self.assertFalse(self.supervisor._enter_device_workload(
+                InferenceWorkload.ENRICHMENT, source="vehicle_reid",
+            ))
+        finally:
+            self.supervisor._leave_device_workload(InferenceWorkload.INCIDENT_REFINEMENT)
+
+        self.assertEqual(self.supervisor.workload_status()["enrichment_sources"], {
+            "tracking_cover_verification": {"admitted": 1, "rejected": 0},
+            "cover_retry": {"admitted": 2, "rejected": 0},
+            "appearance_backfill": {"admitted": 1, "rejected": 0},
+            "vehicle_reid": {"admitted": 0, "rejected": 1},
+        })
 
     def test_cover_recovery_yields_to_other_camera_security_work(self) -> None:
         from survng.app.evidence_work import EvidenceWorkPreempted, cancellable_evidence_work

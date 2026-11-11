@@ -178,6 +178,10 @@ def test_device_gate_and_reid_execution_devices_are_allowlisted() -> None:
             },
             "bad key!": {"shed": 1},
         },
+        "enrichment_sources": {
+            "scene_confirmation": {"admitted": 30, "rejected": 2, "error": secret},
+            f"rtsp://{secret}": {"admitted": 1, "rejected": 0},
+        },
     }
     status["reid"] = {
         "enabled": True,
@@ -212,6 +216,10 @@ def test_device_gate_and_reid_execution_devices_are_allowlisted() -> None:
             "admission_wait_ms_p95": 3.0,
         },
     }
+    assert detector["device_gate"]["enrichment_sources"] == {
+        "scene_confirmation": {"admitted": 30, "rejected": 2},
+    }
+    assert secret not in str(detector["device_gate"])
     assert detector["reid"] == {
         "enabled": True,
         "person": {

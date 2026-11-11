@@ -389,6 +389,23 @@ def _device_gate_snapshot(raw: object) -> dict[str, Any]:
             )
             if _motion_identifier(key) is not None and isinstance(value, dict)
         },
+        "enrichment_sources": _enrichment_sources_snapshot(
+            raw.get("enrichment_sources")
+        ),
+    }
+
+
+def _enrichment_sources_snapshot(raw: object) -> dict[str, Any]:
+    """Attribute the shared enrichment class to the jobs that used it."""
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: {
+            name: int(_number(value.get(name)))
+            for name in ("admitted", "rejected")
+        }
+        for key, value in list(raw.items())[:MAX_DEVICE_GATE_CLASSES]
+        if _motion_identifier(key) is not None and isinstance(value, dict)
     }
 
 
