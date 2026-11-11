@@ -21,7 +21,7 @@ import {
 import { crossCameraMatchCameraLabel, crossCameraMatchLabel, crossCameraTracePath } from "../crossCameraTrace.mjs";
 import { incidentReplayTracking, trackingCoverageLabel } from "../objectTrackReplay.mjs";
 import { incidentSceneObjects, observedObjectSummaries } from "../incidentScene.mjs";
-import { incidentEvidenceTimeline, incidentMosaicEvents, incidentMosaicPage, incidentTriggerLabel, showIncidentCardAnnotations } from "../incidentNavigation.mjs";
+import { eventCoverTime, incidentEvidenceTimeline, incidentMosaicEvents, incidentMosaicPage, incidentTriggerLabel, showIncidentCardAnnotations } from "../incidentNavigation.mjs";
 import { relatedEvidenceReasons, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../relatedIncidents.mjs";
 import {
   appearanceCapableLabel,
@@ -66,7 +66,7 @@ function EvidenceTimeline({ incident, hero, timeline, timeZone, stripRef, onSele
   const spanLabel = evidenceSpanLabel(timeline.durationSeconds);
   const heroEvent = hero?.event || incident;
   const heroLabels = incidentLabels(heroEvent);
-  const heroTime = formatTimeOnly(heroEvent.created_at || hero?.epoch || incident.created_at, timeZone);
+  const heroTime = formatTimeOnly(hero?.epoch || eventCoverTime(heroEvent, incident.created_at), timeZone);
   return (
     <div className="incident-evidence" role="group" aria-label={`Incident evidence timeline, ${summary}`}>
       <div className="incident-evidence-hero">
@@ -87,7 +87,8 @@ function EvidenceTimeline({ incident, hero, timeline, timeZone, stripRef, onSele
         <div className="incident-evidence-strip" ref={stripRef} onKeyDown={onKeyDown}>
           {frames.map((frame) => {
             const selected = frame.key === hero?.key;
-            const time = formatTimeOnly(frame.event.created_at || frame.epoch || incident.created_at, timeZone);
+            // frame.epoch is the image's capture time; created_at is only the trigger.
+            const time = formatTimeOnly(frame.epoch || eventCoverTime(frame.event, incident.created_at), timeZone);
             const labels = incidentLabels(frame.event);
             const labelText = labels.length ? labels.join(", ") : "motion";
             return (
@@ -102,7 +103,7 @@ function EvidenceTimeline({ incident, hero, timeline, timeZone, stripRef, onSele
                 onClick={(clickEvent) => { clickEvent.stopPropagation(); onSelect(frame); }}
               >
                 <SnapshotImage event={frame.event} alt="" thumbnail objectFocusMode="off" objectFocusControls={false} showAnnotations={false} showTracking={false} />
-                <time dateTime={frame.event.created_at || undefined}>{time}</time>
+                <time dateTime={eventCoverTime(frame.event) || undefined}>{time}</time>
                 <span>{labelText}</span>
               </button>
             );
@@ -179,7 +180,7 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
   const timeText = incident.start_at && incident.end_at && incident.start_at !== incident.end_at
     ? `${formatDateTime(incident.start_at, timeZone)} - ${formatDuration(incident.duration_seconds)}`
     : formatDateTime(incident.created_at, timeZone);
-  const previewTimeText = preview.created_at ? formatDateTime(preview.created_at, timeZone) : timeText;
+  const previewTimeText = eventCoverTime(preview) ? formatDateTime(eventCoverTime(preview), timeZone) : timeText;
 
   useEffect(() => {
     if (!expanded) {
@@ -408,12 +409,12 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
                   className="incident-mosaic-tile"
                   key={`${event.id || "event"}-${index}`}
                   onClick={(clickEvent) => { clickEvent.stopPropagation(); selectMosaicEvent(event); }}
-                  aria-label={`Focus event at ${formatTimeOnly(event.created_at || incident.created_at, timeZone)}`}
+                  aria-label={`Focus event at ${formatTimeOnly(eventCoverTime(event, incident.created_at), timeZone)}`}
                 >
                   <SnapshotImage event={event} alt="incident event snapshot" className="incident-mosaic-snapshot" progressive thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusAspect={null} objectFocusControls={false} showAnnotations showTracking={false}>
                     <IncidentSourceDot trigger={eventTrigger} className="incident-mosaic-source" />
                     <div className="incident-mosaic-hud">
-                      <time>{formatTimeOnly(event.created_at || incident.created_at, timeZone)}</time>
+                      <time>{formatTimeOnly(eventCoverTime(event, incident.created_at), timeZone)}</time>
                       <div className="pill-row compact"><IncidentObjectBadges labels={eventLabels} /></div>
                     </div>
                   </SnapshotImage>
@@ -960,7 +961,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
   return (
     <aside ref={inspectorRef} id="incident-inspector" className={`incident-inspector${open ? " open" : ""}`} role={open ? "dialog" : undefined} aria-modal={open ? "true" : undefined} aria-labelledby={open ? "incident-inspector-title" : undefined}>
       <div className="incident-inspector-head">
-        <div><strong id="incident-inspector-title">{cameraNameById.get(incident.camera_id) || incident.camera_id}</strong><time>{formatDateTime(inspectedEvent.created_at || incident.created_at, timeZone)}</time></div>
+        <div><strong id="incident-inspector-title">{cameraNameById.get(incident.camera_id) || incident.camera_id}</strong><time>{formatDateTime(eventCoverTime(inspectedEvent, incident.created_at), timeZone)}</time></div>
         {onClose ? <button type="button" className="incident-inspector-close" onClick={onClose} aria-label="Close incident details"><X size={17} /></button> : null}
       </div>
       <section className="incident-observed-objects" aria-label="Observed objects">

@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import json
 import math
+import re
+from datetime import datetime, timezone
+from pathlib import PurePath
 
 from .incident_utils import (
     event_epoch,
@@ -17,9 +20,70 @@ from .incident_utils import (
     stable_incident_key,
 )
 
+# Snapshot writers name each file after the frame's capture time in UTC.
+_SNAPSHOT_STAMP = re.compile(r"^(\d{8})-(\d{6})-(\d{6})(?:-|\.|$)")
+
+
+def _finite_epoch(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if math.isfinite(value) and value > 0 else None
+    if isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    return None
+
+
+def snapshot_captured_epoch(
+    created_at: object,
+    objects: list[dict],
+    snapshot_path: object,
+) -> float | None:
+    """When the event's cover frame was captured, which is not the trigger time.
+
+    The cover is chosen from samples around the trigger, so it can be seconds
+    earlier or later than ``created_at``. Objects drawn on the cover carry the
+    frame time. A cover with no object on it is recovered from its file name.
+    """
+    cover_objects = [
+        item for item in objects
+        if item.get("label") and item.get("snapshot_visible") is not False
+    ]
+    for key in ("snapshot_captured_at", "frame_captured_at_epoch", "captured_at_epoch"):
+        for item in cover_objects:
+            epoch = _finite_epoch(item.get(key))
+            if epoch is not None:
+                return epoch
+    trigger = _finite_epoch(created_at)
+    if trigger is not None:
+        for item in cover_objects:
+            offset = item.get("temporal_sample_offset_seconds")
+            if (
+                isinstance(offset, (int, float))
+                and not isinstance(offset, bool)
+                and math.isfinite(offset)
+            ):
+                return trigger + float(offset)
+    match = _SNAPSHOT_STAMP.match(PurePath(str(snapshot_path or "")).name)
+    if match:
+        try:
+            stamp = datetime.strptime("".join(match.groups()), "%Y%m%d%H%M%S%f")
+        except ValueError:
+            return None
+        return stamp.replace(tzinfo=timezone.utc).timestamp()
+    return None
+
+
 def _event_row(row: dict) -> dict:
     event = dict(row)
     event["evidence_revision"] = int(event.get("evidence_revision") or 0)
+    stored_snapshot_path = event.get("snapshot_path")
     event["snapshot_path"] = "available" if event.get("snapshot_path") else ""
     event["recording_path"] = "available" if event.get("recording_path") else ""
     try:
@@ -82,6 +146,15 @@ def _event_row(row: dict) -> dict:
         else []
     )
     event["objects"] = objects
+    captured_epoch = (
+        snapshot_captured_epoch(event.get("created_at"), objects, stored_snapshot_path)
+        if stored_snapshot_path else None
+    )
+    if captured_epoch is not None:
+        # Clients label and order cover images by this, not by created_at.
+        event["snapshot_captured_at"] = datetime.fromtimestamp(
+            captured_epoch, timezone.utc
+        ).isoformat()
     event["has_objects"] = bool(detected_objects)
     event["labels"] = sorted({
         str(item["label"])
@@ -294,6 +367,7 @@ def _incident_list_payload(incident: dict) -> dict:
                 "camera_id",
                 "kind",
                 "created_at",
+                "snapshot_captured_at",
                 "evidence_revision",
                 "cover_requirement",
                 "has_objects",

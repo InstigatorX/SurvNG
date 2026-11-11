@@ -1479,6 +1479,8 @@ class EventStoreSceneMixin:
             trigger="ema" if raw_trigger in {"ema","adaptive","visual_backup","adaptive/visual_backup"} else "camera"
             snapshot_observation_id=None
             snapshot_url=None
+            captured_by={event["id"]:event["snapshot_captured_at"] for event in presented_members
+                         if event.get("snapshot_captured_at")}
             selected = _scene_observation_cover(
                 representative, observations_by.get(incident_id, []),
                 recorded_pixels=recorded_pixels_by.get(incident_id, 0),
@@ -1492,12 +1494,15 @@ class EventStoreSceneMixin:
                 snapshot_observation_id=cover["id"]
                 snapshot_url=f"/api/incidents/observations/{snapshot_observation_id}/snapshot"
                 snapshot_path="available"
+                snapshot_captured_at=_iso(cover["captured_epoch"])
                 cover_objects=_card_cover_objects(_json(selected["objects"]))
             elif representative is not None and representative["snapshot_path"]:
                 snapshot_path="available"
+                snapshot_captured_at=captured_by.get(representative["id"])
                 cover_objects=_card_cover_objects(representative["objects_json"])
             else:
                 snapshot_path=""
+                snapshot_captured_at=None
                 cover_objects=[]
             cover_event_id=int(representative["id"]) if representative is not None and snapshot_path else None
             cards.append({
@@ -1520,6 +1525,7 @@ class EventStoreSceneMixin:
                 "snapshot_path":snapshot_path,
                 "snapshot_url":snapshot_url,
                 "snapshot_observation_id":snapshot_observation_id,
+                **({"snapshot_captured_at":snapshot_captured_at} if snapshot_captured_at else {}),
                 "labels":labels,
                 "zones":sorted(zones_by.get(incident_id, ())),
                 "has_objects":bool(labels),
@@ -1533,6 +1539,7 @@ class EventStoreSceneMixin:
                     "camera_id":event["camera_id"],
                     "kind":event["kind"],
                     "created_at":event["created_at"],
+                    **({"snapshot_captured_at":captured_by[event["id"]]} if event["id"] in captured_by else {}),
                     "evidence_revision":int(event["evidence_revision"] or 0),
                     "has_objects":bool(labels),
                     "labels":labels,

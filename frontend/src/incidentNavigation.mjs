@@ -207,6 +207,17 @@ function eventEpoch(event) {
   return 0;
 }
 
+// An event's cover frame is chosen from samples around the trigger, so its
+// capture time can differ from created_at by several seconds.
+export function eventCoverEpoch(event) {
+  const captured = new Date(event?.snapshot_captured_at || 0).getTime() / 1000;
+  return Number.isFinite(captured) && captured > 0 ? captured : eventEpoch(event);
+}
+
+export function eventCoverTime(event, fallback = "") {
+  return event?.snapshot_captured_at || event?.created_at || fallback;
+}
+
 function largestTrackFrame(tracking) {
   let best = null;
   for (const track of Array.isArray(tracking?.tracks) ? tracking.tracks : []) {
@@ -253,7 +264,7 @@ export function incidentEvidenceTimeline(incident) {
     .map((event, index) => ({
       key: `${event?.id ?? "event"}-${index}`,
       event,
-      epoch: eventEpoch(event),
+      epoch: eventCoverEpoch(event),
       index,
     })), ...incidentGalleryFrames(incident).map((frame, index) => ({ ...frame, index: events.length + index }))]
     .sort((left, right) => (left.epoch || Number.POSITIVE_INFINITY) - (right.epoch || Number.POSITIVE_INFINITY) || left.index - right.index)
@@ -304,7 +315,9 @@ export function incidentEvidenceFrames(event) {
   const hasPeakOffset = Number.isFinite(Number(primary?.temporal_peak_confidence_offset_seconds));
   const detectionOffset = Number(primary?.temporal_peak_confidence_offset_seconds ?? primary?.temporal_sample_offset_seconds);
   const selectedOffset = Number(primary?.temporal_sample_offset_seconds);
-  const selectedEpoch = Number.isFinite(selectedOffset) ? epoch + selectedOffset : epoch;
+  const selectedEpoch = event?.snapshot_captured_at
+    ? eventCoverEpoch(event)
+    : (Number.isFinite(selectedOffset) ? epoch + selectedOffset : epoch);
   const tracking = largestTrackFrame(event?.object_tracking);
   return [
     { key: "trigger", label: "Trigger", epoch, kind: "recording" },

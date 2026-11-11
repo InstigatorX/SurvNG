@@ -20,6 +20,8 @@
 - Incident cover images now show the subject that established the incident.
   A subject sampled too few times to confirm no longer loses the cover to a
   sharper empty frame, and cover choice weighs subject sharpness with size.
+- Incident evidence thumbnails now show when each cover frame was captured,
+  not when its event was triggered, and are ordered by that time.
 - Incidents can keep up to four additional evidence images, up from two.
   Object tracking now fills the extra slots with distinct full-detail views
   from across the incident once its session completes.
