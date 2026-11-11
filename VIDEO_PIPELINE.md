@@ -409,9 +409,10 @@ For each available target:
 2. Decode one frame with FFmpeg, using configured hardware decoding when
    available and CPU fallback otherwise. Samples that share a segment decode
    in one process, and hardware surfaces are downloaded only after frame
-   selection. Except under `qsv`, the batch seeks to the whole second before
-   the first sample; after a seek, the QSV decoder returns an earlier image
-   under the requested timestamp on B-frame streams.
+   selection. The batch seeks to the whole second before the first sample,
+   including under `qsv`. Recorded reads use `-copyts -start_at_zero` to retain
+   the image/timestamp pairing through QSV seeking on B-frame streams while
+   normalizing container start offsets to the segment timeline.
 3. Nudge the requested offset when damaged timestamps or keyframe placement
    prevent an exact read.
 4. Run the configured OpenVINO/Core ML detector.

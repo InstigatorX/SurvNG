@@ -771,6 +771,8 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertIn("bmp", command)
         self.assertIn("bgr24", command)
         self.assertNotIn("mjpeg", command)
+        self.assertLess(command.index("-copyts"), command.index("-i"))
+        self.assertLess(command.index("-start_at_zero"), command.index("-i"))
 
     def test_recorded_frame_batch_uses_one_process_and_splits_lossless_frames(self) -> None:
         first = np.full((12, 16, 3), 17, dtype=np.uint8)
@@ -843,8 +845,8 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                     self.returncode = None
                     self.stdout = BytesIO(encoded.tobytes() * 2)
                     self.stderr = BytesIO(
-                        b"[showinfo@event_sample] n: 0 pts: 90000 pts_time:1\n"
-                        b"[showinfo@event_sample] n: 1 pts: 139500 pts_time:1.55\n"
+                        b"[showinfo@event_sample] n: 0 pts: 630000 pts_time:7\n"
+                        b"[showinfo@event_sample] n: 1 pts: 679500 pts_time:7.55\n"
                     )
 
                 def wait(self, timeout=None):
@@ -864,10 +866,11 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertEqual(command[command.index("-ss") + 1], "6")
         self.assertLess(command.index("-hwaccel"), command.index("-ss"))
         self.assertLess(command.index("-ss"), command.index("-i"))
-        self.assertNotIn("-copyts", command)
+        self.assertLess(command.index("-copyts"), command.index("-i"))
+        self.assertLess(command.index("-start_at_zero"), command.index("-i"))
         video_filter = command[command.index("-vf") + 1]
-        self.assertIn("gte(t\\,1.000)", video_filter)
-        self.assertIn("gte(t\\,1.500)", video_filter)
+        self.assertIn("gte(t\\,7.000)", video_filter)
+        self.assertIn("gte(t\\,7.500)", video_filter)
         self.assertLess(video_filter.index("select="), video_filter.index("hwdownload"))
         self.assertLess(video_filter.index("hwdownload"), video_filter.index("showinfo@event_sample"))
         self.assertEqual(frames[7.0].actual_offset, 7.0)
@@ -884,7 +887,14 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 backend._read_recorded_frames(recording, [7.0, 7.5])
         qsv_command = popen.call_args_list[0].args[0]
         self.assertIn("qsv", qsv_command)
-        self.assertNotIn("-ss", qsv_command)
+        self.assertEqual(qsv_command[qsv_command.index("-ss") + 1], "6")
+        self.assertIn("-copyts", qsv_command)
+        self.assertIn("-start_at_zero", qsv_command)
+        cpu_command = popen.call_args_list[1].args[0]
+        self.assertNotIn("-hwaccel", cpu_command)
+        self.assertEqual(cpu_command[cpu_command.index("-vf") + 1], video_filter.replace("hwdownload,format=nv12,", ""))
+        self.assertIn("-copyts", cpu_command)
+        self.assertIn("-start_at_zero", cpu_command)
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required for seek equivalence")
     def test_recorded_frame_batch_seek_matches_decoding_from_segment_start(self) -> None:
@@ -917,11 +927,48 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 self.assertEqual(with_seek[offset].actual_offset, without_seek[offset].actual_offset)
                 self.assertTrue(np.array_equal(with_seek[offset].frame, without_seek[offset].frame))
 
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required for timestamp normalization")
+    def test_recorded_reads_normalize_container_start_offsets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source.mp4"
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc2=size=96x64:rate=30000/1001",
+                "-t", "10", "-c:v", "libx264", "-g", "23", "-bf", "2",
+                "-pix_fmt", "yuv420p", str(source),
+            ], check=True, capture_output=True, timeout=30)
+            backend = RecordedMotionObjectDetector(
+                CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+                SimpleNamespace(config=SimpleNamespace()),
+                SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="off"),
+                lambda: None,
+            )
+            offsets = [2.0, 7.0]
+            reference, _count = backend._read_recorded_frames(source, offsets)
+            self.assertEqual(set(reference), set(offsets))
+            single_reference = backend._read_recorded_frame(source, 2.0)
+            self.assertIsNotNone(single_reference)
+            for start_offset in (0.125, 2.0):
+                with self.subTest(start_offset=start_offset):
+                    recording = Path(tmpdir) / f"offset-{start_offset}.mp4"
+                    subprocess.run([
+                        "ffmpeg", "-hide_banner", "-loglevel", "error",
+                        "-i", str(source), "-c", "copy",
+                        "-output_ts_offset", str(start_offset), str(recording),
+                    ], check=True, capture_output=True, timeout=30)
+                    frames, _count = backend._read_recorded_frames(recording, offsets)
+                    self.assertEqual(set(frames), set(offsets))
+                    for offset in offsets:
+                        self.assertEqual(frames[offset].actual_offset, reference[offset].actual_offset)
+                        self.assertTrue(np.array_equal(frames[offset].frame, reference[offset].frame))
+                    single = backend._read_recorded_frame(recording, 2.0)
+                    self.assertTrue(np.array_equal(single, single_reference))
+
     @unittest.skipUnless(
-        shutil.which("ffmpeg") and render_device_available() and "vaapi" in ffmpeg_hwaccels("ffmpeg"),
-        "hardware decode is required for seek content regression",
+        shutil.which("ffmpeg") and render_device_available() and "qsv" in ffmpeg_hwaccels("ffmpeg"),
+        "QSV decode is required for seek content regression",
     )
-    def test_hardware_seeked_reads_return_the_image_at_the_reported_offset(self) -> None:
+    def test_qsv_seeked_reads_return_the_image_at_the_reported_offset(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "bframes.mp4"
             subprocess.run([
@@ -942,12 +989,18 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 distances = [np.abs(frame.astype(int) - image.astype(int)).mean() for frame in reference]
                 return times[int(np.argmin(distances))]
 
-            for mode in ("qsv", "vaapi"):
-                with self.subTest(mode=mode):
+            for start_offset in (0.0, 0.125, 2.0):
+                with self.subTest(start_offset=start_offset):
+                    recording = Path(tmpdir) / f"offset-{start_offset}.mp4"
+                    subprocess.run([
+                        "ffmpeg", "-hide_banner", "-loglevel", "error",
+                        "-i", str(path), "-c", "copy",
+                        "-output_ts_offset", str(start_offset), str(recording),
+                    ], check=True, capture_output=True, timeout=30)
                     backend = RecordedMotionObjectDetector(
                         CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
                         SimpleNamespace(config=SimpleNamespace()),
-                        SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration=mode),
+                        SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="qsv"),
                         lambda: None,
                     )
                     real_popen = subprocess.Popen
@@ -955,14 +1008,16 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                         "survng.app.motion_pipeline.object_detection.subprocess.Popen",
                         side_effect=real_popen,
                     ) as popen:
-                        frames, _count = backend._read_recorded_frames(path, [2.0, 7.0])
+                        frames, _count = backend._read_recorded_frames(recording, [2.0, 7.0])
                     if popen.call_count != 1:
-                        self.skipTest("hardware decode fell back to software")
+                        self.skipTest("QSV decode fell back to software")
+                    self.assertEqual(set(frames), {2.0, 7.0})
+                    command = popen.call_args.args[0]
+                    self.assertIn("qsv", command)
+                    self.assertEqual(command[command.index("-ss") + 1], "1")
                     for offset, item in frames.items():
                         self.assertEqual(content_time(item.frame), item.actual_offset)
-                    if mode == "qsv":
-                        continue
-                    single = backend._read_recorded_frame(path, 2.0)
+                    single = backend._read_recorded_frame(recording, 2.0)
                     self.assertEqual(content_time(single), frames[2.0].actual_offset)
 
     def test_nonselected_recorded_frames_are_released(self) -> None:

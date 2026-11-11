@@ -28,7 +28,6 @@ from ..face_detection_geometry import upper_body_window
 from ..ffmpeg_hw import (
     RECORDED_FRAME_INPUT_THREAD_ARGS,
     RECORDED_FRAME_OUTPUT_THREAD_ARGS,
-    qsv_enabled,
     recorded_frame_hw_args,
 )
 from ..object_activity import ObjectActivityAttributor
@@ -3140,6 +3139,8 @@ class RecordedMotionObjectDetector:
                     *input_args,
                     "-ss",
                     f"{sample_at:.3f}",
+                    "-copyts",
+                    "-start_at_zero",
                     "-i",
                     str(path),
                     "-map",
@@ -3227,18 +3228,14 @@ class RecordedMotionObjectDetector:
         if not offsets:
             return {}, 0
 
-        # Input seeking skips decoding the segment prefix. A whole-second seek
-        # shifts every timestamp by an exact number of time-base ticks, so the
-        # shifted select picks the same frames as an unseeked decode. After a
-        # seek, QSV returns an earlier image under the selected timestamp on
-        # B-frame streams, so QSV decodes from the segment start.
-        seek_seconds = 0
-        if not qsv_enabled(self.recorder.hardware_acceleration):
-            seek_seconds = max(0, math.floor(offsets[0] - RECORDED_BATCH_SEEK_MARGIN_SECONDS))
+        # Skip the segment prefix while preserving the timestamp/image pairing
+        # through QSV's B-frame decoder. -start_at_zero removes the container's
+        # initial offset, keeping select and showinfo on the segment timeline.
+        seek_seconds = max(0, math.floor(offsets[0] - RECORDED_BATCH_SEEK_MARGIN_SECONDS))
         expression = "0"
         for index, offset in reversed(list(enumerate(offsets))):
             expression = (
-                f"if(eq(selected_n\\,{index})\\,gte(t\\,{offset - seek_seconds:.3f})\\,{expression})"
+                f"if(eq(selected_n\\,{index})\\,gte(t\\,{offset:.3f})\\,{expression})"
             )
         seek_args = ["-ss", str(seek_seconds)] if seek_seconds else []
         hw_input_args, hw_filter_args = recorded_frame_hw_args(
@@ -3274,6 +3271,8 @@ class RecordedMotionObjectDetector:
                 *RECORDED_FRAME_INPUT_THREAD_ARGS,
                 *input_args,
                 *seek_args,
+                "-copyts",
+                "-start_at_zero",
                 "-i",
                 str(path),
                 "-map",
@@ -3390,7 +3389,7 @@ class RecordedMotionObjectDetector:
                     last_error = f"{backend}: {' '.join(detail)[:180]}"
                 continue
             actual_offsets = [
-                round(float(match.group(1)) + seek_seconds, 6)
+                round(float(match.group(1)), 6)
                 for match in re.finditer(
                     rb"showinfo@event_sample[^\r\n]*\bpts_time:([-+0-9.eE]+)",
                     stderr,
