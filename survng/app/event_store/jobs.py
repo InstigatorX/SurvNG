@@ -1264,7 +1264,9 @@ class EventStoreJobsMixin:
         lease_owner: str = "",
     ) -> dict[str, Any] | None:
         now_epoch = time.time()
-        with self._jobs_lock, self._connect_jobs() as conn:
+        # Idle decision workers poll this every 100 ms per camera. Probe
+        # read-only and take the shared jobs lock only for a due trigger.
+        with polling_connection(self.jobs_db_path) as conn:
             if job_id:
                 due = conn.execute(
                     "select 1 from motion_trigger_jobs where id = ? and camera_id = ? "

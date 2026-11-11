@@ -30,9 +30,10 @@ RETENTION_INITIAL_DELAY_SECONDS = 5
 RETENTION_BATCH_TIME_BUDGET_SECONDS = 10.0
 RETENTION_FAILURE_RETRY_MAX_SECONDS = 15 * 60
 RETENTION_PRESSURE_IDLE_RETRY_SECONDS = 60
-# Match storage repair: a full or read-only location can still prove a file is
-# gone. Offline, unmounted, or unavailable locations cannot.
-_HEALTHY_RECORDING_LOCATION_STATES = frozenset({"online", "full", "read_only"})
+# Match storage repair: a low-space, full, or read-only location can still prove
+# a file is gone. Offline, unmounted, or unavailable locations cannot. Low space
+# is the state that triggers pressure cleanup, so it must not block deletion.
+_HEALTHY_RECORDING_LOCATION_STATES = frozenset({"online", "low_space", "full", "read_only"})
 
 
 class RecordingRetentionService:

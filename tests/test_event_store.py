@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import sqlite3
 import tempfile
 import threading
@@ -398,6 +399,39 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(store.motion_trigger_status("gate"), {"running": 1})
             store.complete_motion_trigger("trigger-1", lease_owner="generation-a")
             self.assertEqual(store.motion_trigger_status("gate"), {})
+
+    def test_idle_motion_trigger_poll_does_not_take_the_jobs_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            before = store.lock_wait_status()["jobs"]["acquisitions"]
+            holder_ready = threading.Event()
+            release_holder = threading.Event()
+
+            def hold_jobs_lock() -> None:
+                with store._jobs_lock:
+                    holder_ready.set()
+                    release_holder.wait(5.0)
+
+            holder = threading.Thread(target=hold_jobs_lock)
+            holder.start()
+            try:
+                self.assertTrue(holder_ready.wait(5.0))
+                started = time.monotonic()
+                for _ in range(5):
+                    self.assertIsNone(store.claim_motion_trigger("gate", lease_owner="worker"))
+                self.assertLess(time.monotonic() - started, 1.0)
+            finally:
+                release_holder.set()
+                holder.join(5.0)
+            self.assertEqual(
+                store.lock_wait_status()["jobs"]["acquisitions"],
+                before + 1,
+            )
+            store.enqueue_motion_trigger(
+                job_id="trigger-1", camera_id="gate", payload={"topic": "onvif/motion"},
+            )
+            claimed = store.claim_motion_trigger("gate", lease_owner="worker")
+            self.assertEqual(claimed["id"], "trigger-1")
 
     def test_motion_trigger_same_owner_cannot_reclaim_running_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1583,6 +1617,48 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(row["snapshot_path"], event["snapshot_path"])
             self.assertEqual(claims, 0)
             self.assertTrue(snapshot.exists())
+
+    def test_snapshot_retention_clears_missing_reference_on_a_low_space_location(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            evidence = root / "evidence"
+            snapshot = evidence / "snapshots" / "gate" / "old.webp"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_bytes(b"snapshot")
+            registry = MediaStorageRegistry(
+                root / "metadata",
+                MediaStorageConfig(locations=[
+                    MediaStorageLocationConfig(
+                        id="evidence", path=str(evidence), roles=["snapshots"],
+                        reserve_percent=15,
+                    ),
+                ]),
+            )
+            with patch(
+                "survng.app.media_storage.shutil.disk_usage",
+                return_value=shutil._ntuple_diskusage(1000, 870, 130),
+            ):
+                self.assertEqual(registry.status("evidence").state, "low_space")
+                store = EventStore(root / "metadata", media_storage=registry)
+                event = store.add_event(
+                    camera_id="gate",
+                    kind="object",
+                    snapshot_path=str(snapshot),
+                    created_at="2020-01-01T00:00:00+00:00",
+                )
+                snapshot.unlink()
+                result = store.apply_snapshot_retention(
+                    datetime(2023, 1, 1, tzinfo=timezone.utc).timestamp(),
+                    100,
+                )
+
+            self.assertEqual(result["missing_files"], 1)
+            self.assertEqual(result["failed_files"], 0)
+            with store._connect() as connection:
+                row = connection.execute(
+                    "select snapshot_path from events where id = ?", (event["id"],)
+                ).fetchone()
+            self.assertEqual(row["snapshot_path"], "")
 
     def test_snapshot_retention_keeps_reference_when_location_is_offline(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

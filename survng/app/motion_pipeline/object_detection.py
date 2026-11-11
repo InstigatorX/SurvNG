@@ -62,6 +62,9 @@ RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
 RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS = 6.0
 # Finalization and edge indexing after a segment boundary.
 RECORDED_SEGMENT_INDEX_MARGIN_SECONDS = 1.0
+# FFmpeg's accurate seek discards frames before the seek point, so keep the
+# seek strictly ahead of the first requested sample.
+RECORDED_BATCH_SEEK_MARGIN_SECONDS = 0.25
 # Shorter waits are cheaper to sleep through than to reschedule.
 RECORDED_SPLIT_MINIMUM_WAIT_SECONDS = 1.0
 FAST_LIVE_FRAME_MAX_AGE_SECONDS = 1.0
@@ -3223,11 +3226,16 @@ class RecordedMotionObjectDetector:
         if not offsets:
             return {}, 0
 
+        # Input seeking skips decoding the segment prefix. A whole-second seek
+        # shifts every timestamp by an exact number of time-base ticks, so the
+        # shifted select picks the same frames as an unseeked decode.
+        seek_seconds = max(0, math.floor(offsets[0] - RECORDED_BATCH_SEEK_MARGIN_SECONDS))
         expression = "0"
         for index, offset in reversed(list(enumerate(offsets))):
             expression = (
-                f"if(eq(selected_n\\,{index})\\,gte(t\\,{offset:.3f})\\,{expression})"
+                f"if(eq(selected_n\\,{index})\\,gte(t\\,{offset - seek_seconds:.3f})\\,{expression})"
             )
+        seek_args = ["-ss", str(seek_seconds)] if seek_seconds else []
         hw_input_args, hw_filter_args = recorded_frame_hw_args(
             self.recorder.hardware_acceleration
         )
@@ -3242,12 +3250,13 @@ class RecordedMotionObjectDetector:
                 if remaining <= 0:
                     break
                 timeout = min(timeout, remaining)
-            filter_prefix = ""
+            # Download only the selected surfaces from the hardware decoder.
+            download_filter = ""
             if filter_args:
                 try:
-                    filter_prefix = f"{filter_args[filter_args.index('-vf') + 1]},"
+                    download_filter = f"{filter_args[filter_args.index('-vf') + 1]},"
                 except (ValueError, IndexError):
-                    filter_prefix = ""
+                    download_filter = ""
             command = [
                 self.recorder.ffmpeg_path,
                 "-hide_banner",
@@ -3259,13 +3268,14 @@ class RecordedMotionObjectDetector:
                 "ignore_err",
                 *RECORDED_FRAME_INPUT_THREAD_ARGS,
                 *input_args,
+                *seek_args,
                 "-i",
                 str(path),
                 "-map",
                 "0:v:0",
                 "-an",
                 "-vf",
-                f"{filter_prefix}select={expression},showinfo@event_sample",
+                f"select={expression},{download_filter}showinfo@event_sample",
                 "-fps_mode",
                 "passthrough",
                 "-frames:v",
@@ -3375,7 +3385,7 @@ class RecordedMotionObjectDetector:
                     last_error = f"{backend}: {' '.join(detail)[:180]}"
                 continue
             actual_offsets = [
-                float(match.group(1))
+                round(float(match.group(1)) + seek_seconds, 6)
                 for match in re.finditer(
                     rb"showinfo@event_sample[^\r\n]*\bpts_time:([-+0-9.eE]+)",
                     stderr,

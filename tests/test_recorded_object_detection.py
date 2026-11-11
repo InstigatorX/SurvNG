@@ -822,6 +822,85 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertIn("-fps_mode", command)
         self.assertIn("select=", " ".join(command))
         self.assertIn("showinfo@event_sample", " ".join(command))
+        self.assertNotIn("-ss", command)
+
+    def test_recorded_frame_batch_seeks_and_downloads_only_selected_surfaces(self) -> None:
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            SimpleNamespace(config=SimpleNamespace()),
+            SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="qsv"),
+            lambda: None,
+        )
+        _ok, encoded = cv2.imencode(".bmp", np.full((12, 16, 3), 9, dtype=np.uint8))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recording = Path(tmpdir) / "sample.mp4"
+            recording.touch()
+
+            class Process:
+                def __init__(self) -> None:
+                    self.returncode = None
+                    self.stdout = BytesIO(encoded.tobytes() * 2)
+                    self.stderr = BytesIO(
+                        b"[showinfo@event_sample] n: 0 pts: 90000 pts_time:1\n"
+                        b"[showinfo@event_sample] n: 1 pts: 139500 pts_time:1.55\n"
+                    )
+
+                def wait(self, timeout=None):
+                    self.returncode = 0
+                    return 0
+
+                def kill(self):
+                    self.returncode = -9
+
+            with patch(
+                "survng.app.motion_pipeline.object_detection.subprocess.Popen",
+                return_value=Process(),
+            ) as popen:
+                frames, _count = backend._read_recorded_frames(recording, [7.0, 7.5])
+
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("-ss") + 1], "6")
+        self.assertLess(command.index("-hwaccel"), command.index("-ss"))
+        self.assertLess(command.index("-ss"), command.index("-i"))
+        self.assertNotIn("-copyts", command)
+        video_filter = command[command.index("-vf") + 1]
+        self.assertIn("gte(t\\,1.000)", video_filter)
+        self.assertIn("gte(t\\,1.500)", video_filter)
+        self.assertLess(video_filter.index("select="), video_filter.index("hwdownload"))
+        self.assertLess(video_filter.index("hwdownload"), video_filter.index("showinfo@event_sample"))
+        self.assertEqual(frames[7.0].actual_offset, 7.0)
+        self.assertEqual(frames[7.5].actual_offset, 7.55)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required for seek equivalence")
+    def test_recorded_frame_batch_seek_matches_decoding_from_segment_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "short-gop.mp4"
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc2=size=96x64:rate=20",
+                "-t", "10", "-c:v", "libx264", "-g", "23", "-bf", "2",
+                "-pix_fmt", "yuv420p", str(path),
+            ], check=True, capture_output=True, timeout=30)
+            backend = RecordedMotionObjectDetector(
+                CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+                SimpleNamespace(config=SimpleNamespace()),
+                SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="off"),
+                lambda: None,
+            )
+            requests = ([0.3, 0.8], [2.0, 2.05, 2.5], [4.25, 4.3], [7.0, 7.5, 8.0], [9.1, 9.95])
+            seeked = [backend._read_recorded_frames(path, offsets)[0] for offsets in requests]
+            with patch(
+                "survng.app.motion_pipeline.object_detection.RECORDED_BATCH_SEEK_MARGIN_SECONDS",
+                1e9,
+            ):
+                unseeked = [backend._read_recorded_frames(path, offsets)[0] for offsets in requests]
+
+        for offsets, with_seek, without_seek in zip(requests, seeked, unseeked):
+            self.assertEqual(set(with_seek), set(offsets))
+            self.assertEqual(set(with_seek), set(without_seek))
+            for offset in offsets:
+                self.assertEqual(with_seek[offset].actual_offset, without_seek[offset].actual_offset)
+                self.assertTrue(np.array_equal(with_seek[offset].frame, without_seek[offset].frame))
 
     def test_nonselected_recorded_frames_are_released(self) -> None:
         samples = [

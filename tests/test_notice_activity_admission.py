@@ -30,11 +30,16 @@ def evidence(*, movement=0.00383, entry=False, arrival=False, y=80):
     return samples
 
 
-def notice(*, source="motion"):
+# Located motion inside an incident zone establishes on its own (zone motion),
+# so tests about object evidence alone place the motion outside the zone.
+OUTSIDE_ZONE_REGION = (0.7, 0.1, 0.9, 0.4)
+
+
+def notice(*, source="motion", region=(0.1, 0.5, 0.4, 0.9)):
     return {"source": source, "epoch": 1001,
             "activity_policy": {"version": 1, "require_motion_correlation": True,
                                 "alignment": {"reliable": True}},
-            "features": {"motion_regions": [[0.1, 0.5, 0.4, 0.9]]}}
+            "features": {"motion_regions": [list(region)]}}
 
 
 @pytest.mark.parametrize("source", ["motion", "camera"])
@@ -44,7 +49,7 @@ def test_uncorrelated_notice_does_not_establish_even_with_high_confidence(source
     original = deepcopy(samples)
     result = evaluate_scene_establishment(
         samples, policy=policy(zone("Entry", "incident", 0.5, 1)) if restricted else policy(require=False),
-        notice=notice(source=source),
+        notice=notice(source=source, region=OUTSIDE_ZONE_REGION),
     )
     assert result["status"] == "pending"
     assert result["reason"] == "object_not_motion_correlated"
@@ -69,7 +74,8 @@ def test_correlated_object_outside_zone_cannot_use_unrelated_in_zone_box():
         for item in sample["observations"]:
             item["id"] += "-outside"
     result = evaluate_scene_establishment(
-        outside + inside, policy=policy(zone("Entry", "incident", 0.5, 1)), notice=notice(),
+        outside + inside, policy=policy(zone("Entry", "incident", 0.5, 1)),
+        notice=notice(region=OUTSIDE_ZONE_REGION),
     )
     assert result["status"] != "supported"
     assert result["supporting_observation_ids"] == []
@@ -107,7 +113,7 @@ def test_handler_and_durable_admission_agree_and_survive_restart(tmp_path, movin
     )
     outcome = handler.handle(
         "adaptive/visual_backup", "visual backup", datetime.fromtimestamp(1001, timezone.utc),
-        {"trigger_source": "visual_backup", "features": notice()["features"]},
+        {"trigger_source": "visual_backup", "features": notice(region=OUTSIDE_ZONE_REGION)["features"]},
         require_motion_correlation=True,
     )
     assert outcome.event_id is not None  # raw evidence remains accessible
@@ -190,7 +196,7 @@ def test_pending_evidence_can_establish_later_without_noise_prolonging_it(tmp_pa
             {"status": "scene_observations", "samples": samples,
              "observations": [item for sample in samples for item in sample["observations"]]},
             {"status": "motion_qualification", "motion_qualification": {
-                "trigger_source": "visual_backup", "features": notice()["features"],
+                "trigger_source": "visual_backup", "features": notice(region=OUTSIDE_ZONE_REGION)["features"],
                 "notice_activity_policy": notice()["activity_policy"],
                 "establishment_zone_policy": policy(zone("Entry", "incident", 0.5, 1)),
             }},

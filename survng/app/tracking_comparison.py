@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import hashlib
+import logging
 import platform
 from importlib.metadata import PackageNotFoundError, version
 import queue
@@ -19,7 +20,13 @@ import numpy as np
 
 from .config import CameraConfig, ObjectTrackingConfig
 from .detector import detection_failure
-from .ffmpeg_hw import RECORDED_FRAME_INPUT_THREAD_ARGS, RECORDED_FRAME_OUTPUT_THREAD_ARGS
+from .ffmpeg_hw import (
+    RECORDED_FRAME_INPUT_THREAD_ARGS,
+    RECORDED_FRAME_OUTPUT_THREAD_ARGS,
+    dri_render_device,
+    qsv_enabled,
+    vaapi_enabled,
+)
 from .object_tracking import (
     ObjectTrackerRegistry,
     _encode_appearance,
@@ -29,6 +36,7 @@ from .object_tracking import (
 from .zones import apply_detection_zones
 from .video_frames import DecodedVideoFrame, VideoFrameReference
 
+LOGGER = logging.getLogger(__name__)
 
 TRACKING_COMPARISON_IMPLEMENTATIONS = (
     "survng_hybrid",
@@ -72,12 +80,19 @@ def sampled_video_frames(
     start_offset_seconds: float = 0.0,
     concat_input: bool = False,
     probe_path: Path | None = None,
+    hardware_acceleration: str | None = None,
 ) -> Iterator[DecodedVideoFrame]:
     """Sample frames using ``start_epoch`` as the epoch at the seek point.
 
     Source PTS remains file-relative; ``start_epoch`` is the wall-clock epoch
     of ``start_offset_seconds``. Trimming occurs before timestamp collection
     so every sampled timestamp corresponds to an emitted image.
+
+    ``hardware_acceleration`` follows recorded-frame policy: only explicit
+    ``qsv`` or ``vaapi`` decodes and scales on the GPU (through VAAPI).
+    Hardware pixels are not bit-identical to the software decode, so callers
+    that re-decode an exact frame reference for pixel equality must leave it
+    unset. A hardware failure before the first frame retries in software.
     """
     if not ffmpeg_path:
         raise ValueError("ffmpeg_path is required for video frame sampling")
@@ -91,7 +106,32 @@ def sampled_video_frames(
         start_offset_seconds=start_offset_seconds,
         concat_input=concat_input,
         probe_path=probe_path,
+        hardware_acceleration=hardware_acceleration,
     )
+
+
+def _sampled_decode_plans(
+    hardware_acceleration: str | None,
+    output_width: int,
+    output_height: int,
+) -> list[tuple[str, list[str], str]]:
+    """Return (backend, input args, pre-sampling scale filter) attempts.
+
+    Explicit QSV also uses VAAPI here: scale_qsv re-times frames onto a
+    1/fps time base, which would break exact source-PTS frame references.
+    """
+    plans: list[tuple[str, list[str], str]] = []
+    if qsv_enabled(hardware_acceleration) or vaapi_enabled(hardware_acceleration):
+        plans.append((
+            "vaapi",
+            [
+                "-vaapi_device", dri_render_device(),
+                "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi",
+            ],
+            f"scale_vaapi=w={output_width}:h={output_height}:format=nv12,hwdownload,format=nv12",
+        ))
+    plans.append(("cpu", [], ""))
+    return plans
 
 
 def _ffmpeg_sampled_video_frames(
@@ -105,6 +145,7 @@ def _ffmpeg_sampled_video_frames(
     start_offset_seconds: float,
     concat_input: bool,
     probe_path: Path | None,
+    hardware_acceleration: str | None = None,
 ) -> Iterator[DecodedVideoFrame]:
     # ffprobe is isolated and substantially
     # faster under a full camera workload. A constituent file is used when the
@@ -119,7 +160,6 @@ def _ffmpeg_sampled_video_frames(
     output_height = max(2, int(round(source_height * output_width / source_width)))
     output_width -= output_width % 2
     output_height -= output_height % 2
-    frame_bytes = output_width * output_height * 3
     input_options = ["-f", "concat", "-safe", "0"] if concat_input else []
     duration = max(0.1, float(duration_seconds))
     offset = max(0.0, float(start_offset_seconds))
@@ -129,27 +169,87 @@ def _ffmpeg_sampled_video_frames(
         # trim, showinfo PTS and frame references are unchanged; a container
         # start offset would shift that timeline, so only zero-start files seek.
         input_options = ["-ss", f"{offset - INPUT_SEEK_MARGIN_SECONDS:.6f}", "-copyts"]
-    command = [
-        ffmpeg_path,
-        "-nostdin",
-        "-v", "info",
-        *RECORDED_FRAME_INPUT_THREAD_ARGS,
-        *input_options,
-        "-i", str(path),
-        "-vf", (
-            f"trim=start={offset:.6f}:end={offset + duration:.6f},"
-            f"scale={output_width}:{output_height},showinfo@source,"
-            f"fps={max(0.1, float(sample_fps)):.6f},showinfo@sampled,"
-            "setpts=PTS-STARTPTS"
-        ),
-        "-t", f"{duration:.6f}",
-        "-fps_mode", "passthrough",
-        "-an", "-sn", "-dn",
-        "-f", "rawvideo",
-        "-pix_fmt", "bgr24",
-        *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
-        "pipe:1",
-    ]
+    trim = f"trim=start={offset:.6f}:end={offset + duration:.6f}"
+    sampling = (
+        f"showinfo@source,fps={max(0.1, float(sample_fps)):.6f},showinfo@sampled"
+    )
+    plans = _sampled_decode_plans(hardware_acceleration, output_width, output_height)
+    for index, (backend, decode_args, hardware_scale) in enumerate(plans):
+        # Source and sampled checksums must see system-memory frames. Hardware
+        # scales before download; software scales only the sampled frames.
+        video_filter = (
+            f"{trim},{hardware_scale},{sampling},setpts=PTS-STARTPTS"
+            if hardware_scale
+            else f"{trim},{sampling},scale={output_width}:{output_height},setpts=PTS-STARTPTS"
+        )
+        command = [
+            ffmpeg_path,
+            "-nostdin",
+            "-v", "info",
+            *RECORDED_FRAME_INPUT_THREAD_ARGS,
+            *decode_args,
+            *input_options,
+            "-i", str(path),
+            "-vf", video_filter,
+            "-t", f"{duration:.6f}",
+            "-fps_mode", "passthrough",
+            "-an", "-sn", "-dn",
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
+            "pipe:1",
+        ]
+        yielded = False
+        try:
+            for sample in _run_sampled_decoder(
+                command,
+                path=path,
+                start_epoch=start_epoch,
+                offset=offset,
+                start_offset_seconds=start_offset_seconds,
+                output_width=output_width,
+                output_height=output_height,
+                time_base_num=time_base_num,
+                time_base_den=time_base_den,
+            ):
+                yielded = True
+                yield sample
+            return
+        except (OSError, RuntimeError) as error:
+            if yielded or index == len(plans) - 1:
+                raise
+            _warn_sampled_hardware_fallback(backend, error)
+
+
+_hardware_fallback_warned: set[str] = set()
+_hardware_fallback_lock = threading.Lock()
+
+
+def _warn_sampled_hardware_fallback(backend: str, error: BaseException) -> None:
+    with _hardware_fallback_lock:
+        first = backend not in _hardware_fallback_warned
+        _hardware_fallback_warned.add(backend)
+    LOGGER.log(
+        logging.WARNING if first else logging.DEBUG,
+        "%s sampled-frame decode failed; using software decode (%s)",
+        backend,
+        error,
+    )
+
+
+def _run_sampled_decoder(
+    command: list[str],
+    *,
+    path: Path,
+    start_epoch: float,
+    offset: float,
+    start_offset_seconds: float,
+    output_width: int,
+    output_height: int,
+    time_base_num: int,
+    time_base_den: int,
+) -> Iterator[DecodedVideoFrame]:
+    frame_bytes = output_width * output_height * 3
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,

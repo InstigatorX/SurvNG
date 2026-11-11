@@ -254,13 +254,89 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         self.assertEqual(before_input[before_input.index("-filter_threads") + 1], "1")
         self.assertEqual(after_input[after_input.index("-threads:v") + 1], "1")
         self.assertIn(
-            "scale=8:4,showinfo@source,fps=2.000000,showinfo@sampled",
+            "showinfo@source,fps=2.000000,showinfo@sampled,scale=8:4,",
             command[command.index("-vf") + 1],
         )
+        self.assertNotIn("-hwaccel", command)
         self.assertEqual(command[command.index("-f") + 1], "concat")
         self.assertEqual(command[command.index("-safe") + 1], "0")
         self.assertIn("trim=start=1.250000:end=2.250000", command[command.index("-vf") + 1])
         self.assertNotIn("-ss", command)
+
+    def test_ffmpeg_sampler_scales_on_hardware_before_download(self) -> None:
+        process = SimpleNamespace(
+            stdout=BytesIO(bytes(16 * 8 * 3)),
+            stderr=BytesIO(
+                b"[showinfo@source] n: 0 pts: 585000 pts_time:6.5 checksum:AAAA\n"
+                b"[showinfo@sampled] n: 0 pts: 13 pts_time:6.5 checksum:AAAA\n"
+            ),
+            wait=Mock(return_value=0), poll=Mock(return_value=0),
+            terminate=Mock(), kill=Mock(),
+        )
+        probe = SimpleNamespace(
+            returncode=0,
+            stdout='{"streams":[{"width":16,"height":8,"time_base":"1/90000"}],'
+                   '"format":{"start_time":"0.000000"}}',
+        )
+        with (
+            patch("survng.app.tracking_comparison.subprocess.run", return_value=probe),
+            patch("survng.app.tracking_comparison.subprocess.Popen", return_value=process) as popen,
+        ):
+            frames = list(sampled_video_frames(
+                Path("segment.mp4"), start_epoch=50.0, sample_fps=2.0, duration_seconds=1.0,
+                ffmpeg_path="ffmpeg", maximum_width=8, start_offset_seconds=6.5,
+                probe_path=Path("segment.mp4"), hardware_acceleration="qsv",
+            ))
+
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(popen.call_count, 1)
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("-hwaccel") + 1], "vaapi")
+        self.assertLess(command.index("-hwaccel"), command.index("-i"))
+        self.assertEqual(command[command.index("-ss") + 1], "6.250000")
+        video_filter = command[command.index("-vf") + 1]
+        self.assertTrue(video_filter.startswith(
+            "trim=start=6.500000:end=7.500000,scale_vaapi=w=16:h=8:format=nv12,hwdownload,format=nv12,"
+            "showinfo@source,fps=2.000000,showinfo@sampled,"
+        ))
+
+    def test_ffmpeg_sampler_falls_back_to_software_before_the_first_frame(self) -> None:
+        failed = SimpleNamespace(
+            stdout=BytesIO(b""), stderr=BytesIO(b""), wait=Mock(return_value=1),
+            poll=Mock(return_value=1), terminate=Mock(), kill=Mock(),
+        )
+        decoded = SimpleNamespace(
+            stdout=BytesIO(bytes(96)),
+            stderr=BytesIO(
+                b"[showinfo@source] n: 0 pts: 117000 pts_time:1.3 checksum:AAAA\n"
+                b"[showinfo@sampled] n: 0 pts: 3 pts_time:1.5 checksum:AAAA\n"
+            ),
+            wait=Mock(return_value=0), poll=Mock(return_value=0),
+            terminate=Mock(), kill=Mock(),
+        )
+        probe = SimpleNamespace(
+            returncode=0,
+            stdout='{"streams":[{"width":8,"height":4,"time_base":"1/90000"}]}',
+        )
+        with (
+            patch("survng.app.tracking_comparison.subprocess.run", return_value=probe),
+            patch(
+                "survng.app.tracking_comparison.subprocess.Popen",
+                side_effect=[failed, decoded],
+            ) as popen,
+            self.assertLogs("survng.app.tracking_comparison", level="DEBUG"),
+        ):
+            frames = list(sampled_video_frames(
+                Path("segment.mp4"), start_epoch=50.0, sample_fps=2.0, duration_seconds=1.0,
+                ffmpeg_path="ffmpeg", maximum_width=8, start_offset_seconds=1.25,
+                hardware_acceleration="vaapi",
+            ))
+
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0].reference.pts, 117000)
+        hardware, software = (call.args[0] for call in popen.call_args_list)
+        self.assertIn("scale_vaapi=w=8:h=4:format=nv12", hardware[hardware.index("-vf") + 1])
+        self.assertNotIn("-hwaccel", software)
 
     def test_ffmpeg_sampler_seeks_to_a_keyframe_on_the_source_timeline(self) -> None:
         def sampled_command(probe_stdout):

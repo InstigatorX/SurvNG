@@ -7,6 +7,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from survng.app.config import load_config
+from survng.app.config_secrets import SECRET_PLACEHOLDER
+from survng.app.security import hash_api_token
+
 
 class ApiTokenScriptTest(unittest.TestCase):
     def run_cli(self, config_path: Path, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -43,16 +47,21 @@ class ApiTokenScriptTest(unittest.TestCase):
             token = result.stdout.strip().splitlines()[-1]
             saved_text = config_path.read_text(encoding="utf-8")
             saved = json.loads(saved_text)
+            secrets_text = (Path(tmpdir) / "secrets.json").read_text(encoding="utf-8")
+            loaded = load_config(config_path)
 
         self.assertTrue(token.startswith("survng_"))
         self.assertNotIn(token, saved_text)
+        self.assertNotIn(token, secrets_text)
         self.assertTrue(saved["api_auth"]["enabled"])
         self.assertEqual(saved["api_auth"]["tokens"][0]["id"], "home-assistant")
         self.assertEqual(
             saved["api_auth"]["tokens"][0]["scopes"],
             ["read", "camera:control"],
         )
-        self.assertEqual(len(saved["api_auth"]["tokens"][0]["token_hash"]), 64)
+        # The digest lives in the encrypted secrets.json sidecar, not config.json.
+        self.assertEqual(saved["api_auth"]["tokens"][0]["token_hash"], SECRET_PLACEHOLDER)
+        self.assertEqual(loaded.api_auth.tokens[0].token_hash, hash_api_token(token))
 
     def test_cli_lists_metadata_and_deletes_by_id_without_exposing_hash(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

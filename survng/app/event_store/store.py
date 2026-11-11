@@ -48,9 +48,9 @@ class EventStore(
 ):
     SNAPSHOT_SIZE_WRITE_BATCH = 50
     SNAPSHOT_REFERENCE_WRITE_BATCH = 50
-    # Match storage repair: full and read-only locations can still prove a file
-    # is gone. Offline, unmounted, or unavailable locations cannot.
-    _HEALTHY_SNAPSHOT_LOCATION_STATES = frozenset({"online", "full", "read_only"})
+    # Match storage repair: low-space, full, and read-only locations can still
+    # prove a file is gone. Offline, unmounted, or unavailable locations cannot.
+    _HEALTHY_SNAPSHOT_LOCATION_STATES = frozenset({"online", "low_space", "full", "read_only"})
     SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY = "snapshot_size_backfill_cursor"
     SNAPSHOT_SIZE_IDLE_SCAN_SECONDS = 3600.0
     COMPACT_COLUMNS = (

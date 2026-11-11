@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from .config import MotionQualificationConfig
+from .database_polling import database_polling_session
 from .motion import MotionQualificationResult
 from .motion_topics import semantic_motion_kind
 from .camera_semantics import active_camera_semantic_kind, camera_semantic_reports
@@ -248,6 +249,7 @@ class MotionDecisionOrchestrator:
             error=str(error),
         )
 
+    @database_polling_session()
     def run_until_error(self, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
             try:
