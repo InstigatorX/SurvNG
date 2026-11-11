@@ -611,6 +611,14 @@ def _resources_snapshot(raw_detector: dict[str, Any], semantic: Any) -> dict[str
             } if isinstance(raw, dict) else {}
         except Exception as error:
             LOGGER.debug("semantic search usage unavailable (%s)", type(error).__name__)
+    timing: dict[str, Any] = {}
+    timing_source = getattr(semantic, "search_timing", None)
+    if callable(timing_source):
+        try:
+            raw_timing = timing_source()
+            timing = _search_timing_snapshot(raw_timing) if isinstance(raw_timing, dict) else {}
+        except Exception as error:
+            LOGGER.debug("semantic search timing unavailable (%s)", type(error).__name__)
     return {
         "processes": [
             {
@@ -624,8 +632,32 @@ def _resources_snapshot(raw_detector: dict[str, Any], semantic: Any) -> dict[str
         "semantic_search": {
             "enabled": bool(getattr(getattr(semantic, "config", None), "enabled", False)),
             "searches_since_start": searches,
+            "search_timing_ms": timing,
         },
     }
+
+
+_SEARCH_TIMING_PHASES = (
+    "encoder_wait_ms", "encode_ms", "prepare_ms", "cache_ms",
+    "score_ms", "database_ms", "rank_ms", "total_ms", "prompts",
+)
+
+
+def _search_timing_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
+    """Allowlist per-phase search milliseconds for the last search and average."""
+    result: dict[str, Any] = {}
+    for section in ("last", "average"):
+        values = raw.get(section)
+        if not isinstance(values, dict) or not values:
+            continue
+        entry: dict[str, Any] = {
+            phase: _optional_number(values.get(phase)) for phase in _SEARCH_TIMING_PHASES
+            if phase in values
+        }
+        if section == "last" and values.get("kind") in {"text", "image"}:
+            entry["kind"] = values["kind"]
+        result[section] = entry
+    return result
 
 
 def build_runtime_status(

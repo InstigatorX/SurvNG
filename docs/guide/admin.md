@@ -67,6 +67,10 @@ resident GPU memory, and busy seconds per engine since the process started. A
 process with a GPU client but zero busy time holds the GPU without using it.
 `resources.semantic_search.searches_since_start` counts completed text and
 image searches, showing whether always-on semantic indexing is being used.
+`resources.semantic_search.search_timing_ms` splits the last search, and the
+average since start, into phases: waiting for the encoder behind background
+indexing, encoding the query prompts, loading the vector cache, scoring,
+validating candidates in the database, and ranking.
 The log tail contains only timestamp, level, logger, and message fields; it is
 size-limited, credential-redacted, and has URLs removed. Tracebacks and
 structured logging extras are not exposed. The default socket is

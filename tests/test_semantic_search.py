@@ -80,6 +80,123 @@ class SemanticIndexTest(unittest.TestCase):
 
         self.assertEqual(service.searches_served(), {"text": 1, "image": 1})
         self.assertEqual(service.worker_pid, 4242)
+        timing = service.search_timing()
+        self.assertEqual(timing["last"]["kind"], "image")
+        self.assertEqual(timing["last"]["prompts"], 1.0)
+        for phase in ("encoder_wait_ms", "encode_ms", "database_ms", "total_ms"):
+            self.assertGreaterEqual(timing["last"][phase], 0.0)
+            self.assertIn(phase, timing["average"])
+
+    def test_composed_search_validates_only_ranked_candidates_with_full_scan_parity(self) -> None:
+        from survng.app.semantic_search import semantic_query_plan
+
+        identity = SemanticModelIdentity("test", "parity-model", "parity-prep", 8)
+        with sqlite3.connect(self.database_path) as connection:
+            connection.executemany(
+                "insert or ignore into events(id) values (?)",
+                [(event_id,) for event_id in range(1, 121)],
+            )
+        rng = np.random.default_rng(7)
+        evidence = [
+            SemanticEvidence(
+                event_id=1 + index // 3,
+                camera_id="gate" if index % 2 else "drive",
+                captured_at=f"2026-01-01T00:{index // 60:02d}:{index % 60:02d}+00:00",
+                source_kind="object_crop",
+                source_key=f"crop-{index}",
+                image_path=f"snap-{index}.jpg",
+                object_label="car",
+            )
+            for index in range(360)
+        ]
+        # A third of the evidence resembles "red car"; some rows are near-ties.
+        target = rng.normal(size=8)
+        base = rng.normal(size=(360, 8))
+        base[::3] = target + rng.normal(scale=0.35, size=(120, 8))
+        base[::21] = target + rng.normal(scale=0.01, size=(len(base[::21]), 8))
+        self.index.upsert(evidence, base, identity)
+        plan = semantic_query_plan("red car")
+        self.assertTrue(plan.composed)
+        component_names = tuple(plan.prompts)
+
+        def red_car_query(seed: int) -> np.ndarray:
+            local = np.random.default_rng(seed)
+            query = local.normal(size=(len(component_names), 8))
+            for name in ("full", "subject", "attribute"):
+                query[component_names.index(name)] = target + local.normal(scale=0.2, size=8)
+            return query
+
+        executed: list[str] = []
+
+        def search(cached: bool, query: np.ndarray, **filters: object) -> list:
+            if cached:
+                connect = self.index._connect
+
+                def traced():
+                    connection = connect()
+                    connection.set_trace_callback(executed.append)
+                    return connection
+
+                with patch.object(self.index, "_connect", traced):
+                    return self.index.search(query, identity, query_plan=plan, **filters)
+            with patch.object(self.index, "_vector_cache_locked", return_value=None):
+                return self.index.search(query, identity, query_plan=plan, **filters)
+
+        cases = (
+            {},
+            {"limit": 3},
+            {"limit": 5, "unique_events": True},
+            {"camera_ids": ["gate"], "limit": 10},
+            {"minimum_score": 0.2},
+        )
+        returned = 0
+        for seed in range(6):
+            query = red_car_query(seed)
+            for filters in cases:
+                with self.subTest(seed=seed, filters=filters):
+                    executed.clear()
+                    hits = search(True, query, **filters)
+                    returned += len(hits)
+                    self.assertEqual(hits, search(False, query, **filters))
+                    full_scans = [
+                        sql for sql in executed
+                        if "from semantic_embeddings" in sql and "id in (" not in sql
+                        and "order by captured_at" in sql
+                    ]
+                    self.assertEqual(full_scans, [])
+        self.assertGreater(returned, 30)
+
+        # Plain single-prompt searches validate ranked IDs in growing batches;
+        # a small bulk size forces several batch sizes within one search.
+        plain = SemanticQueryPlan("car", {"full": "car"})
+        with patch.object(SemanticIndex, "VECTOR_LOAD_BATCH_ROWS", 16):
+            for seed in range(4):
+                query = red_car_query(seed)[[component_names.index("full")]]
+                for filters in cases:
+                    with self.subTest(plain_seed=seed, filters=filters):
+                        cached = self.index.search(query, identity, query_plan=plain, **filters)
+                        with patch.object(self.index, "_vector_cache_locked", return_value=None):
+                            scanned = self.index.search(query, identity, query_plan=plain, **filters)
+                        self.assertEqual(cached, scanned)
+                        if not filters.get("minimum_score"):
+                            self.assertTrue(cached)
+
+    def test_search_reports_phase_timing(self) -> None:
+        self.index.upsert(
+            [SemanticEvidence(1, "gate", "2026-01-01T00:00:00+00:00", "full_frame", "frame", "a.jpg")],
+            [[1, 0, 0]],
+            self.identity,
+        )
+        timing: dict[str, float] = {}
+
+        hits = self.index.search([1, 0, 0], self.identity, timing=timing)
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(
+            set(timing),
+            {"prepare_ms", "cache_ms", "score_ms", "database_ms", "rank_ms"},
+        )
+        self.assertTrue(all(value >= 0.0 for value in timing.values()))
 
     def test_observation_lookup_uses_the_observation_index(self) -> None:
         with self.index._connect() as connection:

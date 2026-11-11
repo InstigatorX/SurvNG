@@ -526,6 +526,11 @@ def test_resources_report_semantic_usage_without_index_queries(monkeypatch) -> N
         config=SimpleNamespace(enabled=True),
         worker_pid=None,
         searches_served=Mock(return_value={"text": 3, "image": 1, "private": "secret"}),
+        search_timing=Mock(return_value={
+            "last": {"kind": "text", "encode_ms": 41.5, "database_ms": 12.0,
+                     "total_ms": 60.2, "prompts": 13.0, "query": "secret"},
+            "average": {"encode_ms": 30.0, "total_ms": 45.0},
+        }),
         status=Mock(side_effect=AssertionError("status() queries the index")),
     )
 
@@ -534,7 +539,13 @@ def test_resources_report_semantic_usage_without_index_queries(monkeypatch) -> N
     assert snapshot["semantic_search"] == {
         "enabled": True,
         "searches_since_start": {"text": 3, "image": 1},
+        "search_timing_ms": {
+            "last": {"kind": "text", "encode_ms": 41.5, "database_ms": 12.0,
+                     "total_ms": 60.2, "prompts": 13.0},
+            "average": {"encode_ms": 30.0, "total_ms": 45.0},
+        },
     }
+    assert "secret" not in str(snapshot)
     assert [item["role"] for item in snapshot["processes"]] == ["main"]
     semantic.status.assert_not_called()
 
@@ -545,6 +556,6 @@ def test_runtime_status_includes_resources_without_semantic_service() -> None:
     )
 
     assert status["resources"]["semantic_search"] == {
-        "enabled": False, "searches_since_start": {},
+        "enabled": False, "searches_since_start": {}, "search_timing_ms": {},
     }
     assert status["resources"]["processes"][0]["role"] == "main"

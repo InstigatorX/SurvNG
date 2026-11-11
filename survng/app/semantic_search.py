@@ -15,7 +15,7 @@ import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -864,7 +864,11 @@ class SemanticIndex:
         end_at: str = "",
         limit: int = 100,
         minimum_score: float = -1.0,
+        timing: dict[str, float] | None = None,
     ) -> list[SemanticSearchHit]:
+        """Rank evidence for a query; ``timing`` receives per-phase milliseconds."""
+        started = time.perf_counter()
+        marks = {"cache": started, "score": started, "database": started}
         query = normalized_matrix(query_embedding)
         plan = query_plan or SemanticQueryPlan("", {"full": ""})
         component_names = tuple(plan.prompts)
@@ -945,7 +949,10 @@ class SemanticIndex:
                 f"{effective_label} as search_object_label"
             )
             where = " and ".join(clauses)
+            prepared = time.perf_counter()
             cache = self._vector_cache_locked(connection, identity)
+            marks["cache"] = time.perf_counter()
+            marks["score"] = marks["database"] = marks["cache"]
             candidates: list[sqlite3.Row | dict[str, Any]] = []
             if cache is not None:
                 base_components = cache.vectors @ query.T
@@ -968,29 +975,20 @@ class SemanticIndex:
                     all_components = np.concatenate((
                         all_components, np.stack(extra_components),
                     ))
-                scored_positions = {
-                    **cache.positions,
-                    **{
-                        row_id: len(cache.row_ids) + index
-                        for index, row_id in enumerate(extra_ids)
-                    },
-                }
+                marks["score"] = time.perf_counter()
                 if plan.composed:
-                    rows = connection.execute(
-                        f"select {selected_columns} from semantic_embeddings "
-                        f"where {where} order by captured_at desc,id desc",
+                    candidates, component_matrix = self._composed_candidates(
+                        connection,
+                        f"select {selected_columns} from semantic_embeddings where {where}",
                         parameters,
-                    ).fetchall()
-                    component_matrix = np.empty(
-                        (len(rows), len(component_names)), dtype=np.float32
+                        plan,
+                        component_names,
+                        all_components,
+                        scored_ids,
+                        minimum_score=minimum_score,
+                        target=max(1, min(int(limit), 500)),
+                        unique_events=unique_events,
                     )
-                    for row in rows:
-                        position = scored_positions.get(int(row["id"]))
-                        if position is None:
-                            continue
-                        component_matrix[len(candidates)] = all_components[position]
-                        candidates.append(row)
-                    component_matrix = component_matrix[:len(candidates)]
                 else:
                     # Score every retained-generation vector first, then ask
                     # SQLite to validate ranked IDs in batches. This proves the
@@ -1002,10 +1000,10 @@ class SemanticIndex:
                     selected_event_ids: set[int] = set()
                     target = max(1, int(limit))
                     available = 0
-                    for offset in range(0, len(ranked_positions), self.VECTOR_LOAD_BATCH_ROWS):
-                        positions = ranked_positions[
-                            offset:offset + self.VECTOR_LOAD_BATCH_ROWS
-                        ]
+                    for start, end in self._validation_batches(
+                        len(ranked_positions), target + target // 4 + 8,
+                    ):
+                        positions = ranked_positions[start:end]
                         if len(positions) == 0 or float(scores[positions[0]]) < minimum_score:
                             break
                         positions = positions[scores[positions] >= minimum_score]
@@ -1082,6 +1080,14 @@ class SemanticIndex:
                     if component_batches
                     else np.empty((0, len(component_names)), dtype=np.float32)
                 )
+            marks["database"] = time.perf_counter()
+        if timing is not None:
+            timing.update({
+                "prepare_ms": (prepared - started) * 1000.0,
+                "cache_ms": (marks["cache"] - prepared) * 1000.0,
+                "score_ms": (marks["score"] - marks["cache"]) * 1000.0,
+                "database_ms": (marks["database"] - marks["score"]) * 1000.0,
+            })
         if not candidates:
             return []
         component_indexes = {name: index for index, name in enumerate(component_names)}
@@ -1159,7 +1165,130 @@ class SemanticIndex:
             seen_event_ids.add(event_id)
             if len(hits) >= max(1, min(int(limit), 500)):
                 break
+        if timing is not None:
+            timing["rank_ms"] = (time.perf_counter() - marks["database"]) * 1000.0
         return hits
+
+    def _validation_batches(self, total: int, first: int) -> Iterator[tuple[int, int]]:
+        """Grow validation batches from what the caller needs to the bulk size.
+
+        Each candidate check costs about a millisecond on a large live
+        database, so starting at the bulk size would validate thousands of
+        rows to prove a handful of results.
+        """
+        start = 0
+        size = max(1, min(int(first), self.VECTOR_LOAD_BATCH_ROWS))
+        while start < total:
+            yield start, min(total, start + size)
+            start += size
+            size = min(self.VECTOR_LOAD_BATCH_ROWS, size * 4)
+
+    def _composed_candidates(
+        self,
+        connection: sqlite3.Connection,
+        select_sql: str,
+        parameters: Sequence[Any],
+        plan: SemanticQueryPlan,
+        component_names: tuple[str, ...],
+        all_components: np.ndarray,
+        scored_ids: np.ndarray,
+        *,
+        minimum_score: float,
+        target: int,
+        unique_events: bool,
+    ) -> tuple[list[sqlite3.Row], np.ndarray]:
+        """Validate only the candidates a composed ranking can return.
+
+        The composed ranking keeps candidates near the best valid rank and
+        near each required component's best valid score. Scores are exact in
+        memory, so walking them in descending order and validating in batches
+        finds those maxima, and then the eligible window, without asking
+        SQLite to filter the whole generation. The returned subset contains
+        every row that determines those maxima, so the shared ranking below
+        produces the same hits as ranking every valid candidate.
+        """
+        index = {name: position for position, name in enumerate(component_names)}
+        full = all_components[:, index["full"]]
+        required = all_components[:, [index[name] for name in plan.required]]
+        contradiction = all_components[:, [index[name] for name in plan.contradictions]].max(axis=1)
+        margin = all_components[:, index["attribute"]] - contradiction
+        rank = (
+            full * 0.45
+            + required.mean(axis=1) * 0.55
+            + np.minimum(0.04, margin) * 0.35
+        )
+        pool = np.flatnonzero(margin >= -0.005)
+        valid: dict[int, sqlite3.Row] = {}
+        checked: set[int] = set()
+
+        def validate(positions: np.ndarray) -> None:
+            pending = [int(position) for position in positions if int(position) not in checked]
+            if not pending:
+                return
+            ids = [int(scored_ids[position]) for position in pending]
+            rows = connection.execute(
+                f"{select_sql} and id in ({','.join('?' for _ in ids)})",
+                (*parameters, *ids),
+            ).fetchall()
+            by_id = {int(row["id"]): row for row in rows}
+            for position, row_id in zip(pending, ids, strict=True):
+                checked.add(position)
+                if row_id in by_id:
+                    valid[position] = by_id[row_id]
+
+        def best_valid(scores: np.ndarray) -> int | None:
+            ordered = pool[np.argsort(scores[pool])[::-1]]
+            for start, end in self._validation_batches(len(ordered), 32):
+                batch = ordered[start:end]
+                validate(batch)
+                for position in batch:
+                    if int(position) in valid:
+                        return int(position)
+            return None
+
+        best = best_valid(rank)
+        if best is None:
+            return [], np.empty((0, len(component_names)), dtype=np.float32)
+        anchors = [best]
+        for column in range(required.shape[1]):
+            anchor = best_valid(required[:, column])
+            if anchor is not None:
+                anchors.append(anchor)
+        best_required = np.asarray([
+            required[anchors[column + 1], column] for column in range(required.shape[1])
+        ])
+        window = pool[
+            (rank[pool] >= rank[best] - 0.05)
+            & np.all(required[pool] >= best_required - 0.07, axis=1)
+            & (full[pool] >= minimum_score)
+        ]
+        window = window[np.argsort(rank[window])[::-1]]
+        selected: list[int] = []
+        event_ids: set[int] = set()
+        for start, end in self._validation_batches(len(window), target + target // 4 + 8):
+            batch = window[start:end]
+            validate(batch)
+            for position in batch:
+                row = valid.get(int(position))
+                if row is None:
+                    continue
+                selected.append(int(position))
+                event_ids.add(int(row["event_id"]))
+                if (len(event_ids) if unique_events else len(selected)) >= target:
+                    break
+            if (len(event_ids) if unique_events else len(selected)) >= target:
+                break
+        positions = list(dict.fromkeys([*anchors, *selected]))
+        # Match the full-scan path's candidate order so equal scores tie-break
+        # the same way.
+        positions.sort(
+            key=lambda position: (str(valid[position]["captured_at"]), int(valid[position]["id"])),
+            reverse=True,
+        )
+        return (
+            [valid[position] for position in positions],
+            all_components[positions].astype(np.float32, copy=False),
+        )
 
     def coverage(self, identity: SemanticModelIdentity | None = None) -> dict[str, int]:
         clauses = ""
@@ -1911,6 +2040,24 @@ def load_semantic_manifest(model_dir: Path) -> dict[str, Any]:
     return payload
 
 
+def _search_timing(
+    started: float,
+    locked: float,
+    encoded: float,
+    index_timing: Mapping[str, float],
+    prompts: int,
+) -> dict[str, float]:
+    """Combine encoder and index phases; lock wait is time behind indexing."""
+    timing = {
+        "encoder_wait_ms": (locked - started) * 1000.0,
+        "encode_ms": (encoded - locked) * 1000.0,
+        **{key: float(value) for key, value in index_timing.items()},
+        "total_ms": (time.perf_counter() - started) * 1000.0,
+    }
+    timing["prompts"] = float(prompts)
+    return timing
+
+
 class DisabledSemanticSearch:
     """Stable no-op service used when semantic search is disabled."""
 
@@ -1921,15 +2068,38 @@ class DisabledSemanticSearch:
         # always-on indexing is actually being used.
         self._searches_lock = threading.Lock()
         self._searches_served = {"text": 0, "image": 0}
+        self._search_timing_totals: dict[str, float] = {}
+        self._last_search_timing: dict[str, float] = {}
 
-    def _count_search(self, kind: str) -> None:
+    def _count_search(self, kind: str, timing: Mapping[str, float] | None = None) -> None:
         with self._searches_lock:
             self._searches_served[kind] += 1
+            if timing:
+                self._last_search_timing = {"kind": kind, **dict(timing)}  # type: ignore[dict-item]
+                for phase, value in timing.items():
+                    self._search_timing_totals[phase] = (
+                        self._search_timing_totals.get(phase, 0.0) + float(value)
+                    )
 
     def searches_served(self) -> dict[str, int]:
         """Cheap usage counters; unlike status(), this never touches the index."""
         with self._searches_lock:
             return dict(self._searches_served)
+
+    def search_timing(self) -> dict[str, Any]:
+        """Per-phase milliseconds for the last search and the running average."""
+        with self._searches_lock:
+            count = sum(self._searches_served.values())
+            return {
+                "last": {
+                    key: (round(value, 1) if isinstance(value, float) else value)
+                    for key, value in self._last_search_timing.items()
+                },
+                "average": {
+                    phase: round(total / count, 1)
+                    for phase, total in self._search_timing_totals.items()
+                } if count else {},
+            }
 
     @property
     def worker_pid(self) -> int | None:
@@ -3685,18 +3855,23 @@ class SemanticSearchService(DisabledSemanticSearch):
         if not isinstance(image, np.ndarray) or image.size == 0:
             raise ValueError("semantic search image cannot be empty")
         plan = SemanticQueryPlan("visual", {"full": "visual"})
+        timing: dict[str, float] = {}
+        started = time.perf_counter()
         with self._encoder_lock:
+            locked = time.perf_counter()
             if self.encoder is None:
                 raise RuntimeError(self._error or "semantic search is unavailable")
             embedding = self.encoder.encode_images([image])
             identity = self.encoder.identity
+        encoded = time.perf_counter()
         hits = self.index.search(
             embedding,
             identity,
             query_plan=plan,
+            timing=timing,
             **filters,
         )
-        self._count_search("image")
+        self._count_search("image", _search_timing(started, locked, encoded, timing, 1))
         return hits
 
     def search_event_object(
@@ -3717,18 +3892,25 @@ class SemanticSearchService(DisabledSemanticSearch):
         if not text:
             raise ValueError("semantic search query cannot be empty")
         plan = semantic_query_plan(text)
+        timing: dict[str, float] = {}
+        started = time.perf_counter()
         with self._encoder_lock:
+            locked = time.perf_counter()
             if self.encoder is None:
                 raise RuntimeError(self._error or "semantic search is unavailable")
             embedding = self.encoder.encode_text(list(plan.prompts.values()))
             identity = self.encoder.identity
+        encoded = time.perf_counter()
         hits = self.index.search(
             embedding,
             identity,
             query_plan=plan,
+            timing=timing,
             **filters,
         )
-        self._count_search("text")
+        self._count_search(
+            "text", _search_timing(started, locked, encoded, timing, len(plan.prompts)),
+        )
         return hits
 
     def _reported_device(self, target_device: str) -> str:
