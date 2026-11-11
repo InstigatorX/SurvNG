@@ -29,24 +29,24 @@ AUTOMATIC_SETTING_SPECS: dict[str, dict[str, Any]] = {
 }
 _CLASS_COPY: dict[str, tuple[str, str]] = {
     "motion_sensitivity": (
-        "Motion sensitivity",
-        "How readily motion qualifies, including stationary-object tolerance.",
+        "How easily motion counts",
+        "How much movement it takes before a camera treats something as motion, including objects that sit still.",
     ),
     "motion_analysis": (
-        "Motion analysis",
-        "Frame size used for visual motion analysis.",
+        "Picture size for motion checks",
+        "How large a picture SurvNG uses when it looks for motion.",
     ),
     "visual_backup": (
-        "Visual backup",
-        "Rescue score, persistence, cooldown, and how often a rescue may fire.",
+        "Backup alerts from the video",
+        "When the camera stays quiet, how sure SurvNG must be, and how often it may raise an alert from the video itself.",
     ),
     "borderline_rescue": (
-        "Borderline rescue",
-        "Whether near-threshold motion is checked again, and how close it must be.",
+        "A second look at close calls",
+        "Whether motion that almost qualified gets checked again, and how close it has to be.",
     ),
     "restore_inherit": (
-        "Restore inheritance",
-        "Put a camera back on the system value when that does not change what is in effect.",
+        "Follow the site setting",
+        "Put a camera back on the site-wide value when that does not change what the camera does today.",
     ),
 }
 # Applying these reloads the camera manager, which refuses while any AI work,
@@ -415,3 +415,507 @@ def next_run_at(last: datetime | None, *, hours: float, now: datetime) -> dateti
         return now
     candidate = _aware(last) + timedelta(hours=hours)
     return candidate if candidate > now else now
+
+
+# Plain-language copy for every setting a review can suggest.
+# stricter_when is internal: higher, lower, higher_choice, lower_choice, or off.
+_GUIDE_FIELDS = ("label", "what", "higher", "lower", "unit", "location")
+SETTING_GUIDE: dict[str, dict[str, str]] = {
+    "motion.sensitivity": {
+        "label": "Motion sensitivity",
+        "what": "How much movement it takes before the camera treats something as motion.",
+        "higher": "High notices smaller movement and raises more alerts.",
+        "lower": "Low ignores small movement and raises fewer alerts.",
+        "unit": "choice",
+        "location": "camera_motion",
+        "stricter_when": "lower_choice",
+    },
+    "motion.stationary_object_tolerance": {
+        "label": "Still-object tolerance",
+        "what": "How readily a camera ignores something that sits still, such as a parked car.",
+        "higher": "High ignores objects that sit still.",
+        "lower": "Low keeps alerting while something sits in view.",
+        "unit": "choice",
+        "location": "camera_motion",
+        "stricter_when": "higher_choice",
+    },
+    "motion.frame_width": {
+        "label": "Motion picture size",
+        "what": "How wide a picture SurvNG uses when it looks for motion. Larger pictures see more detail and use more of the computer.",
+        "higher": "A larger picture can catch smaller movement and uses more processing.",
+        "lower": "A smaller picture uses less processing and can miss small movement.",
+        "unit": "px",
+        "location": "camera_motion",
+        "stricter_when": "lower",
+    },
+    "motion.visual_backup_grace_seconds": {
+        "label": "Wait before a backup alert",
+        "what": "How long SurvNG waits after the camera goes quiet before it may raise an alert from the video itself.",
+        "higher": "A longer wait means fewer backup alerts.",
+        "lower": "A shorter wait means backup alerts can start sooner.",
+        "unit": "seconds",
+        "location": "camera_motion",
+        "stricter_when": "higher",
+    },
+    "motion.visual_backup_min_score": {
+        "label": "Backup alert confidence",
+        "what": "How sure SurvNG must be before raising an alert from video when the camera sent no motion signal.",
+        "higher": "Higher means fewer false alarms but may miss faint movement.",
+        "lower": "Lower catches fainter movement and can raise more false alarms.",
+        "unit": "percent",
+        "location": "camera_motion",
+        "stricter_when": "higher",
+    },
+    "motion.visual_backup_min_consecutive": {
+        "label": "Backup alert persistence",
+        "what": "How many checks in a row must agree before a backup alert is raised.",
+        "higher": "More checks mean fewer brief false alarms.",
+        "lower": "Fewer checks raise an alert sooner.",
+        "unit": "count",
+        "location": "camera_motion",
+        "stricter_when": "higher",
+    },
+    "motion.visual_backup_cooldown_seconds": {
+        "label": "Pause between backup alerts",
+        "what": "How long SurvNG waits after a backup alert before it can raise another one.",
+        "higher": "A longer pause means fewer repeated alerts.",
+        "lower": "A shorter pause allows alerts to repeat sooner.",
+        "unit": "seconds",
+        "location": "camera_motion",
+        "stricter_when": "higher",
+    },
+    "motion.visual_backup_max_triggers_5m": {
+        "label": "Backup alerts in five minutes",
+        "what": "How many backup alerts one camera may raise in five minutes.",
+        "higher": "A higher cap allows more alerts in a short time.",
+        "lower": "A lower cap holds alerts back once the camera has been busy.",
+        "unit": "count",
+        "location": "camera_motion",
+        "stricter_when": "lower",
+    },
+    "motion.borderline_rescue_enabled": {
+        "label": "Second look at close calls",
+        "what": "Whether motion that almost qualified gets a second check.",
+        "higher": "On gives close calls another chance to become an alert.",
+        "lower": "Off leaves close calls alone.",
+        "unit": "choice",
+        "location": "camera_motion",
+        "stricter_when": "off",
+    },
+    "motion.borderline_margin": {
+        "label": "Close-call window",
+        "what": "How close to the line motion must be before that second check runs.",
+        "higher": "A wider margin checks more close calls.",
+        "lower": "A narrower margin checks only the closest calls.",
+        "unit": "percent",
+        "location": "camera_motion",
+        "stricter_when": "lower",
+    },
+    "detector.tracking.sample_fps": {
+        "label": "Tracking sample rate",
+        "what": "How many times a second SurvNG looks at an object it is already following.",
+        "higher": "More samples follow the object more closely and use more of the computer.",
+        "lower": "Fewer samples use less of the computer and can lose the object sooner.",
+        "unit": "fps",
+        "location": "detection",
+        "stricter_when": "lower",
+    },
+}
+_TITLES: dict[str, dict[str, str]] = {
+    "motion.sensitivity": {
+        "stricter": "Make {where} ignore more small movement",
+        "looser": "Make {where} notice smaller movement",
+    },
+    "motion.stationary_object_tolerance": {
+        "stricter": "Make {where} ignore objects that sit still",
+        "looser": "Make {where} alert on objects that sit still",
+    },
+    "motion.frame_width": {
+        "stricter": "Use a smaller picture when {where} checks for motion",
+        "looser": "Use a larger picture when {where} checks for motion",
+    },
+    "motion.visual_backup_grace_seconds": {
+        "stricter": "Give {where} longer before a backup alert",
+        "looser": "Let {where} raise a backup alert sooner",
+    },
+    "motion.visual_backup_min_score": {
+        "stricter": "Make {where} less eager to raise visual backup alerts",
+        "looser": "Make {where} more willing to raise visual backup alerts",
+    },
+    "motion.visual_backup_min_consecutive": {
+        "stricter": "Ask {where} to see motion longer before a backup alert",
+        "looser": "Let {where} raise a backup alert after less persistence",
+    },
+    "motion.visual_backup_cooldown_seconds": {
+        "stricter": "Pause longer between backup alerts on {where}",
+        "looser": "Allow backup alerts more often on {where}",
+    },
+    "motion.visual_backup_max_triggers_5m": {
+        "stricter": "Cap how often {where} can raise backup alerts",
+        "looser": "Allow {where} to raise backup alerts more often",
+    },
+    "motion.borderline_rescue_enabled": {
+        "stricter": "Stop the second look at close calls on {where}",
+        "looser": "Give close calls a second look on {where}",
+    },
+    "motion.borderline_margin": {
+        "stricter": "Narrow the close-call window on {where}",
+        "looser": "Widen the close-call window on {where}",
+    },
+    "detector.tracking.sample_fps": {
+        "stricter": "Sample active tracks less often",
+        "looser": "Sample active tracks more often",
+    },
+}
+_CHOICE_ORDER = {"low": 0, "balanced": 1, "high": 2}
+
+
+def public_setting_guide() -> dict[str, dict[str, str]]:
+    """Copy the guide without the internal direction rule."""
+    return {
+        setting: {field: spec[field] for field in _GUIDE_FIELDS}
+        for setting, spec in SETTING_GUIDE.items()
+    }
+
+
+def automatic_level(classes: list[str] | None) -> str:
+    """Return on, off, or custom for the single automation switch."""
+    selected = set(normalize_automatic_classes(list(classes or [])))
+    if not selected:
+        return "off"
+    if selected >= set(AUTOMATIC_CLASSES):
+        return "on"
+    return "custom"
+
+
+def review_image_url(value: Any) -> str:
+    """Keep sample pictures that are already served on the authenticated API."""
+    url = str(value or "")
+    if url.startswith("/api/") and not url.startswith("//"):
+        return url
+    return ""
+
+
+def _camera_name(config: Any, camera_id: str) -> str:
+    for camera in getattr(config, "cameras", []) or []:
+        if str(getattr(camera, "id", "") or "") == camera_id:
+            return str(getattr(camera, "name", "") or camera_id)
+    return camera_id or "This camera"
+
+
+def _guide(setting: str) -> dict[str, str]:
+    spec = SETTING_GUIDE.get(setting)
+    if spec:
+        return spec
+    label = setting.split(".")[-1].replace("_", " ").capitalize() if setting else "Setting"
+    return {
+        "label": label,
+        "what": "SurvNG suggested a change to this setting.",
+        "higher": "",
+        "lower": "",
+        "unit": "",
+        "location": "camera_motion",
+        "stricter_when": "higher",
+    }
+
+
+def _public_guide(setting: str) -> dict[str, str]:
+    spec = _guide(setting)
+    return {field: spec.get(field, "") for field in _GUIDE_FIELDS}
+
+
+def _direction(setting: str, current: Any, proposed: Any) -> str:
+    if proposed in (None, "inherit"):
+        return "restore"
+    rule = _guide(setting).get("stricter_when") or "higher"
+    if rule == "off":
+        current_on = current is True or current == "true"
+        proposed_on = proposed is True or proposed == "true"
+        return "looser" if proposed_on and not current_on else "stricter"
+    if rule in {"higher", "lower"}:
+        current_number = _number(current)
+        proposed_number = _number(proposed)
+        if current_number is None or proposed_number is None or current_number == proposed_number:
+            return "looser"
+        increased = proposed_number > current_number
+        return "stricter" if increased == (rule == "higher") else "looser"
+    current_rank = _CHOICE_ORDER.get(str(current))
+    proposed_rank = _CHOICE_ORDER.get(str(proposed))
+    if current_rank is None or proposed_rank is None or current_rank == proposed_rank:
+        return "looser"
+    toward_high = proposed_rank > current_rank
+    return "stricter" if toward_high == (rule == "higher_choice") else "looser"
+
+
+def _where_rows(item: dict[str, Any], config: Any) -> list[dict[str, Any]]:
+    preview = item.get("effective_preview") or []
+    rows: list[dict[str, Any]] = []
+    if isinstance(preview, list) and preview:
+        for row in preview:
+            if not isinstance(row, dict):
+                continue
+            camera_id = str(row.get("camera_id") or "")
+            current = row.get("current")
+            proposed = row.get("proposed")
+            rows.append({
+                "camera_id": camera_id,
+                "camera_name": _camera_name(config, camera_id),
+                "current": current,
+                "proposed": proposed,
+                "inherits": bool(row.get("inherits")),
+                "changes": current != proposed,
+            })
+        return rows
+    camera_id = str(item.get("camera_id") or "")
+    current = item.get("current_effective", item.get("current"))
+    proposed = item.get("proposed")
+    if str(item.get("scope") or "") == "global":
+        affected = [str(value) for value in item.get("affected_cameras") or [] if value]
+        targets = affected or [camera.id for camera in getattr(config, "cameras", []) or []]
+        return [
+            {
+                "camera_id": target,
+                "camera_name": _camera_name(config, target),
+                "current": current,
+                "proposed": proposed,
+                "inherits": True,
+                "changes": current != proposed,
+            }
+            for target in targets
+        ]
+    return [{
+        "camera_id": camera_id,
+        "camera_name": _camera_name(config, camera_id),
+        "current": current,
+        "proposed": proposed,
+        "inherits": False,
+        "changes": current != proposed,
+    }]
+
+
+def describe_recommendation(
+    item: dict[str, Any],
+    config: Any,
+    automatic_classes: list[str] | None,
+    apply_enabled: bool,
+) -> dict[str, Any]:
+    """Explain one suggestion: what changes, where, and whether it can apply itself."""
+    setting = str(item.get("setting") or "")
+    guide = _public_guide(setting)
+    rows = _where_rows(item, config)
+    changed = [row for row in rows if row["changes"]]
+    unchanged = [row for row in rows if not row["changes"]]
+    scope = "global" if str(item.get("scope") or "") == "global" else "camera"
+    if scope == "camera":
+        place = rows[0]["camera_name"] if rows else "This camera"
+        summary = f"{place} only"
+    else:
+        place = "every camera"
+        summary = f"Changes on {len(changed)} " + ("camera" if len(changed) == 1 else "cameras")
+        if len(unchanged) == 1:
+            summary += ", 1 keeps its own setting"
+        elif unchanged:
+            summary += f", {len(unchanged)} keep their own setting"
+    current = item.get("current_effective", item.get("current"))
+    proposed = item.get("proposed")
+    direction = _direction(setting, current, proposed)
+    if direction == "restore":
+        title = f"Put {place} back on the site setting for {guide['label']}"
+    else:
+        template = _TITLES.get(setting, {}).get(direction) or "{where}: {label}"
+        title = template.format(where=place, label=guide["label"])
+    class_id = suggestion_class(item)
+    allowed = set(normalize_automatic_classes(list(automatic_classes or [])))
+    if not apply_enabled:
+        auto_status = "disabled"
+    elif class_id in AUTOMATIC_CLASSES and class_id in allowed:
+        auto_status = "automatic"
+    elif class_id in AUTOMATIC_CLASSES:
+        auto_status = "approval"
+    else:
+        auto_status = "manual"
+    return {
+        "title": title,
+        "direction": direction,
+        "guide": guide,
+        "where": {
+            "scope": scope,
+            "summary": summary,
+            "changed_count": len(changed),
+            "unchanged_count": len(unchanged),
+            "cameras": rows,
+        },
+        "auto_status": auto_status,
+    }
+
+
+def at_a_glance(result: dict[str, Any] | None) -> dict[str, Any]:
+    """Summarize what a briefing looked at, without the raw reports."""
+    payload = result or {}
+    reports = payload.get("camera_reports") or {}
+    analyzed = 0
+    verdicts: dict[str, int] = {}
+    if isinstance(reports, dict):
+        for report in reports.values():
+            if not isinstance(report, dict):
+                continue
+            analyzed += int(report.get("analyzed") or 0)
+            for name, count in (report.get("verdict_counts") or {}).items():
+                verdicts[str(name)] = verdicts.get(str(name), 0) + int(count or 0)
+    if not analyzed:
+        analyzed = int(payload.get("analyzed") or 0)
+    summaries = payload.get("camera_summaries") or []
+    cameras = len(summaries) if isinstance(summaries, list) and summaries else (len(reports) if isinstance(reports, dict) else 0)
+    suggestions = [
+        item for item in payload.get("recommendations") or []
+        if isinstance(item, dict) and not item.get("dismissed")
+    ]
+    return {
+        "analyzed": analyzed,
+        "cameras": cameras,
+        "suggestions": len(suggestions),
+        "verdicts": verdicts,
+        "pass": str(payload.get("pass") or ""),
+        "summary": str(payload.get("summary") or ""),
+    }
+
+
+def describe_change_set(change_set: dict[str, Any], config: Any) -> dict[str, Any]:
+    """Explain an applied change: who made it, where it is in the watch, and the result."""
+    action = str(change_set.get("action") or "apply")
+    status = str(change_set.get("status") or "")
+    evaluation = change_set.get("evaluation") if isinstance(change_set.get("evaluation"), dict) else {}
+    automatic = bool((change_set.get("apply_result") or {}).get("automatic"))
+    if action == "rollback":
+        origin = "rollback"
+    elif automatic:
+        origin = "automatic"
+    else:
+        origin = "you"
+    rolled_back = status in {"rolled_back", "partially_rolled_back"} or bool(evaluation.get("rolled_back"))
+    if rolled_back or action == "rollback":
+        phase = "rolled_back"
+    elif status == "reviewing":
+        phase = "checking"
+    elif status == "collecting":
+        phase = "watching"
+    else:
+        phase = "result"
+    created = parse_timestamp(change_set.get("created_at"))
+    try:
+        hours = float(change_set.get("evaluation_hours") or 0)
+    except (TypeError, ValueError):
+        hours = 0
+    watch_until = (created + timedelta(hours=hours)).isoformat() if created and action == "apply" and hours else None
+    cameras: list[dict[str, str]] = []
+    for camera_id, payload in (evaluation.get("camera_comparisons") or {}).items():
+        outcome = ""
+        if isinstance(payload, dict):
+            outcome = str((payload.get("comparison") or {}).get("outcome") or "")
+        cameras.append({
+            "camera_id": str(camera_id),
+            "camera_name": _camera_name(config, str(camera_id)),
+            "outcome": outcome,
+        })
+    changes: list[dict[str, Any]] = []
+    for change in change_set.get("changes") or []:
+        if not isinstance(change, dict):
+            continue
+        setting = str(change.get("setting") or "")
+        guide = _public_guide(setting)
+        camera_id = str(change.get("camera_id") or "")
+        changes.append({
+            "id": change.get("id"),
+            "setting": setting,
+            "label": guide["label"],
+            "unit": guide["unit"],
+            "scope": str(change.get("scope") or ("camera" if camera_id else "global")),
+            "camera_id": camera_id,
+            "camera_name": _camera_name(config, camera_id) if camera_id else "Every camera",
+            "before": change.get("before"),
+            "after": change.get("after"),
+        })
+    return {
+        "id": change_set.get("id"),
+        "run_id": change_set.get("run_id"),
+        "action": action,
+        "origin": origin,
+        "phase": phase,
+        "status": status,
+        "created_at": change_set.get("created_at"),
+        "watch_until": watch_until,
+        "outcome": evaluation.get("outcome"),
+        "summary": str(evaluation.get("summary") or ""),
+        "cameras": cameras,
+        "changes": changes,
+        "rollback_error": str(evaluation.get("rollback_error") or ""),
+        "undoes_id": change_set.get("parent_change_set_id") if action == "rollback" else None,
+    }
+
+
+def link_change_feed(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Point each applied change at the rollback that undid it, and the reverse."""
+    undone_by: dict[Any, list[Any]] = {}
+    for item in items:
+        parent = item.get("undoes_id")
+        if parent:
+            undone_by.setdefault(parent, []).append(item.get("id"))
+    return [{**item, "undone_by": undone_by.get(item.get("id"), [])} for item in items]
+
+
+def present_review_result(
+    result: dict[str, Any] | None,
+    config: Any,
+    automatic_classes: list[str] | None,
+    apply_enabled: bool,
+) -> dict[str, Any]:
+    """Attach plain descriptions and keep only authenticated sample pictures."""
+    payload = dict(result or {})
+    notes = [
+        note for note in payload.get("site_notes") or []
+        if not (
+            isinstance(note, dict)
+            and (note.get("kind") == "grace" or "45-second" in str(note.get("text") or ""))
+        )
+    ]
+    payload["site_notes"] = notes
+    recommendations: list[dict[str, Any]] = []
+    for item in payload.get("recommendations") or []:
+        if not isinstance(item, dict):
+            continue
+        class_id = suggestion_class(item)
+        evidence = [
+            {**entry, "image_url": review_image_url(entry.get("image_url"))}
+            for entry in item.get("evidence") or []
+            if isinstance(entry, dict)
+        ]
+        described = describe_recommendation(
+            {**item, "evidence": evidence},
+            config,
+            automatic_classes,
+            apply_enabled,
+        )
+        recommendations.append({
+            **item,
+            "automatic_class": class_id if class_id in AUTOMATIC_CLASSES else None,
+            "evidence": evidence,
+            "plain": described,
+        })
+    payload["recommendations"] = recommendations
+    reports = payload.get("camera_reports")
+    if isinstance(reports, dict):
+        presented: dict[str, Any] = {}
+        for camera_id, report in reports.items():
+            if not isinstance(report, dict):
+                presented[camera_id] = report
+                continue
+            samples = []
+            for sample in report.get("samples") or []:
+                if isinstance(sample, dict):
+                    samples.append({**sample, "image_url": review_image_url(sample.get("image_url"))})
+                else:
+                    samples.append(sample)
+            presented[camera_id] = {**report, "samples": samples}
+        payload["camera_reports"] = presented
+    payload["at_a_glance"] = at_a_glance(payload)
+    return payload

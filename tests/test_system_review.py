@@ -373,6 +373,184 @@ def test_tracking_is_suggested_but_never_applied_automatically() -> None:
     assert [item["id"] for item in ranked["recommendations"]] == ["t"]
 
 
+def test_setting_guide_covers_every_suggestable_setting():
+    from survng.app.system_review import AUTOMATIC_SETTING_SPECS, public_setting_guide
+
+    guide = public_setting_guide()
+    assert set(guide) == set(AUTOMATIC_SETTING_SPECS)
+    for spec in guide.values():
+        assert spec["label"] and spec["what"] and spec["higher"] and spec["lower"]
+        assert spec["unit"] in {"percent", "seconds", "fps", "px", "count", "choice"}
+        assert spec["location"] in {"camera_motion", "detection"}
+        assert "stricter_when" not in spec
+
+
+def test_plain_descriptions_cover_direction_scope_and_automation():
+    from survng.app.config import AppConfig, CameraConfig
+    from survng.app.system_review import AUTOMATIC_CLASSES, automatic_level, describe_recommendation
+
+    config = AppConfig(cameras=[
+        CameraConfig(id="gate", name="Front Door", stream_url="rtsp://192.0.2.2/a"),
+        CameraConfig(
+            id="yard",
+            name="Yard",
+            stream_url="rtsp://192.0.2.3/a",
+            motion_qualification={"visual_backup_min_score": 0.9},
+        ),
+    ])
+    site = describe_recommendation({
+        "setting": "motion.visual_backup_min_score",
+        "scope": "global",
+        "current": 0.70,
+        "proposed": 0.76,
+        "effective_preview": [
+            {"camera_id": "gate", "current": 0.70, "proposed": 0.76, "inherits": True},
+            {"camera_id": "yard", "current": 0.90, "proposed": 0.90, "inherits": False},
+        ],
+    }, config, ["visual_backup"], True)
+    assert site["direction"] == "stricter"
+    assert site["title"] == "Make every camera less eager to raise visual backup alerts"
+    assert site["where"]["changed_count"] == 1
+    assert site["where"]["unchanged_count"] == 1
+    assert site["where"]["summary"] == "Changes on 1 camera, 1 keeps its own setting"
+    assert site["auto_status"] == "automatic"
+
+    looser = describe_recommendation({
+        "setting": "motion.visual_backup_min_score",
+        "scope": "camera",
+        "camera_id": "gate",
+        "current_effective": 0.80,
+        "proposed": 0.70,
+    }, config, [], True)
+    assert looser["direction"] == "looser"
+    assert looser["title"] == "Make Front Door more willing to raise visual backup alerts"
+    assert looser["where"]["summary"] == "Front Door only"
+    assert looser["auto_status"] == "approval"
+
+    restored = describe_recommendation({
+        "setting": "motion.visual_backup_min_score",
+        "scope": "camera",
+        "camera_id": "gate",
+        "current": 0.76,
+        "proposed": "inherit",
+    }, config, ["restore_inherit"], True)
+    assert restored["direction"] == "restore"
+    assert restored["title"] == "Put Front Door back on the site setting for Backup alert confidence"
+    assert restored["auto_status"] == "automatic"
+
+    blocked = describe_recommendation({
+        "setting": "motion.sensitivity",
+        "scope": "camera",
+        "camera_id": "gate",
+        "current": "balanced",
+        "proposed": "low",
+    }, config, list(AUTOMATIC_CLASSES), False)
+    assert blocked["direction"] == "stricter"
+    assert blocked["auto_status"] == "disabled"
+
+    assert automatic_level([]) == "off"
+    assert automatic_level(["visual_backup"]) == "custom"
+    assert automatic_level(["tracking", *AUTOMATIC_CLASSES]) == "on"
+
+
+def test_change_feed_names_the_phase_and_links_a_rollback():
+    from survng.app.config import AppConfig, CameraConfig
+    from survng.app.system_review import describe_change_set, link_change_feed
+
+    config = AppConfig(cameras=[CameraConfig(id="gate", name="Front Door", stream_url="rtsp://192.0.2.2/a")])
+    watching = describe_change_set({
+        "id": 3,
+        "action": "apply",
+        "status": "collecting",
+        "created_at": "2026-11-10T00:00:00+00:00",
+        "evaluation_hours": 24,
+        "apply_result": {"apply_mode": "hot"},
+        "changes": [{
+            "id": "3:1",
+            "setting": "motion.visual_backup_min_score",
+            "scope": "camera",
+            "camera_id": "gate",
+            "before": 0.70,
+            "after": 0.76,
+        }],
+    }, config)
+    assert watching["origin"] == "you"
+    assert watching["phase"] == "watching"
+    assert watching["watch_until"] == "2026-11-11T00:00:00+00:00"
+    assert watching["changes"][0]["label"] == "Backup alert confidence"
+    assert watching["changes"][0]["camera_name"] == "Front Door"
+
+    failed = describe_change_set({
+        "id": 4,
+        "action": "apply",
+        "status": "evaluated",
+        "apply_result": {"automatic": True},
+        "evaluation": {
+            "outcome": "regressed",
+            "rolled_back": False,
+            "rollback_error": "AI work is active",
+            "camera_comparisons": {"gate": {"comparison": {"outcome": "worsened"}}},
+        },
+        "changes": [],
+    }, config)
+    assert failed["origin"] == "automatic"
+    assert failed["phase"] == "result"
+    assert failed["rollback_error"] == "AI work is active"
+    assert failed["cameras"] == [{"camera_id": "gate", "camera_name": "Front Door", "outcome": "worsened"}]
+
+    applied = describe_change_set({"id": 8, "action": "apply", "status": "rolled_back", "changes": []}, config)
+    undo = describe_change_set({
+        "id": 9,
+        "action": "rollback",
+        "status": "rolled_back",
+        "parent_change_set_id": 8,
+        "changes": [],
+    }, config)
+    linked = link_change_feed([applied, undo])
+    assert applied["phase"] == "rolled_back"
+    assert linked[1]["undoes_id"] == 8
+    assert linked[0]["undone_by"] == [9]
+    assert linked[1]["phase"] == "rolled_back"
+
+
+def test_past_system_review_rejects_other_runs():
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    from fastapi import HTTPException
+
+    from survng.app.config import AppConfig, CameraConfig
+    from survng.app.events import EventStore
+
+    config = AppConfig(cameras=[CameraConfig(id="gate", name="Gate", stream_url="rtsp://192.0.2.2/a")])
+    state = {"config": config}
+    with TemporaryDirectory() as tmp:
+        store = EventStore(Path(tmp))
+        other = store.create_calibration_run(mode="standard", camera_ids=["gate"], configuration_fingerprint="b" * 64)
+        system = store.create_calibration_run(mode="system_daily", camera_ids=["gate"], configuration_fingerprint="c" * 64)
+        store.update_calibration_run(int(system["id"]), status="completed", result={
+            "summary": "Checked stored activity.",
+            "pass": "daily",
+            "recommendations": [],
+            "camera_reports": {"gate": {"samples": [
+                {"verdict": "likely_miss", "image_url": "/api/motion-audit/4/snapshot.jpg"},
+                {"verdict": "likely_miss", "image_url": "https://example.invalid/secret.jpg"},
+            ]}},
+        })
+        service, _manager = _review_service(state, store)
+        try:
+            service.system_review_run(int(other["id"]))
+        except HTTPException as exc:
+            assert exc.status_code == 404
+        else:
+            raise AssertionError("non-system runs must stay out of system review history")
+        opened = service.system_review_run(int(system["id"]))
+    assert opened["result"]["at_a_glance"]["pass"] == "daily"
+    samples = opened["result"]["camera_reports"]["gate"]["samples"]
+    assert samples[0]["image_url"] == "/api/motion-audit/4/snapshot.jpg"
+    assert samples[1]["image_url"] == ""
+
+
 def test_unknown_automatic_class_is_rejected():
     from pydantic import ValidationError
 

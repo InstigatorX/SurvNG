@@ -37,6 +37,7 @@
     "test:incident-semantic-search": "node tests/incident-semantic-search.mjs",
     "test:zone-geometry": "node tests/zone-geometry.mjs",
     "test:detection-tuneup": "node tests/detection-tuneup.mjs",
+    "test:system-review-view": "node tests/system-review-view.mjs",
     "test:workspace-navigation": "node tests/workspace-navigation.mjs",
     "test:workspace-lazy": "node tests/workspace-lazy.mjs",
     "test:duration": "node tests/duration.mjs",

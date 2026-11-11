@@ -46,12 +46,17 @@ from .recording_routes import recording_source
 from .system_review import (
     AUTOMATIC_CLASSES,
     automatic_eligible,
+    automatic_level,
     collect_stored_signals,
     daily_briefing,
+    describe_change_set,
     detection_camera_ids,
     due_pass,
+    link_change_feed,
     next_run_at,
     parse_timestamp,
+    present_review_result,
+    public_setting_guide,
     rank_site_recommendations,
     review_progress,
     suggestion_class,
@@ -1062,22 +1067,17 @@ class IntelligenceService:
         briefing = next((item for item in system_runs if item.get('status') in {'queued', 'running', 'cancelling'}), None)
         if briefing is None:
             briefing = next((item for item in system_runs if item.get('status') == 'completed'), None)
-        if briefing and isinstance(briefing.get('result'), dict):
-            result = dict(briefing['result'])
-            result['recommendations'] = [
-                {**item, 'automatic_class': class_id if (class_id := suggestion_class(item)) in AUTOMATIC_CLASSES else None}
-                for item in result.get('recommendations') or []
-                if isinstance(item, dict)
-            ]
-            result['site_notes'] = [
-                note for note in result.get('site_notes') or []
-                if not (isinstance(note, dict) and (note.get('kind') == 'grace' or '45-second' in str(note.get('text') or '')))
-            ]
-            briefing = {**briefing, 'result': result}
+        briefing = self._present_system_briefing(briefing, active_config)
         change_sets = active_manager.events.calibration_change_sets(30)
         system_ids = {int(item.get('id') or 0) for item in system_runs}
+        described = [
+            describe_change_set(item, active_config)
+            for item in change_sets
+            if int(item.get('run_id') or 0) in system_ids
+        ]
         now = datetime.now(timezone.utc)
         cadence = active_config.system_review.cadence
+        classes = list(active_config.system_review.automatic_classes)
         last_daily = self._latest_system_run(completed_daily, 'system_daily')
         last_weekly = self._latest_system_run(completed_weekly, 'system_weekly')
         daily_covered = max(
@@ -1086,22 +1086,46 @@ class IntelligenceService:
         )
         return {
             'cadence': cadence,
-            'automatic_classes': list(active_config.system_review.automatic_classes),
+            'automatic_classes': classes,
+            'automatic_level': automatic_level(classes),
             'automatic_class_catalog': [
                 {'id': class_id, 'label': spec['label'], 'detail': spec.get('detail') or ''}
                 for class_id, spec in AUTOMATIC_CLASSES.items()
             ],
+            'setting_guide': public_setting_guide(),
             'apply_enabled': bool(active_config.audit_ai.allow_apply_recommendations),
             'next_daily_at': next_run_at(daily_covered, hours=20, now=now).isoformat() if cadence in {'daily', 'weekly'} else None,
             'next_weekly_at': next_run_at(last_weekly, hours=24 * 6, now=now).isoformat() if cadence == 'weekly' else None,
             'briefing': briefing,
-            'change_sets': [item for item in change_sets if int(item.get('run_id') or 0) in system_ids],
+            'changes': link_change_feed(described),
             'history': [
                 {key: item.get(key) for key in ('id', 'status', 'mode', 'error', 'created_at', 'completed_at')}
                 | {'summary': (item.get('result') or {}).get('summary') or ''}
                 for item in system_runs
             ],
         }
+
+    def _present_system_briefing(self, briefing: dict | None, active_config: AppConfig) -> dict | None:
+        if not briefing or not isinstance(briefing.get('result'), dict):
+            return briefing
+        return {
+            **briefing,
+            'result': present_review_result(
+                briefing.get('result'),
+                active_config,
+                list(active_config.system_review.automatic_classes),
+                bool(active_config.audit_ai.allow_apply_recommendations),
+            ),
+        }
+
+    def system_review_run(self, run_id: int) -> dict:
+        """Return one past system review, read only, in the same shape as the latest briefing."""
+        with self.deps.manager_lock:
+            active_config = self.deps.get_config()
+            run = self.deps.get_manager().events.get_calibration_run(run_id)
+        if run is None or not str(run.get('mode') or '').startswith('system_'):
+            raise HTTPException(status_code=404, detail='system review not found')
+        return self._present_system_briefing(run, active_config) or run
 
     def update_system_review_settings(self, request: SystemReviewSettingsRequest) -> dict:
         with self.deps.manager_lock:
@@ -2424,6 +2448,7 @@ def create_intelligence_router(deps: IntelligenceDependencies) -> IntelligenceRo
     router.add_api_route('/api/system-review', service.system_review, methods=['GET'])
     router.add_api_route('/api/system-review/run', service.start_system_review, methods=['POST'], status_code=202)
     router.add_api_route('/api/system-review/settings', service.update_system_review_settings, methods=['POST'])
+    router.add_api_route('/api/system-review/runs/{run_id}', service.system_review_run, methods=['GET'])
     router.add_api_route('/api/system-review/runs/{run_id}/dismiss', service.dismiss_system_review, methods=['POST'])
     router.add_api_route('/api/calibration/runs', service.start_calibration_run, methods=['POST'], status_code=202)
     router.add_api_route('/api/calibration/runs', service.calibration_runs, methods=['GET'])
