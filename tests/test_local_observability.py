@@ -157,6 +157,91 @@ def test_runtime_status_is_effective_and_strictly_allowlisted() -> None:
     assert "private_key" not in encoded
 
 
+def test_device_gate_and_reid_execution_devices_are_allowlisted() -> None:
+    secret = "secret-token-password"
+    manager = _manager(secret)
+    status = manager.detector_status.return_value
+    status["runtime"]["workloads"] = {
+        "accepting": True,
+        "security_active": 1,
+        "optional_active": 0,
+        "private": secret,
+        "classes": {
+            "tracking": {
+                "admitted": 40,
+                "completed": 40,
+                "shed": 6,
+                "timed_out": 0,
+                "max_wait_ms": 12.5,
+                "admission_wait_ms_p95": 3.0,
+                "error": secret,
+            },
+            "bad key!": {"shed": 1},
+        },
+    }
+    status["reid"] = {
+        "enabled": True,
+        "model_path": f"/models/{secret}",
+        "person": {
+            "enabled": True,
+            "ready": True,
+            "device": "AUTO",
+            "execution_devices": ["GPU.0", f"rtsp://{secret}"],
+            "error": secret,
+            "model_path": f"/models/{secret}",
+        },
+    }
+
+    detector = build_runtime_status(
+        AppConfig(),
+        manager,
+        instance_id="instance-one",
+        uptime_seconds=1.0,
+        stopping=False,
+    )["detector"]
+
+    assert detector["device_gate"]["accepting"] is True
+    assert detector["device_gate"]["security_active"] == 1
+    assert detector["device_gate"]["classes"] == {
+        "tracking": {
+            "admitted": 40,
+            "completed": 40,
+            "shed": 6,
+            "timed_out": 0,
+            "max_wait_ms": 12.5,
+            "admission_wait_ms_p95": 3.0,
+        },
+    }
+    assert detector["reid"] == {
+        "enabled": True,
+        "person": {
+            "enabled": True,
+            "ready": True,
+            "device": "AUTO",
+            "execution_devices": ["GPU.0"],
+        },
+    }
+    assert secret not in json.dumps(detector)
+
+
+def test_reid_execution_devices_follow_auto_handoff() -> None:
+    from survng.app.config import DetectorConfig
+    from survng.app.person_reidentification import OpenVinoPersonReidentifier
+
+    engine = OpenVinoPersonReidentifier(DetectorConfig(enabled=False))
+    assert engine.status()["execution_devices"] == []
+    reported = iter((["(CPU)"], ["GPU.0"]))
+    engine._compiled = SimpleNamespace(get_property=lambda _name: next(reported))
+    assert engine.status()["execution_devices"] == ["(CPU)"]
+    assert engine.status()["execution_devices"] == ["GPU.0"]
+
+    def unsupported(_name):
+        raise RuntimeError("property not supported")
+
+    engine._compiled = SimpleNamespace(get_property=unsupported)
+    assert engine.status()["execution_devices"] == []
+
+
 def test_runtime_status_log_tail_is_bounded_allowlisted_and_redacted() -> None:
     secret = "observer-secret-value"
     log_rows = [

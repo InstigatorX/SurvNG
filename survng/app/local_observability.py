@@ -345,7 +345,79 @@ def _detector_snapshot(config: AppConfig, raw: dict[str, Any]) -> dict[str, Any]
             "auxiliary_started": bool(lifecycle.get("auxiliary_started")),
             "closed": bool(lifecycle.get("closed")),
         },
+        "device_gate": _device_gate_snapshot(runtime.get("workloads")),
+        "reid": _reid_snapshot(raw.get("reid")),
     }
+
+
+_DEVICE_GATE_COUNTS = (
+    "security_waiting",
+    "security_active",
+    "initial_waiting",
+    "initial_active",
+    "refinement_active",
+    "optional_active",
+)
+_DEVICE_GATE_CLASS_FIELDS = (
+    "admitted",
+    "completed",
+    "shed",
+    "timed_out",
+    "max_wait_ms",
+    "admission_wait_ms_p95",
+)
+MAX_DEVICE_GATE_CLASSES = 16
+
+
+def _device_gate_snapshot(raw: object) -> dict[str, Any]:
+    """Expose per-workload shedding so optional-work starvation is measurable."""
+    if not isinstance(raw, dict):
+        return {}
+    classes = raw.get("classes")
+    return {
+        "accepting": bool(raw.get("accepting")),
+        **{name: int(_number(raw.get(name))) for name in _DEVICE_GATE_COUNTS},
+        "classes": {
+            key: {
+                name: _optional_number(value.get(name))
+                for name in _DEVICE_GATE_CLASS_FIELDS
+            }
+            for key, value in (
+                list(classes.items())[:MAX_DEVICE_GATE_CLASSES]
+                if isinstance(classes, dict)
+                else ()
+            )
+            if _motion_identifier(key) is not None and isinstance(value, dict)
+        },
+    }
+
+
+def _device_name(value: object) -> str:
+    text = str(value or "")[:32]
+    return text if all(char.isalnum() or char in "._:()-," for char in text) else ""
+
+
+def _reid_snapshot(raw: object) -> dict[str, Any]:
+    """Report where ReID actually executes; AUTO may move from CPU to GPU."""
+    if not isinstance(raw, dict):
+        return {}
+    engines: dict[str, Any] = {}
+    for kind in ("person", "vehicle"):
+        engine = raw.get(kind)
+        if not isinstance(engine, dict):
+            continue
+        devices = engine.get("execution_devices")
+        engines[kind] = {
+            "enabled": bool(engine.get("enabled")),
+            "ready": bool(engine.get("ready")),
+            "device": _device_name(engine.get("device")),
+            "execution_devices": [
+                name
+                for name in (_device_name(item) for item in list(devices)[:4])
+                if name
+            ] if isinstance(devices, (list, tuple)) else [],
+        }
+    return {"enabled": bool(raw.get("enabled")), **engines}
 
 
 def _storage_snapshot(raw: dict[str, Any]) -> dict[str, Any]:

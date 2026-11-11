@@ -54,6 +54,7 @@ class OpenVinoPersonReidentifier:
         self.input_layout = "NCHW"
         self.embedding_size = 0
         self.model_load_ms: float | None = None
+        self._compiled: Any = None
         self._infer_request: Any = None
         self._input: Any = None
         self._output: Any = None
@@ -101,6 +102,7 @@ class OpenVinoPersonReidentifier:
                     openvino_latency_compile_config("CPU"),
                 )
                 self.loaded_device = "CPU"
+            self._compiled = compiled
             self._infer_request = compiled.create_infer_request()
             self._input = compiled.input(0)
             self._output = compiled.output(0)
@@ -181,6 +183,7 @@ class OpenVinoPersonReidentifier:
             "error": self.error,
             "kind": self.kind.lower(),
             "device": self.loaded_device or self.configured_device,
+            "execution_devices": self.execution_devices(),
             "model_path": self.configured_model_path,
             "model_fingerprint": self.model_fingerprint,
             "input_shape": list(self.input_shape),
@@ -189,6 +192,25 @@ class OpenVinoPersonReidentifier:
             "model_load_ms": self.model_load_ms,
             "match_threshold": self.match_threshold,
         }
+
+
+    def execution_devices(self) -> list[str]:
+        """Return the hardware OpenVINO actually runs on (e.g. AUTO -> GPU.0).
+
+        Queried live because AUTO may start on CPU and hand off to an
+        accelerator once its compilation finishes.
+        """
+        compiled = self._compiled
+        if compiled is None:
+            return []
+        try:
+            value = compiled.get_property("EXECUTION_DEVICES")
+        except Exception as exc:
+            # Diagnostic only: some plugins do not expose this property.
+            LOGGER.debug("%s ReID execution devices unavailable: %s", self.kind, exc)
+            return []
+        values = [value] if isinstance(value, str) else list(value or ())
+        return [str(item)[:32] for item in values[:4]]
 
 
 class OpenVinoAppearanceReidentifier:
