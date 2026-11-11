@@ -22,6 +22,9 @@
   sharper empty frame, and cover choice weighs subject sharpness with size.
 - Incident evidence thumbnails now show when each cover frame was captured,
   not when its event was triggered, and are ordered by that time.
+- Incidents can keep up to four additional evidence images, up from two.
+  Object tracking now fills the extra slots with distinct full-detail views
+  from across the incident once its session completes.
 - Added browser sign-in, local users and API tokens, TLS certificate management,
   and trusted reverse-proxy configuration.
 - Added privacy-safe support bundle downloads for remote troubleshooting.

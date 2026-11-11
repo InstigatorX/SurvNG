@@ -607,6 +607,25 @@ from the snapshot file name, which every writer stamps with the capture time.
 It is omitted when neither is available, and clients fall back to
 `created_at`.
 
+Each incident can also retain up to four additional evidence images beside
+its cover. They come from two sources and never change the cover, admission,
+or alerts:
+
+- Recorded detection contributes at most two per incident, chosen from
+  frames it already decoded. The other two slots are reserved for tracking,
+  which runs later, so detection passes on several events cannot fill the
+  gallery first. Tracking may also use slots detection left empty.
+- Object tracking contributes when a session completes. While it follows a
+  subject it nominates the best view per subject every two seconds, then
+  re-reads the chosen moments from the main recording at full detail. Views
+  that repeat the cover or an image already kept are skipped: the same place
+  at a similar size counts as the same picture, however far apart in time.
+  With `tracking.analysis_mode: on_demand` this happens when the incident's
+  recorded analysis is requested, not when the incident is created.
+
+Tracking status reports `evidence_images_saved`, `evidence_images_nominated`,
+and `evidence_images_result` for the session.
+
 Incident grouping is a presentation/aggregation layer over events from the
 same camera and nearby time range. Object and zone eligibility determine which
 detections are promoted through incident, MQTT, and Home Assistant object
