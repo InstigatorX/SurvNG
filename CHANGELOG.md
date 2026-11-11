@@ -20,6 +20,9 @@
 - Incident cover images now show the subject that established the incident.
   A subject sampled too few times to confirm no longer loses the cover to a
   sharper empty frame, and cover choice weighs subject sharpness with size.
+- Incidents can keep up to four additional evidence images, up from two.
+  Object tracking now fills the extra slots with distinct full-detail views
+  from across the incident once its session completes.
 - Added browser sign-in, local users and API tokens, TLS certificate management,
   and trusted reverse-proxy configuration.
 - Added privacy-safe support bundle downloads for remote troubleshooting.

@@ -28,6 +28,7 @@ from ..security import redact_secret_text
 from ..video_frames import DecodedVideoFrame, VideoFrameReference
 from ..visual_quality import image_quality
 from ..zones import apply_depth_zone_filters, apply_detection_zones
+from .evidence import TrackedEvidenceCollector, save_tracked_evidence
 from .geometry import (
     _box,
     _confidence,
@@ -48,6 +49,8 @@ from .types import (
     ObjectDetectorBackend,
     TrackingCoverFrameProvider,
     TrackingCoverPromoter,
+    TrackingEvidenceCapacity,
+    TrackingEvidenceWriter,
     TrackingPublisher,
     TrackingSnapshotWriter,
     TrackingUpdate,
@@ -191,6 +194,8 @@ class ObjectTrackingSession:
         cover_promoter: TrackingCoverPromoter | None = None,
         cover_revision_provider: Callable[[int], int | None] | None = None,
         window_provider: Callable[[int, datetime], tuple[float, float]] | None = None,
+        evidence_capacity: TrackingEvidenceCapacity | None = None,
+        evidence_writer: TrackingEvidenceWriter | None = None,
     ) -> None:
         self.camera = camera
         self.config = config
@@ -218,6 +223,11 @@ class ObjectTrackingSession:
         self.cover_promoter = cover_promoter
         self.cover_revision_provider = cover_revision_provider
         self.window_provider = window_provider
+        self.evidence_capacity = evidence_capacity
+        self.evidence_writer = evidence_writer
+        self._evidence = TrackedEvidenceCollector()
+        self._evidence_known_frames: list[dict[str, Any]] = []
+        self._evidence_status: dict[str, Any] | None = None
         self._lock = threading.RLock()
         self._transition_lock = threading.Lock()
         self._stop = threading.Event()
@@ -595,6 +605,53 @@ class ObjectTrackingSession:
             return
         if self._cover_candidate is None or candidate.score > self._cover_candidate.score:
             self._cover_candidate = candidate
+
+    def _note_cover_for_evidence(
+        self,
+        captured_at: float,
+        objects: list[dict[str, Any]],
+    ) -> None:
+        """Remember a cover frame so evidence images do not repeat it."""
+        if self._frame_width <= 0 or self._frame_height <= 0:
+            return
+        self._evidence_known_frames.append({
+            "camera_id": self.camera.id,
+            "captured_epoch": float(captured_at),
+            "objects": [
+                {
+                    "box": item.get("box"),
+                    "track_id": item.get("track_id"),
+                    "detection_frame_width": self._frame_width,
+                    "detection_frame_height": self._frame_height,
+                }
+                for item in objects
+            ],
+        })
+
+    def _save_tracked_evidence(self, event_id: int, stop: threading.Event) -> None:
+        """Retain a few distinct full-detail views from the completed session."""
+        if (
+            self.evidence_capacity is None
+            or self.evidence_writer is None
+            or self.cover_frame_provider is None
+            or self.snapshot_writer is None
+        ):
+            return
+        promoted = self._cover_candidate
+        if promoted is not None and (self._cover_promotion or {}).get("cover_promoted"):
+            self._note_cover_for_evidence(promoted.captured_at, list(promoted.tracked_objects))
+        self._evidence_status = save_tracked_evidence(
+            self._evidence.views(),
+            event_id=event_id,
+            camera_id=self.camera.id,
+            capacity=self.evidence_capacity,
+            writer=self.evidence_writer,
+            frame_provider=self.cover_frame_provider,
+            snapshot_writer=self.snapshot_writer,
+            known_frames=self._evidence_known_frames,
+            stopped=stop.is_set,
+        )
+        self._evidence.reset()
 
     def _promote_cover_candidate(self, event_id: int) -> None:
         """Verify and persist one materially better tracked cover."""
@@ -1036,6 +1093,9 @@ class ObjectTrackingSession:
             self._cover_baseline = None
             self._cover_candidate = None
             self._cover_promotion = None
+            self._evidence.reset()
+            self._evidence_known_frames = []
+            self._evidence_status = None
             self._set_status(
                 cover_promoted=False,
                 cover_promotion_attempted=False,
@@ -1107,6 +1167,7 @@ class ObjectTrackingSession:
                     primary_track_ids = {int(item["track_id"]) for item in seeded if item.get("track_id") is not None}
                 if initial_frame is not None:
                     self._consider_cover_candidate(initial_frame, seed_epoch, seeded, primary_track_ids)
+                    self._note_cover_for_evidence(seed_epoch, seeded)
                 seed_pending = False
 
             if not seed_pending and requested_window is None:
@@ -1350,6 +1411,15 @@ class ObjectTrackingSession:
                     primary_track_ids,
                     frame_reference,
                 )
+                if self.evidence_writer is not None:
+                    self._evidence.consider(
+                        frame,
+                        sample_epoch,
+                        tracked,
+                        self._frame_width,
+                        self._frame_height,
+                        frame_reference,
+                    )
                 self._last_analyzed_epoch = sample_epoch
                 if self._analyzed_from is None:
                     self._analyzed_from = sample_epoch
@@ -1728,6 +1798,14 @@ class ObjectTrackingSession:
                         "tracked cover promotion failed for %s event %d",
                         self.camera.id, event_id,
                     )
+                try:
+                    self._save_tracked_evidence(event_id, stop)
+                except Exception:
+                    # Optional images must not turn a completed session into a failure.
+                    LOGGER.exception(
+                        "tracked evidence images failed for %s event %d",
+                        self.camera.id, event_id,
+                    )
             self._persist(event_id, tracker, final_epoch, None, frames_processed, final_state)
             self._set_status(
                 enabled=True,
@@ -2041,6 +2119,8 @@ class ObjectTrackingSession:
         }
         if self._cover_promotion:
             payload.update(self._cover_promotion)
+        if self._evidence_status:
+            payload.update(self._evidence_status)
         if self._frame_width > 0 and self._frame_height > 0:
             payload["frame_width"] = self._frame_width
             payload["frame_height"] = self._frame_height
@@ -2088,6 +2168,7 @@ class ObjectTrackingSession:
                 )
             },
             **(self._cover_promotion or {}),
+            **(self._evidence_status or {}),
         )
         if state in {"complete", "interrupted"}:
             self._publish_safely(event_id, payload)
@@ -2388,6 +2469,8 @@ class ObjectTrackingSessionFactory:
         cover_promoter: TrackingCoverPromoter | None = None,
         cover_revision_provider: Callable[[int], int | None] | None = None,
         window_provider: Callable[[int, datetime], tuple[float, float]] | None = None,
+        evidence_capacity: TrackingEvidenceCapacity | None = None,
+        evidence_writer: TrackingEvidenceWriter | None = None,
     ) -> None:
         self.config = config
         self.detector = detector
@@ -2400,6 +2483,8 @@ class ObjectTrackingSessionFactory:
         self.cover_promoter = cover_promoter
         self.cover_revision_provider = cover_revision_provider
         self.window_provider = window_provider
+        self.evidence_capacity = evidence_capacity
+        self.evidence_writer = evidence_writer
         # Fail configuration loading before any event tries to start a session.
         self.tracker_registry.require(config.implementation)
 
@@ -2428,4 +2513,6 @@ class ObjectTrackingSessionFactory:
             cover_promoter=self.cover_promoter,
             cover_revision_provider=self.cover_revision_provider,
             window_provider=self.window_provider,
+            evidence_capacity=self.evidence_capacity,
+            evidence_writer=self.evidence_writer,
         )

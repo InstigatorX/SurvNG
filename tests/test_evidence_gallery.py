@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from survng.app.config import ImageStorageConfig
-from survng.app.evidence_gallery import GalleryImage, encode_gallery
+from survng.app.evidence_gallery import MAX_GALLERY_IMAGES, GalleryImage, encode_gallery
 from survng.app.events import EventStore
 from survng.app.image_storage import DurableImageWriter, EncodedImage
 from survng.app.motion_pipeline.object_detection import _RecordedDetectionSample, RecordedDetectionResult
@@ -127,14 +127,14 @@ def test_persistence_is_capped_across_events_and_retries_without_promoting_cover
     before=store.scene_incident(event_id=event['id'])
     before_notifications=store.scene_pending_notifications()
     write,calls=writer_for(tmp_path)
-    images=[gallery_image('first'),gallery_image('second',1004)]
-    assert store.retain_scene_evidence_images(event['id'],images,write)==2
+    images=[gallery_image(f'image-{index}',1001+index) for index in range(MAX_GALLERY_IMAGES)]
+    assert store.retain_scene_evidence_images(event['id'],images,write)==MAX_GALLERY_IMAGES
     assert store.retain_scene_evidence_images(event['id'],images,write)==0
-    assert store.retain_scene_evidence_images(event['id'],[gallery_image('third',1005)],write)==0
-    assert len(calls)==2
+    assert store.retain_scene_evidence_images(event['id'],[gallery_image('extra',1009)],write)==0
+    assert len(calls)==MAX_GALLERY_IMAGES
     assert store.scene_evidence_capacity(event['id'])['remaining']==0
     after=store.scene_incident(event_id=event['id'])
-    assert len(after['evidence_images'])==2
+    assert len(after['evidence_images'])==MAX_GALLERY_IMAGES
     for field in ('snapshot_path','snapshot_url','snapshot_observation_id','labels','scene_objects',
                   'alert_decisions','establishment','summary','objects'):
         assert after.get(field)==before.get(field),field
@@ -146,7 +146,7 @@ def test_persistence_is_capped_across_events_and_retries_without_promoting_cover
         assert image['objects'][0]['snapshot_visible']
         assert store.scene_evidence_image(image['id'])['snapshot_path']
     plan=store.snapshot_retention_plan(2000)
-    assert plan['file_count']==2
+    assert plan['file_count']==MAX_GALLERY_IMAGES
     # Related events share the incident-wide cap.
     second=store.add_event('gate','motion',created_at=datetime.fromtimestamp(1005,timezone.utc).isoformat(),
         objects_json=json.dumps([observation(1005)]))
@@ -158,7 +158,7 @@ def test_write_failure_releases_reservation_and_expiry_does_not_refill_slots(tmp
     store=EventStore(tmp_path);event=seed(store);image=gallery_image('first')
     with pytest.raises(OSError):
         store.retain_scene_evidence_images(event['id'],[image],Mock(side_effect=OSError('disk unavailable')))
-    assert store.scene_evidence_capacity(event['id'])['remaining']==2
+    assert store.scene_evidence_capacity(event['id'])['remaining']==MAX_GALLERY_IMAGES
     write,calls=writer_for(tmp_path)
     assert store.retain_scene_evidence_images(event['id'],[image],write)==1
     row=store.scene_incident(event_id=event['id'])['evidence_images'][0]
@@ -169,7 +169,7 @@ def test_write_failure_releases_reservation_and_expiry_does_not_refill_slots(tmp
         store._clear_snapshot_references(conn,[path])
     assert store.scene_incident(event_id=event['id'])['evidence_images']==[]
     assert store.scene_evidence_image(row['id']) is None
-    assert store.scene_evidence_capacity(event['id'])['remaining']==1
+    assert store.scene_evidence_capacity(event['id'])['remaining']==MAX_GALLERY_IMAGES-1
     assert store.retain_scene_evidence_images(event['id'],[image],write)==0
     assert len(calls)==1
 
@@ -196,7 +196,7 @@ def test_decision_handler_adopts_compressed_gallery_and_releases_capacity(tmp_pa
     handler.refine('motion','motion',datetime.fromtimestamp(1000,timezone.utc),{},existing_event_id=event['id'])
     assert len(store.scene_incident(event_id=event['id'])['evidence_images'])==2
     assert batch.images==[]
-    assert provider.call_args.args[1]['evidence_gallery']['remaining']==2
+    assert provider.call_args.args[1]['evidence_gallery']['remaining']==MAX_GALLERY_IMAGES
 
 
 def test_full_subject_is_preferred_over_a_larger_clipped_near_duplicate():
@@ -217,7 +217,7 @@ def test_failed_gallery_transaction_removes_unadopted_file(tmp_path):
     with patch.object(store,'_evidence_outbox',side_effect=RuntimeError('commit failed')):
         with pytest.raises(RuntimeError):
             store.retain_scene_evidence_images(event['id'],[gallery_image('failed')],write)
-    assert store.scene_evidence_capacity(event['id'])['remaining']==2
+    assert store.scene_evidence_capacity(event['id'])['remaining']==MAX_GALLERY_IMAGES
     assert list((tmp_path/'snapshots').iterdir())==[]
 
 
@@ -256,7 +256,7 @@ def test_gallery_endpoint_serves_real_image_without_exposing_it_as_observation(t
     assert store.scene_observation(image['id']) is None
 
 
-def test_concurrent_refinements_reserve_only_two_slots(tmp_path):
+def test_concurrent_refinements_reserve_only_the_incident_cap(tmp_path):
     import threading
     from concurrent.futures import ThreadPoolExecutor
     store=EventStore(tmp_path);event=seed(store)
@@ -267,7 +267,7 @@ def test_concurrent_refinements_reserve_only_two_slots(tmp_path):
         return writer(image,at)
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures=[pool.submit(store.retain_scene_evidence_images,event['id'],
-            [gallery_image(f'{i}-a',1001+i),gallery_image(f'{i}-b',1010+i)],blocked_write) for i in (0,1)]
-        assert sum(f.result(timeout=5) for f in futures)==2
-    assert len(store.scene_incident(event_id=event['id'])['evidence_images'])==2
-    assert len(list((tmp_path/'snapshots').iterdir()))==2
+            [gallery_image(f'{i}-{n}',1001+i+10*n) for n in range(MAX_GALLERY_IMAGES)],blocked_write) for i in (0,1)]
+        assert sum(f.result(timeout=5) for f in futures)==MAX_GALLERY_IMAGES
+    assert len(store.scene_incident(event_id=event['id'])['evidence_images'])==MAX_GALLERY_IMAGES
+    assert len(list((tmp_path/'snapshots').iterdir()))==MAX_GALLERY_IMAGES

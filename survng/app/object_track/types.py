@@ -46,6 +46,9 @@ TrackingCoverFrameProvider = Callable[
 ]
 TrackingSnapshotWriter = Callable[[np.ndarray, datetime], str]
 TrackingCoverPromoter = Callable[..., dict[str, Any] | None]
+# Remaining gallery slots plus retained frames, and the store that adopts images.
+TrackingEvidenceCapacity = Callable[[int], dict[str, Any]]
+TrackingEvidenceWriter = Callable[..., int]
 
 
 class ObjectDetectorBackend(Protocol):
