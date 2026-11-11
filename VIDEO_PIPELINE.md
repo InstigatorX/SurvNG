@@ -602,8 +602,10 @@ Each incident can also retain up to four additional evidence images beside
 its cover. They come from two sources and never change the cover, admission,
 or alerts:
 
-- Recorded detection contributes at most two per pass, chosen from frames it
-  already decoded.
+- Recorded detection contributes at most two per incident, chosen from
+  frames it already decoded. The other two slots are reserved for tracking,
+  which runs later, so detection passes on several events cannot fill the
+  gallery first. Tracking may also use slots detection left empty.
 - Object tracking contributes when a session completes. While it follows a
   subject it nominates the best view per subject every two seconds, then
   re-reads the chosen moments from the main recording at full detail. Views

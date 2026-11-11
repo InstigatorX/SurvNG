@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 
 from survng.app.config import CameraConfig, ImageStorageConfig, ObjectTrackingConfig
-from survng.app.evidence_gallery import MAX_BATCH_IMAGES, MAX_GALLERY_IMAGES, encode_gallery
+from survng.app.evidence_gallery import MAX_DETECTION_IMAGES, MAX_GALLERY_IMAGES, encode_gallery
 from survng.app.events import EventStore
 from survng.app.image_storage import DurableImageWriter
 from survng.app.motion_pipeline.object_detection import _RecordedDetectionSample
@@ -73,6 +73,10 @@ def snapshot_writer(tmp_path):
     return write
 
 
+def tracking_capacity(store):
+    return lambda event_id: store.scene_evidence_capacity(event_id, source="object_tracking")
+
+
 def save(store, event, views, tmp_path, *, frames=None, known=(), stopped=lambda: False):
     requested = []
 
@@ -85,7 +89,7 @@ def save(store, event, views, tmp_path, *, frames=None, known=(), stopped=lambda
 
     status = save_tracked_evidence(
         views, event_id=event["id"], camera_id="gate",
-        capacity=store.scene_evidence_capacity, writer=store.retain_scene_evidence_images,
+        capacity=tracking_capacity(store), writer=store.retain_scene_evidence_images,
         frame_provider=provide, snapshot_writer=snapshot_writer(tmp_path),
         known_frames=list(known), stopped=stopped,
     )
@@ -198,7 +202,7 @@ def test_tracked_views_respect_the_incident_cap_and_existing_images(tmp_path):
 
     assert status["evidence_images_saved"] == MAX_GALLERY_IMAGES
     assert len(requested) == MAX_GALLERY_IMAGES
-    assert store.scene_evidence_capacity(event["id"])["remaining"] == 0
+    assert tracking_capacity(store)(event["id"])["remaining"] == 0
     again, requested = save(store, event, collect(moments).views(), tmp_path)
     assert again["evidence_images_result"] == "gallery_full"
     assert requested == []
@@ -263,7 +267,7 @@ def test_session_saves_evidence_only_when_a_gallery_store_is_wired(tmp_path):
     assert run(session()) is None
     assert store.scene_incident(event_id=event["id"])["evidence_images"] == []
 
-    status = run(session(evidence_capacity=store.scene_evidence_capacity,
+    status = run(session(evidence_capacity=tracking_capacity(store),
                          evidence_writer=store.retain_scene_evidence_images))
     assert status["evidence_images_saved"] == 1
     images = store.scene_incident(event_id=event["id"])["evidence_images"]
@@ -286,7 +290,7 @@ def test_one_detection_pass_still_contributes_at_most_two_images():
     batch = encode_gallery(samples, samples[-1], observations, camera_id="gate", event_epoch=1000,
                            request={"remaining": MAX_GALLERY_IMAGES}, timing={})
     try:
-        assert len(batch.images) == MAX_BATCH_IMAGES < MAX_GALLERY_IMAGES
+        assert len(batch.images) == MAX_DETECTION_IMAGES < MAX_GALLERY_IMAGES
     finally:
         batch.close()
 
@@ -361,3 +365,49 @@ def test_completed_recorded_session_nominates_and_saves_evidence(tmp_path):
     assert epochs == sorted(epochs) and len(set(epochs)) == len(epochs)
     assert all(later - earlier >= 1.0 for earlier, later in zip(epochs, epochs[1:]))
     assert {size for _epoch, size in saved} == {(200, 200)}
+
+
+def test_detection_cannot_take_the_slots_reserved_for_tracking(tmp_path):
+    # Two events in one incident each run a detection pass before on-demand
+    # tracking starts. Their images must not fill the whole gallery.
+    from survng.app.evidence_gallery import gallery_image
+
+    store, event = seeded_store(tmp_path)
+    write = snapshot_writer(tmp_path)
+
+    def detection_image(epoch, x):
+        return gallery_image(np.full((HEIGHT, WIDTH, 3), 90, np.uint8), {
+            "camera_id": "gate", "captured_epoch": epoch, "width": WIDTH, "height": HEIGHT,
+            "frame_timestamp_exact": True, "recording_path": "recordings/gate.mp4", "role": "gallery",
+            "objects": [{"label": "car", "confidence": 0.9, "box": {"x1": x, "y1": 20, "x2": x + 40, "y2": 60},
+                         "detection_frame_width": WIDTH, "detection_frame_height": HEIGHT}]})
+
+    first_pass = [detection_image(1000.5, 10), detection_image(1001.0, 60)]
+    second_pass = [detection_image(1006.0, 110), detection_image(1006.5, 160)]
+    assert store.retain_scene_evidence_images(event["id"], first_pass, write) == MAX_DETECTION_IMAGES
+    assert store.scene_evidence_capacity(event["id"])["remaining"] == 0
+    assert store.retain_scene_evidence_images(event["id"], second_pass, write) == 0
+    assert tracking_capacity(store)(event["id"])["remaining"] == MAX_GALLERY_IMAGES - MAX_DETECTION_IMAGES
+
+    moments = [(1010.0 + 2 * index, [tracked((200 + 30 * index, 80, 240 + 30 * index, 150))])
+               for index in range(4)]
+    status, _requested = save(store, event, collect(moments).views(), tmp_path)
+
+    assert status["evidence_images_saved"] == MAX_GALLERY_IMAGES - MAX_DETECTION_IMAGES
+    images = store.scene_incident(event_id=event["id"])["evidence_images"]
+    assert len(images) == MAX_GALLERY_IMAGES
+    assert sum(image["objects"][0].get("evidence_source") == "object_tracking" for image in images) == 2
+    # Tracking images do not free up, or use up, detection's own allowance.
+    assert store.scene_evidence_capacity(event["id"])["remaining"] == 0
+
+
+def test_tracking_may_use_slots_detection_left_empty(tmp_path):
+    store, event = seeded_store(tmp_path)
+    moments = [(1001.0 + 2 * index, [tracked((10 + 50 * index, 20, 60 + 50 * index, 90))])
+               for index in range(6)]
+
+    status, _requested = save(store, event, collect(moments).views(), tmp_path)
+
+    assert status["evidence_images_saved"] == MAX_GALLERY_IMAGES
+    # Detection arriving afterwards finds the incident full.
+    assert store.scene_evidence_capacity(event["id"])["remaining"] == 0

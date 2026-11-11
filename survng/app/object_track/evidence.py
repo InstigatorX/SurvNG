@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from ..evidence_gallery import MAX_GALLERY_IMAGES, _box as _normalized_box, gallery_image
+from ..evidence_gallery import MAX_GALLERY_IMAGES, TRACKING_SOURCE, _box as _normalized_box, gallery_image
 from ..video_frames import VideoFrameReference
 from ..visual_quality import image_quality
 from .geometry import Box, _box, _confidence
@@ -77,13 +77,14 @@ class TrackedEvidenceView:
                 "detection_frame_height": int(height),
                 "frame_source": "recorded_main",
                 "captured_at_epoch": self.captured_at,
-                "evidence_source": "object_tracking",
+                "evidence_source": TRACKING_SOURCE,
             })
         return {
             "camera_id": camera_id, "captured_epoch": self.captured_at, "objects": objects,
             "width": int(width), "height": int(height), "frame_source": "recorded_main",
             "frame_timestamp_exact": True,
             "recording_path": str(self.frame_reference.source_path), "role": "gallery",
+            "source": TRACKING_SOURCE,
         }
 
     def comparison(self, camera_id: str) -> dict[str, Any]:

@@ -485,7 +485,10 @@ class InferenceLifecycle:
             appearance_indexer=self.appearance_index.replace_event,
             cover_promoter=self.events.promote_tracking_cover,
             cover_revision_provider=lambda event_id: (self.events.get(event_id) or {}).get("evidence_revision"),
-            evidence_capacity=getattr(self.events, "scene_evidence_capacity", None),
+            evidence_capacity=(
+                (lambda event_id: self.events.scene_evidence_capacity(event_id, source="object_tracking"))
+                if callable(getattr(self.events, "scene_evidence_capacity", None)) else None
+            ),
             evidence_writer=getattr(self.events, "retain_scene_evidence_images", None),
         )
 

@@ -16,9 +16,12 @@ from .image_storage import DurableImageWriter, EncodedImage
 
 # Retained images per incident, from every source combined.
 MAX_GALLERY_IMAGES = 4
-# One detection pass contributes at most this many, which bounds its encode
-# time and pending memory. Object tracking may fill the remaining slots.
-MAX_BATCH_IMAGES = 2
+# Recorded detection keeps at most this many per incident, and per pass, which
+# bounds its encode time and pending memory. The remaining slots are reserved
+# for object tracking: it runs later and sees the whole incident, so earlier
+# detection passes must not be able to fill the gallery first.
+MAX_DETECTION_IMAGES = 2
+TRACKING_SOURCE = "object_tracking"
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_IMAGE_PIXELS = 16_000_000
 GALLERY_JPEG_QUALITY = 85
@@ -110,7 +113,7 @@ def gallery_image(frame, metadata):
 
 
 def encode_gallery(samples, selected, observations, *, camera_id, event_epoch, request, timing):
-    limit = min(MAX_BATCH_IMAGES, max(0, int((request or {}).get('remaining', 0))))
+    limit = min(MAX_DETECTION_IMAGES, max(0, int((request or {}).get('remaining', 0))))
     if not limit:
         return None
     if not _PENDING_BATCHES.acquire(blocking=False):
