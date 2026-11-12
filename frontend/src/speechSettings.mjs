@@ -7,6 +7,7 @@ export const SPEECH_DEFAULTS = Object.freeze({
   whisper_models_dir: "",
   transcription_device: "CPU",
   transcription_model: "auto",
+  transcription_cpu_threads: 0,
   max_queue_per_camera: 8,
   retention_days: 7,
   mqtt_publish_transcripts: false,

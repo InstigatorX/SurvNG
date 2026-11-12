@@ -634,6 +634,8 @@ class SpeechConfig(BaseModel):
     transcription_device: Literal["CPU", "GPU"] = "CPU"
     # ``auto`` picks base.en on CPU and small.en on GPU.
     transcription_model: Literal["auto", "tiny.en", "base.en", "small.en", "medium.en"] = "auto"
+    # CPU threads for Whisper; 0 = automatic (half the cores, 1-4).
+    transcription_cpu_threads: int = Field(default=0, ge=0, le=64)
     max_queue_per_camera: int = Field(default=8, ge=1, le=64)
     retention_days: int = Field(default=7, ge=1, le=365)
     mqtt_publish_transcripts: bool = False

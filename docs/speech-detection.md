@@ -71,6 +71,32 @@ That writes:
 - `speech.vad_model_path`, `speech.whisper_models_dir` and
   `speech.transcription_device` in `config.json`
 
+## CPU use
+
+Measured on a 4-core host:
+
+| Part | Cost |
+|---|---|
+| FFmpeg listener | About 0.5% of one core per camera, even with a 1080p video stream underneath (video is not decoded). |
+| Voice detection | About 2% of one core per camera with continuous background noise. The model runs single-threaded; OpenVINO's default threading cost about 4× more. Near-silent audio skips inference. |
+| Whisper | The only heavy part, and only while a transcribing camera hears speech. It runs in the `survng-speech` process at reduced priority (nice +10) with `transcription_cpu_threads` threads (0 = half the cores, up to 4). A camera near a TV or radio can keep it busy continuously; turn off Transcribe for that camera, or keep listening only. |
+
+A worker that crashes repeatedly backs off 5 s → 15 s → 60 s → 5 min
+instead of reloading Whisper every few seconds.
+
+To see where CPU goes on a host:
+
+```bash
+ps -o pid,pcpu,etime,comm -C survng-speech,survng-audio-li
+```
+
+```bash
+./survngctl status
+```
+
+`survngctl status` shows the transcriber's queue depth, completed, failed and
+restart counts in its `speech` section.
+
 ## Configuration
 
 In the web UI, go to **Admin → Detection → Speech**. The top card holds the
@@ -88,6 +114,7 @@ the live listener state, and optional tuning. The same settings in
     "whisper_models_dir": "/models/speech/whisper",
     "transcription_device": "CPU",
     "transcription_model": "auto",
+    "transcription_cpu_threads": 0,
     "max_queue_per_camera": 8,
     "retention_days": 7,
     "mqtt_publish_transcripts": false

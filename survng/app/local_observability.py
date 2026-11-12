@@ -497,7 +497,7 @@ def _speech_snapshot(raw: object) -> dict[str, Any]:
             "model": _safe_log_text(transcriber.get("model") or "", limit=32),
             **_numeric_fields(
                 transcriber,
-                ("queue_depth", "completed", "failed", "dropped", "restarts"),
+                ("queue_depth", "completed", "failed", "dropped", "restarts", "cpu_threads"),
             ),
         }
     return {

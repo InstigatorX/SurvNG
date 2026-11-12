@@ -20,6 +20,7 @@ STATE_SHAPE = (2, 1, 128)
 # Frames quieter than about -60 dBFS cannot hold intelligible speech; skipping
 # them keeps idle cameras nearly free.
 SILENCE_RMS = 0.001
+VAD_CPU_PROPERTIES = {"INFERENCE_NUM_THREADS": 1, "NUM_STREAMS": 1}
 
 
 class VadUnavailable(RuntimeError):
@@ -41,7 +42,10 @@ class SileroVadModel:
         output_names = {item.get_any_name() for item in model.outputs}
         if not {"input", "state"} <= input_names or not {"output", "stateN"} <= output_names:
             raise VadUnavailable("voice activity model has an unexpected interface")
-        self._compiled = core.compile_model(model, device)
+        # The model is tiny and called ~31 times a second per camera; letting
+        # OpenVINO spread each call across every core costs several times
+        # more CPU than running it on one thread.
+        self._compiled = core.compile_model(model, device, VAD_CPU_PROPERTIES if device == "CPU" else {})
         self._lock = threading.Lock()
         self.path = str(path)
 

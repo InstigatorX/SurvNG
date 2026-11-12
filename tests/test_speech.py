@@ -629,3 +629,27 @@ def test_turning_detection_off_refreshes_speech_immediately() -> None:
     assert switches.calls == [("gate", False)]
     assert refresh.count == 1
     assert manager._speech_camera_active("gate") is False
+
+
+def test_whisper_cpu_threads_default_to_half_the_cores_capped() -> None:
+    from survng.app.speech.transcriber import transcription_cpu_threads
+
+    assert transcription_cpu_threads(0, cpu_count=16) == 4
+    assert transcription_cpu_threads(0, cpu_count=4) == 2
+    assert transcription_cpu_threads(0, cpu_count=1) == 1
+    assert transcription_cpu_threads(6, cpu_count=16) == 6
+
+
+def test_crashing_worker_backs_off_instead_of_reloading_every_few_seconds() -> None:
+    from survng.app.speech.transcriber import RESTART_DELAYS_SECONDS, restart_delay
+
+    delays = [restart_delay(failures) for failures in range(1, 8)]
+    assert delays == sorted(delays)
+    assert delays[0] == RESTART_DELAYS_SECONDS[0]
+    assert delays[-1] == RESTART_DELAYS_SECONDS[-1] >= 300
+
+
+def test_voice_model_runs_single_threaded() -> None:
+    from survng.app.speech.vad import VAD_CPU_PROPERTIES
+
+    assert VAD_CPU_PROPERTIES == {"INFERENCE_NUM_THREADS": 1, "NUM_STREAMS": 1}

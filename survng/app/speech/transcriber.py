@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import os
 import threading
 import time
 from collections import OrderedDict, deque
@@ -29,6 +30,18 @@ START_TIMEOUT_SECONDS = 180.0
 # presumed wedged and restarted.
 REQUEST_TIMEOUT_SECONDS = 120.0
 RESTART_DELAYS_SECONDS = (5.0, 15.0, 60.0, 300.0)
+# Transcription is enrichment: it runs below surveillance work in the OS
+# scheduler and, on CPU, never takes every core.
+WORKER_NICE_INCREMENT = 10
+AUTO_CPU_THREADS_MAX = 4
+
+
+def transcription_cpu_threads(configured: int, cpu_count: int | None = None) -> int:
+    """Whisper CPU threads: the configured value, or half the cores (1-4)."""
+    if configured > 0:
+        return int(configured)
+    cores = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
+    return max(1, min(AUTO_CPU_THREADS_MAX, cores // 2))
 # Whisper fills silence and noise with stock phrases learned from subtitles.
 HALLUCINATION_PHRASES = frozenset({
     "thank you.",
@@ -64,6 +77,11 @@ class TranscriptionResult:
     reason: str = ""
 
 
+def restart_delay(failures: int) -> float:
+    index = max(0, min(int(failures) - 1, len(RESTART_DELAYS_SECONDS) - 1))
+    return RESTART_DELAYS_SECONDS[index]
+
+
 def classify_transcript(text: str) -> str:
     normalized = " ".join(text.split()).strip()
     if not normalized:
@@ -87,7 +105,11 @@ def _send(connection, message: tuple) -> bool:
         return False
 
 
-def transcription_worker_main(connection, candidates: list[tuple[str, str]]) -> None:
+def transcription_worker_main(
+    connection,
+    candidates: list[tuple[str, str]],
+    cpu_threads: int = 0,
+) -> None:
     """Child process entry point. ``candidates`` is [(device, model_path), ...]."""
     try:
         from ..inference_runtime.process import _disable_worker_core_dumps, _set_worker_process_name
@@ -95,6 +117,10 @@ def transcription_worker_main(connection, candidates: list[tuple[str, str]]) -> 
         _disable_worker_core_dumps()
         _set_worker_process_name("speech")
     except Exception:
+        pass
+    try:
+        os.nice(WORKER_NICE_INCREMENT)
+    except OSError:
         pass
     try:
         import openvino_genai
@@ -109,8 +135,19 @@ def transcription_worker_main(connection, candidates: list[tuple[str, str]]) -> 
         if not candidate_path or not Path(candidate_path).is_dir():
             errors.append(f"{candidate_device}: model not installed")
             continue
+        properties = (
+            {"INFERENCE_NUM_THREADS": int(cpu_threads)}
+            if candidate_device == "CPU" and cpu_threads > 0
+            else {}
+        )
         try:
-            pipeline = openvino_genai.WhisperPipeline(candidate_path, candidate_device)
+            try:
+                pipeline = openvino_genai.WhisperPipeline(candidate_path, candidate_device, **properties)
+            except Exception:
+                if not properties:
+                    raise
+                # A runtime that rejects the thread cap still transcribes.
+                pipeline = openvino_genai.WhisperPipeline(candidate_path, candidate_device)
             device, model_path = candidate_device, candidate_path
             break
         except Exception as error:  # device or model load failure
@@ -237,6 +274,7 @@ class TranscriptionService:
             "state": self._state,
             "reason": self._reason,
             "requested_device": self.config.transcription_device,
+            "cpu_threads": transcription_cpu_threads(self.config.transcription_cpu_threads),
             "device": self._device,
             "model": self._model,
             "queue_depth": sum(depth.values()),
@@ -263,29 +301,38 @@ class TranscriptionService:
         return None
 
     def _run(self) -> None:
-        attempt = 0
+        # Consecutive failures without a successful transcription. A worker
+        # that crashes on every request must not reload Whisper every few
+        # seconds, so the backoff keeps growing until one job succeeds.
+        failures = 0
         while not self._stop.is_set():
             if not self._start_process():
                 if self._state == "unavailable":
                     self._drain_unavailable()
                     return
-                delay = RESTART_DELAYS_SECONDS[min(attempt, len(RESTART_DELAYS_SECONDS) - 1)]
-                attempt += 1
-                self._stop.wait(delay)
+                failures += 1
+                self._stop.wait(restart_delay(failures))
                 continue
-            attempt = 0
+            completed_before = self._completed
             healthy = self._serve()
             self._stop_process()
+            if self._completed > completed_before:
+                failures = 0
             if not healthy and not self._stop.is_set():
+                failures += 1
                 self._restarts += 1
                 self._state = "restarting"
-                self._stop.wait(RESTART_DELAYS_SECONDS[0])
+                self._stop.wait(restart_delay(failures))
 
     def _start_process(self) -> bool:
         parent, child = self._context.Pipe()
         process = self._context.Process(
             target=transcription_worker_main,
-            args=(child, self.candidates()),
+            args=(
+                child,
+                self.candidates(),
+                transcription_cpu_threads(self.config.transcription_cpu_threads),
+            ),
             name="survng-speech",
             daemon=True,
         )
