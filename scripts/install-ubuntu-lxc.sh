@@ -5,7 +5,7 @@
 # The survng user, packages, checkout, config, go2rtc, and unit are created
 # here. Nothing else is expected to exist.
 #
-#   curl -fsSL https://raw.githubusercontent.com/InstigatorX/SurvNG/v1.2.0/scripts/install-ubuntu-lxc.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/InstigatorX/SurvNG/v1.2/scripts/install-ubuntu-lxc.sh | bash
 #   bash scripts/install-ubuntu-lxc.sh --gpu --media-dir /srv/survng/media
 set -euo pipefail
 

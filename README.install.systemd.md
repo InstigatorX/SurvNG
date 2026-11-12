@@ -14,7 +14,7 @@ On a fresh Ubuntu LXC, `scripts/install-ubuntu-lxc.sh` does this install as
 root. It creates the `survng` user, then starts `survng.service` as that user:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/InstigatorX/SurvNG/v1.2.0/scripts/install-ubuntu-lxc.sh | bash
+curl -fsSL https://raw.githubusercontent.com/InstigatorX/SurvNG/v1.2/scripts/install-ubuntu-lxc.sh | bash
 ```
 
 Pass `--gpu` when `/dev/dri` is available, `--skip-models` to boot with
