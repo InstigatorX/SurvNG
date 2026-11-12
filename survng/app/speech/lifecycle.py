@@ -17,8 +17,9 @@ from typing import Any
 from ..config import AppConfig, CameraConfig
 from .attach import incident_speech
 from .retention import apply_speech_retention
+from .triggers import TriggerDispatcher, TriggerThrottle
 from .listener import ListenerEvent, SpeechListener
-from .segmenter import SpeechEnded, SpeechStarted
+from .segmenter import SpeechConfirmed, SpeechEnded, SpeechStarted
 from .store import SpeechStore
 from .transcriber import TranscriptionJob, TranscriptionResult, TranscriptionService
 from .vad import SileroVadModel, VadUnavailable
@@ -47,7 +48,11 @@ class SpeechLifecycle:
         transcriber_factory: Callable[..., TranscriptionService] = TranscriptionService,
         episode_windows: Callable[[str, float, float], list[tuple[float, float]]] | None = None,
         recording_ranges: Callable[[str, float, float], list[tuple[float, float]]] | None = None,
+        request_incident_check: Callable[[str, float], Any] | None = None,
     ) -> None:
+        self.request_incident_check = request_incident_check
+        self._throttles: dict[str, TriggerThrottle] = {}
+        self._dispatcher: TriggerDispatcher | None = None
         self.episode_windows = episode_windows
         self.recording_ranges = recording_ranges
         self.config = config
@@ -115,6 +120,17 @@ class SpeechLifecycle:
                 on_dropped=self._transcription_dropped,
             )
             self.transcriber.start()
+        trigger_cameras = [camera for camera in self.cameras.values() if camera.speech.incidents == "trigger"]
+        if trigger_cameras and self.request_incident_check is not None:
+            self._throttles = {
+                camera.id: TriggerThrottle(
+                    cooldown_seconds=camera.speech.trigger_cooldown_seconds,
+                    max_per_window=camera.speech.trigger_max_per_5m,
+                )
+                for camera in trigger_cameras
+            }
+            self._dispatcher = TriggerDispatcher(self.request_incident_check)
+            self._dispatcher.start()
         self._state, self._reason = "running", ""
         self._stop.clear()
         self._reconcile()
@@ -132,6 +148,8 @@ class SpeechLifecycle:
         for camera_id, listener in listeners:
             listener.stop()
             self._publish_state(camera_id, False)
+        if self._dispatcher is not None:
+            self._dispatcher.stop()
         if self.transcriber is not None:
             self.transcriber.stop()
         if self._state == "running":
@@ -226,6 +244,11 @@ class SpeechLifecycle:
     # Events -----------------------------------------------------------
 
     def _listener_event(self, item: ListenerEvent) -> None:
+        if isinstance(item.event, SpeechConfirmed):
+            throttle = self._throttles.get(item.camera_id)
+            if self._dispatcher is not None and throttle is not None and throttle.allow():
+                self._dispatcher.submit(item.camera_id, item.started_at)
+            return
         if isinstance(item.event, SpeechStarted):
             self._publish_state(item.camera_id, True, started_at=item.started_at)
             return
@@ -351,6 +374,11 @@ class SpeechLifecycle:
                 "state": "paused" if self._state == "running" else self._state,
                 "transcribe": bool(camera.speech.transcribe),
                 "source": camera.speech.source,
+            }
+            cameras[camera_id] = {
+                **cameras[camera_id],
+                "incidents": camera.speech.incidents,
+                **(self._throttles[camera_id].status() if camera_id in self._throttles else {}),
             }
         return {
             "enabled": bool(self.speech.enabled),

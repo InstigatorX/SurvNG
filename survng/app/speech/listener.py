@@ -24,7 +24,7 @@ from ..config import CameraConfig
 from ..ffmpeg_input import ffmpeg_input_args
 from ..ffmpeg_process import named_ffmpeg_executable
 from ..security import redact_secret_text
-from .segmenter import FRAME_SAMPLES, SAMPLE_RATE, SegmenterEvent, SpeechEnded, SpeechSegmenter
+from .segmenter import FRAME_SAMPLES, SAMPLE_RATE, SegmenterEvent, SpeechEnded, SpeechSegmenter, SpeechStarted
 
 LOGGER = logging.getLogger("uvicorn.error")
 
@@ -243,6 +243,7 @@ class SpeechListener:
             pre_roll_ms=speech.pre_roll_ms,
             max_segment_seconds=speech.max_segment_seconds,
             keep_audio=self.keep_audio,
+            confirm_ms=speech.trigger_min_speech_ms if speech.incidents == "trigger" else None,
         )
         anchor: float | None = None
         stdout = process.stdout
@@ -280,7 +281,7 @@ class SpeechListener:
                 self._last_speech_at = ended_at
                 if self._state == "speaking":
                     self._state = "listening"
-        else:
+        elif isinstance(event, SpeechStarted):
             self._set_state("speaking")
         try:
             self.on_event(ListenerEvent(self.camera.id, event, started_at, ended_at))

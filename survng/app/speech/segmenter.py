@@ -31,6 +31,18 @@ class SpeechStarted:
 
 
 @dataclass(frozen=True, slots=True)
+class SpeechConfirmed:
+    """Enough voiced audio in one utterance to request an incident check.
+
+    Emitted at most once per utterance (a long utterance split at
+    max_segment_seconds is still one utterance). ``start_sample`` is where
+    the utterance began, so the incident time is when speech started.
+    """
+
+    start_sample: int
+
+
+@dataclass(frozen=True, slots=True)
 class SpeechEnded:
     start_sample: int
     end_sample: int
@@ -45,7 +57,7 @@ class SpeechEnded:
         return (self.end_sample - self.start_sample) / SAMPLE_RATE
 
 
-SegmenterEvent = SpeechStarted | SpeechEnded
+SegmenterEvent = SpeechStarted | SpeechConfirmed | SpeechEnded
 
 
 def _frames_for_ms(milliseconds: float, frame_samples: int) -> int:
@@ -63,6 +75,7 @@ class SpeechSegmenter:
         max_segment_seconds: float = 30.0,
         keep_audio: bool = False,
         frame_samples: int = FRAME_SAMPLES,
+        confirm_ms: int | None = None,
     ) -> None:
         self.threshold = float(threshold)
         self.release = max(0.01, self.threshold - RELEASE_MARGIN)
@@ -74,6 +87,12 @@ class SpeechSegmenter:
             _frames_for_ms(max_segment_seconds * 1000.0, frame_samples),
         )
         self.keep_audio = bool(keep_audio)
+        self.confirm_frames = (
+            max(1, _frames_for_ms(confirm_ms, frame_samples)) if confirm_ms else None
+        )
+        self._voiced = 0
+        self._utterance_start = 0
+        self._confirmed = False
         self._pre_roll: deque[np.ndarray | None] = deque(
             maxlen=_frames_for_ms(pre_roll_ms, frame_samples)
         )
@@ -111,10 +130,14 @@ class SpeechSegmenter:
                 self._pre_roll.clear()
                 self._peak = probability
                 self._last_voiced = index
+                self._utterance_start = self._segment_start
+                self._voiced = 1
+                self._confirmed = False
                 self._append(stored)
                 if self.min_speech_frames <= 1:
                     self._state = "speaking"
                     events.append(SpeechStarted(self._segment_start * self.frame_samples))
+                    self._maybe_confirm(events)
             else:
                 self._pre_roll.append(stored)
             return events
@@ -123,6 +146,7 @@ class SpeechSegmenter:
         self._peak = max(self._peak, probability)
         if probability >= self.threshold:
             self._last_voiced = index
+            self._voiced += 1
 
         if self._state == "candidate":
             if probability < self.release:
@@ -135,9 +159,11 @@ class SpeechSegmenter:
                 self._state = "speaking"
                 self._silence = 0
                 events.append(SpeechStarted(self._segment_start * self.frame_samples))
+                self._maybe_confirm(events)
             return events
 
         # speaking
+        self._maybe_confirm(events)
         if probability < self.release:
             self._silence += 1
         else:
@@ -183,7 +209,18 @@ class SpeechSegmenter:
             audio=audio,
         )
 
+    def _maybe_confirm(self, events: list[SegmenterEvent]) -> None:
+        if (
+            self.confirm_frames is not None
+            and not self._confirmed
+            and self._voiced >= self.confirm_frames
+        ):
+            self._confirmed = True
+            events.append(SpeechConfirmed(self._utterance_start * self.frame_samples))
+
     def _reset_to_idle(self) -> None:
+        self._voiced = 0
+        self._confirmed = False
         self._state = "idle"
         self._silence = 0
         self._peak = 0.0

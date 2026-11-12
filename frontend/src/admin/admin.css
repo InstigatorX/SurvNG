@@ -953,7 +953,8 @@ a.button {
   color: var(--warn);
 }
 
-.speech-camera-tuning {
+.speech-camera-tuning,
+.speech-camera-incidents {
   grid-column: 1 / -1;
 }
 

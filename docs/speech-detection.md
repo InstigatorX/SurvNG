@@ -71,6 +71,29 @@ That writes:
 - `speech.vad_model_path`, `speech.whisper_models_dir` and
   `speech.transcription_device` in `config.json`
 
+## Speech-triggered incidents
+
+Each listening camera has an **Incidents** setting:
+
+- **Show speech on incidents** (`"incidents": "attach"`, default): speech
+  appears on incidents that video creates; it never creates one.
+- **Speech also creates incidents** (`"trigger"`): once one utterance has
+  `trigger_min_speech_ms` of voiced audio (1.5 s by default), SurvNG asks
+  the camera's motion pipeline for an incident check, dated to when the
+  speech began. This does not turn on the Motion sensor, set "last
+  motion", or count as an ONVIF event, and it works in every motion mode.
+  The check snapshots, runs object detection on the recording and creates
+  or extends an incident labelled with a purple **Speech** trigger
+  ("The camera heard speech." when nothing else explains it).
+
+Every check costs a recorded detection job, so speech has its own limits:
+at most one check per `trigger_cooldown_seconds` (60 s) and
+`trigger_max_per_5m` (5) per camera. A long utterance split into 30 s
+segments still counts as one. Checks are requested on a separate thread so
+audio reading never waits for the motion pipeline. Admin → Detection →
+Speech shows how many checks each camera requested and how many the limits
+held back.
+
 ## CPU use
 
 Measured on a 4-core host:

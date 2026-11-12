@@ -22,6 +22,10 @@ export const CAMERA_SPEECH_DEFAULTS = Object.freeze({
   hangover_ms: 800,
   pre_roll_ms: 500,
   max_segment_seconds: 30,
+  incidents: "attach",
+  trigger_min_speech_ms: 1500,
+  trigger_cooldown_seconds: 60,
+  trigger_max_per_5m: 5,
 });
 
 export const WHISPER_MODELS = Object.freeze(["tiny.en", "base.en", "small.en", "medium.en"]);

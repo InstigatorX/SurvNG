@@ -528,6 +528,9 @@ def test_observability_snapshot_excludes_transcripts_and_unknown_values() -> Non
         "transcribe": True,
         "restarts": 2,
         "segments_since_restart": 5,
+        "incidents": "attach",
+        "incident_checks": 0,
+        "incident_checks_suppressed": 0,
     }
     assert snapshot["transcriber"]["device"] == "GPU"
     assert "text" not in snapshot["transcriber"]

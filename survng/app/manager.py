@@ -452,6 +452,7 @@ class AppManager:
             publish=self.mqtt.publish,
             episode_windows=lambda camera_id, start, end: self.events.scene_episode_windows_overlapping(camera_id, start, end),
             recording_ranges=self._speech_recording_ranges,
+            request_incident_check=self._speech_incident_check,
         )
         self._process_started_monotonic = time.monotonic()
         self._process_started_at = datetime.now(timezone.utc).isoformat()
@@ -966,6 +967,16 @@ class AppManager:
         speech = getattr(self, "speech", None)
         if speech is not None:
             speech.refresh()
+
+    def _speech_incident_check(self, camera_id: str, started_at: float) -> bool:
+        """Ask the camera's motion pipeline for an incident check (speech thread)."""
+        if not self._speech_camera_active(camera_id):
+            return False
+        worker = getattr(self, "workers", {}).get(camera_id)
+        handle = getattr(worker, "handle_speech", None)
+        if handle is None:
+            return False
+        return bool(handle(datetime.fromtimestamp(started_at, timezone.utc)))
 
     def _speech_recording_ranges(self, camera_id: str, start: float, end: float) -> list[tuple[float, float]]:
         ranges: list[tuple[float, float]] = []

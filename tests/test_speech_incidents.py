@@ -385,3 +385,135 @@ def test_retention_keeps_running_after_speech_is_turned_off(tmp_path) -> None:
         assert off.store is not None
     finally:
         off.stop()
+
+
+# Speech confirmation and trigger throttling -------------------------------
+
+import threading as _threading
+
+from survng.app.speech.listener import ListenerEvent
+from survng.app.speech.segmenter import FRAME_SAMPLES, SpeechConfirmed, SpeechSegmenter
+from survng.app.speech.triggers import TriggerDispatcher, TriggerThrottle
+
+
+def _segmenter_events(probabilities, **kwargs):
+    segmenter = SpeechSegmenter(**kwargs)
+    events = []
+    for value in probabilities:
+        events.extend(segmenter.push(None, value))
+    return events
+
+
+def test_confirmation_needs_enough_voiced_audio_and_fires_once_per_utterance() -> None:
+    settings = dict(min_speech_ms=100, hangover_ms=320, pre_roll_ms=128, max_segment_seconds=5.0, confirm_ms=1500)
+    short = _segmenter_events([0.0] * 10 + [0.9] * 30 + [0.0] * 20, **settings)  # about 1 s
+    assert not any(isinstance(event, SpeechConfirmed) for event in short)
+
+    long = _segmenter_events([0.0] * 10 + [0.9] * 400 + [0.0] * 20, **settings)  # about 13 s, split at 5 s
+    confirmed = [event for event in long if isinstance(event, SpeechConfirmed)]
+    assert len(confirmed) == 1
+    # Dated to where the utterance began (pre-roll included), not to confirmation.
+    assert confirmed[0].start_sample == 6 * FRAME_SAMPLES
+
+    two = _segmenter_events(([0.9] * 60 + [0.0] * 20) * 2, **settings)
+    assert sum(isinstance(event, SpeechConfirmed) for event in two) == 2
+
+    disabled = _segmenter_events([0.9] * 100, min_speech_ms=100)
+    assert not any(isinstance(event, SpeechConfirmed) for event in disabled)
+
+
+def test_throttle_applies_cooldown_and_rolling_budget() -> None:
+    now = [0.0]
+    throttle = TriggerThrottle(cooldown_seconds=30.0, max_per_window=3, clock=lambda: now[0])
+    assert throttle.allow() is True
+    now[0] = 10.0
+    assert throttle.allow() is False  # cooldown
+    allowed = []
+    for moment in (40.0, 80.0, 120.0, 160.0):
+        now[0] = moment
+        allowed.append(throttle.allow())
+    assert allowed == [True, True, False, False]  # budget of 3 per 5 minutes
+    now[0] = 301.0
+    assert throttle.allow() is True  # the first check left the window
+    assert throttle.status() == {"incident_checks": 4, "incident_checks_suppressed": 3}
+
+
+def test_trigger_cameras_request_checks_off_the_audio_thread(tmp_path) -> None:
+    from survng.app.speech.lifecycle import SpeechLifecycle
+
+    config = AppConfig_for_speech({"gate": "trigger", "yard": "attach"})
+    calls = []
+    done = _threading.Event()
+
+    def request(camera_id, started_at):
+        calls.append((camera_id, started_at, _threading.current_thread().name))
+        done.set()
+        return True
+
+    lifecycle = SpeechLifecycle(
+        config,
+        database_dir=tmp_path,
+        camera_enabled=lambda camera_id: True,
+        vad_factory=lambda path: object(),
+        listener_factory=lambda camera, **kwargs: SimpleNamespace(start=lambda: None, stop=lambda: None, status=lambda: {"state": "listening"}),
+        request_incident_check=request,
+    )
+    lifecycle.start()
+    try:
+        lifecycle._listener_event(ListenerEvent("yard", SpeechConfirmed(0), 50.0, None))
+        lifecycle._listener_event(ListenerEvent("gate", SpeechConfirmed(0), 100.0, None))
+        lifecycle._listener_event(ListenerEvent("gate", SpeechConfirmed(0), 105.0, None))  # within cooldown
+        assert done.wait(5.0)
+        assert [(camera, at) for camera, at, _ in calls] == [("gate", 100.0)]
+        assert calls[0][2] == "speech-incident-trigger"
+        gate = lifecycle.status()["cameras"]["gate"]
+        assert gate["incidents"] == "trigger"
+        assert (gate["incident_checks"], gate["incident_checks_suppressed"]) == (1, 1)
+        assert "incident_checks" not in lifecycle.status()["cameras"]["yard"]
+    finally:
+        lifecycle.stop()
+
+
+def AppConfig_for_speech(modes: dict[str, str]):
+    from survng.app.config import AppConfig
+
+    return AppConfig.model_validate({
+        "speech": {"enabled": True, "vad_model_path": "/models/vad.onnx"},
+        "cameras": [
+            {"id": camera_id, "name": camera_id, "stream_url": f"rtsp://camera.local/{camera_id}", "speech": {"enabled": True, "incidents": mode}}
+            for camera_id, mode in modes.items()
+        ],
+    })
+
+
+def test_manager_requests_checks_only_for_active_cameras() -> None:
+    from survng.app.manager import AppManager
+
+    seen = []
+    worker = SimpleNamespace(handle_speech=lambda when: seen.append(when) or True)
+    switches = SimpleNamespace(camera_enabled=lambda camera_id: True, detection_enabled=lambda camera_id: True)
+    manager = AppManager.__new__(AppManager)
+    manager.camera_fleet = switches
+    manager.camera_controls = switches
+    manager.workers = {"gate": worker}
+
+    assert manager._speech_incident_check("gate", SPOKEN_AT.timestamp()) is True
+    assert seen == [SPOKEN_AT]
+    assert manager._speech_incident_check("unknown", SPOKEN_AT.timestamp()) is False
+    switches.detection_enabled = lambda camera_id: False
+    assert manager._speech_incident_check("gate", SPOKEN_AT.timestamp()) is False
+    assert len(seen) == 1
+
+
+def test_dispatcher_drops_when_full_instead_of_blocking() -> None:
+    from survng.app.speech import triggers
+
+    blocker = _threading.Event()
+    dispatcher = TriggerDispatcher(lambda camera_id, at: blocker.wait(5.0))
+    dispatcher.start()
+    try:
+        results = [dispatcher.submit("gate", float(index)) for index in range(triggers.QUEUE_LIMIT + 5)]
+        assert results.count(False) >= 4 and dispatcher.dropped == results.count(False)
+    finally:
+        blocker.set()
+        dispatcher.stop()

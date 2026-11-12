@@ -670,6 +670,12 @@ class CameraSpeechConfig(BaseModel):
     hangover_ms: int = Field(default=800, ge=100, le=5000)
     pre_roll_ms: int = Field(default=500, ge=0, le=3000)
     max_segment_seconds: float = Field(default=30.0, ge=5.0, le=120.0)
+    # "attach": speech is shown on incidents that video creates.
+    # "trigger": confirmed speech also asks for an incident check.
+    incidents: Literal["attach", "trigger"] = "attach"
+    trigger_min_speech_ms: int = Field(default=1500, ge=300, le=10000)
+    trigger_cooldown_seconds: float = Field(default=60.0, ge=0.0, le=3600.0)
+    trigger_max_per_5m: int = Field(default=5, ge=1, le=60)
 
 
 class CameraConfig(BaseModel):

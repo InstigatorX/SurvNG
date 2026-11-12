@@ -133,6 +133,10 @@ export function SpeechSettings({ config, updateConfig }) {
               <option value="main">Main stream</option>
               <option value="live">Sub stream</option>
             </select></label>
+            <label className="speech-camera-incidents">Incidents<select value={settings.incidents} disabled={!settings.enabled} onChange={(event) => setCameraSpeech(index, "incidents", event.target.value)}>
+              <option value="attach">Show speech on incidents</option>
+              <option value="trigger">Speech also creates incidents</option>
+            </select>{settings.enabled && settings.incidents === "trigger" ? <small>{live?.incident_checks != null ? `${live.incident_checks} checks requested · ${live.incident_checks_suppressed || 0} held back by limits` : "Confirmed speech asks for an incident check."}</small> : null}</label>
             {settings.enabled ? <details className="detection-compact-details speech-camera-tuning">
               <summary>Tuning</summary>
               <div className="detection-field-grid">
@@ -141,6 +145,11 @@ export function SpeechSettings({ config, updateConfig }) {
                 <label>End after silence (ms)<input type="number" min="100" max="5000" step="50" value={settings.hangover_ms} onChange={(event) => setCameraSpeech(index, "hangover_ms", Number(event.target.value))} /></label>
                 <label>Include before speech (ms)<input type="number" min="0" max="3000" step="50" value={settings.pre_roll_ms} onChange={(event) => setCameraSpeech(index, "pre_roll_ms", Number(event.target.value))} /></label>
                 <label>Longest segment (s)<input type="number" min="5" max="120" step="1" value={settings.max_segment_seconds} onChange={(event) => setCameraSpeech(index, "max_segment_seconds", Number(event.target.value))} /></label>
+                {settings.incidents === "trigger" ? <>
+                  <label>Speech before an incident check (ms)<input type="number" min="300" max="10000" step="100" value={settings.trigger_min_speech_ms} onChange={(event) => setCameraSpeech(index, "trigger_min_speech_ms", Number(event.target.value))} /><small>Voiced time in one utterance before speech asks for a check.</small></label>
+                  <label>Time between checks (s)<input type="number" min="0" max="3600" step="5" value={settings.trigger_cooldown_seconds} onChange={(event) => setCameraSpeech(index, "trigger_cooldown_seconds", Number(event.target.value))} /></label>
+                  <label>Most checks per 5 minutes<input type="number" min="1" max="60" step="1" value={settings.trigger_max_per_5m} onChange={(event) => setCameraSpeech(index, "trigger_max_per_5m", Number(event.target.value))} /><small>Limits detection work from a TV, radio or long conversation.</small></label>
+                </> : null}
               </div>
             </details> : null}
           </div>;

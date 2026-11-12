@@ -486,6 +486,9 @@ def _speech_snapshot(raw: object) -> dict[str, Any]:
             "transcribe": bool(item.get("transcribe")),
             "restarts": int(_number(item.get("restarts"))),
             "segments_since_restart": int(_number(item.get("segments"))),
+            "incidents": "trigger" if item.get("incidents") == "trigger" else "attach",
+            "incident_checks": int(_number(item.get("incident_checks"))),
+            "incident_checks_suppressed": int(_number(item.get("incident_checks_suppressed"))),
         }
     transcriber = raw.get("transcriber")
     transcriber_snapshot = None
