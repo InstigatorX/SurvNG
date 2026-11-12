@@ -4,6 +4,8 @@ python-multipart>=0.0.32,<1
 websockets>=17.1,<18
 opencv-python==5.0.0.93
 openvino==2026.3.1
+# Whisper speech transcription; must match the openvino release above.
+openvino-genai==2026.3.1.0
 tokenizers>=0.22.1,<0.23
 ftfy>=6.3.1,<7
 regex>=2026.9.10,<2027

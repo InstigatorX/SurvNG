@@ -2,6 +2,13 @@
 
 ## SurvNG v1.2
 
+- Added optional per-camera speech detection (Silero VAD on OpenVINO) with
+  local English transcription (Whisper via OpenVINO GenAI; `base.en` on CPU,
+  `small.en` on GPU with CPU fallback). Off by default globally and per camera;
+  transcripts are searchable through admin-scoped APIs, a Home Assistant
+  speech sensor is published over MQTT, and transcript text reaches MQTT only
+  when explicitly enabled. Install models with
+  `install-docker-models.sh --speech`. See `docs/speech-detection.md`.
 - Camera motion that no detector class explains now establishes a motion-only
   incident when the qualifier located that motion inside an eligible zone, so
   animals and other unmodelled subjects appear under **Incidents → Motion**.

@@ -83,6 +83,7 @@ from .state_events import StateEventBroker
 from .incident_lifecycle import IncidentLifecycle
 from .security import redact_secret_text
 from .telemetry_store import TelemetryStore
+from .speech import SpeechLifecycle
 from .telemetry_migration import migrate_legacy_runtime_telemetry
 
 
@@ -440,6 +441,14 @@ class AppManager:
             raise
         self.faces.set_identity_event_publisher(
             self._publish_identity_update
+        )
+        # Construction is inert (no database, model, or process) until start.
+        self.speech = SpeechLifecycle(
+            config,
+            database_dir=self.database_dir,
+            camera_enabled=lambda camera_id: self.camera_fleet.camera_enabled(camera_id),
+            audio_available=self._speech_audio_available,
+            publish=self.mqtt.publish,
         )
         self._process_started_monotonic = time.monotonic()
         self._process_started_at = datetime.now(timezone.utc).isoformat()
@@ -900,6 +909,7 @@ class AppManager:
                     startup_tasks,
                     on_complete=self._camera_startup_completed,
                 )
+                self._start_speech()
                 phase_started = time.monotonic()
                 self.inference.start_auxiliary()
                 self._startup_timings["auxiliary_services_seconds"] = round(
@@ -928,6 +938,28 @@ class AppManager:
                     self._closed = True
                 self._started = False
                 raise
+
+    def _start_speech(self) -> None:
+        speech = getattr(self, "speech", None)
+        if speech is None:
+            return
+        try:
+            speech.start()
+        except Exception:
+            # Optional enrichment: never block surveillance startup.
+            LOGGER.exception("Speech listening failed to start")
+
+    def _speech_audio_available(self, camera) -> bool | None:
+        info = self.recorder.audio_stream_info(camera, camera.speech.source)
+        if not info.known:
+            return None
+        return bool(info.codec)
+
+    def speech_status(self) -> dict:
+        speech = getattr(self, "speech", None)
+        if speech is None:
+            return {"enabled": False, "state": "disabled", "reason": "", "cameras": {}, "transcriber": None}
+        return speech.status()
 
     def _camera_startup_completed(self) -> None:
         self._replay_restored_detection_watches()
@@ -1030,6 +1062,10 @@ class AppManager:
         attempt("runtime monitor", self.runtime_monitor.stop)
         if getattr(self, "database_retention", None) is not None:
             attempt("database retention", self.database_retention.stop)
+        speech = getattr(self, "speech", None)
+        if speech is not None:
+            LOGGER.info("SurvNG shutdown: stopping speech listeners")
+            attempt("speech listeners", speech.stop)
         if getattr(self, "evidence_projection", None) is not None:
             try:
                 self.evidence_projection.stop()
@@ -1576,6 +1612,7 @@ class AppManager:
                 "name": camera.name,
                 "model_classes": self.detector.labels,
                 "recording_configured": bool(camera.record or camera.record_sub),
+                "speech_enabled": bool(self.config.speech.enabled and camera.speech.enabled),
                 "zones": [
                     {
                         "name": zone.name,
