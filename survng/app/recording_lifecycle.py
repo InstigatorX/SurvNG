@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .config import AppConfig, CameraConfig, RecordingRetentionConfig
 from .media_storage import MediaStorageRegistry
@@ -113,7 +114,7 @@ class RecordingLifecycle:
             if self._closed:
                 raise RuntimeError("recording lifecycle is closed")
             camera_list = list(cameras)
-            previous = {
+            previous: dict[str, Any] = {
                 "ffmpeg_path": self.recorder.ffmpeg_path,
                 "hardware_acceleration": self.recorder.hardware_acceleration,
                 "segment_seconds": self.recorder.segment_seconds,

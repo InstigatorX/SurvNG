@@ -870,7 +870,7 @@ class MotionEpisodeController:
 
     def _transition_request_status(
         self,
-        episode: MotionEpisode,
+        episode: _Episode,
         new_status: DetectionRequestStatus,
         *,
         allowed_from: frozenset[DetectionRequestStatus],

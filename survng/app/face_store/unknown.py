@@ -106,7 +106,7 @@ class FaceStoreUnknownMixin:
             rows = [
                 dict(row)
                 for row in connection.execute(
-                    f"""
+                    """
                     select id, embedding_blob, quality_score
                     from face_observations
                     where canonical = 1

@@ -760,7 +760,8 @@ class TelemetryStore:
                     "(occurred_at,kind,scope,camera_id,summary,details_json) values (?,?,?,?,?,?)",
                     (current.isoformat(), kind, scope, camera_id, summary, encoded),
                 )
-                event_id = int(cursor.lastrowid)
+                # lastrowid is always set after a successful single-row INSERT.
+                event_id = int(cursor.lastrowid)  # type: ignore[arg-type]
                 count = 1
         return {"id": event_id, "count": count, "coalesced": count > 1}
 

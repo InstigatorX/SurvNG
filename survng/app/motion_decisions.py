@@ -8,7 +8,7 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from .config import MotionQualificationConfig
 from .database_polling import database_polling_session
@@ -151,7 +151,7 @@ class MotionDecisionOrchestrator:
         qualification: MotionDecisionQualification,
         incidents: MotionDecisionIncidents,
         media: MotionDecisionMedia,
-        analysis: MotionDecisionAnalysis,
+        analysis: Any,
         state: MotionDecisionState,
         model_labels: Callable[[], list[str]] | None = None,
     ) -> None:

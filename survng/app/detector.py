@@ -344,7 +344,6 @@ class OpenVinoDetector:
             preprocessor.input().preprocess().convert_element_type(input_type)
             model = preprocessor.build()
             self._openvino_embedded_preprocess = True
-            device = self.config.device.upper()
             compile_config = openvino_latency_compile_config(self.config.device)
             try:
                 self.compiled_model = core.compile_model(model=model, device_name=self.config.device, config=compile_config)
