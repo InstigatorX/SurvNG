@@ -59,6 +59,9 @@ class EventStoreSceneAcquisitionMixin:
                     observation_id text not null references acquired_observations(id),
                     primary key(sample_id,observation_id)
                 );
+                -- Database retention keeps an observation while any sample links it.
+                create index if not exists acquired_sample_observation_observation
+                    on acquired_sample_observations(observation_id);
                 create table if not exists acquired_sample_events (
                     sample_id text not null references acquired_samples(id), event_id integer not null,
                     primary key(sample_id,event_id)

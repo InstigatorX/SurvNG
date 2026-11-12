@@ -477,6 +477,27 @@ class CameraRetentionConfig(BaseModel):
     live_days: int | None = Field(default=None, ge=1, le=3650)
 
 
+class DatabaseRetentionConfig(BaseModel):
+    """Age out working data that no incident or retained evidence depends on.
+
+    Event-linked rows follow their event; images follow snapshot retention,
+    except motion-sample images, which are removed with their audit rows.
+    """
+
+    enabled: bool = True
+    # Report what would be removed without deleting anything.
+    dry_run: bool = True
+    interval_hours: float = Field(default=24.0, ge=1.0, le=168.0)
+    # Empty live-discovery frames serve only as a 40-second confirmation baseline.
+    empty_discovery_hours: float = Field(default=24.0, ge=1.0, le=720.0)
+    # Unadmitted activity decisions, their samples and observations, and
+    # finished candidate jobs. Main-stream recordings they point into expire
+    # sooner.
+    activity_days: int = Field(default=30, ge=1, le=3650)
+    # Motion audits not linked to an incident.
+    motion_audit_days: int = Field(default=30, ge=1, le=3650)
+
+
 class RecordingRetentionConfig(BaseModel):
     enabled: bool = True
     automatic_cleanup: bool = False
@@ -1253,6 +1274,7 @@ class AppConfig(BaseModel):
     tls: TlsConfig = Field(default_factory=TlsConfig)
     proxy: ProxyConfig = Field(default_factory=ProxyConfig)
     retention: RecordingRetentionConfig = Field(default_factory=RecordingRetentionConfig)
+    database_retention: DatabaseRetentionConfig = Field(default_factory=DatabaseRetentionConfig)
     motion_qualification: MotionQualificationConfig = Field(default_factory=MotionQualificationConfig)
     audit_ai: AuditAiConfig = Field(default_factory=AuditAiConfig)
     system_review: SystemReviewConfig = Field(default_factory=SystemReviewConfig)

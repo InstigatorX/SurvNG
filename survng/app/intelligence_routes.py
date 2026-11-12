@@ -325,7 +325,13 @@ class IntelligenceService:
 
     def motion_effectiveness(self, days: float=7.0) -> dict:
         with self.deps.manager_lock:
-            active_events = self.deps.get_manager().events
+            active_manager = self.deps.get_manager()
+            active_events = active_manager.events
+            retention = getattr(getattr(active_manager, 'config', None), 'database_retention', None)
+        if retention is not None and retention.enabled and not retention.dry_run:
+            # Audits older than the retention period are pruned; the reply's
+            # "days" reports the range actually covered.
+            days = min(float(days), float(retention.motion_audit_days))
         return active_events.motion_effectiveness(days=days)
 
     def motion_audit_snapshot(self, audit_id: int) -> FileResponse:

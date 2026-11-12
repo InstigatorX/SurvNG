@@ -660,6 +660,63 @@ def _search_timing_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+_RETENTION_STEPS = (
+    "candidate_jobs",
+    "activity_decisions",
+    "acquired_samples",
+    "acquired_observations",
+    "motion_audits",
+)
+_RETENTION_FILE_COUNTS = (
+    "motion_sample_files_deleted",
+    "motion_sample_files_missing",
+    "motion_sample_files_failed",
+)
+
+
+def _database_retention_snapshot(service: Any) -> dict[str, Any]:
+    """Report pruning policy and the last run's per-table counts."""
+    status_source = getattr(service, "status", None)
+    if not callable(status_source):
+        return {}
+    try:
+        raw = status_source()
+    except Exception as error:
+        LOGGER.debug("database retention status unavailable (%s)", type(error).__name__)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    policy = raw.get("policy") if isinstance(raw.get("policy"), dict) else {}
+    last = raw.get("last_run") if isinstance(raw.get("last_run"), dict) else None
+    snapshot: dict[str, Any] = {
+        "enabled": bool(raw.get("enabled")),
+        "dry_run": bool(raw.get("dry_run")),
+        "running": bool(raw.get("running")),
+        "runs": int(_number(raw.get("runs"))),
+        "next_run_at": str(raw.get("next_run_at") or "")[:40],
+        "policy": _numeric_fields(policy, (
+            "empty_discovery_hours", "activity_days", "motion_audit_days", "interval_hours",
+        )),
+        "last_run": None,
+    }
+    if raw.get("last_error"):
+        snapshot["last_error"] = _motion_identifier(raw.get("last_error")) or "error"
+    if last is not None:
+        steps = last.get("steps") if isinstance(last.get("steps"), dict) else {}
+        snapshot["last_run"] = {
+            "started_at": str(last.get("started_at") or "")[:40],
+            "dry_run": bool(last.get("dry_run")),
+            "interrupted": bool(last.get("interrupted")),
+            "duration_seconds": _optional_number(last.get("duration_seconds")),
+            "steps": {
+                name: _numeric_fields(steps.get(name), ("eligible", "deleted", "skipped_batches"))
+                for name in _RETENTION_STEPS
+            },
+            **{name: int(_number(last.get(name))) for name in _RETENTION_FILE_COUNTS},
+        }
+    return snapshot
+
+
 def build_runtime_status(
     config: AppConfig,
     manager: Any,
@@ -771,6 +828,9 @@ def build_runtime_status(
             getattr(getattr(manager, "inference", None), "semantic_search", None),
         ),
         "storage": _storage_snapshot(raw_retention),
+        "database_retention": _database_retention_snapshot(
+            getattr(manager, "database_retention", None)
+        ),
         "cameras": cameras,
         "recent_logs": _recent_log_snapshot(log_rows),
     }

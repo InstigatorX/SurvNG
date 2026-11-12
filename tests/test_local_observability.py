@@ -559,3 +559,35 @@ def test_runtime_status_includes_resources_without_semantic_service() -> None:
         "enabled": False, "searches_since_start": {}, "search_timing_ms": {},
     }
     assert status["resources"]["processes"][0]["role"] == "main"
+
+
+def test_database_retention_status_is_allowlisted() -> None:
+    secret = "rtsp://admin:secret@camera"
+    manager = _manager()
+    manager.database_retention = SimpleNamespace(status=Mock(return_value={
+        "enabled": True, "dry_run": True, "running": False, "runs": 2,
+        "next_run_at": "2026-11-12T03:00:00+00:00",
+        "policy": {"empty_discovery_hours": 24.0, "activity_days": 30,
+                   "motion_audit_days": 30, "interval_hours": 24.0, "path": secret},
+        "last_run": {
+            "started_at": "2026-11-11T03:00:00+00:00", "dry_run": True,
+            "duration_seconds": 42.5, "error": secret,
+            "steps": {"motion_audits": {"eligible": 7, "deleted": 0, "sql": secret}},
+            "motion_sample_files_deleted": 0,
+        },
+    }))
+
+    status = build_runtime_status(
+        AppConfig(), manager, instance_id="one", uptime_seconds=1.0, stopping=False,
+    )["database_retention"]
+
+    assert status["dry_run"] is True
+    assert status["runs"] == 2
+    assert status["policy"]["motion_audit_days"] == 30
+    assert status["last_run"]["steps"]["motion_audits"] == {
+        "eligible": 7, "deleted": 0, "skipped_batches": None,
+    }
+    assert status["last_run"]["steps"]["acquired_samples"] == {
+        "eligible": None, "deleted": None, "skipped_batches": None,
+    }
+    assert secret not in json.dumps(status)

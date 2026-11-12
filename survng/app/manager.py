@@ -75,6 +75,7 @@ from .motion_pipeline import (
     resolve_motion_pipeline_graphs,
 )
 from .motion_pipeline.recorded_decode_budget import RecordedDecodeBudget
+from .database_retention import DatabaseRetention
 from .evidence_projection import EvidenceProjection
 from .motion_analysis import FairMotionAnalysisLimiter
 from .recording_lifecycle import RecordingLifecycle
@@ -415,6 +416,9 @@ class AppManager:
         self.evidence_projection = EvidenceProjection(
             self.events, lambda: self.semantic_search, self.state_events,
             self._refresh_incident_notification,
+        )
+        self.database_retention = DatabaseRetention(
+            self.events, lambda: self.config.database_retention,
         )
         try:
             self.mqtt = MqttLifecycle(config.mqtt, self._build_mqtt_service)
@@ -890,6 +894,8 @@ class AppManager:
                 )
                 self._started = True
                 self.evidence_projection.start()
+                if getattr(self, "database_retention", None) is not None:
+                    self.database_retention.start()
                 self.camera_fleet.start_admission(
                     startup_tasks,
                     on_complete=self._camera_startup_completed,
@@ -1022,6 +1028,8 @@ class AppManager:
                 for failure in error.failures
             )
         attempt("runtime monitor", self.runtime_monitor.stop)
+        if getattr(self, "database_retention", None) is not None:
+            attempt("database retention", self.database_retention.stop)
         if getattr(self, "evidence_projection", None) is not None:
             try:
                 self.evidence_projection.stop()

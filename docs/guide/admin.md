@@ -78,6 +78,33 @@ structured logging extras are not exposed. The default socket is
 owner (or root). Use `--observability-socket /absolute/path.sock` when starting
 SurvNG if your service needs a different runtime directory.
 
+## Database retention
+
+Recording and snapshot retention expire media files, but the working data
+behind scene discovery and motion qualification is stored as database rows.
+`database_retention` in `config.json` ages those rows out once nothing
+depends on them:
+
+| Data | Kept for |
+|---|---|
+| Empty live-discovery frames and their pending decisions | `empty_discovery_hours` (24) |
+| Unadmitted unsupported/incomplete decisions, their samples and observations, finished candidate jobs | `activity_days` (30) |
+| Motion audits not linked to an incident | `motion_audit_days` (30) |
+
+Rows linked to an incident (its establishing decision, samples, scene
+observations, motion audits) are never removed here; they follow the
+incident. Acquisition images keep following snapshot retention. Motion-sample
+images are deleted with their audit rows when no other row names the file.
+While pruning is active, the motion effectiveness range is capped at
+`motion_audit_days`.
+
+The job runs 10 minutes after startup and then every `interval_hours` (24),
+in small batches. It starts with `dry_run: true`, which only counts what it
+would remove; `./survngctl status` shows the counts under
+`database_retention.last_run`. Set `dry_run` to `false` to start pruning.
+SQLite reuses freed space, so the database file stops growing but does not
+shrink until it is compacted.
+
 ## Depth estimation
 
 **Detection → Depth Estimation** configures optional monocular depth enrichment
