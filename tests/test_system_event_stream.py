@@ -369,3 +369,65 @@ def test_global_notifications_off_filters_recovery_and_replay():
     chunks = asyncio.run(read_chunks(stream_handler(manager, Mock()), request, 2))
     assert "suppressed" not in "".join(chunks)
     assert f"id: {last.id}" in chunks[-1]
+
+
+def _state_manager(broker):
+    return SimpleNamespace(
+        state_events=broker,
+        statuses=Mock(return_value=[{"id": "gate", "running": True}]),
+        incident_notification_allowed=lambda item: True,
+        incident_notification_payload=lambda item: item,
+        incidents=SimpleNamespace(snapshot=Mock(return_value=[])),
+    )
+
+
+def _state_request(**params):
+    request = StreamRequest(**params)
+    request.query_params.update({"incidents_only": "1", "state": "1"})
+    return request
+
+
+def test_state_stream_sends_camera_and_light_system_snapshots_before_connected():
+    broker = StateEventBroker()
+    manager = _state_manager(broker)
+    telemetry = SimpleNamespace(system_status=Mock(return_value={"instance_id": "i", "uptime_seconds": 5}))
+
+    chunks = asyncio.run(read_chunks(stream_handler(manager, telemetry), _state_request(), 5))
+
+    assert "event: incident_notifications_state" in chunks[1]
+    assert "event: cameras_state" in chunks[2] and '"id":"gate"' in chunks[2]
+    assert "event: system_state" in chunks[3] and "id:" not in chunks[3]
+    assert "event: connected" in chunks[4]
+    telemetry.system_status.assert_called_once_with(manager, include_runtime_details=False)
+
+
+def test_state_stream_replays_camera_state_and_default_stream_does_not():
+    broker = StateEventBroker()
+    first = broker.publish("camera_state", {"id": "gate", "recording": False})
+    changed = broker.publish("camera_state", {"id": "gate", "recording": True})
+    telemetry = SimpleNamespace(system_status=Mock(return_value={"instance_id": "i"}))
+
+    chunks = asyncio.run(read_chunks(
+        stream_handler(_state_manager(broker), telemetry), _state_request(query_cursor=first.id), 5,
+    ))
+    assert "event: camera_state" in chunks[1] and f"id: {changed.id}" in chunks[1]
+    assert "event: cameras_state" in chunks[2]
+    assert "event: system_state" in chunks[3]
+    assert "event: connected" in chunks[4] and f"id: {changed.id}" in chunks[4]
+
+    request = StreamRequest(query_cursor=first.id)
+    request.query_params["incidents_only"] = "1"
+    plain = asyncio.run(read_chunks(stream_handler(_state_manager(broker), telemetry), request, 2))
+    assert "event: connected" in plain[1]  # camera_state is not forwarded without state=1
+
+
+def test_state_stream_refreshes_system_state_periodically(monkeypatch):
+    monkeypatch.setattr(system_routes, "SYSTEM_STATE_STREAM_SECONDS", 0.01)
+    broker = StateEventBroker()
+    telemetry = SimpleNamespace(system_status=Mock(return_value={"instance_id": "i"}))
+
+    chunks = asyncio.run(read_chunks(stream_handler(_state_manager(broker), telemetry), _state_request(), 6))
+
+    assert "event: connected" in chunks[4]
+    assert "event: system_state" in chunks[5]
+    assert telemetry.system_status.call_count == 2

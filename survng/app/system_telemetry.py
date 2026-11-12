@@ -61,7 +61,14 @@ class SystemTelemetryService:
     _persisted_source: object | None = field(default=None, init=False)
     _persisted_cache: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
 
-    def system_status(self, manager: AppManager) -> dict[str, Any]:
+    def system_status(
+        self, manager: AppManager, *, include_runtime_details: bool = True,
+    ) -> dict[str, Any]:
+        """Summarize the server; without runtime details, skip worker IPC.
+
+        Integration streams send this every 30 seconds and read only the
+        summary, so they omit detector, go2rtc, and camera-startup state.
+        """
         # The recording store may be an NFS mount.  Never stat it from an API
         # request: a stalled mount would otherwise block health consumers and
         # integrations even though cameras and the application are healthy.
@@ -92,7 +99,7 @@ class SystemTelemetryService:
         ]
         payload = {
             "instance_id": self.process_instance_id,
-            "version": SURVNG_VERSION,
+            "package_version": SURVNG_VERSION,
             "lifecycle": str((mqtt or {}).get("server_lifecycle") or "running"),
             "uptime_seconds": round(
                 max(0.0, time.monotonic() - self.process_started_monotonic), 1
@@ -116,7 +123,6 @@ class SystemTelemetryService:
                 else None,
                 "available": bool(storage_total),
             },
-            "detector": manager.detector_status(),
             "cameras": {
                 "total": len(cameras),
                 "enabled": len(enabled_cameras),
@@ -125,9 +131,11 @@ class SystemTelemetryService:
                 "recording": sum(1 for camera in expected_recordings if camera.get("recording")),
             },
             "mqtt": mqtt,
-            "go2rtc": manager.go2rtc_status(),
-            "camera_startup": manager.camera_startup_status(),
         }
+        if include_runtime_details:
+            payload["detector"] = manager.detector_status()
+            payload["go2rtc"] = manager.go2rtc_status()
+            payload["camera_startup"] = manager.camera_startup_status()
         return payload
 
     @staticmethod

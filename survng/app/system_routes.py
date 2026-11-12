@@ -24,6 +24,8 @@ from .security import authenticate_api_token, authenticate_session
 
 SSE_HEARTBEAT_SECONDS = 15.0
 SSE_DISCONNECT_POLL_SECONDS = 1.0
+# Light system summary cadence on state=1 integration streams.
+SYSTEM_STATE_STREAM_SECONDS = 30.0
 DETECTOR_MODEL_SEARCH_BASES = (Path("models"), Path("/models"))
 
 
@@ -86,10 +88,16 @@ def _sse_message(event_type: str, payload: object, event_id: str | None = None) 
     return "\n".join(lines) + "\n\n"
 
 
-def _incidents_stream_chunk(manager, event) -> str | None:
-    """Native HA events: incident lifecycle and zone occupancy snapshots."""
+def _incidents_stream_chunk(manager, event, *, include_state: bool = False) -> str | None:
+    """Native HA events: incident lifecycle and zone occupancy snapshots.
+
+    ``include_state`` (``state=1``) also forwards per-camera status changes so
+    an integration can follow camera state without polling.
+    """
     if event.type == "zone_occupancy" and isinstance(event.data, dict):
         return _sse_message("zone_occupancy", event.data, event.id)
+    if include_state and event.type == "camera_state" and isinstance(event.data, dict):
+        return _sse_message("camera_state", event.data, event.id)
     if event.type != "incident_lifecycle" or not manager.incident_notification_allowed(event.data):
         return None
     return _sse_message(
@@ -160,6 +168,15 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                 yield "retry: 3000\n\n"
                 query_params = getattr(request, "query_params", {})
                 incidents_only = query_params.get("incidents_only") == "1"
+                # Opt-in for integrations: camera snapshots and changes plus a
+                # light periodic system summary, so they need not poll.
+                include_state = incidents_only and query_params.get("state") == "1"
+
+                async def system_state() -> str:
+                    return _sse_message("system_state", await asyncio.to_thread(
+                        deps.system_telemetry.system_status, active_manager,
+                        include_runtime_details=False,
+                    ))
                 last_event_id = (
                     request.headers.get("last-event-id", "")
                     or query_params.get("last_event_id", "")
@@ -187,7 +204,9 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                     for event in replay:
                         replayed_ids.add(event.id)
                         if incidents_only:
-                            chunk = _incidents_stream_chunk(active_manager, event)
+                            chunk = _incidents_stream_chunk(
+                                active_manager, event, include_state=include_state,
+                            )
                             if chunk is not None:
                                 yield chunk
                             continue
@@ -196,6 +215,10 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                             if event.type == "incident_lifecycle" else event.data
                         ), event.id)
                     connection_cursor = replay[-1].id if replay else last_event_id
+                if include_state:
+                    # Snapshots carry no id: they never move the replay cursor.
+                    yield _sse_message("cameras_state", await asyncio.to_thread(active_manager.statuses))
+                    yield await system_state()
                 yield _sse_message(
                     "connected",
                     {"instance": active_manager.state_events.instance_id},
@@ -203,9 +226,16 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                 )
                 last_sequence = active_manager.state_events.sequence(connection_cursor)
                 next_heartbeat = time.monotonic() + SSE_HEARTBEAT_SECONDS
+                next_system_state = time.monotonic() + SYSTEM_STATE_STREAM_SECONDS
                 while True:
                     if not authorized() or await request.is_disconnected():
                         return
+                    if include_state and time.monotonic() >= next_system_state:
+                        # Checked before the queue so a busy stream still
+                        # refreshes the summary.
+                        yield await system_state()
+                        next_system_state = time.monotonic() + SYSTEM_STATE_STREAM_SECONDS
+                        continue
                     try:
                         event = subscriber.get_nowait()
                     except queue.Empty:
@@ -217,6 +247,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                         await asyncio.sleep(min(
                             SSE_DISCONNECT_POLL_SECONDS,
                             max(0.0, next_heartbeat - now),
+                            max(0.0, next_system_state - now) if include_state else SSE_DISCONNECT_POLL_SECONDS,
                         ))
                         continue
                     if event is None:
@@ -236,7 +267,9 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                         return
                     last_sequence = event_sequence
                     if incidents_only:
-                        chunk = _incidents_stream_chunk(active_manager, event)
+                        chunk = _incidents_stream_chunk(
+                            active_manager, event, include_state=include_state,
+                        )
                         if chunk is not None:
                             yield chunk
                         continue

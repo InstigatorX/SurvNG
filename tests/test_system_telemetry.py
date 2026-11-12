@@ -166,6 +166,10 @@ class SystemTelemetryRouterTest(unittest.TestCase):
         self.assertEqual(status["resources"]["application_memory_bytes"], 3_221_225_472)
         self.assertEqual(status["resources"]["cpu_load_percent"], 25.0)
         self.assertEqual(status["lifecycle"], "running")
+        # "version" is the deployment snapshot; the package version has its own key.
+        from survng import __version__
+        self.assertEqual(status["package_version"], __version__)
+        self.assertIsInstance(status["version"], dict)
         self.assertGreaterEqual(status["uptime_seconds"], 0.0)
         self.assertEqual(status["storage"]["free_bytes"], 40)
         self.assertTrue(status["storage"]["available"])
@@ -195,6 +199,22 @@ class SystemTelemetryRouterTest(unittest.TestCase):
             "recording": 1,
         })
 
+
+    def test_light_system_status_skips_runtime_worker_queries(self) -> None:
+        manager = SimpleNamespace(
+            recorder=SimpleNamespace(retention_status=Mock(return_value={"plan": {"storage": {}}})),
+            statuses=Mock(return_value=[]),
+            mqtt_status=Mock(return_value={}),
+            detector_status=Mock(side_effect=AssertionError("light status queries workers")),
+            go2rtc_status=Mock(side_effect=AssertionError("light status queries go2rtc")),
+            camera_startup_status=Mock(side_effect=AssertionError("light status reads startup")),
+        )
+
+        status = SystemTelemetryService().system_status(manager, include_runtime_details=False)
+
+        self.assertNotIn("detector", status)
+        self.assertIn("resources", status)
+        self.assertEqual(status["cameras"]["total"], 0)
 
 if __name__ == "__main__":
     unittest.main()
