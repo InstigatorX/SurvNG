@@ -531,6 +531,21 @@ class MqttService:
             self.remove_retained_topic(
                 f"{discovery_prefix}/sensor/{object_id}/zones/config"
             )
+            if camera.get("speech_enabled"):
+                entities.append(("binary_sensor", "speech", {
+                    "name": "Speech",
+                    "unique_id": f"survng_{camera_id}_speech",
+                    "state_topic": f"{state_topic}/speech",
+                    "value_template": "{{ value_json.state }}",
+                    "payload_on": "ON",
+                    "payload_off": "OFF",
+                    "device_class": "sound",
+                    "icon": "mdi:account-voice",
+                }))
+            else:
+                self.remove_retained_topic(
+                    f"{discovery_prefix}/binary_sensor/{object_id}/speech/config"
+                )
             for zone in camera.get("zones") or []:
                 zone_name = str(zone.get("name") or "").strip()
                 if not zone_name:

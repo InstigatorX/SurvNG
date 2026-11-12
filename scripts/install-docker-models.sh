@@ -35,6 +35,7 @@ DO_PERSON_REID=1
 DO_VEHICLE_REID=1
 DO_SEMANTIC=1
 DO_FACE=1
+DO_SPEECH=0
 PYTHON_BIN=""
 SEMANTIC_EXPORTER_REF="${SURVNG_INSTALLER_REF:-v1.2}"
 IN_CONTAINER="${SURVNG_INSTALLER_IN_CONTAINER:-0}"
@@ -51,6 +52,9 @@ FACE_LANDMARK_NAME="landmarks-regression-retail-0009"
 FACE_LANDMARK_URL="https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/${FACE_LANDMARK_NAME}/FP16"
 FACE_DETECTOR_NAME="face-detection-retail-0004"
 FACE_DETECTOR_URL="https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/${FACE_DETECTOR_NAME}/FP16"
+SILERO_VAD_VERSION="6.2.3"
+SILERO_VAD_MEMBER="silero_vad/data/silero_vad_openvino_16k.onnx"
+SILERO_VAD_SHA256="7776b81ad1b0350c15d7f1555943b9232eb53e9ca5d989c6d0cea9ebc8664d87"
 SEMANTIC_EXPORTER_URL="https://raw.githubusercontent.com/InstigatorX/SurvNG/${SEMANTIC_EXPORTER_REF}/scripts/export-mobileclip2-openvino.py"
 
 usage() {
@@ -89,6 +93,9 @@ Options:
   --skip-vehicle-reid  Skip vehicle ReID only
   --skip-semantic      Skip MobileCLIP2-B Smart Search export
   --skip-face          Skip ArcFace embedding, landmarks, and face detector
+  --speech             Also install speech models (opt-in): Silero VAD plus
+                       Whisper English (base.en for CPU; small.en and base.en
+                       for GPU). Never enables speech listening in config.json.
   -h, --help           Show this help
 
 Environment:
@@ -103,6 +110,8 @@ Licenses (not SurvNG MIT; not baked into GHCR images):
   person-reid-0286     Intel Open Model Zoo Apache-2.0
   vehicle-reid-0001    MIT (OSNet / Open Model Zoo public)
   face ArcFace/landmarks/detector  Intel Open Model Zoo (Apache-2.0 / OMZ terms)
+  Silero VAD (--speech)          MIT
+  Whisper base.en/small.en       MIT (OpenAI); OpenVINO int8 packages
 
 Examples:
   # Default: installer container (no host PyTorch/Ultralytics)
@@ -126,6 +135,9 @@ Default layout under the models directory (container /models):
   face_model/landmarks-regression-retail-0009.xml
   face_detector/face-detection-retail-0004.xml
   mobileclip2-b-openvino-fp16/
+  speech/silero_vad_openvino_16k.onnx        (--speech)
+  speech/whisper/whisper-base.en/            (--speech)
+  speech/whisper/whisper-small.en/           (--speech --device GPU)
 EOF
 }
 
@@ -170,6 +182,7 @@ run_installer_container() {
   [[ "$DO_VEHICLE_REID" -eq 0 ]] && inner+=(--skip-vehicle-reid)
   [[ "$DO_SEMANTIC" -eq 0 ]] && inner+=(--skip-semantic)
   [[ "$DO_FACE" -eq 0 ]] && inner+=(--skip-face)
+  [[ "$DO_SPEECH" -eq 1 ]] && inner+=(--speech)
 
   log "Running installer container: $INSTALLER_IMAGE"
   log "  models mount: $models_host -> /models-out"
@@ -585,6 +598,64 @@ install_semantic() {
   log "Installed Smart Search package: $model_dir"
 }
 
+install_speech() {
+  local speech_dir="$MODELS_DIR/speech"
+  local vad="$speech_dir/silero_vad_openvino_16k.onnx"
+  local whisper_dir="$speech_dir/whisper"
+  local venv
+  venv="$(venv_root)/speech-venv"
+  ensure_venv "$venv" 'huggingface_hub>=1.31.0,<2'
+  mkdir -p "$speech_dir" "$whisper_dir"
+
+  if [[ ! -f "$vad" || "$FORCE" -eq 1 ]]; then
+    log "Downloading Silero VAD ${SILERO_VAD_VERSION} (MIT) from PyPI..."
+    local wheel_dir="$CACHE_DIR/silero-vad-${SILERO_VAD_VERSION}"
+    mkdir -p "$wheel_dir"
+    "$venv/bin/python" -m pip download --no-deps --only-binary=:all: \
+      --dest "$wheel_dir" "silero-vad==${SILERO_VAD_VERSION}"
+    "$venv/bin/python" - "$wheel_dir" "$SILERO_VAD_MEMBER" "$vad.part" <<'PY'
+import sys, zipfile
+from pathlib import Path
+wheel = next(Path(sys.argv[1]).glob("silero_vad-*.whl"))
+with zipfile.ZipFile(wheel) as archive:
+    Path(sys.argv[3]).write_bytes(archive.read(sys.argv[2]))
+PY
+    local actual
+    actual="$(sha256_of "$vad.part")"
+    if [[ "$actual" != "$SILERO_VAD_SHA256" ]]; then
+      err "Silero VAD SHA-256 mismatch: expected $SILERO_VAD_SHA256, got $actual"
+      rm -f "$vad.part"
+      return 1
+    fi
+    mv -f "$vad.part" "$vad"
+    log "Installed Silero VAD: $vad"
+  else
+    log "Silero VAD already present: $vad"
+  fi
+
+  local models=(base.en)
+  [[ "$DEVICE" == "GPU" ]] && models=(small.en base.en)
+  local model target
+  for model in "${models[@]}"; do
+    target="$whisper_dir/whisper-${model}"
+    if [[ -f "$target/openvino_encoder_model.xml" && "$FORCE" -eq 0 ]]; then
+      log "Whisper ${model} already present: $target"
+      continue
+    fi
+    log "Downloading Whisper ${model} OpenVINO int8 package (MIT)..."
+    HF_HOME="$CACHE_DIR/hf" "$venv/bin/python" - "OpenVINO/whisper-${model}-int8-ov" "$target" <<'PY'
+import sys
+from huggingface_hub import snapshot_download
+snapshot_download(repo_id=sys.argv[1], local_dir=sys.argv[2])
+PY
+    if [[ ! -f "$target/openvino_encoder_model.xml" ]]; then
+      err "Whisper ${model} download is incomplete: $target"
+      return 1
+    fi
+    log "Installed Whisper ${model}: $target"
+  done
+}
+
 install_face() {
   local face_dir="$MODELS_DIR/face_model"
   local detector_dir="$MODELS_DIR/face_detector"
@@ -679,6 +750,8 @@ patch_config() {
   local face_landmark="$MODELS_DIR/face_model/${FACE_LANDMARK_NAME}.xml"
   local face_detector="$MODELS_DIR/face_detector/${FACE_DETECTOR_NAME}.xml"
   local depth_xml="$MODELS_DIR/${DEPTH_NAME}_openvino_model/${DEPTH_NAME}.xml"
+  local speech_vad="$MODELS_DIR/speech/silero_vad_openvino_16k.onnx"
+  local speech_whisper="$MODELS_DIR/speech/whisper"
 
   local detector_container="" labels_container="" person_container=""
   local vehicle_container="" semantic_container="" depth_container=""
@@ -694,8 +767,13 @@ patch_config() {
   [[ -f "$face_landmark" ]] && face_landmark_container="$(container_path "$face_landmark")"
   [[ -f "$face_detector" ]] && face_detector_container="$(container_path "$face_detector")"
   [[ -f "$depth_xml" ]] && depth_container="$(container_path "$depth_xml")"
+  local speech_vad_container="" speech_whisper_container=""
+  [[ -f "$speech_vad" ]] && speech_vad_container="$(container_path "$speech_vad")"
+  if compgen -G "$speech_whisper/whisper-*/openvino_encoder_model.xml" >/dev/null; then
+    speech_whisper_container="$(container_path "$speech_whisper")"
+  fi
 
-  if [[ -z "$detector_container$person_container$vehicle_container$semantic_container$face_embed_container$depth_container" ]]; then
+  if [[ -z "$detector_container$person_container$vehicle_container$semantic_container$face_embed_container$depth_container$speech_vad_container" ]]; then
     err "No installed models found under $MODELS_DIR; not writing config.json"
     exit 1
   fi
@@ -705,7 +783,7 @@ patch_config() {
     "$detector_container" "$labels_container" "$person_container" \
     "$vehicle_container" "$semantic_container" \
     "$face_embed_container" "$face_landmark_container" "$face_detector_container" \
-    "$depth_container" <<'PY'
+    "$depth_container" "$speech_vad_container" "$speech_whisper_container" <<'PY'
 import json
 import os
 import sys
@@ -724,7 +802,9 @@ enable = sys.argv[3] == "1"
     face_landmark,
     face_detector,
     depth_xml,
-) = sys.argv[4:13]
+    speech_vad,
+    speech_whisper,
+) = sys.argv[4:15]
 
 DOCKER_DEFAULT = {
     "base_path": "/survng",
@@ -894,6 +974,16 @@ if depth_xml:
     if enable:
         depth["enabled"] = True
 
+if speech_vad or speech_whisper:
+    # Model paths only: listening to audio stays an explicit operator choice,
+    # so speech.enabled is never switched on here, even without --no-enable.
+    speech = section("speech")
+    if speech_vad:
+        speech["vad_model_path"] = speech_vad
+    if speech_whisper:
+        speech["whisper_models_dir"] = speech_whisper
+        speech["transcription_device"] = device
+
 temporary = config_path.with_name(config_path.name + ".tmp")
 temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 os.replace(temporary, config_path)
@@ -930,6 +1020,7 @@ while [[ $# -gt 0 ]]; do
     --skip-vehicle-reid) DO_VEHICLE_REID=0; shift ;;
     --skip-semantic) DO_SEMANTIC=0; shift ;;
     --skip-face) DO_FACE=0; shift ;;
+    --speech) DO_SPEECH=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       err "Unknown option: $1"
@@ -990,6 +1081,9 @@ if [[ "$DO_SEMANTIC" -eq 1 ]]; then
 fi
 if [[ "$DO_FACE" -eq 1 ]]; then
   install_face || note_step_failure "face model install"
+fi
+if [[ "$DO_SPEECH" -eq 1 ]]; then
+  install_speech || note_step_failure "speech model install"
 fi
 
 ensure_models_readable || note_step_failure "model permission fix"
