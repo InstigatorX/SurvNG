@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Mic, Play } from "lucide-react";
 import { fetch, recordingsHref } from "../shared/api.js";
 import { formatDateTime } from "../shared/format.js";
-import { incidentSpeechLabel, speechSegmentRecordingContext, speechSegmentReasonLabel, speechSegmentStatusLabel, speechSegmentsQuery } from "../speechSettings.mjs";
+import { incidentSpeechLabel, speechSegmentPlaceholder, speechSegmentRecordingContext, speechSegmentsQuery } from "../speechSettings.mjs";
 
 export function IncidentSpeechBadge({ speech }) {
   const label = incidentSpeechLabel(speech);
@@ -54,10 +54,9 @@ export function IncidentSpeechPanel({ incident, timeZone }) {
       {segments.map((segment) => {
         const context = speechSegmentRecordingContext(segment);
         const text = segment.text?.trim();
-        const reason = speechSegmentReasonLabel(segment.reason);
         return <li key={segment.id}>
           <time dateTime={segment.started_at}>{formatDateTime(segment.started_at, timeZone)}</time>
-          <p className={text ? "" : "empty"}>{text ? `“${text}”` : segment.status === "detected" ? "Speech (not transcribed for this camera)" : `${speechSegmentStatusLabel(segment.status)}${reason ? ` · ${reason}` : ""}`}</p>
+          <p className={text ? "" : "empty"}>{text ? `“${text}”` : speechSegmentPlaceholder(segment)}</p>
           {context ? <a href={recordingsHref(context)}><Play size={13} />Play</a> : null}
         </li>;
       })}

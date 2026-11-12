@@ -104,6 +104,14 @@ export function speechSegmentReasonLabel(reason) {
   return "";
 }
 
+/** What to show for a segment that has no transcript text. */
+export function speechSegmentPlaceholder(segment) {
+  if (segment?.content_expired) return "Transcript expired with the recording.";
+  if (segment?.status === "detected") return "Speech detected (transcription is off for this camera).";
+  const reason = speechSegmentReasonLabel(segment?.reason);
+  return `${speechSegmentStatusLabel(segment?.status)}${reason ? ` · ${reason}` : ""}`;
+}
+
 /** Short summary of the speech counts attached to an incident payload. */
 export function incidentSpeechLabel(speech) {
   const count = Number(speech?.segments) || 0;

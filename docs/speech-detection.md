@@ -175,8 +175,21 @@ standard manager reload, which restarts camera workers.
   category, restart and segment counts, and transcriber device, model, queue
   and drop counters. Transcript text never appears in this snapshot, in logs,
   or in the observability socket.
-- **Retention.** Segments older than `speech.retention_days` are deleted
-  hourly, independent of video retention.
+- **Retention** (checked hourly, also while speech is turned off):
+  - Speech newer than `speech.retention_days` is kept.
+  - Older speech that isn't part of an incident is deleted.
+  - Older speech that is part of an incident keeps its transcript while a
+    recording (main or sub stream) still covers that moment. When the
+    recording is removed, the transcript text and its search entry are
+    deleted, but the incident still shows that speech happened
+    ("Transcript expired with the recording"). On a camera that doesn't
+    record, transcripts last `retention_days`.
+- **Speech on incidents.** Speech that overlaps an incident's time on the
+  same camera (with a 5 s margin) appears on that incident: a microphone
+  badge in the list, a purple Speech trigger dot when speech started the
+  check, and a Speech transcript panel in the incident view. Incident APIs
+  carry only counts; the transcript text comes from the admin-only speech
+  API.
 
 ## Listener states
 

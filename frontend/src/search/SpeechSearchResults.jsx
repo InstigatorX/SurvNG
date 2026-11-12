@@ -3,7 +3,7 @@ import { CircleAlert, Mic, Play, Search } from "lucide-react";
 import { appUrl, fetch, recordingsHref } from "../shared/api.js";
 import { canonicalIncidentHref } from "../incidentScene.mjs";
 import { formatDateTime } from "../shared/format.js";
-import { speechSegmentReasonLabel, speechSegmentRecordingContext, speechSegmentStatusLabel, speechSegmentsQuery } from "../speechSettings.mjs";
+import { speechSegmentPlaceholder, speechSegmentRecordingContext, speechSegmentStatusLabel, speechSegmentsQuery } from "../speechSettings.mjs";
 
 const PAGE_SIZE = 50;
 
@@ -83,10 +83,7 @@ export function SpeechSearchWorkspace({ cameras, cameraId, timeZone, initialQuer
         const name = cameraName(segment.camera_id);
         const when = formatDateTime(segment.started_at, timeZone);
         const text = segment.text?.trim();
-        const reason = speechSegmentReasonLabel(segment.reason);
-        const placeholder = segment.status === "detected"
-          ? "Speech detected (transcription is off for this camera)."
-          : `${speechSegmentStatusLabel(segment.status)}${reason ? ` · ${reason}` : ""}`;
+        const placeholder = speechSegmentPlaceholder(segment);
         return <article key={segment.id} className={`speech-result ${segment.status}`} aria-label={`Speech at ${name}, ${when}`}>
           <div className="speech-result-meta"><Mic size={15} /><strong>{name}</strong><small>{when} · {Number(segment.duration_seconds || 0).toFixed(1)}s</small><span className={`speech-result-status ${segment.status}`}>{speechSegmentStatusLabel(segment.status)}</span></div>
           <p className={text ? "speech-result-text" : "speech-result-text empty"}>{text ? `“${text}”` : placeholder}</p>

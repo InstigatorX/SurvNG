@@ -286,3 +286,102 @@ def test_transcript_rows_link_to_their_incident(tmp_path) -> None:
     ]
     manager.speech_incident_ids(rows)
     assert [row["incident_id"] for row in rows] == ["live", None]
+
+
+# Transcript retention (option B) -------------------------------------------
+
+import sqlite3
+
+from survng.app.speech.retention import apply_speech_retention
+
+
+def test_retention_deletes_unattached_and_expires_attached_without_recordings(tmp_path) -> None:
+    speech = SpeechStore(tmp_path)
+    unattached = _speech(speech, "gate", 10.0, 12.0, text="nobody cares")
+    recorded = _speech(speech, "gate", 101.0, 104.0, text="package at the door")
+    unrecorded = _speech(speech, "gate", 201.0, 204.0, text="secret plans")
+    young = _speech(speech, "gate", 5_000.0, 5_002.0, text="still fresh")
+    episodes = {"gate": [(100.0, 110.0), (200.0, 210.0)]}
+
+    result = apply_speech_retention(
+        speech,
+        cutoff=1_000.0,
+        episode_windows=lambda camera, low, high: [w for w in episodes.get(camera, []) if w[1] >= low and w[0] <= high],
+        recording_ranges=lambda camera, low, high: [(90.0, 150.0)],
+        batch_size=2,
+    )
+
+    assert (result.deleted, result.expired, result.kept) == (1, 1, 1)
+    assert speech.get(unattached) is None
+    assert speech.get(recorded)["text"] == "package at the door"
+    expired = speech.get(unrecorded)
+    assert expired["text"] == "" and expired["content_expired"] is True
+    assert speech.list_segments(query="secret") == []  # search entry removed too
+    assert speech.get(young)["text"] == "still fresh"
+    # The incident still shows that speech happened, with no transcript.
+    summary = incident_speech(speech, {"live": [("gate", 200.0, 210.0)]})
+    assert summary["live"]["segments"] == 1 and summary["live"]["transcribed"] == 0
+
+    # Finalized rows are not rescanned; recorded ones are checked again later.
+    again = apply_speech_retention(
+        speech, cutoff=1_000.0,
+        episode_windows=lambda camera, low, high: episodes["gate"],
+        recording_ranges=lambda camera, low, high: [],
+    )
+    assert (again.deleted, again.expired, again.kept) == (0, 1, 0)
+    assert speech.get(recorded)["content_expired"] is True
+
+
+def test_retention_keeps_attached_transcripts_when_recordings_cannot_be_read(tmp_path) -> None:
+    speech = SpeechStore(tmp_path)
+    attached = _speech(speech, "gate", 101.0, 104.0, text="keep me")
+
+    def broken(*_args):
+        raise RuntimeError("recording index unavailable")
+
+    result = apply_speech_retention(
+        speech, cutoff=1_000.0,
+        episode_windows=lambda camera, low, high: [(100.0, 110.0)],
+        recording_ranges=broken,
+    )
+    assert result.kept == 1
+    assert speech.get(attached)["text"] == "keep me"
+
+
+def test_existing_speech_database_is_migrated(tmp_path) -> None:
+    with sqlite3.connect(tmp_path / "speech.sqlite3") as conn:
+        conn.execute(
+            "create table speech_segments (id integer primary key autoincrement, camera_id text not null, "
+            "started_at real not null, ended_at real not null, peak_probability real not null default 0, "
+            "status text not null, text text not null default '', language text not null default '', score real, "
+            "model text not null default '', device text not null default '', reason text not null default '', "
+            "created_at real not null, updated_at real not null)"
+        )
+        conn.execute(
+            "insert into speech_segments (camera_id, started_at, ended_at, status, text, created_at, updated_at) "
+            "values ('gate', 1, 2, 'done', 'old row', 0, 0)"
+        )
+    store = SpeechStore(tmp_path)
+    row = store.list_segments()[0]
+    assert row["text"] == "old row" and row["content_expired"] is False
+
+
+def test_retention_keeps_running_after_speech_is_turned_off(tmp_path) -> None:
+    from survng.app.config import AppConfig
+    from survng.app.speech.lifecycle import SpeechLifecycle
+
+    config = AppConfig.model_validate({"cameras": []})
+    off = SpeechLifecycle(config, database_dir=tmp_path, camera_enabled=lambda camera_id: False)
+    off.start()
+    assert off._thread is None  # no database: nothing to expire, nothing created
+    assert not (tmp_path / "speech.sqlite3").exists()
+
+    SpeechStore(tmp_path)
+    off = SpeechLifecycle(config, database_dir=tmp_path, camera_enabled=lambda camera_id: False)
+    off.start()
+    try:
+        assert off.status()["state"] == "disabled"
+        assert off._thread is not None and off._thread.is_alive()
+        assert off.store is not None
+    finally:
+        off.stop()

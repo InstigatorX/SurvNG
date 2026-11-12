@@ -450,6 +450,8 @@ class AppManager:
             camera_enabled=self._speech_camera_active,
             audio_available=self._speech_audio_available,
             publish=self.mqtt.publish,
+            episode_windows=lambda camera_id, start, end: self.events.scene_episode_windows_overlapping(camera_id, start, end),
+            recording_ranges=self._speech_recording_ranges,
         )
         self._process_started_monotonic = time.monotonic()
         self._process_started_at = datetime.now(timezone.utc).isoformat()
@@ -964,6 +966,18 @@ class AppManager:
         speech = getattr(self, "speech", None)
         if speech is not None:
             speech.refresh()
+
+    def _speech_recording_ranges(self, camera_id: str, start: float, end: float) -> list[tuple[float, float]]:
+        ranges: list[tuple[float, float]] = []
+        for source in ("main", "live"):
+            availability = self.recorder.recording_availability_between(
+                camera_id, start, end, source, discover_missing=False,
+            )
+            ranges.extend(
+                (float(item["start_epoch"]), float(item["end_epoch"]))
+                for item in availability.get("ranges", [])
+            )
+        return ranges
 
     def _speech_audio_available(self, camera) -> bool | None:
         info = self.recorder.audio_stream_info(camera, camera.speech.source)

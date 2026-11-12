@@ -40,7 +40,7 @@ def _iso(value: float | None) -> str | None:
 
 
 class SpeechStore:
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, database_dir: Path | str) -> None:
         self.path = Path(database_dir) / "speech.sqlite3"
@@ -88,6 +88,17 @@ class SpeechStore:
                 create index if not exists speech_segments_status
                     on speech_segments (status);
                 """
+            )
+            columns = {str(row[1]) for row in conn.execute("pragma table_info(speech_segments)").fetchall()}
+            if "content_expired" not in columns:
+                # Set when an attached transcript's recording is gone: the
+                # text is removed, the timing row stays for incident counts.
+                conn.execute(
+                    "alter table speech_segments add column content_expired integer not null default 0"
+                )
+            conn.execute(
+                "create index if not exists speech_segments_retention "
+                "on speech_segments (content_expired, started_at)"
             )
             conn.execute(
                 "insert or replace into speech_metadata (key, value) values ('schema_version', ?)",
@@ -190,8 +201,40 @@ class SpeechStore:
             return int(cursor.rowcount or 0)
 
     def purge_before(self, cutoff: float) -> int:
+        """Delete every segment older than ``cutoff`` (no incident awareness)."""
         with self._lock, self._connect() as conn:
             cursor = conn.execute("delete from speech_segments where started_at < ?", (cutoff,))
+            return int(cursor.rowcount or 0)
+
+    def retention_candidates(self, cutoff: float, *, after_id: int = 0, limit: int = 1000) -> list[tuple[int, str, float, float]]:
+        """(id, camera_id, started_at, ended_at) past retention, not yet finalized."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select id, camera_id, started_at, ended_at from speech_segments "
+                "where content_expired = 0 and started_at < ? and id > ? order by id limit ?",
+                (cutoff, after_id, max(1, int(limit))),
+            ).fetchall()
+        return [(int(row[0]), str(row[1]), float(row[2]), float(row[3])) for row in rows]
+
+    def delete_segments(self, ids: list[int]) -> int:
+        if not ids:
+            return 0
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                f"delete from speech_segments where id in ({','.join('?' for _ in ids)})", ids,
+            )
+            return int(cursor.rowcount or 0)
+
+    def expire_content(self, ids: list[int]) -> int:
+        """Remove transcript text (and its search entry) but keep the timing row."""
+        if not ids:
+            return 0
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                "update speech_segments set text = '', content_expired = 1, updated_at = ? "
+                f"where id in ({','.join('?' for _ in ids)})",
+                (time.time(), *ids),
+            )
             return int(cursor.rowcount or 0)
 
     # Reads -------------------------------------------------------------
@@ -292,4 +335,5 @@ class SpeechStore:
             "model": row["model"],
             "device": row["device"],
             "reason": row["reason"],
+            "content_expired": bool(row["content_expired"]),
         }

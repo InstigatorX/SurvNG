@@ -16,6 +16,7 @@ from typing import Any
 
 from ..config import AppConfig, CameraConfig
 from .attach import incident_speech
+from .retention import apply_speech_retention
 from .listener import ListenerEvent, SpeechListener
 from .segmenter import SpeechEnded, SpeechStarted
 from .store import SpeechStore
@@ -44,7 +45,11 @@ class SpeechLifecycle:
         vad_factory: Callable[[str], Any] = SileroVadModel,
         listener_factory: Callable[..., SpeechListener] = SpeechListener,
         transcriber_factory: Callable[..., TranscriptionService] = TranscriptionService,
+        episode_windows: Callable[[str, float, float], list[tuple[float, float]]] | None = None,
+        recording_ranges: Callable[[str, float, float], list[tuple[float, float]]] | None = None,
     ) -> None:
+        self.episode_windows = episode_windows
+        self.recording_ranges = recording_ranges
         self.config = config
         self.speech = config.speech
         self.database_dir = database_dir
@@ -78,9 +83,11 @@ class SpeechLifecycle:
         """Start speech services; failures leave SurvNG running without speech."""
         if not self.speech.enabled:
             self._state, self._reason = "disabled", "speech is disabled"
+            self._start_retention_only()
             return
         if not self.cameras:
             self._state, self._reason = "idle", "no camera has speech listening enabled"
+            self._start_retention_only()
             return
         try:
             self.store = SpeechStore(self.database_dir)
@@ -141,10 +148,24 @@ class SpeechLifecycle:
         except Exception:
             LOGGER.exception("Speech reconciliation failed")
 
+    def _start_retention_only(self) -> None:
+        """Keep expiring transcripts after speech is turned off."""
+        if not (Path(self.database_dir) / "speech.sqlite3").exists():
+            return
+        try:
+            self.store = SpeechStore(self.database_dir)
+        except Exception:
+            LOGGER.exception("Speech database could not be opened for retention")
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="speech-retention", daemon=True)
+        self._thread.start()
+
     def _run(self) -> None:
         while not self._stop.wait(RECONCILE_INTERVAL_SECONDS):
             try:
-                self._reconcile()
+                if self._state == "running":
+                    self._reconcile()
                 self._apply_retention()
             except Exception:
                 LOGGER.exception("Speech reconciliation failed")
@@ -189,9 +210,18 @@ class SpeechLifecycle:
         if now - self._last_retention < RETENTION_INTERVAL_SECONDS:
             return
         self._last_retention = now
-        removed = self.store.purge_before(now - self.speech.retention_days * 86400.0)
-        if removed:
-            LOGGER.info("Speech retention removed %d segments", removed)
+        result = apply_speech_retention(
+            self.store,
+            cutoff=now - self.speech.retention_days * 86400.0,
+            episode_windows=self.episode_windows,
+            recording_ranges=self.recording_ranges,
+        )
+        if result.deleted or result.expired:
+            LOGGER.info(
+                "Speech retention removed %d segments and expired %d transcripts whose recordings are gone",
+                result.deleted,
+                result.expired,
+            )
 
     # Events -----------------------------------------------------------
 

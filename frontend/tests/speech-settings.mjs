@@ -68,3 +68,9 @@ assert.equal(incidentSpeechLabel({ segments: 0 }), "");
 assert.equal(incidentSpeechLabel({ segments: 1, seconds: 3.4, transcribed: 0 }), "1 speech segment · 3s");
 assert.equal(incidentSpeechLabel({ segments: 3, seconds: 20, transcribed: 2 }), "3 speech segments · 20s · 2 transcribed");
 console.log("incident speech label tests passed");
+
+import { speechSegmentPlaceholder } from "../src/speechSettings.mjs";
+assert.equal(speechSegmentPlaceholder({ status: "done", content_expired: true }), "Transcript expired with the recording.");
+assert.equal(speechSegmentPlaceholder({ status: "detected" }), "Speech detected (transcription is off for this camera).");
+assert.equal(speechSegmentPlaceholder({ status: "skipped", reason: "too_short" }), "Not transcribed · too short to transcribe");
+console.log("speech placeholder tests passed");
