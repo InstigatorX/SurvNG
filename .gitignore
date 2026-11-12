@@ -72,9 +72,10 @@ frames/
 !frontend/src/assets/**/*.png
 !frontend/src/assets/**/*.webp
 
-# Local model artifacts. Keep small label/class files trackable.
-models/mobileclip2-b-openvino-fp16/
-models/.mobileclip2-download-cache/
+# Local model artifacts. Ignore the whole models directory so installed
+# packages and installer caches are never untracked files that a clean can
+# remove. Nothing under models/ is tracked.
+models/
 *.onnx
 *.pt
 *.pth
