@@ -16,6 +16,7 @@ import {
   Clock3,
   Crop,
   Cog,
+  Database,
   Download,
   Cpu,
   Gauge,
@@ -4126,6 +4127,13 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <button type="button" className="danger" onClick={() => runRetention(true)} disabled={["queued", "planning", "cleaning", "waiting"].includes(retentionStatus?.state)}><Trash2 size={15} /> Clean Up Now</button>
             </div>
             <p className="retention-protection"><ShieldCheck size={15} /> Incident snapshots expire only after their configured history; face-reference images, incident clips, metadata databases, and the newest five minutes of recording remain protected.</p>
+            <div className="retention-heading">
+              <div><h4 className="section-heading-with-icon"><span className="section-heading-icon"><Database size={16} /></span>Database cleanup</h4><p>Daily removal of working data no incident uses: empty scene-discovery frames after {config.database_retention?.empty_discovery_hours ?? 24} hours, unadmitted activity after {config.database_retention?.activity_days ?? 30} days, and motion audits not linked to an incident after {config.database_retention?.motion_audit_days ?? 30} days. Incident-linked rows always stay.</p></div>
+            </div>
+            <div className="retention-fields">
+              <label className="check-field"><input type="checkbox" checked={(config.database_retention?.enabled ?? true) && config.database_retention?.dry_run === false} disabled={!(config.database_retention?.enabled ?? true)} onChange={(event) => updateConfig(["database_retention", "dry_run"], !event.target.checked)} /> Remove unused database rows</label>
+              <small>Off: each daily run only counts what it would remove (<code>./survngctl status</code>). On: removal starts about 10 minutes after saving, then runs daily.</small>
+            </div>
           </div>
           </div>
         </div>

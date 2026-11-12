@@ -12,7 +12,7 @@ from .motion_pipeline.configuration import resolve_motion_pipeline_graphs
 
 LOGGER = logging.getLogger(__name__)
 
-HOT_CONFIG_FIELDS = frozenset({"weather", "property", "base_path", "event_clip_before_seconds", "event_clip_after_seconds", "incident_thumbnail_annotations", "incident_thumbnail_object_focus", "incident_thumbnail_object_focus_zoom", "image_storage", "recording_cache_max_gb", "recording_cache_max_days", "recording_cache_prewarm", "api_auth", "web_auth", "tls", "proxy", "audit_ai", "system_review", "integration_notifications", "mqtt", "retention", "semantic_search"})
+HOT_CONFIG_FIELDS = frozenset({"weather", "property", "base_path", "event_clip_before_seconds", "event_clip_after_seconds", "incident_thumbnail_annotations", "incident_thumbnail_object_focus", "incident_thumbnail_object_focus_zoom", "image_storage", "recording_cache_max_gb", "recording_cache_max_days", "recording_cache_prewarm", "api_auth", "web_auth", "tls", "proxy", "audit_ai", "system_review", "integration_notifications", "mqtt", "retention", "database_retention", "semantic_search"})
 # The configured FFmpeg binary also owns live capture and reloads the manager.
 # Acceleration remains recorder/refinement-only and can be applied in place.
 RECORDER_CONFIG_FIELDS = frozenset({"hardware_acceleration", "recording_segment_seconds"})
@@ -37,6 +37,7 @@ class ConfigurableRuntime(Protocol):
     def reconfigure_recorders(self, config: AppConfig) -> None: ...
     def reconfigure_mqtt(self, config: Any) -> None: ...
     def reconfigure_recording_retention(self, config: AppConfig) -> None: ...
+    def reconfigure_database_retention(self, config: AppConfig) -> None: ...
     def reconfigure_image_storage(self, config: Any) -> None: ...
     def reconfigure_semantic_search(self, config: Any) -> None: ...
     def reconfigure_inference(self, config: Any, roles: set[str], *, refresh_tracking: bool) -> None: ...
@@ -200,6 +201,7 @@ class TargetedConfigApplication:
             mqtt_changed = current.mqtt != incoming.mqtt
             recorder_changes = [field for field in sorted(RECORDER_CONFIG_FIELDS) if getattr(current, field) != getattr(incoming, field)]
             retention_changed = "retention" in changes
+            database_retention_changed = "database_retention" in changes
             image_changed = "image_storage" in changes
             semantic_changed = "semantic_search" in changes
             policy_changed = any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_HOT_POLICY_FIELDS)
@@ -256,6 +258,7 @@ class TargetedConfigApplication:
                     (bool(recorder_changes), "recorders", lambda c: runtime.reconfigure_recorders(c), lambda c: runtime.reconfigure_recorders(c)),
                     (mqtt_changed, "mqtt", lambda c: runtime.reconfigure_mqtt(c.mqtt), lambda c: runtime.reconfigure_mqtt(c.mqtt)),
                     (retention_changed, "retention", runtime.reconfigure_recording_retention, runtime.reconfigure_recording_retention),
+                    (database_retention_changed, "database_retention", runtime.reconfigure_database_retention, runtime.reconfigure_database_retention),
                     (image_changed, "image_storage", lambda c: runtime.reconfigure_image_storage(c.image_storage), lambda c: runtime.reconfigure_image_storage(c.image_storage)),
                     (semantic_changed, "semantic_search", lambda c: runtime.reconfigure_semantic_search(c.semantic_search), lambda c: runtime.reconfigure_semantic_search(c.semantic_search)),
                     (bool(roles), "inference", lambda c: runtime.reconfigure_inference(c.detector, roles, refresh_tracking=refresh), lambda c: runtime.reconfigure_inference(c.detector, roles, refresh_tracking=refresh)),

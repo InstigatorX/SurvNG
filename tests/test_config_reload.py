@@ -1147,6 +1147,28 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertIn("retention", result["hot_updated"])
         self.assertFalse(result["camera_workers_restarted"])
 
+    def test_database_retention_change_hot_applies_without_manager_reload(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.database_retention.dry_run = False
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_database_retention.assert_called_once_with(effective)
+        active.reconfigure_recording_retention.assert_not_called()
+        self.assertFalse(effective.database_retention.dry_run)
+        self.assertIn("database_retention", result["hot_updated"])
+        self.assertFalse(result["camera_workers_restarted"])
+
     def test_camera_owned_change_uses_full_manager_reload(self) -> None:
         active = Mock()
         current = AppConfig()

@@ -1314,6 +1314,13 @@ class AppManager:
             list(self._unique_cameras()),
         )
 
+    def reconfigure_database_retention(self, next_config: AppConfig) -> None:
+        # The job reads self.config on each run; reschedule so a policy
+        # change (such as leaving dry run) takes effect soon, not next day.
+        retention = getattr(self, "database_retention", None)
+        if retention is not None:
+            retention.reschedule()
+
     def reconfigure_image_storage(self, config: ImageStorageConfig) -> None:
         self.image_writer.reconfigure(config)
 

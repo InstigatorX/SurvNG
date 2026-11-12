@@ -106,6 +106,7 @@ class DatabaseRetention:
         self._pause_seconds = pause_seconds
         self._startup_delay_seconds = startup_delay_seconds
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._status_lock = threading.Lock()
         self._running = False
@@ -123,10 +124,15 @@ class DatabaseRetention:
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=30.0)
         self._thread = None
+
+    def reschedule(self) -> None:
+        """Run again after the startup delay, e.g. after a policy change."""
+        self._wake.set()
 
     def status(self) -> dict[str, Any]:
         config = self._config()
@@ -149,8 +155,13 @@ class DatabaseRetention:
         while True:
             with self._status_lock:
                 self._status["next_run_at"] = _iso(self._clock() + delay)
-            if self._stop.wait(delay):
+            woken = self._wake.wait(delay)
+            self._wake.clear()
+            if self._stop.is_set():
                 return
+            if woken:
+                delay = self._startup_delay_seconds
+                continue
             config = self._config()
             if config.enabled:
                 try:

@@ -233,3 +233,24 @@ def test_motion_effectiveness_range_follows_audit_retention(dry_run: bool, expec
     service.motion_effectiveness(days=90.0)
 
     events.motion_effectiveness.assert_called_once_with(days=expected)
+
+
+def test_reschedule_wakes_the_loop_to_run_after_the_startup_delay(store: EventStore) -> None:
+    import threading
+
+    config = DatabaseRetentionConfig(dry_run=True, interval_hours=24.0)
+    retention = DatabaseRetention(
+        store, lambda: config, pause_seconds=0, startup_delay_seconds=0.2,
+    )
+    ran = threading.Event()
+    retention.run_once = lambda **_: ran.set()  # type: ignore[method-assign]
+    retention.start()
+    try:
+        assert ran.wait(5.0)  # startup run
+        ran.clear()
+        assert not ran.wait(0.5)  # next run is a day away
+        retention.reschedule()
+        assert ran.wait(5.0)  # policy change: runs after the short delay
+    finally:
+        retention.stop()
+    assert retention._thread is None
