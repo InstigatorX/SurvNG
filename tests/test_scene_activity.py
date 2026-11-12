@@ -234,3 +234,29 @@ def test_localization_measurements_must_be_valid_and_exceed_background():
     assert localized_change_supported(0.2, 0.07)
     assert localized_change_supported(0.15, 0.07)
     assert not localized_change_supported(0.149999, 0.07)
+
+
+def _discovery_sample(sample_id, *, observations=(), source="live_discovery", finished=False):
+    return {"id": sample_id, "camera_id": "gate", "captured_epoch": 1000.0, "status": "complete",
+            "observations": list(observations),
+            "metadata": {"source": source, "confirmation_complete": finished}}
+
+
+def test_empty_live_discovery_look_is_labelled_no_observations_but_stays_a_look():
+    from survng.app.zone_occupancy import scene_look_publishes
+
+    empty = evaluate_scene_activity([_discovery_sample("s1")])
+    assert empty["status"] == "pending"
+    assert empty["reason"] == "no_observations"
+    assert empty["summary"] == "No objects were detected in the sampled frame."
+    # A pending look still replaces, and so can clear, zone occupancy.
+    assert scene_look_publishes(empty["status"], detection_completed=True)
+
+    seen = evaluate_scene_activity([_discovery_sample("s2", observations=[{"id": "o1", "label": "car"}])])
+    assert (seen["status"], seen["reason"]) == ("pending", "awaiting_activity_confirmation")
+
+    notice = evaluate_scene_activity([_discovery_sample("s3", source="recorded_main")])
+    assert (notice["status"], notice["reason"]) == ("pending", "awaiting_activity_confirmation")
+
+    finished = evaluate_scene_activity([_discovery_sample("s4", finished=True)])
+    assert (finished["status"], finished["reason"]) == ("incomplete", "insufficient_distinct_frames")

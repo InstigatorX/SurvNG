@@ -143,4 +143,16 @@ def evaluate_scene_activity(samples, *, policy_version=1, ignore_stationary_scen
                       reason="no_supported_physical_change" if len(complete) >= 2 else "insufficient_distinct_frames",
                       summary="No physical activity was established in the sampled interval." if len(complete)>=2
                       else "There are too few distinct frames to assess activity.")
+    elif all(
+        (sample.get("metadata") or {}).get("source") == "live_discovery"
+        and not any(isinstance(observation, dict) for observation in sample.get("observations", []))
+        for variants in complete.values()
+        for sample in variants
+    ):
+        # An empty live-discovery look schedules no confirmation, so
+        # "awaiting confirmation" misdescribes it. The verdict stays pending:
+        # that is what lets a completed look replace (and clear) zone
+        # occupancy. Notice-triggered samples keep the original reason.
+        result.update(reason="no_observations",
+                      summary="No objects were detected in the sampled frame.")
     return result
