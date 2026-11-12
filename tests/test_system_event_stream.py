@@ -431,3 +431,24 @@ def test_state_stream_refreshes_system_state_periodically(monkeypatch):
     assert "event: connected" in chunks[4]
     assert "event: system_state" in chunks[5]
     assert telemetry.system_status.call_count == 2
+
+
+def test_state_stream_drops_camera_churn_that_integrations_do_not_display():
+    broker = StateEventBroker()
+    seed = broker.publish("activity", {"camera_id": "gate"})
+    first = broker.publish("camera_state", {"id": "gate", "recording": True, "onvif_renewals": 1})
+    churn = broker.publish("camera_state", {"id": "gate", "recording": True, "onvif_renewals": 2})
+    changed = broker.publish("camera_state", {"id": "gate", "recording": False, "onvif_renewals": 3})
+    telemetry = SimpleNamespace(system_status=Mock(return_value={"instance_id": "i"}))
+    manager = _state_manager(broker)
+    manager.statuses.return_value = []
+
+    chunks = asyncio.run(read_chunks(
+        stream_handler(manager, telemetry), _state_request(query_cursor=seed.id), 5,
+    ))
+
+    assert f"id: {first.id}" in chunks[1]  # first sighting sets the baseline
+    assert f"id: {changed.id}" in chunks[2] and '"recording":false' in chunks[2]
+    assert f"id: {churn.id}" not in "".join(chunks)  # counter-only churn
+    assert "event: cameras_state" in chunks[3]
+    assert "event: system_state" in chunks[4]

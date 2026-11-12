@@ -88,15 +88,35 @@ def _sse_message(event_type: str, payload: object, event_id: str | None = None) 
     return "\n".join(lines) + "\n\n"
 
 
-def _incidents_stream_chunk(manager, event, *, include_state: bool = False) -> str | None:
+# Camera fields integrations display. camera_state also fires on ONVIF poll
+# timestamps and counters (about 14 events/s here); forwarding only changes to
+# these keeps a state=1 stream from overflowing its subscriber queue.
+INTEGRATION_CAMERA_FIELDS = (
+    "name", "running", "connected", "frame_fresh", "detection_enabled", "recording",
+    "onvif_connected", "last_motion_at", "recording_enabled", "incident_notifications_enabled",
+)
+
+
+def _integration_camera_view(status: dict) -> tuple:
+    return tuple(status.get(key) for key in INTEGRATION_CAMERA_FIELDS)
+
+
+def _incidents_stream_chunk(
+    manager, event, *, camera_views: dict[str, tuple] | None = None,
+) -> str | None:
     """Native HA events: incident lifecycle and zone occupancy snapshots.
 
-    ``include_state`` (``state=1``) also forwards per-camera status changes so
-    an integration can follow camera state without polling.
+    ``camera_views`` (``state=1``) also forwards per-camera status, but only
+    when a field in INTEGRATION_CAMERA_FIELDS changed for that connection.
     """
     if event.type == "zone_occupancy" and isinstance(event.data, dict):
         return _sse_message("zone_occupancy", event.data, event.id)
-    if include_state and event.type == "camera_state" and isinstance(event.data, dict):
+    if camera_views is not None and event.type == "camera_state" and isinstance(event.data, dict):
+        camera_id = str(event.data.get("id") or "")
+        view = _integration_camera_view(event.data)
+        if not camera_id or camera_views.get(camera_id) == view:
+            return None
+        camera_views[camera_id] = view
         return _sse_message("camera_state", event.data, event.id)
     if event.type != "incident_lifecycle" or not manager.incident_notification_allowed(event.data):
         return None
@@ -171,6 +191,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                 # Opt-in for integrations: camera snapshots and changes plus a
                 # light periodic system summary, so they need not poll.
                 include_state = incidents_only and query_params.get("state") == "1"
+                camera_views: dict[str, tuple] | None = {} if include_state else None
 
                 async def system_state() -> str:
                     return _sse_message("system_state", await asyncio.to_thread(
@@ -205,7 +226,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                         replayed_ids.add(event.id)
                         if incidents_only:
                             chunk = _incidents_stream_chunk(
-                                active_manager, event, include_state=include_state,
+                                active_manager, event, camera_views=camera_views,
                             )
                             if chunk is not None:
                                 yield chunk
@@ -217,7 +238,12 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                     connection_cursor = replay[-1].id if replay else last_event_id
                 if include_state:
                     # Snapshots carry no id: they never move the replay cursor.
-                    yield _sse_message("cameras_state", await asyncio.to_thread(active_manager.statuses))
+                    cameras = await asyncio.to_thread(active_manager.statuses)
+                    camera_views.update({
+                        str(item.get("id")): _integration_camera_view(item)
+                        for item in cameras if isinstance(item, dict) and item.get("id")
+                    })
+                    yield _sse_message("cameras_state", cameras)
                     yield await system_state()
                 yield _sse_message(
                     "connected",
@@ -268,7 +294,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                     last_sequence = event_sequence
                     if incidents_only:
                         chunk = _incidents_stream_chunk(
-                            active_manager, event, include_state=include_state,
+                            active_manager, event, camera_views=camera_views,
                         )
                         if chunk is not None:
                             yield chunk
