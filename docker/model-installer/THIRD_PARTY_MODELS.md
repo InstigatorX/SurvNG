@@ -15,8 +15,6 @@ are SurvNG MIT code.
 | landmarks-regression-retail-0009 | OpenVINO IR | **Apache-2.0** | Intel OMZ pre-converted FP16 IR. |
 | face-detection-retail-0004 | OpenVINO IR | **Apache-2.0** | Intel OMZ pre-converted FP16 IR. |
 | MobileCLIP2-B | OpenVINO package dir | **Apple ML Research Model terms** | Research / non-commercial use; exported at install time via `open_clip_torch`. |
-| Silero VAD (`--speech` only) | **ONNX** (`silero_vad_openvino_16k.onnx`) | **MIT** | Extracted from the pinned `silero-vad` PyPI wheel; SHA-256 verified. |
-| Whisper base.en / small.en (`--speech` only) | OpenVINO package dir | **MIT** (OpenAI Whisper weights) | Pre-converted int8 packages from the `OpenVINO` Hugging Face organization. |
 
 Pass `--skip-face` to omit the face stack. The legacy host helper
 `scripts/install-face-model.sh` remains for native checkouts.

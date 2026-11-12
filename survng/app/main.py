@@ -103,7 +103,6 @@ from .system_telemetry import (
 from .motion_pipeline import build_builtin_motion_registry
 from .system_routes import SystemRouteDependencies, create_system_router
 from .tls_routes import TlsRouteDependencies, create_tls_router
-from .speech_routes import SpeechRouteDependencies, create_speech_router
 from .training_routes import TrainingRouteDependencies, create_training_router
 from .proxy import apply_trusted_proxy_headers, request_is_secure, scope_header
 from .security import (
@@ -1232,7 +1231,6 @@ app.include_router(
     )
 )
 app.include_router(create_onvif_inspector_router())
-app.include_router(create_speech_router(SpeechRouteDependencies(get_manager=get_manager)))
 health = _frontend_route_bundle.handlers["health"]
 favicon = _frontend_route_bundle.handlers["favicon"]
 apple_touch_icon = _frontend_route_bundle.handlers["apple_touch_icon"]

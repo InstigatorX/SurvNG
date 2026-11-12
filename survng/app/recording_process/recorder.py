@@ -222,8 +222,7 @@ class Recorder(RecordingIndexMixin):
                 self._starting.discard(key)
         self.cleanup_duplicate_recorders({key})
 
-    def audio_stream_info(self, camera: CameraConfig, source: str) -> AudioStreamInfo:
-        """Cached go2rtc audio metadata; ``known=False`` when it cannot be read."""
+    def _audio_output_args(self, camera: CameraConfig, source: str) -> list[str]:
         source_url = camera.source_url(source)
         cache_key = (camera.id, source, source_url)
         with self._lock:
@@ -233,10 +232,6 @@ class Recorder(RecordingIndexMixin):
             if info.known:
                 with self._lock:
                     self._audio_stream_cache[cache_key] = info
-        return info
-
-    def _audio_output_args(self, camera: CameraConfig, source: str) -> list[str]:
-        info = self.audio_stream_info(camera, source)
         if info.known and not info.codec:
             return []
         if (info.known and info.codec == "aac") or not info.known:

@@ -512,9 +512,6 @@ def required_api_scope(method: str, path: str) -> ApiScope:
         return "admin"
     if path.startswith("/api/tls"):
         return "admin"
-    # Transcripts are recorded conversation content, not integration data.
-    if path.startswith("/api/speech/segments"):
-        return "admin"
     if path.startswith("/api/auth/") and path not in {"/api/auth/session", "/api/auth/login", "/api/auth/logout", "/api/auth/bootstrap"}:
         return "admin"
     if normalized_method in {"GET", "HEAD", "OPTIONS"}:

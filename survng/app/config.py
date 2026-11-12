@@ -616,61 +616,6 @@ class CameraLiveViewConfig(BaseModel):
     live: CameraViewFrameConfig = Field(default_factory=CameraViewFrameConfig)
 
 
-WHISPER_DEFAULT_MODEL_BY_DEVICE: dict[str, str] = {"CPU": "base.en", "GPU": "small.en"}
-
-
-class SpeechConfig(BaseModel):
-    """Process-wide speech listening and transcription (off by default).
-
-    Speech work runs only for cameras whose own ``speech.enabled`` is also
-    true. Audio is never stored separately: playback uses the recording.
-    """
-
-    enabled: bool = False
-    vad_model_path: str = Field(default="", max_length=4096)
-    # Directory holding OpenVINO Whisper packages named ``whisper-<model>``
-    # (for example ``whisper-base.en``), as written by the model installer.
-    whisper_models_dir: str = Field(default="", max_length=4096)
-    transcription_device: Literal["CPU", "GPU"] = "CPU"
-    # ``auto`` picks base.en on CPU and small.en on GPU.
-    transcription_model: Literal["auto", "tiny.en", "base.en", "small.en", "medium.en"] = "auto"
-    max_queue_per_camera: int = Field(default=8, ge=1, le=64)
-    retention_days: int = Field(default=7, ge=1, le=365)
-    min_transcript_score: float = Field(default=-1.0, ge=-10.0, le=0.0)
-    mqtt_publish_transcripts: bool = False
-
-    @field_validator("vad_model_path", "whisper_models_dir", mode="before")
-    @classmethod
-    def normalize_paths(cls, value: object) -> str:
-        return str(value or "").strip()
-
-    def resolved_whisper_model(self, device: str | None = None) -> str:
-        if self.transcription_model != "auto":
-            return self.transcription_model
-        return WHISPER_DEFAULT_MODEL_BY_DEVICE.get(
-            (device or self.transcription_device).upper(), "base.en"
-        )
-
-    def whisper_model_path(self, device: str | None = None) -> str:
-        if not self.whisper_models_dir:
-            return ""
-        model = self.resolved_whisper_model(device)
-        return str(Path(self.whisper_models_dir) / f"whisper-{model}")
-
-
-class CameraSpeechConfig(BaseModel):
-    """Per-camera speech listening; requires the global ``speech.enabled``."""
-
-    enabled: bool = False
-    transcribe: bool = False
-    source: Literal["main", "live"] = "main"
-    vad_threshold: float = Field(default=0.5, ge=0.1, le=0.95)
-    min_speech_ms: int = Field(default=300, ge=100, le=5000)
-    hangover_ms: int = Field(default=800, ge=100, le=5000)
-    pre_roll_ms: int = Field(default=500, ge=0, le=3000)
-    max_segment_seconds: float = Field(default=30.0, ge=5.0, le=120.0)
-
-
 class CameraConfig(BaseModel):
     incident_notifications_enabled: bool = True
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
@@ -687,7 +632,6 @@ class CameraConfig(BaseModel):
     stationary_subject_presence: Literal["inherit", "ignore", "activity"] = "inherit"
     motion_qualification: CameraMotionQualificationConfig = Field(default_factory=CameraMotionQualificationConfig)
     onvif: OnvifConfig = Field(default_factory=OnvifConfig)
-    speech: CameraSpeechConfig = Field(default_factory=CameraSpeechConfig)
     zones: list[DetectionZone] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -1337,7 +1281,6 @@ class AppConfig(BaseModel):
     semantic_search: SemanticSearchConfig = Field(default_factory=SemanticSearchConfig)
     integration_notifications: IntegrationNotificationConfig = Field(default_factory=IntegrationNotificationConfig)
     mqtt: MqttConfig = Field(default_factory=MqttConfig)
-    speech: SpeechConfig = Field(default_factory=SpeechConfig)
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
 

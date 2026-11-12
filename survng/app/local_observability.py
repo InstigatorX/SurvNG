@@ -460,54 +460,6 @@ def _safe_log_text(value: object, *, limit: int) -> str:
     return redacted[:limit]
 
 
-_SPEECH_CAMERA_STATES = frozenset({
-    "starting", "listening", "speaking", "restarting", "no_audio_track",
-    "camera_off", "stopped", "disabled", "idle", "unavailable",
-})
-_SPEECH_FAILURES = frozenset({
-    "", "no_audio_track", "stream_unauthorized", "stream_unavailable",
-    "audio_decode_error", "ffmpeg_error", "ffmpeg_start_failed", "stream_ended",
-})
-
-
-def _speech_snapshot(raw: object) -> dict[str, Any]:
-    """Operational speech state only; transcripts never enter this snapshot."""
-    raw = raw if isinstance(raw, dict) else {}
-    cameras: dict[str, Any] = {}
-    raw_cameras = raw.get("cameras")
-    for camera_id, item in (raw_cameras.items() if isinstance(raw_cameras, dict) else ()):
-        if not isinstance(item, dict):
-            continue
-        state = str(item.get("state") or "")
-        failure = str(item.get("failure") or "")
-        cameras[str(camera_id)[:128]] = {
-            "state": state if state in _SPEECH_CAMERA_STATES else "unknown",
-            "failure": failure if failure in _SPEECH_FAILURES else "other",
-            "transcribe": bool(item.get("transcribe")),
-            "restarts": int(_number(item.get("restarts"))),
-            "segments_since_restart": int(_number(item.get("segments"))),
-        }
-    transcriber = raw.get("transcriber")
-    transcriber_snapshot = None
-    if isinstance(transcriber, dict):
-        transcriber_snapshot = {
-            "state": _safe_log_text(transcriber.get("state") or "", limit=32),
-            "requested_device": _safe_log_text(transcriber.get("requested_device") or "", limit=16),
-            "device": _safe_log_text(transcriber.get("device") or "", limit=16),
-            "model": _safe_log_text(transcriber.get("model") or "", limit=32),
-            **_numeric_fields(
-                transcriber,
-                ("queue_depth", "completed", "failed", "dropped", "restarts"),
-            ),
-        }
-    return {
-        "enabled": bool(raw.get("enabled")),
-        "state": _safe_log_text(raw.get("state") or "", limit=32),
-        "cameras": cameras,
-        "transcriber": transcriber_snapshot,
-    }
-
-
 def _recent_log_snapshot(
     log_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -817,15 +769,6 @@ def build_runtime_status(
         )
         limiter = {}
 
-    try:
-        raw_speech = manager.speech_status()
-    except Exception as error:
-        LOGGER.warning(
-            "local observability could not read speech status (%s)",
-            type(error).__name__,
-        )
-        raw_speech = {}
-
     tracking_config = config.detector.tracking
     active_camera_ids = [
         camera["id"] for camera in cameras if camera["tracking"]["active"]
@@ -888,7 +831,6 @@ def build_runtime_status(
         "database_retention": _database_retention_snapshot(
             getattr(manager, "database_retention", None)
         ),
-        "speech": _speech_snapshot(raw_speech),
         "cameras": cameras,
         "recent_logs": _recent_log_snapshot(log_rows),
     }

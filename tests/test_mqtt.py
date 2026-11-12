@@ -72,20 +72,6 @@ class MqttServiceTest(unittest.TestCase):
         self.assertIn("homeassistant/switch/survng_gate/recording/config", topics)
         self.assertIn("homeassistant/switch/survng_gate/detection/config", topics)
 
-    def test_discovery_adds_speech_sensor_only_for_speech_cameras(self) -> None:
-        service = self.service()
-        service.publish_discovery([
-            {"id": "gate", "name": "Gate", "zones": [], "speech_enabled": True},
-            {"id": "yard", "name": "Yard", "zones": []},
-        ])
-
-        published = {topic: payload for topic, payload, _qos, _retain in service.client.published}
-        gate = json.loads(published["homeassistant/binary_sensor/survng_gate/speech/config"])
-        self.assertEqual(gate["state_topic"], "survng/camera/gate/speech")
-        self.assertEqual(gate["device_class"], "sound")
-        # Disabled cameras clear any sensor left over from earlier discovery.
-        self.assertEqual(published["homeassistant/binary_sensor/survng_yard/speech/config"], "")
-
     def test_discovery_includes_server_device_entities(self) -> None:
         service = self.service()
         service.publish_discovery([])

@@ -23,7 +23,6 @@ the `Dockerfile`.
 | websockets | BSD-3-Clause |
 | opencv-python | Apache-2.0 |
 | openvino | Apache-2.0 |
-| openvino-genai / openvino-tokenizers | Apache-2.0 |
 | pydantic | MIT |
 | onvif-zeep | MIT |
 | paho-mqtt | EPL-2.0 / EDL-1.0 (see package metadata) |

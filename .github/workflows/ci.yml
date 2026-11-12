@@ -65,8 +65,6 @@ jobs:
             tests/test_timeline_identity.py
       - name: Run local observability regression tests
         run: scripts/run-tests.sh tests/test_local_observability.py tests/test_camera_status.py
-      - name: Run speech detection regression tests
-        run: scripts/run-tests.sh tests/test_speech.py tests/test_mqtt.py
       - name: Run security and auth regression tests
         run: |
           scripts/run-tests.sh \
