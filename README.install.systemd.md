@@ -10,8 +10,9 @@ root on a new install.
 Commands are meant to be pasted in order. Set the variables in section 1, then
 paste each later block as-is.
 
-On a fresh Ubuntu LXC, `scripts/install-ubuntu-lxc.sh` does this install as
-root. It creates the `survng` user, then starts `survng.service` as that user:
+On a fresh Ubuntu or Debian LXC, `scripts/install-ubuntu-lxc.sh` does this
+install as root. It creates the `survng` user, then starts `survng.service`
+as that user. Debian 13 or Ubuntu 24.04 is required:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/InstigatorX/SurvNG/v1.2/scripts/install-ubuntu-lxc.sh | bash

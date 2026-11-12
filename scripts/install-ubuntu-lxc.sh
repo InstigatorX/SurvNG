@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Install SurvNG as a systemd service on a fresh Ubuntu LXC.
+# Install SurvNG as a systemd service on a fresh Ubuntu or Debian LXC.
 #
-# Prerequisite: a root shell on Ubuntu with systemd and a network connection.
+# Prerequisite: a root shell with systemd and a network connection.
 # The survng user, packages, checkout, config, go2rtc, and unit are created
-# here. Nothing else is expected to exist.
+# here. Nothing else is expected to exist. Debian 12's default Python is too
+# old; Debian 13 and Ubuntu 24.04 supply Python 3.12 or newer.
 #
 #   curl -fsSL https://raw.githubusercontent.com/InstigatorX/SurvNG/v1.2/scripts/install-ubuntu-lxc.sh | bash
 #   bash scripts/install-ubuntu-lxc.sh --gpu --media-dir /srv/survng/media
@@ -28,8 +29,9 @@ usage() {
   cat <<'EOF'
 Usage: install-ubuntu-lxc.sh [options]
 
-Install SurvNG from Git onto a fresh Ubuntu LXC and start survng.service.
+Install SurvNG from Git onto a fresh Ubuntu or Debian LXC and start survng.service.
 Run as root. The script creates the survng user. The service does not run as root.
+Debian 13 or Ubuntu 24.04 is required. Debian 12 ships Python 3.11.
 
 Options:
   --uid N            survng uid (default: 1500, or $SURVNG_UID)
@@ -71,13 +73,16 @@ done
 [[ "$(id -u)" -eq 0 ]] || die "run this script as root"
 [[ "$SURVNG_UID" != "0" && "$SURVNG_GID" != "0" ]] || die "refusing to install SurvNG as uid 0 or gid 0"
 [[ "$SURVNG_UID" =~ ^[0-9]+$ && "$SURVNG_GID" =~ ^[0-9]+$ ]] || die "uid and gid must be numeric"
-[[ -d /run/systemd/system ]] || die "systemd is not running. Use an Ubuntu LXC template with systemd."
+[[ -d /run/systemd/system ]] || die "systemd is not running. Use an Ubuntu or Debian LXC template with systemd."
 
 if [[ -r /etc/os-release ]]; then
   # shellcheck disable=SC1091
   . /etc/os-release
 fi
-[[ "${ID:-}" == "ubuntu" ]] || die "this installer targets Ubuntu (found ${ID:-unknown})"
+case "${ID:-}" in
+  ubuntu|debian) ;;
+  *) die "this installer targets Ubuntu or Debian (found ${ID:-unknown})" ;;
+esac
 
 if command -v docker >/dev/null 2>&1; then
   if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'survng'; then
@@ -95,11 +100,31 @@ apt-get install -y \
   ffmpeg pkg-config build-essential \
   libgl1 libglib2.0-0 libgomp1
 
-python3 - <<'PY'
-import sys
-if sys.version_info < (3, 12):
-    raise SystemExit(f"Python 3.12 or newer is required, found {sys.version.split()[0]}")
-PY
+python_is_new_enough() {
+  "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)'
+}
+
+PYTHON_BIN=""
+if python_is_new_enough python3; then
+  PYTHON_BIN="python3"
+else
+  log "Default python3 is older than 3.12; looking for a newer package"
+  for pkg in python3.13 python3.12; do
+    if apt-cache show "$pkg" >/dev/null 2>&1; then
+      apt-get install -y "$pkg" "${pkg}-venv"
+    fi
+  done
+  for candidate in python3.13 python3.12 python3; do
+    if command -v "$candidate" >/dev/null 2>&1 && python_is_new_enough "$candidate"; then
+      PYTHON_BIN="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -z "$PYTHON_BIN" ]]; then
+  die "Python 3.12 or newer is required. Debian 12 ships 3.11; use Debian 13 or Ubuntu 24.04."
+fi
+log "Using $($PYTHON_BIN -c 'import sys; print(sys.version.split()[0])') ($PYTHON_BIN)"
 
 node_major=0
 if command -v node >/dev/null 2>&1; then
@@ -169,7 +194,7 @@ chown -R survng:survng "$SURVNG_ROOT"
 
 log "Building the virtualenv and frontend"
 if [[ ! -x "$SURVNG_ROOT/.venv/bin/python" ]]; then
-  as_survng python3 -m venv "$SURVNG_ROOT/.venv"
+  as_survng "$PYTHON_BIN" -m venv "$SURVNG_ROOT/.venv"
 fi
 as_survng "$SURVNG_ROOT/.venv/bin/pip" install --upgrade pip
 as_survng "$SURVNG_ROOT/.venv/bin/pip" install -r "$SURVNG_ROOT/requirements.txt"
