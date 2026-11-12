@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,7 @@ PIP_TIMEOUT_SECONDS = 900.0
 FRONTEND_TIMEOUT_SECONDS = 900.0
 HELPER_TIMEOUT_SECONDS = 3600.0
 MAX_COMMIT_PREVIEW = 12
+_URL_USERINFO = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]+@")
 
 
 def _utc_now() -> str:
@@ -136,6 +138,31 @@ def _run_git(
         text=True,
         timeout=timeout,
     )
+
+
+def _describe_update_failure(error: BaseException) -> str:
+    """Return an update-job error that names the failed Git command and its stderr."""
+    if not isinstance(error, subprocess.CalledProcessError):
+        return str(error)
+    command = [str(part) for part in (error.cmd or [])]
+    # Drop the git executable and the `-c safe.directory=<path>` prefix added
+    # by _git_command; keep the subcommand and its arguments.
+    args = command[1:]
+    if len(args) >= 2 and args[0] == "-c" and args[1].startswith("safe.directory="):
+        args = args[2:]
+    output = error.stderr or error.stdout or ""
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", "replace")
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    detail = next(
+        (line for line in lines if line.startswith(("fatal:", "error:"))),
+        lines[-1] if lines else "",
+    )
+    summary = f"git {' '.join(args)} exited with status {error.returncode}"
+    if detail:
+        summary = f"{summary}: {detail}"
+    # Never surface URL credentials (https://user:token@host/...).
+    return _URL_USERINFO.sub(r"\1***@", summary)[:500]
 
 
 def _git_output(repo_root: Path, args: Sequence[str], *, timeout: float = 30.0) -> str:
@@ -353,10 +380,19 @@ class ProductUpdateService:
         try:
             current_branch = _git_output(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
             current_sha = _git_output(repo_root, ["rev-parse", "HEAD"])
+            # Status is polled while the update worker may be running
+            # `git switch`/`git pull`, which require .git/index.lock. A plain
+            # `git status` takes that lock to refresh the index and can make
+            # the worker's checkout or pull fail, so skip optional locks here.
             dirty = bool(
                 _run_git(
                     repo_root,
-                    ["status", "--porcelain", "--untracked-files=no"],
+                    [
+                        "--no-optional-locks",
+                        "status",
+                        "--porcelain",
+                        "--untracked-files=no",
+                    ],
                     timeout=30.0,
                     check=False,
                 ).stdout.strip()
@@ -651,12 +687,13 @@ class ProductUpdateService:
             else:
                 self._run_native_git()
         except BaseException as error:
-            LOGGER.exception("product update failed")
+            message = _describe_update_failure(error)
+            LOGGER.exception("product update failed: %s", message)
             with self._lock:
                 self._state = {
                     "status": "failed",
                     "finished_at": _utc_now(),
-                    "error": str(error),
+                    "error": message,
                     "phase": "Failed",
                     "log": list(self._state.get("log") or []),
                 }
