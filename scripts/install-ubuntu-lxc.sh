@@ -50,7 +50,7 @@ EOF
 }
 
 log() { printf '==> %s\n' "$*"; }
-die() { printf 'install-ubuntu-lxc: %s\n' "$*" >&2; exit 1; }
+die() { printf 'survng-install: %s\n' "$*" >&2; exit 1; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -73,16 +73,17 @@ done
 [[ "$(id -u)" -eq 0 ]] || die "run this script as root"
 [[ "$SURVNG_UID" != "0" && "$SURVNG_GID" != "0" ]] || die "refusing to install SurvNG as uid 0 or gid 0"
 [[ "$SURVNG_UID" =~ ^[0-9]+$ && "$SURVNG_GID" =~ ^[0-9]+$ ]] || die "uid and gid must be numeric"
-[[ -d /run/systemd/system ]] || die "systemd is not running. Use an Ubuntu or Debian LXC template with systemd."
+[[ -d /run/systemd/system ]] || die "systemd is not running. Use a Debian or Ubuntu LXC template with systemd."
 
 if [[ -r /etc/os-release ]]; then
   # shellcheck disable=SC1091
   . /etc/os-release
 fi
-case "${ID:-}" in
-  ubuntu|debian) ;;
-  *) die "this installer targets Ubuntu or Debian (found ${ID:-unknown})" ;;
-esac
+# Ubuntu ships /etc/debian_version too. Match the family instead of requiring ID=ubuntu.
+if [[ ! -f /etc/debian_version ]]; then
+  die "Debian and Ubuntu are supported. This system reports ID=${ID:-unknown} and has no /etc/debian_version."
+fi
+log "Detected ${PRETTY_NAME:-${ID:-debian}}"
 
 if command -v docker >/dev/null 2>&1; then
   if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'survng'; then
@@ -122,7 +123,7 @@ else
   done
 fi
 if [[ -z "$PYTHON_BIN" ]]; then
-  die "Python 3.12 or newer is required. Debian 12 ships 3.11; use Debian 13 or Ubuntu 24.04."
+  die "Python 3.12 or newer is required. Debian 12 ships Python 3.11; use Debian 13 (or Ubuntu 24.04)."
 fi
 log "Using $($PYTHON_BIN -c 'import sys; print(sys.version.split()[0])') ($PYTHON_BIN)"
 
