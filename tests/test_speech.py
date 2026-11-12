@@ -439,7 +439,7 @@ def test_listeners_follow_camera_power_and_only_speech_cameras(tmp_path: Path) -
         lifecycle._reconcile()
         assert _FakeListener.instances[0].stopped
         assert published[-1] == ("camera/gate/speech", {"camera_id": "gate", "state": "OFF", "speech": False})
-        assert lifecycle.status()["cameras"]["gate"]["state"] == "camera_off"
+        assert lifecycle.status()["cameras"]["gate"]["state"] == "paused"
     finally:
         lifecycle.stop()
 
@@ -554,3 +554,78 @@ def test_status_reports_installed_models_without_paths(tmp_path: Path) -> None:
         "selected_model_installed": False,
     }
     assert str(tmp_path) not in repr(models)
+
+
+def test_refresh_applies_camera_changes_immediately(tmp_path: Path) -> None:
+    enabled = {"gate": True}
+    published: list = []
+    lifecycle = _lifecycle(tmp_path, _config(), enabled, published)
+    lifecycle.refresh()  # not started: no-op
+    assert _FakeListener.instances == []
+    lifecycle.start()
+    try:
+        listener = _FakeListener.instances[0]
+        enabled["gate"] = False
+        lifecycle.refresh()
+        assert listener.stopped
+        assert lifecycle.status()["cameras"]["gate"]["state"] == "paused"
+        enabled["gate"] = True
+        lifecycle.refresh()
+        assert len(_FakeListener.instances) == 2 and _FakeListener.instances[1].started
+    finally:
+        lifecycle.stop()
+
+
+class _Switches:
+    def __init__(self, powered: bool, detection: bool) -> None:
+        self.powered = powered
+        self.detection = detection
+        self.calls: list[tuple[str, bool]] = []
+
+    def camera_enabled(self, camera_id: str) -> bool:
+        return self.powered
+
+    def detection_enabled(self, camera_id: str) -> bool:
+        return self.detection
+
+    def set_detection(self, camera_id: str, enabled: bool) -> bool:
+        self.calls.append((camera_id, enabled))
+        self.detection = enabled
+        return True
+
+
+class _RefreshCounter:
+    def __init__(self) -> None:
+        self.count = 0
+
+    def refresh(self) -> None:
+        self.count += 1
+
+
+@pytest.mark.parametrize(
+    ("powered", "detection", "active"),
+    [(True, True, True), (True, False, False), (False, True, False), (False, False, False)],
+)
+def test_speech_listens_only_with_camera_power_and_detection(powered: bool, detection: bool, active: bool) -> None:
+    from survng.app.manager import AppManager
+
+    switches = _Switches(powered, detection)
+    manager = AppManager.__new__(AppManager)
+    manager.camera_fleet = switches
+    manager.camera_controls = switches
+    assert manager._speech_camera_active("gate") is active
+
+
+def test_turning_detection_off_refreshes_speech_immediately() -> None:
+    from survng.app.manager import AppManager
+
+    switches = _Switches(True, True)
+    refresh = _RefreshCounter()
+    manager = AppManager.__new__(AppManager)
+    manager.camera_fleet = switches
+    manager.camera_controls = switches
+    manager.speech = refresh
+    assert manager.set_detection("gate", False) is True
+    assert switches.calls == [("gate", False)]
+    assert refresh.count == 1
+    assert manager._speech_camera_active("gate") is False

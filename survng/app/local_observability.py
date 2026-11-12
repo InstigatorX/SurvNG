@@ -462,7 +462,7 @@ def _safe_log_text(value: object, *, limit: int) -> str:
 
 _SPEECH_CAMERA_STATES = frozenset({
     "starting", "listening", "speaking", "restarting", "no_audio_track",
-    "camera_off", "stopped", "disabled", "idle", "unavailable",
+    "paused", "stopped", "disabled", "idle", "unavailable",
 })
 _SPEECH_FAILURES = frozenset({
     "", "no_audio_track", "stream_unauthorized", "stream_unavailable",

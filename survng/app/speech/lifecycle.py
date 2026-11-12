@@ -131,6 +131,15 @@ class SpeechLifecycle:
 
     # Reconciliation ---------------------------------------------------
 
+    def refresh(self) -> None:
+        """Apply camera power/detection changes now instead of at the next tick."""
+        if self._state != "running" or self._stop.is_set():
+            return
+        try:
+            self._reconcile()
+        except Exception:
+            LOGGER.exception("Speech reconciliation failed")
+
     def _run(self) -> None:
         while not self._stop.wait(RECONCILE_INTERVAL_SECONDS):
             try:
@@ -308,7 +317,7 @@ class SpeechLifecycle:
         cameras = {}
         for camera_id, camera in self.cameras.items():
             cameras[camera_id] = listeners.get(camera_id) or {
-                "state": "camera_off" if self._state == "running" else self._state,
+                "state": "paused" if self._state == "running" else self._state,
                 "transcribe": bool(camera.speech.transcribe),
                 "source": camera.speech.source,
             }

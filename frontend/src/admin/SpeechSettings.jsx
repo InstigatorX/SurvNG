@@ -116,7 +116,7 @@ export function SpeechSettings({ config, updateConfig }) {
     <section className="detection-settings-card wide-card">
       <header className="detection-settings-card-head">
         <div className="detection-settings-card-icon"><AudioLines size={18} /></div>
-        <div><h3>Cameras</h3><p>{listeningCount ? `${listeningCount} of ${cameras.length} cameras listening.` : "Choose which cameras listen for speech."}{speech.enabled ? "" : " Speech is turned off above, so no camera listens yet."}</p></div>
+        <div><h3>Cameras</h3><p>{listeningCount ? `${listeningCount} of ${cameras.length} cameras listening.` : "Choose which cameras listen for speech."}{speech.enabled ? "" : " Speech is turned off above, so no camera listens yet."} A camera listens only while it is on and its Detection switch is on.</p></div>
       </header>
       {cameras.length ? <div className="speech-camera-list">
         {cameras.map((camera, index) => {
