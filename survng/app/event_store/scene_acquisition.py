@@ -99,6 +99,11 @@ class EventStoreSceneAcquisitionMixin:
                     event_id integer not null references events(id),
                     primary key(candidate_id,generation)
                 );
+                -- Foreign-key checks on database-retention deletes look these up.
+                create index if not exists scene_candidate_seed_candidate
+                    on scene_candidate_seeds(candidate_id);
+                create index if not exists scene_candidate_admission_decision
+                    on scene_candidate_admissions(decision_id);
                 create table if not exists scene_acquisition_migrations (name text primary key,cursor integer not null);
                 create table if not exists acquired_expired_snapshots (snapshot_path text primary key);
             """)

@@ -254,3 +254,26 @@ def test_reschedule_wakes_the_loop_to_run_after_the_startup_delay(store: EventSt
     finally:
         retention.stop()
     assert retention._thread is None
+
+
+@pytest.mark.parametrize("parent", (
+    "scene_candidate_jobs", "scene_activity_decisions", "acquired_samples", "acquired_observations",
+))
+def test_foreign_keys_into_pruned_tables_are_indexed(tmp_path: Path, parent: str) -> None:
+    # Each pruned parent row makes SQLite check every child foreign key; an
+    # unindexed child column turns each delete into a full scan of that table.
+    store = EventStore(tmp_path)
+    unindexed = []
+    with sqlite3.connect(store.db_path) as db:
+        tables = [row[0] for row in db.execute("select name from sqlite_master where type='table'")]
+        for table in tables:
+            for fk in db.execute(f"pragma foreign_key_list('{table}')").fetchall():
+                if fk[2] != parent:
+                    continue
+                leading = {
+                    db.execute(f"pragma index_info('{index[1]}')").fetchone()[2]
+                    for index in db.execute(f"pragma index_list('{table}')").fetchall()
+                }
+                if fk[3] not in leading:
+                    unindexed.append(f"{table}.{fk[3]}")
+    assert not unindexed, f"unindexed foreign keys into {parent}: {unindexed}"

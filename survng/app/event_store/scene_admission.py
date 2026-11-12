@@ -29,6 +29,9 @@ class EventStoreSceneAdmissionMixin:
                 event_id integer primary key references events(id) on delete cascade,
                 decision_id text not null references scene_activity_decisions(id)
             );
+            -- Foreign-key checks on database-retention deletes look this up.
+            create index if not exists scene_event_establishment_decision
+                on scene_event_establishment(decision_id);
             create table if not exists scene_context_projection_jobs (
                 episode_id text primary key references scene_episodes(id) on delete cascade,
                 anchor_event_id integer not null references events(id) on delete cascade,
