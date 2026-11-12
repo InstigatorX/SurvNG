@@ -392,7 +392,7 @@ def test_retention_keeps_running_after_speech_is_turned_off(tmp_path) -> None:
 import threading as _threading
 
 from survng.app.speech.listener import ListenerEvent
-from survng.app.speech.segmenter import FRAME_SAMPLES, SpeechConfirmed, SpeechSegmenter
+from survng.app.speech.segmenter import FRAME_SAMPLES, SpeechConfirmed, SpeechEnded, SpeechSegmenter
 from survng.app.speech.triggers import TriggerDispatcher, TriggerThrottle
 
 
@@ -607,3 +607,87 @@ def test_speech_establishment_is_stable_on_replay() -> None:
     first = _speech_decision(samples)
     again = _speech_decision(json.loads(json.dumps(samples)))
     assert (first["status"], first["reason"]) == (again["status"], again["reason"])
+
+
+# Speech notifications and loudness telemetry ------------------------------
+
+import numpy as _np
+
+from survng.app.speech.levels import LevelTracker
+
+
+def _alert_manager(exclude_motion: bool, notify: str):
+    from survng.app.config import AppConfig
+    from survng.app.manager import AppManager
+
+    manager = AppManager.__new__(AppManager)
+    manager.config = AppConfig.model_validate({
+        "integration_notifications": {"exclude_motion": exclude_motion},
+        "cameras": [{
+            "id": "gate", "name": "Gate", "stream_url": "rtsp://camera.local/gate",
+            "speech": {"enabled": True, "incidents": "trigger", "notify": notify},
+        }],
+    })
+    return manager
+
+
+@pytest.mark.parametrize("exclude_motion", [False, True])
+@pytest.mark.parametrize("notify", ["motion", "always", "never"])
+def test_speech_notification_matrix(exclude_motion: bool, notify: str) -> None:
+    manager = _alert_manager(exclude_motion, notify)
+    payload = {"camera_id": "gate", "trigger_source": "speech", "events": [{"id": 1, "camera_id": "gate", "trigger_source": "speech"}]}
+    nobody = {"event_id": 1, "objects": []}
+    pedestrian = {"event_id": 1, "objects": [{"label": "person", "eligible": False, "zones": ["Sidewalk"]}]}
+    visitor = {"event_id": 1, "objects": [{"label": "person", "eligible": True, "zones": []}]}
+
+    expected_nobody = {"motion": not exclude_motion, "always": True, "never": False}[notify]
+    assert manager._scene_alert_enabled(nobody, payload) is expected_nobody
+    assert manager._scene_alert_enabled(pedestrian, payload) is False
+    assert manager._scene_alert_enabled(visitor, payload) is True
+    # Camera-started motion-only incidents keep the global rule.
+    camera_payload = {"camera_id": "gate", "trigger_source": "camera", "events": [{"id": 1, "camera_id": "gate", "trigger_source": "camera"}]}
+    assert manager._scene_alert_enabled(nobody, camera_payload) is (not exclude_motion)
+
+
+def test_level_tracker_reports_voiced_level_over_background() -> None:
+    tracker = LevelTracker(threshold=0.5)
+    quiet = _np.full(512, 0.001, dtype=_np.float32)   # -60 dBFS background
+    voice = _np.full(512, 0.1, dtype=_np.float32)     # -20 dBFS speech
+    for _ in range(200):
+        tracker.observe(quiet, 0.05)
+    assert tracker.take() is None  # no speech yet
+    for _ in range(30):
+        tracker.observe(voice, 0.9)
+    level = tracker.take()
+    assert level.voiced_dbfs == pytest.approx(-20.0, abs=0.2)
+    assert level.noise_dbfs == pytest.approx(-60.0, abs=0.5)
+    assert level.snr_db == pytest.approx(40.0, abs=0.5)
+    assert tracker.take() is None  # reset after each segment
+
+
+def test_segment_rows_store_loudness(tmp_path) -> None:
+    from survng.app.speech.levels import SpeechLevel
+
+    published: list = []
+    lifecycle = _lifecycle_for_levels(tmp_path, published)
+    lifecycle.start()
+    try:
+        ended = SpeechEnded(0, 32000, 0.9, False, None)
+        lifecycle._listener_event(ListenerEvent("gate", ended, 100.0, 102.0, SpeechLevel(-28.0, -55.5)))
+        row = lifecycle.segments()[0]
+        assert (row["voiced_dbfs"], row["noise_dbfs"], row["snr_db"]) == (-28.0, -55.5, 27.5)
+    finally:
+        lifecycle.stop()
+
+
+def _lifecycle_for_levels(tmp_path, published):
+    from survng.app.speech.lifecycle import SpeechLifecycle
+
+    return SpeechLifecycle(
+        AppConfig_for_speech({"gate": "attach"}),
+        database_dir=tmp_path,
+        camera_enabled=lambda camera_id: True,
+        publish=lambda suffix, payload: published.append((suffix, payload)),
+        vad_factory=lambda path: object(),
+        listener_factory=lambda camera, **kwargs: SimpleNamespace(start=lambda: None, stop=lambda: None, status=lambda: {"state": "listening"}),
+    )

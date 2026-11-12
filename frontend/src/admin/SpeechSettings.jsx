@@ -136,7 +136,11 @@ export function SpeechSettings({ config, updateConfig }) {
             <label className="speech-camera-incidents">Incidents<select value={settings.incidents} disabled={!settings.enabled} onChange={(event) => setCameraSpeech(index, "incidents", event.target.value)}>
               <option value="attach">Show speech on incidents</option>
               <option value="trigger">Speech also creates incidents</option>
-            </select>{settings.enabled && settings.incidents === "trigger" ? <small>{live?.incident_checks != null ? `${live.incident_checks} checks requested · ${live.incident_checks_suppressed || 0} held back by limits` : "Confirmed speech asks for an incident check."}</small> : null}</label>
+            </select>{settings.enabled && settings.incidents === "trigger" ? <select aria-label={`Notifications for speech incidents on ${camera.name || camera.id}`} value={settings.notify} onChange={(event) => setCameraSpeech(index, "notify", event.target.value)}>
+              <option value="motion">Notify like motion-only incidents</option>
+              <option value="always">Always notify for speech incidents</option>
+              <option value="never">Never notify for speech-only incidents</option>
+            </select> : null}{settings.enabled && settings.incidents === "trigger" ? <small>{live?.incident_checks != null ? `${live.incident_checks} checks requested · ${live.incident_checks_suppressed || 0} held back by limits` : "Confirmed speech asks for an incident check."}</small> : null}</label>
             {settings.enabled ? <details className="detection-compact-details speech-camera-tuning">
               <summary>Tuning</summary>
               <div className="detection-field-grid">

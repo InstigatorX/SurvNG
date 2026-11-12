@@ -1807,7 +1807,12 @@ class AppManager:
             zones = subject.get("zones") or []
             if subject.get("eligible") and (not zones or any(rules.get(zone, True) for zone in zones)):
                 return True
-        return not self.config.integration_notifications.exclude_motion and not decision.get("objects")
+        if decision.get("objects"):
+            return False
+        speech_started = "speech" in {event.get("trigger_source"), payload.get("trigger_source")}
+        if speech_started and camera is not None and camera.speech.notify != "motion":
+            return camera.speech.notify == "always"
+        return not self.config.integration_notifications.exclude_motion
 
     def _refresh_incident_notification(self, camera_id: str, event_id: int, *, allow_new: bool = False) -> None:
         event = self.events.get(event_id) if event_id else None

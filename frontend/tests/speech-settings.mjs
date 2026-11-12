@@ -74,3 +74,9 @@ assert.equal(speechSegmentPlaceholder({ status: "done", content_expired: true })
 assert.equal(speechSegmentPlaceholder({ status: "detected" }), "Speech detected (transcription is off for this camera).");
 assert.equal(speechSegmentPlaceholder({ status: "skipped", reason: "too_short" }), "Not transcribed · too short to transcribe");
 console.log("speech placeholder tests passed");
+
+import { speechLevelLabel } from "../src/speechSettings.mjs";
+assert.equal(speechLevelLabel({}), "");
+assert.equal(speechLevelLabel({ voiced_dbfs: -31.4, snr_db: 17.6 }), "-31 dBFS · 18 dB over background");
+assert.equal(speechLevelLabel({ voiced_dbfs: -40, snr_db: null }), "-40 dBFS");
+console.log("speech level label tests passed");

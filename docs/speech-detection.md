@@ -110,6 +110,19 @@ audio reading never waits for the motion pipeline. Admin → Detection →
 Speech shows how many checks each camera requested and how many the limits
 held back.
 
+**Notifications.** A speech incident with a person in an eligible zone
+notifies like any person incident. For speech-only incidents (nobody
+eligible visible) each camera's `notify` setting decides: `"motion"`
+(default) behaves like motion-only incidents, so the global "exclude
+motion" setting applies; `"always"` or `"never"` override it.
+
+**Loudness (recorded only).** Each segment stores its voiced level
+(`voiced_dbfs`) and the camera's rolling background level (`noise_dbfs`);
+Search → Speech shows them as "-31 dBFS · 18 dB over background".
+Nothing is filtered on loudness yet: microphone gain and automatic gain
+control make absolute levels unreliable for judging distance, so these
+numbers are collected first to calibrate a filter from real data.
+
 ## CPU use
 
 Measured on a 4-core host:
@@ -169,7 +182,12 @@ the live listener state, and optional tuning. The same settings in
         "min_speech_ms": 300,
         "hangover_ms": 800,
         "pre_roll_ms": 500,
-        "max_segment_seconds": 30
+        "max_segment_seconds": 30,
+        "incidents": "attach",
+        "trigger_min_speech_ms": 1500,
+        "trigger_cooldown_seconds": 60,
+        "trigger_max_per_5m": 5,
+        "notify": "motion"
       }
     }
   ]

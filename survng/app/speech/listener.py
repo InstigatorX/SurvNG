@@ -24,6 +24,7 @@ from ..config import CameraConfig
 from ..ffmpeg_input import ffmpeg_input_args
 from ..ffmpeg_process import named_ffmpeg_executable
 from ..security import redact_secret_text
+from .levels import LevelTracker, SpeechLevel
 from .segmenter import FRAME_SAMPLES, SAMPLE_RATE, SegmenterEvent, SpeechEnded, SpeechSegmenter, SpeechStarted
 
 LOGGER = logging.getLogger("uvicorn.error")
@@ -43,6 +44,7 @@ class ListenerEvent:
     event: SegmenterEvent
     started_at: float
     ended_at: float | None
+    level: SpeechLevel | None = None
 
 
 def audio_listener_command(camera: CameraConfig, ffmpeg_path: str) -> list[str]:
@@ -246,6 +248,7 @@ class SpeechListener:
             confirm_ms=speech.trigger_min_speech_ms if speech.incidents == "trigger" else None,
         )
         anchor: float | None = None
+        levels = LevelTracker(speech.vad_threshold)
         stdout = process.stdout
         try:
             while not self._stop.is_set() and stdout is not None:
@@ -264,17 +267,20 @@ class SpeechListener:
                     anchor = now - position / SAMPLE_RATE
                 frame = np.frombuffer(data, dtype="<i2").astype(np.float32) / 32768.0
                 probability = detector.probability(frame)
+                levels.observe(frame, probability)
                 for event in segmenter.push(frame, probability):
-                    self._emit(event, anchor)
+                    self._emit(event, anchor, levels)
         finally:
             ended = segmenter.flush()
             if ended is not None and anchor is not None:
-                self._emit(ended, anchor)
+                self._emit(ended, anchor, levels)
 
-    def _emit(self, event: SegmenterEvent, anchor: float) -> None:
+    def _emit(self, event: SegmenterEvent, anchor: float, levels: LevelTracker | None = None) -> None:
         started_at = anchor + event.start_sample / SAMPLE_RATE
         ended_at = None
+        level = None
         if isinstance(event, SpeechEnded):
+            level = levels.take() if levels is not None else None
             ended_at = anchor + event.end_sample / SAMPLE_RATE
             with self._lock:
                 self._segments += 1
@@ -284,7 +290,7 @@ class SpeechListener:
         elif isinstance(event, SpeechStarted):
             self._set_state("speaking")
         try:
-            self.on_event(ListenerEvent(self.camera.id, event, started_at, ended_at))
+            self.on_event(ListenerEvent(self.camera.id, event, started_at, ended_at, level))
         except Exception:
             LOGGER.exception("speech event handling failed for camera %s", self.camera.id)
 

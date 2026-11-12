@@ -274,6 +274,8 @@ class SpeechLifecycle:
             peak_probability=event.peak_probability,
             status=status,
             reason=reason,
+            voiced_dbfs=item.level.voiced_dbfs if item.level is not None else None,
+            noise_dbfs=item.level.noise_dbfs if item.level is not None else None,
         )
         if not event.split:
             self._publish_state(item.camera_id, False, segment_id=segment_id)

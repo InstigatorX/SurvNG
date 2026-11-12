@@ -676,6 +676,10 @@ class CameraSpeechConfig(BaseModel):
     trigger_min_speech_ms: int = Field(default=1500, ge=300, le=10000)
     trigger_cooldown_seconds: float = Field(default=60.0, ge=0.0, le=3600.0)
     trigger_max_per_5m: int = Field(default=5, ge=1, le=60)
+    # Notifications for incidents started by speech with no eligible object:
+    # "motion" behaves like motion-only incidents (the global "exclude
+    # motion" setting decides), "always" or "never" override it.
+    notify: Literal["motion", "always", "never"] = "motion"
 
 
 class CameraConfig(BaseModel):

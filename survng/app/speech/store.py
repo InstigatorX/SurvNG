@@ -40,7 +40,7 @@ def _iso(value: float | None) -> str | None:
 
 
 class SpeechStore:
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, database_dir: Path | str) -> None:
         self.path = Path(database_dir) / "speech.sqlite3"
@@ -96,6 +96,9 @@ class SpeechStore:
                 conn.execute(
                     "alter table speech_segments add column content_expired integer not null default 0"
                 )
+            for column in ("voiced_dbfs", "noise_dbfs"):
+                if column not in columns:
+                    conn.execute(f"alter table speech_segments add column {column} real")
             conn.execute(
                 "create index if not exists speech_segments_retention "
                 "on speech_segments (content_expired, started_at)"
@@ -139,6 +142,8 @@ class SpeechStore:
         peak_probability: float,
         status: str,
         reason: str = "",
+        voiced_dbfs: float | None = None,
+        noise_dbfs: float | None = None,
     ) -> int:
         if status not in STATUSES:
             raise ValueError(f"unknown speech segment status: {status}")
@@ -148,10 +153,11 @@ class SpeechStore:
                 """
                 insert into speech_segments
                     (camera_id, started_at, ended_at, peak_probability, status, reason,
-                     created_at, updated_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?)
+                     voiced_dbfs, noise_dbfs, created_at, updated_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (camera_id, started_at, ended_at, peak_probability, status, reason, now, now),
+                (camera_id, started_at, ended_at, peak_probability, status, reason,
+                 voiced_dbfs, noise_dbfs, now, now),
             )
             return int(cursor.lastrowid)
 
@@ -336,4 +342,11 @@ class SpeechStore:
             "device": row["device"],
             "reason": row["reason"],
             "content_expired": bool(row["content_expired"]),
+            "voiced_dbfs": row["voiced_dbfs"],
+            "noise_dbfs": row["noise_dbfs"],
+            "snr_db": (
+                round(float(row["voiced_dbfs"]) - float(row["noise_dbfs"]), 1)
+                if row["voiced_dbfs"] is not None and row["noise_dbfs"] is not None
+                else None
+            ),
         }

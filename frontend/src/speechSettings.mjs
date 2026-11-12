@@ -26,6 +26,7 @@ export const CAMERA_SPEECH_DEFAULTS = Object.freeze({
   trigger_min_speech_ms: 1500,
   trigger_cooldown_seconds: 60,
   trigger_max_per_5m: 5,
+  notify: "motion",
 });
 
 export const WHISPER_MODELS = Object.freeze(["tiny.en", "base.en", "small.en", "medium.en"]);
@@ -106,6 +107,14 @@ export function speechSegmentReasonLabel(reason) {
   if (text.includes("model not installed")) return "Whisper model not installed";
   if (text.includes("openvino-genai")) return "transcription runtime not installed";
   return "";
+}
+
+/** Loudness telemetry for a segment, e.g. "-31 dBFS · 18 dB over background". */
+export function speechLevelLabel(segment) {
+  const voiced = Number(segment?.voiced_dbfs);
+  if (segment?.voiced_dbfs == null || !Number.isFinite(voiced)) return "";
+  const snr = Number(segment?.snr_db);
+  return `${Math.round(voiced)} dBFS${segment?.snr_db != null && Number.isFinite(snr) ? ` · ${Math.round(snr)} dB over background` : ""}`;
 }
 
 /** What to show for a segment that has no transcript text. */

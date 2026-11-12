@@ -3,7 +3,7 @@ import { CircleAlert, Mic, Play, Search } from "lucide-react";
 import { appUrl, fetch, recordingsHref } from "../shared/api.js";
 import { canonicalIncidentHref } from "../incidentScene.mjs";
 import { formatDateTime } from "../shared/format.js";
-import { speechSegmentPlaceholder, speechSegmentRecordingContext, speechSegmentStatusLabel, speechSegmentsQuery } from "../speechSettings.mjs";
+import { speechLevelLabel, speechSegmentPlaceholder, speechSegmentRecordingContext, speechSegmentStatusLabel, speechSegmentsQuery } from "../speechSettings.mjs";
 
 const PAGE_SIZE = 50;
 
@@ -85,7 +85,7 @@ export function SpeechSearchWorkspace({ cameras, cameraId, timeZone, initialQuer
         const text = segment.text?.trim();
         const placeholder = speechSegmentPlaceholder(segment);
         return <article key={segment.id} className={`speech-result ${segment.status}`} aria-label={`Speech at ${name}, ${when}`}>
-          <div className="speech-result-meta"><Mic size={15} /><strong>{name}</strong><small>{when} · {Number(segment.duration_seconds || 0).toFixed(1)}s</small><span className={`speech-result-status ${segment.status}`}>{speechSegmentStatusLabel(segment.status)}</span></div>
+          <div className="speech-result-meta"><Mic size={15} /><strong>{name}</strong><small>{when} · {Number(segment.duration_seconds || 0).toFixed(1)}s{speechLevelLabel(segment) ? ` · ${speechLevelLabel(segment)}` : ""}</small><span className={`speech-result-status ${segment.status}`}>{speechSegmentStatusLabel(segment.status)}</span></div>
           <p className={text ? "speech-result-text" : "speech-result-text empty"}>{text ? `“${text}”` : placeholder}</p>
           {context || segment.incident_id ? <nav aria-label={`Actions for speech at ${name}`}>
             {segment.incident_id ? <a href={appUrl(canonicalIncidentHref({ incident_id: segment.incident_id }))}>Open incident</a> : null}
