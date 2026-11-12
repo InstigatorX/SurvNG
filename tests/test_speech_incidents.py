@@ -517,3 +517,93 @@ def test_dispatcher_drops_when_full_instead_of_blocking() -> None:
     finally:
         blocker.set()
         dispatcher.stop()
+
+
+# Speech establishment on cameras with zones ------------------------------
+
+from tests.test_scene_zone_admission import box, physical, restricting
+
+SPEECH_NOTICE = {"source": "speech", "epoch": 1000.0}
+
+
+def _finished(samples):
+    for sample in samples:
+        sample["metadata"]["confirmation_complete"] = True
+    return samples
+
+
+def _empty_frames(count=2):
+    return [{
+        "id": f"empty-{index}", "camera_id": "gate", "captured_epoch": 1000 + index, "status": "complete",
+        "observations": [], "metadata": {"frame_width": 160, "frame_height": 100, "activity_witnesses": [], "confirmation_complete": True},
+    } for index in range(count)]
+
+
+def _speech_decision(samples):
+    return evaluate_scene_establishment(samples, policy=restricting(), notice=dict(SPEECH_NOTICE))
+
+
+def test_zoned_camera_speech_with_nobody_visible_establishes() -> None:
+    decision = _speech_decision(_empty_frames())
+    assert decision["status"] == "supported"
+    assert decision["reason"] == "admitted_speech_notice"
+    assert decision["evidence_kind"] == "speech_reported"
+    assert decision["zone_interpretation"]["establishment_eligible"] is True
+    # The same notice from the camera (not speech) stays zone-restricted.
+    camera = evaluate_scene_establishment(_empty_frames(), policy=restricting(), notice={"source": "camera", "epoch": 1000.0})
+    assert camera["status"] != "supported"
+
+
+def test_speech_is_explained_away_only_by_people_in_ignore_zones() -> None:
+    pedestrian = _speech_decision(_finished(physical(["person", "person"], [box(20, 40), box(40, 40)])))
+    assert pedestrian["status"] == "unsupported"
+    assert pedestrian["reason"] == "speech_attributed_to_ignored_subject"
+
+    parked_car = _speech_decision(_finished(physical(["car", "car"], [box(20, 40), box(40, 40)])))
+    assert parked_car["status"] == "supported"
+    assert parked_car["reason"] == "admitted_speech_notice"
+
+
+def test_person_in_an_eligible_zone_supports_speech() -> None:
+    visitor = _speech_decision(physical(["person", "person"], [box(20, 80), box(40, 80)]))
+    assert visitor["status"] == "supported"
+    assert visitor["reason"] == "speech_with_subject"
+    assert visitor["supporting_observation_ids"]
+
+    both = physical(["person", "person"], [box(20, 40), box(40, 80)])
+    assert _speech_decision(both)["reason"] == "speech_with_subject"
+
+
+def test_stationary_resident_in_an_eligible_zone_still_counts_as_present() -> None:
+    samples = physical(["person", "person"], [box(20, 80), box(20, 80)])
+    for sample in samples:
+        for observation in sample["observations"]:
+            observation["activity_role"] = "scene_context"
+    zoned = restricting()
+    zoned["stationary_subject_presence"] = "ignore"
+    zoned["object_activity_attribution"] = "enforce"
+    interpretations = evaluate_scene_establishment(samples, policy=zoned)["zone_interpretation"]["observations"]
+    assert {item["admission_reason"] for item in interpretations} == {"stationary_scene_context"}
+    # A resident sitting still does not open an incident on video alone...
+    assert evaluate_scene_establishment(samples, policy=zoned)["status"] != "supported"
+    # ...but is present, so speech heard while they are there establishes.
+    decision = evaluate_scene_establishment(samples, policy=zoned, notice=dict(SPEECH_NOTICE))
+    assert decision["status"] == "supported"
+    assert decision["reason"] == "speech_with_subject"
+
+
+def test_unverifiable_video_marks_speech_unverified_and_undecided_video_waits() -> None:
+    failed = _speech_decision([{"id": "failed", "camera_id": "gate", "captured_epoch": 1000, "status": "failed", "observations": [], "metadata": {}}])
+    assert failed["status"] == "supported"
+    assert failed["evidence_kind"] == "speech_unverified"
+    assert _speech_decision([])["evidence_kind"] == "speech_unverified"
+
+    sampling = physical(["car"], [box(20, 40)])  # one frame, detection still running
+    assert _speech_decision(sampling)["status"] == "pending"
+
+
+def test_speech_establishment_is_stable_on_replay() -> None:
+    samples = _finished(physical(["person", "person"], [box(20, 40), box(40, 40)]))
+    first = _speech_decision(samples)
+    again = _speech_decision(json.loads(json.dumps(samples)))
+    assert (first["status"], first["reason"]) == (again["status"], again["reason"])

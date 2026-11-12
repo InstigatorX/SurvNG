@@ -86,6 +86,22 @@ Each listening camera has an **Incidents** setting:
   or extends an incident labelled with a purple **Speech** trigger
   ("The camera heard speech." when nothing else explains it).
 
+**On cameras with ignore or incident zones** speech isn't placed in a zone
+(audio has no position), so zones don't decide it. The video can explain
+it away instead:
+
+| Video at the time of speech | Result |
+|---|---|
+| A person in an eligible zone (including a resident sitting still) | Incident: "heard speech while a person was in an eligible zone" |
+| Only people in ignore zones (e.g. sidewalk passers-by) | No incident: the speech is attributed to them |
+| Nobody visible, or only vehicles/other objects | Incident: "The camera heard speech" |
+| Video couldn't be checked (detection failed or unavailable) | Incident, marked "the video could not be checked" |
+
+Known limits: someone talking out of view while a pedestrian is visible in
+an ignore zone is missed, and loud out-of-frame speech from the sidewalk
+can still create an incident. A check that was also triggered by the camera
+itself follows the normal zone rules.
+
 Every check costs a recorded detection job, so speech has its own limits:
 at most one check per `trigger_cooldown_seconds` (60 s) and
 `trigger_max_per_5m` (5) per camera. A long utterance split into 30 s

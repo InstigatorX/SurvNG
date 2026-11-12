@@ -533,6 +533,71 @@ def _notice_activity_assessment(samples, notice):
     }
 
 
+SPEECH_SUBJECT_LABELS = frozenset({"person", "face"})
+_IGNORED_REASONS = frozenset({"ignored_zone", "depth_ignore_zone"})
+
+
+def _speech_establishment(result, zone, activity, interpretations, samples, notice):
+    """Speech on a camera whose zones restrict incidents.
+
+    Audio has no position, so zones cannot place it and do not decide it.
+    Instead the video can explain it away: speech heard while the only people
+    visible stand in ignore zones (passers-by on the sidewalk) is theirs. A
+    person in an eligible zone, including a resident marked as stationary
+    scene context, supports it. With nobody visible it stands on its own.
+    Vehicles and other objects neither support nor explain away speech.
+    Establishment is never downgraded once supported, so undecided evidence
+    waits instead of establishing early.
+    """
+    labels = {
+        identifier: str((observation.get("payload", observation) or {}).get("label") or "").lower()
+        for identifier, observation, _, _ in _iter_observations(samples)
+        if identifier
+    }
+    people = [item for item in interpretations if labels.get(item.get("observation_id")) in SPEECH_SUBJECT_LABELS]
+    present = [item for item in people if item.get("establishment_eligible")]
+    ignored = [item for item in people if item.get("reason") in _IGNORED_REASONS]
+    epoch = notice.get("epoch")
+    if present:
+        ids = sorted(item["observation_id"] for item in present if item.get("observation_id"))
+        zone.update(
+            establishment_eligible=True,
+            reason="incident_zone" if any(item.get("reason") == "incident_zone" for item in present) else "full_frame",
+        )
+        result.update(
+            status="supported", reason="speech_with_subject",
+            summary="The camera heard speech while a person was in an eligible zone.",
+            activity_epoch=epoch, supporting_observation_ids=ids, evidence_kind="speech_reported",
+        )
+        return result
+    if ignored:
+        zone.update(establishment_eligible=False, reason="speech_attributed_to_ignored_subject")
+        result.update(
+            status="unsupported", reason="speech_attributed_to_ignored_subject",
+            summary="Speech was heard while the only people visible were in ignore zones.",
+            activity_epoch=None, supporting_observation_ids=[], evidence_kind="none",
+        )
+        return result
+    status = activity.get("status")
+    if status == "pending":
+        # Detection is still sampling; a person may yet appear.
+        return result
+    unverified = status == "incomplete"
+    zone.update(establishment_eligible=True, reason="speech_unlocated")
+    result.update(
+        status="supported",
+        reason="admitted_speech_notice",
+        summary=(
+            "The camera heard speech; the video could not be checked."
+            if unverified else
+            "The camera heard speech; nobody was visible in an ignore zone."
+        ),
+        activity_epoch=epoch, supporting_observation_ids=[],
+        evidence_kind="speech_unverified" if unverified else "speech_reported",
+    )
+    return result
+
+
 def evaluate_scene_establishment(
     samples,
     *,
@@ -603,6 +668,8 @@ def evaluate_scene_establishment(
     if notice_activity is not None:
         result["notice_activity"] = notice_activity
         result["policy_version"] = "establishment_activity_v3"
+    if restricting and isinstance(notice, dict) and notice.get("source") == "speech":
+        return _speech_establishment(result, zone, activity, interpretations, samples, notice)
     if not restricting and (notice_activity is None or activity["status"] == "supported"):
         if notice and result.get("status") != "supported":
             source = notice.get("source") if notice.get("source") in {"camera", "speech"} else "motion"
