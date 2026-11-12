@@ -27,6 +27,8 @@ RECONCILE_INTERVAL_SECONDS = 5.0
 RETENTION_INTERVAL_SECONDS = 3600.0
 # Shorter than this is almost never transcribable speech.
 MIN_TRANSCRIBE_SECONDS = 0.5
+WHISPER_MODELS = ("tiny.en", "base.en", "small.en", "medium.en")
+WHISPER_MARKER_FILE = "openvino_encoder_model.xml"
 
 
 class SpeechLifecycle:
@@ -279,6 +281,27 @@ class SpeechLifecycle:
 
     # Status -----------------------------------------------------------
 
+    def model_status(self) -> dict[str, Any]:
+        """Which configured models exist on disk (names only, never paths)."""
+        speech = self.speech
+        vad_installed = bool(speech.vad_model_path) and Path(speech.vad_model_path).is_file()
+        installed: list[str] = []
+        if speech.whisper_models_dir:
+            root = Path(speech.whisper_models_dir)
+            installed = [
+                model
+                for model in WHISPER_MODELS
+                if (root / f"whisper-{model}" / WHISPER_MARKER_FILE).is_file()
+            ]
+        selected = speech.resolved_whisper_model()
+        return {
+            "vad_installed": vad_installed,
+            "whisper_installed": installed,
+            "selected_device": speech.transcription_device,
+            "selected_model": selected,
+            "selected_model_installed": selected in installed,
+        }
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             listeners = {camera_id: listener.status() for camera_id, listener in self._listeners.items()}
@@ -295,6 +318,7 @@ class SpeechLifecycle:
             "reason": self._reason,
             "cameras": cameras,
             "transcriber": self.transcriber.status() if self.transcriber is not None else None,
+            "models": self.model_status(),
         }
 
     def _read_store(self) -> SpeechStore | None:

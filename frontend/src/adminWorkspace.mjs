@@ -179,6 +179,16 @@ export function configValuesEqual(left, right) {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
+// Per-camera speech switches live on the Detection page, which saves through
+// the system (general) configuration path rather than the Cameras workspace.
+export function cameraSpeechDirty(cameras = [], baselineCameras = []) {
+  const baseline = new Map((baselineCameras || []).map((camera) => [camera.id, camera]));
+  return (cameras || []).some((camera) => !configValuesEqual(
+    camera?.speech ?? null,
+    baseline.get(camera?.id)?.speech ?? null,
+  ));
+}
+
 export function comparableCameraSettings(camera) {
   if (!camera || typeof camera !== "object") return null;
   const { zones: _zones, ...settings } = camera;

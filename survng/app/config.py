@@ -636,7 +636,6 @@ class SpeechConfig(BaseModel):
     transcription_model: Literal["auto", "tiny.en", "base.en", "small.en", "medium.en"] = "auto"
     max_queue_per_camera: int = Field(default=8, ge=1, le=64)
     retention_days: int = Field(default=7, ge=1, le=365)
-    min_transcript_score: float = Field(default=-1.0, ge=-10.0, le=0.0)
     mqtt_publish_transcripts: bool = False
 
     @field_validator("vad_model_path", "whisper_models_dir", mode="before")

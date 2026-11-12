@@ -30,6 +30,7 @@ import {
   Volume2,
   VolumeX,
   X,
+  Mic,
 } from "lucide-react";
 import { liveFramingStyle } from "../liveFraming.mjs";
 import { browserStorage } from "../storage.mjs";
@@ -39,6 +40,8 @@ import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob
 import { recordingPlaybackTransport, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
+import { SpeechSearchWorkspace } from "../search/SpeechSearchResults.jsx";
+import { speechSearchMode } from "../speechSettings.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "../semanticSearchState.mjs";
 import {
   clearVisualSearchTrail,
@@ -592,10 +595,13 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
   }, []);
   const initialQueryText = initialQuery.get("q") || "";
   const initialCameraId = initialQuery.get("camera") || "";
+  const initialMode = speechSearchMode(initialQuery.get("mode"));
   const restoredSearch = useMemo(
-    () => readSemanticSearchSession(sessionStorage, initialQueryText, initialCameraId),
-    [initialCameraId, initialQueryText, sessionStorage],
+    () => (initialMode === "visual" ? readSemanticSearchSession(sessionStorage, initialQueryText, initialCameraId) : null),
+    [initialCameraId, initialMode, initialQueryText, sessionStorage],
   );
+  const [mode, setMode] = useState(initialMode);
+  const [speechStatus, setSpeechStatus] = useState(null);
   const [cameras, setCameras] = useState([]);
   const [cameraId, setCameraId] = useState(initialCameraId);
   const [query, setQuery] = useState(initialQueryText);
@@ -628,10 +634,16 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
     } catch (reason) {
       setSetupError(reason.message || "Could not load Smart Search.");
     }
+    try {
+      const speechResponse = await fetch("/api/speech/status");
+      setSpeechStatus(speechResponse.ok ? await speechResponse.json() : null);
+    } catch {
+      setSpeechStatus(null);
+    }
   }
   useEffect(() => { void loadSearchSetup(); }, []);
   useEffect(() => {
-    if (initialSearchRunRef.current || restoredSearch || !initialQueryText.trim() || !status) return;
+    if (initialMode !== "visual" || initialSearchRunRef.current || restoredSearch || !initialQueryText.trim() || !status) return;
     initialSearchRunRef.current = true;
     void runSearch(null, initialQueryText, initialCameraId);
   }, [status]);
@@ -707,17 +719,36 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
     window.history.replaceState(null, "", appUrl("/search"));
   }
 
+  function selectMode(nextMode) {
+    if (loading || nextMode === mode) return;
+    searchRequestRef.current?.abort();
+    setMode(nextMode);
+    setError("");
+    if (nextMode === "visual") {
+      const params = new URLSearchParams();
+      if (submittedQuery) params.set("q", submittedQuery);
+      if (cameraId) params.set("camera", cameraId);
+      window.history.replaceState(null, "", appUrl(`/search${params.toString() ? `?${params}` : ""}`));
+    }
+  }
+
   function selectCamera(nextCameraId) {
     if (loading) return;
     const selectedCameraId = String(nextCameraId || "");
     setCameraId(selectedCameraId);
+    // Speech results follow the camera selection on their own.
+    if (mode === "speech") return;
     const committedQuery = String(submittedQuery || query || "").trim();
     if (committedQuery) void runSearch(null, committedQuery, selectedCameraId);
   }
 
   return <main className="search-page">
     <header className="search-commandbar">
-      <div><Search size={18} /><span><strong>Smart Search</strong><small>Find incidents by describing what you remember</small></span></div>
+      <div><Search size={18} /><span><strong>Smart Search</strong><small>{mode === "speech" ? "Find what was said near your cameras" : "Find incidents by describing what you remember"}</small></span></div>
+      {speechStatus?.enabled || mode === "speech" ? <div className="search-mode-switch" role="group" aria-label="Search type">
+        <button type="button" aria-pressed={mode === "visual"} className={mode === "visual" ? "active" : ""} onClick={() => selectMode("visual")} disabled={loading}><Search size={14} />Visual</button>
+        <button type="button" aria-pressed={mode === "speech"} className={mode === "speech" ? "active" : ""} onClick={() => selectMode("speech")} disabled={loading}><Mic size={14} />Speech</button>
+      </div> : null}
       <MobileCameraSelect
         className="search-mobile-camera-select"
         cameras={cameras}
@@ -727,7 +758,7 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
         allOption={{ value: "", label: "All cameras" }}
         disabled={loading}
       />
-      {setupError ? <button type="button" className="search-setup-retry" onClick={() => void loadSearchSetup()}><RefreshCcw size={15} />Retry status</button> : <span className={`semantic-status ${status?.state || ""}`}>{status?.state === "ready" ? `${Number(status.event_count || 0).toLocaleString()} incidents indexed` : status?.state || "Loading"}</span>}
+      {mode === "speech" ? <span className={`semantic-status ${speechStatus?.enabled ? "ready" : "disabled"}`}>{speechStatus?.enabled ? `Speech ${speechStatus.state || "on"}` : "Speech off"}</span> : setupError ? <button type="button" className="search-setup-retry" onClick={() => void loadSearchSetup()}><RefreshCcw size={15} />Retry status</button> : <span className={`semantic-status ${status?.state || ""}`}>{status?.state === "ready" ? `${Number(status.event_count || 0).toLocaleString()} incidents indexed` : status?.state || "Loading"}</span>}
     </header>
     <aside className="search-scope-panel">
       <div className="search-scope-heading"><strong>Camera</strong><small>Refine current results</small></div>
@@ -735,7 +766,7 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
         <button type="button" className={!cameraId ? "active" : ""} onClick={() => selectCamera("")} disabled={loading} aria-pressed={!cameraId}><Search size={16} /><span>All cameras</span><i /></button>
         {cameras.map((camera) => <button type="button" key={camera.id} className={cameraId === camera.id ? "active" : ""} onClick={() => selectCamera(camera.id)} disabled={loading} aria-pressed={cameraId === camera.id}><Camera size={16} /><span>{camera.name}</span><i className={camera.running ? "online" : ""} /></button>)}
       </div>
-      {searchHistory.length ? <section className="search-history-panel" aria-labelledby="search-history-title">
+      {mode === "visual" && searchHistory.length ? <section className="search-history-panel" aria-labelledby="search-history-title">
         <div id="search-history-title"><Clock3 size={15} /><strong>Recent searches</strong></div>
         {searchHistory.map((item) => {
           const cameraName = item.cameraId ? cameras.find((camera) => camera.id === item.cameraId)?.name || item.cameraId : "All cameras";
@@ -743,7 +774,13 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
         })}
       </section> : null}
     </aside>
-    <section className="semantic-search-workspace">
+    {mode === "speech" ? <SpeechSearchWorkspace
+      cameras={cameras}
+      cameraId={cameraId}
+      timeZone={timeZone}
+      initialQuery={initialMode === "speech" ? initialQueryText : ""}
+      disabledReason={speechStatus && !speechStatus.enabled ? "Speech detection is turned off. Past transcripts remain searchable until retention removes them." : ""}
+    /> : <section className="semantic-search-workspace">
       <form onSubmit={runSearch} className="semantic-search-form"><Search size={20} /><input value={query} onChange={(event) => setQuery(event.target.value)} disabled={loading} placeholder='Try “person in a red jacket” or “white delivery truck”' aria-label="Describe what to find" autoFocus /><div className="semantic-search-actions"><button type="button" className="secondary" onClick={resetSearch} disabled={!query && !cameraId && !results.length && !error}>Reset</button><button type="submit" disabled={loading || !query.trim()}>{loading ? "Searching…" : "Search"}</button></div></form>
       <div className="search-results-heading" aria-live="polite"><strong>{loading ? "Searching…" : results.length ? `${visibleResults.length} visual matches${submittedQuery ? ` for “${submittedQuery}”` : ""}` : "Visual matches"}</strong>{resultsCameraId ? <small>{cameras.find((camera) => camera.id === resultsCameraId)?.name || resultsCameraId}</small> : submittedQuery ? <small>All cameras</small> : null}</div>
       {error ? <div className="semantic-search-error"><CircleAlert size={17} />{error}</div> : null}
@@ -758,7 +795,7 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
         })}
         {!loading && !error && !visibleResults.length ? <div className="semantic-search-empty"><Search size={28} /><strong>{results.length && cameraId ? "No matching results from this camera" : "Search indexed incidents by appearance"}</strong><span>{results.length && cameraId ? "Choose All cameras or another camera to widen the current results." : "Results link to the exact incident and recording time."}</span></div> : null}
       </div>
-    </section>
+    </section>}
   </main>;
 }
 

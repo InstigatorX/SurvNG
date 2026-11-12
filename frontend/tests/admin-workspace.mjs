@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, adminHomeDestinations, adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, preferredStoredValue, readAdminSubsection, readAdminWorkspace, resolveAdminWorkspace, telemetryLocationOptions } from "../src/adminWorkspace.mjs";
+import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, adminHomeDestinations, adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, preferredStoredValue, readAdminSubsection, readAdminWorkspace, resolveAdminWorkspace, telemetryLocationOptions } from "../src/adminWorkspace.mjs";
 
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS.map((group) => group.label), ["Configure", "Observe", "Act"]);
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS[0].items.slice(0, 5).map((item) => item.label), ["Cameras", "Detection", "Storage", "Integrations", "Access"]);
@@ -72,5 +72,11 @@ assert.match(facesBlock[0], /Face Detection Confidence/);
 assert.doesNotMatch(facesBlock[0], /Embedding Model|Landmark Model|Suggestion Threshold|References Per Person|Automatically identify|visit_auto_link|Model input profile|Recognition enabled/);
 assert.doesNotMatch(configPageSource, /<h3>Face recognition<\/h3>/);
 assert.match(configPageSource, /\["faces", "Face detection"/);
+
+// Camera speech switches are edited on the Detection page and saved with it.
+assert.equal(cameraSpeechDirty([{ id: "gate", speech: { enabled: true } }], [{ id: "gate", speech: { enabled: false } }]), true);
+assert.equal(cameraSpeechDirty([{ id: "gate", speech: { enabled: false }, name: "Renamed" }], [{ id: "gate", speech: { enabled: false }, name: "Gate" }]), false);
+assert.equal(cameraSpeechDirty([], []), false);
+assert.match(configPageSource, /\["speech", "Speech", Mic\]/);
 
 console.log("admin workspace tests passed");

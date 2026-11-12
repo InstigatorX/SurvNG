@@ -47,6 +47,7 @@ import {
   ZoomIn,
   ZoomOut,
   X,
+  Mic,
 } from "lucide-react";
 import { buildMotionDecisionFusion, MOTION_BEHAVIOR_OPTIONS, motionBehaviorOption, motionBehaviorSettings, motionBehaviorValue, motionModeInfo, readMotionDecisionFusion } from "../motionDecisionConfig.mjs";
 import { availableQualificationPresets, motionAnalysisPresetSelectionUseful, presetQualificationGraph, readMotionAnalysisPreset } from "../motionAnalysisConfig.mjs";
@@ -57,7 +58,7 @@ import { logPayloadSignature } from "../pollingPolicy.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { motionAuditRegions } from "../motionAudit.mjs";
 import { clampZoneView, insertZonePointWithIndex, zoomZoneView } from "../zoneGeometry.mjs";
-import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminHomeDestinations, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, resolveAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
+import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminHomeDestinations, adminWorkspaceSearch, cameraConfigDirtyState, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, resolveAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
 import { appUrl, mediaUrl, fetch } from "../shared/api.js";
 import { MEDIA_STORAGE_ROLES, CAMERA_ADMIN_SECTIONS, TELEMETRY_ADMIN_SECTIONS, HEALTH_TELEMETRY_SECTIONS, GENERAL_ADMIN_SECTIONS, US_TIME_ZONES, THEMES } from "../shared/constants.js";
 import { CameraScopePicker } from "../shared/CameraScopePicker.jsx";
@@ -70,6 +71,7 @@ import { AccessSettings } from "./AccessSettings.jsx";
 import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
 import { DetectionOccupancyCard } from "./DetectionOccupancyCard.jsx";
+import { SpeechSettings } from "./SpeechSettings.jsx";
 
 export const ADMIN_DESTINATION_ICONS = {
   home: LayoutDashboard,
@@ -1399,7 +1401,10 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const selectedCamera = cameras.find((camera) => camera.id === selectedId) || cameras[0] || null;
   const baselineConfig = baselineConfigRef.current;
   const baselineCamera = baselineConfig?.cameras?.find((camera) => camera.id === selectedCamera?.id) || null;
-  const generalDirty = Boolean(config && baselineConfig) && !configValuesEqual(comparableSystemConfig(config), comparableSystemConfig(baselineConfig));
+  const generalDirty = Boolean(config && baselineConfig) && (
+    !configValuesEqual(comparableSystemConfig(config), comparableSystemConfig(baselineConfig))
+    || cameraSpeechDirty(config.cameras || [], baselineConfig.cameras || [])
+  );
   const selectedCameraSettingsDirty = Boolean(selectedCamera) && !configValuesEqual(comparableCameraSettings(selectedCamera), comparableCameraSettings(baselineCamera));
   const selectedZonesDirty = Boolean(selectedCamera) && !configValuesEqual(selectedCamera.zones || [], baselineCamera?.zones || []);
   const cameraDirtyState = cameraConfigDirtyState(config?.cameras || [], baselineConfig?.cameras || []);
@@ -4254,9 +4259,10 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       {section === "detection" ? (
         <div className="detection-settings subsection-workspace">
           <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="Intelligence and detection settings">
-            {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["depth", "Depth Estimation", Layers], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face detection", ScanFace]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
+            {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["depth", "Depth Estimation", Layers], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face detection", ScanFace], ["speech", "Speech", Mic]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
           </nav>
           <div className="detection-settings-content">
+          {detectionSection === "speech" ? <SpeechSettings config={config} updateConfig={updateConfig} /> : null}
           {detectionSection === "object" ? <section className="detection-settings-card primary">
             <header className="detection-settings-card-head">
               <div className="detection-settings-card-icon"><ScanFace size={18} /></div>

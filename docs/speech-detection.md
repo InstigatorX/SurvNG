@@ -73,6 +73,13 @@ That writes:
 
 ## Configuration
 
+In the web UI, go to **Admin → Detection → Speech**. The top card holds the
+global switch, a consent notice, which models are installed, the transcription
+device and model, retention, and the MQTT transcript opt-in. The **Cameras**
+card lists every camera with Listen and Transcribe switches, the audio source,
+the live listener state, and optional tuning. The same settings in
+`config.json`:
+
 ```json
 {
   "speech": {
@@ -108,6 +115,10 @@ standard manager reload, which restarts camera workers.
 
 ## Outputs
 
+- **Search page.** **Search → Speech** lists recent speech and searches
+  transcripts. It reuses the page's camera filter, and **Play recording**
+  opens the timeline at the moment speech started. The Visual/Speech switch
+  appears once speech is enabled. Transcripts are admin-only.
 - **API**
   - `GET /api/speech/status` (read scope): service, per-camera and transcriber
     state.
@@ -148,8 +159,6 @@ standard manager reload, which restarts camera workers.
 
 ## Not yet included
 
-- Web UI for transcripts and per-camera speech settings. Today they are
-  configured through `config.json` or the configuration API.
 - Linking segments to incidents.
 - Keyword notifications.
 - Hot-applying speech config changes without a manager reload.

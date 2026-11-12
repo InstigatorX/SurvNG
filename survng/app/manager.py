@@ -958,7 +958,7 @@ class AppManager:
     def speech_status(self) -> dict:
         speech = getattr(self, "speech", None)
         if speech is None:
-            return {"enabled": False, "state": "disabled", "reason": "", "cameras": {}, "transcriber": None}
+            return {"enabled": False, "state": "disabled", "reason": "", "cameras": {}, "transcriber": None, "models": None}
         return speech.status()
 
     def _camera_startup_completed(self) -> None:

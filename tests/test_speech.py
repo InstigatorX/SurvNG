@@ -531,3 +531,26 @@ def test_observability_snapshot_excludes_transcripts_and_unknown_values() -> Non
     }
     assert snapshot["transcriber"]["device"] == "GPU"
     assert "text" not in snapshot["transcriber"]
+
+
+def test_status_reports_installed_models_without_paths(tmp_path: Path) -> None:
+    vad = tmp_path / "vad.onnx"
+    vad.write_bytes(b"x")
+    whisper = tmp_path / "whisper"
+    (whisper / "whisper-base.en").mkdir(parents=True)
+    (whisper / "whisper-base.en" / "openvino_encoder_model.xml").write_text("<net/>")
+    (whisper / "whisper-small.en").mkdir()  # incomplete download
+    config = _config()
+    config.speech.vad_model_path = str(vad)
+    config.speech.whisper_models_dir = str(whisper)
+    config.speech.transcription_device = "GPU"
+    lifecycle = _lifecycle(tmp_path, config, {}, [])
+    models = lifecycle.status()["models"]
+    assert models == {
+        "vad_installed": True,
+        "whisper_installed": ["base.en"],
+        "selected_device": "GPU",
+        "selected_model": "small.en",
+        "selected_model_installed": False,
+    }
+    assert str(tmp_path) not in repr(models)

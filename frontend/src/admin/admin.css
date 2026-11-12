@@ -851,3 +851,119 @@ a.button {
 .camera-order-panel {
   margin: 0 18px 12px;
 }
+
+/* Speech detection settings */
+.speech-consent-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border-radius: 7px;
+  background: var(--warn-bg);
+  color: var(--ink);
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.speech-consent-notice svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--warn);
+}
+
+.speech-model-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.speech-model-summary span {
+  border-radius: 3px;
+  background: var(--ok-bg);
+  color: var(--ok-ink);
+  padding: 2px 7px;
+}
+
+.speech-model-summary span.missing {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.speech-model-summary small {
+  flex-basis: 100%;
+  color: var(--muted);
+}
+
+.speech-camera-list {
+  display: grid;
+  gap: 6px;
+}
+
+.speech-camera-row {
+  display: grid;
+  grid-template-columns: auto auto minmax(140px, 1fr);
+  align-items: end;
+  gap: 8px 12px;
+  border-radius: 7px;
+  background: var(--control-muted);
+  padding: 8px 10px;
+}
+
+.speech-camera-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.speech-camera-row>.compact-toggle {
+  white-space: nowrap;
+}
+
+.speech-camera-name strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.speech-camera-state {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.speech-camera-state.speaking,
+.speech-camera-state.listening {
+  color: var(--ok-ink);
+}
+
+.speech-camera-state.restarting,
+.speech-camera-state.no_audio_track,
+.speech-camera-state.unavailable {
+  color: var(--warn);
+}
+
+.speech-camera-tuning {
+  grid-column: 1 / -1;
+}
+
+.speech-service-summary {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .speech-camera-row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .speech-camera-row>label:not(.compact-toggle) {
+    grid-column: 1 / -1;
+  }
+}

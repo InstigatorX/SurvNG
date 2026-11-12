@@ -380,3 +380,122 @@
   }
 }
 
+
+/* Speech transcript search */
+.search-mode-switch {
+  display: inline-flex;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--control-muted);
+  padding: 2px;
+}
+
+.search-mode-switch button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.search-mode-switch button.active {
+  background: var(--panel-solid);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.speech-search-results {
+  display: grid;
+  gap: 8px;
+  max-width: 960px;
+  margin: 8px auto 0;
+}
+
+.speech-result {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-solid);
+  padding: 10px 12px;
+}
+
+.speech-result-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  color: var(--muted);
+}
+
+.speech-result-meta strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.speech-result-meta small {
+  font-size: 12px;
+}
+
+.speech-result-status {
+  margin-left: auto;
+  border-radius: 3px;
+  background: var(--control-muted);
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 560;
+}
+
+.speech-result-status.done {
+  background: var(--ok-bg);
+  color: var(--ok-ink);
+}
+
+.speech-result-status.failed,
+.speech-result-status.low_confidence {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.speech-result-text {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.speech-result-text.empty {
+  color: var(--muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+.speech-result nav a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+}
+
+.speech-load-more {
+  justify-self: center;
+  margin: 6px 0 12px;
+}
+
+@media (max-width: 640px) {
+  .search-mode-switch button {
+    min-height: 36px;
+  }
+
+  .speech-result-status {
+    margin-left: 0;
+  }
+}
