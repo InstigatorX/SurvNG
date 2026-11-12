@@ -1059,7 +1059,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertEqual(len(cars), 1)
         self.assertFalse(cars[0]["temporal_consensus"])
         self.assertFalse(cars[0]["incident_eligible"])
-        self.assertFalse(cars[0]["snapshot_primary_subject"])
+        self.assertTrue(cars[0]["snapshot_primary_subject"])
 
     def test_unconfirmed_cover_prefers_best_supported_zone_subject(self) -> None:
         outside = {**detected("bicycle", 0.99, (10, 10, 200, 200)), "incident_eligible": False}

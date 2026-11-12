@@ -2,6 +2,23 @@
 
 ## SurvNG v1.2
 
+Released as `v1.2.0`.
+
+- Recording indexes and snapshot links stay when the expected volume is
+  unmounted or cannot be identified, including after a mountpoint directory
+  is left behind. A replacement disk is not enrolled automatically.
+- Restoring a camera to the site setting no longer changes what that camera
+  does today. Rollback puts the previous override back without the forward
+  step limit. A dismissed system-review suggestion cannot be applied.
+- One failed semantic retry no longer blocks historical indexing. Database
+  cleanup keeps a durable claim on motion-audit files until they are actually
+  removed, and stops between batches when cleanup is turned off.
+- Incident covers stay on the subject that established the incident, gallery
+  times match the selected frame, and detection reserves evidence slots before
+  tracking can take them.
+- Live camera frames for integrations no longer hold the reload lock, and the
+  status stream no longer runs git status. Docker installs disable OpenCV
+  OpenCL the same way the systemd unit does.
 - Added optional per-camera speech detection (Silero VAD on OpenVINO) with
   local English transcription (Whisper via OpenVINO GenAI; `base.en` on CPU,
   `small.en` on GPU with CPU fallback). Off by default globally and per camera;

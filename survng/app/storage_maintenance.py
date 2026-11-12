@@ -235,20 +235,25 @@ class StorageReconciler:
         path = Path(raw_path)
         return path if path.is_absolute() else self.storage_dir / path
 
+    def _media_verdict(self, path_value: object) -> str:
+        path = self._media_path(path_value)
+        checker = getattr(self.recorder, "_file_verdict", None)
+        if checker is not None:
+            return checker(path)
+        presence = path_presence(path)
+        if presence == "present":
+            return "present"
+        if presence == "missing":
+            return "confirmed_absent"
+        return "unknown"
+
     def _missing(self, path_value: object) -> bool:
         raw_path = str(path_value or "").strip()
-        return bool(raw_path) and path_presence(self._media_path(raw_path)) == "missing"
+        return bool(raw_path) and self._media_verdict(raw_path) == "confirmed_absent"
 
     def _media_location_blocks_clear(self, path_value: object) -> bool:
-        """Refuse to clear references when their configured location is offline."""
-        if self.media_storage is None:
-            return False
-        path = self._media_path(path_value)
-        location_id = self.media_storage.location_id_for(path)
-        if location_id is None:
-            return False
-        status = self.media_storage.status(location_id)
-        return status.state not in HEALTHY_MEDIA_LOCATION_STATES
+        """Refuse to clear references when the expected volume cannot be confirmed."""
+        return self._media_verdict(path_value) not in {"present", "confirmed_absent"}
 
     def _display_path(self, path_value: object) -> str:
         path = self._media_path(path_value)

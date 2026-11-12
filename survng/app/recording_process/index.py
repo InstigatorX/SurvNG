@@ -17,6 +17,7 @@ from typing import Callable
 from ..config import CameraConfig, RecordingRetentionConfig
 from ..main_database import ClosingDatabaseConnection
 from ..media_storage import path_presence
+from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 from ..recording_media import mp4_playback_metadata, mp4_stream_fingerprint
 
 
@@ -30,6 +31,20 @@ RECORDING_LOCATION_BACKFILL_CURSOR_KEY = "recording_location_backfill_cursor"
 
 
 class RecordingIndexMixin:
+    def _volume_gate(self) -> VolumeGate:
+        gate = getattr(self, "_volume_gate_instance", None)
+        if gate is not None:
+            return gate
+        media_roots = list(self.media_storage._roots.values()) if self.media_storage is not None else []
+        store = VolumeIdentityStore(identity_db_path(Path(self.index_path).parent, media_roots))
+        fallback = None if self.media_storage is not None else self.recordings_dir
+        gate = VolumeGate(store, media_storage=self.media_storage, fallback_root=fallback)
+        self._volume_gate_instance = gate
+        return gate
+
+    def _file_verdict(self, path: Path | str) -> str:
+        return self._volume_gate().verdict(path, presence=path_presence)
+
     def _index_connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
             self.index_path,
@@ -434,17 +449,21 @@ class RecordingIndexMixin:
                 row["start_at"] = datetime.fromtimestamp(float(row["start_epoch"]), timezone.utc).isoformat()
             return rows
 
-        # Path.is_file() is false for ESTALE/EIO as well as a real deletion.
-        # Only a confirmed absence may drop the index row; an unknown stat
-        # leaves the segment available for the next read.
+        # Only a confirmed absence on the expected volume drops the index row.
+        # Unknown or unavailable storage is withheld from playback and kept.
         stale_paths = {
             str(row["path"])
             for row in rows
-            if path_presence(str(row["path"])) == "missing"
+            if self._file_verdict(str(row["path"])) == "confirmed_absent"
+        }
+        withheld = {
+            str(row["path"])
+            for row in rows
+            if self._file_verdict(str(row["path"])) != "present"
         }
         if stale_paths:
             self._delete_index_paths(list(stale_paths))
-            rows = [row for row in rows if str(row["path"]) not in stale_paths]
+        rows = [row for row in rows if str(row["path"]) not in withheld]
 
         start_date = datetime.fromtimestamp(start_epoch).date() - timedelta(days=1)
         end_date = datetime.fromtimestamp(end_epoch).date() + timedelta(days=1)
@@ -573,13 +592,12 @@ class RecordingIndexMixin:
         """
         existing: list[dict] = []
         stale_paths: list[str] = []
-        unavailable_roots = self._unavailable_recording_roots()
         for row in rows:
             path = str(row.get("path") or "")
-            presence = path_presence(path) if path else "unknown"
-            if presence == "present":
+            verdict = self._file_verdict(path) if path else "unknown"
+            if verdict == "present":
                 existing.append(row)
-            elif presence == "missing" and not self._path_under_roots(path, unavailable_roots):
+            elif verdict == "confirmed_absent":
                 stale_paths.append(path)
         self._delete_index_paths(stale_paths)
         return existing
@@ -1139,16 +1157,13 @@ class RecordingIndexMixin:
         ordered = sorted(candidates - discovered_paths)
         for index, path in enumerate(ordered, start=1):
             self._raise_if_cancelled(cancel_event)
-            if self._path_under_roots(path, unavailable_roots):
-                unknown.append(path)
+            verdict = self._file_verdict(path)
+            if verdict == "confirmed_absent" and not self._path_under_roots(path, unavailable_roots):
+                stale.append(path)
+            elif verdict == "present":
+                retained_present.append(path)
             else:
-                presence = path_presence(path)
-                if presence == "missing":
-                    stale.append(path)
-                elif presence == "present":
-                    retained_present.append(path)
-                else:
-                    unknown.append(path)
+                unknown.append(path)
             if progress and index % 100 == 0:
                 progress("Confirming indexed recordings", index, len(ordered))
         return stale, retained_present, unknown
@@ -1265,7 +1280,7 @@ class RecordingIndexMixin:
             if str(path) not in snapshot_paths
         ]
         confirmed_missing = [
-            path for path in stale_candidates if path_presence(path) == "missing"
+            path for path in stale_candidates if self._file_verdict(path) == "confirmed_absent"
         ]
         self._delete_index_paths(confirmed_missing)
         return {
@@ -1524,11 +1539,11 @@ class RecordingIndexMixin:
             if self._index_stop.is_set():
                 break
             path = Path(path_value)
-            presence = path_presence(path)
-            if presence == "missing":
+            verdict = self._file_verdict(path)
+            if verdict == "confirmed_absent":
                 self._delete_index_paths([path_value])
                 continue
-            if presence != "present":
+            if verdict != "present":
                 with self._fingerprint_lock:
                     if path_value not in self._fingerprint_pending_set:
                         self._fingerprint_pending.append(path_value)
@@ -1551,15 +1566,18 @@ class RecordingIndexMixin:
                     (camera_id, source),
                 )
             ]
-            stale = [(path,) for path in indexed_paths if path not in existing_paths]
-            if stale:
-                connection.executemany("DELETE FROM recordings WHERE path = ?", stale)
+        stale = [path for path in indexed_paths if path not in existing_paths]
+        self._delete_index_paths(stale)
 
     def _delete_index_paths(self, paths: list[str]) -> None:
-        if not paths:
+        confirmed = [path for path in paths if self._file_verdict(path) == "confirmed_absent"]
+        if not confirmed:
             return
         with self._index_connection() as connection:
-            connection.executemany("DELETE FROM recordings WHERE path = ?", [(path,) for path in paths])
+            connection.executemany(
+                "DELETE FROM recordings WHERE path = ?",
+                [(path,) for path in confirmed],
+            )
 
     def _prune_missing_index_rows(self, limit: int = 500) -> int:
         with self._index_connection() as connection:
@@ -1579,7 +1597,7 @@ class RecordingIndexMixin:
         stale_paths = [
             str(row["path"])
             for row in rows
-            if path_presence(str(row["path"])) == "missing"
+            if self._file_verdict(str(row["path"])) == "confirmed_absent"
         ]
         self._delete_index_paths(stale_paths)
         return len(stale_paths)
@@ -1616,11 +1634,11 @@ class RecordingIndexMixin:
             if self._index_stop.is_set():
                 break
             path = Path(path_value)
-            presence = path_presence(path)
-            if presence == "missing":
+            verdict = self._file_verdict(path)
+            if verdict == "confirmed_absent":
                 self._delete_index_paths([path_value])
                 continue
-            if presence != "present":
+            if verdict != "present":
                 with self._validation_lock:
                     if path_value not in self._validation_pending_set:
                         self._validation_pending.append(path_value)
@@ -1759,9 +1777,12 @@ class RecordingIndexMixin:
         for row in rows:
             payload = self._bound_recording_availability(dict(row))
             if float(payload["start_epoch"]) <= epoch < float(payload["end_epoch"]):
-                if path_presence(str(payload["path"])) != "missing":
+                verdict = self._file_verdict(str(payload["path"]))
+                if verdict == "present":
                     return payload
-                self._delete_index_paths([str(payload["path"])])
+                if verdict == "confirmed_absent":
+                    self._delete_index_paths([str(payload["path"])])
+                # Unavailable or unknown storage keeps the row and is not playable.
         if abs(time.time() - epoch) <= max(60.0, self.segment_seconds * 6):
             self.request_recording_edge_refresh(camera_id, source, epoch)
         return None

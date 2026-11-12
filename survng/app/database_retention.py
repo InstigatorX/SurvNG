@@ -42,6 +42,7 @@ from typing import Any, Callable, Iterator, Sequence
 
 from .config import DatabaseRetentionConfig
 from .incident_utils import event_snapshot_path
+from .volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 
 LOGGER = logging.getLogger(__name__)
 
@@ -208,7 +209,7 @@ class DatabaseRetention:
             config = self._config()
             if config.enabled:
                 try:
-                    self.run_once()
+                    self.run_once(honor_config=True)
                 except Exception as error:  # keep the loop alive; report it
                     LOGGER.exception("database retention run failed")
                     with self._status_lock:
@@ -217,9 +218,10 @@ class DatabaseRetention:
             delay = max(3600.0, float(config.interval_hours) * 3600.0)
 
     # ------------------------------------------------------------------ run
-    def run_once(self, *, dry_run: bool | None = None) -> dict[str, Any]:
+    def run_once(self, *, dry_run: bool | None = None, honor_config: bool = False) -> dict[str, Any]:
         config = self._config()
         dry = bool(config.dry_run if dry_run is None else dry_run)
+        self._honor_config = honor_config
         now = self._clock()
         cutoffs = {
             "empty": now - float(config.empty_discovery_hours) * 3600.0,
@@ -239,6 +241,9 @@ class DatabaseRetention:
         }
         steps = result["steps"]
         try:
+            self._ensure_deletion_work()
+            if not dry:
+                self._drain_motion_deletions(result)
             self._candidate_jobs(steps["candidate_jobs"], cutoffs, dry)
             referenced = self._referenced_decisions()
             self._activity_decisions(steps["activity_decisions"], cutoffs, referenced, dry)
@@ -401,7 +406,9 @@ class DatabaseRetention:
         unlinked = (
             "not exists(select 1 from acquired_sample_events e where e.sample_id=s.id) "
             "and not exists(select 1 from acquired_sample_episodes p where p.sample_id=s.id) "
-            "and not exists(select 1 from scene_candidate_seeds c where c.sample_id=s.id)"
+            "and not exists(select 1 from scene_candidate_seeds c where c.sample_id=s.id) "
+            "and not exists(select 1 from scene_activity_decisions d, json_each(d.sample_ids_json) j "
+            "where json_valid(d.sample_ids_json) and j.value = s.id)"
         )
         empty = "not exists(select 1 from acquired_sample_observations o where o.sample_id=s.id)"
         # Empty live-discovery frames expire on the short schedule, everything
@@ -516,11 +523,28 @@ class DatabaseRetention:
 
                 def delete(conn: sqlite3.Connection, batch=batch, paths=paths) -> int:
                     marks = _marks(batch)
-                    paths.extend(str(row[0]) for row in conn.execute(
+                    owned = [str(row[0]) for row in conn.execute(
                         f"select snapshot_path from motion_audits where id in ({marks}) "
                         f"and created_at < ? and {unlinked} and snapshot_path != ''",
                         (*batch, cutoff),
-                    ))
+                    )]
+                    paths.extend(owned)
+                    claimed_at = _iso(self._clock())
+                    conn.execute(
+                        "create table if not exists media_deletion_work ("
+                        "path text primary key, role text not null, created_at text not null)"
+                    )
+                    for raw in dict.fromkeys(owned):
+                        conn.execute(
+                            "insert or ignore into media_deletion_work (path, role, created_at) "
+                            "values (?, 'motion_audit', ?)",
+                            (raw, claimed_at),
+                        )
+                        conn.execute(
+                            "insert or ignore into media_deletion_claims (path, role, claimed_at) "
+                            "values (?, 'motion_audit', ?)",
+                            (raw, claimed_at),
+                        )
                     return conn.execute(
                         f"delete from motion_audits where id in ({marks}) "
                         f"and created_at < ? and {unlinked}",
@@ -528,29 +552,86 @@ class DatabaseRetention:
                     ).rowcount
 
                 self._write(step, delete)
-                self._delete_motion_sample_files(result, paths)
+                self._drain_motion_deletions(result)
 
     # -------------------------------------------------------------- helpers
-    def _delete_motion_sample_files(self, result: dict[str, Any], paths: list[str]) -> None:
-        """Remove images whose only owner was a pruned audit row."""
-        if not paths:
+    def _ensure_deletion_work(self) -> None:
+        with self._events._connect() as conn:
+            conn.execute(
+                "create table if not exists media_deletion_work ("
+                "path text primary key, role text not null, created_at text not null)"
+            )
+
+    def _motion_verdict(self, path: Path) -> str:
+        events = self._events
+        media_storage = getattr(events, "media_storage", None)
+        roots = list(media_storage._roots.values()) if media_storage is not None else []
+        store = VolumeIdentityStore(identity_db_path(Path(events.db_path), roots))
+        fallback = None if media_storage is not None else Path(events.storage_dir)
+        return VolumeGate(store, media_storage=media_storage, fallback_root=fallback).verdict(path)
+
+    def _release_motion_work(self, raw: str) -> None:
+        with self._events._lock, self._events._connect() as conn:
+            conn.execute("begin immediate")
+            conn.execute(
+                "delete from media_deletion_work where path = ? and role = 'motion_audit'",
+                (raw,),
+            )
+            conn.execute(
+                "delete from media_deletion_claims where path = ? and role = 'motion_audit'",
+                (raw,),
+            )
+
+    def _drain_motion_deletions(self, result: dict[str, Any]) -> None:
+        """Unlink files whose audit row is already gone, while the claim is held.
+
+        The claim is inserted in the same transaction as the row delete. Writers
+        that consult media_deletion_claims cannot adopt the path between the
+        owner check and unlink. Unavailable storage leaves both rows in place.
+        """
+        self._ensure_deletion_work()
+        with self._events._connect() as conn:
+            queued = [
+                str(row[0])
+                for row in conn.execute(
+                    "select path from media_deletion_work where role = 'motion_audit'"
+                )
+            ]
+        if not queued:
             return
         storage_dir = Path(self._events.storage_dir)
         media_storage = getattr(self._events, "media_storage", None)
-        candidates = list(dict.fromkeys(paths))
-        spellings = {raw: _path_spellings(storage_dir, raw) for raw in candidates}
-        named = self._named_image_paths({value for values in spellings.values() for value in values})
-        unreferenced = [raw for raw in candidates if not spellings[raw] & named]
-        for raw in unreferenced:
+        for raw in queued:
+            spellings = _path_spellings(storage_dir, raw)
+            if self._named_image_paths(spellings):
+                self._release_motion_work(raw)
+                continue
+            path: Path | None = None
             try:
                 path = event_snapshot_path(storage_dir, {"snapshot_path": raw}, media_storage)
                 if not _audit_image_location(storage_dir, path, media_storage):
                     result["motion_sample_files_failed"] += 1
                     continue
-                path.unlink()
-                result["motion_sample_files_deleted"] += 1
+                verdict = self._motion_verdict(path)
+                if verdict not in {"present", "confirmed_absent"}:
+                    result["motion_sample_files_failed"] += 1
+                    continue
+                if self._named_image_paths(spellings):
+                    self._release_motion_work(raw)
+                    continue
+                if verdict == "present":
+                    path.unlink()
+                self._release_motion_work(raw)
+                if verdict == "present":
+                    result["motion_sample_files_deleted"] += 1
+                else:
+                    result["motion_sample_files_missing"] += 1
             except FileNotFoundError:
-                result["motion_sample_files_missing"] += 1
+                if path is not None and self._motion_verdict(path) == "confirmed_absent":
+                    self._release_motion_work(raw)
+                    result["motion_sample_files_missing"] += 1
+                else:
+                    result["motion_sample_files_failed"] += 1
             except (PermissionError, OSError, RuntimeError, ValueError):
                 result["motion_sample_files_failed"] += 1
 
@@ -587,4 +668,6 @@ class DatabaseRetention:
 
     def _check_stop(self) -> None:
         if self._stop.is_set():
+            raise _Stopped()
+        if getattr(self, "_honor_config", False) and not self._config().enabled:
             raise _Stopped()

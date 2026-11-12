@@ -1358,6 +1358,7 @@ app.include_router(create_mcp_router(McpDependencies(
     intelligence=_intelligence_route_bundle.service,
     application_stopping=APPLICATION_STOPPING,
     call_limiter=MCP_CALL_LIMITER,
+    manager_access=MANAGER_ACCESS,
 )))
 
 

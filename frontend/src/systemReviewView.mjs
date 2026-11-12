@@ -83,7 +83,9 @@ export function glanceSentence(glance) {
   const pictures = `${analyzed} ${analyzed === 1 ? "picture" : "pictures"}`;
   const cameraLabel = `${cameras} ${cameras === 1 ? "camera" : "cameras"}`;
   const suggestionLabel = `${suggestions} ${suggestions === 1 ? "suggestion" : "suggestions"}`;
-  return `Looked at ${pictures} across ${cameraLabel}. ${suggestionLabel}.`;
+  const failed = Number(glance.failed) || 0;
+  const skipped = failed ? ` ${failed} ${failed === 1 ? "camera" : "cameras"} skipped.` : "";
+  return `Looked at ${pictures} across ${cameraLabel}. ${suggestionLabel}.${skipped}`;
 }
 
 export function plainNote(text, guide = {}) {

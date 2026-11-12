@@ -87,7 +87,9 @@ export function SystemReviewPanel({ cameras = [], timeZone, onCommandBarChange =
   const suggestions = (result.recommendations || []).filter((item) => !item.dismissed);
   const findings = findingsByCamera(result);
   const running = ["queued", "running", "cancelling"].includes(live?.status);
-  const progress = running ? reviewProgress(live, cameras) : null;
+  const progress = (running || Object.keys(live?.result?.camera_errors || {}).length)
+    ? reviewProgress(live, cameras)
+    : null;
 
   useEffect(() => {
     let cancelled = false;

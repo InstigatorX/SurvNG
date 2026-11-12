@@ -428,18 +428,45 @@ class MotionDecisionHandler:
             if isinstance(current_event, dict) and "evidence_revision" in current_event:
                 revision_kwargs["expected_revision"] = int(current_event["evidence_revision"])
         provider_qualification = qualification
+        gallery_reservation = None
         gallery_capacity = getattr(type(self.events), "scene_evidence_capacity", None)
+        reserve_slots = getattr(self.events, "reserve_scene_evidence_slots", None)
+
+        def release_gallery_reservation() -> None:
+            nonlocal gallery_reservation
+            reservation = gallery_reservation
+            gallery_reservation = None
+            if reservation is None:
+                return
+            release = getattr(self.events, "release_scene_evidence_reservation", None)
+            if callable(release):
+                release(reservation)
+
         if callable(gallery_capacity):
-            provider_qualification = {**qualification,
-                "evidence_gallery":self.events.scene_evidence_capacity(existing_event_id)}
+            capacity = self.events.scene_evidence_capacity(existing_event_id)
+            remaining = max(0, int((capacity or {}).get("remaining") or 0))
+            from ..evidence_gallery import MAX_DETECTION_IMAGES
+            reserve_count = min(MAX_DETECTION_IMAGES, remaining)
+            if callable(reserve_slots) and existing_event_id is not None and reserve_count:
+                gallery_reservation = reserve_slots(existing_event_id, reserve_count)
+                if gallery_reservation:
+                    reserve_count = len(gallery_reservation.get("ids") or [])
+            provider_qualification = {**qualification, "evidence_gallery": {
+                **(capacity or {}), "remaining": reserve_count,
+            }}
         provider_result = (
             evidence_provider(event_at, provider_qualification)
             if evidence_provider is not None
             else self._invoke_detection_provider(provider, event_at, provider_qualification)
         )
-        check_evidence_cancellation()
+        try:
+            check_evidence_cancellation()
+        except BaseException:
+            release_gallery_reservation()
+            raise
         resume_at = getattr(provider_result, "resume_at", None)
         if resume_at is not None:
+            release_gallery_reservation()
             return MotionDecisionOutcome(
                 event_id=existing_event_id,
                 snapshot_path="",
@@ -551,6 +578,7 @@ class MotionDecisionHandler:
             if scene_look:
                 self._publish_scene_occupancy(objects, normalized_event_at, verdict, detection_completed)
             if verdict != "supported":
+                release_gallery_reservation()
                 return MotionDecisionOutcome(
                     event_id=existing_event_id, snapshot_path=acquisition["snapshot_path"],
                     object_detected=False, rejection_reason="scene_activity_" + acquisition["assessment"]["status"],
@@ -565,6 +593,7 @@ class MotionDecisionHandler:
             # never replace a known-good provisional snapshot or its objects
             # with empty/status-only evidence.
             qualification["refinement_evidence_preserved"] = True
+            release_gallery_reservation()
             return MotionDecisionOutcome(
                 event_id=int(existing_event_id),
                 snapshot_path="",
@@ -824,6 +853,7 @@ class MotionDecisionHandler:
                     "cover_reason": cover_promotion_reason or "no_compatible_main_evidence",
                     "processing_timing": processing_timing,
                 })
+            release_gallery_reservation()
             return MotionDecisionOutcome(
                 event_id=existing_event_id,
                 snapshot_path=snapshot_path,
@@ -901,6 +931,7 @@ class MotionDecisionHandler:
             )
             if refined_event is None:
                 qualification["refinement_evidence_preserved"] = True
+                release_gallery_reservation()
                 return MotionDecisionOutcome(
                     event_id=event_id,
                     snapshot_path="",
@@ -928,6 +959,7 @@ class MotionDecisionHandler:
                     route_origin[1],
                 )
         if route_admission_duplicate:
+            release_gallery_reservation()
             return MotionDecisionOutcome(
                 # The canonical event belongs to the winning decision. Do not
                 # make this alternate job link its episode/audit/tracker to it.
@@ -950,8 +982,15 @@ class MotionDecisionHandler:
         if gallery is not None:
             started = time.monotonic()
             try:
-                processing_timing["gallery_saved_images"] = self.events.retain_scene_evidence_images(
-                    event_id, gallery.images, self.snapshot_writer)
+                if gallery_reservation is not None and callable(
+                    getattr(self.events, "finish_scene_evidence_reservation", None)
+                ):
+                    processing_timing["gallery_saved_images"] = self.events.finish_scene_evidence_reservation(
+                        event_id, gallery_reservation, gallery.images, self.snapshot_writer)
+                    gallery_reservation = None
+                else:
+                    processing_timing["gallery_saved_images"] = self.events.retain_scene_evidence_images(
+                        event_id, gallery.images, self.snapshot_writer)
             except Exception:
                 # The incident is already durable. An optional image failure
                 # must not retry admission or turn a successful event into failure.
@@ -1005,6 +1044,7 @@ class MotionDecisionHandler:
             for detected in scene_objects
             if not snapshot_adoption_refused and detected.get("snapshot_visible") is not False
         )
+        release_gallery_reservation()
         return MotionDecisionOutcome(
             event_id=event_id,
             snapshot_path=snapshot_path,

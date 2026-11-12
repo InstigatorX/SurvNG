@@ -1122,7 +1122,7 @@ def _temporal_consensus(
             "snapshot_exposure_score": round(observation_quality.exposure, 4),
             "snapshot_contrast_score": round(observation_quality.contrast, 4),
             "snapshot_edge_detail_score": round(observation_quality.edge_detail, 4),
-            "snapshot_primary_subject": id(track) in primary_ids,
+            "snapshot_primary_subject": id(track) in cover_primary_ids,
             "snapshot_edge_clearance_ratio": round(edge_clearance, 5),
             "snapshot_subject_area_ratio": round(subject_area, 5),
         }

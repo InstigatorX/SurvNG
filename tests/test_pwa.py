@@ -12,7 +12,7 @@ from survng.app.pwa import (
 
 class ProgressiveWebAppTest(unittest.TestCase):
     def test_package_version_is_v1(self) -> None:
-        self.assertEqual(__version__, "1.0.0")
+        self.assertEqual(__version__, "1.2.0")
 
     def test_manifest_uses_configured_base_path(self) -> None:
         manifest = web_app_manifest("/survng")

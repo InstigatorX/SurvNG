@@ -340,4 +340,13 @@ const coverFrames = incidentEvidenceFrames({
 });
 assert.equal(coverFrames.find((frame) => frame.key === "selected").epoch, Date.parse("2026-11-11T01:21:58.380Z") / 1000);
 assert.equal(coverFrames.find((frame) => frame.key === "trigger").epoch, Date.parse("2026-11-11T01:21:50Z") / 1000);
+const gallery = incidentGalleryFrames({
+  events: [{ id: 20, snapshot_captured_at: "2026-11-11T01:21:50Z", created_at: "2026-11-11T01:21:50Z" }],
+  evidence_images: [{
+    id: "image-1", event_id: 20, camera_id: "gate", snapshot_url: "/evidence/1.jpg",
+    captured_at: "2026-11-11T01:22:10Z", captured_epoch: Date.parse("2026-11-11T01:22:10Z") / 1000,
+    objects: [],
+  }],
+});
+assert.equal(eventCoverTime(gallery[0].event), "2026-11-11T01:22:10Z");
 console.log("incident cover time tests passed");

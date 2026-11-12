@@ -266,10 +266,42 @@ def _validate_bounded_step(setting: str, before: Any, after: Any) -> None:
         )
 
 
+def _validate_effective_steps(
+    original: AppConfig,
+    candidate: AppConfig,
+    applied: list[dict[str, Any]],
+) -> None:
+    """Bound the effective change on the finished configuration."""
+    for item in applied:
+        setting = str(item.get("setting") or "")
+        scope = str(item.get("scope") or "")
+        if setting.startswith("motion."):
+            name = setting.removeprefix("motion.")
+            if scope == "camera":
+                before_camera = camera_by_id(original, str(item.get("camera_id") or ""))
+                after_camera = camera_by_id(candidate, str(item.get("camera_id") or ""))
+                before = _motion_effective_value(original, before_camera, name)
+                after = _motion_effective_value(candidate, after_camera, name)
+            else:
+                before = _motion_effective_value(original, None, name)
+                after = _motion_effective_value(candidate, None, name)
+            _validate_bounded_step(setting, before, after)
+            continue
+        _validate_bounded_step(setting, item.get("before"), item.get("after"))
+
+
 def apply_calibration_changes(
     config: AppConfig,
     changes: Iterable[dict[str, Any]],
+    *,
+    restore: bool = False,
 ) -> tuple[AppConfig, list[dict[str, Any]]]:
+    """Apply calibration changes.
+
+    ``restore`` is only for ledger rollback. It skips the forward step cap
+    and is not exposed to clients. Forward applies compare effective values
+    on the finished candidate, so site and camera changes are order-independent.
+    """
     candidate = config.model_copy(deep=True)
     applied: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -289,17 +321,6 @@ def apply_calibration_changes(
         before = calibration_setting_value(
             candidate, scope=scope, camera_id=camera_id, setting=setting
         )
-        comparison_before = before
-        if (
-            scope == "camera"
-            and setting.startswith("motion.")
-            and before in (None, "inherit")
-        ):
-            comparison_before = getattr(
-                candidate.motion_qualification,
-                setting.removeprefix("motion."),
-            )
-        _validate_bounded_step(setting, comparison_before, proposed)
         if before == proposed:
             continue
         if scope == "camera":
@@ -334,6 +355,8 @@ def apply_calibration_changes(
             "before_inherited": scope == "camera" and before in (None, "inherit"),
             "after_inherited": scope == "camera" and proposed in (None, "inherit"),
         })
+    if not restore:
+        _validate_effective_steps(config, candidate, applied)
     validate_motion_pipeline_configuration(candidate)
     candidate = AppConfig.model_validate(candidate.model_dump(mode="json"))
     return candidate, applied
@@ -460,7 +483,17 @@ def build_calibration_report(
                 continue
             current = _motion_effective_value(config, camera, setting)
             if current == proposed:
-                if override not in (None, "inherit"):
+                site_after = _motion_effective_value(config, None, setting)
+                for existing in recommendations:
+                    if (
+                        existing.get("scope") == "global"
+                        and existing.get("setting") == f"motion.{setting}"
+                    ):
+                        site_after = existing.get("proposed")
+                # Automatic restore_inherit only when inheritance keeps today's
+                # effective value. A manual inherit that would change behavior
+                # is still accepted by apply, with the ordinary step bound.
+                if override not in (None, "inherit") and current == site_after:
                     inherited_value: Any = (
                         "inherit"
                         if setting in {"sensitivity", "stationary_object_tolerance"}

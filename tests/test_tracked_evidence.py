@@ -411,3 +411,15 @@ def test_tracking_may_use_slots_detection_left_empty(tmp_path):
     assert status["evidence_images_saved"] == MAX_GALLERY_IMAGES
     # Detection arriving afterwards finds the incident full.
     assert store.scene_evidence_capacity(event["id"])["remaining"] == 0
+
+
+def test_detection_reservation_is_visible_before_the_images_are_written(tmp_path):
+    store, event = seeded_store(tmp_path)
+    capacity = store.scene_evidence_capacity(event["id"])
+    reservation = store.reserve_scene_evidence_slots(
+        event["id"], min(MAX_DETECTION_IMAGES, capacity["remaining"]),
+    )
+    assert reservation and len(reservation["ids"]) == MAX_DETECTION_IMAGES
+    assert tracking_capacity(store)(event["id"])["remaining"] == MAX_GALLERY_IMAGES - MAX_DETECTION_IMAGES
+    store.release_scene_evidence_reservation(reservation)
+    assert tracking_capacity(store)(event["id"])["remaining"] == MAX_GALLERY_IMAGES

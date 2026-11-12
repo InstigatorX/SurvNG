@@ -311,3 +311,61 @@ def test_audit_snapshot_images_are_removed_only_when_nothing_names_them(tmp_path
     assert (snapshots / "incident.jpg").exists()  # incident observation names it
     assert result["motion_sample_files_deleted"] == 1
     assert result["motion_sample_files_failed"] == 0
+    with sqlite3.connect(store.db_path) as db:
+        assert db.execute(
+            "select count(*) from media_deletion_work where role = 'motion_audit'"
+        ).fetchone()[0] == 0
+        assert db.execute(
+            "select count(*) from media_deletion_claims where role = 'motion_audit'"
+        ).fetchone()[0] == 0
+
+
+def test_restart_finishes_motion_deletion_work_recorded_before_unlink(tmp_path: Path) -> None:
+    store = EventStore(tmp_path)
+    image = tmp_path / "snapshots" / "gate" / "left.jpg"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"jpg")
+    raw = "snapshots/gate/left.jpg"
+    with sqlite3.connect(store.db_path) as db:
+        db.execute(
+            "create table if not exists media_deletion_work ("
+            "path text primary key, role text not null, created_at text not null)"
+        )
+        db.execute(
+            "insert into media_deletion_work values (?, 'motion_audit', ?)",
+            (raw, _iso(NOW)),
+        )
+        db.execute(
+            "insert into media_deletion_claims (path, role, claimed_at) values (?, 'motion_audit', ?)",
+            (raw, _iso(NOW)),
+        )
+    result = _retention(store).run_once()
+    assert not image.exists()
+    assert result["motion_sample_files_deleted"] == 1
+    with sqlite3.connect(store.db_path) as db:
+        assert db.execute("select count(*) from media_deletion_claims where path = ?", (raw,)).fetchone()[0] == 0
+
+
+def test_sample_kept_when_a_decision_survives_the_reference_snapshot(tmp_path: Path) -> None:
+    store = EventStore(tmp_path)
+    event_id = store.add_event("gate", "motion")["id"]
+    with sqlite3.connect(store.db_path) as db:
+        db.execute("pragma foreign_keys=off")
+        db.execute(
+            "insert into acquired_samples values (?,?,?,?,?,?,?,?,?)",
+            ("late-sample", "gate", NOW - 40 * DAY, "recorded", "complete", "{}", "", "", NOW - 40 * DAY),
+        )
+        db.execute(
+            "insert into scene_activity_decisions values (?,?,?,?,?,?,?,?,?)",
+            ("late-decision", "gate", '["late-sample"]', "unsupported",
+             None, "r", "1", "{}", NOW - 40 * DAY),
+        )
+        db.execute(
+            "insert or replace into scene_event_establishment values (?,?)",
+            (event_id, "late-decision"),
+        )
+    retention = _retention(store)
+    retention._referenced_decisions = lambda: set()
+    retention.run_once()
+    assert "late-sample" in _ids(store, "acquired_samples")
+    assert "late-decision" in _ids(store, "scene_activity_decisions")

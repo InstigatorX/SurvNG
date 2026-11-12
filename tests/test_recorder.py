@@ -784,8 +784,7 @@ class RecorderTest(unittest.TestCase):
             with recorder._index_connection() as connection:
                 indexed = connection.execute("SELECT COUNT(*) FROM recordings").fetchone()[0]
 
-        self.assertIsNotNone(result)
-        self.assertEqual(result["path"], str(clip))
+        self.assertIsNone(result)
         self.assertEqual(indexed, 1)
 
     def test_recording_range_can_discover_legacy_main_directory(self) -> None:
@@ -842,7 +841,7 @@ class RecorderTest(unittest.TestCase):
             with recorder._index_connection() as connection:
                 indexed = connection.execute("SELECT COUNT(*) FROM recordings").fetchone()[0]
 
-        self.assertEqual([item["path"] for item in rows], [str(clip)])
+        self.assertEqual(rows, [])
         self.assertEqual(indexed, 1)
 
     def test_recording_range_discovers_files_missing_from_partial_index(self) -> None:

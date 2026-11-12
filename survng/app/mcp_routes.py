@@ -127,6 +127,7 @@ class McpDependencies:
     intelligence: IntelligenceService
     application_stopping: threading.Event
     call_limiter: threading.BoundedSemaphore
+    manager_access: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -770,6 +771,27 @@ class McpEndpoint:
                 )
             return operation(self.deps.get_manager())
 
+    def _with_generation_lease(self, operation: Callable[[AppManager], _T]) -> _T:
+        """Resolve the manager under the reload lock, then run I/O outside it."""
+        access = self.deps.manager_access
+        if access is None:
+            return self._with_manager(operation)
+        with self.deps.manager_lock:
+            if self.deps.application_stopping.is_set():
+                raise McpProtocolError(
+                    _INTERNAL_ERROR,
+                    "SurvNG is shutting down",
+                    status_code=503,
+                )
+        with access.lease(self.deps.manager_lock, self.deps.get_manager) as manager:
+            if self.deps.application_stopping.is_set():
+                raise McpProtocolError(
+                    _INTERNAL_ERROR,
+                    "SurvNG is shutting down",
+                    status_code=503,
+                )
+            return operation(manager)
+
     def _locate_snapshot(self, manager: AppManager, event_id: int) -> Path | _ToolOutcome:
         event = manager.events.get(event_id)
         if event is None:
@@ -807,7 +829,7 @@ class McpEndpoint:
                 detail = exc.detail if isinstance(exc.detail, str) else "no frame available"
                 return _text_result(detail, is_error=True)
 
-        located = self._with_manager(load)
+        located = self._with_generation_lease(load)
         if isinstance(located, _ToolOutcome):
             return located
         try:

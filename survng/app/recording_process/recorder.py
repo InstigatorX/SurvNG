@@ -121,6 +121,7 @@ class Recorder(RecordingIndexMixin):
             snapshot_cleanup_provider=apply_snapshot_retention,
             media_storage=self.media_storage,
             delete_recording_provider=self._delete_recording_for_retention,
+            volume_verdict=self._file_verdict,
         )
 
     def start(self, camera: CameraConfig, source: str = "main") -> None:
@@ -146,6 +147,7 @@ class Recorder(RecordingIndexMixin):
         try:
             camera_dir = self._camera_dir(camera.id, source).absolute()
             camera_dir.mkdir(parents=True, exist_ok=True)
+            self._volume_gate().store.note_mounted(self._volume_root_for(camera_dir))
             self._ensure_recording_dirs(camera_dir)
             keeper = threading.Thread(target=self._keep_recording_dirs, args=(camera_dir, stop_event), daemon=True)
             keeper.start()
@@ -404,6 +406,23 @@ class Recorder(RecordingIndexMixin):
                 key: {**values, "rollover_pending": key in pending}
                 for key, values in self._timestamp_health.items()
             }
+
+    def _volume_root_for(self, camera_dir: Path) -> Path:
+        recordings_root = camera_dir.parent.parent
+        if self.media_storage is not None:
+            for location_root in self.media_storage._roots.values():
+                try:
+                    recordings_root.resolve(strict=False).relative_to(
+                        location_root.resolve(strict=False)
+                    )
+                except ValueError:
+                    continue
+                return location_root
+        return recordings_root
+
+    def reconcile_volume(self, root: Path, *, require_mount: bool = False) -> bool:
+        """Write the established token onto this root. Never called by deletion."""
+        return self._volume_gate().store.reconcile(root, require_mount=require_mount)
 
     def _camera_dir(self, camera_id: str, source: str = "main") -> Path:
         source = "main" if source == "main" else "live"

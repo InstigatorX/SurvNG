@@ -115,7 +115,13 @@ def normalize_automatic_classes(classes: list[str]) -> list[str]:
     ))
 
 
+def recommendation_dismissed(recommendation: dict[str, Any]) -> bool:
+    return bool(recommendation.get("dismissed"))
+
+
 def automatic_eligible(recommendation: dict[str, Any], allowed: set[str] | frozenset[str]) -> bool:
+    if recommendation_dismissed(recommendation):
+        return False
     class_id = suggestion_class(recommendation)
     if class_id is None:
         return False
@@ -710,7 +716,7 @@ def describe_recommendation(
         place = rows[0]["camera_name"] if rows else "This camera"
         summary = f"{place} only"
     else:
-        place = "every camera"
+        place = "cameras following the site setting" if unchanged else "every camera"
         summary = f"Changes on {len(changed)} " + ("camera" if len(changed) == 1 else "cameras")
         if len(unchanged) == 1:
             summary += ", 1 keeps its own setting"
@@ -770,9 +776,14 @@ def at_a_glance(result: dict[str, Any] | None) -> dict[str, Any]:
         item for item in payload.get("recommendations") or []
         if isinstance(item, dict) and not item.get("dismissed")
     ]
+    errors = payload.get("camera_errors") or {}
+    failed = len(errors) if isinstance(errors, dict) else 0
+    coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
     return {
         "analyzed": analyzed,
         "cameras": cameras,
+        "failed": int(coverage.get("failed") or failed),
+        "requested": int(coverage.get("requested") or cameras + failed),
         "suggestions": len(suggestions),
         "verdicts": verdicts,
         "pass": str(payload.get("pass") or ""),

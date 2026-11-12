@@ -248,6 +248,8 @@ export function incidentGalleryFrames(incident) {
     const labels = [...new Set(objects.map((object) => object.label).filter(Boolean))];
     const event = { ...source, id: image.event_id, camera_id: image.camera_id,
       created_at: image.captured_at, created_epoch: image.captured_epoch,
+      snapshot_captured_at: image.captured_at, frame_captured_at_epoch: image.captured_epoch,
+      captured_at_epoch: image.captured_epoch,
       snapshot_path: "available", snapshot_url: image.snapshot_url, snapshot_evidence_id: image.id,
       evidence_image_id: image.id, objects, labels, scene_objects: undefined, object_tracking: null };
     return [{ key: image.id, event, epoch: image.captured_epoch,

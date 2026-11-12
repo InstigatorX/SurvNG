@@ -14,6 +14,7 @@ from typing import Any
 from ..incident_utils import event_snapshot_path, portable_media_path, snapshot_deletion_claimed
 from ..main_database import connect_main_database
 from ..media_storage import MediaStorageRegistry, path_presence
+from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 from ..object_motion import tracking_motion_promotions
 from ..perf_samples import TimedLock
 from .calibration import EventStoreCalibrationMixin
@@ -1703,6 +1704,23 @@ class EventStore(
                 ((path,) for path in paths),
             )
 
+    def _snapshot_gate(self) -> VolumeGate:
+        gate = getattr(self, "_snapshot_volume_gate", None)
+        if gate is not None:
+            return gate
+        roots = list(self.media_storage._roots.values()) if self.media_storage is not None else []
+        store = VolumeIdentityStore(identity_db_path(self.db_path, roots))
+        gate = VolumeGate(
+            store,
+            media_storage=self.media_storage,
+            fallback_root=None if self.media_storage is not None else self.storage_dir,
+        )
+        self._snapshot_volume_gate = gate
+        return gate
+
+    def _snapshot_verdict(self, path: Path) -> str:
+        return self._snapshot_gate().verdict(path, presence=path_presence)
+
     def _snapshot_location_unreliable(self, path: Path) -> bool:
         """Return whether this snapshot location can prove a file is gone.
 
@@ -1739,11 +1757,11 @@ class EventStore(
                 # Path.exists() is false for both a deleted file and a transient
                 # stat failure (ESTALE, EIO, EACCES). Only a confirmed absence
                 # on a readable location may drop incident snapshot links.
-                presence = path_presence(path)
-                if presence == "unknown" or self._snapshot_location_unreliable(path):
+                verdict = self._snapshot_verdict(path)
+                if verdict not in {"present", "confirmed_absent"}:
                     continue
                 releasable.append(raw_path)
-                if presence == "missing":
+                if verdict == "confirmed_absent":
                     missing.append(raw_path)
             self._clear_snapshot_references(conn, missing)
             conn.executemany(
@@ -1840,6 +1858,14 @@ class EventStore(
             path: Path | None = None
             try:
                 path = self._snapshot_path_for_retention(raw_path)
+                verdict = self._snapshot_verdict(path)
+                if verdict not in {"present", "confirmed_absent"}:
+                    failed_files += 1
+                    continue
+                if verdict == "confirmed_absent":
+                    missing_files += 1
+                    removed.append(raw_path)
+                    continue
                 actual_size = max(
                     int(row["snapshot_size_bytes"] or 0), int(path.stat().st_size)
                 )
@@ -1848,13 +1874,11 @@ class EventStore(
                 deleted_bytes += actual_size
                 removed.append(raw_path)
             except FileNotFoundError:
-                # An empty mountpoint raises FileNotFoundError for every image
-                # that still exists on the unmounted disk. Keep those links.
-                if path is not None and self._snapshot_location_unreliable(path):
-                    failed_files += 1
-                else:
+                if path is not None and self._snapshot_verdict(path) == "confirmed_absent":
                     missing_files += 1
                     removed.append(raw_path)
+                else:
+                    failed_files += 1
             except (PermissionError, OSError, RuntimeError, ValueError):
                 failed_files += 1
         for offset in range(0, len(removed), self.SNAPSHOT_REFERENCE_WRITE_BATCH):

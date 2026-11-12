@@ -892,7 +892,13 @@ class IntelligenceService:
                 eligible_camera_ids=list(camera_ids) if mode == 'system_weekly' else None,
             )
             result['camera_errors'] = errors
-            result['progress'] = review_progress(completed=len(camera_ids), total=len(camera_ids), phase='Complete')
+            result['coverage'] = {
+                'requested': len(camera_ids),
+                'reviewed': len(reports),
+                'failed': len(errors),
+                'excluded': len(result.get('excluded_cameras') or []),
+            }
+            result['progress'] = review_progress(completed=len(reports), total=len(camera_ids), phase='Complete')
             if mode == 'system_weekly':
                 signals = self._system_review_signals(active_manager, active_config)
                 ranked = rank_site_recommendations(result.get('recommendations') or [], signals)
@@ -1172,9 +1178,15 @@ class IntelligenceService:
                 return
             allowed = set(active_config.system_review.automatic_classes)
             run = active_manager.events.get_calibration_run(run_id) or {}
+            result_payload = run.get('result') or {}
+            failed_cameras = set((result_payload.get('camera_errors') or {}))
             selected = [
-                item for item in (run.get('result') or {}).get('recommendations') or []
+                item for item in result_payload.get('recommendations') or []
                 if automatic_eligible(item, allowed)
+                and not (
+                    item.get('camera_id') and str(item.get('camera_id')) in failed_cameras
+                )
+                and not (str(item.get('scope') or '') == 'global' and failed_cameras)
             ]
             if not selected:
                 return
@@ -1334,6 +1346,8 @@ class IntelligenceService:
             if unknown:
                 raise HTTPException(status_code=400, detail='one or more recommendations changed or expired')
             selected = [recommendations[item] for item in recommendation_ids]
+            if any(item.get("dismissed") for item in selected):
+                raise HTTPException(status_code=409, detail="suggestion was dismissed")
             try:
                 next_config, changes = apply_calibration_changes(self.deps.get_config(), selected)
             except ValueError as exc:
@@ -1596,7 +1610,9 @@ class IntelligenceService:
             if conflicts and (not request.force_conflicts):
                 raise HTTPException(status_code=409, detail={'message': 'newer configuration changes conflict with rollback', 'conflicts': conflicts})
             try:
-                next_config, changes = apply_calibration_changes(self.deps.get_config(), inverse)
+                next_config, changes = apply_calibration_changes(
+                    self.deps.get_config(), inverse, restore=True,
+                )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             before_config = self.deps.get_config().model_copy(deep=True)

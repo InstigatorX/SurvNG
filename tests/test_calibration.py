@@ -617,3 +617,68 @@ def test_calibration_evaluation_refuses_confounded_configuration() -> None:
     evaluation = events.update_calibration_evaluation.call_args.args[1]
     assert evaluation["outcome"] == "inconclusive"
     assert evaluation["comparison_basis"] == "configuration_conflict"
+
+
+def test_automatic_inherit_is_not_offered_when_it_changes_the_effective_value() -> None:
+    config = AppConfig(cameras=[CameraConfig(
+        id="gate",
+        name="Gate",
+        stream_url="rtsp://192.0.2.2/stream",
+        motion_qualification={"visual_backup_min_score": 0.90},
+    )])
+    report = build_calibration_report(config, {
+        "gate": {
+            "analyzed": 4,
+            "recommendations": [{
+                "setting": "visual_backup_min_score",
+                "value": 0.90,
+                "support_count": 2,
+                "reasons": ["Keep the current score."],
+                "evidence": [],
+            }],
+        },
+    }, mode="standard")
+    assert all(item.get("proposed") not in (None, "inherit") or item.get("scope") != "camera"
+               for item in report["recommendations"])
+
+    with pytest.raises(ValueError, match="at most 0.1"):
+        apply_calibration_changes(config, [{
+            "scope": "camera",
+            "camera_id": "gate",
+            "setting": "motion.visual_backup_min_score",
+            "proposed": None,
+        }])
+
+    inherited = config.model_copy(deep=True)
+    inherited.cameras[0].motion_qualification.visual_backup_min_score = None
+    restored, changes = apply_calibration_changes(inherited, [{
+        "scope": "camera",
+        "camera_id": "gate",
+        "setting": "motion.visual_backup_min_score",
+        "proposed": 0.90,
+    }], restore=True)
+    assert restored.cameras[0].motion_qualification.visual_backup_min_score == 0.90
+    assert changes[0]["after"] == 0.90
+
+
+def test_inherit_and_site_change_use_the_finished_effective_value() -> None:
+    config = AppConfig(cameras=[CameraConfig(
+        id="gate",
+        name="Gate",
+        stream_url="rtsp://192.0.2.2/stream",
+        motion_qualification={"visual_backup_min_score": 0.75},
+    )])
+    orders = (
+        [
+            {"scope": "global", "setting": "motion.visual_backup_min_score", "proposed": 0.76},
+            {"scope": "camera", "camera_id": "gate", "setting": "motion.visual_backup_min_score", "proposed": None},
+        ],
+        [
+            {"scope": "camera", "camera_id": "gate", "setting": "motion.visual_backup_min_score", "proposed": None},
+            {"scope": "global", "setting": "motion.visual_backup_min_score", "proposed": 0.76},
+        ],
+    )
+    for changes in orders:
+        candidate, _applied = apply_calibration_changes(config, changes)
+        assert candidate.cameras[0].motion_qualification.visual_backup_min_score is None
+        assert candidate.motion_qualification.visual_backup_min_score == 0.76

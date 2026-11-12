@@ -51,6 +51,113 @@ class EventStoreGalleryMixin:
             remaining = min(remaining, MAX_DETECTION_IMAGES - detection)
         return max(0, remaining)
 
+    def reserve_scene_evidence_slots(self, event_id, count, *, source='detection'):
+        """Occupy slots before a caller encodes, so tracking cannot take them.
+
+        The returned pending rows are the caller's capacity. Success converts
+        those rows; failure, cancellation, and expiry release only the unused
+        ones. Tracking may use whatever this reservation does not hold.
+        """
+        count = max(0, int(count or 0))
+        if count <= 0 or event_id is None:
+            return None
+        now, token = time.time(), uuid.uuid4().hex
+        ids = []
+        with self._lock, self._connect() as conn:
+            conn.execute('begin immediate')
+            incident = self._gallery_incident(conn, event_id)
+            if not incident:
+                return None
+            rows = self._gallery_rows(conn, incident)
+            for row in rows:
+                if row['state'] == 'pending' and row['lease_until'] <= now:
+                    conn.execute('delete from scene_evidence_images where id=?', (row['id'],))
+            rows = [row for row in rows if row['state'] != 'pending' or row['lease_until'] > now]
+            payloads = [json.loads(row['payload_json']) for row in rows]
+            for index in range(count):
+                if self._gallery_remaining(payloads, source) <= 0:
+                    break
+                image_id = 'gallery-' + uuid.uuid4().hex
+                payload = {'source': source, 'reservation': True, 'camera_id': ''}
+                conn.execute(
+                    'insert into scene_evidence_images '
+                    '(id,event_id,frame_key,captured_epoch,payload_json,state,lease_token,lease_until) '
+                    'values(?,?,?,?,?,\'pending\',?,?)',
+                    (image_id, event_id, f'reservation:{token}:{index}', now, json.dumps(payload), token, now + 300),
+                )
+                payloads.append(payload)
+                ids.append(image_id)
+        if not ids:
+            return None
+        return {'token': token, 'ids': ids, 'event_id': int(event_id)}
+
+    def release_scene_evidence_reservation(self, reservation) -> None:
+        if not reservation:
+            return
+        ids = list(reservation.get('ids') or [])
+        token = str(reservation.get('token') or '')
+        if not ids or not token:
+            return
+        with self._lock, self._connect() as conn:
+            conn.execute('begin immediate')
+            conn.execute(
+                f"delete from scene_evidence_images where lease_token=? and state='pending' "
+                f"and id in ({','.join('?' for _ in ids)})",
+                (token, *ids),
+            )
+
+    def finish_scene_evidence_reservation(self, event_id, reservation, images, snapshot_writer) -> int:
+        """Turn reserved rows into retained images and release the unused tail."""
+        if not reservation:
+            return self.retain_scene_evidence_images(event_id, images, snapshot_writer)
+        ids = list(reservation.get('ids') or [])
+        token = str(reservation.get('token') or '')
+        saved = 0
+        used: list[str] = []
+        for image, image_id in zip(images, ids):
+            if len(image.image.data) > MAX_IMAGE_BYTES:
+                continue
+            path = ''
+            adopted = False
+            try:
+                path = snapshot_writer(image.image, datetime.fromtimestamp(image.captured_epoch, timezone.utc))
+                with self._lock, self._connect() as conn:
+                    conn.execute('begin immediate')
+                    retained = self._acquired_media_path(conn, path) if path else ''
+                    updated = False
+                    if retained:
+                        updated = bool(conn.execute(
+                            "update scene_evidence_images set snapshot_path=?, captured_epoch=?, "
+                            "payload_json=?, state='ready', lease_until=0 "
+                            "where id=? and lease_token=? and state='pending'",
+                            (retained, image.captured_epoch, json.dumps(image.metadata), image_id, token),
+                        ).rowcount)
+                    if updated:
+                        self._register_acquired_snapshot(
+                            conn, retained, image.metadata['camera_id'],
+                            image.captured_epoch, len(image.image.data),
+                        )
+                        conn.execute(
+                            'update events set scene_media_revision=scene_media_revision+1 where id=?',
+                            (event_id,),
+                        )
+                        adopted = True
+                    else:
+                        conn.execute(
+                            "delete from scene_evidence_images where id=? and lease_token=? and state='pending'",
+                            (image_id, token),
+                        )
+                if adopted:
+                    saved += 1
+                    used.append(image_id)
+            finally:
+                if not adopted and path:
+                    self._delete_snapshot_if_unreferenced(path)
+        unused = [image_id for image_id in ids if image_id not in used]
+        if unused:
+            self.release_scene_evidence_reservation({'token': token, 'ids': unused})
+        return saved
+
     def scene_evidence_capacity(self, event_id=None, *, source='detection'):
         if event_id is None:
             return {'remaining':self._gallery_remaining([], source), 'frames':[]}

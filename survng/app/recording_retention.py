@@ -15,7 +15,7 @@ from typing import Any
 from threading import Thread
 
 from .config import CameraConfig, RecordingRetentionConfig
-from .media_storage import MediaStorageRegistry
+from .media_storage import MediaStorageRegistry, path_presence
 
 
 LOGGER = logging.getLogger(__name__)
@@ -50,6 +50,7 @@ class RecordingRetentionService:
         snapshot_cleanup_provider: Callable[[float, int], Mapping[str, Any]] | None = None,
         media_storage: MediaStorageRegistry | None = None,
         delete_recording_provider: Callable[[Path], bool] | None = None,
+        volume_verdict: Callable[[Path], str] | None = None,
     ) -> None:
         self.storage_dir = storage_dir.resolve()
         self.recordings_dir = recordings_dir.resolve()
@@ -60,6 +61,7 @@ class RecordingRetentionService:
         self.snapshot_cleanup_provider = snapshot_cleanup_provider
         self.media_storage = media_storage
         self.delete_recording_provider = delete_recording_provider
+        self.volume_verdict = volume_verdict
         self._cameras: dict[str, CameraConfig] = {}
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -594,13 +596,19 @@ class RecordingRetentionService:
                     result["failed_files"] += 1
                     LOGGER.error("Retention rejected recording path outside storage: %s", raw_path)
                     continue
-                if self._recording_location_unreliable(path):
+                verdict = self._deletion_verdict(path)
+                if verdict not in {"present", "confirmed_absent"}:
                     result["failed_files"] += 1
                     self._record_delete_failure(raw_path)
                     LOGGER.warning(
                         "Retention skipped %s because its storage location cannot confirm the file is present",
                         path,
                     )
+                    continue
+                if verdict == "confirmed_absent":
+                    result["missing_files"] += 1
+                    removed_paths.append(raw_path)
+                    self._clear_delete_failure(raw_path)
                     continue
                 try:
                     if self.delete_recording_provider is not None:
@@ -626,9 +634,9 @@ class RecordingRetentionService:
                     removed_paths.append(raw_path)
                     self._clear_delete_failure(raw_path)
                 except FileNotFoundError:
-                    # An empty mountpoint raises FileNotFoundError for every
-                    # segment that still exists on the unmounted disk.
-                    if self._recording_location_unreliable(path):
+                    # Re-check the volume immediately. An unmount between the
+                    # earlier verdict and unlink must not drop the index row.
+                    if self._deletion_verdict(path) != "confirmed_absent":
                         result["failed_files"] += 1
                         self._record_delete_failure(raw_path)
                         LOGGER.warning(
@@ -1343,6 +1351,18 @@ class RecordingRetentionService:
                     if len(candidates) >= limit or selected_bytes >= quota_remaining:
                         break
         return sorted(candidates.values(), key=lambda row: float(row["start_epoch"] or 0))[:limit]
+
+    def _deletion_verdict(self, path: Path) -> str:
+        if self.volume_verdict is not None:
+            return self.volume_verdict(path)
+        if self._recording_location_unreliable(path):
+            return "unavailable"
+        presence = path_presence(path)
+        if presence == "present":
+            return "present"
+        if presence == "missing":
+            return "confirmed_absent"
+        return "unknown"
 
     def _recording_location_unreliable(self, path: Path) -> bool:
         """Return whether this location can prove a recording file is gone.

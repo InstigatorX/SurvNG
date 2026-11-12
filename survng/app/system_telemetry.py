@@ -28,6 +28,7 @@ from .telemetry_interruptions import (
 from survng import __version__ as SURVNG_VERSION
 
 LOGGER = logging.getLogger(__name__)
+_VERSION_IDENTITY: dict[str, Any] = {}
 
 
 class DiagnosticSessionRequest(BaseModel):
@@ -140,12 +141,22 @@ class SystemTelemetryService:
 
     @staticmethod
     def product_version() -> dict[str, Any]:
-        snapshot = ProductUpdateService().status(refresh_remote=False)
+        """Cached deployment identity. Does not run git status.
+
+        The admin updater still calls ProductUpdateService.status, which is
+        the path that may spend time in git. Stream and health snapshots use
+        this baked or previously cached identity instead.
+        """
+        cached = _VERSION_IDENTITY.get("payload")
+        if isinstance(cached, dict):
+            return dict(cached)
+        from .product_update import _baked_version, _deployment_mode, resolve_repo_root
+        baked = _baked_version()
         return {
-            "deployment_mode": snapshot.get("deployment_mode"),
-            "sha": snapshot.get("current_sha"),
-            "short_sha": snapshot.get("current_short_sha"),
-            "branch": snapshot.get("branch"),
+            "deployment_mode": _deployment_mode(resolve_repo_root()),
+            "sha": baked.get("sha"),
+            "short_sha": baked.get("short_sha"),
+            "branch": baked.get("branch"),
         }
 
     @staticmethod

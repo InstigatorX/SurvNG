@@ -2884,6 +2884,24 @@ class OllamaEmbeddingEncoder:
         self.abort()
 
 
+def _quarantine_failure_is_systemic(exc: BaseException) -> bool:
+    """True when the next quarantine item would fail for the same reason.
+
+    Event-specific decode and payload errors are deferred. Database, encoder,
+    and worker failures return to supervisor recovery instead of being recorded
+    as a run of bad events.
+    """
+    if isinstance(exc, (sqlite3.Error, MemoryError, SemanticInferenceError)):
+        return True
+    if isinstance(exc, OSError):
+        filename = str(getattr(exc, "filename", "") or "")
+        return any(token in filename for token in ("sqlite", "model", "manifest"))
+    if isinstance(exc, RuntimeError) and not isinstance(exc, SemanticMediaUnavailable):
+        text = str(exc).lower()
+        return any(token in text for token in ("encoder", "worker", "model store"))
+    return False
+
+
 class SemanticMediaUnavailable(RuntimeError):
     """A retained historical image is temporarily unavailable for projection."""
 
@@ -3143,23 +3161,33 @@ class SemanticSearchService(DisabledSemanticSearch):
         for event_id in self.index.due_media_failures(encoder.identity):
             if self._stop.is_set():
                 return
-            event = getter(event_id)
-            if event is None:
-                self.index.clear_media_failure(encoder.identity, event_id)
-                continue
-            queued = self._revision_event(event, refresh=True)
-            revision = queued.get("_semantic_revision")
-            if isinstance(revision, _SemanticEventRevision):
-                revision.historical = True
             try:
+                event = getter(event_id)
+                if event is None:
+                    self.index.clear_media_failure(encoder.identity, event_id)
+                    continue
+                queued = self._revision_event(event, refresh=True)
+                revision = queued.get("_semantic_revision")
+                if isinstance(revision, _SemanticEventRevision):
+                    revision.historical = True
                 self.index_event(queued)
             except SemanticMediaUnavailable as exc:
                 self.index.record_media_failure(encoder.identity, event_id, exc)
+                continue
+            except Exception as exc:
+                if _quarantine_failure_is_systemic(exc):
+                    raise
+                LOGGER.warning(
+                    "semantic quarantine deferred event %s after %s",
+                    event_id,
+                    type(exc).__name__,
+                )
+                self.index.defer_media_failure(encoder.identity, event_id)
+                continue
+            if self.projection_current(queued) or not self._quarantine_retry_useful(queued):
+                self.index.clear_media_failure(encoder.identity, event_id)
             else:
-                if self.projection_current(queued) or not self._quarantine_retry_useful(queued):
-                    self.index.clear_media_failure(encoder.identity, event_id)
-                else:
-                    self.index.defer_media_failure(encoder.identity, event_id)
+                self.index.defer_media_failure(encoder.identity, event_id)
 
     def _quarantine_retry_useful(self, event: dict[str, Any]) -> bool:
         """False when another retry cannot create or remove semantic evidence."""

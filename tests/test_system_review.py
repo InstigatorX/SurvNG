@@ -409,7 +409,7 @@ def test_plain_descriptions_cover_direction_scope_and_automation():
         ],
     }, config, ["visual_backup"], True)
     assert site["direction"] == "stricter"
-    assert site["title"] == "Make every camera less eager to raise visual backup alerts"
+    assert site["title"] == "Make cameras following the site setting less eager to raise visual backup alerts"
     assert site["where"]["changed_count"] == 1
     assert site["where"]["unchanged_count"] == 1
     assert site["where"]["summary"] == "Changes on 1 camera, 1 keeps its own setting"

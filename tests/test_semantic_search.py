@@ -1281,6 +1281,98 @@ class SemanticIndexTest(unittest.TestCase):
             service._retry_quarantined_media(Store())
             self.assertEqual(self.index.due_media_failures(self.identity), [11, 12])
 
+    def test_quarantine_retry_defers_one_bad_event_and_continues(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+        from survng.app.semantic_search import SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS
+
+        recorded_at = time.time()
+        with patch("survng.app.semantic_search.time.time", return_value=recorded_at):
+            for event_id in (1, 2):
+                self.assertFalse(self.index.record_media_failure(self.identity, event_id, RuntimeError("media")))
+                self.assertFalse(self.index.record_media_failure(self.identity, event_id, RuntimeError("media")))
+                self.assertTrue(self.index.record_media_failure(self.identity, event_id, RuntimeError("media")))
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        service.encoder = type("Encoder", (), {"identity": self.identity})()
+        seen: list[int] = []
+
+        class Store:
+            def get(self, event_id: int) -> dict[str, object]:
+                return {"id": event_id, "snapshot_path": "frame.webp"}
+
+        def index_event(event: dict[str, object]) -> int:
+            event_id = int(event["id"])
+            seen.append(event_id)
+            if event_id == 1:
+                raise ValueError("corrupt payload")
+            return 1
+
+        with (
+            patch(
+                "survng.app.semantic_search.time.time",
+                return_value=recorded_at + SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS + 1,
+            ),
+            patch.object(service, "index_event", side_effect=index_event),
+            patch.object(service, "projection_current", return_value=True),
+            patch.object(service, "_backfill") as backfill,
+        ):
+            service._retry_quarantined_media(Store())
+            service._backfill(Store())
+
+        self.assertEqual(seen, [1, 2])
+        backfill.assert_called_once()
+        with sqlite3.connect(self.database_path) as connection:
+            row = connection.execute(
+                "select next_attempt_at from semantic_media_failures where event_id = 1"
+            ).fetchone()
+        self.assertGreater(row[0], recorded_at + SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS)
+
+    def test_systemic_quarantine_failure_does_not_mark_later_events(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+        from survng.app.semantic_search import SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS
+
+        recorded_at = time.time()
+        with patch("survng.app.semantic_search.time.time", return_value=recorded_at):
+            for event_id in (1, 2):
+                self.assertFalse(self.index.record_media_failure(self.identity, event_id, RuntimeError("media")))
+                self.assertFalse(self.index.record_media_failure(self.identity, event_id, RuntimeError("media")))
+                self.assertTrue(self.index.record_media_failure(self.identity, event_id, RuntimeError("media")))
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        service.encoder = type("Encoder", (), {"identity": self.identity})()
+        seen: list[int] = []
+
+        class Store:
+            def get(self, event_id: int) -> dict[str, object]:
+                seen.append(event_id)
+                if event_id == 1:
+                    raise sqlite3.OperationalError("database is locked")
+                return {"id": event_id}
+
+        with (
+            patch(
+                "survng.app.semantic_search.time.time",
+                return_value=recorded_at + SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS + 1,
+            ),
+            patch.object(service, "_backfill") as backfill,
+        ):
+            with self.assertRaises(sqlite3.OperationalError):
+                service._retry_quarantined_media(Store())
+            backfill.assert_not_called()
+
+        self.assertEqual(seen, [1])
+        with sqlite3.connect(self.database_path) as connection:
+            attempts = {
+                row[0]: row[1]
+                for row in connection.execute(
+                    "select event_id, next_attempt_at from semantic_media_failures"
+                )
+            }
+        self.assertLessEqual(attempts[1], recorded_at + SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS)
+        self.assertLessEqual(attempts[2], recorded_at + SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS)
+
     def test_quarantine_retry_drops_an_event_that_cannot_be_indexed(self) -> None:
         from survng.app.config import SemanticSearchConfig
         from survng.app.semantic_search import SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS
