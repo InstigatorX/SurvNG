@@ -543,6 +543,28 @@ def _speech_decision(samples):
     return evaluate_scene_establishment(samples, policy=restricting(), notice=dict(SPEECH_NOTICE))
 
 
+def test_analyzed_empty_speech_frames_establish_without_a_confirmation_pass() -> None:
+    samples = _empty_frames()
+    for sample in samples:
+        sample["metadata"]["confirmation_complete"] = False
+    decision = _speech_decision(samples)
+    assert decision["status"] == "supported"
+    assert decision["reason"] == "admitted_speech_notice"
+    assert decision["evidence_kind"] == "speech_reported"
+    single = _speech_decision(samples[:1])
+    assert (single["status"], single["reason"]) == ("supported", "admitted_speech_notice")
+    # The same empty frames from the camera stay zone-restricted.
+    camera = evaluate_scene_establishment(samples, policy=restricting(), notice={"source": "camera", "epoch": 1000.0})
+    assert camera["status"] != "supported"
+    # A finished look with a vehicle in an eligible zone has no confirmation job.
+    parked_in_zone = physical(["car"], [box(20, 80)])
+    admitted = _speech_decision(parked_in_zone)
+    assert (admitted["status"], admitted["reason"]) == ("supported", "admitted_speech_notice")
+    # The same look waits only while work is actually still open.
+    parked_in_zone[0]["metadata"]["confirmation_pending"] = True
+    assert _speech_decision(parked_in_zone)["status"] == "pending"
+
+
 def test_zoned_camera_speech_with_nobody_visible_establishes() -> None:
     decision = _speech_decision(_empty_frames())
     assert decision["status"] == "supported"
@@ -598,8 +620,470 @@ def test_unverifiable_video_marks_speech_unverified_and_undecided_video_waits() 
     assert failed["evidence_kind"] == "speech_unverified"
     assert _speech_decision([])["evidence_kind"] == "speech_unverified"
 
-    sampling = physical(["car"], [box(20, 40)])  # one frame, detection still running
-    assert _speech_decision(sampling)["status"] == "pending"
+    # A stationary vehicle in an eligible zone does not imply a confirmation job.
+    eligible = physical(["car"], [box(20, 80)])
+    decided = _speech_decision(eligible)
+    assert (decided["status"], decided["reason"], decided["evidence_kind"]) == (
+        "supported", "admitted_speech_notice", "speech_reported",
+    )
+    eligible[0]["metadata"]["look_pending"] = True
+    assert _speech_decision(eligible)["status"] == "pending"
+    # The same vehicle in an ignore zone schedules nothing, so speech stands.
+    parked = _speech_decision(physical(["car"], [box(20, 40)]))
+    assert parked["status"] == "supported"
+    assert parked["reason"] == "admitted_speech_notice"
+    assert parked["evidence_kind"] == "speech_reported"
+    stationary = physical(["car", "car"], [box(20, 40), box(40, 40)])
+    for sample in stationary:
+        sample["metadata"]["activity_witnesses"] = []
+    decision = _speech_decision(stationary)
+    assert (decision["status"], decision["reason"], decision["evidence_kind"]) == (
+        "supported", "admitted_speech_notice", "speech_reported",
+    )
+
+
+def test_unanalyzed_speech_notice_is_unverified() -> None:
+    notice = [{
+        "id": "notice", "camera_id": "gate", "captured_epoch": 1000.0, "status": "complete",
+        "observations": [], "metadata": {"source": "event_notice", "analysis_unknown": True},
+    }]
+    decision = _speech_decision(notice)
+    assert decision["status"] == "supported"
+    assert decision["evidence_kind"] == "speech_unverified"
+    assert decision["summary"] == "The camera heard speech; the video could not be checked."
+    analyzed = _empty_frames(1)
+    analyzed[0]["metadata"]["confirmation_complete"] = False
+    combined = _speech_decision(analyzed + notice)
+    assert combined["evidence_kind"] == "speech_reported"
+
+
+def test_provisional_speech_without_samples_waits_and_can_still_be_rejected(tmp_path) -> None:
+    """detect_initial() reports pending coverage and omits samples.
+
+    An empty provisional look must not open a speech incident. Later video
+    that shows only an ignored-zone person must still be able to reject it.
+    """
+    store = EventStore(tmp_path)
+    created = datetime.fromtimestamp(1000, timezone.utc).isoformat()
+    qualification = {
+        "status": "motion_qualification",
+        "motion_qualification": {
+            "trigger_source": "speech",
+            "establishment_zone_policy": restricting(),
+        },
+    }
+    provisional = {
+        "status": "scene_observations",
+        "observations": [],
+        "coverage": {"sampled_frames": 1, "state": "pending"},
+    }
+    event = store.add_event(
+        "gate", "motion", topic="survng/speech", created_at=created,
+        objects_json=json.dumps([qualification, provisional]),
+    )
+    with store._connect() as conn:
+        assert conn.execute("select count(*) from scene_incidents").fetchone()[0] == 0
+        verdict = conn.execute("select verdict from scene_activity_decisions").fetchone()[0]
+    assert verdict == "pending"
+
+    person = {
+        "label": "person", "confidence": 0.9,
+        "box": {"x1": 20, "y1": 20, "x2": 40, "y2": 40},
+        "detection_frame_width": 160, "detection_frame_height": 100,
+        "captured_at_epoch": 1000.0, "frame_source": "recorded_main",
+    }
+    finished = {
+        "status": "scene_observations",
+        "observations": [person],
+        "samples": [{
+            "id": "sample-finished", "camera_id": "gate", "captured_epoch": 1000.0,
+            "status": "complete", "observations": [person],
+            "metadata": {
+                "source": "recorded_main", "frame_width": 160, "frame_height": 100,
+                "confirmation_complete": True, "activity_witnesses": [],
+            },
+        }],
+        "coverage": {"sampled_frames": 1, "state": "sampled"},
+    }
+    store.update_objects(event["id"], json.dumps([qualification, finished]))
+    with store._connect() as conn:
+        assert conn.execute("select count(*) from scene_incidents").fetchone()[0] == 0
+        row = conn.execute(
+            "select d.verdict, d.reason from scene_activity_decisions d "
+            "join scene_event_establishment e on e.decision_id=d.id where e.event_id=?",
+            (event["id"],),
+        ).fetchone()
+    assert (row[0], row[1]) == ("unsupported", "speech_attributed_to_ignored_subject")
+
+
+def _linked_speech(store: EventStore, event_id: int) -> tuple[int, str | None, str | None, str | None]:
+    with store._connect() as conn:
+        incidents = conn.execute("select count(*) from scene_incidents").fetchone()[0]
+        row = conn.execute(
+            "select d.verdict, d.reason, d.evidence_json from scene_activity_decisions d "
+            "join scene_event_establishment e on e.decision_id=d.id where e.event_id=?",
+            (event_id,),
+        ).fetchone()
+    evidence = json.loads(row[2]) if row is not None else {}
+    return (
+        incidents,
+        None if row is None else row[0],
+        None if row is None else row[1],
+        evidence.get("evidence_kind"),
+    )
+
+
+def _handler(store: EventStore, provider):
+    from survng.app.motion_pipeline.decision_handler import MotionDecisionHandler
+
+    return MotionDecisionHandler(
+        camera_id="gate", events=store, detection_provider=provider,
+        snapshot_writer=lambda _frame, _at: "provisional.webp", object_serializer=json.dumps,
+    )
+
+
+def test_unavailable_initial_frame_waits_until_ignored_zone_video(tmp_path) -> None:
+    """A missing fast frame has face_evidence_pending and no coverage batch.
+
+    That look must not open a speech incident. Recorded video that shows only
+    an ignored-zone person then rejects it.
+    """
+    import numpy as np
+    from survng.app.motion_pipeline.object_detection import RecordedDetectionResult
+
+    store = EventStore(tmp_path)
+    unavailable = RecordedDetectionResult(
+        frame=None,
+        objects=[{"status": "fast_frame_unavailable", "frame_source": "live_fast_path"}],
+        recording_path="", timings_ms={}, refinement_pending=True,
+    )
+    person = {
+        "label": "person", "confidence": 0.9, "incident_eligible": True,
+        "temporal_candidate_threshold": 0.25,
+        "box": {"x1": 20, "y1": 20, "x2": 40, "y2": 40},
+        "detection_frame_width": 160, "detection_frame_height": 100,
+    }
+    recorded = RecordedDetectionResult(
+        frame=np.zeros((100, 160, 3), dtype=np.uint8),
+        objects=[person], recording_path="main.mp4", timings_ms={},
+        refinement_pending=False, frame_captured_at_epoch=1000.0,
+        frame_source="recorded_main", frame_timestamp_exact=True,
+    )
+    results = [unavailable, recorded]
+
+    def provider(_at):
+        return results.pop(0)
+
+    qualification = {"trigger_source": "speech", "establishment_zone_policy": restricting()}
+    at = datetime.fromtimestamp(1000, timezone.utc)
+    initial = _handler(store, provider).handle("survng/speech", "speech", at, qualification)
+    stored = json.loads(store.get(initial.event_id)["objects_json"])
+    assert any(item.get("status") == "face_evidence_pending" for item in stored)
+    assert not any((item.get("coverage") or {}).get("state") == "pending" for item in stored if isinstance(item, dict))
+    incidents, verdict, _reason, kind = _linked_speech(store, initial.event_id)
+    assert (incidents, verdict) == (0, "pending")
+    assert kind != "speech_reported"
+
+    outcome = _handler(store, provider).refine(
+        "survng/speech", "speech", at, qualification, existing_event_id=initial.event_id,
+    )
+    assert outcome.event_id == initial.event_id
+    incidents, verdict, reason, _kind = _linked_speech(store, initial.event_id)
+    assert incidents == 0
+    assert (verdict, reason) == ("unsupported", "speech_attributed_to_ignored_subject")
+
+
+def test_failed_refinement_opens_unverified_speech_without_replacing_the_snapshot(tmp_path) -> None:
+    """An empty provisional look stays pending. Unavailable recorded video ends it.
+
+    The snapshot and provisional objects stay. Admission settles as speech
+    whose video could not be checked.
+    """
+    import numpy as np
+    from survng.app.motion_pipeline.object_detection import RecordedDetectionResult
+
+    store = EventStore(tmp_path)
+    provisional = RecordedDetectionResult(
+        frame=np.zeros((100, 160, 3), dtype=np.uint8),
+        objects=[{
+            "status": "scene_observations", "observations": [],
+            "coverage": {"sampled_frames": 1, "state": "pending"},
+        }],
+        recording_path="", timings_ms={}, refinement_pending=True,
+        frame_source="live_fast_path", frame_captured_at_epoch=1000.0,
+    )
+    failed = RecordedDetectionResult(
+        frame=None, objects=[{"status": "no_recorded_frame"}],
+        recording_path="", timings_ms={}, refinement_pending=False,
+    )
+    results = [provisional, failed]
+
+    def provider(_at):
+        return results.pop(0)
+
+    qualification = {"trigger_source": "speech", "establishment_zone_policy": restricting()}
+    at = datetime.fromtimestamp(1000, timezone.utc)
+    handler = _handler(store, provider)
+    initial = handler.handle("survng/speech", "speech", at, qualification)
+    before = store.get(initial.event_id)
+    incidents, verdict, _reason, _kind = _linked_speech(store, initial.event_id)
+    assert (incidents, verdict) == (0, "pending")
+
+    outcome = handler.refine("survng/speech", "speech", at, qualification, existing_event_id=initial.event_id)
+    after = store.get(initial.event_id)
+    stored = json.loads(after["objects_json"])
+    assert outcome.rejection_reason == "refinement_unavailable_preserved"
+    assert outcome.refinement_pending is False
+    assert after["snapshot_path"] == before["snapshot_path"]
+    assert not any(item.get("status") == "face_evidence_pending" for item in stored)
+    assert any(
+        item.get("status") == "scene_observations" and (item.get("coverage") or {}).get("state") == "unavailable"
+        for item in stored
+    )
+    incidents, verdict, reason, kind = _linked_speech(store, initial.event_id)
+    assert incidents == 1
+    assert (verdict, reason, kind) == ("supported", "admitted_speech_notice", "speech_unverified")
+
+
+def _speech_runtime(store, provider, *, vehicle=False, evidence_ready_at=None):
+    from survng.app.motion_incidents import MotionIncidentService
+    from survng.app.motion_pipeline.decision_handler import MotionDecisionHandler
+    from survng.app.motion_pipeline.object_detection import RecordedMotionObjectDetector
+
+    at = datetime.now(timezone.utc)
+    objects = [{
+        "label": "car", "confidence": 0.9, "incident_eligible": True,
+        "provisional_detection": True, "box": box(20, 80),
+        "detection_frame_width": 160, "detection_frame_height": 100,
+    }] if vehicle else []
+    initial = RecordedMotionObjectDetector._result(
+        _np.zeros((100, 160, 3), dtype=_np.uint8), objects, "", {}, time.monotonic(),
+        refinement_pending=True, frame_captured_at_epoch=at.timestamp(),
+        frame_source="live_fast_path",
+    )
+    handler = MotionDecisionHandler(
+        camera_id="gate", events=store, initial_detection_provider=lambda _at: initial,
+        detection_provider=provider, snapshot_writer=lambda *_: "provisional.webp",
+        object_serializer=json.dumps, establishment_zone_policy=restricting,
+    )
+    service = MotionIncidentService(
+        camera_id="gate", decision_processor=handler,
+        tracking_enabled=lambda: False, has_trackable_objects=lambda _: False,
+        start_tracking=lambda *_: False, prewarm_tracking=lambda: None,
+        image_reader=lambda _: None, refinement_store=store,
+        evidence_ready_at=evidence_ready_at,
+    )
+    return service, at
+
+
+def test_failed_cover_does_not_finish_a_queued_speech_refinement(tmp_path) -> None:
+    from survng.app.motion_pipeline.object_detection import RecordedDetectionResult
+
+    store = EventStore(tmp_path)
+    service, at = _speech_runtime(
+        store, lambda _: RecordedDetectionResult(
+            frame=None, objects=[{"status": "no_recorded_frame"}],
+            recording_path="", timings_ms={}, refinement_pending=False,
+        ), vehicle=True, evidence_ready_at=lambda *_: time.time() + 120,
+    )
+    initial = service.process("survng/speech", "", at, {"trigger_source": "speech"})
+    before = store.get(initial.event_id)
+    assert _linked_speech(store, initial.event_id)[:2] == (0, "pending")
+    with store._connect() as conn:
+        conn.execute("update event_cover_requirements set available_at_epoch=?", (time.time() - 1,))
+    service._security_work_pending.clear()
+
+    assert service._run_cover_requirement()
+
+    assert store.detection_job_status("gate")["queued"] == 1
+    assert _linked_speech(store, initial.event_id)[:2] == (0, "pending")
+    after = store.get(initial.event_id)
+    assert after["snapshot_path"] == before["snapshot_path"]
+    assert after["objects_json"] == before["objects_json"]
+
+
+def test_retrying_speech_stays_pending_and_terminal_failure_finishes_it(tmp_path) -> None:
+    store = EventStore(tmp_path)
+    service, at = _speech_runtime(store, lambda _: None)
+    initial = service.process("survng/speech", "", at, {"trigger_source": "speech"})
+    job = store.claim_detection_job("gate", lease_owner="review")
+    assert store.retry_detection_job(job["id"], "inference failed", maximum_attempts=2,
+                                     retry_delay_seconds=0, lease_owner="review") is True
+    assert store.finish_failed_speech_looks("gate") == 0
+    assert _linked_speech(store, initial.event_id)[:2] == (0, "pending")
+    job = store.claim_detection_job("gate", lease_owner="review")
+    assert store.retry_detection_job(job["id"], "inference failed", maximum_attempts=2,
+                                     lease_owner="review") is False
+
+    assert store.finish_failed_speech_looks("gate") == 1
+    assert _linked_speech(store, initial.event_id) == (
+        1, "supported", "admitted_speech_notice", "speech_unverified",
+    )
+    assert store.finish_failed_speech_looks("gate") == 0
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, TimeoutError])
+def test_terminal_worker_error_finishes_speech(tmp_path, monkeypatch, error_type) -> None:
+    import threading
+
+    store = EventStore(tmp_path)
+
+    def broken(_at):
+        raise error_type("inference failed")
+
+    service, at = _speech_runtime(store, broken)
+    retry = store.retry_detection_job
+    monkeypatch.setattr(store, "retry_detection_job", lambda *args, **kwargs: retry(
+        *args, **{**kwargs, "retry_delay_seconds": 0},
+    ))
+    settled = threading.Event()
+    finish = store.finish_failed_speech_looks
+
+    def finish_and_signal(*args, **kwargs):
+        count = finish(*args, **kwargs)
+        if count:
+            settled.set()
+        return count
+
+    monkeypatch.setattr(store, "finish_failed_speech_looks", finish_and_signal)
+    stop = threading.Event()
+    service.start(stop)
+    try:
+        initial = service.process("survng/speech", "", at, {"trigger_source": "speech"})
+        assert settled.wait(5)
+        assert store.detection_job_status("gate")["failed"] == 1
+        assert _linked_speech(store, initial.event_id) == (
+            1, "supported", "admitted_speech_notice", "speech_unverified",
+        )
+    finally:
+        stop.set()
+        service.request_stop()
+        assert service.wait_stopped(3)
+
+
+def test_expired_speech_is_recovered_after_restart_and_kept_until_settled(tmp_path, monkeypatch) -> None:
+    import threading
+
+    store = EventStore(tmp_path)
+    service, at = _speech_runtime(store, lambda _: None)
+    initial = service.process("survng/speech", "", at, {"trigger_source": "speech"})
+    assert store.expire_stale_detection_jobs("gate", maximum_age_seconds=0,
+                                             event_maximum_age_seconds=0) == 1
+    with store._connect_jobs() as conn:
+        conn.execute("update detection_jobs set updated_at='2000-01-01T00:00:00+00:00'")
+    assert store.prune_detection_jobs(force=True) == 0
+
+    recovered = EventStore(tmp_path)
+    runtime, _ = _speech_runtime(recovered, lambda _: pytest.fail("expired job ran inference"))
+    settled = threading.Event()
+    finish = recovered.finish_failed_speech_looks
+
+    def finish_and_signal(*args, **kwargs):
+        count = finish(*args, **kwargs)
+        if count:
+            settled.set()
+        return count
+
+    monkeypatch.setattr(recovered, "finish_failed_speech_looks", finish_and_signal)
+    stop = threading.Event()
+    runtime.start(stop)
+    try:
+        assert settled.wait(5)
+        assert _linked_speech(recovered, initial.event_id) == (
+            1, "supported", "admitted_speech_notice", "speech_unverified",
+        )
+        assert recovered.prune_detection_jobs(force=True) == 1
+    finally:
+        stop.set()
+        runtime.request_stop()
+        assert runtime.wait_stopped(3)
+
+
+def test_speech_finalization_replays_a_commit_without_duplicating_the_incident(tmp_path, monkeypatch) -> None:
+    store = EventStore(tmp_path)
+    service, at = _speech_runtime(store, lambda _: None)
+    initial = service.process("survng/speech", "", at, {"trigger_source": "speech"})
+    store.expire_stale_detection_jobs("gate", maximum_age_seconds=0, event_maximum_age_seconds=0)
+
+    def fail_acknowledgement(_job_id):
+        raise OSError("jobs database unavailable")
+
+    monkeypatch.setattr(store, "finish_speech_look_job", fail_acknowledgement)
+    with pytest.raises(OSError, match="jobs database unavailable"):
+        store.finish_failed_speech_looks("gate")
+    assert _linked_speech(store, initial.event_id)[:2] == (1, "supported")
+
+    recovered = EventStore(tmp_path)
+    assert recovered.finish_failed_speech_looks("gate") == 1
+    assert recovered.finish_failed_speech_looks("gate") == 0
+    assert _linked_speech(recovered, initial.event_id)[:2] == (1, "supported")
+
+
+def test_failed_speech_waits_for_a_separate_confirmation_then_replays(tmp_path) -> None:
+    store = EventStore(tmp_path)
+    service, at = _speech_runtime(store, lambda _: None)
+    now = time.time()
+    seed = store.acquire_scene_sample(
+        sample_id="speech-confirmation-seed", camera_id="gate", captured_epoch=at.timestamp(),
+        source="recorded_main", status="complete", observations=[],
+        metadata={"source": "recorded_main", "frame_width": 160, "frame_height": 100},
+        request_confirmation={"start_epoch": now - 1, "end_epoch": now + 1,
+                              "deadline_epoch": now + 300, "available_at_epoch": now},
+    )
+    initial = service.process("survng/speech", "", at, {
+        "trigger_source": "speech", "scene_sample_ids": [seed["id"]],
+    })
+    store.expire_stale_detection_jobs("gate", maximum_age_seconds=0, event_maximum_age_seconds=0)
+
+    assert store.finish_failed_speech_looks("gate") == 0
+    assert _linked_speech(store, initial.event_id)[:2] == (0, "pending")
+    assert len(store.failed_speech_looks("gate")) == 1
+    with store._connect() as conn:
+        conn.execute("update scene_candidate_jobs set state='complete'")
+
+    assert store.finish_failed_speech_looks("gate") == 1
+    assert _linked_speech(store, initial.event_id) == (
+        1, "supported", "admitted_speech_notice", "speech_reported",
+    )
+
+
+def test_speech_recovery_does_not_touch_camera_notices_or_live_jobs(tmp_path) -> None:
+    store = EventStore(tmp_path)
+    service, at = _speech_runtime(store, lambda _: None)
+    speech = service.process("survng/speech", "", at, {"trigger_source": "speech"})
+    store.expire_stale_detection_jobs("gate", maximum_age_seconds=0, event_maximum_age_seconds=0)
+    store.enqueue_detection_job(
+        job_id="another-live-refinement", camera_id="gate", dedupe_key="another-live-refinement",
+        payload={"existing_event_id": speech.event_id, "qualification": {"trigger_source": "speech"},
+                 "evidence_ready_epoch": time.time() + 300},
+        available_at=time.time() + 300,
+    )
+    assert store.finish_failed_speech_looks("gate") == 0
+    assert _linked_speech(store, speech.event_id)[:2] == (0, "pending")
+
+    camera = service.process("onvif/motion", "", at, {"trigger_source": "camera"})
+    before = _linked_speech(store, camera.event_id)
+    store.expire_stale_detection_jobs("gate", maximum_age_seconds=0, event_maximum_age_seconds=0)
+    assert all(job["event_id"] != camera.event_id for job in store.failed_speech_looks("gate"))
+    assert store.finish_failed_speech_looks("gate") == 0
+    assert _linked_speech(store, camera.event_id) == before
+
+
+@pytest.mark.parametrize("physical_state", ["failed", "insufficient", "supported"])
+def test_pending_speech_work_waits_regardless_of_the_physical_verdict(physical_state) -> None:
+    if physical_state == "supported":
+        samples = physical(["car", "car"], [box(20, 40), box(40, 40)])
+    else:
+        samples = _empty_frames(1)
+        if physical_state == "failed":
+            samples[0]["status"] = "failed"
+    samples[-1]["metadata"]["look_pending"] = True
+    decision = _speech_decision(samples)
+    assert decision["status"] == "pending"
+    assert decision["activity_epoch"] is None
+
+    samples[-1]["metadata"].pop("look_pending")
+    assert _speech_decision(samples)["status"] == "supported"
 
 
 def test_speech_establishment_is_stable_on_replay() -> None:

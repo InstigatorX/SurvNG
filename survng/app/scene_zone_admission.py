@@ -537,6 +537,45 @@ SPEECH_SUBJECT_LABELS = frozenset({"person", "face"})
 _IGNORED_REASONS = frozenset({"ignored_zone", "depth_ignore_zone"})
 
 
+def _speech_sample_metadata(sample: dict) -> dict:
+    metadata = sample.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _speech_sample_was_analyzed(sample: dict) -> bool:
+    """A complete empty record is not an analyzed frame.
+
+    The event store keeps a notice when no frame was decoded and marks it
+    ``analysis_unknown``. That is unavailable video, not an empty room.
+    """
+    if sample.get("status") != "complete":
+        return False
+    metadata = _speech_sample_metadata(sample)
+    if metadata.get("analysis_unknown") is True:
+        return False
+    source = str(metadata.get("source") or sample.get("source") or "")
+    return source not in {"legacy", "event_notice"}
+
+
+def _speech_work_pending(samples) -> bool:
+    """True when this look still has work that can change who is visible.
+
+    A completed recorded frame is not pending work. Speech checks do not queue
+    the discovery confirmation pass, so a vehicle in an eligible zone does not
+    keep the decision open by itself. An unfinished frame, a look whose coverage
+    is still pending, or a confirmation job that is actually queued does.
+    """
+    for sample in samples or []:
+        if not isinstance(sample, dict):
+            continue
+        if sample.get("status") not in {"complete", "failed", None}:
+            return True
+        metadata = _speech_sample_metadata(sample)
+        if metadata.get("look_pending") is True or metadata.get("confirmation_pending") is True:
+            return True
+    return False
+
+
 def _speech_establishment(result, zone, activity, interpretations, samples, notice):
     """Speech on a camera whose zones restrict incidents.
 
@@ -579,10 +618,22 @@ def _speech_establishment(result, zone, activity, interpretations, samples, noti
         )
         return result
     status = activity.get("status")
-    if status == "pending":
-        # Detection is still sampling; a person may yet appear.
+    analyzed = [
+        sample for sample in samples or []
+        if isinstance(sample, dict) and _speech_sample_was_analyzed(sample)
+    ]
+    if _speech_work_pending(samples):
+        # Physical evidence can be supported or unavailable while this look
+        # still has work. Neither settles who the speech can be attributed to.
+        result.update(
+            status="pending", reason="awaiting_activity_confirmation",
+            summary="Waiting for video to finish checking who was visible.",
+            activity_epoch=None, supporting_observation_ids=[],
+        )
         return result
-    unverified = status == "incomplete"
+    # Pending with no confirmation pass is a finished look: analyzed frames
+    # saw nobody eligible, and a notice with no analysis could not be checked.
+    unverified = status == "incomplete" or (status == "pending" and not analyzed)
     zone.update(establishment_eligible=True, reason="speech_unlocated")
     result.update(
         status="supported",

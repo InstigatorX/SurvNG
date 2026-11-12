@@ -104,6 +104,106 @@ class EventStoreSceneAdmissionMixin:
                 samples.append(variant)
         return samples
 
+    def _mark_pending_look(self, samples, objects):
+        """A coverage state of pending is work still running on this look.
+
+        It is read from the event, not stored on the sample. A finished look
+        must not stay pending because an earlier pass recorded the flag.
+        A pending batch can omit its samples, as detect_initial() does while
+        refinement is still running. That look still covers the samples this
+        event acquired, including the synthetic notice for an empty frame.
+        An unavailable initial frame has no scene batch at all. The decision
+        handler records that with face_evidence_pending, and that marker is
+        the same unfinished look.
+        """
+        pending = set()
+        settled = set()
+        pending_without_samples = False
+        face_pending = any(
+            isinstance(item, dict) and item.get("status") == "face_evidence_pending"
+            for item in objects or []
+        )
+        for item in objects or []:
+            if not isinstance(item, dict) or item.get("status") != "scene_observations":
+                continue
+            batch = [sample for sample in item.get("samples") or [] if isinstance(sample, dict)]
+            keys = set()
+            for sample in batch:
+                if sample.get("id"):
+                    keys.add(str(sample["id"]))
+                metadata = sample.get("metadata") or {}
+                source = str(metadata.get("source") or sample.get("source") or "recorded_main")
+                try:
+                    keys.add((round(float(sample["captured_epoch"]), 6), source))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if (item.get("coverage") or {}).get("state") == "pending":
+                if batch:
+                    pending.update(keys)
+                else:
+                    pending_without_samples = True
+            else:
+                settled.update(keys)
+        if not pending and not pending_without_samples and not face_pending:
+            return samples
+        marked = []
+        for sample in samples:
+            if not isinstance(sample, dict):
+                marked.append(sample)
+                continue
+            metadata = sample.get("metadata") or {}
+            source = str(metadata.get("source") or sample.get("source") or "")
+            try:
+                key = (round(float(sample.get("captured_epoch") or 0), 6), source)
+            except (TypeError, ValueError):
+                key = None
+            sample_id = str(sample.get("id") or "")
+            named = sample_id in pending or key in pending
+            # A pending batch with no sample list, or a face-evidence marker
+            # with no batch, still owns this look. Samples an explicit finished
+            # batch already identified are left alone.
+            covered = (
+                (pending_without_samples or face_pending)
+                and sample_id not in settled
+                and key not in settled
+            )
+            if named or covered:
+                metadata = dict(metadata)
+                metadata["look_pending"] = True
+                sample = {**sample, "metadata": metadata}
+            marked.append(sample)
+        return marked
+
+    def _mark_pending_confirmation(self, conn, samples):
+        """Copy an open confirmation job onto the samples establishment reads.
+
+        The job table is the pending work. A box that could have been confirmed
+        is not, unless a job for that sample is still pending or running.
+        """
+        ids = [str(sample.get("id")) for sample in samples if isinstance(sample, dict) and sample.get("id")]
+        if not ids:
+            return samples
+        placeholders = ",".join("?" for _ in ids)
+        pending = {
+            str(row[0])
+            for row in conn.execute(
+                "select s.sample_id from scene_candidate_seeds s "
+                "join scene_candidate_jobs j on j.id=s.candidate_id "
+                f"where s.sample_id in ({placeholders}) and j.state in ('pending','running')",
+                ids,
+            )
+        }
+        if not pending:
+            return samples
+        marked = []
+        for sample in samples:
+            if isinstance(sample, dict) and str(sample.get("id") or "") in pending:
+                metadata = dict(sample.get("metadata") or {})
+                metadata["confirmation_pending"] = True
+                sample = {**sample, "metadata": metadata}
+            marked.append(sample)
+        return marked
+
     def _scene_ingest(self, conn, row, *, historical=False, notify=True, activity=True, force_revision=False, objects=None):
         """``objects`` is the decoded ``row["objects_json"]`` when the caller has it; it is only read."""
         from ..scene_activity import evaluate_scene_activity
@@ -126,6 +226,7 @@ class EventStoreSceneAdmissionMixin:
             decision = previous
             decision_id = decision["id"]
         policy = qualification.get("establishment_zone_policy")
+        notice = None
         if historical:
             # Historical import keeps the decision recorded with the evidence.
             # Today's zone configuration must not reopen or reject those episodes.
@@ -139,7 +240,6 @@ class EventStoreSceneAdmissionMixin:
                 assessment.update(status="incomplete", reason="historical_activity_unverified",
                                   summary="Activity could not be established from retained historical observations.")
         else:
-            notice = None
             if not qualification.get("scene_discovery") and not qualification.get("scene_confirmation"):
                 trigger_source = qualification.get("trigger_source", "camera")
                 notice = {"source": trigger_source if trigger_source in {"camera", "speech"} else "motion", "epoch": at}
@@ -156,6 +256,8 @@ class EventStoreSceneAdmissionMixin:
                 memory = self.scene_context_snapshot(conn, str(row.get("camera_id") or ""))
             created = row.get("created_at")
             event_key = created.isoformat() if hasattr(created, "isoformat") else str(created or "")
+            samples = self._mark_pending_look(samples, objects)
+            samples = self._mark_pending_confirmation(conn, samples)
             assessment = evaluate_scene_establishment(
                 samples,
                 policy=policy if isinstance(policy, dict) else None,
@@ -166,7 +268,17 @@ class EventStoreSceneAdmissionMixin:
             )
         newer_activity = assessment["status"] == "supported" and (
             decision is None or decision["verdict"] != "supported" or (assessment.get("activity_epoch") or 0) > (decision.get("activity_epoch") or 0))
-        if decision is None or (newer_activity and activity and not historical):
+        # Speech waits while refinement runs. A finished pass, including one
+        # that attributes the speech to an ignored person, replaces that wait.
+        # A supported decision is never replaced by a later rejection.
+        speech_finished = (
+            isinstance(notice, dict)
+            and notice.get("source") == "speech"
+            and decision is not None
+            and decision.get("verdict") == "pending"
+            and assessment["status"] in {"supported", "unsupported"}
+        )
+        if decision is None or ((newer_activity or speech_finished) and activity and not historical):
             decision_id = "activity-event-" + _identity([row["id"], assessment, sample_ids])
             decision = self._record_scene_activity_decision(
                 conn, decision_id=decision_id, sample_ids=sample_ids, verdict=assessment["status"],

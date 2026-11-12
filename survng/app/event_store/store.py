@@ -909,6 +909,84 @@ class EventStore(
             row = self._finish_evidence_commit(conn, event_id, before, reason="objects_updated")
         return dict(row) if row is not None else None
 
+    def finish_pending_look(
+        self,
+        event_id: int,
+        *,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Refinement ended without video. Keep the image and settle admission.
+
+        The provisional snapshot and detections stay. Pending coverage and
+        face_evidence_pending are only the signal that refinement is still
+        running, so a finished failure removes them and admission runs again.
+        """
+        with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
+            before = conn.execute("select * from events where id=?", (event_id,)).fetchone()
+            if before is None:
+                return None
+            self._check_evidence_revision(before, expected_revision)
+            try:
+                objects = json.loads(before["objects_json"] or "[]")
+            except (TypeError, ValueError):
+                return dict(before)
+            if not isinstance(objects, list):
+                return dict(before)
+            changed = False
+            settled: list[Any] = []
+            for item in objects:
+                if not isinstance(item, dict):
+                    settled.append(item)
+                    continue
+                if item.get("status") == "face_evidence_pending":
+                    changed = True
+                    continue
+                coverage = item.get("coverage") if item.get("status") == "scene_observations" else None
+                if isinstance(coverage, dict) and coverage.get("state") == "pending":
+                    item = {**item, "coverage": {**coverage, "state": "unavailable"}}
+                    changed = True
+                settled.append(item)
+            if not changed:
+                pending = conn.execute(
+                    "select 1 from scene_event_establishment x "
+                    "join scene_activity_decisions d on d.id=x.decision_id "
+                    "where x.event_id=? and d.verdict='pending'",
+                    (event_id,),
+                ).fetchone()
+                if pending is None:
+                    return dict(before)
+            conn.execute(
+                "update events set objects_json=? where id=?",
+                (json.dumps(settled, separators=(",", ":")), event_id),
+            )
+            row = self._finish_evidence_commit(conn, event_id, before, reason="objects_updated")
+        return dict(row) if row is not None else None
+
+    def finish_failed_speech_looks(self, camera_id: str, *, limit: int = 100) -> int:
+        """Recover failed refinements without losing admission across databases.
+
+        Failure/expiry is durable in the jobs ledger. Commit the event first,
+        then acknowledge the job; replay between those commits is idempotent.
+        """
+        finished = 0
+        for job in self.failed_speech_looks(camera_id, limit=limit):
+            self.finish_pending_look(int(job["event_id"]))
+            with self._connect() as conn:
+                pending = conn.execute(
+                    "select 1 from scene_event_establishment x "
+                    "join scene_activity_decisions d on d.id=x.decision_id "
+                    "where x.event_id=? and d.verdict='pending'",
+                    (job["event_id"],),
+                ).fetchone()
+            if pending is not None:
+                # A separately queued confirmation still owns admission. Keep
+                # the obligation so its completion can trigger another replay.
+                continue
+            self.finish_speech_look_job(str(job["id"]))
+            finished += 1
+        return finished
+
     def replace_detected_objects(
         self,
         event_id: int,

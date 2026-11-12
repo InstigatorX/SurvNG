@@ -21,6 +21,16 @@ DETECTION_EVENT_JOB_MAXIMUM_AGE_SECONDS = 60.0
 # Bound unfinished bookkeeping independently, including recovery after restart.
 DETECTION_COMPLETION_JOB_MAXIMUM_AGE_SECONDS = 24 * 60 * 60.0
 
+# A failed speech job remains an admission obligation until the main event
+# transaction has settled its pending look. Keep that obligation through pruning.
+_UNFINISHED_SPEECH_LOOK_SQL = (
+    "state='failed' "
+    "and coalesce(json_extract(payload_json, '$.qualification.trigger_source'),'')='speech' "
+    "and json_extract(payload_json, '$.existing_event_id') is not null "
+    "and coalesce(json_extract(payload_json, '$.qualification.cover_only'),0)=0 "
+    "and coalesce(json_extract(payload_json, '$.speech_look_finished'),0)=0"
+)
+
 
 def _detection_job_occurrence(payload: dict[str, Any]) -> dict[str, Any]:
     qualification = payload.get("qualification")
@@ -1125,6 +1135,34 @@ class EventStoreJobsMixin:
             )
             return retry if cursor.rowcount == 1 else None
 
+    def failed_speech_looks(self, camera_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Read terminal admission obligations, including ones left by a crash.
+
+        Another live mandatory job for the event still owns its pending look.
+        No jobs write lock is held while the caller updates the main database.
+        """
+        with self._connect_jobs() as conn:
+            return [dict(row) for row in conn.execute(
+                "select job.id, json_extract(job.payload_json, '$.existing_event_id') event_id "
+                f"from detection_jobs job where job.camera_id=? and {_UNFINISHED_SPEECH_LOOK_SQL} "
+                "and not exists(select 1 from detection_jobs active "
+                "where active.camera_id=job.camera_id and active.state in ('queued','running') "
+                "and json_extract(active.payload_json, '$.existing_event_id')="
+                "json_extract(job.payload_json, '$.existing_event_id')) "
+                "order by job.updated_at,job.id limit ?",
+                (camera_id, max(1, min(int(limit), 1000))),
+            )]
+
+    def finish_speech_look_job(self, job_id: str) -> None:
+        """Acknowledge only after the main event transaction has committed."""
+        with self._jobs_lock, self._connect_jobs() as conn:
+            conn.execute(
+                "update detection_jobs set payload_json="
+                "json_set(payload_json, '$.speech_look_finished', json('true')) "
+                "where id=? and state='failed'",
+                (job_id,),
+            )
+
     def detection_job_status(self, camera_id: str) -> dict[str, int | float]:
         with self._connect_jobs() as conn:
             rows = conn.execute(
@@ -1196,6 +1234,7 @@ class EventStoreJobsMixin:
                     "where state in ('completed','failed') and updated_at < ? "
                     "and (updated_at < ? or json_extract(payload_json, "
                     "'$.qualification.scene_discovery') = 1) "
+                    f"and not ({_UNFINISHED_SPEECH_LOOK_SQL}) "
                     "order by updated_at asc limit ?",
                     (discovery_cutoff, cutoff, batch),
                 ).fetchall()

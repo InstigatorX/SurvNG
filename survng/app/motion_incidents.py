@@ -1302,6 +1302,11 @@ class MotionIncidentService:
             errno.ESTALE, errno.ETIMEDOUT,
         }
 
+    def _finish_failed_speech_looks(self) -> None:
+        finish = getattr(self.refinement_store, "finish_failed_speech_looks", None)
+        if callable(finish):
+            finish(self.camera_id)
+
     def _forget_terminal_refinements(self) -> None:
         with self._status_lock:
             local_ids = set(self._refinement_callbacks) | set(self._refinement_progress)
@@ -1525,6 +1530,9 @@ class MotionIncidentService:
                             "stale motion refinement expiration failed for %s",
                             self.camera_id,
                         )
+                # Also recover terminal exceptions and failures persisted by a
+                # previous runtime. Main-DB failures leave the job unacknowledged.
+                self._finish_failed_speech_looks()
             # Clear before inspecting the durable queue. Admission after this
             # point sets the token, including the race between claim and cover.
             with self._status_lock:
@@ -1686,6 +1694,7 @@ class MotionIncidentService:
                         except queue.Full:
                             pass
                     else:
+                        self._finish_failed_speech_looks()
                         with self._status_lock:
                             self._refinement_callbacks.pop(job_id, None)
                     continue

@@ -591,8 +591,13 @@ class MotionDecisionHandler:
         if existing_event_id is not None and not detection_completed:
             # Refinement is additive. A transient decoder/detector failure must
             # never replace a known-good provisional snapshot or its objects
-            # with empty/status-only evidence.
+            # with empty/status-only evidence. Admission is separate: the
+            # pending look has now finished, so speech can reach a verdict
+            # from the evidence that was kept.
             qualification["refinement_evidence_preserved"] = True
+            finish_pending_look = getattr(self.events, "finish_pending_look", None)
+            if not cover_only and callable(finish_pending_look):
+                finish_pending_look(int(existing_event_id), **revision_kwargs)
             release_gallery_reservation()
             return MotionDecisionOutcome(
                 event_id=int(existing_event_id),
