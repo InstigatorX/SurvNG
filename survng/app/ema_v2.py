@@ -266,6 +266,9 @@ class MotionSource(StrEnum):
     CAMERA = "camera"
     EMA = "ema"
     MANUAL = "manual"
+    # Confirmed speech from the camera's audio. Kept apart from CAMERA so it
+    # never replaces a retained ONVIF notice or counts as camera motion.
+    SPEECH = "speech"
 
 
 class DetectionRequestStatus(StrEnum):
@@ -317,6 +320,7 @@ class DetectionIntent:
     followup: bool = False
     ema: EmaQualified | None = None
     camera_notice: CameraNotice | None = None
+    speech_notice: CameraNotice | None = None
     # A live-frame-only recheck of an episode that has not produced an
     # incident. It bypasses EMA cooldown/budget and recorded refinement.
     live_probe: bool = False
@@ -347,6 +351,7 @@ class _Episode:
     pending_sources: set[MotionSource] = field(default_factory=set)
     ema: EmaQualified | None = None
     camera_notice: CameraNotice | None = None
+    speech_notice: CameraNotice | None = None
     intent: DetectionIntent | None = None
     status: DetectionRequestStatus | None = None
     admission_acknowledged: bool = False
@@ -455,6 +460,19 @@ class MotionEpisodeController:
             camera_notice=notice,
         )
 
+    def observe_speech(
+        self, notice: CameraNotice, *, generation: int
+    ) -> EpisodeDecision:
+        if notice.camera_id != self.camera_id:
+            raise ValueError("speech notice belongs to another camera")
+        return self._observe(
+            MotionSource.SPEECH,
+            event_at=notice.event_at,
+            observed_monotonic=notice.observed_monotonic,
+            generation=generation,
+            speech_notice=notice,
+        )
+
     def observe_ema(
         self, qualified: EmaQualified, *, generation: int
     ) -> EpisodeDecision:
@@ -477,6 +495,7 @@ class MotionEpisodeController:
         generation: int,
         ema: EmaQualified | None = None,
         camera_notice: CameraNotice | None = None,
+        speech_notice: CameraNotice | None = None,
     ) -> EpisodeDecision:
         with self._lock:
             if generation != self._generation:
@@ -498,6 +517,8 @@ class MotionEpisodeController:
                 episode.ema = ema
             if camera_notice is not None:
                 episode.camera_notice = camera_notice
+            if speech_notice is not None:
+                episode.speech_notice = speech_notice
             bypass_ema_limits = bool(
                 ema is not None
                 and ema.result.features.get("security_verification_bypass_limits")
@@ -528,6 +549,7 @@ class MotionEpisodeController:
                         followup=episode.intent.followup,
                         ema=episode.ema,
                         camera_notice=episode.camera_notice,
+                        speech_notice=episode.speech_notice,
                         live_probe=episode.intent.live_probe,
                     )
                 return self._decision(
@@ -722,6 +744,7 @@ class MotionEpisodeController:
             followup=followup,
             ema=episode.ema,
             camera_notice=episode.camera_notice,
+            speech_notice=episode.speech_notice,
             live_probe=live_probe,
         )
         episode.intent = intent
@@ -805,6 +828,16 @@ class MotionEpisodeController:
                 episode,
                 source=camera_source,
                 event_at=notice.event_at,
+                observed_monotonic=occurred_monotonic,
+                generation=episode.generation,
+                sources=sources,
+            )
+        speech = episode.speech_notice
+        if speech is not None and MotionSource.SPEECH in sources:
+            return self._reserve_intent(
+                episode,
+                source=MotionSource.SPEECH,
+                event_at=speech.event_at,
                 observed_monotonic=occurred_monotonic,
                 generation=episode.generation,
                 sources=sources,
@@ -1107,6 +1140,7 @@ class MotionEpisodeController:
             followup=intent.followup,
             ema=intent.ema,
             camera_notice=intent.camera_notice,
+            speech_notice=intent.speech_notice,
             live_probe=intent.live_probe,
         )
 

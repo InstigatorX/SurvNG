@@ -14,6 +14,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import PurePath
 
+from .motion_topics import SPEECH_TOPIC
 from .incident_utils import (
     event_epoch,
     stable_incident_id,
@@ -110,6 +111,8 @@ def _event_row(row: dict) -> dict:
     event["trigger_source"] = (
         "ema"
         if raw_trigger_source in {"adaptive", "visual_backup", "adaptive/visual_backup"}
+        else "speech"
+        if raw_trigger_source in {"speech", SPEECH_TOPIC}
         else "camera"
     )
     tracking_entry = next(

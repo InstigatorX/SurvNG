@@ -727,6 +727,7 @@ class EventStoreMotionIntelligenceMixin:
                 "object_events": 0,
                 "no_object_events": 0,
                 "camera_object_events": 0,
+                "speech_object_events": 0,
                 "ema_object_events": 0,
                 "borderline_rescued": 0,
                 "suppression_verification_checks": 0,
@@ -789,6 +790,8 @@ class EventStoreMotionIntelligenceMixin:
                     "ema",
                 }:
                     summary["ema_object_events"] += 1
+                elif trigger_source == "speech":
+                    summary["speech_object_events"] += 1
                 else:
                     summary["camera_object_events"] += 1
             if qualification.get("trigger_source") == "visual_backup":

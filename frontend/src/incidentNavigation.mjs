@@ -550,9 +550,9 @@ export function incidentZoomLayout(frameSize, zoom) {
 
 export function incidentTriggerLabel(incident) {
   const source = String(incident?.trigger_source || "camera").toLowerCase();
-  return ["ema", "adaptive", "visual_backup", "adaptive/visual_backup"].includes(source)
-    ? "EMA"
-    : "Camera";
+  if (["ema", "adaptive", "visual_backup", "adaptive/visual_backup"].includes(source)) return "EMA";
+  if (source === "speech" || source === "survng/speech") return "Speech";
+  return "Camera";
 }
 
 export function incidentObjectIconName(label) {

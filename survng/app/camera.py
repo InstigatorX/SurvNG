@@ -1122,6 +1122,10 @@ class CameraWorker:
     ) -> None:
         self.motion_runtime.handle_event(topic, message, event_at, active=active)
 
+    def handle_speech(self, started_at: datetime) -> bool:
+        """Request an incident check for confirmed speech (not camera motion)."""
+        return self.motion_runtime.handle_speech(started_at)
+
     def set_motion_debug_enabled(self, enabled: bool) -> None:
         self.motion_qualification.set_debug_enabled(enabled)
 

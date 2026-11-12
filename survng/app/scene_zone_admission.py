@@ -605,14 +605,17 @@ def evaluate_scene_establishment(
         result["policy_version"] = "establishment_activity_v3"
     if not restricting and (notice_activity is None or activity["status"] == "supported"):
         if notice and result.get("status") != "supported":
-            source = "camera" if notice.get("source") == "camera" else "motion"
+            source = notice.get("source") if notice.get("source") in {"camera", "speech"} else "motion"
             result.update(
                 status="supported",
-                reason="admitted_camera_notice",
-                summary="The camera reported activity." if source == "camera" else "The motion pipeline reported activity.",
+                reason="admitted_speech_notice" if source == "speech" else "admitted_camera_notice",
+                summary={
+                    "camera": "The camera reported activity.",
+                    "speech": "The camera heard speech.",
+                }.get(source, "The motion pipeline reported activity."),
                 activity_epoch=notice.get("epoch"),
                 supporting_observation_ids=[],
-                evidence_kind="camera_reported",
+                evidence_kind="speech_reported" if source == "speech" else "camera_reported",
             )
             zone.update(establishment_eligible=True, reason="full_frame")
         elif result.get("status") == "supported":

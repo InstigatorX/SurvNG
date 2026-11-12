@@ -495,6 +495,9 @@ class MotionRuntimeService:
     ) -> None:
         self.ingress.handle(topic, message, event_at, active=active)
 
+    def handle_speech(self, started_at: datetime) -> bool:
+        return self.ingress.handle_speech(started_at)
+
     def submit_frame(
         self,
         image: Any,

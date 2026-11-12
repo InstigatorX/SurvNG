@@ -13,6 +13,7 @@ from .camera_semantics import camera_semantic_reports
 from .motion_events import MotionEventCoordinator, MotionEventTiming, MotionTrigger
 from .domain_events import MotionObserved
 from .ema_v2 import CameraNotice, EpisodeDecision, EpisodeDecisionReason
+from .motion_topics import SPEECH_TOPIC
 
 
 class MotionIngressQualification(Protocol):
@@ -238,6 +239,69 @@ class MotionEventIngressService:
                 )
                 if not queued:
                     self._enqueue_ema_fallback(admission)
+        finally:
+            self.state.end_ingress(generation)
+
+    def handle_speech(self, started_at: datetime, *, message: str = "") -> bool:
+        """Ask for an incident check because the camera heard confirmed speech.
+
+        Speech is not camera motion: it never sets ``last_motion_at``, never
+        publishes a motion activity event (the Home Assistant Motion sensor),
+        is not recorded as ONVIF evidence, never feeds the camera clock model
+        (its time comes from SurvNG's clock), and is admitted in every
+        qualification mode. Returns True when a detection check was queued.
+        """
+        generation = self.state.begin_ingress()
+        if generation is None:
+            return False
+        try:
+            received_at = self.epoch_now()
+            receipt_time = datetime.fromtimestamp(received_at, timezone.utc)
+            event_at = self._utc(started_at)
+            event_timing = MotionEventTiming(
+                sampling_at=event_at,
+                received_at=receipt_time,
+                selection_reason="speech_time",
+            )
+            episode = self.events.episode_controller.observe_speech(
+                CameraNotice(
+                    camera_id=self.camera_id,
+                    event_at=event_at.timestamp(),
+                    observed_monotonic=time.monotonic(),
+                    topic=SPEECH_TOPIC,
+                    message=message,
+                ),
+                generation=generation,
+            )
+            if episode.reason not in {
+                EpisodeDecisionReason.REQUEST_RESERVED,
+                EpisodeDecisionReason.FOLLOWUP_RESERVED,
+            }:
+                return False
+            intent = episode.intent
+            if intent is None:
+                return False
+            queued = False
+            try:
+                queued = self.enqueue(MotionTrigger(
+                    topic=SPEECH_TOPIC,
+                    message=message,
+                    event_at=event_at,
+                    received_at=received_at,
+                    event_timing=event_timing,
+                    episode_id=intent.episode_id,
+                    detection_intent_id=intent.intent_id,
+                    lifecycle_generation=intent.generation,
+                ), evict_oldest=False)
+            finally:
+                admission = self.events.episode_controller.acknowledge_admission(
+                    intent.intent_id,
+                    admitted=queued,
+                    occurred_monotonic=time.monotonic(),
+                )
+                if not queued:
+                    self._enqueue_ema_fallback(admission)
+            return queued
         finally:
             self.state.end_ingress(generation)
 

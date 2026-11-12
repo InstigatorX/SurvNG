@@ -1797,9 +1797,12 @@ class MotionAnalysisService:
         }:
             return False
         intent = decision.intent
-        if intent is None or intent.camera_notice is None:
+        if intent is None:
             return False
-        notice = intent.camera_notice
+        # A retained camera notice wins; otherwise replay confirmed speech.
+        notice = intent.camera_notice or intent.speech_notice
+        if notice is None:
+            return False
         admitted = False
         try:
             admitted = self._enqueue_trigger(MotionTrigger(

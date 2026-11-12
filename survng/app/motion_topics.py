@@ -3,6 +3,15 @@
 from __future__ import annotations
 
 
+# Notice topic used when confirmed speech asks for an incident check. It is
+# SurvNG's own topic, never a camera/ONVIF topic, so it carries no semantics.
+SPEECH_TOPIC = "survng/speech"
+
+
+def is_speech_topic(topic: str) -> bool:
+    return normalize_motion_topic(topic) == SPEECH_TOPIC
+
+
 def normalize_motion_topic(topic: str) -> str:
     return "/".join(
         segment.rsplit(":", 1)[-1].strip().lower()

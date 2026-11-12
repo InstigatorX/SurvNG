@@ -13,7 +13,7 @@ from typing import Any, Protocol
 from .config import MotionQualificationConfig
 from .database_polling import database_polling_session
 from .motion import MotionQualificationResult
-from .motion_topics import semantic_motion_kind
+from .motion_topics import is_speech_topic, semantic_motion_kind
 from .camera_semantics import active_camera_semantic_kind, camera_semantic_reports
 from .motion_events import (
     MotionEventCoordinator,
@@ -371,6 +371,14 @@ class MotionDecisionOrchestrator:
                     report_keys.add(key)
                     semantic_reports.append(dict(report))
         priority = bool(priority_triggers or semantic_reports)
+        speech_trigger = bool(
+            "speech" in authoritative_sources
+            or any(is_speech_topic(item.topic) for item in triggers)
+        )
+        # Speech labels the decision only when no camera notice shares it.
+        speech_only = speech_trigger and not authoritative_sources.intersection(
+            {"camera", "manual"}
+        )
         adaptive_only = bool(
             all(item.topic.startswith("adaptive/") for item in triggers)
             and not authoritative_sources.intersection({"camera", "manual"})
@@ -399,6 +407,7 @@ class MotionDecisionOrchestrator:
             sensitivity=sensitivity,
             priority=priority,
             adaptive_only=adaptive_only,
+            speech=speech_trigger,
         )
         if stop_event.is_set():
             self._abort_episode_intents(triggers)
@@ -451,6 +460,8 @@ class MotionDecisionOrchestrator:
                 if visual_backup
                 else "active_followup"
                 if active_followup
+                else "speech"
+                if speech_only
                 else "adaptive" if adaptive_only else "camera"
             ),
             "live_probe": live_probe,
@@ -574,6 +585,7 @@ class MotionDecisionOrchestrator:
         sensitivity: str,
         priority: bool,
         adaptive_only: bool,
+        speech: bool = False,
     ) -> tuple[MotionQualificationResult, dict[str, Any]]:
         prequalified = [
             item.prequalified for item in triggers if item.prequalified is not None
@@ -610,6 +622,17 @@ class MotionDecisionOrchestrator:
                 "camera_primary_fast_path",
                 0,
                 {"primary_motion_source": "camera"},
+            )
+        elif speech:
+            # Speech has no visual motion to qualify: an unseen speaker is the
+            # case it exists for. The recorded object check still runs.
+            result = MotionQualificationResult(
+                True,
+                1.0,
+                0.0,
+                "speech_trigger",
+                0,
+                {"primary_motion_source": "speech"},
             )
         elif priority:
             result = MotionQualificationResult(

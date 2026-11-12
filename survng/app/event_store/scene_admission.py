@@ -141,7 +141,8 @@ class EventStoreSceneAdmissionMixin:
         else:
             notice = None
             if not qualification.get("scene_discovery") and not qualification.get("scene_confirmation"):
-                notice = {"source": "camera" if qualification.get("trigger_source", "camera") == "camera" else "motion", "epoch": at}
+                trigger_source = qualification.get("trigger_source", "camera")
+                notice = {"source": trigger_source if trigger_source in {"camera", "speech"} else "motion", "epoch": at}
                 # Motion regions place an unexplained notice against the zones
                 # even when no motion-correlation policy was recorded.
                 notice["features"] = qualification.get("features") if isinstance(qualification.get("features"), dict) else {}
