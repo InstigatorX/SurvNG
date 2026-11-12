@@ -110,6 +110,10 @@ the live listener state, and optional tuning. The same settings in
 }
 ```
 
+A camera listens only while it is powered on **and** its Detection switch is
+on (from the Live view, the API, MQTT or Home Assistant). Turning either off
+stops its listener immediately, and turning both back on restarts it.
+
 Speech settings are not hot-applied yet. Changing them goes through the
 standard manager reload, which restarts camera workers.
 
@@ -155,7 +159,7 @@ standard manager reload, which restarts camera workers.
 | `speaking` | A segment is open. |
 | `no_audio_track` | go2rtc or FFmpeg reports no audio on the selected source; rechecked every 10 min. |
 | `restarting` | FFmpeg exited. `failure` gives the category: `stream_unavailable`, `stream_unauthorized`, `audio_decode_error`, `ffmpeg_error` or `stream_ended`. |
-| `camera_off` | The camera is powered off in SurvNG. |
+| `paused` | The camera is powered off, or its Detection switch is off. Speech follows both. |
 
 ## Not yet included
 

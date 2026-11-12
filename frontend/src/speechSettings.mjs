@@ -50,7 +50,7 @@ const LISTENER_LABELS = Object.freeze({
   speaking: "Speech now",
   restarting: "Reconnecting",
   no_audio_track: "No audio track",
-  camera_off: "Camera off",
+  paused: "Paused: camera or detection off",
   stopped: "Stopped",
   disabled: "Off",
   idle: "Off",

@@ -446,7 +446,7 @@ class AppManager:
         self.speech = SpeechLifecycle(
             config,
             database_dir=self.database_dir,
-            camera_enabled=lambda camera_id: self.camera_fleet.camera_enabled(camera_id),
+            camera_enabled=self._speech_camera_active,
             audio_available=self._speech_audio_available,
             publish=self.mqtt.publish,
         )
@@ -837,7 +837,9 @@ class AppManager:
         return self.camera_controls.set_recording(camera_id, enabled)
 
     def set_detection(self, camera_id: str, enabled: bool) -> bool:
-        return self.camera_controls.set_detection(camera_id, enabled)
+        changed = self.camera_controls.set_detection(camera_id, enabled)
+        self._refresh_speech()
+        return changed
 
     def runtime_preferences(self) -> dict[str, dict[str, bool]]:
         return self.camera_controls.snapshot()
@@ -948,6 +950,19 @@ class AppManager:
         except Exception:
             # Optional enrichment: never block surveillance startup.
             LOGGER.exception("Speech listening failed to start")
+
+    def _speech_camera_active(self, camera_id: str) -> bool:
+        # Speech is detection: it listens only while the camera is powered on
+        # and its Detection switch is on.
+        return bool(
+            self.camera_fleet.camera_enabled(camera_id)
+            and self.camera_controls.detection_enabled(camera_id)
+        )
+
+    def _refresh_speech(self) -> None:
+        speech = getattr(self, "speech", None)
+        if speech is not None:
+            speech.refresh()
 
     def _speech_audio_available(self, camera) -> bool | None:
         info = self.recorder.audio_stream_info(camera, camera.speech.source)
@@ -1108,7 +1123,9 @@ class AppManager:
         return self.camera_fleet.camera(camera_id)
 
     def start_camera(self, camera_id: str) -> bool:
-        return self.camera_controls.start_camera(camera_id)
+        started = self.camera_controls.start_camera(camera_id)
+        self._refresh_speech()
+        return started
 
     def stop_camera(self, camera_id: str) -> bool:
         media_sessions = getattr(self, "media_sessions", None)
@@ -1125,7 +1142,9 @@ class AppManager:
                     MediaSessionKind.CAPTURE_MAIN,
                 },
             )
-        return self.camera_controls.stop_camera(camera_id)
+        stopped = self.camera_controls.stop_camera(camera_id)
+        self._refresh_speech()
+        return stopped
 
     def update_camera_zones(
         self,
