@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { IncidentSpeechBadge, IncidentSpeechPanel } from "./IncidentSpeech.jsx";
 import {
   Activity,
   ChevronLeft,
@@ -176,7 +177,7 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
   const observationCount = Number(incident.motion_observation_count || motionObservations.length || 0);
   const countText = `${eventCount} ${eventCount === 1 ? "event" : "events"}${observationCount ? ` · ${observationCount} additional motion update${observationCount === 1 ? "" : "s"}` : ""}`;
   const triggerLabel = incidentTriggerLabel(incident);
-  const triggerTitle = triggerLabel === "EMA" ? "EMA visual backup trigger" : "Camera motion trigger";
+  const triggerTitle = triggerLabel === "EMA" ? "EMA visual backup trigger" : triggerLabel === "Speech" ? "Speech trigger" : "Camera motion trigger";
   const timeText = incident.start_at && incident.end_at && incident.start_at !== incident.end_at
     ? `${formatDateTime(incident.start_at, timeZone)} - ${formatDuration(incident.duration_seconds)}`
     : formatDateTime(incident.created_at, timeZone);
@@ -470,6 +471,7 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
                 </div>
                 <div className="pill-row compact incident-labels">
                   <IncidentObjectBadges labels={labels} />
+                  <IncidentSpeechBadge speech={incident.speech} />
                 </div>
               </div>
             ) : null}
@@ -964,6 +966,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
         <div><strong id="incident-inspector-title">{cameraNameById.get(incident.camera_id) || incident.camera_id}</strong><time>{formatDateTime(eventCoverTime(inspectedEvent, incident.created_at), timeZone)}</time></div>
         {onClose ? <button type="button" className="incident-inspector-close" onClick={onClose} aria-label="Close incident details"><X size={17} /></button> : null}
       </div>
+      <IncidentSpeechPanel incident={incident} timeZone={timeZone} />
       <section className="incident-observed-objects" aria-label="Observed objects">
         <h3>Observed objects</h3>
         {observedObjects.length ? <ul>{observedObjectSummaries(observedObjects).map((detection) => (

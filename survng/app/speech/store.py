@@ -249,6 +249,20 @@ class SpeechStore:
             ).fetchall()
         return [self._row(row) for row in rows]
 
+    def timing_rows(self, camera_id: str, start: float, end: float) -> list[tuple[int, float, float, str, bool]]:
+        """(id, started_at, ended_at, status, has_text) overlapping a span; never text."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select id, started_at, ended_at, status, text != '' as has_text "
+                "from speech_segments where camera_id = ? and ended_at >= ? and started_at <= ? "
+                "order by started_at",
+                (camera_id, start, end),
+            ).fetchall()
+        return [
+            (int(row[0]), float(row[1]), float(row[2]), str(row[3]), bool(row[4]))
+            for row in rows
+        ]
+
     def counts(self) -> dict[str, int]:
         with self._connect() as conn:
             rows = conn.execute(

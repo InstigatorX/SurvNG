@@ -84,6 +84,7 @@ from .incident_lifecycle import IncidentLifecycle
 from .security import redact_secret_text
 from .telemetry_store import TelemetryStore
 from .speech import SpeechLifecycle
+from .speech.attach import ATTACH_PAD_SECONDS
 from .telemetry_migration import migrate_legacy_runtime_telemetry
 
 
@@ -969,6 +970,40 @@ class AppManager:
         if not info.known:
             return None
         return bool(info.codec)
+
+    def attach_incident_speech(self, incidents: list[dict]) -> list[dict]:
+        """Add speech counts (never text) to incident payloads in place."""
+        speech = getattr(self, "speech", None)
+        ids = [str(item.get("incident_id") or item.get("id") or "") for item in incidents if isinstance(item, dict)]
+        ids = [item for item in ids if item]
+        if speech is None or not ids:
+            return incidents
+        try:
+            summaries = speech.incident_speech(self.events.scene_episode_windows(ids))
+        except Exception:
+            # Speech is enrichment; incident pages must load without it.
+            LOGGER.warning("Speech could not be attached to incidents", exc_info=True)
+            return incidents
+        for item in incidents:
+            if not isinstance(item, dict):
+                continue
+            summary = summaries.get(str(item.get("incident_id") or item.get("id") or ""))
+            if summary:
+                item["speech"] = summary
+        return incidents
+
+    def speech_incident_ids(self, segments: list[dict]) -> None:
+        """Add the overlapping incident id to transcript rows (admin API only)."""
+        for segment in segments:
+            try:
+                start = datetime.fromisoformat(str(segment["started_at"])).timestamp()
+                end = datetime.fromisoformat(str(segment["ended_at"])).timestamp()
+                ids = self.events.scene_incident_ids_overlapping(
+                    segment["camera_id"], start - ATTACH_PAD_SECONDS, end + ATTACH_PAD_SECONDS,
+                )
+            except Exception:
+                ids = []
+            segment["incident_id"] = ids[0] if ids else None
 
     def speech_status(self) -> dict:
         speech = getattr(self, "speech", None)

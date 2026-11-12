@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { IncidentSpeechBadge, IncidentSpeechPanel } from "../incidents/IncidentSpeech.jsx";
 import { IncidentScenePanel } from "../incidents/IncidentScenePanel.jsx";
 import { IncidentAnalysisStatus } from "../incidents/IncidentAnalysisStatus.jsx";
 import { useIncidentPlayback } from "../incidents/useIncidentPlayback.js";
@@ -107,7 +108,8 @@ export function IncidentObjectBadges({ labels }) {
 }
 
 export function IncidentSourceDot({ trigger, className = "", onClick = null, ariaLabel = "", title = "" }) {
-  const source = String(trigger || "Camera").toUpperCase() === "EMA" ? "EMA" : "Camera";
+  const normalized = String(trigger || "Camera").toUpperCase();
+  const source = normalized === "EMA" ? "EMA" : normalized === "SPEECH" ? "Speech" : "Camera";
   const classes = `incident-source-dot source-${source.toLowerCase()} ${className}`.trim();
   const label = ariaLabel || `${source} trigger`;
   if (onClick) {
@@ -622,7 +624,7 @@ export function IncidentListItem({ incident, cameraName, timeZone, selected, thu
       <button type="button" className="live-activity-select" onClick={() => onSelect(incident)} aria-label={`Open ${cameraName} activity at ${formatDateTime(time, timeZone)}`}>
         <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusControls={false} showAnnotations={thumbnailAnnotations} showTracking={false} /></span>
         <span className="live-activity-copy">
-          <span className="live-activity-kind"><IncidentObjectBadges labels={labels} /><span className="sr-only">{activityLabel}</span></span>
+          <span className="live-activity-kind"><IncidentObjectBadges labels={labels} /><IncidentSpeechBadge speech={incident.speech} /><span className="sr-only">{activityLabel}</span></span>
           <b>{cameraName}</b>
           <time>{formatDateTime(time, timeZone)}</time>
         </span>
@@ -1466,6 +1468,7 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
         <div className="event-detail-body">
           <IncidentAnalysisStatus key={event.incident_id || event.id} incidentId={event.incident_id} onDetail={(detail) => setCorrectedScene((current) => current?.id === detail.id && Number(current.revision) > Number(detail.revision) ? current : detail)} />
           <IncidentScenePanel key={event.incident_id || event.id} incident={event} timeZone={timeZone} canCorrectIncident={canCorrectIncident} onChanged={(detail) => { setCorrectedScene(detail); onRefresh?.(); }} onSelectEpisode={scenePlayback.select} onPlayScene={scenePlayback.playAll} activeEpisodeId={scenePlayback.episode?.episode_id} onNextEpisode={scenePlayback.hasNext ? scenePlayback.nextEpisode : null} onStopPlayback={scenePlayback.stop} />
+          <IncidentSpeechPanel incident={event} timeZone={timeZone} />
           <details
             className="event-analysis-details"
             open={analysisToolsOpen}

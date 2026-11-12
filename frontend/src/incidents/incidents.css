@@ -505,3 +505,94 @@
   margin: 8px 0;
   accent-color: var(--accent);
 }
+
+/* Speech attached to incidents */
+.pill.speech-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: #c4b5fd;
+}
+
+.incident-speech-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.incident-speech-panel h3 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 14px;
+}
+
+.incident-speech-panel h3 small {
+  flex-basis: 100%;
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.incident-speech-panel ol {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.incident-speech-panel li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 4px 10px;
+  border-radius: 6px;
+  background: var(--control-muted);
+  padding: 7px 9px;
+}
+
+.incident-speech-panel time {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.incident-speech-panel li p {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.incident-speech-panel li p.empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.incident-speech-panel li a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.incident-speech-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+
+.incident-inspector .incident-speech-panel {
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 10px;
+}

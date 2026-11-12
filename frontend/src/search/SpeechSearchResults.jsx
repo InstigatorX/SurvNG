@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { CircleAlert, Mic, Play, Search } from "lucide-react";
 import { appUrl, fetch, recordingsHref } from "../shared/api.js";
+import { canonicalIncidentHref } from "../incidentScene.mjs";
 import { formatDateTime } from "../shared/format.js";
 import { speechSegmentReasonLabel, speechSegmentRecordingContext, speechSegmentStatusLabel, speechSegmentsQuery } from "../speechSettings.mjs";
 
@@ -89,7 +90,10 @@ export function SpeechSearchWorkspace({ cameras, cameraId, timeZone, initialQuer
         return <article key={segment.id} className={`speech-result ${segment.status}`} aria-label={`Speech at ${name}, ${when}`}>
           <div className="speech-result-meta"><Mic size={15} /><strong>{name}</strong><small>{when} · {Number(segment.duration_seconds || 0).toFixed(1)}s</small><span className={`speech-result-status ${segment.status}`}>{speechSegmentStatusLabel(segment.status)}</span></div>
           <p className={text ? "speech-result-text" : "speech-result-text empty"}>{text ? `“${text}”` : placeholder}</p>
-          {context ? <nav aria-label={`Actions for speech at ${name}`}><a href={recordingsHref(context)}><Play size={14} />Play recording</a></nav> : null}
+          {context || segment.incident_id ? <nav aria-label={`Actions for speech at ${name}`}>
+            {segment.incident_id ? <a href={appUrl(canonicalIncidentHref({ incident_id: segment.incident_id }))}>Open incident</a> : null}
+            {context ? <a href={recordingsHref(context)}><Play size={14} />Play recording</a> : null}
+          </nav> : null}
         </article>;
       })}
       {!loading && !error && !segments.length ? <div className="semantic-search-empty"><Mic size={28} /><strong>{submittedQuery ? "No transcripts match" : "No speech recorded yet"}</strong><span>{submittedQuery ? "Try fewer or different words, or choose All cameras." : "Speech appears here when a listening camera hears someone talk."}</span></div> : null}

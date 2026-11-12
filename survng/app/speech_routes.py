@@ -65,6 +65,7 @@ def create_speech_router(deps: SpeechRouteDependencies) -> APIRouter:
             before_id=before_id,
             limit=limit,
         )
+        deps.get_manager().speech_incident_ids(segments)
         return {
             "segments": segments,
             "next_before_id": segments[-1]["id"] if len(segments) == limit else None,

@@ -61,3 +61,10 @@ assert.equal(speechSearchMode("anything"), "visual");
 assert.equal(speechSearchMode(null), "visual");
 
 console.log("speech settings tests passed");
+
+import { incidentSpeechLabel } from "../src/speechSettings.mjs";
+assert.equal(incidentSpeechLabel(undefined), "");
+assert.equal(incidentSpeechLabel({ segments: 0 }), "");
+assert.equal(incidentSpeechLabel({ segments: 1, seconds: 3.4, transcribed: 0 }), "1 speech segment · 3s");
+assert.equal(incidentSpeechLabel({ segments: 3, seconds: 20, transcribed: 2 }), "3 speech segments · 20s · 2 transcribed");
+console.log("incident speech label tests passed");

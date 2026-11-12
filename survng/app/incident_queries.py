@@ -59,6 +59,12 @@ def _motion_audit_row(row: dict[str, Any], storage_dir: Path, media_storage=None
     return audit
 
 
+def _with_speech(manager: Any, incidents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add speech counts when this manager supports speech (optional enrichment)."""
+    attach = getattr(manager, "attach_incident_speech", None)
+    return attach(incidents) if callable(attach) else incidents
+
+
 def _filter_incidents_by_event_type(
     incidents: list[dict[str, Any]], event_type: str
 ) -> list[dict[str, Any]]:
@@ -272,7 +278,7 @@ class IncidentQueryService:
         bounded_limit = max(1, min(limit, 200))
         bounded_gap = max(5, min(gap_seconds, 300))
         summaries = self.recent_summaries(manager, bounded_limit, bounded_gap)
-        return self.with_faces(manager, self.hydrate(manager, summaries))
+        return _with_speech(manager, self.with_faces(manager, self.hydrate(manager, summaries)))
 
     def feed(
         self,
@@ -325,7 +331,7 @@ class IncidentQueryService:
             ),
         }
         return {
-            "items": [_incident_list_payload(item) for item in page],
+            "items": _with_speech(manager, [_incident_list_payload(item) for item in page]),
             "limit": bounded_limit,
             "offset": bounded_offset,
             "has_more": has_more,
@@ -366,7 +372,7 @@ class IncidentQueryService:
         ids = {item["id"] for item in incidents}
         if len(ids) != 1:
             raise HTTPException(status_code=422, detail={"message": "events belong to multiple incidents", "incident_ids": sorted(ids)})
-        return self.with_faces(manager, [incidents[0]])[0]
+        return _with_speech(manager, self.with_faces(manager, [incidents[0]]))[0]
 
     @staticmethod
     def search(
@@ -425,7 +431,7 @@ class IncidentQueryService:
             total = manager.events.count_scene_incidents(**filters)
             page_summaries = manager.events.list_scene_incident_cards(**filters,limit=bounded_limit,offset=bounded_offset)
         return {
-            "items": [_incident_list_payload(item) for item in page_summaries],
+            "items": _with_speech(manager, [_incident_list_payload(item) for item in page_summaries]),
             "total": total,
             "limit": bounded_limit,
             "offset": bounded_offset,
@@ -446,7 +452,7 @@ class IncidentQueryService:
         detail = manager.events.scene_incident(incident_id)
         if detail is None:
             raise HTTPException(status_code=404, detail="incident was not found")
-        detail = self.with_faces(manager, [detail])[0]
+        detail = _with_speech(manager, self.with_faces(manager, [detail]))[0]
         camera = next((camera for camera in manager.config.cameras if camera.id == detail.get("camera_id")), None)
         return {"incident": detail, "notification": manager.incidents.get(incident_id),
                 "camera_name": camera.name if camera else detail.get("camera_id"), "incident_id": detail["id"]}
@@ -807,7 +813,7 @@ def create_incident_query_router(
             incident = active.events.scene_incident(incident_id)
             if incident is None:
                 raise HTTPException(status_code=404, detail="incident was not found")
-            return service.with_faces(active, [incident])[0]
+            return _with_speech(active, service.with_faces(active, [incident]))[0]
         return with_manager(resolve)
 
     @router.post("/api/incidents/{incident_id}/corrections")

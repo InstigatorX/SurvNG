@@ -1223,6 +1223,58 @@ class EventStoreSceneMixin:
                                "where p.id=? and m.event_id=?", (episode_id, event_id)).fetchone()
             return dict(row) if row else None
 
+    def scene_episode_windows(self, incident_ids):
+        """Per-camera episode windows of listed, confirmed incidents.
+
+        Merged incidents hand their episodes to the survivor and unconfirmed
+        ones are not shown, so neither contributes windows.
+        """
+        ids = [str(item) for item in dict.fromkeys(incident_ids or []) if item]
+        result = {incident_id: [] for incident_id in ids}
+        if not ids:
+            return result
+        with self._connect() as conn:
+            for offset in range(0, len(ids), 500):
+                chunk = ids[offset:offset + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    "select p.incident_id, p.camera_id, p.start_epoch, p.end_epoch "
+                    "from scene_episodes p join scene_incidents i on i.id=p.incident_id "
+                    f"where p.incident_id in ({placeholders}) "
+                    "and i.state not in ('unconfirmed','merged') "
+                    "order by p.start_epoch",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    result[str(row[0])].append((str(row[1]), float(row[2]), float(row[3])))
+        return result
+
+    def scene_episode_windows_overlapping(self, camera_id, start_epoch, end_epoch):
+        """Episode windows of confirmed incidents on one camera within a span."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select p.start_epoch, p.end_epoch from scene_episodes p "
+                "join scene_incidents i on i.id=p.incident_id "
+                "where p.camera_id=? and p.end_epoch>=? and p.start_epoch<=? "
+                "and i.state not in ('unconfirmed','merged') "
+                "order by p.start_epoch",
+                (str(camera_id), float(start_epoch), float(end_epoch)),
+            ).fetchall()
+        return [(float(row[0]), float(row[1])) for row in rows]
+
+    def scene_incident_ids_overlapping(self, camera_id, start_epoch, end_epoch):
+        """Incident ids whose episode on this camera overlaps a span."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select distinct p.incident_id from scene_episodes p "
+                "join scene_incidents i on i.id=p.incident_id "
+                "where p.camera_id=? and p.end_epoch>=? and p.start_epoch<=? "
+                "and i.state not in ('unconfirmed','merged') "
+                "order by p.start_epoch",
+                (str(camera_id), float(start_epoch), float(end_epoch)),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
     def scene_incident(self,incident_id=None,*,event_id=None):
         with self._connect() as conn:
             if event_id is not None:

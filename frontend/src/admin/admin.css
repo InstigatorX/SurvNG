@@ -657,6 +657,11 @@ a.button {
   box-shadow: 0 0 0 2px rgba(244, 160, 25, .12);
 }
 
+.incident-source-dot.source-speech::before {
+  background: #a78bfa;
+  box-shadow: 0 0 0 2px rgba(167, 139, 250, .14);
+}
+
 .incident-mosaic-source {
   position: absolute;
   z-index: 6;

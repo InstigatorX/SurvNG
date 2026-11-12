@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import AppConfig, CameraConfig
+from .attach import incident_speech
 from .listener import ListenerEvent, SpeechListener
 from .segmenter import SpeechEnded, SpeechStarted
 from .store import SpeechStore
@@ -342,6 +343,12 @@ class SpeechLifecycle:
     def segments(self, **filters: Any) -> list[dict[str, Any]]:
         store = self._read_store()
         return store.list_segments(**filters) if store is not None else []
+
+    def incident_speech(self, windows_by_incident) -> dict[str, dict[str, Any]]:
+        store = self._read_store()
+        if store is None:
+            return {}
+        return incident_speech(store, windows_by_incident)
 
     def segment(self, segment_id: int) -> dict[str, Any] | None:
         store = self._read_store()

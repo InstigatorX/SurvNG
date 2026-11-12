@@ -104,6 +104,16 @@ export function speechSegmentReasonLabel(reason) {
   return "";
 }
 
+/** Short summary of the speech counts attached to an incident payload. */
+export function incidentSpeechLabel(speech) {
+  const count = Number(speech?.segments) || 0;
+  if (!count) return "";
+  const seconds = Math.round(Number(speech.seconds) || 0);
+  const spoken = `${count} speech segment${count === 1 ? "" : "s"}${seconds ? ` · ${seconds}s` : ""}`;
+  const transcribed = Number(speech.transcribed) || 0;
+  return transcribed ? `${spoken} · ${transcribed} transcribed` : spoken;
+}
+
 /** Query string for GET /api/speech/segments. */
 export function speechSegmentsQuery({ query = "", cameraId = "", limit = 100, beforeId = null } = {}) {
   const params = new URLSearchParams();
