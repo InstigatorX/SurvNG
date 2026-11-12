@@ -54,6 +54,7 @@ jobs:
             tests/test_inference_lifecycle.py \
             tests/test_object_tracking.py \
             tests/test_camera_worker.py \
+            tests/test_run_benchmarks.py \
             tests/test_config_reload.py
       - name: Run face and identity regression tests
         run: |

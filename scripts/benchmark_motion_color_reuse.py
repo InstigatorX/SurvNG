@@ -9,6 +9,8 @@ current path reuses that frozen color buffer.
 
 from __future__ import annotations
 
+import argparse
+import json
 import statistics
 import sys
 import threading
@@ -50,8 +52,8 @@ def _service(frame_width: int) -> MotionAnalysisService:
     )
 
 
-def _frozen(height: int, width: int) -> np.ndarray:
-    frame = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
+def _frozen(height: int, width: int, rng=np.random) -> np.ndarray:
+    frame = rng.randint(0, 255, (height, width, 3), dtype=np.uint8)
     frame.setflags(write=False)
     return frame
 
@@ -80,8 +82,17 @@ def _median_ms(work, repeats: int = 9, frames: int = 400) -> float:
 
 
 def main() -> None:
-    analysis = _frozen(360, 640)
-    larger = _frozen(720, 1280)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--json", action="store_true", help="print one JSON object instead of text"
+    )
+    parser.add_argument(
+        "--seed", type=int, default=None, help="fixed seed for the synthetic frames"
+    )
+    args = parser.parse_args()
+    rng = np.random.RandomState(args.seed) if args.seed is not None else np.random
+    analysis = _frozen(360, 640, rng)
+    larger = _frozen(720, 1280, rng)
     service = _service(640)
     epoch = 1_000.0
 
@@ -99,12 +110,27 @@ def main() -> None:
         if prepared is None or prepared[1].shape != (360, 640, 3):
             raise RuntimeError("larger frame was not downscaled")
 
-    print(f"640x360 always resize  {_median_ms(lambda: _always_resize(analysis, 640, 360)):.3f} ms")
-    print(f"640x360 reuse color    {_median_ms(lambda: _reuse_color(analysis)):.3f} ms")
-    print(f"640x360 service reuse  {_median_ms(current_analysis):.3f} ms")
-    print(f"1280x720 downscale     {_median_ms(lambda: _always_resize(larger, 640, 360)):.3f} ms")
-    print(f"1280x720 service       {_median_ms(current_larger):.3f} ms")
+    cases = (
+        ("640x360_always_resize", "640x360 always resize  ", lambda: _always_resize(analysis, 640, 360)),
+        ("640x360_reuse_color", "640x360 reuse color    ", lambda: _reuse_color(analysis)),
+        ("640x360_service_reuse", "640x360 service reuse  ", current_analysis),
+        ("1280x720_downscale", "1280x720 downscale     ", lambda: _always_resize(larger, 640, 360)),
+        ("1280x720_service", "1280x720 service       ", current_larger),
+    )
+    results = {}
+    for key, label, work in cases:
+        results[key] = _median_ms(work)
+        if not args.json:
+            print(f"{label}{results[key]:.3f} ms")
     telemetry = service.telemetry_snapshot()
+    if args.json:
+        print(json.dumps({
+            "seed": args.seed,
+            "ms_per_frame": {key: round(value, 4) for key, value in results.items()},
+            "identity_color_reuse_count": telemetry["identity_color_reuse_count"],
+            "derived_frame_bytes": telemetry["derived_frame_bytes"],
+        }))
+        return
     print(
         "identity reuse",
         telemetry["identity_color_reuse_count"],

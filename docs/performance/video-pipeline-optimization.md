@@ -2,6 +2,8 @@
 
 Phase 0 was skipped. Recording stream-copy and go2rtc/WebRTC are unchanged.
 
+The capture-transport and color-reuse benchmarks below also run nightly with fixed synthetic inputs; see [nightly-benchmarks.md](nightly-benchmarks.md).
+
 | Phase | Change | CPU | p95 latency | Copies | RSS | Result |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | Raw BGR instead of BMP on the live capture pipe (FFmpeg 8.1.2) | Lower at 720p | Read p95 lower at 720p | One pipe fill into the NumPy frame | Similar | Keep |
