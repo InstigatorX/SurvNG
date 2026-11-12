@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
-from .main_database import ClosingDatabaseConnection
+from .main_database import closing_connection_factory
 from .recording_media import concatenated_clip_timing
 from .recorder import Recorder
 from .media_storage import MediaStorageRegistry
@@ -53,7 +53,7 @@ class MediaExportStore:
         connection = sqlite3.connect(
             self.path,
             timeout=10.0,
-            factory=ClosingDatabaseConnection,
+            factory=closing_connection_factory("exports"),
         )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 10000")

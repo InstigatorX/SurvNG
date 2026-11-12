@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
-from .main_database import ClosingDatabaseConnection
+from .main_database import closing_connection_factory
 from .telemetry_contract import TelemetryRetentionPolicy
 
 
@@ -89,7 +89,7 @@ class TelemetryStore:
         conn = sqlite3.connect(
             self.path,
             timeout=2.0,
-            factory=ClosingDatabaseConnection,
+            factory=closing_connection_factory("telemetry"),
         )
         conn.row_factory = sqlite3.Row
         conn.execute("pragma journal_mode=wal")
