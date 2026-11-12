@@ -20,8 +20,9 @@ Rules, each rechecked inside the deleting transaction:
 * Finished candidate jobs that never admitted an event age out after
   ``activity_days``.
 * Motion audits not linked to an incident age out after
-  ``motion_audit_days``; their motion-sample images are deleted with them
-  when no other row names the file.
+  ``motion_audit_days``; their images (in a motion-sample or snapshot
+  directory) are deleted with them when no other row names the file in
+  either its relative or absolute spelling.
 
 Acquisition images are registered in ``scene_snapshot_assets`` and keep
 following snapshot retention, so removing their rows never orphans a file.
@@ -58,17 +59,27 @@ STEPS = (
     "acquired_observations",
     "motion_audits",
 )
-# Tables whose snapshot_path keeps an image file alive.
-IMAGE_OWNER_TABLES = (
-    "motion_audits",
-    "events",
-    "face_observations",
-    "scene_observations",
-    "scene_evidence_images",
-    "acquired_samples",
-    "acquired_observations",
-    "scene_snapshot_assets",
+# Columns whose value keeps an image file alive. Audit images live in the
+# motion-sample directory or, for most triggers, the snapshot directory, so
+# every table that can name a snapshot must be listed here.
+IMAGE_OWNERS = (
+    ("motion_audits", "snapshot_path"),
+    ("events", "snapshot_path"),
+    ("incidents", "snapshot_path"),
+    ("incident_observations", "snapshot_path"),
+    ("event_source_observations", "snapshot_path"),
+    ("face_observations", "snapshot_path"),
+    ("scene_observations", "snapshot_path"),
+    ("scene_evidence_images", "snapshot_path"),
+    ("acquired_samples", "snapshot_path"),
+    ("acquired_observations", "snapshot_path"),
+    ("scene_snapshot_assets", "snapshot_path"),
+    ("semantic_embeddings", "image_path"),
+    ("semantic_projection_receipts", "image_path"),
 )
+# Directories an audit image may be removed from.
+AUDIT_IMAGE_ROLES = ("motion_audits", "snapshots")
+AUDIT_IMAGE_DIRECTORIES = ("motion_samples", "snapshots")
 
 
 def _iso(epoch: float) -> str:
@@ -82,6 +93,38 @@ def _chunks(items: Sequence[Any], size: int) -> Iterator[Sequence[Any]]:
 
 def _marks(items: Sequence[Any]) -> str:
     return ",".join("?" for _ in items)
+
+
+def _path_spellings(storage_dir: Path, raw: str) -> set[str]:
+    """Every way a row may name this file: as stored, relative, absolute."""
+    spellings = {raw}
+    for root in dict.fromkeys((storage_dir, storage_dir.expanduser().resolve(strict=False))):
+        path = Path(raw)
+        absolute = path if path.is_absolute() else root / path
+        spellings.add(str(absolute))
+        try:
+            spellings.add(str(absolute.relative_to(root)))
+        except ValueError:
+            pass
+    return spellings
+
+
+def _audit_image_location(storage_dir: Path, path: Path, media_storage: Any) -> bool:
+    """True when ``path`` is in a directory audit images may be removed from."""
+    if media_storage is None:
+        resolved = path.resolve(strict=False)
+        root = storage_dir.resolve(strict=False)
+        for directory in AUDIT_IMAGE_DIRECTORIES:
+            try:
+                resolved.relative_to(root / directory)
+            except ValueError:
+                continue
+            return True
+        return False
+    return any(
+        media_storage.location_id_for(path, role=role) is not None
+        for role in AUDIT_IMAGE_ROLES
+    )
 
 
 class _Stopped(Exception):
@@ -492,29 +535,16 @@ class DatabaseRetention:
         """Remove images whose only owner was a pruned audit row."""
         if not paths:
             return
-        with self._events._connect() as conn:
-            tables = [
-                table for table in IMAGE_OWNER_TABLES
-                if conn.execute(
-                    "select 1 from sqlite_master where type='table' and name=?", (table,),
-                ).fetchone()
-            ]
-            owned = " or ".join(
-                f"exists(select 1 from {table} where snapshot_path=? and snapshot_path!='')"
-                for table in tables
-            ) or "0"
-            unreferenced = [
-                path for path in dict.fromkeys(paths)
-                if not conn.execute(f"select {owned}", (path,) * len(tables)).fetchone()[0]
-            ]
         storage_dir = Path(self._events.storage_dir)
         media_storage = getattr(self._events, "media_storage", None)
+        candidates = list(dict.fromkeys(paths))
+        spellings = {raw: _path_spellings(storage_dir, raw) for raw in candidates}
+        named = self._named_image_paths({value for values in spellings.values() for value in values})
+        unreferenced = [raw for raw in candidates if not spellings[raw] & named]
         for raw in unreferenced:
             try:
                 path = event_snapshot_path(storage_dir, {"snapshot_path": raw}, media_storage)
-                if media_storage is None:
-                    path.resolve(strict=False).relative_to((storage_dir / "motion_samples").resolve())
-                elif media_storage.location_id_for(path, role="motion_audits") is None:
+                if not _audit_image_location(storage_dir, path, media_storage):
                     result["motion_sample_files_failed"] += 1
                     continue
                 path.unlink()
@@ -523,6 +553,24 @@ class DatabaseRetention:
                 result["motion_sample_files_missing"] += 1
             except (PermissionError, OSError, RuntimeError, ValueError):
                 result["motion_sample_files_failed"] += 1
+
+    def _named_image_paths(self, values: set[str]) -> set[str]:
+        """The subset of ``values`` that any image-owning row still names."""
+        named: set[str] = set()
+        ordered = sorted(values)
+        with self._events._connect() as conn:
+            for table, column in IMAGE_OWNERS:
+                columns = {str(row[1]) for row in conn.execute(f"pragma table_info('{table}')")}
+                if column not in columns:
+                    continue
+                # ``!= ''`` lets partial snapshot indexes serve the lookup.
+                for chunk in _chunks(ordered, BATCH_ROWS):
+                    named.update(str(row[0]) for row in conn.execute(
+                        f"select {column} from {table} where {column} != '' "
+                        f"and {column} in ({_marks(chunk)})",
+                        tuple(chunk),
+                    ))
+        return named
 
     def _write(self, step: dict[str, int], operation: Callable[[sqlite3.Connection], int]) -> None:
         self._check_stop()

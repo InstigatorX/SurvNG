@@ -93,8 +93,9 @@ depends on them:
 
 Rows linked to an incident (its establishing decision, samples, scene
 observations, motion audits) are never removed here; they follow the
-incident. Acquisition images keep following snapshot retention. Motion-sample
-images are deleted with their audit rows when no other row names the file.
+incident. Acquisition images keep following snapshot retention. A motion
+audit's image, whether in the motion-sample or the snapshot directory, is
+deleted with its audit row when no other row names the file.
 While pruning is active, the motion effectiveness range is capped at
 `motion_audit_days`.
 

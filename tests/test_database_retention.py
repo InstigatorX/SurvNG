@@ -277,3 +277,37 @@ def test_foreign_keys_into_pruned_tables_are_indexed(tmp_path: Path, parent: str
                 if fk[3] not in leading:
                     unindexed.append(f"{table}.{fk[3]}")
     assert not unindexed, f"unindexed foreign keys into {parent}: {unindexed}"
+
+
+def test_audit_snapshot_images_are_removed_only_when_nothing_names_them(tmp_path: Path) -> None:
+    # Most audits keep their image in the snapshot directory, often shared
+    # with an event or incident under another spelling of the same path.
+    store = EventStore(tmp_path)
+    snapshots = tmp_path / "snapshots" / "gate"
+    snapshots.mkdir(parents=True)
+    for name in ("orphan.jpg", "event.jpg", "incident.jpg"):
+        (snapshots / name).write_bytes(b"jpg")
+    store.add_event("gate", "motion", snapshot_path=str(snapshots / "event.jpg"))
+    with sqlite3.connect(store.db_path) as db:
+        db.execute("create table if not exists incident_observations (snapshot_path text)")
+        db.execute(
+            "insert into incident_observations values (?)",
+            (str(snapshots / "incident.jpg"),),
+        )
+        for audit_id, name in enumerate(("orphan.jpg", "event.jpg", "incident.jpg"), start=101):
+            db.execute(
+                "insert into motion_audits (id,event_id,camera_id,snapshot_path,created_at,mode,"
+                "sensitivity,score,threshold,reason,object_detected,trigger_count,features_json,"
+                "decision_id,related_event_id,category) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (audit_id, None, "gate", f"snapshots/gate/{name}", _iso(NOW - 40 * DAY), "m",
+                 1.0, 0.1, 0.2, "clear", 0, 1, "{}", "", None, "visual_backup"),
+            )
+
+    result = _retention(store).run_once()
+
+    assert result["steps"]["motion_audits"]["deleted"] == 3
+    assert not (snapshots / "orphan.jpg").exists()
+    assert (snapshots / "event.jpg").exists()  # event names it by absolute path
+    assert (snapshots / "incident.jpg").exists()  # incident observation names it
+    assert result["motion_sample_files_deleted"] == 1
+    assert result["motion_sample_files_failed"] == 0
