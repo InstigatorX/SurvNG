@@ -68,7 +68,9 @@ tracking/enrichment/initial/refinement waves each run five times at 1, 4, 8, and
 32 simultaneous camera equivalents. The 32-camera case is synthetic overload,
 not a capacity claim. Warmup and worker startup are reported separately.
 
-Per-request end-to-end samples and result digests are retained in raw output.
+The harness writes per-request timings, result digests and model/fixture hashes
+to the requested local output file. Keep generated measurement dumps outside
+version control; this report retains the reviewable results and limitations.
 Latency percentiles exclude deferred/unavailable results; outcome counts always
 include them. Throughput counts only completed requests. Worker admission and IPC
 counters are cumulative and include diagnostic status requests. Detector stages
@@ -93,10 +95,10 @@ OpenCV 5.0.0. Two independently compiled CPU object workers, LATENCY hint,
 one stream each; model cache disabled and warmup enabled. The reviewed local
 model has FP32 NCHW input `[1,3,960,960]` and final YOLO output `[1,300,6]`.
 Startup including worker creation was 2.195 s; model loads 710.3/585.7 ms and
-warmups 79.4/83.1 ms. The accompanying JSON records model/fixture hashes.
+warmups 79.4/83.1 ms. Model/fixture hashes are retained with the archived measurements.
 
-The [measurement data](inference-serving-phase0-1.json) contains 80 measured runs
-and 8,000 request outcomes (five repeats of 100 at each scenario/load point).
+The baseline covered 80 measured runs and 8,000 request outcomes
+(five repeats of 100 at each scenario/load point).
 Throughput below is the median of five completed-request rates; p95/p99 pool
 successful end-to-end samples across repeats. Failures and deferrals are shown
 separately so fast rejected requests cannot improve the reported latency.
@@ -192,7 +194,7 @@ Future concurrency must allocate separate native requests and preprocessing slot
   from 2560×1440 to 4512×2512, each replayed at default, .2, .7, .01 and .99
   thresholds against baseline and changed detectors. All 40 comparisons matched
   exactly, including 16 returned detections. Private images, paths and detections
-  were not published; the JSON contains only fixture hashes and dimensions.
+  were not published; fixture hashes and dimensions are retained in the local evidence archive.
 - Broader validation: 485 tests and 33 subtests passed; six notification-related
   manager lifecycle tests failed. All six also failed in an untouched detached
   `f8291c9` worktree (58 passed, seven failed there; the additional worktree-only

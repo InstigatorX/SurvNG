@@ -97,8 +97,8 @@ audio. Header/container probing does not certify every decoded video frame.
 ## Memory and remaining limits
 
 Production object RSS was 154.7/156.7 MiB in the old long-running processes and
-193.0/209.2 MiB after restart. Each new worker's RSS varied by less than 0.5 MiB throughout the
-post-restart observation. These observations do not explain the higher fresh
+193.0/209.2 MiB after restart. Each new worker's RSS varied by less than 0.5 MiB
+throughout the post-restart observation. These observations do not explain the higher fresh
 process RSS or establish a memory saving. The alternating experiment with fresh
 workers on both revisions produced broadly comparable worker RSS near 237 MiB
 and 102.6 MiB GPU residency per worker. Driver/compiler allocation and process
@@ -117,6 +117,22 @@ performance experiment.
 Other GPU models/output contracts, Core ML hardware, 30-minute saturation,
 peak-memory checks and repeated lifecycle performance cycles remain unverified.
 Private images, detector configuration, raw detections, camera names and recording
-paths are retained only in owner-private local artifacts. The accompanying
-[measurement summary](inference-serving-gpu-restart.json) contains sanitized
-metrics, hashes and latency samples.
+paths are retained only in owner-private local artifacts. Generated measurement
+dumps, hashes and latency samples are archived locally outside version control;
+this report retains the measured results, procedure and limitations.
+
+## Later normal-load observation
+
+At 16:57 EST, about 2 hours 25 minutes after restart, the same service process
+remained active with no automatic restarts. All 13 cameras were connected and
+all nine configured recorders were active. The snapshot reported 4,518
+inferences with zero inference failures, 28.7 ms average inference, and no
+pending requests. All 95 initial and 956 refinement admissions had completed
+without admission timeouts. Object RSS had decreased to 173.5/182.0 MiB, with
+GPU residency about 102.6 MiB per worker; this is ordinary-load evidence, not
+a sustained saturation or peak-memory test.
+
+Later logs included an optional face-refinement error and one camera's
+H.264/timestamp recovery error burst at 15:54–15:58 EST. That camera's latest
+main/live MP4 outputs were fresh and readable by FFprobe. Their cause was not
+investigated in this ownership PR; no connection to the refactor was established.
