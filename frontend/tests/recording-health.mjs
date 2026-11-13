@@ -75,6 +75,24 @@ assert.ok(!recordingHealthContext(result).storage[0].includes("20.0%"), "stale s
 result = recordingHealth(base({ system: { ...base().system, lifecycle: "starting", detector: { enabled: true, loaded_backend: null } } }));
 assert.equal(result.issues, 1, "system health remains visible on every workspace");
 assert.deepEqual(recordingHealthContext(result).attention, ["System is starting.", "Detection is enabled but its backend is not loaded."]);
+result = recordingHealth(base({
+  appConfig: { cameras: [{ id: "porch", name: "Porch", record: true, power: "battery" }] },
+  cameras: [{ id: "porch", name: "Porch", power: "battery", record: true, recording: false, running: true, capture_connectivity: "asleep", wake: { phase: "asleep" } }],
+}));
+assert.equal(result.rows[0].state, "healthy", "battery sleep is not a recording fault");
+assert.deepEqual(result.rows[0].missing, []);
+result = recordingHealth(base({
+  appConfig: { cameras: [{ id: "porch", name: "Porch", record: true, power: "battery" }] },
+  cameras: [{ id: "porch", name: "Porch", power: "battery", recording: false, running: true, capture_connectivity: "wake_failed", wake: { phase: "wake_failed" } }],
+}));
+assert.equal(result.rows[0].state, "attention");
+assert.deepEqual(result.rows[0].missing, ["wake"]);
+result = recordingHealth(base({
+  appConfig: { cameras: [{ id: "porch", name: "Porch", record: true, power: "battery" }] },
+  cameras: [{ id: "porch", power: "battery", recording: false, running: true, capture_connectivity: "healthy", wake: { phase: "awake", overdue: true } }],
+}));
+assert.equal(result.rows[0].state, "attention");
+assert.deepEqual(result.rows[0].missing, ["wake session"]);
 result = recordingHealth(base({ appConfig: { cameras: [{ id: "paused", record: true }] }, cameras: [{ id: "paused", recording_enabled: false }] }));
 assert.match(recordingHealthContext(result).recording[1], /1 paused or disabled camera is excluded/);
 assert.deepEqual(recordingHealthContext(result).attention, []);

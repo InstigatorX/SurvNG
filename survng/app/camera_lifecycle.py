@@ -122,6 +122,7 @@ class CameraLifecycleService:
         tracking: ObjectTrackingLifecycle,
         motion_runtime: MotionRuntimeService,
         tracking_frames: CameraFrameTimeline,
+        defer_capture: bool = False,
     ) -> None:
         self.camera_id = camera_id
         self.state = state
@@ -130,6 +131,9 @@ class CameraLifecycleService:
         self.tracking = tracking
         self.motion_runtime = motion_runtime
         self.tracking_frames = tracking_frames
+        # Battery cameras stay enabled without a stream or ONVIF subscription
+        # until an external wake opens capture for one session.
+        self.defer_capture = bool(defer_capture)
         # Serialize lifecycle commands without blocking state readers. This may
         # be held across joins and camera I/O; state.lock may not.
         self._operation_lock = threading.Lock()
@@ -175,14 +179,21 @@ class CameraLifecycleService:
                 # Clear previous-run state before any producer can enqueue new work.
                 if detection_enabled:
                     self.motion_runtime.start(threading.Event())
-                if not self.capture.start():
+                if self.defer_capture:
+                    if not self.capture.arm():
+                        raise RuntimeError(
+                            f"camera source did not arm for {self.camera_id}"
+                        )
+                elif not self.capture.start():
                     raise RuntimeError(
                         f"camera source did not start for {self.camera_id}"
                     )
                 # ONVIF events only feed object-detection admission. Preserve
                 # live capture for a detection-disabled camera without holding
                 # a camera subscription that cannot produce useful work.
-                if detection_enabled:
+                # Battery cameras are not subscribed: PullPoint would fail for
+                # the whole sleep or poke the camera awake.
+                if detection_enabled and not self.defer_capture:
                     self.onvif.start()
             except BaseException as startup_error:
                 try:
@@ -551,7 +562,8 @@ class CameraLifecycleService:
                         motion_changed = True
                         # Motion cancellation must not stop live capture.
                         self.motion_runtime.start(threading.Event())
-                        self.onvif.start()
+                        if not self.defer_capture:
+                            self.onvif.start()
                     else:
                         self.onvif.stop()
                         motion_changed = True
@@ -595,7 +607,7 @@ class CameraLifecycleService:
                                 self.camera_id,
                             )
                     try:
-                        if previous:
+                        if previous and not self.defer_capture:
                             self.onvif.start()
                         else:
                             self.onvif.stop()

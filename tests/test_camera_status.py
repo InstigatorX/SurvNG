@@ -227,6 +227,30 @@ def test_capture_connectivity_reports_reconnecting_when_thread_is_alive_without_
     assert status["capture_running"] is True
 
 
+def test_battery_sleep_is_healthy_and_a_missed_wake_is_not() -> None:
+    asleep = _service(live_clock=0.0)
+    asleep.camera = asleep.camera.model_copy(update={"power": "battery"})
+    asleep.wake_status = lambda: {"phase": "asleep", "overdue": False, "saw_frame": False}
+    assert asleep.snapshot()["capture_connectivity"] == "asleep"
+    assert asleep.snapshot()["power"] == "battery"
+
+    failed = _service(live_clock=0.0)
+    failed.camera = failed.camera.model_copy(update={"power": "battery"})
+    failed.wake_status = lambda: {"phase": "wake_failed", "overdue": False, "saw_frame": False}
+    assert failed.snapshot()["capture_connectivity"] == "wake_failed"
+
+    awake = _service()
+    awake.camera = awake.camera.model_copy(update={"power": "battery"})
+    awake.wake_status = lambda: {"phase": "awake", "overdue": False, "saw_frame": True}
+    assert awake.snapshot()["capture_connectivity"] == "healthy"
+
+    stale_awake = _service(live_clock=0.0)
+    stale_awake.camera = stale_awake.camera.model_copy(update={"power": "battery"})
+    stale_awake.wake_status = lambda: {"phase": "awake", "overdue": False, "saw_frame": True}
+    assert stale_awake.snapshot()["connected"] is False
+    assert stale_awake.snapshot()["capture_connectivity"] == "healthy"
+
+
 def test_capture_connectivity_reports_paused_when_camera_is_disabled() -> None:
     status = _service(enabled=False).snapshot()
 

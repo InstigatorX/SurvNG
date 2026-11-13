@@ -662,6 +662,12 @@ class CameraConfig(BaseModel):
     stream_url: str = Field(max_length=4096)
     live_stream_url: str | None = Field(default=None, max_length=4096)
     live_view: CameraLiveViewConfig = Field(default_factory=CameraLiveViewConfig)
+    # Mains cameras stay connected. Battery cameras sleep until an external
+    # wake, then serve the same URL only for a bounded session.
+    power: Literal["mains", "battery"] = "mains"
+    wake_max_seconds: float = Field(default=60.0, ge=5.0, le=180.0)
+    wake_idle_seconds: float = Field(default=4.0, ge=1.0, le=30.0)
+    wake_open_timeout_seconds: float = Field(default=8.0, ge=1.0, le=30.0)
     record: bool = True
     record_sub: bool = False
     retention: CameraRetentionConfig = Field(default_factory=CameraRetentionConfig)
@@ -694,7 +700,14 @@ class CameraConfig(BaseModel):
                 if live.scheme.lower() not in {"rtsp", "rtsps", "http", "https"} or not live.hostname:
                     raise ValueError("live_stream_url must include a supported scheme and camera host")
         apply_stream_url_defaults(self)
+        if self.wake_idle_seconds >= self.wake_max_seconds:
+            raise ValueError("wake idle time must be shorter than the wake limit")
+        if self.wake_open_timeout_seconds > self.wake_max_seconds:
+            raise ValueError("wake open timeout must not exceed the wake limit")
         return self
+
+    def battery_powered(self) -> bool:
+        return self.power == "battery"
 
     def live_url(self) -> str:
         return self.live_stream_url or self.stream_url

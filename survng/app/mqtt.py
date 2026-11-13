@@ -85,11 +85,13 @@ class MqttService:
         detection_callback: Callable[[str, bool], bool],
         connected_callback: Callable[[], None] | None = None,
         server_status_callback: Callable[[], dict[str, Any]] | None = None,
+        wake_callback: Callable[[str, bool], bool] | None = None,
     ) -> None:
         self.config = config
         self.power_callback = power_callback
         self.recording_callback = recording_callback
         self.detection_callback = detection_callback
+        self.wake_callback = wake_callback
         self.connected_callback = connected_callback
         self.server_status_callback = server_status_callback
         self.client: Any = None
@@ -546,6 +548,28 @@ class MqttService:
                 self.remove_retained_topic(
                     f"{discovery_prefix}/binary_sensor/{object_id}/speech/config"
                 )
+            if camera.get("power") == "battery":
+                entities.append(("button", "wake", {
+                    "name": "Wake",
+                    "unique_id": f"survng_{camera_id}_wake",
+                    "command_topic": f"{state_topic}/wake/set",
+                    "payload_press": "ON",
+                    "icon": "mdi:power-sleep",
+                }))
+                entities.append(("sensor", "wake_state", {
+                    "name": "Wake state",
+                    "unique_id": f"survng_{camera_id}_wake_state",
+                    "state_topic": f"{state_topic}/wake/state",
+                    "value_template": "{{ value_json.state }}",
+                    "icon": "mdi:battery",
+                }))
+            else:
+                self.remove_retained_topic(
+                    f"{discovery_prefix}/button/{object_id}/wake/config"
+                )
+                self.remove_retained_topic(
+                    f"{discovery_prefix}/sensor/{object_id}/wake_state/config"
+                )
             for zone in camera.get("zones") or []:
                 zone_name = str(zone.get("name") or "").strip()
                 if not zone_name:
@@ -803,6 +827,14 @@ class MqttService:
             retain=True,
         )
 
+    def publish_wake_state(self, camera_id: str, phase: str) -> None:
+        """Publish battery sleep state separately from the power on/off switch."""
+        self.publish(
+            f"camera/{camera_id}/wake/state",
+            {"camera_id": camera_id, "state": phase},
+            retain=True,
+        )
+
     def publish_camera_feature_state(self, camera_id: str, feature: str, enabled: bool) -> None:
         if feature not in {"recording", "detection"}:
             return
@@ -867,6 +899,7 @@ class MqttService:
                 client.subscribe(f"{self.prefix}/camera/+/power/set", qos=self.config.qos),
                 client.subscribe(f"{self.prefix}/camera/+/recording/set", qos=self.config.qos),
                 client.subscribe(f"{self.prefix}/camera/+/detection/set", qos=self.config.qos),
+                client.subscribe(f"{self.prefix}/camera/+/wake/set", qos=self.config.qos),
             ]
             failed = [result for result in subscriptions if int(result[0]) != 0]
             if failed:
@@ -925,6 +958,7 @@ class MqttService:
             "power": self.power_callback,
             "recording": self.recording_callback,
             "detection": self.detection_callback,
+            "wake": self.wake_callback,
         }
         callback = callbacks.get(feature)
         if callback is None:

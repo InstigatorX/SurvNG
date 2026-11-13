@@ -45,6 +45,21 @@ Technical path: [Incident evidence data path](../incident-evidence-data-path.md)
 
 You can start/stop a camera’s capture or recording from Admin controls and, when MQTT is enabled, from Home Assistant. Stopping recording pauses history for that camera; it does not delete what was already saved.
 
+## Battery cameras
+
+Set **Power** to **Battery** for a local camera that only serves its RTSP, RTSPS, HTTP, or HTTPS URL while it is awake. SurvNG leaves that camera asleep: it does not keep a capture process, a recorder, or an ONVIF subscription open, and Live does not wake it. Sleep is healthy. The tile keeps the last still and shows **ASLEEP**.
+
+SurvNG cannot turn the camera’s radio on. A hub, Home Assistant, or the camera’s own notify must tell SurvNG the URL is up:
+
+- `POST /api/cameras/CAMERA_ID/wake` with a token that has `camera:control`
+- MQTT `survng/camera/CAMERA_ID/wake/set` with payload `ON`
+
+SurvNG then opens the existing stream, records it when recording is enabled, and treats that wake as the motion notice. The session ends when the stream ends, when it goes idle, or when it reaches the wake limit. A second wake during the session extends the idle timer and does not start a second recording. If the URL never opens, the camera shows **WAKE** until the next successful wake.
+
+Short bursts may need a lower confirmation count on that camera. Video from before the stream comes up stays on the camera. Continuous motion analysis and speech listening stay off, because they would need a picture that is not there.
+
+Leave the camera on **Mains** when a hub already exposes a continuous URL. Cloud accounts such as Ring, Blink, Arlo, and Nest, and proprietary P2P links such as Reolink UID or Eufy, are not battery mode. Those cameras need a local stream SurvNG can open.
+
 ## Related
 
 - [Getting started](getting-started.md)

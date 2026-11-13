@@ -1219,6 +1219,14 @@ class AppManager:
     def _mqtt_power_command(self, camera_id: str, turn_on: bool) -> bool:
         return self.start_camera(camera_id) if turn_on else self.stop_camera(camera_id)
 
+    def wake_camera(self, camera_id: str) -> str:
+        return self.camera_controls.wake_camera(camera_id)
+
+    def _mqtt_wake_command(self, camera_id: str, turn_on: bool) -> bool:
+        if not turn_on:
+            return True
+        return self.wake_camera(camera_id) != "missing"
+
     def _build_mqtt_service(self, mqtt_config: MqttConfig) -> MqttService:
         return MqttService(
             mqtt_config,
@@ -1227,6 +1235,7 @@ class AppManager:
             self.set_detection,
             self._mqtt_connected,
             self._mqtt_server_status,
+            wake_callback=self._mqtt_wake_command,
         )
 
     def reconfigure_mqtt(self, mqtt_config: MqttConfig) -> None:
@@ -1285,6 +1294,10 @@ class AppManager:
             camera = self.camera(str(status.get("id") or ""))
             if camera is None or camera.id not in enabled_ids or not self.recording_enabled(camera.id):
                 continue
+            if camera.battery_powered():
+                phase = str((status.get("wake") or {}).get("phase") or "asleep")
+                if phase not in {"connecting", "awake"}:
+                    continue
             if camera.record:
                 recorder_total += 1
                 recorders_running += int(bool(status.get("recording")))
@@ -1687,7 +1700,12 @@ class AppManager:
                 "name": camera.name,
                 "model_classes": self.detector.labels,
                 "recording_configured": bool(camera.record or camera.record_sub),
-                "speech_enabled": bool(self.config.speech.enabled and camera.speech.enabled),
+                "speech_enabled": bool(
+                    self.config.speech.enabled
+                    and camera.speech.enabled
+                    and not camera.battery_powered()
+                ),
+                "power": camera.power,
                 "zones": [
                     {
                         "name": zone.name,
@@ -1704,6 +1722,9 @@ class AppManager:
             self.mqtt.publish_camera_state(camera_id, bool(status.get("running")))
             self.mqtt.publish_camera_feature_state(camera_id, "recording", bool(status.get("recording_enabled")))
             self.mqtt.publish_camera_feature_state(camera_id, "detection", bool(status.get("detection_enabled")))
+            if status.get("power") == "battery":
+                phase = str((status.get("wake") or {}).get("phase") or "asleep")
+                self.mqtt.publish_wake_state(camera_id, phase)
             self.mqtt.publish(
                 f"camera/{camera_id}/activity",
                 self.activity_events.snapshot(camera_id),

@@ -60,6 +60,16 @@ survng/camera/front-door/power/set
 
 Use `ON` to turn it back on. Replace `survng` with your configured topic prefix and `front-door` with the camera id.
 
+### Example: wake a battery camera
+
+Power on/off still enables or disables the camera. Sleep is separate. For a camera set to **Battery**, publish `ON` to:
+
+```text
+survng/camera/front-door/wake/set
+```
+
+SurvNG reports `asleep`, `awake`, or `wake_failed` on `survng/camera/front-door/wake/state`. The same wake is `POST /api/cameras/front-door/wake`.
+
 ## API tokens
 
 Optional bearer tokens let automations call SurvNG safely when authentication is enabled.

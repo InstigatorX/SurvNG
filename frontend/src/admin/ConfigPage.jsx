@@ -2284,7 +2284,16 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                     {cameraSection === "settings" ? <>
                       <div className="field-row camera-identity-fields">
                         <label>Name<input value={selectedCamera.name} onChange={(event) => updateCamera(selectedCamera.id, ["name"], event.target.value)} /></label>
+                        <label>Power<select value={selectedCamera.power === "battery" ? "battery" : "mains"} onChange={(event) => updateCamera(selectedCamera.id, ["power"], event.target.value)}>
+                          <option value="mains">Mains</option>
+                          <option value="battery">Battery</option>
+                        </select><small>Battery cameras sleep until something else sends a wake. SurvNG does not turn the camera on. A hub that already offers a continuous URL should stay on mains.</small></label>
                       </div>
+                      {selectedCamera.power === "battery" ? <div className="field-row">
+                        <label>Wake limit<input type="number" min="5" max="180" step="1" value={selectedCamera.wake_max_seconds ?? 60} onChange={(event) => updateCamera(selectedCamera.id, ["wake_max_seconds"], Number(event.target.value))} /><small>Hard cap for one wake, in seconds.</small></label>
+                        <label>Idle timeout<input type="number" min="1" max="30" step="1" value={selectedCamera.wake_idle_seconds ?? 4} onChange={(event) => updateCamera(selectedCamera.id, ["wake_idle_seconds"], Number(event.target.value))} /><small>Return to sleep after the stream stalls.</small></label>
+                        <label>Open timeout<input type="number" min="1" max="30" step="1" value={selectedCamera.wake_open_timeout_seconds ?? 8} onChange={(event) => updateCamera(selectedCamera.id, ["wake_open_timeout_seconds"], Number(event.target.value))} /><small>Give up if the URL never opens.</small></label>
+                      </div> : null}
                     </> : null}
 
                     {cameraSection === "motion" ? <div className="field-row camera-object-policy-fields">

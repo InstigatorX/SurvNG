@@ -118,10 +118,11 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
   const [holdPreviewState, setHoldPreviewState] = useState("");
   const [tileLiveReady, setTileLiveReady] = useState(false);
   const displayedTransport = hoverPreview ? "webrtc" : activeTransport;
-  const shouldUseLiveMedia = liveMediaShouldRun({ running: camera.running, streamReady: hoverPreview || streamReady, mediaActive, transport: displayedTransport });
+  const cameraConnectivity = cameraCaptureConnectivity(camera);
+  const batteryQuiet = cameraConnectivity === "asleep" || cameraConnectivity === "wake_failed";
+  const shouldUseLiveMedia = !batteryQuiet && liveMediaShouldRun({ running: camera.running, streamReady: hoverPreview || streamReady, mediaActive, transport: displayedTransport });
   const shouldUseWebRtc = shouldUseLiveMedia && displayedTransport === "webrtc";
   const shouldUseMjpegStream = shouldUseLiveMedia && activeTransport === "mjpeg";
-  const cameraConnectivity = cameraCaptureConnectivity(camera);
   const currentRecordingStatus = recordingStatus(camera, { busy: recordingBusy, error: recordingError });
   const currentDetectionStatus = detectionStatus(camera, { busy: detectionBusy, error: detectionError });
 
@@ -504,12 +505,12 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
         style={{ "--media-aspect": aspect }}
       >
         <div className="camera-tile-chrome">
-          <span className="camera-tile-name"><i className={`${cameraConnectivity === "healthy" ? "online" : cameraConnectivity === "reconnecting" ? "reconnecting" : "offline"}`} aria-hidden="true" /><strong>{camera.name}</strong></span>
+          <span className="camera-tile-name"><i className={`${cameraConnectivity === "healthy" ? "online" : cameraConnectivity === "reconnecting" || cameraConnectivity === "wake_failed" ? "reconnecting" : cameraConnectivity === "asleep" ? "asleep" : "offline"}`} aria-hidden="true" /><strong>{camera.name}</strong></span>
           <time className="camera-tile-time">{formatTimeOnly(Date.now() / 1000, timeZone)}</time>
           <span className="camera-tile-actions">
             <CameraTileStatus status={currentRecordingStatus} />
             <CameraTileStatus status={currentDetectionStatus} />
-            <span className={`camera-tile-live-state ${cameraConnectivity === "reconnecting" ? "attention" : ""}`}>{cameraTileLiveState(camera)}</span>
+            <span className={`camera-tile-live-state ${cameraConnectivity === "reconnecting" || cameraConnectivity === "wake_failed" ? "attention" : ""}`}>{cameraTileLiveState(camera)}</span>
             {!mobileView ? <button
               type="button"
               ref={controlMenuButtonRef}
@@ -1592,7 +1593,7 @@ export function LivePage({ timeZone, canCorrectIncident = false, onRecordingCont
               >
                 <Camera size={16} aria-hidden="true" />
                 <span>{camera.name || camera.id}</span>
-                {camera.kind !== "weather" ? <i className={online ? "online" : connectivity === "reconnecting" ? "reconnecting" : ""} aria-hidden="true" /> : null}
+                {camera.kind !== "weather" ? <i className={online ? "online" : connectivity === "reconnecting" || connectivity === "wake_failed" ? "reconnecting" : connectivity === "asleep" ? "asleep" : ""} aria-hidden="true" /> : null}
               </button>
             );
           })}

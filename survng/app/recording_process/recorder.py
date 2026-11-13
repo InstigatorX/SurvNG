@@ -81,6 +81,8 @@ class Recorder(RecordingIndexMixin):
         self._audio_stream_cache: dict[tuple[str, str, str], AudioStreamInfo] = {}
         self._audio_probe_unavailable_hosts: set[str] = set()
         self._disabled_cameras: set[str] = set()
+        # Battery cameras stay out of the watchdog until a wake releases them.
+        self._session_released: set[str] = set()
         self.owner_token = f"survng-{os.getpid()}"
         self._lock = threading.Lock()
         self._watchdog_stop = threading.Event()
@@ -478,6 +480,21 @@ class Recorder(RecordingIndexMixin):
         if not enabled:
             self.stop(camera_id)
 
+    def set_session_released(self, camera_id: str, released: bool) -> None:
+        """Allow or withhold watchdog recording for one battery wake."""
+        with self._lock:
+            if released:
+                self._session_released.add(camera_id)
+            else:
+                self._session_released.discard(camera_id)
+        if not released:
+            self.stop(camera_id)
+        self._watchdog_wake.set()
+
+    def session_released(self, camera_id: str) -> bool:
+        with self._lock:
+            return camera_id in self._session_released
+
     def camera_enabled(self, camera_id: str) -> bool:
         with self._lock:
             return camera_id not in self._disabled_cameras
@@ -579,8 +596,11 @@ class Recorder(RecordingIndexMixin):
         wanted: dict[RecorderKey, CameraConfig] = {}
         with self._lock:
             disabled_cameras = set(self._disabled_cameras)
+            released_cameras = set(self._session_released)
         for camera_id, camera in camera_map.items():
             if camera_id in disabled_cameras:
+                continue
+            if getattr(camera, "power", "mains") == "battery" and camera_id not in released_cameras:
                 continue
             if camera.record:
                 wanted[(camera_id, "main")] = camera

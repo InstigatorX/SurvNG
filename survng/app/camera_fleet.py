@@ -41,6 +41,7 @@ class CameraFleetWorker(Protocol):
 class CameraFleetRecorder(Protocol):
     def set_camera_enabled(self, camera_id: str, enabled: bool) -> None: ...
     def start(self, camera: CameraConfig, source: str) -> None: ...
+    def session_released(self, camera_id: str) -> bool: ...
 
 
 class CameraFleetStatePublisher(Protocol):
@@ -428,6 +429,8 @@ class CameraFleetLifecycle:
             or not self.camera_enabled(camera.id)
             or not recording_is_enabled(camera.id)
         ):
+            return
+        if camera.battery_powered() and not self.recorder.session_released(camera.id):
             return
         if camera.record:
             self.recorder.start(camera, "main")
