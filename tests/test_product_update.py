@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import threading
@@ -15,6 +16,7 @@ from survng.app.operations_routes import (
 )
 from survng.app.product_update import (
     ProductUpdateService,
+    _describe_update_failure,
     _format_git_failure,
     _git_command,
     resolve_repo_root,
@@ -169,6 +171,22 @@ def test_format_git_failure_prefers_stderr_and_ownership_guidance() -> None:
     assert "not installed" in _format_git_failure(missing).lower()
 
 
+def test_describe_update_failure_names_command_and_redacts_url_credentials() -> None:
+    error = subprocess.CalledProcessError(
+        128,
+        ["/usr/bin/git", "-c", "safe.directory=/srv/SurvNG", "fetch", "--prune", "origin"],
+        stderr=(
+            "hint: ignored\n"
+            "fatal: unable to access 'https://user:s3cret@example.com/SurvNG.git/'\n"
+        ),
+    )
+    message = _describe_update_failure(error)
+    assert message.startswith("git fetch --prune origin exited with status 128: fatal:")
+    assert "s3cret" not in message and "user:" not in message
+    assert "https://***@example.com/SurvNG.git/" in message
+    assert _describe_update_failure(RuntimeError("pip failed")) == "pip failed"
+
+
 def test_product_update_status_reports_behind_commits(tmp_path: Path) -> None:
     repo = _init_survng_repo(tmp_path)
     bare = tmp_path / "remote.git"
@@ -308,6 +326,87 @@ def test_product_update_start_checks_out_selected_branch(
     assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "develop"
     assert (repo / "survng" / "develop.txt").read_text(encoding="utf-8") == "develop\n"
     restart.assert_called_once_with()
+
+
+def test_product_update_status_poll_does_not_lock_or_rewrite_index(tmp_path: Path) -> None:
+    # Status is polled while the update worker runs `git switch`/`git pull`,
+    # which must create .git/index.lock. A plain `git status` refreshes stale
+    # stat data by taking that lock and rewriting the index, so a concurrent
+    # poll could make the worker's checkout fail with exit 128
+    # ("Unable to create '.git/index.lock': File exists").
+    repo = _init_survng_repo(tmp_path)
+    bare = tmp_path / "remote.git"
+    _git(tmp_path, "clone", "--bare", str(repo), str(bare))
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "fetch", "origin")
+
+    # Make the index's cached stat data stale without changing content, so a
+    # locking `git status` would deterministically rewrite the index.
+    tracked = repo / "requirements.txt"
+    old_ns = tracked.stat().st_mtime_ns - 10_000_000_000
+    os.utime(tracked, ns=(old_ns, old_ns))
+    index = repo / ".git" / "index"
+    before = (index.stat().st_ino, index.stat().st_mtime_ns, index.read_bytes())
+
+    status = ProductUpdateService(repo_root=repo).status(refresh_remote=False)
+
+    assert status["dirty"] is False
+    assert status["can_check"] is True
+    after = (index.stat().st_ino, index.stat().st_mtime_ns, index.read_bytes())
+    assert after == before
+    assert not (repo / ".git" / "index.lock").exists()
+
+
+def test_product_update_failure_reports_git_command_and_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _init_survng_repo(tmp_path)
+    bare = tmp_path / "remote.git"
+    _git(tmp_path, "clone", "--bare", str(repo), str(bare))
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "fetch", "origin")
+
+    work = tmp_path / "publisher"
+    _git(tmp_path, "clone", str(bare), str(work))
+    _git(work, "config", "user.email", "test@example.com")
+    _git(work, "config", "user.name", "Test")
+    _git(work, "checkout", "-b", "develop")
+    (work / "survng" / "develop.txt").write_text("develop\n", encoding="utf-8")
+    _git(work, "add", "survng/develop.txt")
+    _git(work, "commit", "-m", "develop change")
+    _git(work, "push", "origin", "develop")
+
+    service = ProductUpdateService(repo_root=repo, request_server_restart=Mock())
+    real_run = subprocess.run
+    lock = repo / ".git" / "index.lock"
+
+    def fake_run(command, **kwargs):
+        cmd = [str(part) for part in command]
+        if "switch" in cmd and threading.current_thread().name == "product-update":
+            # Simulate another Git process holding the index lock.
+            lock.write_text("", encoding="utf-8")
+            try:
+                return real_run(command, **kwargs)
+            finally:
+                lock.unlink()
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr("survng.app.product_update.subprocess.run", fake_run)
+
+    service.start(branch="develop")
+    for _ in range(200):
+        status = service.status(refresh_remote=False, branch="develop")
+        if status["status"] in {"restarting", "complete", "failed"}:
+            break
+        threading.Event().wait(0.05)
+
+    assert status["status"] == "failed", status
+    error = status["job"]["error"]
+    assert "git switch --create develop --track origin/develop" in error
+    assert "128" in error
+    assert "index.lock" in error and "File exists" in error
+    assert "safe.directory" not in error
 
 
 def test_product_update_start_fast_forwards_and_restarts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
