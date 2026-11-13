@@ -2284,9 +2284,12 @@ class OpenVinoManifestEncoder:
         )
         if not image_model.is_file() or not text_model.is_file():
             raise RuntimeError("semantic image or text OpenVINO model is missing")
+        from .inference_runtime.worker_topology import openvino_gpu_compile_config
+
         core = Core()
-        self._image_model = core.compile_model(str(image_model), device)
-        self._text_model = core.compile_model(str(text_model), device)
+        compile_config = openvino_gpu_compile_config(device)
+        self._image_model = core.compile_model(str(image_model), device, compile_config)
+        self._text_model = core.compile_model(str(text_model), device, compile_config)
         self._tokenizer = _semantic_tokenizer(self.model_dir, text_spec)
         self._image_spec = image_spec
         self._text_spec = text_spec

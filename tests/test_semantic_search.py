@@ -27,6 +27,29 @@ from survng.app.semantic_search import (
 )
 
 
+class SemanticCompilationPolicyTest(unittest.TestCase):
+    def test_both_towers_receive_the_gpu_compilation_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "image_encoder.xml").touch()
+            (root / "text_encoder.xml").touch()
+            identity = SemanticModelIdentity("test", "model", "preprocessing", 4)
+            for device, expected in (("GPU", {"COMPILATION_NUM_THREADS": 1}), ("CPU", {})):
+                with self.subTest(device=device):
+                    core = Mock()
+                    with (
+                        patch("openvino.Core", return_value=core),
+                        patch("survng.app.semantic_search._semantic_tokenizer"),
+                    ):
+                        OpenVinoManifestEncoder(root, {"image": {}, "text": {}}, device, identity)
+                    self.assertEqual(core.compile_model.call_count, 2)
+                    self.assertEqual(
+                        [call.args for call in core.compile_model.call_args_list],
+                        [(str(root / "image_encoder.xml"), device, expected),
+                         (str(root / "text_encoder.xml"), device, expected)],
+                    )
+
+
 class SemanticIndexTest(unittest.TestCase):
     def test_semantic_objects_exclude_boxes_not_visible_in_promoted_cover(self) -> None:
         visible = {"label": "car", "snapshot_visible": True}

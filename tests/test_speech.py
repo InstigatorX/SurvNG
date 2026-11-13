@@ -297,6 +297,57 @@ def test_listener_waits_without_ffmpeg_when_camera_has_no_audio() -> None:
 # Transcriber -------------------------------------------------------------
 
 
+@pytest.fixture
+def isolated_transcriber_constructor(monkeypatch, tmp_path):
+    """Exercise worker startup without changing the test process's OS policy."""
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from survng.app.inference_runtime import process
+    from survng.app.speech import transcriber
+
+    constructor = Mock(return_value=object())
+    monkeypatch.setitem(sys.modules, "openvino_genai", SimpleNamespace(WhisperPipeline=constructor))
+    monkeypatch.setattr(process, "_disable_worker_core_dumps", lambda: None)
+    monkeypatch.setattr(process, "_set_worker_process_name", lambda _role: None)
+    monkeypatch.setattr(transcriber.os, "nice", lambda _increment: None)
+    messages = []
+    connection = SimpleNamespace(send=messages.append, recv=lambda: ("stop",))
+
+    def run(device):
+        transcriber.transcription_worker_main(connection, [(device, str(tmp_path))], cpu_threads=4)
+        return messages
+
+    return constructor, run
+
+
+@pytest.mark.parametrize("device,properties", [
+    ("GPU", {"COMPILATION_NUM_THREADS": 1}),
+    ("GPU.0", {"COMPILATION_NUM_THREADS": 1}),
+    ("CPU", {"INFERENCE_NUM_THREADS": 4}),
+])
+def test_transcriber_applies_device_specific_compilation_policy(isolated_transcriber_constructor, device, properties):
+    constructor, run = isolated_transcriber_constructor
+    assert run(device)[0][0:2] == ("ready", device)
+    assert constructor.call_count == 1
+    assert constructor.call_args.kwargs == properties
+
+
+def test_transcriber_never_retries_gpu_without_compilation_guard(isolated_transcriber_constructor):
+    constructor, run = isolated_transcriber_constructor
+    constructor.side_effect = RuntimeError("GPU compilation failed")
+    assert run("GPU") == [("failed", "GPU: RuntimeError")]
+    assert constructor.call_count == 1
+    assert constructor.call_args.kwargs == {"COMPILATION_NUM_THREADS": 1}
+
+
+def test_transcriber_preserves_cpu_thread_property_compatibility(isolated_transcriber_constructor):
+    constructor, run = isolated_transcriber_constructor
+    constructor.side_effect = [RuntimeError("unsupported CPU thread property"), object()]
+    assert run("CPU")[0][0:2] == ("ready", "CPU")
+    assert [call.kwargs for call in constructor.call_args_list] == [{"INFERENCE_NUM_THREADS": 4}, {}]
+
+
 def test_transcript_classification_flags_whisper_filler() -> None:
     assert classify_transcript("  ") == "no_text"
     assert classify_transcript("Thanks for watching!") == "low_confidence"
