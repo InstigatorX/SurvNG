@@ -24,10 +24,12 @@ tests/test_camera_routes.py
 tests/test_camera_startup.py
 tests/test_config_routes.py
 tests/test_config_secrets.py
+tests/test_cover_capture_time.py
 tests/test_cover_recovery_pipeline.py
 tests/test_cross_camera_trace.py
 tests/test_database_connection_ownership.py
 tests/test_database_polling.py
+tests/test_database_retention.py
 tests/test_demand_tracking_notifications.py
 tests/test_docker_packaging.py
 tests/test_domain_events.py
@@ -55,10 +57,10 @@ tests/test_manager_access.py
 tests/test_manager_lifecycle.py
 tests/test_manager_reload.py
 tests/test_mcp.py
+tests/test_mcp_lease.py
 tests/test_media_exports.py
 tests/test_media_sessions.py
 tests/test_media_storage.py
-tests/test_mqtt.py
 tests/test_mqtt_lifecycle.py
 tests/test_notice_activity_admission.py
 tests/test_object_activity.py
@@ -125,9 +127,12 @@ tests/test_telemetry_interruptions.py
 tests/test_telemetry_migration.py
 tests/test_telemetry_store.py
 tests/test_tls.py
+tests/test_tracked_evidence.py
 tests/test_tracking_coverage.py
 tests/test_tracking_window.py
 tests/test_update_from_git.py
+tests/test_version_identity.py
+tests/test_volume_identity.py
 tests/test_weather.py
 tests/test_web_auth.py
 tests/test_workflow_reliability.py
