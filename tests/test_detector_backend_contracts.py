@@ -255,3 +255,108 @@ def test_coreml_unsupported_outputs_report_failure_and_recover():
     outputs["detections"] = np.zeros((1, 300, 6), dtype=np.float32)
     assert detector.detect(frame) == []
     assert detector.status()["model_settings"]["error"] == ""
+
+
+@pytest.mark.parametrize("backend,layout", [
+    (backend, layout)
+    for backend in ("openvino", "opencv", "coreml")
+    for layout in ("ssd", "yolo", "yolo-e2e")
+] + [("openvino", "yolo-seg"), ("openvino", "yolo-seg-e2e"),
+     ("coreml", "coordinates"), ("coreml-image", "coordinates")])
+def test_requests_own_threshold_geometry_and_decoded_results(backend, layout, monkeypatch):
+    from copy import deepcopy
+    from concurrent.futures import ThreadPoolExecutor
+
+    detector = OpenVinoDetector(DetectorConfig(
+        enabled=False, labels=["person", "car"], confidence_threshold=.5,
+        model_output_format=layout if layout != "coordinates" else "auto",
+    ))
+    detector.enabled = True
+    detector.input_shape = (640, 640)
+    detector.output_format = layout
+    if layout == "ssd":
+        output = np.array([[[[0, 1, .6, .375, .375, .625, .625]]]], dtype=np.float32)
+    elif layout in {"yolo", "yolo-seg"}:
+        output = np.zeros((1, 6 + (32 if layout == "yolo-seg" else 0), 1001), dtype=np.float32)
+        output[0, :6, 0] = [320, 320, 160, 160, .6, .1]
+    elif layout == "coordinates":
+        output = np.array([[.5, .5, .25, .25]], dtype=np.float32)
+    else:
+        output = np.zeros((1, 300, 6 + (32 if layout == "yolo-seg-e2e" else 0)), dtype=np.float32)
+        output[0, :1, :6] = [240, 240, 400, 400, .6, 0]
+
+    def execute():
+        # Also inspected while the native backend is executing: configuration
+        # readers must never observe another request's temporary override.
+        assert detector.config.confidence_threshold == .5
+        return output
+
+    prototypes = np.zeros((1, 32, 16, 16), dtype=np.float32)
+    if backend == "openvino":
+        detector.compiled_model = object()
+        detector._openvino_embedded_preprocess = True
+        detector.output_layer = "detections"
+        detector.output_layers = ["detections", "prototypes"]
+        detector.infer_request = SimpleNamespace(infer=lambda _inputs: {
+            "detections": execute(), "prototypes": prototypes,
+        })
+    elif backend == "opencv":
+        net = CaptureNet(output)
+        net.forward = execute
+        detector.cv_net = net
+    else:
+        def predict(_inputs):
+            values = execute()
+            if layout == "coordinates":
+                return {"coordinates": values, "confidence": np.array([[.6, .1]])}
+            return {"detections": values}
+
+        detector.coreml_model = SimpleNamespace(predict=predict)
+        if backend == "coreml-image":
+            detector.coreml_image_input = True
+            monkeypatch.setitem(sys.modules, "PIL", SimpleNamespace(
+                Image=SimpleNamespace(fromarray=lambda rgb: rgb),
+            ))
+
+    frames = [np.zeros((320, 640, 3), dtype=np.uint8), np.zeros((640, 320, 3), dtype=np.uint8)]
+    expected = [
+        {"x1": 240, "y1": 80, "x2": 400, "y2": 240},
+        {"x1": 80, "y1": 240, "x2": 240, "y2": 400},
+    ]
+    # Concurrent callers still use the single execution slot. Keep returned
+    # results alive across subsequent native-output and preprocessing reuse.
+    requests = [(i % 2, threshold) for i in range(4) for threshold in (.3, .7, None)]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(lambda request: detector.detect(
+            frames[request[0]], confidence_threshold=request[1],
+        ), requests))
+    for (index, threshold), objects in zip(requests, results):
+        if threshold == .7:
+            assert objects == []
+        else:
+            assert len(objects) == 1
+            assert objects[0]["confidence"] == .6
+            assert objects[0]["box"] == expected[index]
+            if layout in {"yolo-seg", "yolo-seg-e2e"}:
+                assert len(objects[0]["mask_polygon"]) >= 3
+    retained = deepcopy(results)
+    output.fill(0)  # Simulate the native infer request reusing output storage.
+    prototypes.fill(1)
+    detector.detect(frames[1])
+    assert results == retained
+    assert detector.config.confidence_threshold == .5
+    assert detector.status()["runtime"]["failed_inferences"] == 0
+
+
+def test_geometry_metadata_survives_slot_reuse_and_shape_churn():
+    detector = OpenVinoDetector(DetectorConfig(enabled=False))
+    detector.input_shape = (64, 64)
+    detector._openvino_embedded_preprocess = True
+    first_tensor, first_metadata = detector._preprocess(np.zeros((32, 64, 3), dtype=np.uint8))
+    first_metadata_copy = dict(first_metadata)
+    for width in range(32, 48):
+        tensor, metadata = detector._preprocess(np.full((64, width, 3), width, dtype=np.uint8))
+        assert metadata is not first_metadata
+        assert np.shares_memory(tensor, first_tensor)  # Explicit single-slot borrow.
+        assert len(detector._resize_buffers) <= 8
+    assert first_metadata == first_metadata_copy
