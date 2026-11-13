@@ -220,6 +220,9 @@ class OpenVinoDetector:
         self.warmup_ms: float | None = None
         self.warmup_error = ""
         self._openvino_embedded_preprocess = False
+        # One execution slot: the inference lock owns the infer request, canvas,
+        # and bounded resize cache until all outputs are decoded into Python values.
+        # These arrays must never escape detect() or be reused by concurrent work.
         self._preprocess_canvas: np.ndarray | None = None
         self._resize_buffers: dict[tuple[int, int], np.ndarray] = {}
         self._stats_lock = threading.Lock()
@@ -504,7 +507,7 @@ class OpenVinoDetector:
             return self._detect_locked(frame, confidence_threshold=confidence_threshold, queue_ms=queue_ms)
 
     def _detect_locked(self, frame: np.ndarray, confidence_threshold: float | None = None, queue_ms: float = 0.0) -> list[dict[str, Any]]:
-        original_threshold = self.config.confidence_threshold
+        effective_threshold = self.config.confidence_threshold
         started = time.perf_counter()
         stages = {"queue": queue_ms, "preprocess": 0.0, "inference": 0.0, "postprocess": 0.0}
         candidate_counts: dict[str, int] = {}
@@ -517,10 +520,10 @@ class OpenVinoDetector:
                 requested_threshold = float(confidence_threshold)
                 if not np.isfinite(requested_threshold):
                     raise ValueError("detector confidence threshold must be finite")
-                self.config.confidence_threshold = max(0.01, min(0.99, requested_threshold))
+                effective_threshold = max(0.01, min(0.99, requested_threshold))
             if self.coreml_model is not None:
                 inference_started = time.perf_counter()
-                objects = self._detect_coreml(frame)
+                objects = self._detect_coreml(frame, confidence_threshold=effective_threshold)
                 stages["inference"] = (time.perf_counter() - inference_started) * 1000
                 succeeded = not any(item.get("status") == "detector_unavailable" for item in objects)
                 return objects
@@ -530,12 +533,14 @@ class OpenVinoDetector:
             stages["preprocess"] = (time.perf_counter() - preprocess_started) * 1000
             inference_started = time.perf_counter()
             if self.compiled_model is not None:
+                # Synchronous execution borrows tensor storage. Output views are
+                # consumed below before the lock permits another infer() call.
                 inference = self.infer_request.infer([tensor])
                 stages["inference"] = (time.perf_counter() - inference_started) * 1000
                 postprocess_started = time.perf_counter()
                 if self.output_format in {"yolo-seg", "yolo-seg-e2e"}:
                     outputs = [np.asarray(inference[layer]) for layer in self.output_layers]
-                    objects = self._parse_yolo_seg_outputs(outputs, metadata)
+                    objects = self._parse_yolo_seg_outputs(outputs, metadata, confidence_threshold=effective_threshold)
                     stages["postprocess"] = (time.perf_counter() - postprocess_started) * 1000
                     succeeded = True
                     return objects
@@ -552,6 +557,7 @@ class OpenVinoDetector:
                     output,
                     metadata,
                     metrics=postprocess_metrics,
+                    confidence_threshold=effective_threshold,
                 )
                 for name in ("decode", "nms", "result"):
                     stages[f"postprocess_{name}"] = float(
@@ -562,14 +568,13 @@ class OpenVinoDetector:
                     for name in ("raw", "confidence", "valid_boxes", "selected")
                 }
             elif self.output_format == "yolo-e2e":
-                objects = self._parse_yolo_e2e_output(output, metadata)
+                objects = self._parse_yolo_e2e_output(output, metadata, confidence_threshold=effective_threshold)
             else:
-                objects = self._parse_ssd_output(output, frame.shape[1], frame.shape[0], metadata)
+                objects = self._parse_ssd_output(output, frame.shape[1], frame.shape[0], metadata, confidence_threshold=effective_threshold)
             stages["postprocess"] = (time.perf_counter() - postprocess_started) * 1000
             succeeded = True
             return objects
         finally:
-            self.config.confidence_threshold = original_threshold
             stages["total"] = (time.perf_counter() - started) * 1000 + queue_ms
             self._finish_inference(
                 stages,
@@ -711,16 +716,17 @@ class OpenVinoDetector:
     def _load_labels(self, config: DetectorConfig) -> list[str]:
         return load_detector_labels(config)
 
-    def _detect_coreml(self, frame: np.ndarray) -> list[dict[str, Any]]:
+    def _detect_coreml(self, frame: np.ndarray, *, confidence_threshold: float | None = None) -> list[dict[str, Any]]:
+        confidence_threshold = self.config.confidence_threshold if confidence_threshold is None else confidence_threshold
         try:
             if self.coreml_image_input:
                 image, metadata = self._preprocess_coreml_image(frame)
                 outputs = self.coreml_model.predict({self.coreml_input_name: image})
-                return self._parse_coreml_outputs(outputs, frame.shape[1], frame.shape[0], metadata)
+                return self._parse_coreml_outputs(outputs, frame.shape[1], frame.shape[0], metadata, confidence_threshold=confidence_threshold)
 
             tensor, metadata = self._preprocess(frame)
             outputs = self.coreml_model.predict({self.coreml_input_name: tensor})
-            return self._parse_coreml_outputs(outputs, frame.shape[1], frame.shape[0], metadata)
+            return self._parse_coreml_outputs(outputs, frame.shape[1], frame.shape[0], metadata, confidence_threshold=confidence_threshold)
         except Exception:
             LOGGER.exception("Core ML detection failed")
             return [{"status": "detector_unavailable"}]
@@ -731,7 +737,10 @@ class OpenVinoDetector:
         image_width: int,
         image_height: int,
         metadata: dict[str, float] | None = None,
+        *,
+        confidence_threshold: float | None = None,
     ) -> list[dict[str, Any]]:
+        confidence_threshold = self.config.confidence_threshold if confidence_threshold is None else confidence_threshold
         lower_keys = {key.lower(): key for key in outputs}
         coordinates_key = lower_keys.get("coordinates")
         confidence_key = lower_keys.get("confidence")
@@ -744,6 +753,7 @@ class OpenVinoDetector:
                 image_width,
                 image_height,
                 metadata,
+                confidence_threshold=confidence_threshold,
             )
 
         candidate_error: ModelSettingsError | None = None
@@ -764,22 +774,22 @@ class OpenVinoDetector:
                     continue
                 self.output_format = self._resolve_output_format([list(array.shape)])
                 if self.output_format == "yolo-e2e":
-                    return self._parse_yolo_e2e_output(array, metadata)
+                    return self._parse_yolo_e2e_output(array, metadata, confidence_threshold=confidence_threshold)
                 if self.output_format == "yolo":
-                    return self._parse_yolo_output(array, metadata)
+                    return self._parse_yolo_output(array, metadata, confidence_threshold=confidence_threshold)
                 if self.output_format == "ssd":
-                    return self._parse_ssd_output(array, image_width, image_height, metadata)
+                    return self._parse_ssd_output(array, image_width, image_height, metadata, confidence_threshold=confidence_threshold)
             if squeezed.ndim == 2:
                 if metadata is not None and min(squeezed.shape) >= 5 and (
                     squeezed.shape[0] == len(self.labels) + 4
                     or squeezed.shape[1] == len(self.labels) + 4
                     or max(squeezed.shape) > 100
                 ):
-                    return self._parse_yolo_output(array, metadata)
+                    return self._parse_yolo_output(array, metadata, confidence_threshold=confidence_threshold)
                 if min(squeezed.shape) >= 7:
-                    return self._parse_ssd_output(array, image_width, image_height, metadata)
+                    return self._parse_ssd_output(array, image_width, image_height, metadata, confidence_threshold=confidence_threshold)
             if squeezed.ndim == 3 and min(squeezed.shape[-2:]) >= 5 and metadata is not None:
-                return self._parse_yolo_output(array, metadata)
+                return self._parse_yolo_output(array, metadata, confidence_threshold=confidence_threshold)
 
         if candidate_error is not None:
             self.model_settings["error"] = str(candidate_error)
@@ -829,7 +839,10 @@ class OpenVinoDetector:
         image_width: int,
         image_height: int,
         metadata: dict[str, float] | None = None,
+        *,
+        confidence_threshold: float | None = None,
     ) -> list[dict[str, Any]]:
+        confidence_threshold = self.config.confidence_threshold if confidence_threshold is None else confidence_threshold
         coordinates = np.squeeze(coordinates)
         confidence = np.squeeze(confidence)
         if coordinates.ndim == 1:
@@ -846,7 +859,7 @@ class OpenVinoDetector:
                 continue
             class_id = int(np.argmax(scores))
             score = float(scores[class_id])
-            if score < self.config.confidence_threshold:
+            if score < confidence_threshold:
                 continue
 
             x, y, width, height = [float(value) for value in box_values[:4]]
@@ -929,7 +942,10 @@ class OpenVinoDetector:
         self,
         outputs: list[np.ndarray],
         metadata: dict[str, float],
+        *,
+        confidence_threshold: float | None = None,
     ) -> list[dict[str, Any]]:
+        confidence_threshold = self.config.confidence_threshold if confidence_threshold is None else confidence_threshold
         detections_output = next((value for value in outputs if value.ndim == 3), None)
         prototypes_output = next((value for value in outputs if value.ndim == 4 and value.shape[1] == 32), None)
         if detections_output is None:
@@ -989,7 +1005,7 @@ class OpenVinoDetector:
                     continue
                 input_x1, input_y1, input_x2, input_y2 = [float(value) for value in detection[:4]]
                 coeff = np.asarray(detection[6 : 6 + mask_channels])
-            if not np.isfinite(confidence) or confidence < self.config.confidence_threshold:
+            if not np.isfinite(confidence) or confidence < confidence_threshold:
                 continue
             if not np.all(np.isfinite([input_x1, input_y1, input_x2, input_y2])):
                 continue
@@ -1011,7 +1027,7 @@ class OpenVinoDetector:
             boxes,
             scores,
             class_ids,
-            self.config.confidence_threshold,
+            confidence_threshold,
             self.config.nms_threshold,
         ) if raw_format else list(range(len(boxes)))
         objects: list[dict[str, Any]] = []
@@ -1081,6 +1097,11 @@ class OpenVinoDetector:
         return polygon if len(polygon) >= 3 else []
 
     def _preprocess(self, frame: np.ndarray) -> tuple[np.ndarray, dict[str, float]]:
+        """Return slot-borrowed input and fresh request-owned geometry.
+
+        Call under the inference lock (or during exclusive startup/warmup);
+        consume the tensor before the next preprocessing call overwrites it.
+        """
         input_width, input_height = self.input_shape
         image_height, image_width = frame.shape[:2]
         scale = min(input_width / image_width, input_height / image_height)
@@ -1124,7 +1145,10 @@ class OpenVinoDetector:
         image_width: int,
         image_height: int,
         metadata: dict[str, float] | None = None,
+        *,
+        confidence_threshold: float | None = None,
     ) -> list[dict[str, Any]]:
+        confidence_threshold = self.config.confidence_threshold if confidence_threshold is None else confidence_threshold
         detections = np.squeeze(output)
         objects: list[dict[str, Any]] = []
         if detections.ndim == 1:
@@ -1137,7 +1161,7 @@ class OpenVinoDetector:
                 continue
             confidence = float(detection[2])
             values = np.asarray(detection[1:7], dtype=np.float64)
-            if not np.all(np.isfinite(values)) or confidence < self.config.confidence_threshold:
+            if not np.all(np.isfinite(values)) or confidence < confidence_threshold:
                 continue
             label_id = int(detection[1])
             if label_id < 0:
@@ -1180,7 +1204,10 @@ class OpenVinoDetector:
         self,
         output: np.ndarray,
         metadata: dict[str, float],
+        *,
+        confidence_threshold: float | None = None,
     ) -> list[dict[str, Any]]:
+        confidence_threshold = self.config.confidence_threshold if confidence_threshold is None else confidence_threshold
         detections = np.squeeze(output)
         if detections.ndim == 1 and detections.size == 6:
             detections = detections.reshape(1, 6)
@@ -1200,7 +1227,7 @@ class OpenVinoDetector:
             if len(detection) < 6:
                 continue
             confidence = float(detection[4])
-            if not np.isfinite(confidence) or confidence < self.config.confidence_threshold:
+            if not np.isfinite(confidence) or confidence < confidence_threshold:
                 continue
             class_value = float(detection[5])
             if not np.isfinite(class_value):
@@ -1235,7 +1262,9 @@ class OpenVinoDetector:
         metadata: dict[str, float],
         *,
         metrics: dict[str, float | int] | None = None,
+        confidence_threshold: float | None = None,
     ) -> list[dict[str, Any]]:
+        confidence_threshold = self.config.confidence_threshold if confidence_threshold is None else confidence_threshold
         decode_started = time.perf_counter()
         detections = np.squeeze(output)
         if detections.ndim != 2:
@@ -1260,7 +1289,7 @@ class OpenVinoDetector:
         confidence_mask = (
             finite_scores
             & np.isfinite(scores_array)
-            & (scores_array >= self.config.confidence_threshold)
+            & (scores_array >= confidence_threshold)
         )
         confidence_candidates = int(np.count_nonzero(confidence_mask))
 
@@ -1322,7 +1351,7 @@ class OpenVinoDetector:
             boxes,
             scores,
             class_ids,
-            self.config.confidence_threshold,
+            confidence_threshold,
             self.config.nms_threshold,
         )
         nms_ms = (time.perf_counter() - nms_started) * 1000
@@ -1360,8 +1389,11 @@ class OpenVinoDetector:
         self,
         output: np.ndarray,
         metadata: dict[str, float],
+        *,
+        confidence_threshold: float | None = None,
     ) -> list[dict[str, Any]]:
         """Preserve the pre-vectorization parser for offline equivalence replay."""
+        confidence_threshold = self.config.confidence_threshold if confidence_threshold is None else confidence_threshold
         detections = np.squeeze(output)
         if detections.ndim != 2:
             return []
@@ -1394,7 +1426,7 @@ class OpenVinoDetector:
             confidence = float(class_scores[class_id])
             if (
                 not np.isfinite(confidence)
-                or confidence < self.config.confidence_threshold
+                or confidence < confidence_threshold
             ):
                 continue
 
@@ -1428,7 +1460,7 @@ class OpenVinoDetector:
             boxes,
             scores,
             class_ids,
-            self.config.confidence_threshold,
+            confidence_threshold,
             self.config.nms_threshold,
         )
         objects: list[dict[str, Any]] = []
