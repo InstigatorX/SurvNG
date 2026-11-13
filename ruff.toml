@@ -1,0 +1,16 @@
+# Ruff lint configuration: a deliberately narrow, bug-focused rule set.
+# No formatter, style, line-length, or import-sorting rules are enabled.
+# Run: .venv/bin/ruff check .
+target-version = "py312"
+extend-exclude = [
+    ".claude",  # local agent worktrees (full repo copies)
+    "survng/static",
+    "frontend",
+    "node_modules",
+    "models",
+]
+
+[lint]
+# F: pyflakes (undefined names, unused imports/variables, redefinitions).
+# E9: syntax and IO errors. B006: mutable default arguments.
+select = ["F", "E9", "B006"]

@@ -42,6 +42,8 @@ from .geometry import (
 from .registry import ObjectTrackerRegistry, build_builtin_object_tracker_registry
 from .types import (
     AppearanceEncoder,
+    Box,
+    ObjectTrackerBackend,
     AppearanceIndexWriter,
     CatchupFrameProvider,
     FrameProvider,

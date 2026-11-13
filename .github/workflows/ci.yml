@@ -14,6 +14,10 @@ jobs:
       - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.12"
+      - name: Check CI test assignment
+        run: python scripts/check-ci-test-coverage.py
+      - name: Check requirements.lock matches requirements.txt
+        run: python scripts/check-requirements-lock.py
       - uses: actions/setup-node@v7.0.0
         with:
           node-version: "22"
@@ -36,7 +40,14 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -r requirements.txt pytest anyio httpx2
+          .venv/bin/pip install --require-hashes -r requirements.lock
+          .venv/bin/pip install -r requirements-dev.txt
+      - name: Lint Python (ruff)
+        run: .venv/bin/ruff check .
+      - name: Type-check scoped Python modules (mypy)
+        run: .venv/bin/mypy
+      - name: Run CI tooling tests
+        run: scripts/run-tests.sh tests/test_ci_test_coverage.py tests/test_requirements_lock.py
       - name: Run focused Python tests
         run: |
           scripts/run-tests.sh \
@@ -99,6 +110,7 @@ jobs:
             tests/test_object_motion.py \
             tests/test_stationary_policy.py \
             tests/test_config.py \
+            tests/test_current_only.py \
             tests/test_zones.py \
             tests/test_training_routes.py \
             tests/test_appearance_backfill.py \

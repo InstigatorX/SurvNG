@@ -5,7 +5,8 @@ from __future__ import annotations
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, Literal
 
 
 _WRITE_PREFIXES = (
@@ -27,10 +28,10 @@ class ClosingDatabaseConnection(sqlite3.Connection):
 
     def __exit__(
         self,
-        exc_type: object,
-        exc_value: object,
-        traceback: object,
-    ) -> bool:
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
         try:
             return super().__exit__(exc_type, exc_value, traceback)
         finally:
