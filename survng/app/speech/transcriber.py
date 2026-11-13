@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 
 from ..config import SpeechConfig
+from ..inference_runtime.worker_topology import openvino_gpu_compile_config
 
 LOGGER = logging.getLogger("uvicorn.error")
 
@@ -135,16 +136,14 @@ def transcription_worker_main(
         if not candidate_path or not Path(candidate_path).is_dir():
             errors.append(f"{candidate_device}: model not installed")
             continue
-        properties = (
-            {"INFERENCE_NUM_THREADS": int(cpu_threads)}
-            if candidate_device == "CPU" and cpu_threads > 0
-            else {}
-        )
+        properties = openvino_gpu_compile_config(candidate_device)
+        if candidate_device == "CPU" and cpu_threads > 0:
+            properties["INFERENCE_NUM_THREADS"] = int(cpu_threads)
         try:
             try:
                 pipeline = openvino_genai.WhisperPipeline(candidate_path, candidate_device, **properties)
             except Exception:
-                if not properties:
+                if candidate_device != "CPU" or "INFERENCE_NUM_THREADS" not in properties:
                     raise
                 # A runtime that rejects the thread cap still transcribes.
                 pipeline = openvino_genai.WhisperPipeline(candidate_path, candidate_device)

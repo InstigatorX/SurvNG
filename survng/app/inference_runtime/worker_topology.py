@@ -19,6 +19,9 @@ MAX_OBJECT_WORKERS = 4
 # Face + reid + depth workers accompany the object pool on a typical host.
 SPECIALIST_INFERENCE_WORKERS = 3
 MAX_INFERENCE_THREADS_PER_PROCESS = 4
+# IGC 2.40.13 has reproduced native heap corruption during parallel cold GPU
+# compilation. Limit compilation, preserving runtime streams and request pools.
+GPU_COMPILATION_NUM_THREADS = 1
 INFERENCE_THREAD_ENV_VARS = (
     "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
@@ -111,15 +114,27 @@ def apply_inference_thread_limits(
     }
 
 
+def openvino_gpu_compile_config(device: object) -> dict[str, Any]:
+    """Apply the cold-compilation safeguard only to the GPU plugin."""
+    target = str(device or "").strip().upper()
+    gpu = {"COMPILATION_NUM_THREADS": GPU_COMPILATION_NUM_THREADS}
+    if target.split(".", 1)[0] == "GPU":
+        return gpu
+    if target.split(":", 1)[0] in {"AUTO", "MULTI", "HETERO"}:
+        return {"DEVICE_PROPERTIES": {"GPU": gpu}}
+    return {}
+
+
 def openvino_latency_compile_config(
     device: object,
     *,
     environ: Mapping[str, str] | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Build the shared LATENCY compile config, honoring pinned CPU threads."""
     device_text = str(device or "").strip()
     device_upper = device_text.upper()
-    config: dict[str, str] = {"PERFORMANCE_HINT": "LATENCY"}
+    config: dict[str, Any] = {"PERFORMANCE_HINT": "LATENCY"}
+    config.update(openvino_gpu_compile_config(device))
     if device_upper != "AUTO":
         config["NUM_STREAMS"] = "1"
     env = os.environ if environ is None else environ

@@ -10,6 +10,7 @@ from survng.app.inference_runtime.worker_topology import (
     classify_device_class,
     clamp_object_worker_count,
     object_worker_recommendation_from_status,
+    openvino_gpu_compile_config,
     openvino_latency_compile_config,
     recommend_object_worker_count,
     recommended_inference_threads,
@@ -17,6 +18,30 @@ from survng.app.inference_runtime.worker_topology import (
 
 
 class WorkerTopologyTests(unittest.TestCase):
+    def test_gpu_compilation_limit_preserves_inference_settings(self) -> None:
+        for device in ("GPU", "GPU.0", " gpu.0 "):
+            with self.subTest(device=device):
+                self.assertEqual(openvino_latency_compile_config(device, environ={}), {
+                    "PERFORMANCE_HINT": "LATENCY",
+                    "NUM_STREAMS": "1",
+                    "COMPILATION_NUM_THREADS": 1,
+                })
+
+    def test_virtual_devices_scope_compilation_limit_to_gpu(self) -> None:
+        for device in ("AUTO", "AUTO:GPU,CPU", "MULTI:GPU.0,CPU", "HETERO:GPU,CPU"):
+            with self.subTest(device=device):
+                properties = openvino_latency_compile_config(device, environ={})
+                self.assertNotIn("COMPILATION_NUM_THREADS", properties)
+                self.assertEqual(properties["DEVICE_PROPERTIES"], {"GPU": {"COMPILATION_NUM_THREADS": 1}})
+
+    def test_gpu_policy_does_not_change_cpu_or_npu_compilation(self) -> None:
+        for device in ("CPU", "NPU"):
+            with self.subTest(device=device):
+                self.assertEqual(openvino_gpu_compile_config(device), {})
+                self.assertEqual(openvino_latency_compile_config(device, environ={}), {
+                    "PERFORMANCE_HINT": "LATENCY", "NUM_STREAMS": "1",
+                })
+
     def test_object_worker_count_defaults_to_protected_tracking_lane(self) -> None:
         self.assertEqual(DetectorConfig().object_worker_count, 2)
         self.assertEqual(
