@@ -1,3 +1,4 @@
+import { DetectionReviewControl, DetectionReviewsAdmin } from "../incidents/DetectionReviews.jsx";
 import { WeatherSettings } from "./WeatherSettings.jsx";
 import { SystemReviewPanel } from "./SystemReviewPanel.jsx";
 import React, { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -3200,6 +3201,7 @@ export function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect })
               : <div className="empty-thumb"><Camera size={42} /><span>Audit image unavailable</span></div>}
           </div>
           <aside className="motion-audit-overlay-details">
+            <DetectionReviewControl source="motion_audit" sourceId={item.id} />
             <span className={`motion-audit-outcome ${outcome.className}`}>{outcome.label}</span>
             <div className="motion-audit-overlay-score"><span>{String(item.reason || "rejected").replaceAll("_", " ")}</span><strong>{Number(item.score || 0).toFixed(3)} / {Number(item.threshold || 0).toFixed(3)}</strong></div>
             {item.interpretation?.explanation ? <div className="motion-analysis-warning">{item.interpretation.explanation}</div> : null}
@@ -4335,6 +4337,8 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </details>
           </section> : null}
 
+
+          {detectionSection === "object" ? <DetectionReviewsAdmin /> : null}
 
           {detectionSection === "object" ? <section className="detection-settings-card detection-feature-card wide-card">
             <header className="detection-settings-card-head">

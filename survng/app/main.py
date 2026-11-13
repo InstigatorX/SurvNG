@@ -102,6 +102,7 @@ from .motion_pipeline import build_builtin_motion_registry
 from .system_routes import SystemRouteDependencies, create_system_router
 from .tls_routes import TlsRouteDependencies, create_tls_router
 from .speech_routes import SpeechRouteDependencies, create_speech_router
+from .correction_routes import create_correction_router
 from .training_routes import TrainingRouteDependencies, create_training_router
 from .proxy import apply_trusted_proxy_headers, request_is_secure, scope_header
 from .security import (
@@ -1423,6 +1424,11 @@ event_related_incidents = _appearance_route_bundle.handlers["event_related_incid
 appearance_index_status = _appearance_route_bundle.handlers["appearance_index_status"]
 queue_appearance_backfill = _appearance_route_bundle.handlers["queue_appearance_backfill"]
 
+
+app.include_router(create_correction_router(TrainingRouteDependencies(
+    get_config=lambda: config, get_manager=get_manager,
+    manager_lock=MANAGER_RELOAD_LOCK, manager_access=MANAGER_ACCESS,
+)))
 
 app.include_router(
     create_training_router(

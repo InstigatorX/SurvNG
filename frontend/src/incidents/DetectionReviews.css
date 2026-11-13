@@ -1,0 +1,16 @@
+.detection-review { margin-block: 1rem; padding: .75rem; border: 1px solid var(--border-color, #59616d); border-radius: .6rem; }
+.detection-review summary { cursor: pointer; font-weight: 600; }
+.detection-review label { display: block; margin-block: .65rem; }
+.detection-review input:not([type=checkbox]), .detection-review select { display: block; width: 100%; }
+.detection-review button { margin: .25rem; }
+.detection-review fieldset { margin-block: .75rem; min-width: 0; }
+.review-image { position: relative; width: 100%; }
+.review-image img { display: block; width: 100%; height: auto; }
+.review-image svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.review-image rect { vector-effect: non-scaling-stroke; stroke-width: 2; }
+.review-image .candidate { fill: transparent; stroke: #7dd3fc; cursor: pointer; }
+.review-image .hidden-candidate { stroke: #fbbf24; stroke-dasharray: 4 3; }
+.review-image .selected-box { fill: #34d39922; stroke: #34d399; pointer-events: none; }
+.review-admin-list { padding: 0; list-style: none; }
+.review-admin-list li { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-block: .7rem; }
+.review-admin-list img { width: 96px; height: 72px; object-fit: contain; }

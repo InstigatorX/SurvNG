@@ -1,3 +1,4 @@
+import { DetectionReviewControl } from "./DetectionReviews.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { IncidentSpeechBadge, IncidentSpeechPanel } from "./IncidentSpeech.jsx";
 import {
@@ -967,6 +968,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
         {onClose ? <button type="button" className="incident-inspector-close" onClick={onClose} aria-label="Close incident details"><X size={17} /></button> : null}
       </div>
       <IncidentSpeechPanel incident={incident} timeZone={timeZone} />
+      <DetectionReviewControl sourceId={eventId} labels={appConfig?.detector?.labels || []} />
       <section className="incident-observed-objects" aria-label="Observed objects">
         <h3>Observed objects</h3>
         {observedObjects.length ? <ul>{observedObjectSummaries(observedObjects).map((detection) => (

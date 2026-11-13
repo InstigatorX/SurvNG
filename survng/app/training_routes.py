@@ -32,7 +32,7 @@ CURSOR_VERSION = 1
 class TrainingAnnotation(BaseModel):
     annotation_id: str
     label: str
-    confidence: float = Field(ge=0.0, le=1.0)
+    confidence: float | None = Field(ge=0.0, le=1.0)
     bbox_xyxy: list[float] = Field(min_length=4, max_length=4)
     bbox_xywh: list[float] = Field(min_length=4, max_length=4)
     bbox_normalized_xyxy: list[float] = Field(min_length=4, max_length=4)
@@ -42,7 +42,11 @@ class TrainingAnnotation(BaseModel):
     temporal_consensus: bool
     semantic_tier: str
     source: Literal["survng_object_detection"]
-    annotation_state: Literal["model_generated"]
+    annotation_state: Literal["model_generated", "human_reviewed"]
+    review_verdict: str | None = None
+    original_label: str | None = None
+    correction_id: int | None = None
+    annotation_source: str | None = None
 
 
 class TrainingImage(BaseModel):
@@ -65,7 +69,8 @@ class TrainingSample(BaseModel):
     captured_at: str
     image: TrainingImage
     annotations: list[TrainingAnnotation]
-    annotation_state: Literal["model_generated", "unreviewed"]
+    annotation_state: Literal["model_generated", "unreviewed", "human_reviewed"]
+    verified_negative: bool | None = None
 
 
 class TrainingSamplesResponse(BaseModel):
@@ -289,6 +294,7 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
     @router.get(
         "/api/training/samples",
         response_model=TrainingSamplesResponse,
+        response_model_exclude_unset=True,
         summary="List original incident images and model-generated annotations",
     )
     def training_samples(
@@ -302,6 +308,7 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
         sample_kinds: str = "",
         sources: str = "",
         image_source: Literal["stored", "main_recording"] = "stored",
+        review: Literal["any", "reviewed"] = "any",
         limit: int = Query(default=100, ge=1, le=500),
         cursor: str = Query(default="", max_length=2048),
     ) -> dict[str, Any]:
@@ -326,7 +333,7 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
             raise HTTPException(status_code=422, detail="unsupported training sample source")
         negative_candidates = "negative_candidate" in selected_kinds
         motion_audit_source = "motion_audit" in selected_sources
-        if motion_audit_source and selected_kinds and not negative_candidates:
+        if motion_audit_source and selected_kinds and not negative_candidates and review != "reviewed":
             raise HTTPException(
                 status_code=422,
                 detail="motion_audit source supports negative_candidate samples",
@@ -342,7 +349,22 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                 status_code=422,
                 detail="main_recording images require motion-audit negative candidates",
             )
-        decoded_cursor = _decode_cursor(cursor)
+        if review == "reviewed" and image_source != "stored":
+            raise HTTPException(422, "reviewed annotations require their retained stored image")
+        review_cursor = cursor.startswith("reviews:")
+        legacy_cursor = cursor.startswith("legacy:")
+        if review == "reviewed" and cursor and not review_cursor:
+            raise HTTPException(422, "reviewed exports require a review cursor")
+        if review_cursor:
+            try:
+                review_before = int(cursor.split(":", 1)[1])
+                if review_before < 1:
+                    raise ValueError()
+            except ValueError as exc:
+                raise HTTPException(422, "invalid review cursor") from exc
+        else:
+            review_before = None
+        decoded_cursor = _decode_cursor(cursor[7:] if legacy_cursor else "" if review_cursor else cursor)
         before_created_at = decoded_cursor[0] if decoded_cursor else None
         before_id = decoded_cursor[1] if decoded_cursor else None
         start_iso = start.isoformat()
@@ -354,6 +376,25 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
             deps.get_manager,
         ) as active_manager:
             base_path = deps.get_config().base_path
+            from .review_training import reviewed_training_page, source_has_current_review
+            review_page = None
+            if review == "reviewed" or review_cursor or (not cursor and image_source == "stored"):
+                review_page = reviewed_training_page(
+                    active_manager.events, start=start_iso, end=end_iso, cameras=selected_cameras,
+                    labels=selected_labels, source="motion_audit" if use_motion_audits else "event",
+                    kinds=selected_kinds, before=review_before, limit=limit, base_path=base_path,
+                    reviewed_only=review == "reviewed", eligibility=eligibility, minimum_confidence=minimum_confidence,
+                )
+            if review_page and (review == "reviewed" or review_cursor or review_page[3]):
+                samples, scanned, next_id, _ = review_page
+                return _training_response(
+                    start_iso, end_iso, selected_cameras, selected_labels, eligibility,
+                    minimum_confidence, include_empty, image_source, selected_kinds or tuple(dict.fromkeys(sample["sample_kind"] for sample in samples)),
+                    selected_sources, use_motion_audits, samples, scanned,
+                    f"reviews:{next_id}" if next_id else ("legacy:" if review == "any" else ""),
+                    scanned >= MAX_SCANNED_EVENTS and next_id is not None,
+                    review=review,
+                )
             samples: list[dict[str, Any]] = []
             scanned = 0
             exhausted = False
@@ -395,6 +436,8 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                     last_row = event
                     before_created_at = str(event.get("created_at") or "")
                     before_id = int(event.get("id") or 0)
+                    if image_source == "stored" and source_has_current_review(active_manager.events, "motion_audit" if use_motion_audits else "event", before_id):
+                        continue
                     is_negative_candidate = use_motion_audits
                     if is_negative_candidate:
                         annotations, width, height, sample_offset = [], None, None, 0.0
@@ -479,35 +522,13 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                 str(last_row.get("created_at") or ""),
                 int(last_row.get("id") or 0),
             )
-        return {
-            "schema_version": 1,
-            "coordinate_conventions": {
-                "bbox_xyxy": "pixel coordinates [left, top, right, bottom]",
-                "bbox_xywh": "pixel coordinates [left, top, width, height]",
-                "bbox_normalized_xyxy": "0..1 [left, top, right, bottom]",
-                "bbox_normalized_cxcywh": "YOLO-style 0..1 [center_x, center_y, width, height]",
-            },
-            "range": {"start_at": start_iso, "end_at": end_iso},
-            "filters": {
-                "camera_ids": list(selected_cameras),
-                "object_labels": sorted(selected_labels),
-                "eligibility": eligibility,
-                "minimum_confidence": minimum_confidence,
-                "include_empty": include_empty,
-                "image_source": image_source,
-                "sample_kinds": list(selected_kinds) or [
-                    "negative_candidate" if use_motion_audits else "annotated"
-                ],
-                "sources": list(selected_sources) or [
-                    "motion_audit" if use_motion_audits else "event"
-                ],
-            },
-            "samples": samples,
-            "count": len(samples),
-            "scanned_events": scanned,
-            "scan_limited": scanned >= MAX_SCANNED_EVENTS and not exhausted,
-            "next_cursor": next_cursor,
-        }
+        return _training_response(
+            start_iso, end_iso, selected_cameras, selected_labels, eligibility,
+            minimum_confidence, include_empty, image_source, selected_kinds, selected_sources,
+            use_motion_audits, samples, scanned,
+            ("legacy:" + next_cursor) if legacy_cursor and next_cursor else next_cursor,
+            scanned >= MAX_SCANNED_EVENTS and not exhausted,
+        )
 
     @router.get("/api/training/motion-audits/{audit_id}/main.jpg")
     def training_main_image(audit_id: int) -> FileResponse:
@@ -554,3 +575,39 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
             return FileResponse(path, media_type="image/jpeg", headers=headers)
 
     return router
+
+
+def _training_response(start_iso, end_iso, selected_cameras, selected_labels, eligibility,
+                       minimum_confidence, include_empty, image_source, selected_kinds,
+                       selected_sources, use_motion_audits, samples, scanned, next_cursor,
+                       scan_limited, review="any"):
+    return {
+        "schema_version": 1,
+        "coordinate_conventions": {
+            "bbox_xyxy": "pixel coordinates [left, top, right, bottom]",
+            "bbox_xywh": "pixel coordinates [left, top, width, height]",
+            "bbox_normalized_xyxy": "0..1 [left, top, right, bottom]",
+            "bbox_normalized_cxcywh": "YOLO-style 0..1 [center_x, center_y, width, height]",
+        },
+        "range": {"start_at": start_iso, "end_at": end_iso},
+        "filters": {
+            **({"review": review} if review != "any" else {}),
+            "camera_ids": list(selected_cameras),
+            "object_labels": sorted(selected_labels),
+            "eligibility": eligibility,
+            "minimum_confidence": minimum_confidence,
+            "include_empty": include_empty,
+            "image_source": image_source,
+            "sample_kinds": list(selected_kinds) or [
+                "negative_candidate" if use_motion_audits else "annotated"
+            ],
+            "sources": list(selected_sources) or [
+                "motion_audit" if use_motion_audits else "event"
+            ],
+        },
+        "samples": samples,
+        "count": len(samples),
+        "scanned_events": scanned,
+        "scan_limited": scan_limited,
+        "next_cursor": next_cursor,
+    }

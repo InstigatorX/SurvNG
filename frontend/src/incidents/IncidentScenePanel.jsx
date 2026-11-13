@@ -1,3 +1,4 @@
+import { DetectionReviewControl } from "./DetectionReviews.jsx";
 import React, { useEffect, useState } from "react";
 import { appUrl, fetch, mediaUrl, recordingsHref } from "../shared/api.js";
 import { formatDateTime } from "../shared/format.js";
@@ -159,6 +160,11 @@ export function IncidentScenePanel({ incident, timeZone, canCorrectIncident = fa
         </li>)}</ul>
       </div>)}</details> : null}
     </details>
+    <DetectionReviewControl
+      sourceId={selectedObservation?.event_id || selectedObject?.source_event_id || scene?.representative_event_id || scene?.events?.[0]?.id}
+      initialObservation={selectedObservation?.event_id ? String(selectedObservation.id || "") : ""}
+      labels={objects.map((object) => object.label).filter(Boolean)}
+    />
     {canCorrectIncident && scene?.incident_id && scene.revision != null && Number.isFinite(Number(scene.revision)) ? <details className="incident-corrections"><summary>Correct this incident</summary><p>Changes preserve the original evidence. Incident ID: <code>{scene.incident_id}</code></p>
       <form onSubmit={correct}><label>Correction<select value={operation} onChange={(event) => { setOperation(event.target.value); setSelectedIds([]); setError(""); }}>
         <option value="label">Correct object label</option><option value="associate">Associate object observations</option><option value="separate">Separate object observations</option><option value="split">Separate camera episodes</option><option value="merge">Merge incidents</option>

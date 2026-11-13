@@ -18,6 +18,7 @@ from ..media_storage import MediaStorageRegistry, path_presence
 from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 from ..object_motion import tracking_motion_promotions
 from ..perf_samples import TimedLock
+from .corrections import EventStoreCorrectionsMixin
 from .calibration import EventStoreCalibrationMixin
 from .jobs import EventStoreJobsMixin
 from .evidence import EventStoreEvidenceMixin, EventSnapshotChangedError
@@ -34,6 +35,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class EventStore(
+    EventStoreCorrectionsMixin,
     EventStoreGalleryMixin,
     EventStoreSceneReviewMixin,
     EventStoreSceneAdmissionMixin,
@@ -95,6 +97,7 @@ class EventStore(
             self._init_scene_tracking_schema(conn)
         self._recover_snapshot_deletion_claims()
         self._init_jobs_db()
+        self._init_corrections_db()
 
     def lock_wait_status(self) -> dict[str, dict[str, int | float | None]]:
         """Contended waits on the in-process serialization locks."""

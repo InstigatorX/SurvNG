@@ -136,3 +136,68 @@ The endpoint follows SurvNG's existing HTTP security boundary and does not add
 separate user authentication. Keep it on a trusted LAN/VPN or behind the same
 authenticated reverse proxy as the rest of SurvNG. An external importer must
 provide whatever proxy credentials that deployment requires.
+
+## Human-reviewed samples
+
+Administrators can record reviews using the [detection review APIs](detection-reviews.md).
+These reviews do not change incident admission or enable appearance matching.
+
+`review=any` is the default. With no applicable active reviews, the existing
+manifest output is unchanged. With reviews, stored-image exports first page
+through review-owned images, then continue through the original source manifest.
+Treat cursors as opaque and keep all filters unchanged. A page can be empty with
+a nonempty cursor when filtering or scanning reaches a boundary; continue paging.
+Reviewed images retain their own bytes, dimensions and source identifiers after
+source events, audit rows or recordings expire. Event/source IDs in these samples
+are provenance, not a guarantee that the original route still exists.
+
+`review=reviewed` returns only direct human annotations and verified negatives.
+Use `sources=motion_audit&review=reviewed` for reviewed audit images, optionally
+`sample_kinds=annotated` for drawn positives or `negative_candidate` for verified
+negatives. Without an explicit kind, both kinds of reviewed audit images can be
+returned. Human annotations require `image_source=stored`; they are never remapped
+onto frames extracted with `image_source=main_recording`. The latter continues to
+export the original unreviewed audit candidates.
+
+Reviewed annotation fields:
+
+- `annotation_state: human_reviewed` applies only to directly reviewed regions.
+- `review_verdict`: `not_object`, `wrong_label`, `confirmed`, or `missed`.
+- `original_label`: raw detector label, or null for a drawn box.
+- `correction_id`: review ID, with audit details at
+  `GET /api/detection-corrections/{id}`.
+- `annotation_source`: `operator_reviewed` or `operator_drawn`.
+- `confidence: null`: human judgment has no invented detector confidence score.
+
+For directly reviewed detections, eligibility, zones and temporal metadata retain
+the model evidence values; drawn annotations have no admission result and use
+false/empty values. The review itself does not change admission.
+
+Human annotations bypass the confidence and eligibility filters so a reviewed
+hidden object or hard-negative region remains retrievable. `object_labels` matches
+either its effective label or original label. `not_object` regions remain in the
+response; importers must handle them as negative regions instead of positive
+bounding-box labels. A corrected label is normalized by trimming/collapsing
+whitespace and lowercasing; the original detector label remains unchanged.
+
+With `review=any`, other retained model annotations on the same reviewed image
+remain `model_generated` and still obey the model confidence/eligibility/label
+filters. Only direct reviews gain review fields. A sample-level
+`annotation_state=human_reviewed` means it contains reviewed evidence, **not** that
+all its annotations are human-reviewed or that every object was exhaustively
+annotated. Runtime-propagated labels are not produced in this phase.
+
+A drawn positive makes a reviewed motion image an `annotated` sample. A verified
+whole-image negative has `sample_kind=negative_candidate`,
+`annotation_state=human_reviewed`, `assumed_negative=false`, and
+`verified_negative=true`. Positive annotations and a verified negative on the same
+source image cannot be active simultaneously. Revoke/unreview removes the human
+verdict from future exports; it does not erase review history or rewrite source
+model evidence. A surviving source image can consequently return to model-generated
+or unreviewed export after revocation.
+
+Reviewed ranges use the retained image's capture time where known (otherwise its
+source event/audit timestamp). Image hashes and active review revisions determine
+sample identity/revision. Multiple reviews of the same source image are grouped,
+including when source metadata changed between reviews. A genuinely replaced image
+is a separate sample with its original coordinate plane preserved.

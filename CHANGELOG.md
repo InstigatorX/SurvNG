@@ -4,6 +4,12 @@
 
 Released as `v1.2.0`.
 
+- Administrators can save, supersede and revoke detection training reviews,
+  annotate missed objects on incident/audit images, and verify negative audit
+  images. Review-owned images survive source retention. Training exports add
+  `review=reviewed` and direct `human_reviewed` annotations. Appearance matching
+  remains off; incident decisions and detector behavior are unchanged.
+
 - Recording indexes and snapshot links stay when the expected volume is
   unmounted or cannot be identified, including after a mountpoint directory
   is left behind. A replacement disk is not enrolled automatically.
