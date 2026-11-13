@@ -11,8 +11,8 @@ ARG SURVNG_UID=1000
 ARG SURVNG_GID=1000
 # Prototype-qualified FFmpeg 8.1.2 from ubuntuhandbook1/ffmpeg8 (Noble).
 ARG FFMPEG_VERSION=10:8.1.2-0build1~ubuntu24.04
-ARG GO2RTC_VERSION=1.9.14
-ARG GO2RTC_SHA256=32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6
+ARG GO2RTC_VERSION=1.9.15
+ARG GO2RTC_SHA256=20b46c6910734cb05ecefb234066f36868ff19b42ba1418a7a32e13a3e035712
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/survng-venv/bin:$PATH \
@@ -89,15 +89,16 @@ CMD ["python", "-m", "survng.app", "--host", "0.0.0.0", "--port", "8088", "--loo
 
 # Optional Intel OpenVINO GPU and VA-API/QSV userspace. Select this target with
 # docker compose -f compose.yaml -f compose.intel-gpu.yaml up -d --build.
-# Pins match the prototype Noble + kobuk-team/intel-graphics stack.
+# Current Noble packages from ppa:kobuk-team/intel-graphics. They depend on
+# each other, so move the build args together.
 FROM runtime-base AS runtime-intel
 USER root
-ARG INTEL_COMPUTE_VERSION=26.31.39395.13-1~24.04~ppa1
-ARG INTEL_IGC_VERSION=2.40.13+ds1-1~24.04
-ARG INTEL_GMMLIB_VERSION=22.10.1-1~24.04~ppa1
-ARG INTEL_LEVEL_ZERO_VERSION=1.32.0-1~24.04~ppa1
-ARG INTEL_MEDIA_VERSION=26.3.2-1~24.04~ppa1
-ARG INTEL_VPL_VERSION=1:2.16.0-1~24.04~ppa1
+ARG INTEL_COMPUTE_VERSION=26.40.40196.15-1~24.04~ppa1
+ARG INTEL_IGC_VERSION=2.42.14-1~24.04
+ARG INTEL_GMMLIB_VERSION=22.10.2-1~24.04~ppa1
+ARG INTEL_LEVEL_ZERO_VERSION=1.34.0-1~24.04~ppa1
+ARG INTEL_MEDIA_VERSION=26.4.1-1~24.04~ppa1
+ARG INTEL_VPL_VERSION=1:2.17.0-1~24.04~ppa1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         software-properties-common \

@@ -11,14 +11,14 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
       - name: Check CI test assignment
         run: python scripts/check-ci-test-coverage.py
       - name: Check requirements.lock matches requirements.txt
         run: python scripts/check-requirements-lock.py
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: "22"
           cache: npm

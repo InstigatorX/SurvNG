@@ -19,8 +19,9 @@ MAX_OBJECT_WORKERS = 4
 # Face + reid + depth workers accompany the object pool on a typical host.
 SPECIALIST_INFERENCE_WORKERS = 3
 MAX_INFERENCE_THREADS_PER_PROCESS = 4
-# IGC 2.40.13 has reproduced native heap corruption during parallel cold GPU
-# compilation. Limit compilation, preserving runtime streams and request pools.
+# IGC 2.40.13 reproduced native heap corruption during parallel cold GPU
+# compilation. Keep compilation single-threaded on newer IGC builds until that
+# failure is remeasured. Runtime streams and request pools stay uncapped.
 GPU_COMPILATION_NUM_THREADS = 1
 INFERENCE_THREAD_ENV_VARS = (
     "OMP_NUM_THREADS",

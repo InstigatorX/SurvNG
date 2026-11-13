@@ -302,8 +302,8 @@ install_cpu_torch() {
   # pulls multi-GB NVIDIA wheels; pin the CPU index instead.
   "$venv_dir/bin/python" -m pip install --upgrade pip >/dev/null
   "$venv_dir/bin/python" -m pip install \
-    'torch>=2.14.0,<3' \
-    'torchvision>=0.29.0,<1' \
+    'torch>=2.15.0,<3' \
+    'torchvision>=0.29.2,<1' \
     --index-url https://download.pytorch.org/whl/cpu
 }
 
@@ -421,8 +421,8 @@ install_detector() {
   # Pin <5 to stay on the manylinux builds exercised with libxcb in the image.
   ensure_venv "$venv" \
     'opencv-python>=4.14.0.94,<5' \
-    'ultralytics>=8.4.148,<9' \
-    'openvino>=2026.3.1'
+    'ultralytics>=8.4.211,<9' \
+    'openvino>=2026.4.1,<2026.5'
   finalize_export_venv "$venv"
   (
     cd "$work"
@@ -485,8 +485,8 @@ install_depth() {
   install_cpu_torch "$venv"
   ensure_venv "$venv" \
     'opencv-python>=4.14.0.94,<5' \
-    'ultralytics>=8.4.148,<9' \
-    'openvino>=2026.3.1'
+    'ultralytics>=8.4.211,<9' \
+    'openvino>=2026.4.1,<2026.5'
   finalize_export_venv "$venv"
   (
     cd "$work"
@@ -581,11 +581,11 @@ install_semantic() {
   ensure_venv "$venv"
   install_cpu_torch "$venv"
   ensure_venv "$venv" \
-    'open_clip_torch>=3.3.0,<4' \
-    'timm>=1.0.29,<2' \
-    'huggingface_hub>=1.31.0,<2' \
-    'Pillow>=12.3.0,<13' \
-    'openvino>=2026.3.1'
+    'open_clip_torch>=4.2.2,<5' \
+    'timm>=1.0.31,<2' \
+    'huggingface_hub>=2.4.0,<3' \
+    'Pillow>=13.0.0,<14' \
+    'openvino>=2026.4.1,<2026.5'
   finalize_export_venv "$venv"
   local force_flag=()
   if [[ "$FORCE" -eq 1 ]]; then
@@ -604,7 +604,7 @@ install_speech() {
   local whisper_dir="$speech_dir/whisper"
   local venv
   venv="$(venv_root)/speech-venv"
-  ensure_venv "$venv" 'huggingface_hub>=1.31.0,<2'
+  ensure_venv "$venv" 'huggingface_hub>=2.4.0,<3'
   mkdir -p "$speech_dir" "$whisper_dir"
 
   if [[ ! -f "$vad" || "$FORCE" -eq 1 ]]; then
@@ -680,7 +680,7 @@ install_face() {
 
   local venv
   venv="$(venv_root)/face-venv"
-  ensure_venv "$venv" 'openvino>=2026.3.1'
+  ensure_venv "$venv" 'openvino>=2026.4.1,<2026.5'
   local ovc_bin="$venv/bin/ovc"
   if [[ ! -x "$ovc_bin" ]]; then
     err "OpenVINO converter (ovc) missing from $venv after openvino install"
