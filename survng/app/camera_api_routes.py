@@ -70,6 +70,14 @@ def live_camera_jpeg(manager: AppManager, camera_id: str, source: str = "live") 
     status = worker.status()
     if not status.get("running"):
         raise HTTPException(status_code=503, detail="camera is powered off")
+    if camera.battery_powered() and status.get("capture_connectivity") in {
+        "asleep",
+        "wake_failed",
+    }:
+        image = worker.snapshot(camera.normalized_source(source))
+        if image is None:
+            raise HTTPException(status_code=503, detail="camera is asleep")
+        return image
     image, stale = cached_camera_snapshot(worker, camera, source, status)
     if image is None and not stale:
         try:
@@ -120,6 +128,17 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
             if worker is None or camera is None:
                 raise HTTPException(status_code=404, detail="camera not found")
             status = worker.status()
+            if camera.battery_powered() and status.get("capture_connectivity") in {
+                "asleep",
+                "wake_failed",
+            }:
+                image = worker.snapshot(camera.normalized_source(source))
+                if image is not None:
+                    return Response(
+                        image,
+                        media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"},
+                    )
             image, stale = cached_camera_snapshot(worker, camera, source, status)
             if image is None and status.get("running") and not stale:
                 try:
@@ -396,6 +415,18 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
     @router.post("/api/cameras/{camera_id}/camera/start")
     def start_camera(camera_id: str) -> dict[str, bool]:
         return control(lambda active: active.start_camera(camera_id))
+
+    @router.post("/api/cameras/{camera_id}/wake")
+    def wake_camera(camera_id: str) -> dict[str, Any]:
+        result = with_manager(lambda active: active.wake_camera(camera_id))
+        if result == "missing":
+            raise HTTPException(status_code=404, detail="camera not found")
+        if result == "rejected":
+            raise HTTPException(
+                status_code=409,
+                detail="camera is not an enabled battery camera",
+            )
+        return {"ok": True, "wake": result}
 
     @router.post("/api/cameras/{camera_id}/camera/stop")
     def stop_camera(camera_id: str) -> dict[str, bool]:

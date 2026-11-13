@@ -67,7 +67,7 @@ class SpeechLifecycle:
         self.cameras = {
             camera.id: camera
             for camera in config.cameras
-            if camera.speech.enabled
+            if camera.speech.enabled and not camera.battery_powered()
         }
         self.store: SpeechStore | None = None
         self.transcriber: TranscriptionService | None = None

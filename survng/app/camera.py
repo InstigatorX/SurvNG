@@ -621,7 +621,13 @@ class CameraWorker:
             tracking=self.tracking_lifecycle,
             motion_runtime=self.motion_runtime,
             tracking_frames=self.tracking_frames,
+            defer_capture=camera.battery_powered(),
         )
+        self._wake_status = lambda: {
+            "phase": "asleep",
+            "overdue": False,
+            "saw_frame": False,
+        }
         self.status_reporter = CameraStatusService(
             camera=camera,
             motion_config=self.motion_config,
@@ -641,6 +647,7 @@ class CameraWorker:
             object_tracking=self.tracking_lifecycle,
             incidents=self.motion_incidents,
             lifecycle=self.lifecycle,
+            wake_status=lambda: dict(self._wake_status()),
             spatial_alignment=lambda: {
                 **self._stream_alignment.status(dict(self._effective_spatial_alignment)),
                 "startup_calibration": self._spatial_alignment_startup_active,
@@ -1052,7 +1059,31 @@ class CameraWorker:
 
     def live_capture_ready(self) -> bool:
         """Expose capture readiness to lifecycle orchestration without a frame copy."""
+        # A sleeping battery camera is ready to be admitted. Startup must not
+        # wait for a frame that will not exist until an external wake.
+        if self.camera.battery_powered():
+            return True
         return self.capture.frame_ready("live")
+
+    def set_wake_status_provider(self, provider) -> None:
+        self._wake_status = provider
+
+    def open_wake_capture(self) -> bool:
+        return self.capture.open_wake_source("live")
+
+    def release_wake_capture(self) -> None:
+        self.capture.release_wake_sources()
+
+    def wake_capture_running(self) -> bool:
+        return self.capture.source_running("live")
+
+    def wake_frame_monotonic(self) -> float | None:
+        value = self.capture.status().get("live_frame_monotonic")
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def notify_wake_motion(self) -> None:
+        """Treat a successful wake as the camera motion notice."""
+        self.handle_motion_event("battery/wake", "battery camera wake")
 
     def update_zones(self, zones: list[DetectionZone]) -> None:
         next_zones = [zone.model_copy(deep=True) for zone in zones]
@@ -1220,7 +1251,10 @@ class CameraWorker:
         source = self.camera.normalized_source(source)
         if self._stop.is_set():
             return None
-        frame = self.capture.request_frame(source)
+        if self.camera.battery_powered() and not self.capture.source_running(source):
+            frame = self.capture.latest(source, allow_stale=True)
+        else:
+            frame = self.capture.request_frame(source)
         return frame.image if frame is not None else None
 
     def _get_latest_detection_frame(self) -> TimestampedLiveFrame | None:

@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
 
+from .battery_wake import BatteryWakeService
 from .camera_fleet import CameraFleetLifecycle
 from .camera_lifecycle import DetectionShutdownIncomplete
 from .config import AppConfig, CameraConfig
@@ -59,7 +60,24 @@ class CameraControlService:
         self._detection_enabled: dict[str, bool] = {}
         self._camera_enabled = {camera_id: True for camera_id in self._cameras}
         self._accepting_commands = True
+        self._wake = BatteryWakeService(
+            cameras=self._cameras,
+            open_capture=self._open_wake_capture,
+            release_capture=self._release_wake_capture,
+            capture_running=self._wake_capture_running,
+            frame_monotonic=self._wake_frame_monotonic,
+            notify_motion=self._notify_wake_motion,
+            set_recording_released=self._recording.set_session_released,
+            start_recording=self._recording.start_camera,
+            publish=self._publish_wake_state,
+        )
+        for camera_id, worker in self._workers.items():
+            bind = getattr(worker, "set_wake_status_provider", None)
+            if callable(bind):
+                bind(lambda camera_id=camera_id: self._wake.status(camera_id))
         self._load_persisted_state()
+        if any(camera.battery_powered() for camera in self._cameras.values()):
+            self._wake.start()
 
     def _load_persisted_state(self) -> None:
         state_path = self._state_path
@@ -108,6 +126,25 @@ class CameraControlService:
         """Reject new commands after any in-flight control transaction drains."""
         with self._lock:
             self._accepting_commands = False
+        self._wake.stop()
+
+    def wake_status(self, camera_id: str) -> dict[str, object]:
+        return self._wake.status(camera_id)
+
+    def wake_camera(self, camera_id: str) -> str:
+        """Arm one battery wake. Returns missing, rejected, or the wake phase."""
+        with self._lock:
+            if camera_id not in self._cameras:
+                return "missing"
+            if not self._accepting_commands or not self._camera_enabled.get(camera_id, False):
+                return "rejected"
+            if not self._cameras[camera_id].battery_powered():
+                return "rejected"
+        if not self._wake.arm(camera_id):
+            return "rejected"
+        phase = str(self._wake.status(camera_id).get("phase") or "connecting")
+        self._runtime_monitor.publish_camera_status(camera_id)
+        return phase
 
     def recording_enabled(self, camera_id: str) -> bool:
         with self._lock:
@@ -266,6 +303,7 @@ class CameraControlService:
                 return False
             self._update_preference_locked("camera_enabled", camera_id, False)
             try:
+                self._wake.cancel(camera_id)
                 if not self._fleet.set_camera_enabled(camera_id, False):
                     raise RuntimeError(f"camera {camera_id} is not in the fleet")
                 self._recording.set_camera_enabled(camera_id, False)
@@ -292,8 +330,18 @@ class CameraControlService:
         with self._lock:
             if camera.id not in self._workers:
                 raise RuntimeError(f"camera {camera.id} cannot be replaced")
+            # A reload stops the old capture. End any wake against that
+            # worker before the replacement takes its place.
+            self._wake.cancel(camera.id)
             self._cameras[camera.id] = camera
             self._workers[camera.id] = worker
+            self._wake.replace_cameras(self._cameras)
+            if camera.battery_powered() and self._accepting_commands:
+                self._wake.start()
+            bind = getattr(worker, "set_wake_status_provider", None)
+            if callable(bind):
+                camera_id = camera.id
+                bind(lambda camera_id=camera_id: self._wake.status(camera_id))
 
     def reconfigure_recorders(
         self,
@@ -321,6 +369,49 @@ class CameraControlService:
 
     def _command_allowed(self, camera_id: str) -> bool:
         return self._accepting_commands and camera_id in self._cameras
+
+    def _worker(self, camera_id: str):
+        return self._workers.get(camera_id)
+
+    def _open_wake_capture(self, camera_id: str) -> bool:
+        worker = self._worker(camera_id)
+        method = getattr(worker, "open_wake_capture", None)
+        if not callable(method):
+            return False
+        return bool(method())
+
+    def _release_wake_capture(self, camera_id: str) -> None:
+        worker = self._worker(camera_id)
+        method = getattr(worker, "release_wake_capture", None)
+        if callable(method):
+            method()
+
+    def _wake_capture_running(self, camera_id: str) -> bool:
+        worker = self._worker(camera_id)
+        method = getattr(worker, "wake_capture_running", None)
+        if not callable(method):
+            return False
+        return bool(method())
+
+    def _wake_frame_monotonic(self, camera_id: str) -> float | None:
+        worker = self._worker(camera_id)
+        method = getattr(worker, "wake_frame_monotonic", None)
+        if not callable(method):
+            return None
+        value = method()
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def _notify_wake_motion(self, camera_id: str) -> None:
+        worker = self._worker(camera_id)
+        method = getattr(worker, "notify_wake_motion", None)
+        if callable(method):
+            method()
+
+    def _publish_wake_state(self, camera_id: str, phase: str) -> None:
+        publish = getattr(self._mqtt, "publish_wake_state", None)
+        if callable(publish):
+            publish(camera_id, phase)
+        self._runtime_monitor.publish_camera_status(camera_id)
 
     def _update_preference_locked(
         self,
