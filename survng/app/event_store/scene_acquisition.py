@@ -78,6 +78,8 @@ class EventStoreSceneAcquisitionMixin:
                     decision_id text primary key references scene_activity_decisions(id),
                     event_id integer not null, episode_id text not null, created_at real not null
                 );
+                create index if not exists scene_activity_admission_episode
+                    on scene_activity_admissions(episode_id,decision_id);
                 create table if not exists scene_candidate_jobs (
                     id text primary key, camera_id text not null, start_epoch real not null,
                     end_epoch real not null, seed_sample_ids_json text not null,

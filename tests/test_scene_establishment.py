@@ -17,6 +17,24 @@ def detection(x=20, **extra):
             "box":{"x1":x,"y1":20,"x2":x+20,"y2":70}, **extra}
 
 
+@pytest.mark.parametrize("upgrade", [False, True])
+def test_incident_activity_lookup_does_not_scan_all_admissions(tmp_path, upgrade):
+    store = EventStore(tmp_path)
+    if upgrade:
+        with store._connect() as conn:
+            conn.execute("drop index scene_activity_admission_episode")
+        store = EventStore(tmp_path)
+    with store._connect() as conn:
+        plan = [row[3] for row in conn.execute(
+            "explain query plan select d.evidence_json from scene_activity_decisions d "
+            "join scene_activity_admissions a on a.decision_id=d.id "
+            "join scene_episodes p on p.id=a.episode_id where p.incident_id=?",
+            ("an-incident",),
+        )]
+    assert not any(step.startswith("SCAN a") for step in plan)
+    assert any("SEARCH a USING COVERING INDEX" in step for step in plan)
+
+
 def picture(x=20):
     image=np.zeros((100,160,3),dtype=np.uint8)
     image[20:70,x:x+20]=220
