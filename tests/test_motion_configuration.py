@@ -82,8 +82,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                             "stage_id": "evidence_fusion",
                             "implementation": "buffered_evidence_fusion",
                             "options": {"policy": " ALL ", "sources": " AUX "},
-                        },
-                    ],
+                        }],
                 },
             }),
             CameraMotionQualificationConfig(),
@@ -133,10 +132,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                         "stage_id": "evidence_fusion",
                         "implementation": "buffered_evidence_fusion",
                         "options": {"policy": "all", "sources": " ONVIF "},
-                    },
-                    {"stage_id": "event_state", "implementation": "score_event_state"},
-                    {"stage_id": "trigger", "implementation": "score_trigger"},
-                ],
+                    }],
             },
         })
 
@@ -152,10 +148,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                         "stage_id": "evidence_fusion",
                         "implementation": "buffered_evidence_fusion",
                         "options": {"policy": "all", "sources": ["onvif"]},
-                    },
-                    {"stage_id": "event_state", "implementation": "score_event_state"},
-                    {"stage_id": "trigger", "implementation": "score_trigger"},
-                ],
+                    }],
             },
         })
 
@@ -178,8 +171,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                     "pipeline": {
                         "qualification": [
                             {"stage_id": "same", "implementation": "gray_blur"},
-                            {"stage_id": "same", "implementation": "frame_difference"},
-                        ],
+                            {"stage_id": "same", "implementation": "frame_difference"}],
                     },
                 },
             })
@@ -373,8 +365,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                             "stage_id": "threshold",
                             "implementation": "adaptive_statistical_threshold",
                             "options": {"sigma": None},
-                        },
-                    ],
+                        }],
                 },
             },
         })
@@ -395,12 +386,6 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                         "options": {
                             "source_thresholds": {"aux": float("nan")},
                         },
-                    }, {
-                        "stage_id": "state",
-                        "implementation": "score_event_state",
-                    }, {
-                        "stage_id": "trigger",
-                        "implementation": "score_trigger",
                     }],
                 },
             },
