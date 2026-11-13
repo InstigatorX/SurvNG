@@ -29,9 +29,9 @@ import {
   UserRound,
   X,
 } from "lucide-react";
-import { recordedIncidentWindow, trackingCoverageAt, containedFrameTransform, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
+import { recordedIncidentWindow, trackingCoverageAt, containedFrameTransform, incidentReplayTracking, incidentTrackingSource, playbackEpochAt, snapshotObjectTracks, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
 import { liveActivityEventId, liveActivityIncidentHref } from "../liveWorkspace.mjs";
-import { adjacentIncident, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentImageRenderRect, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
+import { adjacentIncident, eventCoverEpoch, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentImageRenderRect, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "./api.js";
 import { formatDateTime } from "./format.js";
 import { useStoredState, useModalFocus } from "./hooks.js";
@@ -162,7 +162,7 @@ export function objectBoxes(event) {
 
 export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, objectFocusMode = null, objectFocusZoom = 1, objectFocusAspect = { width: 16, height: 9 }, objectFocusControls = true, showAnnotations = true, showTracking = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, zones = null, zonesVisible = false, selectedObjectIndex = null, onSelectObject = null, onRequestFullResolution, onImageSize, children }) {
   const boxes = objectBoxes(event);
-  const tracks = storedObjectTracks(event);
+  const tracks = snapshotObjectTracks(event, eventCoverEpoch(event));
   const boxCoordinateSize = incidentDetectionFrameSize(event);
   const trackCoordinateSize = incidentTrackingFrameSize(event);
   const coordinateSize = showTracking ? trackCoordinateSize : boxCoordinateSize;
@@ -322,7 +322,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
       top: renderedImage.y + track.y1 * scaleY,
       width: (track.x2 - track.x1) * scaleX,
       height: (track.y2 - track.y1) * scaleY,
-      pathPoints: track.trajectory.map(([, x, y]) => `${renderedImage.x + x * scaleX},${renderedImage.y + y * scaleY}`).join(" "),
+      pathPoints: track.path.map(([x, y]) => `${renderedImage.x + x * scaleX},${renderedImage.y + y * scaleY}`).join(" "),
     })).filter((track) => track.width > 0 && track.height > 0);
   }, [frameSize, imageSize, renderedImage, trackCoordinateSize?.height, trackCoordinateSize?.width, tracks]);
 
@@ -936,7 +936,13 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
     events: event.events || [],
   } : event);
   const displayedEvent = manualDetection ? { ...viewerEvent, objects: manualDetection.objects || [] } : viewerEvent;
-  const trackingEvent = displayedEvent;
+  // Episode clips and representative events carry only the final tracking
+  // fragment. The parent scene retains observations from the earlier runs.
+  const replayTracking = incidentReplayTracking(displayedEvent, event);
+  const trackingEvent = replayTracking?.object_tracking ? {
+    ...displayedEvent,
+    object_tracking: replayTracking.object_tracking,
+  } : displayedEvent;
   const storedTracks = storedObjectTracks(trackingEvent);
   const reidDiagnostics = trackingEvent.object_tracking?.reid_diagnostics || {};
   const reidAttemptReasons = reidDiagnostics.inference_attempts_by_reason || {};

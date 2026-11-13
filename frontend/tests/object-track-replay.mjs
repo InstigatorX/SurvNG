@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { trackingCoverageLabel, containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentReplayTracking, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt, withoutIsolatedTrackSpikes } from "../src/objectTrackReplay.mjs";
+import { trackingCoverageLabel, containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentReplayTracking, incidentTrackingSource, playbackEpochAt, snapshotObjectTracks, storedObjectTracks, trackFrameAt, withoutIsolatedTrackSpikes } from "../src/objectTrackReplay.mjs";
+import { eventCoverEpoch } from "../src/incidentNavigation.mjs";
 
 const tracks = storedObjectTracks({ object_tracking: { tracks: [{
   track_id: 7,
@@ -36,6 +37,24 @@ const sparseTrack = storedObjectTracks({ object_tracking: { tracks: [{
 assert.equal(trackFrameAt(sparseTrack, 10.5, { holdSeconds: 3, sampleFps: 2 })?.estimated, false);
 assert.equal(trackFrameAt(sparseTrack, 12, { holdSeconds: 3, sampleFps: 2 })?.estimated, true);
 assert.deepEqual(trackFrameAt(sparseTrack, 12, { holdSeconds: 3, sampleFps: 2 })?.box, [25, 10, 55, 80]);
+
+const snapshotEvent = {
+  created_at: "1970-01-01T00:00:11Z",
+  snapshot_captured_at: "1970-01-01T00:00:10.500Z",
+  object_tracking: { sample_fps: 2, tracks: [
+    { ...tracks[0], track_id: 7, box_history: tracks[0].boxHistory },
+    { ...tracks[0], track_id: 9, box_history: [[11, 20, 10, 50, 80]] },
+    { ...tracks[0], track_id: 10, box_history: [[9, 20, 10, 50, 80]] },
+    { ...tracks[0], track_id: 11, box_history: [] },
+  ] },
+};
+const snapshotTracks = snapshotObjectTracks(snapshotEvent, eventCoverEpoch(snapshotEvent));
+assert.deepEqual(snapshotTracks.map((track) => track.trackId), [7], "hide future, ended, and untimed tracks");
+assert.deepEqual(snapshotTracks.map(({ x1, y1, x2, y2 }) => [x1, y1, x2, y2]), [[15, 10, 45, 80]], "use capture time rather than the trigger or final box");
+assert.deepEqual(snapshotTracks[0].path, [[25, 45], [30, 45]], "exclude the future trajectory");
+assert.deepEqual(snapshotObjectTracks(snapshotEvent, null), [], "unknown capture time cannot show tracks");
+assert.deepEqual(snapshotObjectTracks({ object_tracking: { tracks: [{ ...sparseTrack, track_id: 8, box_history: sparseTrack.boxHistory }] } }, 12), [], "hide unobserved gaps");
+assert.deepEqual(snapshotObjectTracks(snapshotEvent, 11).map((track) => track.trackId), [7, 9], "include tracks observed exactly at capture time");
 
 assert.deepEqual(storedObjectTracks({ object_tracking: { tracks: [{ track_id: 1, label: "person", box: {} }] } }), []);
 
@@ -170,3 +189,16 @@ const repaired = incidentReplayTracking(partial, { scene_objects: [{ label: "per
 assert.equal(repaired.object_tracking.tracks[0].box_history[0][0], 110);
 assert.equal(Date.parse(repaired.object_tracking.analyzed_from) / 1000, 110);
 assert.equal(trackingCoverageAt(repaired.object_tracking, 110), null);
+
+// The modal uses a representative event/episode clip, whose saved tracking
+// contains only the final fragment. Recover the cover's earlier observations
+// from the parent scene without replacing the displayed snapshot metadata.
+const earlyCover = { ...partial, created_at: new Date(150000).toISOString(), snapshot_captured_at: new Date(110000).toISOString() };
+assert.deepEqual(snapshotObjectTracks(earlyCover, eventCoverEpoch(earlyCover)), []);
+const coverReplay = incidentReplayTracking(earlyCover, { scene_objects: [{ label: "person", observations: [
+  { scene_track_key: "10:tracking:10:run:1", label: "person", captured_at_epoch: 110, detection_frame_width: 100, detection_frame_height: 100, box: { x1: 1, y1: 2, x2: 20, y2: 40 } },
+  { scene_track_key: "10:tracking:10:run:1", label: "person", captured_at_epoch: 150, detection_frame_width: 100, detection_frame_height: 100, box: { x1: 4, y1: 5, x2: 34, y2: 44 } },
+] }] });
+const recoveredCover = { ...earlyCover, object_tracking: coverReplay.object_tracking };
+assert.equal(recoveredCover.snapshot_captured_at, earlyCover.snapshot_captured_at);
+assert.deepEqual(snapshotObjectTracks(recoveredCover, eventCoverEpoch(recoveredCover)).map(({ x1, y1, x2, y2 }) => [x1, y1, x2, y2]), [[1, 2, 20, 40]]);

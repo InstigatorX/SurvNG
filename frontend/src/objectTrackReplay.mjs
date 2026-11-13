@@ -291,6 +291,22 @@ export function trackFrameAt(track, epoch, { holdSeconds = 1, sampleFps = 2, obs
   return { box, path, recovery: recovery || null, estimated };
 }
 
+// Snapshot overlays must describe the displayed frame, not the final state of
+// each track. Missing history cannot establish that a track was in this image.
+export function snapshotObjectTracks(event, capturedEpoch) {
+  const sampleFps = event?.object_tracking?.sample_fps || 2;
+  return storedObjectTracks(event).flatMap((track) => {
+    const frame = trackFrameAt(track, capturedEpoch, {
+      holdSeconds: 0,
+      sampleFps,
+      observationsOnly: true,
+    });
+    if (!frame) return [];
+    const [x1, y1, x2, y2] = frame.box;
+    return [{ ...track, x1, y1, x2, y2, path: frame.path }];
+  });
+}
+
 export function playbackEpochAt(windowStartEpoch, mediaTime, mediaStartTime) {
   const startEpoch = finiteNumber(windowStartEpoch);
   const currentTime = finiteNumber(mediaTime);
