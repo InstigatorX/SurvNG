@@ -2,6 +2,7 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,55 @@ class SceneIncidentTest(unittest.TestCase):
     def add(self,seconds=0,camera="upper-garage",objects=None,**kwargs):
         return self.store.add_event(camera,"motion",created_at=datetime.fromtimestamp(1780000000+seconds,timezone.utc).isoformat(),
                                     objects_json=json.dumps(objects if objects is not None else [person()]),**kwargs)
+
+    def test_notification_cache_preserves_roster_and_refreshes_changed_revisions(self):
+        event = self.add(objects=[person(), person(50)])
+        with patch.object(self.store, "_scene_payload", wraps=self.store._scene_payload) as build:
+            first = self.store.list_scene_incident_notifications()[0]
+            first["scene_objects"].clear()
+            second = self.store.list_scene_incident_notifications()[0]
+            self.assertEqual(len(second["scene_objects"]), 2)
+            self.assertEqual(build.call_count, 1)
+            self.store.update_objects(event["id"], json.dumps([person(70, label="car")]))
+            third = self.store.list_scene_incident_notifications()[0]
+            self.assertGreater(third["revision"], second["revision"])
+            self.assertIn("car", third["labels"])
+            self.assertEqual(build.call_count, 2)
+
+    def test_rolled_back_notification_cannot_poison_a_later_revision(self):
+        self.add()
+        before = self.store.list_scene_incident_notifications()[0]
+        with self.assertRaises(RuntimeError):
+            with self.store._lock, self.store._connect() as conn:
+                conn.execute("begin immediate")
+                conn.execute("update scene_incidents set state='complete' where id=?", (before["id"],))
+                self.store._scene_changed(conn, before["id"], notify=False)
+                uncommitted = self.store._scene_notification_payload(conn, before["id"])
+                self.assertEqual(uncommitted["state"], "complete")
+                raise RuntimeError("rollback")
+        with self.store._lock, self.store._connect() as conn:
+            conn.execute("begin immediate")
+            self.store._scene_changed(conn, before["id"], notify=False)
+        after = self.store.list_scene_incident_notifications()[0]
+        self.assertEqual(after["revision"], uncommitted["revision"])
+        self.assertEqual(after["state"], before["state"])
+
+    def test_notification_cache_tracks_media_without_a_scene_revision_change(self):
+        event = self.add()
+        before = self.store.list_scene_incident_notifications()[0]
+        with self.store._lock, self.store._connect() as conn:
+            conn.execute("update events set scene_media_revision=scene_media_revision+1 where id=?", (event["id"],))
+        after = self.store.list_scene_incident_notifications()[0]
+        self.assertEqual(before["revision"], after["revision"])
+        self.assertEqual(after["events"][0]["scene_media_revision"], before["events"][0]["scene_media_revision"] + 1)
+
+    def test_large_notification_keeps_its_roster_without_overfilling_cache(self):
+        self.add(objects=[person(), person(50)])
+        with patch("survng.app.event_store.scenes.SCENE_NOTIFICATION_CACHE_MAX_BYTES", 1):
+            payload = self.store.list_scene_incident_notifications()[0]
+        self.assertEqual(len(payload["scene_objects"]), 2)
+        self.assertEqual(self.store._scene_notification_cache_bytes, 0)
+        self.assertFalse(self.store._scene_notification_cache)
 
     def test_80913_two_people_in_roster_and_alert_separate(self):
         event=self.add(objects=[person(confidence=.941,incident_eligible=True),person(50,incident_eligible=False,incident_ineligible_reasons=["outside_incident_zone"])])

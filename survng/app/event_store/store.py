@@ -7,6 +7,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,9 @@ class EventStore(
         self._jobs_maintenance_lock = threading.Lock()
         self._next_detection_job_prune_monotonic = 0.0
         self._snapshot_size_scan_idle_until = 0.0
+        self._scene_notification_cache = OrderedDict()
+        self._scene_notification_cache_lock = threading.Lock()
+        self._scene_notification_cache_bytes = 0
         self._init_db()
         self._init_scene_context_db()
         self._init_evidence_db()

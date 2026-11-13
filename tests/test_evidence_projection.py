@@ -66,6 +66,7 @@ def test_ack_waits_for_applied_projection_and_coalesces_revisions():
     for _ in range(3):
         assert worker.run_once() == 0
     assert semantic.queue_event.call_count == 1
+    semantic.projection_pending.return_value = False  # The worker completed this revision.
     semantic.projection_current.return_value = True
     assert worker.run_once() == 2
     assert not events.rows
@@ -81,11 +82,42 @@ def test_failed_enqueue_is_retried_with_backoff():
         assert worker.run_once() == 0
         assert worker.run_once() == 0
     assert semantic.queue_event.call_count == 1
+    assert semantic.projection_current.call_count == 1
     with patch("survng.app.evidence_projection.time.monotonic", return_value=106):
         assert worker.run_once() == 0
     assert semantic.queue_event.call_count == 2
     assert len(events.rows) == 1 and notification.call_count == 1
     assert subscriber.get_nowait().type == "incident" and subscriber.empty()
+
+
+def test_pending_revision_skips_searchability_and_projection_database_checks():
+    worker, events, semantic, _, notification = setup_projection()
+    semantic.projection_pending.return_value = True
+    semantic.semantic_searchable = Mock(side_effect=AssertionError("unnecessary history read"))
+    assert worker.run_once() == 0
+    semantic.projection_current.assert_not_called()
+    semantic.queue_event.assert_not_called()
+    notification.assert_called_once()
+    assert events.rows
+
+    semantic.projection_pending.return_value = False
+    semantic.semantic_searchable.return_value = True
+    semantic.semantic_searchable.side_effect = None
+    semantic.projection_current.return_value = True
+    assert worker.run_once() == 1
+
+
+def test_failed_enqueue_backoff_does_not_delay_a_new_media_revision():
+    worker, events, semantic, _, _ = setup_projection()
+    semantic.queue_event.return_value = False
+    with patch("survng.app.evidence_projection.time.monotonic", return_value=100):
+        worker.run_once()
+        worker.run_once()
+        assert semantic.projection_current.call_count == 1
+        events.event["scene_media_revision"] = 1
+        worker.run_once()
+    assert semantic.projection_current.call_count == 2
+    assert semantic.queue_event.call_count == 2
 
 
 def test_ack_failure_does_not_repeat_published_revision_in_same_process():
@@ -276,6 +308,7 @@ def test_real_store_cover_commit_converges_after_projection_restart(tmp_path):
     assert worker.run_once() == 0
     _, _, queued = semantic._queue.get_nowait()
     assert semantic.index_event(queued) == 2
+    queued["_semantic_revision"].pending = False  # Normally cleared by SemanticSearchService._run.
     assert worker.run_once() == 1
     events.refine_event_evidence(event["id"], snapshot_path="snapshots/new.png", recording_path="", objects_json=objects)
     reopened = EventStore(tmp_path)
@@ -283,6 +316,7 @@ def test_real_store_cover_commit_converges_after_projection_restart(tmp_path):
     assert restarted.run_once() == 0
     _, _, queued = semantic._queue.get_nowait()
     assert semantic.index_event(queued) == 2
+    queued["_semantic_revision"].pending = False
     assert restarted.run_once() == 1
     assert not reopened.pending_evidence_updates()
     current = reopened.get(event["id"])
@@ -360,3 +394,48 @@ def test_gallery_update_publishes_without_notifications_or_semantic_inference():
     semantic.projection_current.assert_not_called()
     notification.assert_not_called()
     assert subscriber.get(timeout=1).type=='incident'
+
+
+def test_old_outbox_revisions_drain_after_current_evidence_is_processed(tmp_path):
+    from survng.app.events import EventStore
+
+    events = EventStore(tmp_path)
+    event = events.add_event("gate", "motion", objects_json="[]")
+    with events._lock, events._connect() as conn:
+        conn.execute("update events set evidence_revision=2,scene_media_revision=3 where id=?", (event["id"],))
+        row = conn.execute("select * from events where id=?", (event["id"],)).fetchone()
+        events._evidence_outbox(conn, row, "evidence_updated", reason="newer_evidence")
+    assert len(events.pending_evidence_updates()) == 2
+    semantic = SimpleNamespace(config=SimpleNamespace(enabled=False))
+    worker = EvidenceProjection(events, lambda: semantic, StateEventBroker(), Mock())
+    assert worker.run_once() == 2
+    assert events.pending_evidence_updates() == []
+
+
+def test_coalesced_notification_request_is_not_acknowledged_by_an_older_delivery(tmp_path):
+    from survng.app.events import EventStore
+
+    events = EventStore(tmp_path)
+    event = events.add_event("gate", "motion", objects_json="[]")
+    with events._lock, events._connect() as conn:
+        conn.execute("delete from event_evidence_outbox")
+        row = conn.execute("select * from events where id=?", (event["id"],)).fetchone()
+        events._evidence_outbox(conn, row, "gallery_updated", notify=False)
+    broker = StateEventBroker()
+    worker = EvidenceProjection(events, lambda: SimpleNamespace(config=SimpleNamespace(enabled=False)), broker, Mock())
+    publish = broker.publish
+
+    def coalesce_before_mark(*args, **kwargs):
+        with events._lock, events._connect() as conn:
+            row = conn.execute("select * from events where id=?", (event["id"],)).fetchone()
+            events._evidence_outbox(conn, row, "gallery_updated", notify=True)
+        return publish(*args, **kwargs)
+
+    with patch.object(broker, "publish", side_effect=coalesce_before_mark):
+        assert worker.run_once() == 0
+    remaining = events.pending_evidence_updates()
+    assert len(remaining) == 1
+    assert remaining[0]["payload"]["notify"]
+    assert not remaining[0]["publication_done"]
+    assert worker.run_once() == 1
+    worker.refresh_notification.assert_called_once_with("gate", event["id"])

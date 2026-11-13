@@ -286,14 +286,20 @@ class EventStoreEvidenceMixin:
 
     def acknowledge_evidence_update(
         self, outbox_id: int, *, expected_scene_media_revision: int | None = None,
+        expected_payload: dict[str, Any] | None = None,
     ) -> bool:
         with self._lock, self._connect() as conn:
-            if expected_scene_media_revision is not None:
+            conn.execute("begin immediate")
+            if expected_scene_media_revision is not None or expected_payload is not None:
                 current = conn.execute(
-                    "select e.scene_media_revision from event_evidence_outbox o "
-                    "join events e on e.id=o.event_id where o.id=?", (outbox_id,),
+                    "select e.scene_media_revision,o.payload_json from event_evidence_outbox o "
+                    "left join events e on e.id=o.event_id where o.id=?", (outbox_id,),
                 ).fetchone()
-                if current is None or int(current[0] or 0) != int(expected_scene_media_revision):
+                if current is None:
+                    return False
+                if expected_scene_media_revision is not None and int(current[0] or 0) != int(expected_scene_media_revision):
+                    return False
+                if expected_payload is not None and json.loads(current[1]) != expected_payload:
                     return False
             return conn.execute("delete from event_evidence_outbox where id=?", (outbox_id,)).rowcount == 1
 
@@ -377,20 +383,27 @@ class EventStoreEvidenceMixin:
     def mark_evidence_publication(
         self, outbox_ids: list[int], *,
         expected_scene_media_revisions: dict[int, int] | None = None,
+        expected_payloads: dict[int, dict[str, Any]] | None = None,
     ) -> bool:
         ids = sorted({int(value) for value in outbox_ids})
         if not ids:
             return False
         changed = 0
         with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
             for outbox_id in ids:
                 expected = (expected_scene_media_revisions or {}).get(outbox_id)
-                if expected is not None:
+                expected_payload = (expected_payloads or {}).get(outbox_id)
+                if expected is not None or expected_payload is not None:
                     current = conn.execute(
-                        "select e.scene_media_revision from event_evidence_outbox o "
-                        "join events e on e.id=o.event_id where o.id=?", (outbox_id,),
+                        "select e.scene_media_revision,o.payload_json from event_evidence_outbox o "
+                        "left join events e on e.id=o.event_id where o.id=?", (outbox_id,),
                     ).fetchone()
-                    if current is None or int(current[0] or 0) != int(expected):
+                    if current is None:
+                        continue
+                    if expected is not None and int(current[0] or 0) != int(expected):
+                        continue
+                    if expected_payload is not None and json.loads(current[1]) != expected_payload:
                         continue
                 changed += conn.execute(
                     "update event_evidence_outbox set publication_done=1 where id=?",

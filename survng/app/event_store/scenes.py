@@ -11,6 +11,7 @@ import math
 import sqlite3
 import time
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from ..incident_utils import portable_media_path
 from ..scene_identity import observation_identity
@@ -21,6 +22,7 @@ from ..motion_topics import SPEECH_TOPIC
 # observations, so one episode is bounded. Longer activity continues the same
 # incident in a new episode.
 MAX_SCENE_EPISODE_SECONDS = 900.0
+SCENE_NOTIFICATION_CACHE_MAX_BYTES = 16 * 1024 * 1024
 
 
 def _display_confidence(item):
@@ -1056,6 +1058,45 @@ class EventStoreSceneMixin:
             conn.execute("insert or ignore into scene_notification_outbox values(?,?,'')",(incident_id,incident["revision"]))
 
     def _scene_notification_payload(self, conn, incident_id):
+        # A writer may roll back its revision. Cache only committed reads, and
+        # leave explicit read transactions (outbox replay) on their own snapshot.
+        if conn.in_transaction:
+            return self._build_scene_notification_payload(conn, incident_id)
+        incident_id = self._scene_resolve(conn, incident_id)
+        # Gallery media can advance an event without changing scene membership.
+        # Include every member's monotonic evidence/media counters in the key.
+        signature_sql = (
+            "select i.revision,coalesce(sum(e.evidence_revision),0),coalesce(sum(e.scene_media_revision),0) "
+            "from scene_incidents i left join scene_episodes p on p.incident_id=i.id "
+            "left join scene_event_membership m on m.episode_id=p.id "
+            "left join events e on e.id=m.event_id where i.id=? group by i.id"
+        )
+        with self._scene_notification_cache_lock:
+            row = conn.execute(signature_sql, (incident_id,)).fetchone()
+            if row is None:
+                return None
+            signature = tuple(row)
+            cached = self._scene_notification_cache.get(incident_id)
+            if cached is not None and cached[0] == signature:
+                self._scene_notification_cache.move_to_end(incident_id)
+                return deepcopy(cached[1])
+            payload = self._build_scene_notification_payload(conn, incident_id)
+            current = conn.execute(signature_sql, (incident_id,)).fetchone()
+            if payload is not None and current is not None and signature == tuple(current) and signature[0] == payload["revision"]:
+                size = len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+                previous = self._scene_notification_cache.pop(incident_id, None)
+                if previous is not None:
+                    self._scene_notification_cache_bytes -= previous[2]
+                if size <= SCENE_NOTIFICATION_CACHE_MAX_BYTES:
+                    self._scene_notification_cache[incident_id] = (signature, deepcopy(payload), size)
+                    self._scene_notification_cache_bytes += size
+                while (len(self._scene_notification_cache) > 256
+                       or self._scene_notification_cache_bytes > SCENE_NOTIFICATION_CACHE_MAX_BYTES):
+                    _, evicted = self._scene_notification_cache.popitem(last=False)
+                    self._scene_notification_cache_bytes -= evicted[2]
+            return payload
+
+    def _build_scene_notification_payload(self, conn, incident_id):
         payload = self._scene_payload(conn, incident_id)
         if payload is None:
             return None

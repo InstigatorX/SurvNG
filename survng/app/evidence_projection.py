@@ -35,7 +35,9 @@ class EvidenceProjection:
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
         self._run_lock = threading.Lock()
-        self._retry_at: OrderedDict[tuple[int, int, int, int], float] = OrderedDict()
+        # Deadline and whether the last enqueue failed. A failed enqueue does
+        # not warrant another full projection check on every poll.
+        self._retry_at: OrderedDict[tuple[int, int, int, int], tuple[float, bool]] = OrderedDict()
         self._delivery: OrderedDict[int, tuple[tuple, bool, bool]] = OrderedDict()
         self._next_error_log = 0.0
         self._cursor = 0
@@ -72,6 +74,15 @@ class EvidenceProjection:
     def _semantic_current(self, semantic: Any, event: dict, now: float) -> bool:
         if not semantic.config.enabled:
             return True
+        if callable(getattr(semantic, "projection_pending", None)) and semantic.projection_pending(event):
+            return False
+        key = (
+            int(event["id"]), int(event.get("evidence_revision") or 0),
+            int(event.get("scene_media_revision") or 0), id(semantic),
+        )
+        retry_at, failed = self._retry_at.get(key, (0.0, False))
+        if failed and now < retry_at:
+            return False
         searchable = getattr(semantic, "semantic_searchable", semantic_event_searchable)
         if not searchable(event):
             # Removing searchable evidence does not require an available model.
@@ -85,18 +96,13 @@ class EvidenceProjection:
             return True
         if callable(getattr(semantic, "projection_current", None)) and semantic.projection_current(event):
             return True
-        if callable(getattr(semantic, "projection_pending", None)) and semantic.projection_pending(event):
-            return False
-        key = (
-            int(event["id"]), int(event.get("evidence_revision") or 0),
-            int(event.get("scene_media_revision") or 0), id(semantic),
-        )
-        if now < self._retry_at.get(key, 0):
+        if now < retry_at:
             return False
         # Same-revision submissions reuse a pending token. A failed enqueue or
         # failed encoder attempt is retried; neither is a completed projection.
-        self._remember(self._retry_at, key, now + self.retry_seconds)
-        semantic.queue_event(event)
+        self._remember(self._retry_at, key, (now + self.retry_seconds, True))
+        if semantic.queue_event(event):
+            self._retry_at[key] = (now + self.retry_seconds, False)
         return False
 
     def run_once(self) -> int:
@@ -147,7 +153,7 @@ class EvidenceProjection:
                     publication_needed = not all(row.get("publication_done", False) for row in updates)
                     notify = any(not row.get("publication_done", False)
                                  and row.get("payload", {}).get("notify", True) for row in updates)
-                    current, published = self._project_event(
+                    current, published, processed_media_revision = self._project_event(
                         event_id, semantic, needs_semantic, metadata_token, publication_needed,
                         notify=notify,
                     )
@@ -155,10 +161,11 @@ class EvidenceProjection:
                         if not self.events.mark_evidence_publication(
                             [int(row["id"]) for row in updates],
                             expected_scene_media_revisions={
-                                int(row["id"]): int(row.get("payload", {}).get("scene_media_revision") or 0)
+                                int(row["id"]): processed_media_revision
                                 for row in updates
-                                if row["kind"] in {"evidence_updated", "gallery_updated"} and "payload" in row
+                                if row["kind"] in {"evidence_updated", "gallery_updated"} and processed_media_revision is not None
                             },
+                            expected_payloads={int(row["id"]): row["payload"] for row in updates if "payload" in row},
                         ):
                             continue
                     if not current or not published:
@@ -169,9 +176,10 @@ class EvidenceProjection:
                         acknowledged += bool(self.events.acknowledge_evidence_update(
                             int(row["id"]),
                             expected_scene_media_revision=(
-                                int(row.get("payload", {}).get("scene_media_revision") or 0)
-                                if row["kind"] in {"evidence_updated", "gallery_updated"} and "payload" in row else None
+                                processed_media_revision
+                                if row["kind"] in {"evidence_updated", "gallery_updated"} else None
                             ),
+                            expected_payload=row.get("payload"),
                         ))
                 except Exception:
                     self._log_failure()
@@ -181,10 +189,10 @@ class EvidenceProjection:
         self, event_id: int, semantic: Any, needs_semantic: bool,
         metadata_token: int = 0, publication_needed: bool = True,
         *, notify: bool = True,
-    ) -> tuple[bool, bool]:
+    ) -> tuple[bool, bool, int | None]:
         event = self.events.get(event_id)
         if event is None:
-            return True, True
+            return True, True, None
         revision = int(event.get("evidence_revision") or 0)
         scene_revision = int(event.get("scene_media_revision") or 0)
         semantic_current = not needs_semantic
@@ -197,14 +205,14 @@ class EvidenceProjection:
                 self._log_failure()
         latest = self.events.get(event_id)
         if latest is None:
-            return True, True
+            return True, True, None
         if (
             int(latest.get("evidence_revision") or 0) != revision
             or int(latest.get("scene_media_revision") or 0) != scene_revision
         ):
-            return False, False
+            return False, False, None
         if not publication_needed:
-            return semantic_current, True
+            return semantic_current, True, scene_revision
         requirement = latest.get("cover_requirement") or {}
         delivered_identity, notified, published = self._delivery.get(event_id, ((), False, False))
         metadata_token = max(metadata_token, int(delivered_identity[-1]) if delivered_identity else 0)
@@ -229,9 +237,9 @@ class EvidenceProjection:
                 "cover_requirement": latest.get("cover_requirement"),
             })
             if message is None:
-                return semantic_current, False  # A closed broker has not delivered this revision.
+                return semantic_current, False, scene_revision  # A closed broker has not delivered this revision.
             self._remember(self._delivery, event_id, (identity, notified, True))
-        return semantic_current, True
+        return semantic_current, True, scene_revision
 
     def _log_failure(self) -> None:
         now = time.monotonic()
