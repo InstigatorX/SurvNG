@@ -54,6 +54,7 @@ class EventStore(
     # prove a file is gone. Offline, unmounted, or unavailable locations cannot.
     _HEALTHY_SNAPSHOT_LOCATION_STATES = frozenset({"online", "low_space", "full", "read_only"})
     SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY = "snapshot_size_backfill_cursor"
+    SNAPSHOT_SIZE_BACKFILL_WORK_KEY = "snapshot_size_backfill_sweep_work"
     SNAPSHOT_SIZE_IDLE_SCAN_SECONDS = 3600.0
     COMPACT_COLUMNS = (
         "id, camera_id, kind, snapshot_path, recording_path, objects_json, created_at, evidence_revision"
@@ -1517,6 +1518,8 @@ class EventStore(
         """
         if time.monotonic() < self._snapshot_size_scan_idle_until:
             return 0
+        page_size = max(1, min(250, int(limit)))
+        checked_cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         with self._connect() as conn:
             try:
                 cursor_id = max(
@@ -1531,43 +1534,33 @@ class EventStore(
                 )
             except ValueError:
                 cursor_id = 0
+            # Older persisted cursors have no sweep flag. Conservatively finish
+            # that pass before deciding that a complete sweep can idle.
+            had_work = cursor_id > 0 and self._metadata_value(
+                conn, self.SNAPSHOT_SIZE_BACKFILL_WORK_KEY,
+            ) != "0"
             rows = conn.execute(
                 """
-                select min(id) as cursor_id, snapshot_path from events
-                where snapshot_path != '' and snapshot_size_bytes <= 0
-                  and not exists (
-                      select 1 from snapshot_size_migration
-                      where snapshot_size_migration.snapshot_path = events.snapshot_path
-                        and snapshot_size_migration.checked_at > ?
-                  )
-                group by snapshot_path
-                having min(id) > ?
-                order by cursor_id asc limit ?
+                select e.id as cursor_id, e.snapshot_path, m.checked_at from events e
+                left join snapshot_size_migration m on m.snapshot_path=e.snapshot_path
+                where e.id > ? and e.snapshot_path != '' and e.snapshot_size_bytes <= 0
+                order by e.id asc limit ?
                 """,
-                (
-                    (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
-                    cursor_id,
-                    max(1, int(limit)),
-                ),
+                (cursor_id, page_size + 1),
             ).fetchall()
-        if not rows:
-            if cursor_id > 0:
-                with self._lock, self._connect() as conn:
-                    self._set_metadata_value(
-                        conn,
-                        self.SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY,
-                        "0",
-                    )
-            else:
-                self._snapshot_size_scan_idle_until = (
-                    time.monotonic() + self.SNAPSHOT_SIZE_IDLE_SCAN_SECONDS
-                )
-            return 0
-        next_cursor_id = max(int(row["cursor_id"]) for row in rows)
+        more = len(rows) > page_size
+        rows = rows[:page_size]
+        # Filter only after reading the bounded page. Filtering checked paths
+        # in SQL would still scan an unbounded number of missing-file rows.
+        checked_paths = list(dict.fromkeys(
+            str(row["snapshot_path"]) for row in rows
+            if not row["checked_at"] or row["checked_at"] <= checked_cutoff
+        ))
+        had_work = had_work or bool(checked_paths)
+        next_cursor_id = int(rows[-1]["cursor_id"]) if more else 0
         updates = [
-            (size, str(row["snapshot_path"]))
-            for row in rows
-            if (size := self._snapshot_file_size(str(row["snapshot_path"]))) > 0
+            (size, path) for path in checked_paths
+            if (size := self._snapshot_file_size(path)) > 0
         ]
         batch_size = max(
             1,
@@ -1583,28 +1576,16 @@ class EventStore(
                     "update events set snapshot_size_bytes = ? where snapshot_path = ?",
                     batch,
                 )
-                if offset + batch_size >= len(updates):
-                    self._set_metadata_value(
-                        conn,
-                        self.SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY,
-                        str(next_cursor_id),
-                    )
-        checked_paths = [str(row["snapshot_path"]) for row in rows]
-        if checked_paths:
-            with self._lock, self._connect() as conn:
-                conn.executemany(
-                    "insert or replace into snapshot_size_migration "
-                    "(snapshot_path, checked_at) values (?, ?)",
-                    (
-                        (path, datetime.now(timezone.utc).isoformat())
-                        for path in checked_paths
-                    ),
-                )
-                self._set_metadata_value(
-                    conn,
-                    self.SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY,
-                    str(next_cursor_id),
-                )
+        with self._lock, self._connect() as conn:
+            conn.executemany(
+                "insert or replace into snapshot_size_migration "
+                "(snapshot_path, checked_at) values (?, ?)",
+                ((path, datetime.now(timezone.utc).isoformat()) for path in checked_paths),
+            )
+            self._set_metadata_value(conn, self.SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY, str(next_cursor_id))
+            self._set_metadata_value(conn, self.SNAPSHOT_SIZE_BACKFILL_WORK_KEY, "1" if more and had_work else "0")
+        if not more and not had_work:
+            self._snapshot_size_scan_idle_until = time.monotonic() + self.SNAPSHOT_SIZE_IDLE_SCAN_SECONDS
         return len(updates)
 
     @staticmethod

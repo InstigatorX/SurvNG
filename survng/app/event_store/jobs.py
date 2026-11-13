@@ -371,6 +371,10 @@ class EventStoreJobsMixin:
                 "on events(snapshot_path, created_at desc, id desc) where snapshot_path != ''"
             )
             conn.execute(
+                "create index if not exists idx_events_snapshot_size_pending "
+                "on events(id, snapshot_path) where snapshot_path != '' and snapshot_size_bytes <= 0"
+            )
+            conn.execute(
                 "create index if not exists idx_events_recording_retention "
                 "on events(recording_path) where recording_path != ''"
             )

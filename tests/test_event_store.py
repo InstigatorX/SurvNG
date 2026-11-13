@@ -1207,7 +1207,52 @@ class EventStoreTest(unittest.TestCase):
             with patch.object(store, "_connect", side_effect=AssertionError("scanned")):
                 self.assertEqual(store.migrate_snapshot_sizes(limit=3), 0)
             store._snapshot_size_scan_idle_until = 0.0
+            # A tick bounds examined rows, including recently checked files.
+            self.assertEqual(store.migrate_snapshot_sizes(limit=3), 0)
             self.assertEqual(store.migrate_snapshot_sizes(limit=3), 1)
+
+    def test_snapshot_size_backfill_pages_checked_rows_with_an_indexed_seek(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = EventStore(root)
+            for index in range(6):
+                store.add_event("gate", "object", snapshot_path=f"snapshots/missing-{index}.webp")
+            present = root / "snapshots" / "present.webp"
+            present.parent.mkdir()
+            present.write_bytes(b"present")
+            event = store.add_event("gate", "object", snapshot_path=str(present))
+            with store._connect() as conn:
+                conn.execute("update events set snapshot_size_bytes=0")
+                conn.execute(
+                    "insert into snapshot_size_migration select snapshot_path,? from events where id<?",
+                    (datetime.now(timezone.utc).isoformat(), event["id"]),
+                )
+            statements = []
+            original_connect = store._connect
+
+            def traced_connect():
+                conn = original_connect()
+                conn.set_trace_callback(statements.append)
+                return conn
+
+            with patch.object(store, "_connect", side_effect=traced_connect), patch.object(
+                store, "_snapshot_file_size", side_effect=AssertionError("checked file was statted"),
+            ):
+                self.assertEqual(store.migrate_snapshot_sizes(limit=2), 0)
+            query = next(sql for sql in statements if "select e.id as cursor_id" in sql)
+            with original_connect() as conn:
+                plan = " ".join(row[3] for row in conn.execute("explain query plan " + query))
+                self.assertEqual(store._metadata_value(conn, store.SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY), "2")
+            self.assertIn("SEARCH e USING INDEX idx_events_snapshot_size_pending (id>?)", plan)
+            self.assertNotIn("TEMP B-TREE", plan)
+            # Continue the checked cohort after reopening; do not idle early
+            # or skip the unchecked file beyond those bounded pages.
+            store = EventStore(root)
+            self.assertEqual(store.migrate_snapshot_sizes(limit=2), 0)
+            self.assertEqual(store.migrate_snapshot_sizes(limit=2), 0)
+            self.assertEqual(store.migrate_snapshot_sizes(limit=2), 1)
+            with store._connect() as conn:
+                self.assertEqual(conn.execute("select snapshot_size_bytes from events where id=?", (event["id"],)).fetchone()[0], 7)
 
     def test_snapshot_retention_plan_is_read_only_and_does_not_stat_legacy_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
