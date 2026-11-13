@@ -28,7 +28,7 @@ RUN apt-get update \
 
 # Configuration initialization uses the same lightweight dependencies as SurvNG.
 RUN python3 -m venv /opt/config-venv \
-    && /opt/config-venv/bin/pip install --no-cache-dir 'pydantic>=2.13.5,<3' 'cryptography>=41,<47'
+    && /opt/config-venv/bin/pip install --no-cache-dir 'pydantic>=2.14.3,<3' 'cryptography>=50.0.2,<51'
 ENV PATH="/opt/config-venv/bin:$PATH"
 
 WORKDIR /opt/install

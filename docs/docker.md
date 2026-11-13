@@ -217,7 +217,7 @@ Admin > Telemetry for subsystem health.
 
 ## Bundled go2rtc
 
-The image includes go2rtc **v1.9.14**. On first start the entrypoint seeds
+The image includes go2rtc **v1.9.15**. On first start the entrypoint seeds
 `/config/go2rtc.yaml` from `docker/go2rtc.example.yaml` and launches go2rtc
 before SurvNG. With Compose `network_mode: host`, SurvNG reaches the API at
 `127.0.0.1:1984` and restreams at `rtsp://127.0.0.1:8554/...`. Stream ownership

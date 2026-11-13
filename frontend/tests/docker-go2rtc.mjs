@@ -8,9 +8,9 @@ const dockerfile = readFileSync(join(root, "Dockerfile"), "utf8");
 const entrypoint = readFileSync(join(root, "docker/entrypoint.sh"), "utf8");
 const example = readFileSync(join(root, "docker/go2rtc.example.yaml"), "utf8");
 
-assert.match(dockerfile, /GO2RTC_VERSION=1\.9\.14/);
+assert.match(dockerfile, /GO2RTC_VERSION=1\.9\.15/);
 assert.match(dockerfile, /go2rtc_linux_amd64/);
-assert.match(dockerfile, /GO2RTC_SHA256=32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6/);
+assert.match(dockerfile, /GO2RTC_SHA256=20b46c6910734cb05ecefb234066f36868ff19b42ba1418a7a32e13a3e035712/);
 assert.match(dockerfile, /go2rtc\.example\.yaml/);
 
 assert.match(entrypoint, /SURVNG_GO2RTC/);

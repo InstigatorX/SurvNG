@@ -132,7 +132,7 @@ docker exec survng ffmpeg -hide_banner -hwaccels
 
 ### go2rtc
 
-The image ships **go2rtc v1.9.14** at `/usr/local/bin/go2rtc`. The entrypoint
+The image ships **go2rtc v1.9.15** at `/usr/local/bin/go2rtc`. The entrypoint
 starts it by default before SurvNG, using `/config/go2rtc.yaml` (seeded from
 `docker/go2rtc.example.yaml` on first boot).
 
@@ -151,12 +151,14 @@ docker exec survng wget -qO- http://127.0.0.1:1984/api/streams || true
 
 ### Intel GPU userspace
 
-The Intel target uses Ubuntu 24.04 and pins the GPU userspace versions verified
-on the prototype host: Intel compute runtime **26.31.39395.13**, IGC **2.40.13**,
-Level Zero **1.32.0**, media driver **26.3.2**, and oneVPL **2.16**. The kernel
-driver still comes from the Docker host through `/dev/dri`; it is never installed
-in the image. Update the version build arguments together and rebuild when
-intentionally qualifying a new Intel stack.
+The Intel target uses Ubuntu 24.04 and pins the current
+`ppa:kobuk-team/intel-graphics` Noble packages: Intel compute runtime
+**26.40.40196.15**, IGC **2.42.14**, gmmlib **22.10.2**, Level Zero **1.34.0**,
+media driver **26.4.1**, and oneVPL **2.17**. The kernel driver still comes
+from the Docker host through `/dev/dri`; it is never installed in the image.
+Update the version build arguments together and rebuild when moving the Intel
+stack. Confirm OpenVINO device discovery and `vainfo` on the target GPU after
+that rebuild.
 
 After rebuilding, verify the installed packages and OpenVINO device discovery:
 

@@ -120,8 +120,8 @@ SurvNG expects camera URLs to be go2rtc restreams
 (`rtsp://127.0.0.1:8554/<name>`). Docker bundles go2rtc; systemd does not.
 
 ```bash
-GO2RTC_VERSION=1.9.14
-GO2RTC_SHA256=32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6
+GO2RTC_VERSION=1.9.15
+GO2RTC_SHA256=20b46c6910734cb05ecefb234066f36868ff19b42ba1418a7a32e13a3e035712
 curl -fsSL -o /tmp/go2rtc \
   "https://github.com/AlexxIT/go2rtc/releases/download/v${GO2RTC_VERSION}/go2rtc_linux_amd64"
 printf '%s  %s\n' "$GO2RTC_SHA256" /tmp/go2rtc | sha256sum -c -
