@@ -31,6 +31,7 @@ class EventStoreSceneAcquisitionMixin:
     def _init_scene_acquisition_db(self):
         with self._lock, self._connect() as conn:
             had_seeds = conn.execute("select 1 from sqlite_master where name='scene_candidate_seeds'").fetchone() is not None
+            had_decisions = conn.execute("select 1 from sqlite_master where name='scene_activity_decisions'").fetchone() is not None
             conn.executescript("""
                 create table if not exists acquired_samples (
                     id text primary key, camera_id text not null, captured_epoch real not null,
@@ -74,6 +75,30 @@ class EventStoreSceneAcquisitionMixin:
                     evidence_json text not null, created_at real not null
                 );
                 create index if not exists scene_activity_pending on scene_activity_decisions(camera_id,verdict,activity_epoch);
+                create table if not exists scene_decision_samples (
+                    decision_id text not null references scene_activity_decisions(id) on delete cascade,
+                    sample_id text not null,
+                    primary key(decision_id,sample_id)
+                );
+                create index if not exists scene_decision_sample
+                    on scene_decision_samples(sample_id,decision_id);
+                create trigger if not exists scene_decision_samples_insert
+                after insert on scene_activity_decisions when json_valid(new.sample_ids_json)
+                begin
+                    insert or ignore into scene_decision_samples
+                    select new.id,cast(value as text) from json_each(new.sample_ids_json)
+                    where value is not null;
+                end;
+                create trigger if not exists scene_decision_samples_update
+                after update of sample_ids_json on scene_activity_decisions
+                begin
+                    delete from scene_decision_samples where decision_id=new.id;
+                    insert or ignore into scene_decision_samples
+                    select new.id,cast(value as text)
+                    from json_each(case when json_valid(new.sample_ids_json)
+                                        then new.sample_ids_json else '[]' end)
+                    where value is not null;
+                end;
                 create table if not exists scene_activity_admissions (
                     decision_id text primary key references scene_activity_decisions(id),
                     event_id integer not null, episode_id text not null, created_at real not null
@@ -112,6 +137,42 @@ class EventStoreSceneAcquisitionMixin:
             if not had_seeds:
                 conn.execute("insert or ignore into scene_candidate_seeds select s.value,j.id "
                              "from scene_candidate_jobs j,json_each(j.seed_sample_ids_json) s")
+            conn.execute(
+                "insert or ignore into scene_acquisition_migrations values('decision_sample_refs_v1',?)",
+                (0 if had_decisions else -1,),
+            )
+
+    def backfill_scene_decision_samples(self, *, batch_size=500):
+        """Index one legacy page; new decisions already maintain refs atomically.
+
+        Retention finishes this migration before deleting samples. Missing legacy
+        samples are still named here: their JSON references must not be discarded.
+        """
+        limit = max(1, min(int(batch_size), 1000))
+        with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
+            cursor = conn.execute(
+                "select cursor from scene_acquisition_migrations where name='decision_sample_refs_v1'",
+            ).fetchone()[0]
+            if cursor == -1:
+                return {"processed": 0, "complete": True}
+            rows = conn.execute(
+                "select rowid,id,sample_ids_json from scene_activity_decisions "
+                "where rowid>? order by rowid limit ?", (cursor, limit),
+            ).fetchall()
+            conn.executemany(
+                "insert or ignore into scene_decision_samples "
+                "select ?,cast(value as text) "
+                "from json_each(case when json_valid(?) then ? else '[]' end) "
+                "where value is not null",
+                [(row[1], row[2], row[2]) for row in rows],
+            )
+            complete = len(rows) < limit
+            conn.execute(
+                "update scene_acquisition_migrations set cursor=? where name='decision_sample_refs_v1'",
+                (-1 if complete else rows[-1][0],),
+            )
+            return {"processed": len(rows), "complete": complete}
 
     @staticmethod
     def _sample_payload(conn, sample_id):

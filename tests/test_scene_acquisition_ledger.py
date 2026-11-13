@@ -67,6 +67,51 @@ def test_complete_empty_and_failed_samples_remain_distinct(tmp_path):
             source="discovery",status="complete",observations=[])
 
 
+def test_decision_sample_references_follow_atomic_writes_and_deletes(tmp_path):
+    ledger = Ledger(tmp_path)
+    sample(ledger)
+    sample(ledger, "second")
+    with pytest.raises(RuntimeError):
+        with ledger._connect() as conn:
+            ledger._record_scene_activity_decision(
+                conn, decision_id="rolled-back", sample_ids=["s"], verdict="pending",
+                activity_epoch=None, reason="waiting", policy_version=1,
+            )
+            raise RuntimeError("rollback")
+    decision(ledger)
+    with ledger._connect() as conn:
+        assert [tuple(r) for r in conn.execute("select * from scene_decision_samples")] == [("d", "s")]
+        conn.execute("update scene_activity_decisions set sample_ids_json='[\"second\"]' where id='d'")
+        assert [tuple(r) for r in conn.execute("select * from scene_decision_samples")] == [("d", "second")]
+        conn.execute("delete from scene_activity_decisions where id='d'")
+        assert conn.execute("select count(*) from scene_decision_samples").fetchone()[0] == 0
+
+
+def test_legacy_decision_reference_backfill_resumes_and_keeps_new_writes(tmp_path):
+    ledger = Ledger(tmp_path)
+    sample(ledger)
+    for index in range(3):
+        decision(ledger, f"old-{index}")
+    with ledger._connect() as conn:
+        conn.execute("drop trigger scene_decision_samples_insert")
+        conn.execute("drop trigger scene_decision_samples_update")
+        conn.execute("drop table scene_decision_samples")
+        conn.execute("delete from scene_acquisition_migrations where name='decision_sample_refs_v1'")
+        conn.execute("update scene_activity_decisions set sample_ids_json='[\"s\",\"missing-legacy-frame\"]' where id='old-0'")
+    ledger = Ledger(tmp_path)
+    assert ledger.backfill_scene_decision_samples(batch_size=2) == {"processed": 2, "complete": False}
+    decision(ledger, "new")
+    ledger = Ledger(tmp_path)
+    while not ledger.backfill_scene_decision_samples(batch_size=2)["complete"]:
+        pass
+    with ledger._connect() as conn:
+        refs = {tuple(r) for r in conn.execute("select * from scene_decision_samples")}
+        assert refs == {(f"old-{i}", "s") for i in range(3)} | {
+            ("old-0", "missing-legacy-frame"), ("new", "s"),
+        }
+    assert ledger.backfill_scene_decision_samples() == {"processed": 0, "complete": True}
+
+
 def test_supported_decision_admits_atomically_and_only_once(tmp_path):
     ledger=Ledger(tmp_path)
     sample(ledger)

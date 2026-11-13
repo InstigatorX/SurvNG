@@ -50,9 +50,6 @@ STARTUP_DELAY_SECONDS = 600.0
 BATCH_ROWS = 500
 SCAN_ROWS = 5000
 BATCH_PAUSE_SECONDS = 0.05
-# A decision is recorded within minutes of its samples; this margin bounds
-# which surviving decisions can still name a sample old enough to prune.
-DECISION_SAMPLE_MARGIN_SECONDS = 86400.0
 STEPS = (
     "candidate_jobs",
     "activity_decisions",
@@ -241,14 +238,19 @@ class DatabaseRetention:
         }
         steps = result["steps"]
         try:
+            while True:
+                self._check_stop()
+                if self._events.backfill_scene_decision_samples()["complete"]:
+                    break
+                if self._stop.wait(self._pause_seconds):
+                    raise _Stopped()
             self._ensure_deletion_work()
             if not dry:
                 self._drain_motion_deletions(result)
             self._candidate_jobs(steps["candidate_jobs"], cutoffs, dry)
             referenced = self._referenced_decisions()
             self._activity_decisions(steps["activity_decisions"], cutoffs, referenced, dry)
-            kept = self._retained_decision_samples(cutoffs, referenced)
-            self._acquired_samples(steps["acquired_samples"], cutoffs, kept, dry)
+            self._acquired_samples(steps["acquired_samples"], cutoffs, dry)
             self._acquired_observations(steps["acquired_observations"], cutoffs, dry)
             self._motion_audits(result, cutoffs, dry)
         except _Stopped:
@@ -362,53 +364,14 @@ class DatabaseRetention:
             if float(rows[-1][3]) >= newest:
                 return
 
-    def _retained_decision_samples(
-        self, cutoffs: dict[str, float], referenced: set[str],
-    ) -> set[str]:
-        """Samples named (as JSON, without a FK) by decisions that survive.
-
-        Only decisions that can name a sample old enough to prune matter:
-        supported and referenced ones (kept indefinitely) and surviving ones
-        recorded near or after the oldest sample cutoff.
-        """
-        horizon = min(cutoffs["empty"], cutoffs["activity"]) - DECISION_SAMPLE_MARGIN_SECONDS
-        kept: set[str] = set()
-        last_rowid = 0
-        while True:
-            self._check_stop()
-            with self._events._connect() as conn:
-                rows = conn.execute(
-                    "select rowid, id, verdict, created_at, sample_ids_json "
-                    "from scene_activity_decisions where rowid > ? order by rowid limit ?",
-                    (last_rowid, SCAN_ROWS),
-                ).fetchall()
-            if not rows:
-                return kept
-            last_rowid = int(rows[-1][0])
-            for row in rows:
-                decision_id, verdict, created = str(row[1]), str(row[2]), float(row[3])
-                relevant = (
-                    verdict == "supported" or decision_id in referenced or created >= horizon
-                )
-                if not relevant or (
-                    decision_id not in referenced
-                    and self._decision_expires(verdict, created, cutoffs)
-                ):
-                    continue
-                try:
-                    kept.update(str(value) for value in json.loads(row[4] or "[]"))
-                except (TypeError, ValueError):
-                    continue
-
     def _acquired_samples(
-        self, step: dict[str, int], cutoffs: dict[str, float], kept: set[str], dry: bool,
+        self, step: dict[str, int], cutoffs: dict[str, float], dry: bool,
     ) -> None:
         unlinked = (
             "not exists(select 1 from acquired_sample_events e where e.sample_id=s.id) "
             "and not exists(select 1 from acquired_sample_episodes p where p.sample_id=s.id) "
             "and not exists(select 1 from scene_candidate_seeds c where c.sample_id=s.id) "
-            "and not exists(select 1 from scene_activity_decisions d, json_each(d.sample_ids_json) j "
-            "where json_valid(d.sample_ids_json) and j.value = s.id)"
+            "and not exists(select 1 from scene_decision_samples d where d.sample_id=s.id)"
         )
         empty = "not exists(select 1 from acquired_sample_observations o where o.sample_id=s.id)"
         # Empty live-discovery frames expire on the short schedule, everything
@@ -452,7 +415,7 @@ class DatabaseRetention:
                 if not rows:
                     break
                 last_epoch, last_id = float(rows[-1][1]), str(rows[-1][0])
-                ids = [str(row[0]) for row in rows if row[2] and str(row[0]) not in kept]
+                ids = [str(row[0]) for row in rows if row[2]]
                 step["eligible"] += len(ids)
                 if not dry:
                     for batch in _chunks(ids, BATCH_ROWS):

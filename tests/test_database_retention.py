@@ -369,3 +369,39 @@ def test_sample_kept_when_a_decision_survives_the_reference_snapshot(tmp_path: P
     retention.run_once()
     assert "late-sample" in _ids(store, "acquired_samples")
     assert "late-decision" in _ids(store, "scene_activity_decisions")
+
+
+def test_retention_indexes_legacy_references_before_pruning(store: EventStore) -> None:
+    with store._connect() as conn:
+        conn.execute("delete from scene_decision_samples")
+        conn.execute("update scene_acquisition_migrations set cursor=0 where name='decision_sample_refs_v1'")
+    _retention(store).run_once()
+    assert "supported-40d" in _ids(store, "acquired_samples")
+    assert "empty-old" not in _ids(store, "acquired_samples")
+    with store._connect() as conn:
+        assert conn.execute("select cursor from scene_acquisition_migrations where name='decision_sample_refs_v1'").fetchone()[0] == -1
+        plan = [row[3] for row in conn.execute(
+            "explain query plan select s.id from acquired_samples s "
+            "where not exists(select 1 from scene_decision_samples d where d.sample_id=s.id)",
+        )]
+    assert any("SEARCH d USING COVERING INDEX" in step for step in plan)
+    assert not any(step.startswith("SCAN d") or "json_each" in step for step in plan)
+
+
+def test_interrupted_reference_backfill_does_not_prune_samples(store: EventStore, monkeypatch) -> None:
+    retention = _retention(store)
+    before = _ids(store, "acquired_samples")
+    with store._connect() as conn:
+        conn.execute("delete from scene_decision_samples")
+        conn.execute("update scene_acquisition_migrations set cursor=0 where name='decision_sample_refs_v1'")
+    backfill = store.backfill_scene_decision_samples
+
+    def stop_after_one_page():
+        result = backfill(batch_size=1)
+        retention._stop.set()
+        return result
+
+    monkeypatch.setattr(store, "backfill_scene_decision_samples", stop_after_one_page)
+    result = retention.run_once()
+    assert result["interrupted"] is True
+    assert _ids(store, "acquired_samples") == before
