@@ -43,9 +43,7 @@ def manual_detection(tmp_path: Path):
     )
     deps = DetectionRouteDependencies(
         get_manager=lambda: manager, get_config=lambda: manager.config,
-        manager_lock=threading.RLock(), get_comparison_limiter=Mock(),
-        ensure_event_clip=Mock(), dependency_status=Mock(),
-        comparison_runner=Mock(), sample_video_frames=Mock(),
+        manager_lock=threading.RLock(),
     )
     endpoint = create_detection_router(deps).handlers["detect_event_snapshot"]
     return manager, event, endpoint
