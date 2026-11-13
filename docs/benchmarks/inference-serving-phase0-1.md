@@ -4,6 +4,9 @@ Implementation of [PR #308](https://github.com/InstigatorX/SurvNG/pull/308), bas
 v1.2 `f8291c9f4b0a31f05b44977bcd59df9212fd79fe`. Runtime defaults and scheduling
 are unchanged. Pooling, batching, and transfer optimizations remain gated.
 
+A subsequent [GPU replay and live restart validation](inference-serving-gpu-restart.md)
+covers the current production model and records the remaining limitations.
+
 ## Reconciliation with the reviewed source
 
 The plan reviewed `414d4c6`. The seven relevant detector/runtime/test files have
@@ -205,7 +208,8 @@ Future concurrency must allocate separate native requests and preprocessing slot
 
 No optimization was selected. CPU native inference dominates the sampled stage
 costs; controlled production-backend measurements must precede choosing pooling
-or batching settings. GPU/Core ML hardware replay, candidate-heavy performance,
+or batching settings. The current GPU model now has a matched replay and restart
+check; other GPU model/output contracts, Core ML hardware replay, candidate-heavy performance,
 30-minute saturation/peak-memory measurement, and repeated lifecycle performance
 cycles remain unverified. Existing lifecycle tests provide functional coverage,
 not those sustained hardware gates. No throughput or memory improvement is claimed.

@@ -1,6 +1,6 @@
 # Inference-serving architecture: execution plan
 
-Status: Phase 0 local CPU baseline and Phase 1 ownership refactor implemented. See [checkpoint evidence](benchmarks/inference-serving-phase0-1.md). Deployment-specific and sustained performance gates remain open; Phases 2–6 have not been implemented.
+Status: Phase 0 local CPU baseline and Phase 1 ownership refactor implemented. See [checkpoint evidence](benchmarks/inference-serving-phase0-1.md). The current GPU model also has a [replay and live restart check](benchmarks/inference-serving-gpu-restart.md). Other deployment-specific and sustained performance gates remain open; Phases 2–6 have not been implemented.
 
 ## Objective and scope
 
