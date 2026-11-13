@@ -65,6 +65,7 @@ jobs:
             tests/test_inference_lifecycle.py \
             tests/test_object_tracking.py \
             tests/test_camera_worker.py \
+            tests/test_run_benchmarks.py \
             tests/test_config_reload.py
       - name: Run face and identity regression tests
         run: |
@@ -75,7 +76,7 @@ jobs:
             tests/test_unknown_identity*.py \
             tests/test_timeline_identity.py
       - name: Run local observability regression tests
-        run: scripts/run-tests.sh tests/test_local_observability.py tests/test_camera_status.py
+        run: scripts/run-tests.sh tests/test_local_observability.py tests/test_camera_status.py tests/test_local_observability_metrics.py tests/test_production_soak.py
       - name: Run speech detection regression tests
         run: scripts/run-tests.sh tests/test_speech.py tests/test_speech_incidents.py tests/test_mqtt.py
       - name: Run security and auth regression tests
@@ -87,6 +88,7 @@ jobs:
             tests/test_ffmpeg_input.py \
             tests/test_worker_topology.py \
             tests/test_recording_path_indexes.py \
+            tests/test_main_database_metrics.py \
             tests/test_main_database.py
       - name: Run scene and evidence regression tests
         run: |

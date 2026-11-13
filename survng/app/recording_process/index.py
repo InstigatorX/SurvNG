@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from ..config import CameraConfig, RecordingRetentionConfig
-from ..main_database import ClosingDatabaseConnection
+from ..main_database import closing_connection_factory
 from ..media_storage import path_presence
 from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 from ..recording_media import mp4_playback_metadata, mp4_stream_fingerprint
@@ -48,7 +48,7 @@ class RecordingIndexMixin:
         connection = sqlite3.connect(
             self.index_path,
             timeout=10,
-            factory=ClosingDatabaseConnection,
+            factory=closing_connection_factory("recording_index"),
         )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 10000")

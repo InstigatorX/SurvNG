@@ -9,7 +9,7 @@ from typing import Any
 
 from ..database_polling import polling_connection
 from ..durable_payload import durable_json_dumps
-from ..main_database import ClosingDatabaseConnection
+from ..main_database import closing_connection_factory
 
 LOGGER = logging.getLogger(__name__)
 
@@ -146,7 +146,7 @@ class EventStoreJobsMixin:
         conn = sqlite3.connect(
             self.jobs_db_path,
             timeout=10.0,
-            factory=ClosingDatabaseConnection,
+            factory=closing_connection_factory("jobs"),
         )
         conn.row_factory = sqlite3.Row
         conn.execute("pragma busy_timeout = 10000")

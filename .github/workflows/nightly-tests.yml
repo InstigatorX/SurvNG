@@ -45,3 +45,41 @@ jobs:
       - name: Post-job cleanup
         if: always()
         run: scripts/github-runner-cleanup.sh --publish
+
+  benchmarks:
+    # Record-only baseline; no regression thresholds until ~2 weeks of data.
+    # Runs after the test job (pass or fail) so it never shares the runner
+    # with the test suite.
+    needs: full-python
+    if: ${{ always() }}
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Free runner disk space
+        run: scripts/github-runner-cleanup.sh --publish
+      - name: Install Python benchmark dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          if [ -f requirements.lock ]; then
+            .venv/bin/pip install --require-hashes -r requirements.lock
+          else
+            .venv/bin/pip install -r requirements.txt
+          fi
+      - name: Run nightly benchmarks
+        run: .venv/bin/python scripts/run-benchmarks.py --repetitions 3 --output benchmark-results/nightly-benchmarks.json
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-benchmarks-${{ github.run_number }}
+          path: benchmark-results/nightly-benchmarks.json
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Post-job cleanup
+        if: always()
+        run: scripts/github-runner-cleanup.sh --publish
