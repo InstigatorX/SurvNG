@@ -12,8 +12,8 @@ import tarfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMIT = "d81fba565ee26e82170d5f4f8cd358c2fd773f6c"
-SHA256 = "102b6e61900d4e7dcf85e6be3ba5970f9d214ca6829855c5f8981f95373f2efe"
+COMMIT = "d0359d529de18ef318b09a74b71380a879023ec4"
+SHA256 = "1e0ef3238dffe9251487fd29d8b58255ad93ce693f23a0621eb493993da261dd"
 
 
 def run(*args: str, cwd: Path = ROOT) -> None:

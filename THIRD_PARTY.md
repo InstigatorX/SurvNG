@@ -43,7 +43,7 @@ CC-BY-4.0); retain those notices when redistributing the corresponding files.
 
 The optional HKSV3 protocol lab has a separate `homekit-worker/package-lock.json`.
 It uses HAP-NodeJS (Apache-2.0), pinned to source commit
-`d81fba565ee26e82170d5f4f8cd358c2fd773f6c`, and werift 0.24.4 (MIT).
+`d0359d529de18ef318b09a74b71380a879023ec4`, and werift 0.24.4 (MIT).
 License texts are retained in `homekit-worker/licenses/`. Adapted SFrame/RTP
 helpers from camera.ui plugins commit
 `91ce370391c0f18e63faeb26a876967315a317bc` retain their MIT notice and provenance

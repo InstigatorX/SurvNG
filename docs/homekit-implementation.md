@@ -9,7 +9,7 @@ out of scope.
 ## Gate 1: protocol acceptance
 
 The [synthetic worker](../homekit-worker/README.md) provides an isolated protocol
-test. HAP is pinned to `d81fba565ee26e82170d5f4f8cd358c2fd773f6c`, with
+test. HAP is pinned to `d0359d529de18ef318b09a74b71380a879023ec4`, with
 `werift` 0.24.4 and retained MIT-licensed media helpers. It intentionally has no
 production camera input and no integration-enable setting.
 
@@ -26,10 +26,17 @@ startup/restart/shutdown.
 Hardware check (2026-09-26): the synthetic accessory paired successfully and
 received HAP accessory reads across VLANs, but Apple Home displayed “No Response”.
 No snapshot handler or local/remote stream setup was invoked. The Apple TV was
-then confirmed to run tvOS 18.6, below the planned tvOS 27 target. Protocol
-acceptance is blocked pending the hub upgrade and a repeat test; this is not a
-successful video or recording acceptance result. Retain the existing pairing
-for the retry. The 24-hour soak has not been run.
+then confirmed to run tvOS 18.6, below the planned tvOS 27 target.
+
+The hub-version blocker is cleared: a compatible Apple TV is available for a
+repeat test. The lab now tracks the secure-video revision above, which merges
+HAP-NodeJS 2.3.0. That revision answers an Identify write of false instead of
+letting the characteristic time out, and it drops malformed data-stream frames
+instead of crashing the process. Both happen when a tvOS 27 hub opens the camera
+tile and the HDS snapshot relay. Automated tests were rerun on this revision and
+passed. Snapshots, local and cellular viewing, Home recording, and the 24-hour
+soak have not been run on the new hub. Retain the existing pairing for the retry.
+This is not a successful video or recording acceptance result.
 
 ## Remaining implementation after the protocol gate
 

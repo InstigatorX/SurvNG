@@ -34,8 +34,9 @@ HKSV_MEDIA_TESTS=1 npm exec --yes --package=node@24 -- npm test
 Bootstrap verifies the upstream archive SHA-256, installs upstream build tools
 from its lockfile, compiles HAP, and installs worker dependencies from the worker
 lockfile. Downloaded source, packages, build output, and media are excluded from
-Git. HAP's revision is pinned; an upstream update requires deliberate review and
-a lockfile update. Third-party notices are retained in `licenses/` and
+Git. HAP is pinned to secure-video `d0359d529de18ef318b09a74b71380a879023ec4`
+(HAP-NodeJS 2.3.0 merged on 2026-11-03). An upstream update requires deliberate
+review and a lockfile update. Third-party notices are retained in `licenses/` and
 `src/vendor/`.
 
 ## Run the synthetic camera
@@ -101,9 +102,11 @@ lock.
 
 ## Required hardware acceptance
 
-Record the device model and exact OS build for both the iPhone and Apple TV 4K.
-Both must support the HKSV3 path; the target is iOS/tvOS 27. Use a Home with an
-iCloud+ plan that supports recording.
+The September 2026 attempt paired and served HAP reads, then showed “No Response”
+with no snapshot or stream setup. That Apple TV was tvOS 18.6. Repeat the
+checklist on an iOS/tvOS 27 hub. Record the device model and exact OS build for
+both the iPhone and Apple TV 4K. Use a Home with an iCloud+ plan that supports
+recording. Keep the existing state directory so the paired accessory is reused.
 
 1. Pair the lab camera and confirm its snapshot appears.
 2. Open local live view and confirm moving video and the test tone.
