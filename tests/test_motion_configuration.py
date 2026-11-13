@@ -134,8 +134,6 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                         "implementation": "buffered_evidence_fusion",
                         "options": {"policy": "all", "sources": " ONVIF "},
                     },
-                    {"stage_id": "event_state", "implementation": "score_event_state"},
-                    {"stage_id": "trigger", "implementation": "score_trigger"},
                 ],
             },
         })
@@ -153,8 +151,6 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                         "implementation": "buffered_evidence_fusion",
                         "options": {"policy": "all", "sources": ["onvif"]},
                     },
-                    {"stage_id": "event_state", "implementation": "score_event_state"},
-                    {"stage_id": "trigger", "implementation": "score_trigger"},
                 ],
             },
         })
@@ -395,12 +391,6 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                         "options": {
                             "source_thresholds": {"aux": float("nan")},
                         },
-                    }, {
-                        "stage_id": "state",
-                        "implementation": "score_event_state",
-                    }, {
-                        "stage_id": "trigger",
-                        "implementation": "score_trigger",
                     }],
                 },
             },

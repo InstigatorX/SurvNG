@@ -1428,8 +1428,6 @@ class CameraWorkerTest(unittest.TestCase):
                         "implementation": "buffered_evidence_fusion",
                         "options": {"policy": "bypass", "sources": []},
                     },
-                    {"stage_id": "event_state", "implementation": "score_event_state"},
-                    {"stage_id": "trigger", "implementation": "score_trigger"},
                 ],
             },
         })
@@ -1454,7 +1452,7 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(
                 camera,
                 Path(tmpdir),
-                motion_config=MotionQualificationConfig(mode="enforce"),
+                motion_config=MotionQualificationConfig(mode="adaptive"),
             )
             worker._stop.clear()
             thread = worker.motion_analysis.thread = threading.Thread(
@@ -1960,7 +1958,7 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(
                 camera,
                 Path(tmpdir),
-                motion_config=MotionQualificationConfig(mode="enforce"),
+                motion_config=MotionQualificationConfig(mode="adaptive"),
             )
             worker._stop.clear()
             with worker._frame_lock:
@@ -1984,7 +1982,7 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(
                 camera,
                 Path(tmpdir),
-                motion_config=MotionQualificationConfig(mode="enforce"),
+                motion_config=MotionQualificationConfig(mode="adaptive"),
                 event_callback=lambda *args: published.append(args),
             )
             worker._stop.clear()
@@ -2090,8 +2088,6 @@ class CameraWorkerTest(unittest.TestCase):
                             "include_primary": True,
                         },
                     },
-                    {"stage_id": "event_state", "implementation": "score_event_state"},
-                    {"stage_id": "trigger", "implementation": "score_trigger"},
                 ],
             },
         })
@@ -2144,8 +2140,6 @@ class CameraWorkerTest(unittest.TestCase):
                             "include_primary": False,
                         },
                     },
-                    {"stage_id": "event_state", "implementation": "score_event_state"},
-                    {"stage_id": "trigger", "implementation": "score_trigger"},
                 ],
             },
         })
@@ -2188,8 +2182,6 @@ class CameraWorkerTest(unittest.TestCase):
                             "include_primary": False,
                         },
                     },
-                    {"stage_id": "event_state", "implementation": "score_event_state"},
-                    {"stage_id": "trigger", "implementation": "score_trigger"},
                 ],
             },
         })
@@ -2212,8 +2204,6 @@ class CameraWorkerTest(unittest.TestCase):
                             "include_primary": False,
                         },
                     },
-                    {"stage_id": "event_state", "implementation": "score_event_state"},
-                    {"stage_id": "trigger", "implementation": "score_trigger"},
                 ],
             },
         })
@@ -2485,7 +2475,7 @@ class CameraWorkerTest(unittest.TestCase):
 
     def test_event_worker_survives_a_transient_handler_failure(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        config = MotionQualificationConfig(mode="off", burst_quiet_seconds=0.1)
+        config = MotionQualificationConfig(mode="camera_rescue", burst_quiet_seconds=0.1)
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
@@ -2557,7 +2547,7 @@ class CameraWorkerTest(unittest.TestCase):
 
     def test_event_worker_bounds_retries_for_a_persistent_handler_failure(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        config = MotionQualificationConfig(mode="off", burst_quiet_seconds=0.1)
+        config = MotionQualificationConfig(mode="camera_rescue", burst_quiet_seconds=0.1)
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
@@ -2583,7 +2573,7 @@ class CameraWorkerTest(unittest.TestCase):
 
     def test_failed_adaptive_batch_stays_reserved_until_terminal_retry_drop(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        config = MotionQualificationConfig(mode="off", burst_quiet_seconds=0.1)
+        config = MotionQualificationConfig(mode="camera", burst_quiet_seconds=0.1)
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
@@ -2602,6 +2592,7 @@ class CameraWorkerTest(unittest.TestCase):
                     message="adaptive",
                     event_at=now,
                     received_at=now.timestamp(),
+                    prequalified=MotionQualificationResult(True, 0.8, 0.5, "qualified", 2, {}),
                 ))
                 deadline = time.monotonic() + 3
                 while (
@@ -2617,7 +2608,7 @@ class CameraWorkerTest(unittest.TestCase):
 
     def test_enforce_retry_reuses_accepted_qualification_without_advancing_fusion(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        config = MotionQualificationConfig(mode="enforce", burst_quiet_seconds=0.1)
+        config = MotionQualificationConfig(mode="camera", burst_quiet_seconds=0.1)
         accepted = MotionQualificationResult(True, 0.8, 0.5, "qualified", 4, {})
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
@@ -2666,8 +2657,8 @@ class CameraWorkerTest(unittest.TestCase):
 
     def test_post_persistence_audit_failure_does_not_duplicate_incident(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        config = MotionQualificationConfig(mode="audit", burst_quiet_seconds=0.1)
-        rejected = MotionQualificationResult(False, 0.1, 0.5, "rejected", 2, {})
+        config = MotionQualificationConfig(mode="camera", burst_quiet_seconds=0.1)
+        accepted = MotionQualificationResult(True, 0.8, 0.5, "qualified", 2, {})
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
@@ -2691,11 +2682,11 @@ class CameraWorkerTest(unittest.TestCase):
                 thread.start()
                 now = datetime.now(timezone.utc)
                 worker.motion_ingress.enqueue(MotionTrigger(
-                    topic="adaptive/motion",
+                    topic="adaptive/visual_backup",
                     message="adaptive",
                     event_at=now,
                     received_at=now.timestamp(),
-                    prequalified=rejected,
+                    prequalified=accepted,
                 ))
                 deadline = time.monotonic() + 1
                 while worker.motion_state._stats["event_worker_errors"] == 0 and time.monotonic() < deadline:
@@ -2769,7 +2760,7 @@ class CameraWorkerTest(unittest.TestCase):
 
     def test_priority_onvif_bypasses_active_adaptive_event_state(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        config = MotionQualificationConfig(mode="audit", burst_quiet_seconds=0.1)
+        config = MotionQualificationConfig(mode="camera", burst_quiet_seconds=0.1)
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             active = MotionQualificationResult(True, 0.8, 0.5, "qualified", 2, {})
@@ -2803,7 +2794,7 @@ class CameraWorkerTest(unittest.TestCase):
 
     def test_priority_onvif_and_adaptive_evidence_share_one_episode(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        config = MotionQualificationConfig(mode="enforce", burst_quiet_seconds=0.1)
+        config = MotionQualificationConfig(mode="camera", burst_quiet_seconds=0.1)
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
@@ -3261,7 +3252,7 @@ class CameraWorkerTest(unittest.TestCase):
 
     def test_motion_worker_coalesces_a_trigger_burst(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        config = MotionQualificationConfig(mode="off", burst_quiet_seconds=0.1, window_seconds=0.8)
+        config = MotionQualificationConfig(mode="camera_rescue", burst_quiet_seconds=0.1, window_seconds=0.8)
         published = []
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(
@@ -3299,7 +3290,7 @@ class CameraWorkerTest(unittest.TestCase):
 
     def test_audit_records_detector_failure_as_not_run(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        config = MotionQualificationConfig(mode="audit", burst_quiet_seconds=0.1)
+        config = MotionQualificationConfig(mode="camera", burst_quiet_seconds=0.1)
         rejected = MotionQualificationResult(False, 0.2, 0.5, "low_score", 3, {})
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
@@ -3396,7 +3387,7 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertEqual(diagnostics["windows_evaluated"], 1)
             replay.assert_not_called()
 
-    def test_worker_migrates_legacy_state_machine_to_evidence_only_fusion(self) -> None:
+    def test_worker_rejects_retired_fusion_stages(self) -> None:
         camera = CameraConfig(
             id="gate",
             name="Gate",
@@ -3422,33 +3413,9 @@ class CameraWorkerTest(unittest.TestCase):
                 ],
             },
         })
-        score = MotionQualificationResult(
-            accepted=True,
-            score=0.8,
-            threshold=0.48,
-            reason="qualified",
-            frame_count=9,
-            features={},
-        )
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker = make_worker(camera, Path(tmpdir), motion_config=config)
-
-            first = worker.motion_qualification.with_source_evidence(score, 9.0, 10.0)
-            second = worker.motion_qualification.with_source_evidence(score, 10.0, 11.0)
-
-        self.assertTrue(first.accepted)
-        self.assertEqual(first.reason, "qualified")
-        self.assertTrue(second.accepted)
-        self.assertEqual(second.reason, "qualified")
-        self.assertEqual(second.telemetry["schema_version"], 1)
-        self.assertEqual(
-            set(second.telemetry["graphs"]),
-            {"qualification", "observation", "fusion"},
-        )
-        self.assertNotIn(
-            "event_state",
-            second.telemetry["graphs"]["fusion"]["invocation_timings"],
-        )
+            with self.assertRaisesRegex(ValueError, "score_event_state"):
+                make_worker(camera, Path(tmpdir), motion_config=config)
 
     def test_motion_event_rejects_untimestamped_live_fallback(self) -> None:
         camera = CameraConfig(
