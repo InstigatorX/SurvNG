@@ -111,7 +111,7 @@ function sceneReplayTracks(event, incident, sources) {
     for (const track of storedObjectTracks(source)) {
       const candidates = [...groups.values()].filter((group) => {
         const parts = group.key.split(":");
-        return parts[0] === "tracking" && parts[1] === String(source.id || source.representative_event_id)
+        return parts[0] === "tracking" && parts[1] === String(source.representative_event_id || source.id)
           && parts.at(-1) === String(track.trackId) && group.label === track.label;
       });
       const matches = candidates.filter((group) => {
@@ -136,7 +136,7 @@ function sceneReplayTracks(event, incident, sources) {
         });
       });
       const key = track.replay_key || (matches.length === 1 ? matches[0].key
-        : `stored:${source.id || source.representative_event_id}:${track.trackId}`);
+        : `stored:${source.representative_event_id || source.id}:${track.trackId}`);
       for (const sample of track.boxHistory) add(key, track.label, sample[0], sample.slice(1), width, height);
       const group = groups.get(key);
       if (group) group.metadata = { track, width, height };
@@ -192,7 +192,7 @@ export function incidentReplayTracking(event, incident = null) {
   const candidates = [event, ...(event?.events || []), ...(event?.scene_clip_window?.episode_id ? [] : incident?.events || [])];
   const sources = [...new Map(candidates.filter((item) => item?.object_tracking
     && (!camera || !item.camera_id || item.camera_id === camera))
-    .map((item) => [String(item.id || item.representative_event_id), item])).values()];
+    .map((item) => [String(item.representative_event_id || item.id), item])).values()];
   const built = sceneReplayTracks(event, incident, sources);
   if (!built) return source;
   const base = source?.object_tracking || {};
@@ -368,6 +368,40 @@ export function snapshotObjectTracks(event, capturedEpoch) {
     const [x1, y1, x2, y2] = frame.box;
     return [{ ...track, x1, y1, x2, y2, path: frame.path }];
   });
+}
+
+export function snapshotTrackOverview(event, capturedEpoch) {
+  const current = new Map(snapshotObjectTracks(event, capturedEpoch).map((track) => [track.trackId, track]));
+  return incidentTrackFramesAt(storedObjectTracks(event), Number.MAX_VALUE).map((track) => {
+    const visible = current.get(track.trackId);
+    return {
+      ...track,
+      snapshotBox: visible ? [visible.x1, visible.y1, visible.x2, visible.y2] : null,
+    };
+  });
+}
+
+// Round corners within the adjacent segments' triangle. This avoids spline
+// overshoot, preserves endpoints, and leaves observation gaps to the caller.
+export function trackPathD(points, radius = 8) {
+  const path = points.filter((point, index) => index === 0
+    || point[0] !== points[index - 1][0] || point[1] !== points[index - 1][1]);
+  if (!path.length) return "";
+  const format = (point) => point.map((value) => Number(value.toFixed(3))).join(" ");
+  let d = `M ${format(path[0])}`;
+  for (let index = 1; index < path.length - 1; index += 1) {
+    const previous = path[index - 1];
+    const corner = path[index];
+    const next = path[index + 1];
+    const incoming = Math.hypot(corner[0] - previous[0], corner[1] - previous[1]);
+    const outgoing = Math.hypot(next[0] - corner[0], next[1] - corner[1]);
+    const distance = Math.min(Math.max(0, radius), incoming / 3, outgoing / 3);
+    const before = corner.map((value, axis) => value + (previous[axis] - value) * distance / incoming);
+    const after = corner.map((value, axis) => value + (next[axis] - value) * distance / outgoing);
+    d += ` L ${format(before)} Q ${format(corner)} ${format(after)}`;
+  }
+  if (path.length > 1) d += ` L ${format(path.at(-1))}`;
+  return d;
 }
 
 export function playbackEpochAt(windowStartEpoch, mediaTime, mediaStartTime) {

@@ -29,7 +29,7 @@ import {
   UserRound,
   X,
 } from "lucide-react";
-import { recordedIncidentWindow, trackingCoverageAt, containedFrameTransform, incidentTrackFramesAt, incidentReplayTracking, incidentTrackingSource, playbackEpochAt, snapshotObjectTracks, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
+import { recordedIncidentWindow, trackingCoverageAt, containedFrameTransform, incidentTrackFramesAt, incidentReplayTracking, incidentTrackingSource, playbackEpochAt, snapshotTrackOverview, storedObjectTracks, trackFrameAt, trackPathD } from "../objectTrackReplay.mjs";
 import { liveActivityEventId, liveActivityIncidentHref } from "../liveWorkspace.mjs";
 import { adjacentIncident, eventCoverEpoch, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentImageRenderRect, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "./api.js";
@@ -162,7 +162,7 @@ export function objectBoxes(event) {
 
 export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, objectFocusMode = null, objectFocusZoom = 1, objectFocusAspect = { width: 16, height: 9 }, objectFocusControls = true, showAnnotations = true, showTracking = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, zones = null, zonesVisible = false, selectedObjectIndex = null, onSelectObject = null, onRequestFullResolution, onImageSize, children }) {
   const boxes = objectBoxes(event);
-  const tracks = snapshotObjectTracks(event, eventCoverEpoch(event));
+  const tracks = showTracking ? snapshotTrackOverview(event, eventCoverEpoch(event)) : [];
   const boxCoordinateSize = incidentDetectionFrameSize(event);
   const trackCoordinateSize = incidentTrackingFrameSize(event);
   const coordinateSize = showTracking ? trackCoordinateSize : boxCoordinateSize;
@@ -318,12 +318,12 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
     const scaleY = renderedImage.height / sourceHeight;
     return tracks.map((track) => ({
       ...track,
-      left: renderedImage.x + track.x1 * scaleX,
-      top: renderedImage.y + track.y1 * scaleY,
-      width: (track.x2 - track.x1) * scaleX,
-      height: (track.y2 - track.y1) * scaleY,
-      pathPoints: track.path.map(([x, y]) => `${renderedImage.x + x * scaleX},${renderedImage.y + y * scaleY}`).join(" "),
-    })).filter((track) => track.width > 0 && track.height > 0);
+      left: track.snapshotBox ? renderedImage.x + track.snapshotBox[0] * scaleX : null,
+      top: track.snapshotBox ? renderedImage.y + track.snapshotBox[1] * scaleY : null,
+      width: track.snapshotBox ? (track.snapshotBox[2] - track.snapshotBox[0]) * scaleX : null,
+      height: track.snapshotBox ? (track.snapshotBox[3] - track.snapshotBox[1]) * scaleY : null,
+      paths: track.paths.map((path) => path.map(([x, y]) => [renderedImage.x + x * scaleX, renderedImage.y + y * scaleY])),
+    }));
   }, [frameSize, imageSize, renderedImage, trackCoordinateSize?.height, trackCoordinateSize?.width, tracks]);
 
   const focusMaxScale = useMemo(
@@ -437,15 +437,20 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
         ) : null}
         {imageReady && showTracking && renderedTracks.length ? (
           <div className="object-track-layer" aria-hidden="true">
+            <small className="object-track-overview-note">Full incident paths · boxes at snapshot time</small>
             <svg viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="none" aria-hidden="true">
               {renderedTracks.map((track) => (
                 <g className={`object-track-color-${Math.abs(track.trackId) % 6}`} key={`trail-${track.trackId}`}>
-                  {track.pathPoints ? <polyline className="object-track-trail" points={track.pathPoints} vectorEffect="non-scaling-stroke" /> : null}
-                  <circle className="object-track-end" cx={track.left + track.width / 2} cy={track.top + track.height / 2} r="4" vectorEffect="non-scaling-stroke" />
+                  {track.paths.map((path, index) => (
+                    <React.Fragment key={index}>
+                      {path.length > 1 ? <path className="object-track-trail" d={trackPathD(path)} vectorEffect="non-scaling-stroke" /> : null}
+                      {path.length ? <circle className="object-track-end" cx={path.at(-1)[0]} cy={path.at(-1)[1]} r="3" vectorEffect="non-scaling-stroke" /> : null}
+                    </React.Fragment>
+                  ))}
                 </g>
               ))}
             </svg>
-            {renderedTracks.map((track) => (
+            {renderedTracks.filter((track) => track.snapshotBox).map((track) => (
               <span
                 className={`object-track-box object-track-color-${Math.abs(track.trackId) % 6}`}
                 key={`track-${track.trackId}`}
@@ -590,7 +595,7 @@ export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, wind
         {renderedTracks.map((track) => (
           <g className={`object-track-color-${Math.abs(track.trackId) % 6} ${track.recovery ? "reid-recovered" : ""} ${track.estimated ? "track-estimated" : ""}`} key={`video-path-${track.trackId}`}>
             {track.renderedPaths.map((path, index) => path.length > 1
-              ? <polyline key={index} className="object-track-trail" points={path.map(([x, y]) => `${x},${y}`).join(" ")} vectorEffect="non-scaling-stroke" />
+              ? <path key={index} className="object-track-trail" d={trackPathD(path)} vectorEffect="non-scaling-stroke" />
               : path.length ? <circle key={index} className="object-track-end" cx={path[0][0]} cy={path[0][1]} r="3" /> : null)}
             {track.renderedBox ? <rect className="object-track-video-box" x={track.renderedBox[0]} y={track.renderedBox[1]} width={track.renderedBox[2] - track.renderedBox[0]} height={track.renderedBox[3] - track.renderedBox[1]} vectorEffect="non-scaling-stroke" /> : null}
           </g>

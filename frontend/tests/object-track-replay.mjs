@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { trackingCoverageLabel, containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentReplayTracking, incidentTrackingSource, playbackEpochAt, incidentTrackFramesAt, snapshotObjectTracks, storedObjectTracks, trackFrameAt, withoutIsolatedTrackSpikes } from "../src/objectTrackReplay.mjs";
+import { trackingCoverageLabel, containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentReplayTracking, incidentTrackingSource, playbackEpochAt, incidentTrackFramesAt, snapshotObjectTracks, snapshotTrackOverview, storedObjectTracks, trackFrameAt, trackPathD, withoutIsolatedTrackSpikes } from "../src/objectTrackReplay.mjs";
 import { eventCoverEpoch } from "../src/incidentNavigation.mjs";
 
 const tracks = storedObjectTracks({ object_tracking: { tracks: [{
@@ -55,6 +55,11 @@ assert.deepEqual(snapshotTracks[0].path, [[25, 45], [30, 45]], "exclude the futu
 assert.deepEqual(snapshotObjectTracks(snapshotEvent, null), [], "unknown capture time cannot show tracks");
 assert.deepEqual(snapshotObjectTracks({ object_tracking: { tracks: [{ ...sparseTrack, track_id: 8, box_history: sparseTrack.boxHistory }] } }, 12), [], "hide unobserved gaps");
 assert.deepEqual(snapshotObjectTracks(snapshotEvent, 11).map((track) => track.trackId), [7, 9], "include tracks observed exactly at capture time");
+const overview = snapshotTrackOverview(snapshotEvent, eventCoverEpoch(snapshotEvent));
+assert.deepEqual(overview.map((track) => track.trackId), [7, 9, 10], "overview retains past and future tracks with timed observations");
+assert.deepEqual(overview[0].paths, [[[25, 45], [35, 45]]], "overview shows the complete incident path beyond the snapshot time");
+assert.deepEqual(overview.map((track) => track.snapshotBox), [[15, 10, 45, 80], null, null], "only current observations receive snapshot boxes");
+assert.ok(snapshotTrackOverview(snapshotEvent, null).every((track) => track.snapshotBox === null), "unknown capture time still permits paths, never stale boxes");
 
 assert.deepEqual(storedObjectTracks({ object_tracking: { tracks: [{ track_id: 1, label: "person", box: {} }] } }), []);
 
@@ -253,3 +258,10 @@ const endedPath = incidentTrackFramesAt(pathTrack, 16, { holdSeconds: 0, observa
 assert.equal(endedPath[0].box, null, "completed tracks retain no current box");
 assert.deepEqual(endedPath[0].paths, [[[5, 5], [15, 5]], [[45, 5]]], "retain completed trails and break across missing observations");
 assert.deepEqual(incidentTrackFramesAt(pathTrack, 10, { holdSeconds: 0 })[0].paths[0][0], [5, 5], "seeking backwards excludes later history");
+
+assert.equal(trackPathD([]), "");
+assert.equal(trackPathD([[0, 0], [0, 0]]), "M 0 0");
+assert.equal(trackPathD([[0, 0], [10, 10]]), "M 0 0 L 10 10", "two observations remain a straight segment");
+assert.equal(trackPathD([[0, 0], [10, 0], [10, 10]], 2), "M 0 0 L 8 0 Q 10 0 10 2 L 10 10", "round a turn while preserving endpoints");
+assert.equal(trackPathD([[0, 0], [10, 0], [10, 0], [10, 10]], 2), "M 0 0 L 8 0 Q 10 0 10 2 L 10 10", "stationary samples do not produce invalid curves");
+assert.equal(trackPathD([[0, 0], [3, 0], [3, 3]], 50), "M 0 0 L 2 0 Q 3 0 3 1 L 3 3", "limit rounding to local segment lengths");
