@@ -62,108 +62,150 @@ function observationEpoch(observation) {
   return Number.isFinite(parsed) ? parsed / 1000 : null;
 }
 
-function sceneReplayTracks(incident) {
+function replayTrackKey(key) {
+  // The database prefixes an event id to the original tracking key.
+  const parts = String(key || "").split(":");
+  const index = parts.indexOf("tracking");
+  return index >= 0 ? parts.slice(index).join(":") : null;
+}
+
+function sceneReplayTracks(event, incident, sources) {
   const groups = new Map();
-  for (const subject of incident?.scene_objects || []) {
-    for (const observation of subject?.observations || []) {
-      const key = String(observation?.scene_track_key || "");
-      // Stored keys are "tracking:{event}:{run}:{id}". The database column
-      // prefixes the event id, so either form has tracking as its own field.
-      if (!key.split(":").includes("tracking")) continue;
-      const epoch = observationEpoch(observation);
-      const box = observation?.box || {};
-      const coordinates = [box.x1, box.y1, box.x2, box.y2].map(finiteNumber);
-      const width = finiteNumber(observation?.detection_frame_width);
-      const height = finiteNumber(observation?.detection_frame_height);
-      if (
-        epoch === null
-        || width === null
-        || height === null
-        || width <= 0
-        || height <= 0
-        || coordinates.some((value) => value === null)
-        || coordinates[2] <= coordinates[0]
-        || coordinates[3] <= coordinates[1]
-      ) continue;
-      let group = groups.get(key);
-      if (!group) {
-        group = { label: observation.label || subject?.label || "object", samples: [] };
-        groups.set(key, group);
+  const camera = event?.camera_id || incident?.camera_id;
+  const members = event?.scene_clip_window?.episode_id
+    ? new Set((event.events || []).map((item) => String(item.id))) : null;
+  const allowed = (observation) => (
+    (!camera || !observation.camera_id || observation.camera_id === camera)
+    && (!members?.size || members.has(String(observation.event_id)))
+  );
+  function add(key, label, epoch, coordinates, width, height) {
+    if (!key || epoch === null || !(width > 0 && height > 0)
+      || coordinates.some((value) => value === null)
+      || coordinates[2] <= coordinates[0] || coordinates[3] <= coordinates[1]) return;
+    let group = groups.get(key);
+    if (!group) {
+      group = { key, label, samples: [] };
+      groups.set(key, group);
+    }
+    group.samples.push({ epoch, coordinates, width, height });
+  }
+  const scenes = new Set([event, incident]);
+  for (const scene of scenes) {
+    for (const subject of scene?.scene_objects || []) {
+      for (const observation of subject?.observations || []) {
+        if (!allowed(observation)) continue;
+        const box = observation.box || {};
+        add(replayTrackKey(observation.scene_track_key), observation.label || subject.label || "object",
+          observationEpoch(observation), [box.x1, box.y1, box.x2, box.y2].map(finiteNumber),
+          finiteNumber(observation.detection_frame_width), finiteNumber(observation.detection_frame_height));
       }
-      group.samples.push({ epoch, coordinates, width, height });
     }
   }
-  const prepared = [];
-  const sizeCounts = new Map();
-  for (const group of groups.values()) {
-    const localCounts = new Map();
-    for (const sample of group.samples) {
-      const sizeKey = `${sample.width}x${sample.height}`;
-      localCounts.set(sizeKey, (localCounts.get(sizeKey) || 0) + 1);
-      sizeCounts.set(sizeKey, (sizeCounts.get(sizeKey) || 0) + 1);
+  // Match a saved fragment to a full scene identity only with an overlapping
+  // observation. Local numeric IDs alone are reused across events and runs.
+  for (const source of sources) {
+    const tracking = source.object_tracking;
+    const width = finiteNumber(tracking?.frame_width);
+    const height = finiteNumber(tracking?.frame_height);
+    if (!(width > 0 && height > 0)) continue;
+    for (const track of storedObjectTracks(source)) {
+      const candidates = [...groups.values()].filter((group) => {
+        const parts = group.key.split(":");
+        return parts[0] === "tracking" && parts[1] === String(source.id || source.representative_event_id)
+          && parts.at(-1) === String(track.trackId) && group.label === track.label;
+      });
+      const matches = candidates.filter((group) => {
+        if (!group.timeIndex) {
+          group.timeIndex = new Map();
+          for (const point of group.samples) {
+            const bucket = Math.round(point.epoch * 1000);
+            if (!group.timeIndex.has(bucket)) group.timeIndex.set(bucket, []);
+            group.timeIndex.get(bucket).push(point);
+          }
+        }
+        return track.boxHistory.some((sample) => {
+          const bucket = Math.round(sample[0] * 1000);
+          for (let offset = -2; offset <= 2; offset += 1) {
+            if ((group.timeIndex.get(bucket + offset) || []).some((point) => (
+              Math.abs(point.epoch - sample[0]) < 0.002
+              && point.coordinates.every((value, index) => Math.abs(value / (index % 2 ? point.height : point.width)
+                - sample[index + 1] / (index % 2 ? height : width)) < 0.00001)
+            ))) return true;
+          }
+          return false;
+        });
+      });
+      const key = track.replay_key || (matches.length === 1 ? matches[0].key
+        : `stored:${source.id || source.representative_event_id}:${track.trackId}`);
+      for (const sample of track.boxHistory) add(key, track.label, sample[0], sample.slice(1), width, height);
+      const group = groups.get(key);
+      if (group) group.metadata = { track, width, height };
     }
-    const sizeKey = [...localCounts.entries()].sort((left, right) => right[1] - left[1])[0][0];
-    const [width, height] = sizeKey.split("x").map(Number);
+  }
+  const sizes = new Map();
+  for (const group of groups.values()) for (const sample of group.samples) {
+    const key = `${sample.width}x${sample.height}`;
+    sizes.set(key, (sizes.get(key) || 0) + 1);
+  }
+  if (!sizes.size) return null;
+  const [width, height] = [...sizes].sort((a, b) => b[1] - a[1])[0][0].split("x").map(Number);
+  const usedIds = new Set();
+  const tracks = [...groups.values()].sort((a, b) => a.key.localeCompare(b.key)).map((group, index) => {
     const history = [];
-    for (const sample of group.samples.filter((item) => item.width === width && item.height === height).sort((left, right) => left.epoch - right.epoch)) {
-      const point = [sample.epoch, ...sample.coordinates];
-      if (history.length && history[history.length - 1][0] === sample.epoch) history[history.length - 1] = point;
+    for (const sample of group.samples.sort((a, b) => a.epoch - b.epoch)) {
+      const point = [sample.epoch, ...sample.coordinates.map((value, index) => value
+        * (index % 2 ? height / sample.height : width / sample.width))];
+      // Saved history rounds capture times to milliseconds.
+      if (history.length && Math.abs(history.at(-1)[0] - point[0]) < 0.002) history[history.length - 1] = point;
       else history.push(point);
     }
-    if (history.length) prepared.push({ label: group.label, width, height, history });
-  }
-  if (!prepared.length) return { tracks: [], width: 0, height: 0 };
-  const [width, height] = [...sizeCounts.entries()].sort((left, right) => right[1] - left[1])[0][0].split("x").map(Number);
-  const tracks = prepared.filter((track) => track.width === width && track.height === height).map((track, index) => {
-    const last = track.history[track.history.length - 1];
+    // Stable internal IDs preserve separate event/run identities across refreshes.
+    let id = 2166136261;
+    for (const char of group.key) id = Math.imul(id ^ char.charCodeAt(0), 16777619) >>> 0;
+    while (usedIds.has(id)) id = (id + 1) >>> 0;
+    usedIds.add(id);
+    const last = history.at(-1);
+    const metadata = group.metadata;
     return {
-      track_id: index + 1,
-      label: track.label,
+      ...(metadata?.track || {}),
+      track_id: id,
+      replay_key: group.key,
+      display_id: index + 1,
+      label: group.label,
       state: "confirmed",
       box: { x1: last[1], y1: last[2], x2: last[3], y2: last[4] },
-      box_history: track.history,
-      trajectory: track.history.map((sample) => [sample[0], (sample[1] + sample[3]) / 2, (sample[2] + sample[4]) / 2]),
+      box_history: history,
+      trajectory: history.map((sample) => [sample[0], (sample[1] + sample[3]) / 2, (sample[2] + sample[4]) / 2]),
+      reid_recovery_history: (metadata?.track.recoveryHistory || []).map((recovery) => ({
+        captured_at: recovery.capturedAt, similarity: recovery.similarity,
+        resumed_completed_track: recovery.resumedCompletedTrack,
+        box: recovery.box.map((value, index) => value * (index % 2 ? height / metadata.height : width / metadata.width)),
+      })),
     };
   });
   return { tracks, width, height };
 }
 
-function earliestHistory(tracks) {
-  let earliest = null;
-  for (const track of tracks || []) {
-    const history = track?.box_history || track?.boxHistory || [];
-    for (const sample of history) {
-      const epoch = finiteNumber(Array.isArray(sample) ? sample[0] : null);
-      if (epoch === null) continue;
-      earliest = earliest === null ? epoch : Math.min(earliest, epoch);
-    }
-  }
-  return earliest;
-}
-
 export function incidentReplayTracking(event, incident = null) {
   const source = incidentTrackingSource(event, incident);
-  const scene = incident?.scene_objects ? incident : event?.scene_objects ? event : null;
-  const built = sceneReplayTracks(scene);
-  const storedTracks = storedObjectTracks(source);
-  const storedStart = earliestHistory(storedTracks);
-  const sceneStart = earliestHistory(built.tracks);
-  // A reclaimed tracking job saves only its last run. Observations from the
-  // earlier runs are still the path, so a later fragment must not hide them.
-  const sceneStartsEarlier = storedStart !== null && sceneStart !== null && storedStart - sceneStart > 1;
-  if (storedTracks.length && !sceneStartsEarlier) return source;
-  const events = event?.events?.length ? event.events : incident?.events || [];
-  const withTracks = events.find((candidate) => storedObjectTracks(candidate).length);
-  if (withTracks && !sceneStartsEarlier) return withTracks;
-  if (!built.tracks.length) return source;
-  const base = source?.object_tracking && typeof source.object_tracking === "object" ? source.object_tracking : {};
-  const epochs = built.tracks.flatMap((track) => track.box_history.map((sample) => sample[0]));
-  const start = Math.min(...epochs);
-  const end = Math.max(...epochs);
-  const windowStart = finiteNumber(base.window_start_epoch);
-  const windowEnd = finiteNumber(base.window_end_epoch);
+  const camera = event?.camera_id || incident?.camera_id;
+  const candidates = [event, ...(event?.events || []), ...(event?.scene_clip_window?.episode_id ? [] : incident?.events || [])];
+  const sources = [...new Map(candidates.filter((item) => item?.object_tracking
+    && (!camera || !item.camera_id || item.camera_id === camera))
+    .map((item) => [String(item.id || item.representative_event_id), item])).values()];
+  const built = sceneReplayTracks(event, incident, sources);
+  if (!built) return source;
+  const base = source?.object_tracking || {};
+  let start = Infinity;
+  let end = -Infinity;
+  for (const track of built.tracks) for (const sample of track.box_history) {
+    start = Math.min(start, sample[0]);
+    end = Math.max(end, sample[0]);
+  }
+  const starts = sources.map((item) => finiteNumber(item.object_tracking.window_start_epoch)).filter((value) => value !== null);
+  const ends = sources.map((item) => finiteNumber(item.object_tracking.window_end_epoch)).filter((value) => value !== null);
   return {
-    ...(source || event || incident || {}),
+    ...(event || source || incident || {}),
     object_tracking: {
       ...base,
       state: base.state || "complete",
@@ -171,10 +213,11 @@ export function incidentReplayTracking(event, incident = null) {
       frame_height: built.height,
       sample_fps: finiteNumber(base.sample_fps) || 3,
       tracks: built.tracks,
-      window_start_epoch: windowStart === null ? start : Math.min(windowStart, start),
-      window_end_epoch: windowEnd === null ? end : Math.max(windowEnd, end),
-      analyzed_from: new Date(start * 1000).toISOString(),
-      analyzed_through: new Date(end * 1000).toISOString(),
+      window_start_epoch: Math.min(start, ...starts),
+      window_end_epoch: Math.max(end, ...ends),
+      analyzed_from: new Date(Math.min(start, ...sources.map((item) => Date.parse(item.object_tracking.analyzed_from) / 1000).filter(Number.isFinite)) * 1000).toISOString(),
+      analyzed_through: new Date(Math.max(end, ...sources.map((item) => Date.parse(item.object_tracking.analyzed_through) / 1000).filter(Number.isFinite)) * 1000).toISOString(),
+      coverage_incomplete: sources.some((item) => item.object_tracking.coverage_incomplete),
     },
   };
 }
@@ -289,6 +332,26 @@ export function trackFrameAt(track, epoch, { holdSeconds = 1, sampleFps = 2, obs
     .reverse()
     .find((item) => item.capturedAt <= epoch && epoch - item.capturedAt <= Math.max(0.75, safeHoldSeconds));
   return { box, path, recovery: recovery || null, estimated };
+}
+
+// Keep completed paths during replay, with breaks across missing observations.
+export function incidentTrackFramesAt(tracks, epoch, options = {}) {
+  if (!Number.isFinite(epoch)) return [];
+  const maxGap = Math.max(1, 1.75 / Math.max(0.1, Number(options.sampleFps) || 2));
+  return tracks.flatMap((track) => {
+    const frame = trackFrameAt(track, epoch, options);
+    const paths = [];
+    let previousEpoch = -Infinity;
+    for (const sample of track.boxHistory || []) {
+      if (sample[0] > epoch) break;
+      if (sample[0] - previousEpoch > maxGap) paths.push([]);
+      paths.at(-1).push([(sample[1] + sample[3]) / 2, (sample[2] + sample[4]) / 2]);
+      previousEpoch = sample[0];
+    }
+    if (frame && paths.length) paths.at(-1).push([(frame.box[0] + frame.box[2]) / 2, (frame.box[1] + frame.box[3]) / 2]);
+    if (!frame && !paths.length) return [];
+    return [{ ...track, ...frame, box: frame?.box || null, paths }];
+  });
 }
 
 // Snapshot overlays must describe the displayed frame, not the final state of

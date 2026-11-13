@@ -29,7 +29,7 @@ import {
   UserRound,
   X,
 } from "lucide-react";
-import { recordedIncidentWindow, trackingCoverageAt, containedFrameTransform, incidentReplayTracking, incidentTrackingSource, playbackEpochAt, snapshotObjectTracks, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
+import { recordedIncidentWindow, trackingCoverageAt, containedFrameTransform, incidentTrackFramesAt, incidentReplayTracking, incidentTrackingSource, playbackEpochAt, snapshotObjectTracks, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
 import { liveActivityEventId, liveActivityIncidentHref } from "../liveWorkspace.mjs";
 import { adjacentIncident, eventCoverEpoch, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentImageRenderRect, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "./api.js";
@@ -451,7 +451,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
                 key={`track-${track.trackId}`}
                 style={{ left: `${track.left}px`, top: `${track.top}px`, width: `${track.width}px`, height: `${track.height}px` }}
               >
-                <strong>#{track.trackId} {track.label}</strong>
+                <strong>#{track.display_id ?? track.trackId} {track.label}</strong>
               </span>
             ))}
           </div>
@@ -548,22 +548,20 @@ export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, wind
   }, [videoRef, windowStartEpoch, mediaStartTime, mediaKey]);
 
   const visibleTracks = useMemo(() => {
-    if (!Number.isFinite(playbackEpoch) || trackingCoverageAt(tracking, playbackEpoch)) return [];
+    if (!Number.isFinite(playbackEpoch)) return [];
     const holdSeconds = Math.max(0.5, Number(lostTimeoutSeconds) || 3);
-    return tracks.flatMap((track) => {
-      const frame = trackFrameAt(track, playbackEpoch, { holdSeconds, sampleFps, observationsOnly: tracking?.window_start_epoch != null });
-      return frame ? [{ ...track, ...frame }] : [];
-    });
+    return incidentTrackFramesAt(tracks, playbackEpoch, { holdSeconds, sampleFps, observationsOnly: true })
+      .map((track) => trackingCoverageAt(tracking, playbackEpoch) ? { ...track, box: null } : track);
   }, [lostTimeoutSeconds, playbackEpoch, sampleFps, tracks, tracking]);
 
   const secondsUntilTracking = useMemo(() => {
-    if (!Number.isFinite(playbackEpoch) || visibleTracks.length) return null;
+    if (!Number.isFinite(playbackEpoch) || visibleTracks.some((track) => track.box)) return null;
     const nextEpoch = tracks
       .flatMap((track) => track.boxHistory.length ? [track.boxHistory[0][0]] : [])
       .filter((epoch) => epoch > playbackEpoch)
       .sort((left, right) => left - right)[0];
     return Number.isFinite(nextEpoch) ? Math.max(1, Math.ceil(nextEpoch - playbackEpoch)) : null;
-  }, [playbackEpoch, tracks, visibleTracks.length]);
+  }, [playbackEpoch, tracks, visibleTracks]);
 
   const coordinateTransform = useMemo(
     () => containedFrameTransform(layerSize, coordinateSize),
@@ -574,13 +572,13 @@ export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, wind
     const { x, y, scale } = coordinateTransform;
     return visibleTracks.map((track) => ({
       ...track,
-      renderedBox: [
+      renderedBox: track.box ? [
         x + track.box[0] * scale,
         y + track.box[1] * scale,
         x + track.box[2] * scale,
         y + track.box[3] * scale,
-      ],
-      renderedPath: track.path.map(([pathX, pathY]) => [x + pathX * scale, y + pathY * scale]),
+      ] : null,
+      renderedPaths: track.paths.map((path) => path.map(([pathX, pathY]) => [x + pathX * scale, y + pathY * scale])),
     }));
   }, [coordinateTransform, visibleTracks]);
 
@@ -591,18 +589,20 @@ export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, wind
       {layerSize ? <svg viewBox={`0 0 ${layerSize.width} ${layerSize.height}`} preserveAspectRatio="none" aria-hidden="true">
         {renderedTracks.map((track) => (
           <g className={`object-track-color-${Math.abs(track.trackId) % 6} ${track.recovery ? "reid-recovered" : ""} ${track.estimated ? "track-estimated" : ""}`} key={`video-path-${track.trackId}`}>
-            {track.renderedPath.length > 1 ? <polyline className="object-track-trail" points={track.renderedPath.map(([x, y]) => `${x},${y}`).join(" ")} vectorEffect="non-scaling-stroke" /> : null}
-            <rect className="object-track-video-box" x={track.renderedBox[0]} y={track.renderedBox[1]} width={track.renderedBox[2] - track.renderedBox[0]} height={track.renderedBox[3] - track.renderedBox[1]} vectorEffect="non-scaling-stroke" />
+            {track.renderedPaths.map((path, index) => path.length > 1
+              ? <polyline key={index} className="object-track-trail" points={path.map(([x, y]) => `${x},${y}`).join(" ")} vectorEffect="non-scaling-stroke" />
+              : path.length ? <circle key={index} className="object-track-end" cx={path[0][0]} cy={path[0][1]} r="3" /> : null)}
+            {track.renderedBox ? <rect className="object-track-video-box" x={track.renderedBox[0]} y={track.renderedBox[1]} width={track.renderedBox[2] - track.renderedBox[0]} height={track.renderedBox[3] - track.renderedBox[1]} vectorEffect="non-scaling-stroke" /> : null}
           </g>
         ))}
       </svg> : null}
-      {renderedTracks.map((track) => (
+      {renderedTracks.filter((track) => track.renderedBox).map((track) => (
         <span
           className={`object-track-video-label object-track-color-${Math.abs(track.trackId) % 6} ${track.recovery ? "reid-recovered" : ""} ${track.estimated ? "track-estimated" : ""}`}
           key={`video-label-${track.trackId}`}
           style={{ left: `${track.renderedBox[0]}px`, top: `${track.renderedBox[1]}px` }}
         >
-          #{track.trackId} {track.label}{track.estimated ? " · estimated" : ""}{track.recovery ? ` · ReID ${Math.round(track.recovery.similarity * 100)}%` : ""}
+          #{track.display_id ?? track.trackId} {track.label}{track.estimated ? " · estimated" : ""}{track.recovery ? ` · ReID ${Math.round(track.recovery.similarity * 100)}%` : ""}
         </span>
       ))}
       {coverageNotice ? <span className="object-track-video-waiting">{coverageNotice}</span>
