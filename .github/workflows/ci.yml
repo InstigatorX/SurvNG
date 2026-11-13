@@ -110,6 +110,7 @@ jobs:
             tests/test_object_motion.py \
             tests/test_stationary_policy.py \
             tests/test_config.py \
+            tests/test_current_only.py \
             tests/test_zones.py \
             tests/test_training_routes.py \
             tests/test_appearance_backfill.py \

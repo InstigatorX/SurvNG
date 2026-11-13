@@ -124,7 +124,6 @@ tests/test_system_telemetry.py
 tests/test_telemetry_contract.py
 tests/test_telemetry_diagnostics.py
 tests/test_telemetry_interruptions.py
-tests/test_telemetry_migration.py
 tests/test_telemetry_store.py
 tests/test_tls.py
 tests/test_tracked_evidence.py
