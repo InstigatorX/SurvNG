@@ -2175,7 +2175,7 @@ class IntelligenceService:
         name = str(details.get('camera_name') or details.get('camera_id') or 'this camera')
         followups = [f'Is {name} healthy?', f'Summarize recent activity for {name}']
         if details.get('proposals'):
-            followups.append(f'Trace this incident across cameras')
+            followups.append('Trace this incident across cameras')
         return followups[:3]
 
     def _assistant_closed_loop_actions(self, evidence: list[AssistantEvidence]) -> list[dict[str, Any]]:

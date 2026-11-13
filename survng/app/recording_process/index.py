@@ -11,13 +11,17 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from ..config import CameraConfig, RecordingRetentionConfig
 from ..main_database import closing_connection_factory
 from ..media_storage import path_presence
 from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 from ..recording_media import mp4_playback_metadata, mp4_stream_fingerprint
+
+if TYPE_CHECKING:
+    # Annotation-only: recorder.py imports this module, so a runtime import would cycle.
+    from .recorder import RecorderKey
 
 
 LOGGER = logging.getLogger("survng.app.recorder")

@@ -1,0 +1,12 @@
+# Development and CI tooling: test runner, linter, and scoped type checker.
+# Install after the runtime lock:
+#   .venv/bin/pip install --require-hashes -r requirements.lock
+#   .venv/bin/pip install -r requirements-dev.txt
+# Installed as a second step so the hash-locked runtime pins stay in place
+# (pip leaves already-satisfied packages alone).
+pytest==9.2.0
+anyio==4.16.0
+# httpx2 is the HTTP client starlette.testclient (FastAPI TestClient) requires.
+httpx2==2.16.0
+ruff==0.17.4
+mypy==2.4.1

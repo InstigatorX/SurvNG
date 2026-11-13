@@ -20,7 +20,6 @@ from .config import AppConfig
 from .manager import AppManager
 from .performance_health import camera_performance_health
 from .process_memory import process_memory_status
-from .product_update import ProductUpdateService
 from .telemetry_interruptions import (
     classify_telemetry_interruptions,
     summarize_interruptions,
