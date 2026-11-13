@@ -485,6 +485,7 @@ def authenticate_api_token(
 _CAMERA_CONTROL_SUFFIXES = frozenset({
     "/camera/start",
     "/camera/stop",
+    "/wake",
     "/recording/start",
     "/recording/stop",
     "/recording",

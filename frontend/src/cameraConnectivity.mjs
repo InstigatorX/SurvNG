@@ -2,7 +2,7 @@
 
 export function cameraCaptureConnectivity(camera) {
   const state = String(camera?.capture_connectivity || "").trim().toLowerCase();
-  if (state === "healthy" || state === "reconnecting" || state === "offline" || state === "paused") {
+  if (state === "healthy" || state === "reconnecting" || state === "offline" || state === "paused" || state === "asleep" || state === "wake_failed") {
     return state;
   }
   const running = Boolean(camera?.running);
@@ -22,6 +22,10 @@ export function cameraConnectivityLabel(state) {
       return "Reconnecting";
     case "offline":
       return "Offline";
+    case "asleep":
+      return "Asleep";
+    case "wake_failed":
+      return "Wake failed";
     default:
       return "Paused";
   }
@@ -35,6 +39,10 @@ export function cameraConnectivityClass(state) {
       return "attention";
     case "offline":
       return "offline";
+    case "asleep":
+      return "asleep";
+    case "wake_failed":
+      return "attention";
     default:
       return "disabled";
   }
@@ -44,6 +52,8 @@ export function cameraTileLiveState(camera) {
   const connectivity = cameraCaptureConnectivity(camera);
   if (connectivity === "healthy") return "LIVE";
   if (connectivity === "reconnecting") return "RECON";
+  if (connectivity === "asleep") return "ASLEEP";
+  if (connectivity === "wake_failed") return "WAKE";
   if (connectivity === "paused") return "OFF";
   return "OFFLINE";
 }

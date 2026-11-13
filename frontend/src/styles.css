@@ -2391,6 +2391,11 @@ p {
   background: #f0ad4e;
 }
 
+.camera-tile-name i.asleep,
+.mobile-camera-picker i.asleep {
+  background: #8aa0b8;
+}
+
 .camera-tile-live-state.attention {
   background: rgba(240, 173, 78, .24);
   color: #ffdca8;

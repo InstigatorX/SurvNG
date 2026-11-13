@@ -101,6 +101,9 @@ class MqttLifecycle:
     def publish_camera_feature_state(self, camera_id: str, feature: str, enabled: bool) -> None:
         self._current().publish_camera_feature_state(camera_id, feature, enabled)
 
+    def publish_wake_state(self, camera_id: str, phase: str) -> None:
+        self._current().publish_wake_state(camera_id, phase)
+
     def publish_discovery(self, cameras: list[dict[str, Any]]) -> None:
         self._current().publish_discovery(cameras)
 

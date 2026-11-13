@@ -28,16 +28,25 @@ export function recordingHealth({ cameras, appConfig, system, camerasUpdatedAt, 
     const mainRequired = config ? config.record === true : runtime?.recording_configured === true;
     const subRequired = config ? config.record_sub === true : runtime?.record_sub_enabled === true;
     const intentionallyStopped = runtime?.recording_enabled === false;
+    const battery = config?.power === "battery" || runtime?.power === "battery";
+    const wakePhase = String(runtime?.wake?.phase || "");
+    const wakeOverdue = Boolean(runtime?.wake?.overdue);
+    const wakeFailed = wakePhase === "wake_failed" || runtime?.capture_connectivity === "wake_failed";
     const expected = Boolean(enabled && !intentionallyStopped && (mainRequired || subRequired));
     const missing = [];
-    if (expected && !runtime) missing.push("runtime status");
-    else if (expected) {
+    if (enabled && battery && (wakeFailed || wakeOverdue)) missing.push(wakeOverdue ? "wake session" : "wake");
+    else if (expected && !runtime) missing.push("runtime status");
+    else if (expected && battery && wakePhase !== "awake") {
+      // Sleep, and a wake that has not produced a frame yet, are healthy.
+      // A recorder is required only after the session is awake.
+    } else if (expected) {
       if (mainRequired && runtime.recording !== true) missing.push("main stream");
       if (subRequired && runtime.sub_recording !== true) missing.push("substream");
       if (runtime.running === false) missing.push("camera process");
       if (runtime.capture_connectivity === false || ["offline", "disconnected", "error"].includes(runtime.capture_connectivity)) missing.push("capture");
     }
-    const state = !cameraDataKnown ? "stale" : !enabled ? "disabled" : !expected ? "paused" : !runtime ? "unavailable" : missing.length ? "attention" : "healthy";
+    let state = !cameraDataKnown ? "stale" : !enabled ? "disabled" : !expected ? "paused" : !runtime ? "unavailable" : missing.length ? "attention" : "healthy";
+    if (state === "paused" && missing.length) state = "attention";
     return { id, name: config?.name || runtime?.name || id, expected, mainRequired, subRequired, state, missing, runtime };
   });
   const expectedRows = rows.filter((row) => row.expected);

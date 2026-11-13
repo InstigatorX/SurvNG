@@ -19,6 +19,10 @@ export function defaultCamera(cameras, seed = {}) {
     }),
     record: seed.record ?? true,
     record_sub: seed.record_sub ?? false,
+    power: seed.power === "battery" ? "battery" : "mains",
+    wake_max_seconds: seed.wake_max_seconds ?? 60,
+    wake_idle_seconds: seed.wake_idle_seconds ?? 4,
+    wake_open_timeout_seconds: seed.wake_open_timeout_seconds ?? 8,
     retention: {
       main_days: seed.retention?.main_days ?? null,
       live_days: seed.retention?.live_days ?? null,

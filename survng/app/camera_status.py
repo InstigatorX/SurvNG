@@ -50,7 +50,7 @@ class MotionRuntimeStatusProvider(Protocol):
     def runtime_status(self) -> dict[str, Any]: ...
 
 
-CaptureConnectivity = str  # healthy | reconnecting | offline | paused
+CaptureConnectivity = str  # healthy | reconnecting | offline | paused | asleep | wake_failed
 
 
 class CameraStatusService:
@@ -62,9 +62,22 @@ class CameraStatusService:
         running: bool,
         connected: bool,
         capture_running: bool,
+        power: str = "mains",
+        wake_phase: str = "asleep",
+        wake_overdue: bool = False,
     ) -> CaptureConnectivity:
         if not running:
             return "paused"
+        if power == "battery":
+            # Sleep is healthy. A wake that produced no frame, or a session
+            # that outlived its hard cap, is the fault.
+            if wake_overdue or wake_phase == "wake_failed":
+                return "wake_failed"
+            # The session stays healthy until it ends. Frame age is not a
+            # fault while the wake is still inside its idle limit.
+            if wake_phase == "awake":
+                return "healthy"
+            return "asleep"
         if connected:
             return "healthy"
         if capture_running:
@@ -93,6 +106,7 @@ class CameraStatusService:
         incidents: CameraStatusProvider,
         lifecycle: CameraLifecycleStatusProvider,
         spatial_alignment: Callable[[], dict[str, Any]] | None = None,
+        wake_status: Callable[[], dict[str, Any]] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.camera = camera
@@ -114,6 +128,9 @@ class CameraStatusService:
         self.incidents = incidents
         self.lifecycle = lifecycle
         self.spatial_alignment = spatial_alignment
+        self.wake_status = wake_status or (
+            lambda: {"phase": "asleep", "overdue": False, "saw_frame": False}
+        )
         self.monotonic = monotonic
 
     def snapshot(self) -> dict[str, Any]:
@@ -205,16 +222,28 @@ class CameraStatusService:
             "debug": debug,
         }
         capture_running = bool(capture["live_running"])
+        wake = dict(self.wake_status() or {})
+        wake_phase = str(wake.get("phase") or "asleep")
+        wake_overdue = bool(wake.get("overdue"))
         connectivity = self.capture_connectivity(
             running=enabled,
             connected=connected,
             capture_running=capture_running,
+            power=self.camera.power,
+            wake_phase=wake_phase,
+            wake_overdue=wake_overdue,
         )
         live_stats = dict((capture.get("capture_stats") or {}).get("live") or {})
         alignment = self.spatial_alignment() if self.spatial_alignment is not None else {}
         return {
             "id": self.camera.id,
             "name": self.camera.name,
+            "power": self.camera.power,
+            "wake": {
+                "phase": wake_phase,
+                "overdue": wake_overdue,
+                "saw_frame": bool(wake.get("saw_frame")),
+            },
             "running": enabled,
             "connected": connected,
             "capture_running": capture_running,
