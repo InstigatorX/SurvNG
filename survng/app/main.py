@@ -64,6 +64,7 @@ from .media_sessions import MediaSessionManager
 from .manager_access import ManagerAccessCoordinator
 from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
 from .local_observability import LocalObservabilityServer, build_runtime_status
+from .perf_samples import TimedLock
 from .media_exports import MediaExportManager
 from .model_evaluation import ModelEvaluationRunner
 from .incident_queries import (
@@ -128,7 +129,8 @@ FACE_OBSERVATIONS_SYNC_LOCK = threading.Lock()
 FACE_OBSERVATIONS_SYNC_THREAD_LOCK = threading.Lock()
 FACE_OBSERVATIONS_SYNC_THREAD: threading.Thread | None = None
 MANAGER_RELOAD_LOCK = threading.RLock()
-MAIN_DATABASE_WRITE_LOCK = threading.RLock()
+# Timed so the observability snapshot reports shared-writer wait/hold.
+MAIN_DATABASE_WRITE_LOCK = TimedLock(threading.RLock())
 MANAGER_ACCESS = ManagerAccessCoordinator()
 MEDIA_SESSIONS = MediaSessionManager()
 APPLICATION_STOPPING = threading.Event()

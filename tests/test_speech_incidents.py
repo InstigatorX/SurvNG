@@ -143,7 +143,7 @@ def test_speech_is_accepted_without_visual_motion() -> None:
         triggers=[],
         event_at=SPOKEN_AT,
         received_at=SPOKEN_AT.timestamp(),
-        mode="enforce",
+        mode="camera",
         sensitivity="balanced",
         priority=False,
         adaptive_only=False,

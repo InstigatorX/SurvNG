@@ -8,6 +8,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from .tracking_window import recorded_tracking_window
 from .activity_events import ActivityEventBus, ActivityTransition

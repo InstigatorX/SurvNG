@@ -14,7 +14,6 @@ from ..evidence_work import check_evidence_cancellation
 from ..face_candidates import FaceCandidate
 from ..object_activity import AttributionMode, ObjectActivityAttributor
 from ..motion_correlation import assess_motion_objects
-from ..object_motion import temporal_object_motion_evidence
 from .context import Frame
 from .scene_evidence import scene_batches, scene_observation
 

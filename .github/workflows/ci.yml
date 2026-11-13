@@ -14,6 +14,10 @@ jobs:
       - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
+      - name: Check CI test assignment
+        run: python scripts/check-ci-test-coverage.py
+      - name: Check requirements.lock matches requirements.txt
+        run: python scripts/check-requirements-lock.py
       - uses: actions/setup-node@v7.1.0
         with:
           node-version: "22"
@@ -36,7 +40,14 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -r requirements.txt pytest anyio httpx2
+          .venv/bin/pip install --require-hashes -r requirements.lock
+          .venv/bin/pip install -r requirements-dev.txt
+      - name: Lint Python (ruff)
+        run: .venv/bin/ruff check .
+      - name: Type-check scoped Python modules (mypy)
+        run: .venv/bin/mypy
+      - name: Run CI tooling tests
+        run: scripts/run-tests.sh tests/test_ci_test_coverage.py tests/test_requirements_lock.py
       - name: Run focused Python tests
         run: |
           scripts/run-tests.sh \
@@ -54,6 +65,7 @@ jobs:
             tests/test_inference_lifecycle.py \
             tests/test_object_tracking.py \
             tests/test_camera_worker.py \
+            tests/test_run_benchmarks.py \
             tests/test_config_reload.py
       - name: Run face and identity regression tests
         run: |
@@ -64,7 +76,7 @@ jobs:
             tests/test_unknown_identity*.py \
             tests/test_timeline_identity.py
       - name: Run local observability regression tests
-        run: scripts/run-tests.sh tests/test_local_observability.py tests/test_camera_status.py
+        run: scripts/run-tests.sh tests/test_local_observability.py tests/test_camera_status.py tests/test_local_observability_metrics.py tests/test_production_soak.py
       - name: Run speech detection regression tests
         run: scripts/run-tests.sh tests/test_speech.py tests/test_speech_incidents.py tests/test_mqtt.py
       - name: Run security and auth regression tests
@@ -76,6 +88,7 @@ jobs:
             tests/test_ffmpeg_input.py \
             tests/test_worker_topology.py \
             tests/test_recording_path_indexes.py \
+            tests/test_main_database_metrics.py \
             tests/test_main_database.py
       - name: Run scene and evidence regression tests
         run: |
@@ -99,6 +112,7 @@ jobs:
             tests/test_object_motion.py \
             tests/test_stationary_policy.py \
             tests/test_config.py \
+            tests/test_current_only.py \
             tests/test_zones.py \
             tests/test_training_routes.py \
             tests/test_appearance_backfill.py \

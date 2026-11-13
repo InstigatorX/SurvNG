@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
-from .main_database import ClosingDatabaseConnection
+from .main_database import closing_connection_factory
 from .telemetry_contract import TelemetryRetentionPolicy
 
 
@@ -89,7 +89,7 @@ class TelemetryStore:
         conn = sqlite3.connect(
             self.path,
             timeout=2.0,
-            factory=ClosingDatabaseConnection,
+            factory=closing_connection_factory("telemetry"),
         )
         conn.row_factory = sqlite3.Row
         conn.execute("pragma journal_mode=wal")
@@ -760,7 +760,8 @@ class TelemetryStore:
                     "(occurred_at,kind,scope,camera_id,summary,details_json) values (?,?,?,?,?,?)",
                     (current.isoformat(), kind, scope, camera_id, summary, encoded),
                 )
-                event_id = int(cursor.lastrowid)
+                # lastrowid is always set after a successful single-row INSERT.
+                event_id = int(cursor.lastrowid)  # type: ignore[arg-type]
                 count = 1
         return {"id": event_id, "count": count, "coalesced": count > 1}
 

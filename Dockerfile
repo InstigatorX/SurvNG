@@ -59,9 +59,11 @@ RUN chmod 755 /usr/local/bin/add-apt-ppa-retry \
 WORKDIR /app
 ARG SURVNG_GIT_SHA=
 ENV SURVNG_GIT_SHA=$SURVNG_GIT_SHA
-COPY requirements.txt ./
+# requirements.lock is the hash-locked resolution of requirements.txt
+# (regenerate with scripts/lock-requirements.sh).
+COPY requirements.txt requirements.lock ./
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir --require-hashes -r requirements.lock
 
 COPY survng/ ./survng/
 COPY docs/ ./docs/

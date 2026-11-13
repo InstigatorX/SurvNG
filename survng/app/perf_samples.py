@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from collections import deque
+import logging
 import math
 import threading
 import time
+
+from .runtime_metrics import LatencyHistogram
+
+LOGGER = logging.getLogger(__name__)
 
 
 class RollingLatencySamples:
@@ -65,42 +70,66 @@ class TimedLock:
 
     An uncontended acquire costs one extra non-blocking attempt; waits are
     sampled so status can distinguish lock contention from slow work.
+    Contended waits and every hold are also recorded in fixed-memory
+    histograms (cumulative plus a recent window). Metric failures are
+    counted and never prevent the lock from being acquired or released.
     """
 
     def __init__(self, inner: object | None = None, maxlen: int = 2000) -> None:
         self._inner = inner if inner is not None else threading.Lock()
         self._waits = RollingLatencySamples(maxlen)
         self._holds = RollingLatencySamples(maxlen)
+        self._wait_histogram = LatencyHistogram()
+        self._hold_histogram = LatencyHistogram()
         self._held_at = threading.local()
         self._acquisitions = 0
         self._contended = 0
         self._wait_total_ms = 0.0
+        self._metric_failures = 0
+
+    def _metric_failed(self, error: Exception) -> None:
+        self._metric_failures += 1
+        if self._metric_failures == 1:
+            LOGGER.warning("lock metric recording failed (%s)", type(error).__name__)
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
         if self._inner.acquire(False):
             self._acquisitions += 1
-            self._held_at.stack = [*getattr(self._held_at, "stack", ()), time.monotonic()]
+            try:
+                self._held_at.stack = [*getattr(self._held_at, "stack", ()), time.monotonic()]
+            except Exception as error:
+                self._metric_failed(error)
             return True
         if not blocking:
             return False
         started = time.monotonic()
         acquired = self._inner.acquire(True, timeout)
         if acquired:
-            waited = (time.monotonic() - started) * 1000.0
             self._acquisitions += 1
             self._contended += 1
-            self._wait_total_ms += waited
-            self._waits.add(waited)
-            self._held_at.stack = [*getattr(self._held_at, "stack", ()), time.monotonic()]
+            try:
+                waited = (time.monotonic() - started) * 1000.0
+                self._wait_total_ms += waited
+                self._waits.add(waited)
+                self._wait_histogram.record(waited)
+                self._held_at.stack = [*getattr(self._held_at, "stack", ()), time.monotonic()]
+            except Exception as error:
+                self._metric_failed(error)
         return acquired
 
     def release(self) -> None:
-        stack = list(getattr(self._held_at, "stack", ()))
-        started = stack.pop() if stack else None
-        self._held_at.stack = stack
-        if started is not None:
-            self._holds.add((time.monotonic() - started) * 1000.0)
-        self._inner.release()
+        try:
+            stack = list(getattr(self._held_at, "stack", ()))
+            started = stack.pop() if stack else None
+            self._held_at.stack = stack
+            if started is not None:
+                held = (time.monotonic() - started) * 1000.0
+                self._holds.add(held)
+                self._hold_histogram.record(held)
+        except Exception as error:
+            self._metric_failed(error)
+        finally:
+            self._inner.release()
 
     def __enter__(self) -> bool:
         return self.acquire()
@@ -117,4 +146,14 @@ class TimedLock:
                if key != "samples"},
             **{f"hold_{key}": value for key, value in self._holds.snapshot().items()
                if key != "samples"},
+        }
+
+    def histograms(self) -> dict[str, object]:
+        """Fixed-bucket wait (contended only) and hold histograms, in ms."""
+        return {
+            "acquisitions": self._acquisitions,
+            "contended": self._contended,
+            "metric_failures": self._metric_failures,
+            "wait": self._wait_histogram.snapshot(),
+            "hold": self._hold_histogram.snapshot(),
         }

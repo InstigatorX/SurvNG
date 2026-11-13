@@ -13,6 +13,7 @@ import math
 import re
 from datetime import datetime, timezone
 from pathlib import PurePath
+from typing import Any
 
 from .motion_topics import SPEECH_TOPIC
 from .incident_utils import (

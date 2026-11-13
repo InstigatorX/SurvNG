@@ -51,8 +51,88 @@ def process_tree(pid: int, proc: Path = Path("/proc")) -> list[dict]:
     return [samples[key] for key in sorted(selected)]
 
 
-def summarize(path: Path) -> dict:
+# Conservative review thresholds for post-warmup samples; override with
+# --threshold NAME=VALUE. Gauge thresholds compare the largest sample; the
+# *_increase thresholds compare the growth of a since-start counter.
+DEFAULT_THRESHOLDS = {
+    "loop_lag_recent_p99_ms": 100.0,
+    "loop_lag_recent_max_ms": 1000.0,
+    "db_transaction_recent_p99_ms": 250.0,
+    "db_transaction_recent_max_ms": 5000.0,
+    "main_write_lock_wait_recent_max_ms": 1000.0,
+    "main_write_lock_hold_recent_max_ms": 2000.0,
+    "db_busy_errors_increase": 0.0,
+    "db_transactions_failed_increase": 0.0,
+}
+
+
+def _path(source: object, *keys: str) -> object:
+    for key in keys:
+        if not isinstance(source, dict):
+            return None
+        source = source.get(key)
+    return source
+
+
+def runtime_metric_values(runtime: dict) -> dict:
+    """Scalar continuous loop-lag and per-database metrics; absent fields are None."""
+    lag = _path(runtime, "event_loop", "lag")
+    values = {
+        "loop_lag_recent_p99_ms": _path(lag, "recent", "p99_ms"),
+        "loop_lag_recent_max_ms": _path(lag, "recent", "max_ms"),
+        "loop_lag_max_ms": _path(lag, "max_ms"),
+    }
+    lock = _path(runtime, "databases", "main_write_lock")
+    for kind in ("wait", "hold"):
+        for field in ("p99_ms", "max_ms"):
+            values[f"main_write_lock_{kind}_recent_{field}"] = _path(
+                lock, f"{kind}_ms", "recent", field
+            )
+    domains = _path(runtime, "databases", "domains")
+    for name, domain in (domains.items() if isinstance(domains, dict) else ()):
+        values[f"db_{name}_transaction_recent_p99_ms"] = _path(
+            domain, "transaction_ms", "recent", "p99_ms"
+        )
+        values[f"db_{name}_transaction_recent_max_ms"] = _path(
+            domain, "transaction_ms", "recent", "max_ms"
+        )
+        values[f"db_{name}_busy_errors"] = _path(domain, "busy_errors")
+        values[f"db_{name}_transactions_failed"] = _path(domain, "transactions_failed")
+    return values
+
+
+def _threshold_for(metric: str, thresholds: dict) -> tuple[str, float] | None:
+    if metric in thresholds:
+        return metric, thresholds[metric]
+    if metric.startswith("db_"):
+        for suffix in ("transaction_recent_p99_ms", "transaction_recent_max_ms"):
+            if metric.endswith("_" + suffix):
+                return f"db_{suffix}", thresholds[f"db_{suffix}"]
+        for suffix in ("busy_errors", "transactions_failed"):
+            if metric.endswith("_" + suffix):
+                return f"db_{suffix}_increase", thresholds[f"db_{suffix}_increase"]
+    return None
+
+
+def threshold_breaches(metrics: dict, thresholds: dict) -> list[dict]:
+    breaches = []
+    for metric, values in sorted(metrics.items()):
+        rule = _threshold_for(metric, thresholds)
+        if rule is None or not values:
+            continue
+        name, limit = rule
+        observed = values[-1] - values[0] if name.endswith("_increase") else max(values)
+        if observed > limit:
+            breaches.append({"metric": metric, "threshold": name, "limit": limit,
+                             "observed": observed,
+                             "samples_over": sum(v > limit for v in values)
+                             if not name.endswith("_increase") else None})
+    return breaches
+
+
+def summarize(path: Path, thresholds: dict | None = None) -> dict:
     """Keep scalar samples, not large runtime payloads, while reading the log."""
+    thresholds = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
     generations = {}
     errors = 0
     with path.open() as source:
@@ -84,18 +164,47 @@ def summarize(path: Path) -> dict:
                 "max_frame_age_seconds": max((c.get("last_frame_age_seconds") or 0 for c in cameras), default=0),
                 "max_analysis_queue": max(((c.get("motion") or {}).get("analysis_queue_depth") or 0 for c in cameras), default=0),
                 "unhealthy_cameras": sum(not c.get("connected") for c in cameras),
+                **runtime_metric_values(runtime),
             }
             for name, value in values.items():
                 if isinstance(value, (int, float)):
                     group["metrics"].setdefault(name, []).append(value)
     for group in generations.values():
+        series = group["metrics"]
+        group["threshold_breaches"] = threshold_breaches(series, thresholds)
+        seen = set(series)
+        group["unavailable_metrics"] = sorted(
+            name for name in ("loop_lag_recent_p99_ms", "loop_lag_recent_max_ms",
+                              "main_write_lock_wait_recent_max_ms",
+                              "main_write_lock_hold_recent_max_ms")
+            if name not in seen
+        ) + ([] if any(name.startswith("db_") for name in seen) else ["db_*"])
+        if group["samples"] and not series:
+            group["unavailable_metrics"] = ["all (no post-warmup samples)"]
         group["metrics"] = {
             name: {"first_10_median": statistics.median(values[:10]),
                    "last_10_median": statistics.median(values[-10:]), "max": max(values)}
-            for name, values in group["metrics"].items()
+            for name, values in series.items()
         }
     return {"snapshot_errors": errors, "generations": generations,
-            "note": "Metrics exclude the first hour of each process lifetime; compare equivalent workloads."}
+            "thresholds": thresholds,
+            "threshold_breach_count": sum(
+                len(group["threshold_breaches"]) for group in generations.values()
+            ),
+            "note": "Metrics exclude the first hour of each process lifetime; compare equivalent workloads. "
+                    "Unavailable metrics were not reported by the server (older build) and were not evaluated."}
+
+
+def _threshold_argument(text: str) -> tuple[str, float]:
+    name, separator, value = text.partition("=")
+    if not separator or name not in DEFAULT_THRESHOLDS:
+        raise argparse.ArgumentTypeError(
+            f"expected NAME=VALUE with NAME in: {', '.join(sorted(DEFAULT_THRESHOLDS))}"
+        )
+    try:
+        return name, float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"invalid threshold value: {value!r}") from error
 
 
 def main() -> int:
@@ -105,9 +214,11 @@ def main() -> int:
     parser.add_argument("--socket", type=Path, default=default_socket_path())
     parser.add_argument("--output", type=Path)
     parser.add_argument("--summarize", type=Path)
+    parser.add_argument("--threshold", type=_threshold_argument, action="append", default=[],
+                        metavar="NAME=VALUE", help="override a summary review threshold")
     args = parser.parse_args()
     if args.summarize is not None:
-        print(json.dumps(summarize(args.summarize), indent=2))
+        print(json.dumps(summarize(args.summarize, dict(args.threshold)), indent=2))
         return 0
     if args.output is None:
         parser.error("--output is required when recording samples")

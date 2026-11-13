@@ -76,6 +76,11 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("/app/SURVNG_GIT_SHA", dockerfile)
         self.assertIn("add-apt-ppa-retry", dockerfile)
 
+    def test_runtime_image_installs_hash_locked_requirements(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("--require-hashes -r requirements.lock", dockerfile)
+        self.assertNotIn("-r requirements.txt", dockerfile)
+
     def test_runtime_image_includes_help_documentation_and_assets(self) -> None:
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")

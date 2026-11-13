@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from .main_database import database_metrics_snapshot
+from .runtime_metrics import EventLoopLagMonitor
 from .security import redact_secret_text
 from .runtime_directory import SERVICE_RUNTIME_DIRECTORY, prepare_private_directory
 
@@ -33,6 +35,8 @@ MAX_RECENT_LOG_ROWS = 100
 MAX_RECENT_LOG_BYTES = 32 * 1024
 MAX_RECENT_LOG_MESSAGE_CHARACTERS = 500
 MAX_MOTION_STAGES = 64
+MAX_HISTOGRAM_BUCKETS = 32
+MAX_DATABASE_DOMAINS = 16
 _LOG_URL_RE = re.compile(
     r"\b(?:rtsp|rtsps|rtmp|http|https)://[^\s\"'<>]+",
     re.IGNORECASE,
@@ -195,6 +199,73 @@ def _numeric_table(raw: object, names: Sequence[str]) -> dict[str, Any]:
         key: _numeric_fields(value, names)
         for key, value in list(raw.items())[:MAX_MOTION_STAGES]
         if _motion_identifier(key) is not None
+    }
+
+
+def _numeric_list(raw: object, limit: int) -> list[int | float]:
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [_number(value) for value in raw[:limit]]
+
+
+def _histogram_snapshot(raw: object) -> dict[str, Any] | None:
+    """Project a runtime_metrics.LatencyHistogram snapshot (milliseconds)."""
+    if not isinstance(raw, dict):
+        return None
+    return {
+        **_numeric_fields(raw, ("count", "total_ms", "max_ms", "mean_ms")),
+        "bucket_upper_bounds_ms": _numeric_list(
+            raw.get("bucket_upper_bounds_ms"), MAX_HISTOGRAM_BUCKETS
+        ),
+        "bucket_counts": _numeric_list(raw.get("bucket_counts"), MAX_HISTOGRAM_BUCKETS + 1),
+        "recent": _numeric_fields(raw.get("recent"), (
+            "window_seconds", "count", "max_ms", "max_at_epoch_seconds",
+            "p50_ms", "p95_ms", "p99_ms",
+        )),
+    }
+
+
+def _event_loop_lag_snapshot(raw: object) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    return {
+        "running": bool(raw.get("running")),
+        "interval_ms": _optional_number(raw.get("interval_ms")),
+        **(_histogram_snapshot(raw) or {}),
+    }
+
+
+def _write_lock_snapshot(write_lock: object) -> dict[str, Any]:
+    histograms = getattr(write_lock, "histograms", None)
+    if not callable(histograms):
+        return {"available": False}
+    raw = histograms()
+    raw = raw if isinstance(raw, dict) else {}
+    return {
+        "available": True,
+        **_numeric_fields(raw, ("acquisitions", "contended", "metric_failures")),
+        "wait_ms": _histogram_snapshot(raw.get("wait")),
+        "hold_ms": _histogram_snapshot(raw.get("hold")),
+    }
+
+
+def _database_snapshot(raw: object, write_lock: object) -> dict[str, Any]:
+    raw = raw if isinstance(raw, dict) else {}
+    domains = raw.get("domains")
+    domains = domains if isinstance(domains, dict) else {}
+    return {
+        "metric_failures": _optional_number(raw.get("metric_failures")),
+        "domains": {
+            name: {
+                **_numeric_fields(value, ("transactions_failed", "busy_errors")),
+                "transaction_ms": _histogram_snapshot(
+                    value.get("transaction_ms") if isinstance(value, dict) else None
+                ),
+            }
+            for name, value in list(domains.items())[:MAX_DATABASE_DOMAINS]
+            if _motion_identifier(name) is not None
+        },
+        "main_write_lock": _write_lock_snapshot(write_lock),
     }
 
 
@@ -829,6 +900,17 @@ def build_runtime_status(
         )
         raw_speech = {}
 
+    try:
+        databases = _database_snapshot(
+            database_metrics_snapshot(), getattr(manager, "database_write_lock", None)
+        )
+    except Exception as error:
+        LOGGER.warning(
+            "local observability could not read database metrics (%s)",
+            type(error).__name__,
+        )
+        databases = {}
+
     tracking_config = config.detector.tracking
     active_camera_ids = [
         camera["id"] for camera in cameras if camera["tracking"]["active"]
@@ -892,6 +974,7 @@ def build_runtime_status(
             getattr(manager, "database_retention", None)
         ),
         "speech": _speech_snapshot(raw_speech),
+        "databases": databases,
         "cameras": cameras,
         "recent_logs": _recent_log_snapshot(log_rows),
     }
@@ -904,8 +987,12 @@ class LocalObservabilityServer:
         self,
         status_provider: Callable[[], dict[str, Any]],
         socket_path: Path | str | None = None,
+        lag_monitor: EventLoopLagMonitor | None = None,
     ) -> None:
         self.status_provider = status_provider
+        # Owned here so the app lifespan that starts/stops this server also
+        # owns the continuous loop-lag task.
+        self.lag_monitor = lag_monitor if lag_monitor is not None else EventLoopLagMonitor()
         self.socket_path = Path(socket_path) if socket_path is not None else default_socket_path()
         self._server: asyncio.AbstractServer | None = None
         self._clients: set[asyncio.Task[None]] = set()
@@ -994,6 +1081,7 @@ class LocalObservabilityServer:
                     "event_loop": {
                         "tasks": len(asyncio.all_tasks(loop)),
                         "probe_lag_ms": round(probe_lag_ms, 3),
+                        "lag": _event_loop_lag_snapshot(self.lag_monitor.snapshot()),
                     },
                 }
                 response = {"ok": True, "status": status_payload}
@@ -1037,12 +1125,14 @@ class LocalObservabilityServer:
             info = self.socket_path.lstat()
             self._socket_identity = (info.st_dev, info.st_ino)
             self.socket_path.chmod(0o600)
+            self.lag_monitor.start()
         except BaseException:
             await self.stop()
             raise
         LOGGER.info("local observability ready at %s", self.socket_path)
 
     async def stop(self) -> None:
+        await self.lag_monitor.stop()
         server = self._server
         self._server = None
         if server is not None:
