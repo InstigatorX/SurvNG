@@ -1,6 +1,6 @@
 # Inference-serving architecture: execution plan
 
-Status: proposed; implementation has not started. This planning PR changes documentation only.
+Status: Phase 0 local CPU baseline and Phase 1 ownership refactor implemented. See [checkpoint evidence](benchmarks/inference-serving-phase0-1.md). Deployment-specific and sustained performance gates remain open; Phases 2–6 have not been implemented.
 
 ## Objective and scope
 
@@ -75,28 +75,28 @@ Start with multiple infer requests sharing one compiled model inside a process. 
 
 ### Phase 0 — Reconcile and measure
 
-- [ ] Read current AGENTS.md and applicable nested instructions; inspect branch status and relevant diffs.
-- [ ] Re-trace the current paths above and identify changes since the reviewed commit.
-- [ ] Locate existing inference, detector, lifecycle, motion, and tracking tests and reuse their fixtures.
-- [ ] Record backend/runtime version, model/input/output shapes, device, worker count, warmup/cache state, and existing admission limits.
-- [ ] Build a repeatable fixture-based workload covering steady tracking, simultaneous camera incidents, refinement bursts, and mixed optional/initial work.
-- [ ] Capture queue/admission time, preprocessing, IPC copy bytes/time, inference, postprocessing, end-to-end latency by workload, throughput, worker RSS, and accelerator memory where measurable.
-- [ ] Produce the baseline and identify the dominant cost before selecting optimization settings.
+- [x] Read current AGENTS.md and applicable nested instructions; inspect branch status and relevant diffs.
+- [x] Re-trace the current paths above and identify changes since the reviewed commit.
+- [x] Locate existing inference, detector, lifecycle, motion, and tracking tests and reuse their fixtures.
+- [x] Record backend/runtime version, model/input/output shapes, device, worker count, warmup/cache state, and existing admission limits.
+- [x] Build a repeatable fixture-based workload covering steady tracking, simultaneous camera incidents, refinement bursts, and mixed optional/initial work.
+- [x] Capture queue/admission time, preprocessing, IPC copy bytes/time, inference, postprocessing, end-to-end latency by workload, throughput, worker RSS, and accelerator memory where measurable.
+- [x] Produce the baseline and identify the dominant cost before selecting optimization settings.
 
-Deliverable: benchmark procedure and baseline table. No runtime default changes.
+Deliverable: [benchmark procedure, baseline table, source reconciliation and limitations](benchmarks/inference-serving-phase0-1.md). Measurements are a local CPU checkpoint, not production GPU qualification. No runtime default changes.
 
 ### Phase 1 — Request-local resource ownership
 
 Primary files: detector.py; inference_runtime/types.py, process.py, worker.py as needed.
 
-- [ ] Pass the effective confidence threshold through detection/postprocessing rather than mutating shared config for each request.
-- [ ] Make original dimensions and resize/padding metadata request-local.
-- [ ] Identify every reused input/output array and ensure its lifetime is explicit.
-- [ ] Introduce a slot abstraction only where needed; initially retain a single slot and serialized execution.
-- [ ] Ensure outputs are copied or consumed before the infer request's storage is reused.
-- [ ] Keep all supported output formats and current backend fallback paths working.
+- [x] Pass the effective confidence threshold through detection/postprocessing rather than mutating shared config for each request.
+- [x] Make original dimensions and resize/padding metadata request-local.
+- [x] Identify every reused input/output array and ensure its lifetime is explicit.
+- [x] Introduce a slot abstraction only where needed; initially retain a single slot and serialized execution.
+- [x] Ensure outputs are copied or consumed before the infer request's storage is reused.
+- [x] Keep all supported output formats and current backend fallback paths working.
 
-Acceptance: equivalent results to the baseline for identical inputs; interleaved requests with different thresholds and dimensions cannot contaminate each other; existing tests pass.
+Acceptance evidence: 40 native CPU comparisons on eight retained snapshots matched exactly; concurrent threshold/dimension and buffer-lifetime regression cases cover supported parser/backend paths. The scoped suite passed 426 tests and 31 subtests. The broader run reproduced six pre-existing notification test failures; see the [validation details](benchmarks/inference-serving-phase0-1.md#correctness-and-validation). Single-slot serialization and existing fallback paths are preserved.
 
 Suggested commit: refactor inference request state without changing scheduling.
 
@@ -216,6 +216,6 @@ Do not implement every optimization speculatively. Advance through measurement g
 
 For each implementation checkpoint report: files changed, invariants preserved, tests run and results, measured performance if applicable, outstanding limitations, and the rollback method.
 
-## Planning-PR validation
+## Original planning-PR validation
 
-This PR contains only this execution plan. Source references and the current root working agreement were reviewed. No runtime implementation, test execution, hardware benchmark, or claimed performance improvement is included.
+PR #308 contained only the proposed execution plan and source review. This follow-up implements the first ownership checkpoint and records local measurements in the linked evidence document. No performance improvement is claimed; later optimizations remain conditional on the measurement and rollout gates above.
