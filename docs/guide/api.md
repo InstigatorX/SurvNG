@@ -342,9 +342,6 @@ curl -s -X POST http://127.0.0.1:8088/api/assistant/chat \
 | GET | `/api/detector/model-evaluation` | Evaluation job status |
 | POST | `/api/detector/model-evaluation` | Start evaluation |
 | DELETE | `/api/detector/model-evaluation` | Cancel evaluation |
-| GET | `/api/tracking-comparisons` | Tracking comparison list |
-| PUT | `/api/tracking-comparisons/{comparison_id}/verdict` | Record verdict |
-| POST | `/api/events/{event_id}/tracking-comparison` | Compare trackers on an event |
 | GET | `/api/appearance-index/status` | Appearance index status |
 | POST | `/api/appearance-index/backfill` | Backfill appearance signatures |
 | GET | `/api/event-clip/settings` | Clip window settings |

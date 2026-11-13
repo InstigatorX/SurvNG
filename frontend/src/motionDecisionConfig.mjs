@@ -91,29 +91,7 @@ export function motionBehaviorSettings(current, behavior) {
   };
 }
 
-const LEGACY_MODE_INFO = Object.freeze({
-  audit: Object.freeze({
-    value: "audit",
-    label: "Legacy decision preview",
-    status: "Legacy camera triggers · preview only",
-    description: "Camera notices always run object detection; EMA decisions are recorded but never enforced. Select a current mode to migrate this configuration.",
-  }),
-  off: Object.freeze({
-    value: "off",
-    label: "Legacy filtering off",
-    status: "Legacy camera triggers · no filtering",
-    description: "Camera notices always run object detection. Select Camera-triggered to migrate this configuration.",
-  }),
-  enforce: Object.freeze({
-    value: "enforce",
-    label: "Legacy hybrid mode",
-    status: "Legacy camera + visual triggers",
-    description: "Both ordinary ONVIF and EMA may trigger detection. Select a current mode to remove this ambiguous hybrid behavior.",
-  }),
-});
-
 export function motionModeInfo(mode) {
-  if (LEGACY_MODE_INFO[mode]) return LEGACY_MODE_INFO[mode];
   return MOTION_MODE_OPTIONS.find((option) => option.value === mode)
     || MOTION_MODE_OPTIONS.find((option) => option.value === "camera_rescue");
 }
@@ -179,20 +157,17 @@ export function readMotionDecisionFusion(fusion) {
   if (fusion == null || (Array.isArray(fusion) && fusion.length === 0)) {
     return { custom: false, usesDefaults: true, settings: defaultMotionDecisionSettings() };
   }
-  const migrated = Array.isArray(fusion)
-    ? fusion.filter((stage) => !["score_event_state", "score_trigger"].includes(stage?.implementation))
-    : fusion;
   if (
-    !Array.isArray(migrated)
-    || migrated.length !== 1
-    || !isGuidedFusionStage(migrated[0])
-    || (migrated[0]?.options?.minimum_sources ?? 1) !== 1
-    || (migrated[0]?.options?.require_warmed ?? true) !== true
+    !Array.isArray(fusion)
+    || fusion.length !== 1
+    || !isGuidedFusionStage(fusion[0])
+    || (fusion[0]?.options?.minimum_sources ?? 1) !== 1
+    || (fusion[0]?.options?.require_warmed ?? true) !== true
   ) {
     return { custom: true, usesDefaults: false, settings: defaultMotionDecisionSettings() };
   }
 
-  const fusionOptions = migrated[0]?.options || {};
+  const fusionOptions = fusion[0]?.options || {};
   const defaults = defaultMotionDecisionSettings();
   return {
     custom: false,

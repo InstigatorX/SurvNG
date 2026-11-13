@@ -22,7 +22,6 @@ from .calibration import EventStoreCalibrationMixin
 from .jobs import EventStoreJobsMixin
 from .evidence import EventStoreEvidenceMixin, EventSnapshotChangedError
 from .motion_intelligence import EventStoreMotionIntelligenceMixin
-from .tracking import EventStoreTrackingMixin
 from .gallery import EventStoreGalleryMixin
 from .scenes import EventStoreSceneMixin
 from .scene_acquisition import EventStoreSceneAcquisitionMixin
@@ -44,7 +43,6 @@ class EventStore(
     EventStoreEvidenceMixin,
     EventStoreJobsMixin,
     EventStoreCalibrationMixin,
-    EventStoreTrackingMixin,
     EventStoreMotionIntelligenceMixin,
     EventStoreSceneContextMixin,
 ):
@@ -63,18 +61,6 @@ class EventStore(
     # every camera, so an uncapped window can materialize enough of the table to
     # exhaust the recorder it shares a process with.
     MAX_COMPACT_WINDOW_ROWS = 50_000
-    TRACKING_COMPARISON_HISTORY_PER_CAMERA = 100
-    TRACKING_COMPARISON_VERDICTS = {
-        "survng_hybrid_candidate",
-        "survng_sparse_identity",
-        "ultralytics_tracktrack",
-        "survng_hybrid",
-        "ultralytics_botsort",
-        "ultralytics_deepocsort",
-        "ultralytics_fasttrack",
-        "inconclusive",
-    }
-
     def __init__(
         self,
         storage_dir: Path,
@@ -105,15 +91,10 @@ class EventStore(
         self._init_scene_acquisition_db()
         self._init_gallery_db()
         self._init_scene_db()
-        while not self.backfill_existing_scene_acquisitions(batch_size=1000)["complete"]:
-            pass
-        while not self.migrate_scene_establishment(batch_size=100)["complete"]:
-            pass
         with self._connect() as conn:
             self._init_scene_tracking_schema(conn)
         self._recover_snapshot_deletion_claims()
         self._init_jobs_db()
-        self._migrate_legacy_jobs()
 
     def lock_wait_status(self) -> dict[str, dict[str, int | float | None]]:
         """Contended waits on the in-process serialization locks."""
@@ -274,55 +255,6 @@ class EventStore(
                 inserts,
             )
 
-    def _rebase_media_paths(self, conn: sqlite3.Connection) -> None:
-        rows = conn.execute(
-            "select id, snapshot_path, recording_path from events where snapshot_path != '' or recording_path != ''"
-        ).fetchall()
-        updates: list[tuple[str, str, int]] = []
-        for row in rows:
-            snapshot_path = portable_media_path(self.storage_dir, row["snapshot_path"])
-            recording_path = portable_media_path(self.storage_dir, row["recording_path"])
-            if snapshot_path != str(row["snapshot_path"] or "") or recording_path != str(row["recording_path"] or ""):
-                updates.append((snapshot_path, recording_path, int(row["id"])))
-        if updates:
-            conn.executemany(
-                "update events set snapshot_path = ?, recording_path = ? where id = ?",
-                updates,
-            )
-
-        audit_rows = conn.execute(
-            "select id, snapshot_path from motion_audits where snapshot_path != ''"
-        ).fetchall()
-        audit_updates: list[tuple[str, int]] = []
-        for row in audit_rows:
-            raw_path = str(row["snapshot_path"] or "")
-            portable_path = portable_media_path(self.storage_dir, raw_path)
-            if portable_path != raw_path:
-                audit_updates.append((portable_path, int(row["id"])))
-        if audit_updates:
-            conn.executemany(
-                "update motion_audits set snapshot_path = ? where id = ?",
-                audit_updates,
-            )
-
-        face_table = conn.execute(
-            "select 1 from sqlite_master where type = 'table' and name = 'face_observations'"
-        ).fetchone()
-        if face_table:
-            face_rows = conn.execute(
-                "select id, snapshot_path from face_observations where snapshot_path != ''"
-            ).fetchall()
-            face_updates: list[tuple[str, int]] = []
-            for row in face_rows:
-                raw_path = str(row["snapshot_path"] or "")
-                portable_path = portable_media_path(self.storage_dir, raw_path)
-                if portable_path != raw_path:
-                    face_updates.append((portable_path, int(row["id"])))
-            if face_updates:
-                conn.executemany(
-                    "update face_observations set snapshot_path = ? where id = ?",
-                    face_updates,
-                )
 
     def add_event(
         self,

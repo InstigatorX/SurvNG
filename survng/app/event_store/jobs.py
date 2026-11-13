@@ -238,76 +238,6 @@ class EventStoreJobsMixin:
                 """
             )
 
-    def _migrate_legacy_jobs(self) -> None:
-        """Move upgrade-era work tables out of the general event database once."""
-        with self._lock, self._connect() as conn:
-            tables = {
-                str(row[0])
-                for row in conn.execute(
-                    "select name from sqlite_master where type = 'table' "
-                    "and name in ('detection_jobs', 'motion_trigger_jobs')"
-                ).fetchall()
-            }
-            if not tables:
-                return
-            conn.execute("attach database ? as durable_jobs", (str(self.jobs_db_path),))
-            try:
-                if "detection_jobs" in tables:
-                    legacy_detection_columns = {
-                        str(row["name"])
-                        for row in conn.execute(
-                            "pragma main.table_info(detection_jobs)"
-                        ).fetchall()
-                    }
-                    detection_owner = (
-                        "lease_owner"
-                        if "lease_owner" in legacy_detection_columns
-                        else "''"
-                    )
-                    conn.execute(
-                        "insert or ignore into durable_jobs.detection_jobs "
-                        "(id, camera_id, dedupe_key, payload_json, state, attempts, "
-                        "available_at, lease_expires_at, lease_owner, event_id, last_error, "
-                        "created_at, updated_at) select id, camera_id, dedupe_key, "
-                        "payload_json, state, attempts, available_at, lease_expires_at, "
-                        f"{detection_owner}, event_id, last_error, created_at, updated_at "
-                        "from main.detection_jobs"
-                    )
-                if "motion_trigger_jobs" in tables:
-                    legacy_columns = {
-                        str(row["name"])
-                        for row in conn.execute(
-                            "pragma main.table_info(motion_trigger_jobs)"
-                        ).fetchall()
-                    }
-                    owner_value = "lease_owner" if "lease_owner" in legacy_columns else "''"
-                    conn.execute(
-                        "insert or ignore into durable_jobs.motion_trigger_jobs "
-                        "(id, camera_id, payload_json, state, attempts, available_at, "
-                        "lease_expires_at, lease_owner, last_error, created_at, updated_at) "
-                        "select id, camera_id, payload_json, state, attempts, available_at, "
-                        f"lease_expires_at, {owner_value}, last_error, created_at, updated_at "
-                        "from main.motion_trigger_jobs"
-                    )
-                conn.commit()
-            except BaseException:
-                conn.rollback()
-                raise
-            finally:
-                conn.execute("detach database durable_jobs")
-            # Copy and source removal are intentionally separate commits. A
-            # process or power failure can leave harmless duplicate legacy
-            # rows, but can never drop the only durable copy of admitted work.
-            conn.execute("begin immediate")
-            try:
-                if "detection_jobs" in tables:
-                    conn.execute("drop table main.detection_jobs")
-                if "motion_trigger_jobs" in tables:
-                    conn.execute("drop table main.motion_trigger_jobs")
-                conn.commit()
-            except BaseException:
-                conn.rollback()
-                raise
 
     def _init_db(self) -> None:
         with self._lock, self._connect() as conn:
@@ -557,24 +487,6 @@ class EventStoreJobsMixin:
                 ),
             )
             conn.execute(
-                """
-                create table if not exists tracking_comparisons (
-                    id integer primary key autoincrement,
-                    event_id integer not null unique,
-                    camera_id text not null,
-                    event_created_at text not null default '',
-                    result_json text not null,
-                    verdict text not null default '',
-                    reviewed_at text,
-                    created_at text not null,
-                    foreign key(event_id) references events(id) on delete cascade
-                )
-                """
-            )
-            conn.execute(
-                "create index if not exists idx_tracking_comparisons_camera_created on tracking_comparisons(camera_id, created_at desc, id desc)"
-            )
-            conn.execute(
                 "update motion_ai_reviews set status = 'interrupted', error = 'SurvNG restarted before this review completed' where status in ('queued', 'running')"
             )
             conn.execute(
@@ -617,12 +529,6 @@ class EventStoreJobsMixin:
                 )
                 """
             )
-            storage_root = str(self.storage_dir.resolve())
-            if self._metadata_value(conn, "portable_media_paths") != "1":
-                self._rebase_media_paths(conn)
-                self._set_metadata_value(conn, "portable_media_paths", "1")
-            if self._metadata_value(conn, "event_storage_root") != storage_root:
-                self._set_metadata_value(conn, "event_storage_root", storage_root)
             try:
                 backfill_after_id = int(
                     self._metadata_value(conn, "motion_audit_backfill_event_id") or 0
@@ -659,7 +565,6 @@ class EventStoreJobsMixin:
         rollback). Motion-audit links are nulled so training negatives survive.
         """
         counts = {
-            "tracking_comparisons_deleted": 0,
             "face_observations_deleted": 0,
             "motion_audits_event_nulled": 0,
             "motion_audits_related_nulled": 0,
@@ -670,16 +575,6 @@ class EventStoreJobsMixin:
                 "select name from sqlite_master where type = 'table'"
             )
         }
-        if "tracking_comparisons" in tables:
-            cursor = conn.execute(
-                """
-                delete from tracking_comparisons
-                where not exists (
-                    select 1 from events where events.id = tracking_comparisons.event_id
-                )
-                """
-            )
-            counts["tracking_comparisons_deleted"] = max(0, int(cursor.rowcount))
         if "face_observations" in tables:
             cursor = conn.execute(
                 """

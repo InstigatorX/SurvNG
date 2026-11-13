@@ -112,7 +112,7 @@ def test_orchestrator_executes_an_off_mode_trigger_and_clears_active_batch() -> 
     incidents = Mock()
     incidents.process = process_incident
     qualification = Mock()
-    qualification.settings.return_value = ("off", "default", 640)
+    qualification.settings.return_value = ("camera_rescue", "balanced", 640)
     qualification.rescue_settings.return_value = (False, 0.0)
     qualification.suppression_verification_rate.return_value = 0.0
     state = Mock()
@@ -151,7 +151,7 @@ def test_orchestrator_executes_an_off_mode_trigger_and_clears_active_batch() -> 
 def test_camera_primary_batch_preserves_route_provenance_for_admission() -> None:
     events = MotionEventCoordinator(queue_size=4, retry_limit=2)
     qualification = Mock()
-    qualification.settings.return_value = ("off", "default", 640)
+    qualification.settings.return_value = ("camera_rescue", "balanced", 640)
     qualification.rescue_settings.return_value = (False, 0.0)
     qualification.suppression_verification_rate.return_value = 0.0
     incidents = Mock()
@@ -529,7 +529,7 @@ def test_durable_delivery_uses_one_persisted_retry_budget() -> None:
 
         store.fail_motion_trigger = fail_and_make_due  # type: ignore[method-assign]
         qualification = Mock()
-        qualification.settings.return_value = ("off", "default", 640)
+        qualification.settings.return_value = ("camera_rescue", "balanced", 640)
         qualification.rescue_settings.return_value = (False, 0.0)
         qualification.suppression_verification_rate.return_value = 0.0
         incidents = Mock()

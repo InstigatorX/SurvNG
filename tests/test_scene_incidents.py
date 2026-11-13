@@ -240,10 +240,6 @@ class SceneIncidentTest(unittest.TestCase):
             80, label="car", zones=["Yard"], confidence=.2,
             confidence_threshold=.7, confidence_eligible=False,
         )])
-        with self.store._connect() as conn:
-            conn.execute("delete from scene_observation_zones")
-            conn.execute("delete from scene_migrations where name='scene_observation_zones_v1'")
-        self.store._backfill_observation_zones()
         card = self.store.list_scene_incident_cards()[0]
         self.assertEqual(card["zones"], ["Driveway"])
         day = self.store.scene_incident_facets(start_epoch=1780000000, end_epoch=1780000100)
@@ -338,15 +334,6 @@ class SceneIncidentTest(unittest.TestCase):
         restarted=EventStore(self.root)
         self.assertIsNone(restarted.scene_incident(event_id=event["id"]))
 
-    def test_history_migration_is_silent_and_marks_missing_coverage(self):
-        event=self.add(objects=[person(50,incident_eligible=False)])
-        with self.store._connect() as conn:
-            for table in ("acquired_sample_episodes", "scene_activity_admissions", "scene_event_establishment", "scene_event_membership", "scene_notification_outbox", "scene_observations", "scene_objects", "scene_episodes", "scene_incidents", "scene_aliases"):
-                conn.execute("delete from " + table)
-        restarted=EventStore(self.root)
-        incident=restarted.scene_incident(event_id=event["id"])
-        self.assertEqual(restarted.scene_pending_notifications(),[])
-        self.assertEqual(incident["coverage"]["state"],"historical")
 
     def test_uncertain_single_frame_is_not_asserted_as_confirmed(self):
         event=self.add(objects=[person(confidence=.3,temporal_observations=1)])
@@ -387,42 +374,6 @@ class SceneIncidentTest(unittest.TestCase):
         self.store.acknowledge_scene_notification(incident["id"],incident["revision"]+4)
         self.assertEqual(self.store.scene_pending_notifications(),[])
 
-    def test_legacy_outbox_rows_are_retired_and_unfinished_incidents_requeued(self):
-        active=self.store.scene_incident(event_id=self.add()["id"])
-        done=self.store.scene_incident(event_id=self.add(5000,camera="gate")["id"])
-        legacy=json.dumps({"legacy":"x"*1000})
-        with self.store._lock,self.store._connect() as conn:
-            conn.execute("update scene_incidents set state='active' where id=?",(active["id"],))
-            conn.execute("update scene_incidents set state='complete' where id=?",(done["id"],))
-            conn.execute("delete from scene_notification_outbox")
-            for incident in (active,done):
-                for revision in range(1,incident["revision"]+1):
-                    conn.execute("insert into scene_notification_outbox values(?,?,?)",(incident["id"],revision,legacy))
-            conn.execute("delete from scene_migrations where name='notification_outbox_coalesce_v1'")
-        restarted=EventStore(self.root)
-        pending=restarted.scene_pending_notifications()
-        self.assertEqual([(p["incident_id"],p["revision"]) for p in pending],[(active["id"],active["revision"])])
-        self.assertNotIn("legacy",pending[0]["payload"])
-        while restarted.purge_legacy_scene_notifications(limit=2):
-            pass
-        with restarted._connect() as conn:
-            remaining=[tuple(r) for r in conn.execute("select incident_id,payload_json from scene_notification_outbox")]
-        self.assertEqual(remaining,[(active["id"],"")])
-
-    def test_sole_highest_legacy_row_cannot_hide_requeued_marker(self):
-        active=self.store.scene_incident(event_id=self.add()["id"])
-        with self.store._lock,self.store._connect() as conn:
-            conn.execute("update scene_incidents set state='active' where id=?",(active["id"],))
-            conn.execute("delete from scene_notification_outbox")
-            conn.execute("insert into scene_notification_outbox values(?,?,?)",
-                         (active["id"],active["revision"],json.dumps({"legacy":True})))
-            conn.execute("delete from scene_migrations where name='notification_outbox_coalesce_v1'")
-        restarted=EventStore(self.root)
-        pending=restarted.scene_pending_notifications()
-        self.assertEqual([(item["incident_id"],item["revision"]) for item in pending],
-                         [(active["id"],active["revision"])])
-        self.assertEqual(restarted.purge_legacy_scene_notifications(),0)
-        self.assertEqual(len(restarted.scene_pending_notifications()),1)
 
     def test_merged_alias_never_publishes_mismatched_revision(self):
         first=self.add();second=self.add(10,camera="gate")

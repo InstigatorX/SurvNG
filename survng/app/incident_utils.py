@@ -83,20 +83,6 @@ def portable_media_path(storage_dir: Path, path_value: object) -> str:
     except ValueError:
         pass
 
-    # Migrate media written under a different deployment mount (for example,
-    # systemd's /mnt/... versus Docker's /media). Only accept a known SurvNG
-    # media subtree whose equivalent file is present beneath the current root.
-    for directory in MEDIA_DIRECTORIES:
-        if directory not in path.parts:
-            continue
-        relative = Path(*path.parts[path.parts.index(directory) :])
-        candidate = (storage_root / relative).resolve(strict=False)
-        try:
-            candidate.relative_to(storage_root)
-        except ValueError:
-            continue
-        if candidate.is_file():
-            return relative.as_posix()
     return raw_path
 
 

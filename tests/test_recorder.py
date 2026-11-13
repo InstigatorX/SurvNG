@@ -97,115 +97,6 @@ class RecorderTest(unittest.TestCase):
 
         self.assertEqual({row["path"] for row in rows}, {str(first_clip), str(second_clip)})
 
-    def test_recording_location_backfill_is_bounded_and_resumable(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            first = root / "first"
-            second = root / "second"
-            first.mkdir()
-            second.mkdir()
-            registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(locations=[
-                MediaStorageLocationConfig(id="one", path=str(first), roles=["recordings"], reserve_percent=0),
-                MediaStorageLocationConfig(id="two", path=str(second), roles=["recordings"], reserve_percent=0),
-            ]))
-            recorder = Recorder("ffmpeg", root / "metadata", media_storage=registry)
-            for index in range(5):
-                location = first if index % 2 == 0 else second
-                path = location / "recordings" / "gate" / "main" / f"clip-{index}.mp4"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(b"recording")
-                recorder._store_recording_rows(
-                    "gate",
-                    "main",
-                    [self._row(path, start_epoch=1_784_000_000.0 + index * 10)],
-                )
-            with recorder._index_connection() as connection:
-                connection.execute("UPDATE recordings SET location_id = 'default'")
-
-            with patch(
-                "survng.app.media_storage.shutil.disk_usage",
-                side_effect=AssertionError("location migration must not probe storage health"),
-            ):
-                self.assertEqual(recorder._backfill_recording_location_id_batch(limit=2), 2)
-            with recorder._index_connection() as connection:
-                first_pass = connection.execute(
-                    "SELECT location_id FROM recordings ORDER BY rowid"
-                ).fetchall()
-            self.assertEqual(
-                [str(row["location_id"]) for row in first_pass],
-                ["one", "two", "default", "default", "default"],
-            )
-
-            self.assertEqual(recorder._backfill_recording_location_id_batch(limit=2), 2)
-            self.assertEqual(recorder._backfill_recording_location_id_batch(limit=2), 1)
-            self.assertEqual(recorder._backfill_recording_location_id_batch(limit=2), 0)
-            with recorder._index_connection() as connection:
-                final_rows = connection.execute(
-                    "SELECT path, location_id FROM recordings ORDER BY rowid"
-                ).fetchall()
-                cursor = connection.execute(
-                    "SELECT value FROM recording_index_metadata "
-                    "WHERE key = 'recording_location_backfill_cursor'"
-                ).fetchone()["value"]
-            self.assertEqual(
-                [str(row["location_id"]) for row in final_rows],
-                ["one", "two", "one", "two", "one"],
-            )
-            self.assertEqual(cursor, "-1")
-
-    def test_recording_location_backfill_restarts_when_topology_changes(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            first = root / "first"
-            later = root / "later"
-            first.mkdir()
-            later.mkdir()
-            initial_registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(locations=[
-                MediaStorageLocationConfig(id="one", path=str(first), roles=["recordings"]),
-            ]))
-            recorder = Recorder("ffmpeg", root / "metadata", media_storage=initial_registry)
-            unmatched = later / "recordings" / "gate" / "main" / "clip.mp4"
-            unmatched.parent.mkdir(parents=True)
-            unmatched.write_bytes(b"recording")
-            recorder._store_recording_rows("gate", "main", [self._row(unmatched)])
-            with recorder._index_connection() as connection:
-                connection.execute("UPDATE recordings SET location_id = 'default'")
-            self.assertEqual(recorder._backfill_recording_location_id_batch(limit=10), 1)
-            self.assertEqual(recorder._backfill_recording_location_id_batch(limit=10), 0)
-
-            expanded_registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(locations=[
-                MediaStorageLocationConfig(id="one", path=str(first), roles=["recordings"]),
-                MediaStorageLocationConfig(id="later", path=str(later), roles=["recordings"]),
-            ]))
-            recorder.media_storage = expanded_registry
-            self.assertEqual(recorder._backfill_recording_location_id_batch(limit=10), 1)
-            with recorder._index_connection() as connection:
-                location_id = connection.execute(
-                    "SELECT location_id FROM recordings WHERE path = ?",
-                    (str(unmatched),),
-                ).fetchone()["location_id"]
-            self.assertEqual(location_id, "later")
-
-    def test_multi_location_indexer_start_does_not_run_location_backfill_inline(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            first = root / "first"
-            second = root / "second"
-            first.mkdir()
-            second.mkdir()
-            registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(locations=[
-                MediaStorageLocationConfig(id="one", path=str(first), roles=["recordings"]),
-                MediaStorageLocationConfig(id="two", path=str(second), roles=["recordings"]),
-            ]))
-            recorder = Recorder("ffmpeg", root / "metadata", media_storage=registry)
-            with (
-                patch.object(recorder, "_backfill_recording_location_id_batch") as backfill,
-                patch.object(recorder.retention, "start"),
-                patch("survng.app.recording_process.recorder.threading.Thread.start"),
-            ):
-                recorder.start_indexer([])
-
-            backfill.assert_not_called()
 
     def test_rtsp_recording_generates_missing_pts_and_discards_large_regressions(self) -> None:
         camera = CameraConfig(
@@ -787,19 +678,6 @@ class RecorderTest(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(indexed, 1)
 
-    def test_recording_range_can_discover_legacy_main_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
-            hour_dir = Path(tmpdir) / "recordings" / "back-middle" / "2026-07-11" / "11"
-            hour_dir.mkdir(parents=True)
-            clip = hour_dir / "20260711-113000.mp4"
-            clip.write_bytes(b"x" * 2048)
-            start = recorder.recording_start_epoch(clip)
-            self.assertIsNotNone(start)
-
-            rows = recorder.recording_rows_between("back-middle", float(start) - 1, float(start) + 11)
-
-        self.assertEqual([row["name"] for row in rows], [clip.name])
 
     def test_recording_range_removes_missing_index_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1130,33 +1008,6 @@ class RecorderTest(unittest.TestCase):
             {str(new_recorder.recordings_dir / relative) for relative in relatives},
         )
 
-    def test_legacy_index_at_current_root_gets_fast_rebase_marker(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
-            clip = (
-                recorder.recordings_dir
-                / "gate"
-                / "main"
-                / "2026-08-06"
-                / "17"
-                / "clip.mp4"
-            )
-            clip.parent.mkdir(parents=True)
-            clip.write_bytes(b"recording")
-            recorder._store_recording_rows("gate", "main", [self._row(clip)])
-
-            recorder._rebase_recording_index_paths()
-
-            with recorder._index_connection() as connection:
-                marker = connection.execute(
-                    "SELECT value FROM recording_index_metadata WHERE key = 'recordings_root'"
-                ).fetchone()["value"]
-                stored_path = connection.execute(
-                    "SELECT path FROM recordings"
-                ).fetchone()["path"]
-
-        self.assertEqual(marker, str(recorder.recordings_dir.resolve()))
-        self.assertEqual(stored_path, str(clip))
 
     def test_owned_recorders_recognizes_named_ffmpeg_process(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1201,9 +1052,9 @@ class RecorderTest(unittest.TestCase):
                 patch.object(recorder, "_kill_pids") as kill,
             ):
                 owned = recorder._owned_ffmpeg_recorders({("gate", "main"), ("gate", "live")})
-                self.assertEqual(owned, {("gate", "main"): [4101, 4103, 4104], ("gate", "live"): [4102]})
+                self.assertEqual(owned, {("gate", "main"): [4101, 4104], ("gate", "live"): [4102]})
                 recorder.cleanup_stale_recorders({("gate", "main")})
-                kill.assert_called_once_with({4101, 4103, 4104})
+                kill.assert_called_once_with({4101, 4104})
 
     def test_stale_recorder_cleanup_terminates_processes_concurrently(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1934,14 +1785,12 @@ class RecorderTest(unittest.TestCase):
                     side_effect=lambda limit: recorder._index_stop.set(),
                 ) as validate,
                 patch.object(recorder, "_backfill_stream_fingerprints"),
-                patch.object(recorder, "_backfill_recording_location_id_batch") as location_backfill,
                 patch.object(recorder, "_reconcile_recording_source") as reconcile,
                 patch.object(recorder._index_stop, "wait", return_value=False),
             ):
                 recorder._recording_index_maintenance_loop({})
 
         prune.assert_not_called()
-        location_backfill.assert_called_once_with()
         validate.assert_called_once_with(limit=20)
         reconcile.assert_not_called()
 

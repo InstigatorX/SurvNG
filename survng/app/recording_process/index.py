@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import math
@@ -24,10 +23,6 @@ from ..recording_media import mp4_playback_metadata, mp4_stream_fingerprint
 LOGGER = logging.getLogger("survng.app.recorder")
 RECORDING_FINALIZE_GRACE_SECONDS = 2.0
 RECORDING_PATH_REBASE_BATCH_SIZE = 1000
-RECORDING_LOCATION_BACKFILL_BATCH_SIZE = 250
-RECORDING_LOCATION_BACKFILL_VERSION = 1
-RECORDING_LOCATION_BACKFILL_TOKEN_KEY = "recording_location_backfill_token"
-RECORDING_LOCATION_BACKFILL_CURSOR_KEY = "recording_location_backfill_cursor"
 
 
 class RecordingIndexMixin:
@@ -57,6 +52,9 @@ class RecordingIndexMixin:
 
     def _init_recording_index(self) -> None:
         with self._index_connection() as connection:
+            fresh = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recordings'"
+            ).fetchone() is None
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute(
                 """
@@ -125,11 +123,16 @@ class RecordingIndexMixin:
                 WHERE fingerprint_checked = 0
                 """
             )
+            if fresh:
+                connection.execute(
+                    "INSERT OR IGNORE INTO recording_index_metadata(key,value) VALUES('recordings_root',?)",
+                    (str(self.recordings_dir.resolve()),),
+                )
 
     def _rebase_recording_index_paths(self) -> None:
         """Rebase absolute media paths when the same index is used under a new mount."""
         if len(self.recording_roots) > 1:
-            # In a storage pool, absolute legacy paths remain valid and a root
+            # In a storage pool, absolute paths remain valid and a root
             # change must be handled by an explicit drain/migration operation.
             # Rebasing every row onto the first root would corrupt placement.
             return
@@ -143,30 +146,9 @@ class RecordingIndexMixin:
             ).fetchone()
             if metadata is not None and str(metadata["value"]) == root_value:
                 return
-            # Older indexes predate the metadata marker. Check the primary-key
-            # range in SQLite rather than materializing millions of paths in
-            # Python on every service start.
-            mismatch = connection.execute(
-                """
-                SELECT path FROM recordings
-                WHERE path < ? OR path >= ?
-                LIMIT 1
-                """,
-                (root_prefix, root_upper_bound),
-            ).fetchone()
-            if mismatch is None:
-                connection.execute(
-                    """
-                    INSERT INTO recording_index_metadata(key, value)
-                    VALUES ('recordings_root', ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                    """,
-                    (root_value,),
-                )
+            if metadata is None:
                 return
-            previous_root = (
-                Path(str(metadata["value"])) if metadata is not None else None
-            )
+            previous_root = Path(str(metadata["value"]))
             changed = 0
             last_rowid = 0
             while True:
@@ -226,99 +208,6 @@ class RecordingIndexMixin:
                 self.storage_dir,
             )
 
-    def _recording_location_backfill_token(self) -> str:
-        if self.media_storage is None:
-            return ""
-        topology = sorted(
-            (
-                str(location.id),
-                str(Path(location.path).expanduser().resolve(strict=False)),
-            )
-            for location in self.media_storage.config.locations
-            if "recordings" in location.roles
-        )
-        serialized = json.dumps(topology, separators=(",", ":"), ensure_ascii=True)
-        fingerprint = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-        return f"v{RECORDING_LOCATION_BACKFILL_VERSION}:{fingerprint}"
-
-    def _backfill_recording_location_id_batch(
-        self,
-        *,
-        limit: int = RECORDING_LOCATION_BACKFILL_BATCH_SIZE,
-    ) -> int:
-        """Classify one bounded legacy recording cohort by configured storage root."""
-        if self.media_storage is None or not self.media_storage.config.locations:
-            return 0
-        bounded_limit = max(1, min(5000, int(limit)))
-        expected_token = self._recording_location_backfill_token()
-        with self._location_backfill_lock:
-            with self._index_connection() as connection:
-                stored_token = connection.execute(
-                    "SELECT value FROM recording_index_metadata WHERE key = ?",
-                    (RECORDING_LOCATION_BACKFILL_TOKEN_KEY,),
-                ).fetchone()
-                cursor_row = connection.execute(
-                    "SELECT value FROM recording_index_metadata WHERE key = ?",
-                    (RECORDING_LOCATION_BACKFILL_CURSOR_KEY,),
-                ).fetchone()
-                token_matches = (
-                    stored_token is not None
-                    and str(stored_token["value"]) == expected_token
-                )
-                try:
-                    cursor = int(cursor_row["value"]) if token_matches and cursor_row is not None else 0
-                except (TypeError, ValueError):
-                    cursor = 0
-                if token_matches and cursor < 0:
-                    return 0
-                if not token_matches:
-                    connection.execute(
-                        """
-                        INSERT INTO recording_index_metadata(key, value) VALUES (?, ?)
-                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                        """,
-                        (RECORDING_LOCATION_BACKFILL_TOKEN_KEY, expected_token),
-                    )
-                    connection.execute(
-                        """
-                        INSERT INTO recording_index_metadata(key, value) VALUES (?, '0')
-                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                        """,
-                        (RECORDING_LOCATION_BACKFILL_CURSOR_KEY,),
-                    )
-                rows = connection.execute(
-                    """
-                    SELECT rowid, path FROM recordings
-                    WHERE rowid > ? AND location_id = 'default'
-                    ORDER BY rowid LIMIT ?
-                    """,
-                    (cursor, bounded_limit),
-                ).fetchall()
-
-            updates: list[tuple[str, int]] = []
-            for row in rows:
-                location_id = self.media_storage.location_id_for(
-                    Path(str(row["path"])),
-                    "recordings",
-                )
-                if location_id is not None and location_id != "default":
-                    updates.append((location_id, int(row["rowid"])))
-            next_cursor = -1 if len(rows) < bounded_limit else int(rows[-1]["rowid"])
-            with self._index_connection() as connection:
-                if updates:
-                    connection.executemany(
-                        "UPDATE recordings SET location_id = ? "
-                        "WHERE rowid = ? AND location_id = 'default'",
-                        updates,
-                    )
-                connection.execute(
-                    """
-                    INSERT INTO recording_index_metadata(key, value) VALUES (?, ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                    """,
-                    (RECORDING_LOCATION_BACKFILL_CURSOR_KEY, str(next_cursor)),
-                )
-            return len(rows)
 
     @staticmethod
     def _rebased_recording_path(
@@ -338,26 +227,7 @@ class RecordingIndexMixin:
                 ):
                     return recordings_root.joinpath(*relative.parts)
 
-        # Legacy indexes have no root marker. Prefer the component whose
-        # suffix matches the current camera/source/date layout. This remains
-        # correct when an ancestor directory is itself named "recordings".
-        parts = path.parts
-        fallback: tuple[str, ...] | None = None
-        for index, part in enumerate(parts):
-            if part != "recordings":
-                continue
-            relative_parts = parts[index + 1 :]
-            if len(relative_parts) < 4 or any(
-                value in {"", ".", ".."} for value in relative_parts
-            ):
-                continue
-            if fallback is None:
-                fallback = relative_parts
-            if len(relative_parts) >= 5 and relative_parts[1] in {"main", "live"}:
-                return recordings_root.joinpath(*relative_parts)
-        if fallback is None:
-            return None
-        return recordings_root.joinpath(*fallback)
+        return None
 
     def recent_files(self, camera_id: str, limit: int = 20, source: str = "main") -> list[str]:
         source = "main" if source == "main" else "live"
@@ -1090,7 +960,6 @@ class RecordingIndexMixin:
         next_snapshot_size_migration = 0.0
         while not self._index_stop.is_set():
             try:
-                self._backfill_recording_location_id_batch()
                 now = time.monotonic()
                 if (
                     self._migrate_snapshot_sizes is not None
@@ -1295,7 +1164,7 @@ class RecordingIndexMixin:
         cancel_event: threading.Event | None = None,
         progress: Callable[[str, int, int | None], None] | None = None,
     ) -> dict[RecorderKey, list[Path]]:
-        """Discover current and legacy recording layouts without relying on config state."""
+        """Discover current recording layouts without relying on config state."""
         grouped: dict[RecorderKey, list[Path]] = {}
         index = 0
         for recording_root in self.recording_roots:
@@ -1310,8 +1179,6 @@ class RecordingIndexMixin:
                     continue
                 if len(parts) == 5 and parts[1] in {"main", "live"}:
                     camera_id, source = parts[0], parts[1]
-                elif len(parts) == 4:
-                    camera_id, source = parts[0], "main"
                 else:
                     continue
                 grouped.setdefault((camera_id, source), []).append(path)
@@ -1339,8 +1206,6 @@ class RecordingIndexMixin:
             self._raise_if_cancelled(cancel_event)
             for source in ("main", "live"):
                 search_roots = [camera_dir / source]
-                if source == "main":
-                    search_roots.append(camera_dir)
                 files: list[Path] = []
                 for target in targets:
                     for root in search_roots:

@@ -6,195 +6,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import numpy as np
 
-from survng.app.config import CameraConfig, ObjectTrackingConfig
-from survng.app.object_tracking import ByteTrackObjectTracker, ObjectTrackerRegistry
-from survng.app.tracking_comparison import (
-    TrackingComparisonRunner,
-    sampled_video_frames,
-    video_frame_at_reference,
-)
+from survng.app.recorded_video_frames import sampled_video_frames, video_frame_at_reference
 from survng.app.video_frames import VideoFrameReference
 
 
-class Detector:
-    config = SimpleNamespace(confidence_threshold=0.45)
-
-    def detect(self, frame, confidence_threshold=None):
-        offset = int(frame[0, 0, 0])
-        return [{
-            "label": "person",
-            "confidence": 0.9,
-            "box": {"x1": 10 + offset, "y1": 10, "x2": 40 + offset, "y2": 80},
-        }]
-
-
-class TrackingComparisonRunnerTest(unittest.TestCase):
-    def test_disabled_reid_skips_even_an_enabled_encoder(self) -> None:
-        encoder = Mock(enabled=True)
-        runner = TrackingComparisonRunner(
-            config=ObjectTrackingConfig(), detector=Detector(),
-            appearance_encoder=encoder,
-        )
-        frame = np.zeros((100, 120, 3), dtype=np.uint8)
-        self.assertEqual(runner._annotate_appearances(frame, Detector().detect(frame)), 0)
-        encoder.supports_label.assert_not_called()
-        encoder.embed_for_label.assert_not_called()
-
-    def test_new_runs_and_default_replays_execute_active_comparison_engines(self) -> None:
-        expected = ("survng_hybrid", "survng_sparse_identity", "ultralytics_tracktrack", "ultralytics_botsort")
-        registry = ObjectTrackerRegistry()
-        for implementation in (*expected, "survng_hybrid_candidate"):
-            registry.register(implementation, ByteTrackObjectTracker)
-        detector = Detector()
-        runner = TrackingComparisonRunner(
-            config=ObjectTrackingConfig(min_confirmations=1),
-            detector=detector,
-            tracker_registry=registry,
-        )
-        with patch.object(registry, "create", wraps=registry.create) as create:
-            result = runner.run(
-                CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-                [(100.0, np.zeros((100, 120, 3), dtype=np.uint8))],
-            )
-            self.assertEqual(tuple(call.args[0] for call in create.call_args_list), expected)
-            self.assertEqual(tuple(result["engines"]), expected)
-            self.assertTrue(all("error" not in engine for engine in result["engines"].values()))
-
-            create.reset_mock()
-            replayed = runner.replay(result["replay"], tracker_registry=registry)
-            self.assertEqual(tuple(call.args[0] for call in create.call_args_list), expected)
-            self.assertEqual(tuple(replayed["engines"]), expected)
-
-            # Explicit compatibility replay remains possible, but not automatic.
-            create.reset_mock()
-            historic = runner.replay(result["replay"], tracker_registry=registry,
-                                     implementations=("survng_hybrid_candidate",))
-            self.assertEqual(tuple(call.args[0] for call in create.call_args_list), ("survng_hybrid_candidate",))
-            self.assertEqual(tuple(historic["engines"]), ("survng_hybrid_candidate",))
-            self.assertNotIn("error", historic["engines"]["survng_hybrid_candidate"])
-
-    def test_excluded_classes_are_not_in_offline_comparisons(self) -> None:
-        class DetectorWithFace(Detector):
-            def detect(self, frame, confidence_threshold=None):
-                return [
-                    *super().detect(frame, confidence_threshold),
-                    {
-                        "label": "face",
-                        "confidence": 0.9,
-                        "box": {"x1": 15, "y1": 12, "x2": 30, "y2": 30},
-                    },
-                ]
-
-        registry = ObjectTrackerRegistry()
-        registry.register("survng_hybrid", ByteTrackObjectTracker)
-        registry.register("survng_sparse_identity", ByteTrackObjectTracker)
-        registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
-        registry.register("survng_hybrid_candidate", ByteTrackObjectTracker)
-        registry.register("ultralytics_tracktrack", ByteTrackObjectTracker)
-        registry.register("ultralytics_botsort", ByteTrackObjectTracker)
-        runner = TrackingComparisonRunner(
-            config=ObjectTrackingConfig(min_confirmations=1, excluded_labels=["face"]),
-            detector=DetectorWithFace(),
-            tracker_registry=registry,
-        )
-
-        result = runner.run(
-            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-            [(100.0, np.zeros((100, 120, 3), dtype=np.uint8))],
-        )
-
-        for engine in result["engines"].values():
-            self.assertEqual(engine["labels"], {"person": 1})
-
-    def test_runs_both_engines_on_the_same_detections_and_reports_metrics(self) -> None:
-        registry = ObjectTrackerRegistry()
-        registry.register("survng_hybrid", ByteTrackObjectTracker)
-        registry.register("survng_sparse_identity", ByteTrackObjectTracker)
-        registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
-        registry.register("survng_hybrid_candidate", ByteTrackObjectTracker)
-        registry.register("ultralytics_tracktrack", ByteTrackObjectTracker)
-        registry.register("ultralytics_botsort", ByteTrackObjectTracker)
-        config = ObjectTrackingConfig(min_confirmations=1, sample_fps=2.0)
-        runner = TrackingComparisonRunner(
-            config=config,
-            detector=Detector(),
-            tracker_registry=registry,
-        )
-        frames = [
-            (100.0 + index * 0.5, np.full((100, 120, 3), index * 2, dtype=np.uint8))
-            for index in range(3)
-        ]
-
-        result = runner.run(
-            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-            frames,
-        )
-
-        self.assertEqual(result["frames_processed"], 3)
-        self.assertEqual(result["frame_width"], 120)
-        self.assertEqual(result["duration_seconds"], 1.0)
-        self.assertEqual(result["lost_timeout_seconds"], 3.0)
-        for engine in result["engines"].values():
-            self.assertEqual(engine["track_count"], 1)
-            self.assertEqual(engine["observations"], 3)
-            self.assertEqual(engine["fragmentation_proxy"], 0)
-            self.assertEqual(len(engine["tracks"][0]["box_history"]), 3)
-
-    def test_rejects_an_empty_or_unreadable_frame_sequence(self) -> None:
-        registry = ObjectTrackerRegistry()
-        registry.register("survng_hybrid", ByteTrackObjectTracker)
-        registry.register("survng_sparse_identity", ByteTrackObjectTracker)
-        registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
-        registry.register("survng_hybrid_candidate", ByteTrackObjectTracker)
-        registry.register("ultralytics_tracktrack", ByteTrackObjectTracker)
-        registry.register("ultralytics_botsort", ByteTrackObjectTracker)
-        runner = TrackingComparisonRunner(
-            config=ObjectTrackingConfig(),
-            detector=Detector(),
-            tracker_registry=registry,
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "no readable frames"):
-            runner.run(
-                CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-                [],
-            )
-
-    def test_appearance_failure_is_reported_without_losing_geometry_results(self) -> None:
-        class Encoder:
-            enabled = True
-
-            def embed(self, _crop):
-                raise RuntimeError("worker unavailable")
-
-        registry = ObjectTrackerRegistry()
-        registry.register("survng_hybrid", ByteTrackObjectTracker)
-        registry.register("survng_sparse_identity", ByteTrackObjectTracker)
-        registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
-        registry.register("survng_hybrid_candidate", ByteTrackObjectTracker)
-        registry.register("ultralytics_tracktrack", ByteTrackObjectTracker)
-        registry.register("ultralytics_botsort", ByteTrackObjectTracker)
-        runner = TrackingComparisonRunner(
-            config=ObjectTrackingConfig(
-                reid_enabled=True,
-                reid_model_path="person-reid.xml",
-                min_confirmations=1,
-            ),
-            detector=Detector(),
-            tracker_registry=registry,
-            appearance_encoder=Encoder(),
-        )
-
-        result = runner.run(
-            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-            [(100.0, np.zeros((100, 120, 3), dtype=np.uint8))],
-        )
-
-        self.assertEqual(result["appearance_failures"], 1)
-        self.assertEqual(result["engines"]["survng_hybrid"]["track_count"], 1)
-
+class RecordedVideoFramesTest(unittest.TestCase):
     def test_video_sampler_requires_external_ffmpeg(self) -> None:
         with self.assertRaisesRegex(ValueError, "ffmpeg_path is required"):
             list(sampled_video_frames(
@@ -222,13 +39,13 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         )
         with (
             patch(
-                "survng.app.tracking_comparison.subprocess.run",
+                "survng.app.recorded_video_frames.subprocess.run",
                 return_value=SimpleNamespace(
                     returncode=0,
                     stdout='{"streams":[{"width":8,"height":4,"time_base":"1/90000"}]}',
                 ),
             ) as ffprobe,
-            patch("survng.app.tracking_comparison.subprocess.Popen", return_value=process) as popen,
+            patch("survng.app.recorded_video_frames.subprocess.Popen", return_value=process) as popen,
         ):
             frames = list(sampled_video_frames(
                 Path("comparison.ffconcat"),
@@ -279,8 +96,8 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
                    '"format":{"start_time":"0.000000"}}',
         )
         with (
-            patch("survng.app.tracking_comparison.subprocess.run", return_value=probe),
-            patch("survng.app.tracking_comparison.subprocess.Popen", return_value=process) as popen,
+            patch("survng.app.recorded_video_frames.subprocess.run", return_value=probe),
+            patch("survng.app.recorded_video_frames.subprocess.Popen", return_value=process) as popen,
         ):
             frames = list(sampled_video_frames(
                 Path("segment.mp4"), start_epoch=50.0, sample_fps=2.0, duration_seconds=1.0,
@@ -319,12 +136,12 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
             stdout='{"streams":[{"width":8,"height":4,"time_base":"1/90000"}]}',
         )
         with (
-            patch("survng.app.tracking_comparison.subprocess.run", return_value=probe),
+            patch("survng.app.recorded_video_frames.subprocess.run", return_value=probe),
             patch(
-                "survng.app.tracking_comparison.subprocess.Popen",
+                "survng.app.recorded_video_frames.subprocess.Popen",
                 side_effect=[failed, decoded],
             ) as popen,
-            self.assertLogs("survng.app.tracking_comparison", level="DEBUG"),
+            self.assertLogs("survng.app.recorded_video_frames", level="DEBUG"),
         ):
             frames = list(sampled_video_frames(
                 Path("segment.mp4"), start_epoch=50.0, sample_fps=2.0, duration_seconds=1.0,
@@ -345,9 +162,9 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
                 poll=Mock(return_value=0), terminate=Mock(), kill=Mock(),
             )
             with (
-                patch("survng.app.tracking_comparison.subprocess.run",
+                patch("survng.app.recorded_video_frames.subprocess.run",
                       return_value=SimpleNamespace(returncode=0, stdout=probe_stdout)),
-                patch("survng.app.tracking_comparison.subprocess.Popen", return_value=process) as popen,
+                patch("survng.app.recorded_video_frames.subprocess.Popen", return_value=process) as popen,
             ):
                 list(sampled_video_frames(
                     Path("segment.mp4"), start_epoch=50.0, sample_fps=2.0, duration_seconds=1.0,
@@ -383,7 +200,7 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         decoded = SimpleNamespace(returncode=0, stdout=raw)
 
         with patch(
-            "survng.app.tracking_comparison.subprocess.run",
+            "survng.app.recorded_video_frames.subprocess.run",
             side_effect=[probe, decoded],
         ) as run:
             sample = video_frame_at_reference(

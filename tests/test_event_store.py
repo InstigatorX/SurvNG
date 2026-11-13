@@ -235,43 +235,6 @@ class EventStoreTest(unittest.TestCase):
                 ).fetchone()[0]
             self.assertEqual(legacy, 0)
 
-    def test_legacy_security_jobs_migrate_before_source_tables_are_removed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            database = root / "survng.sqlite3"
-            with sqlite3.connect(database) as connection:
-                connection.execute(
-                    "create table detection_jobs (id text primary key, camera_id text, "
-                    "dedupe_key text, payload_json text, state text, attempts integer, "
-                    "available_at real, lease_expires_at real, event_id integer, "
-                    "last_error text, created_at text, updated_at text)"
-                )
-                connection.execute(
-                    "insert into detection_jobs values "
-                    "('job-1','gate','episode:1','{}','queued',0,0,null,null,'','now','now')"
-                )
-                connection.execute(
-                    "create table motion_trigger_jobs (id text primary key, camera_id text, "
-                    "payload_json text, state text, attempts integer, available_at real, "
-                    "lease_expires_at real, last_error text, created_at text, updated_at text)"
-                )
-                connection.execute(
-                    "insert into motion_trigger_jobs values "
-                    "('trigger-1','gate','{}','queued',0,0,null,'','now','now')"
-                )
-
-            store = EventStore(root)
-
-            status = store.detection_job_status("gate")
-            self.assertEqual(status["queued"], 1)
-            self.assertEqual(status["oldest_age_ms"], 0.0)
-            self.assertEqual(store.motion_trigger_status("gate"), {"queued": 1})
-            with store._connect() as connection:
-                remaining = connection.execute(
-                    "select count(*) from sqlite_master where type = 'table' "
-                    "and name in ('detection_jobs', 'motion_trigger_jobs')"
-                ).fetchone()[0]
-            self.assertEqual(remaining, 0)
 
     def test_nonfinite_durable_job_payload_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2338,59 +2301,6 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(store.db_path, Path(database) / "survng.sqlite3")
             self.assertEqual(persisted_snapshot, "snapshots/gate/event.jpg")
 
-    def test_migrates_events_and_motion_audits_to_portable_media_paths(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            storage = root / "media"
-            database = root / "database"
-            snapshot = storage / "snapshots" / "gate" / "event.jpg"
-            audit = storage / "motion_samples" / "gate" / "audit.jpg"
-            recording = storage / "recordings" / "gate" / "segment.mp4"
-            for path in (snapshot, audit, recording):
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(b"media")
-            store = EventStore(storage, database_dir=database)
-            event = store.add_event("gate", "motion")
-            motion = store.add_motion_audit(
-                camera_id="gate",
-                snapshot_path="",
-                created_at="2026-07-30T12:00:00+00:00",
-                mode="adaptive",
-                sensitivity="balanced",
-                score=0.7,
-                threshold=0.5,
-                reason="accepted",
-                object_detected=True,
-                trigger_count=1,
-                features={},
-            )
-            with store._connect() as connection:
-                connection.execute(
-                    "update events set snapshot_path = ?, recording_path = ? where id = ?",
-                    (
-                        "/mnt/frigate/SurvNG/snapshots/gate/event.jpg",
-                        "/mnt/frigate/SurvNG/recordings/gate/segment.mp4",
-                        int(event["id"]),
-                    ),
-                )
-                connection.execute(
-                    "update motion_audits set snapshot_path = ? where id = ?",
-                    (
-                        "/mnt/frigate/SurvNG/motion_samples/gate/audit.jpg",
-                        int(motion["id"]),
-                    ),
-                )
-                connection.execute(
-                    "delete from survng_metadata where key = 'portable_media_paths'"
-                )
-
-            migrated = EventStore(storage, database_dir=database)
-            migrated_event = migrated.get(int(event["id"]))
-            migrated_audit = migrated.get_motion_audit(int(motion["id"]))
-
-            self.assertEqual(migrated_event["snapshot_path"], "snapshots/gate/event.jpg")
-            self.assertEqual(migrated_event["recording_path"], "recordings/gate/segment.mp4")
-            self.assertEqual(migrated_audit["snapshot_path"], "motion_samples/gate/audit.jpg")
 
     def test_recent_and_camera_range_queries_reject_unbounded_negative_limits(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2553,12 +2463,10 @@ class EventStoreTest(unittest.TestCase):
             EventStore(Path(tmpdir))
             with (
                 patch.object(EventStore, "_backfill_motion_audits") as backfill,
-                patch.object(EventStore, "_rebase_media_paths") as rebase,
             ):
                 EventStore(Path(tmpdir))
 
             backfill.assert_not_called()
-            rebase.assert_not_called()
 
     def test_compact_queries_keep_media_availability_and_support_keyset_paging(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3209,139 +3117,6 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual([row["id"] for row in all_audits], [audit["id"]])
             self.assertEqual(all_total, 1)
 
-    def test_tracking_comparison_history_persists_verdict_and_compact_result(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            store = EventStore(Path(tmpdir))
-            event = store.add_event(
-                "foyer",
-                "object",
-                created_at="2026-07-27T19:19:50+00:00",
-            )
-            comparison = store.save_tracking_comparison(
-                event_id=int(event["id"]),
-                camera_id="foyer",
-                event_created_at="2026-07-27T19:19:50+00:00",
-                result={"frames_processed": 12, "engines": {"survng_hybrid": {"track_count": 2}}},
-            )
-
-            reviewed = store.set_tracking_comparison_verdict(
-                comparison["id"],
-                "survng_hybrid",
-            )
-            history = EventStore(Path(tmpdir)).tracking_comparison_history(camera_id="foyer")
-            summary = store.tracking_comparison_summary(camera_id="foyer")
-
-            self.assertEqual(reviewed["verdict"], "survng_hybrid")
-            self.assertIsNotNone(reviewed["reviewed_at"])
-            self.assertEqual(history[0]["result"]["frames_processed"], 12)
-            self.assertEqual(summary["total"], 1)
-            self.assertEqual(summary["reviewed"], 1)
-            self.assertEqual(summary["verdicts"]["survng_hybrid"], 1)
-            self.assertEqual(summary["verdicts"]["ultralytics_deepocsort"], 0)
-
-    def test_tracking_comparison_rerun_resets_verdict_and_prunes_per_camera(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            store = EventStore(Path(tmpdir))
-            store.TRACKING_COMPARISON_HISTORY_PER_CAMERA = 2
-            first_event = store.add_event(
-                "gate", "object", created_at="2026-07-27T19:19:50+00:00"
-            )
-            second_event = store.add_event(
-                "gate", "object", created_at="2026-07-27T19:20:50+00:00"
-            )
-            third_event = store.add_event(
-                "gate", "object", created_at="2026-07-27T19:21:50+00:00"
-            )
-            first = store.save_tracking_comparison(
-                event_id=int(first_event["id"]),
-                camera_id="gate",
-                event_created_at=str(first_event["created_at"]),
-                result={"frames_processed": 1},
-            )
-            store.set_tracking_comparison_verdict(first["id"], "inconclusive")
-            rerun = store.save_tracking_comparison(
-                event_id=int(first_event["id"]),
-                camera_id="gate",
-                event_created_at=str(first_event["created_at"]),
-                result={"frames_processed": 2},
-            )
-            store.save_tracking_comparison(
-                event_id=int(second_event["id"]),
-                camera_id="gate",
-                event_created_at=str(second_event["created_at"]),
-                result={},
-            )
-            store.save_tracking_comparison(
-                event_id=int(third_event["id"]),
-                camera_id="gate",
-                event_created_at=str(third_event["created_at"]),
-                result={},
-            )
-
-            history = store.tracking_comparison_history(camera_id="gate")
-
-            self.assertEqual(rerun["verdict"], "")
-            self.assertIsNone(rerun["reviewed_at"])
-            self.assertEqual(
-                [row["event_id"] for row in history],
-                [int(third_event["id"]), int(second_event["id"])],
-            )
-
-            with self.assertRaisesRegex(ValueError, "invalid tracking comparison verdict"):
-                store.set_tracking_comparison_verdict(history[0]["id"], "automatic")
-
-    def test_tracking_comparison_rejects_failed_or_absent_engine_verdict(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            store = EventStore(Path(tmpdir))
-            event = store.add_event(
-                "gate",
-                "object",
-                created_at="2026-07-27T19:19:50+00:00",
-            )
-            result = store.save_tracking_comparison(
-                event_id=int(event["id"]),
-                camera_id="gate",
-                event_created_at="2026-07-27T19:19:50+00:00",
-                result={
-                    "engines": {
-                        "survng_hybrid": {},
-                        "ultralytics_tracktrack": {"error": "unavailable"},
-                    }
-                },
-            )
-            for verdict in ("ultralytics_tracktrack", "ultralytics_botsort"):
-                with self.assertRaisesRegex(ValueError, "successful engine"):
-                    store.set_tracking_comparison_verdict(result["id"], verdict)
-            self.assertEqual(store.set_tracking_comparison_verdict(result["id"], "survng_hybrid")["verdict"], "survng_hybrid")
-
-    def test_tracking_comparison_accepts_deep_ocsort_and_historic_botsort_verdicts(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            store = EventStore(Path(tmpdir))
-            current_event = store.add_event(
-                "gate", "object", created_at="2026-07-27T19:19:50+00:00"
-            )
-            historic_event = store.add_event(
-                "gate", "object", created_at="2026-07-26T19:19:50+00:00"
-            )
-            current = store.save_tracking_comparison(
-                event_id=int(current_event["id"]),
-                camera_id="gate",
-                event_created_at=str(current_event["created_at"]),
-                result={"engines": {"ultralytics_deepocsort": {}}},
-            )
-            historic = store.save_tracking_comparison(
-                event_id=int(historic_event["id"]),
-                camera_id="gate",
-                event_created_at=str(historic_event["created_at"]),
-                result={"engines": {"ultralytics_botsort": {}}},
-            )
-
-            store.set_tracking_comparison_verdict(current["id"], "ultralytics_deepocsort")
-            store.set_tracking_comparison_verdict(historic["id"], "ultralytics_botsort")
-            summary = store.tracking_comparison_summary(camera_id="gate")
-
-            self.assertEqual(summary["verdicts"]["ultralytics_deepocsort"], 1)
-            self.assertEqual(summary["verdicts"]["ultralytics_botsort"], 1)
 
     def _motion_demoted_event(self, store: EventStore) -> dict:
         return store.add_event(

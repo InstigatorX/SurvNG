@@ -31,7 +31,6 @@ stays bounded and live writers interleave.
 """
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 import threading
@@ -238,12 +237,6 @@ class DatabaseRetention:
         }
         steps = result["steps"]
         try:
-            while True:
-                self._check_stop()
-                if self._events.backfill_scene_decision_samples()["complete"]:
-                    break
-                if self._stop.wait(self._pause_seconds):
-                    raise _Stopped()
             self._ensure_deletion_work()
             if not dry:
                 self._drain_motion_deletions(result)

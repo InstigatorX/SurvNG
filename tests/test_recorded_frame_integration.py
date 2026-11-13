@@ -5,7 +5,7 @@ import subprocess
 import numpy as np
 import pytest
 
-from survng.app.tracking_comparison import sampled_video_frames, video_frame_at_reference
+from survng.app.recorded_video_frames import sampled_video_frames, video_frame_at_reference
 
 
 @pytest.fixture(scope="module")
@@ -37,7 +37,7 @@ def test_keyframe_seek_matches_decoding_from_the_segment_start(source_clip, monk
 
     offsets = (0.0, 0.35, 1.05, 2.8, 3.3)
     seeked = [decode(offset) for offset in offsets]
-    monkeypatch.setattr("survng.app.tracking_comparison.INPUT_SEEK_MARGIN_SECONDS", 1e9)
+    monkeypatch.setattr("survng.app.recorded_video_frames.INPUT_SEEK_MARGIN_SECONDS", 1e9)
     assert seeked == [decode(offset) for offset in offsets]
     assert all(seeked)
 

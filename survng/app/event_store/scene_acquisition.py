@@ -30,8 +30,6 @@ def _epoch(value):
 class EventStoreSceneAcquisitionMixin:
     def _init_scene_acquisition_db(self):
         with self._lock, self._connect() as conn:
-            had_seeds = conn.execute("select 1 from sqlite_master where name='scene_candidate_seeds'").fetchone() is not None
-            had_decisions = conn.execute("select 1 from sqlite_master where name='scene_activity_decisions'").fetchone() is not None
             conn.executescript("""
                 create table if not exists acquired_samples (
                     id text primary key, camera_id text not null, captured_epoch real not null,
@@ -131,49 +129,8 @@ class EventStoreSceneAcquisitionMixin:
                     on scene_candidate_seeds(candidate_id);
                 create index if not exists scene_candidate_admission_decision
                     on scene_candidate_admissions(decision_id);
-                create table if not exists scene_acquisition_migrations (name text primary key,cursor integer not null);
                 create table if not exists acquired_expired_snapshots (snapshot_path text primary key);
             """)
-            if not had_seeds:
-                conn.execute("insert or ignore into scene_candidate_seeds select s.value,j.id "
-                             "from scene_candidate_jobs j,json_each(j.seed_sample_ids_json) s")
-            conn.execute(
-                "insert or ignore into scene_acquisition_migrations values('decision_sample_refs_v1',?)",
-                (0 if had_decisions else -1,),
-            )
-
-    def backfill_scene_decision_samples(self, *, batch_size=500):
-        """Index one legacy page; new decisions already maintain refs atomically.
-
-        Retention finishes this migration before deleting samples. Missing legacy
-        samples are still named here: their JSON references must not be discarded.
-        """
-        limit = max(1, min(int(batch_size), 1000))
-        with self._lock, self._connect() as conn:
-            conn.execute("begin immediate")
-            cursor = conn.execute(
-                "select cursor from scene_acquisition_migrations where name='decision_sample_refs_v1'",
-            ).fetchone()[0]
-            if cursor == -1:
-                return {"processed": 0, "complete": True}
-            rows = conn.execute(
-                "select rowid,id,sample_ids_json from scene_activity_decisions "
-                "where rowid>? order by rowid limit ?", (cursor, limit),
-            ).fetchall()
-            conn.executemany(
-                "insert or ignore into scene_decision_samples "
-                "select ?,cast(value as text) "
-                "from json_each(case when json_valid(?) then ? else '[]' end) "
-                "where value is not null",
-                [(row[1], row[2], row[2]) for row in rows],
-            )
-            complete = len(rows) < limit
-            conn.execute(
-                "update scene_acquisition_migrations set cursor=? where name='decision_sample_refs_v1'",
-                (-1 if complete else rows[-1][0],),
-            )
-            return {"processed": len(rows), "complete": complete}
-
     @staticmethod
     def _sample_payload(conn, sample_id):
         row = conn.execute("select * from acquired_samples where id=?", (sample_id,)).fetchone()
@@ -549,42 +506,3 @@ class EventStoreSceneAcquisitionMixin:
             conn.execute("insert or ignore into acquired_expired_snapshots values(?)",(path,))
             conn.execute("update acquired_samples set snapshot_path='' where snapshot_path=?",(path,))
             conn.execute("update acquired_observations set snapshot_path='' where snapshot_path=?",(path,))
-
-    def backfill_existing_scene_acquisitions(self, *, batch_size=200):
-        """Copy one historical batch silently; caller repeats while remaining.
-
-        No acquisition is purged on a confirmation deadline. Media and metadata
-        continue to follow the application's existing retention policy.
-        """
-        with self._lock,self._connect() as conn:
-            conn.execute("begin immediate")
-            columns={row[1] for row in conn.execute("pragma table_info(scene_observations)")}
-            if not columns:
-                return {"processed":0,"complete":True}
-            if "source_observation_id" not in columns:
-                conn.execute("alter table scene_observations add column source_observation_id text references acquired_observations(id)")
-                conn.execute("create index if not exists scene_observation_source on scene_observations(source_observation_id)")
-            progress=conn.execute("select cursor from scene_acquisition_migrations where name='scene_observations_v1'").fetchone()
-            cursor=progress[0] if progress else 0
-            rows=conn.execute("select rowid as migration_rowid,* from scene_observations where rowid>? order by rowid limit ?",
-                              (cursor,max(1,min(int(batch_size),1000)))).fetchall()
-            for row in rows:
-                if row["source_observation_id"] and conn.execute("select 1 from acquired_observations where id=?", (row["source_observation_id"],)).fetchone():
-                    continue
-                raw=json.loads(row["payload_json"])
-                source_id=row["source_observation_id"] or raw.get("source_observation_id") or row["id"]
-                sample_id="legacy-scene:"+source_id
-                conn.execute("insert or ignore into acquired_samples values(?,?,?,?,?,?,?,?,?)",(sample_id,row["camera_id"],row["captured_epoch"],
-                             "historical_projection","complete",_json({"historical":True}),"","",time.time()))
-                image=self._acquired_media_path(conn,row["snapshot_path"])
-                conn.execute("insert or ignore into acquired_observations values(?,?,?,?,?,?)",
-                             (source_id,row["camera_id"],row["captured_epoch"],row["payload_json"],image,row["recording_path"]))
-                if image:
-                    conn.execute("update acquired_observations set snapshot_path=? where id=? and snapshot_path=''",(image,source_id))
-                conn.execute("insert or ignore into acquired_sample_observations values(?,?)",(sample_id,source_id))
-                self._link_scene_acquisition(conn,sample_id=sample_id,event_id=row["event_id"])
-                conn.execute("update scene_observations set source_observation_id=? where id=?",(source_id,row["id"]))
-                self._register_acquired_snapshot(conn,image,row["camera_id"],row["captured_epoch"])
-            if rows:
-                conn.execute("insert into scene_acquisition_migrations values('scene_observations_v1',?) on conflict(name) do update set cursor=excluded.cursor",(rows[-1]["migration_rowid"],))
-            return {"processed":len(rows),"complete":len(rows)<max(1,min(int(batch_size),1000))}

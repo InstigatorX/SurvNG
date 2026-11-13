@@ -61,7 +61,6 @@ class CameraMotionState:
             "triggers": 0,
             "bursts": 0,
             "passed": 0,
-            "audit_rejected": 0,
             "suppressed": 0,
             "priority_bypasses": 0,
             "insufficient_frames": 0,
@@ -102,7 +101,6 @@ class CameraMotionState:
             "stale_fusion_samples": 0,
             "validation_failures": 0,
             "validation_fail_opens": 0,
-            "audit_object_matches": 0,
             "suppression_verification_checks": 0,
             "suppression_verification_rescues": 0,
             "last_result": None,
@@ -250,13 +248,11 @@ class CameraMotionState:
                 if result.accepted:
                     self._stats["passed"] += 1
                 elif (
-                    mode in {"camera", "camera_rescue", "adaptive", "enforce"}
+                    mode in {"camera", "camera_rescue", "adaptive"}
                     and not borderline_candidate
                     and not suppression_verification_candidate
                 ):
                     self._stats["suppressed"] += 1
-                elif mode == "audit":
-                    self._stats["audit_rejected"] += 1
             self._stats["last_result"] = copy.deepcopy(qualification)
 
     def stats_snapshot(self) -> dict[str, Any]:

@@ -1084,9 +1084,6 @@ def test_small_motion_reaches_scene_aware_pipeline() -> None:
         run_pipeline=run_pipeline,
         trigger_mode="camera",
     )
-    # The retired value remains accepted in saved configurations, but no
-    # longer stands ahead of scene-aware qualification.
-    dependencies.config.temporal_filter_threshold = 1.0
     service = _service(dependencies)
     first = np.zeros((180, 320, 3), dtype=np.uint8)
     second = first.copy()

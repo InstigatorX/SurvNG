@@ -231,22 +231,7 @@ def test_download_picks_the_ranked_jpeg_and_skips_geocoding_for_coordinates(tmp_
     )
 
 
-def test_property_zone_accepts_points_and_legacy_rectangles():
-    overlay = PropertyZoneOverlay.model_validate({
-        "camera_id": "gate",
-        "zone_name": "drive",
-        "x": 0.5,
-        "y": 0.5,
-        "width": 0.2,
-        "height": 0.1,
-        "rotation_deg": 0,
-    })
-    assert [(point.x, point.y) for point in overlay.points] == [
-        pytest.approx((0.4, 0.45)),
-        pytest.approx((0.6, 0.45)),
-        pytest.approx((0.6, 0.55)),
-        pytest.approx((0.4, 0.55)),
-    ]
+def test_property_zone_accepts_points():
     direct = PropertyZoneOverlay.model_validate({
         "camera_id": "gate",
         "zone_name": "yard",
@@ -328,18 +313,14 @@ def test_property_routes_save_layout_without_reloading_workers(tmp_path: Path):
             "zones": [{
                 "camera_id": "gate",
                 "zone_name": "drive",
-                "x": 0.5,
-                "y": 0.5,
-                "width": 0.2,
-                "height": 0.1,
-                "rotation_deg": 12,
+                "points": [{"x": 0.4, "y": 0.45}, {"x": 0.6, "y": 0.45}, {"x": 0.5, "y": 0.55}],
             }],
         })
         assert layout.status_code == 200
         assert layout.json()["camera_workers_restarted"] is False
         assert layout.json()["property"]["image"]["address"] == "House"
         saved_points = layout.json()["property"]["zones"][0]["points"]
-        assert len(saved_points) == 4
+        assert len(saved_points) == 3
         assert all(0 <= point["x"] <= 1 and 0 <= point["y"] <= 1 for point in saved_points)
         assert client.get("/api/property/fov", params={"model": "UVC-G5-Bullet"}).json()["hfov_deg"] == 84.4
         activity = client.get("/api/property/activity").json()

@@ -372,7 +372,7 @@ class RecordingRetentionServiceTest(unittest.TestCase):
             {"one": 200, "two": 200},
         )
 
-    def test_pressure_selection_filters_legacy_locations_before_limit(self) -> None:
+    def test_pressure_selection_filters_current_locations_before_limit(self) -> None:
         second = self.storage / "second"
         second.mkdir()
         registry = MediaStorageRegistry(self.storage, MediaStorageConfig(locations=[
@@ -386,7 +386,8 @@ class RecordingRetentionServiceTest(unittest.TestCase):
         ) for index in range(201)]
         legacy = self.insert_recording(
             age_days=2, size=100,
-            path=second / "recordings" / "legacy.mp4",
+            path=second / "recordings" / "older.mp4",
+            location_id="two",
         )
         indexed = self.insert_recording(
             age_days=1, size=100, location_id="two",

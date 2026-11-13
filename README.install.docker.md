@@ -217,9 +217,9 @@ docker compose "${COMPOSE[@]}" logs --tail=100 survng
 curl -fsS http://127.0.0.1:8088/api/health
 ```
 
-First start writes `/var/lib/survng/config/config.json` (mode `0600`) and seeds
-`go2rtc.yaml` if missing. After the first Admin save, credentials also live in
-encrypted `/var/lib/survng/config/secrets.json` plus `secrets.key` (`0600`) —
+First start initializes `/var/lib/survng/config/config.json`, encrypted
+`secrets.json`, and `secrets.key` (all mode `0600`) and seeds `go2rtc.yaml`
+if missing. Existing configs require their sidecar and cannot contain inline secrets;
 back up `config.json`, `secrets.json`, and `secrets.key` together.
 Detection stays off until models are installed and enabled in Admin.
 

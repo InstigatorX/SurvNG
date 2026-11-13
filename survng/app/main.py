@@ -90,11 +90,9 @@ from .semantic_routes import (
     SemanticRouteDependencies,
     create_semantic_router,
 )
-from .object_tracking import ultralytics_fasttrack_dependency_status
 from .operations_routes import OperationsRouteDependencies, create_operations_router
 from .support_bundle import SupportBundleDependencies, create_support_bundle_router
 from .product_update import ProductUpdateService
-from .tracking_comparison import TrackingComparisonRunner, sampled_video_frames
 from .system_telemetry import (
     SystemTelemetryDependencies,
     SystemTelemetryService,
@@ -144,7 +142,6 @@ AI_ACTIVE_OPERATIONS: dict[str, int] = {}
 AI_SHUTDOWN_DRAIN_SECONDS = 30.0
 MANAGER_ACCESS_DRAIN_SECONDS = 15.0
 FACE_OBSERVATION_SYNC_STOP_SECONDS = 5.0
-TRACKING_COMPARISON_LIMITER = threading.BoundedSemaphore(1)
 SYSTEM_TELEMETRY = SystemTelemetryService()
 PROCESS_INSTANCE_ID = SYSTEM_TELEMETRY.process_instance_id
 INCIDENT_QUERIES = IncidentQueryService()
@@ -1398,30 +1395,12 @@ _detection_route_bundle = create_detection_router(
         get_manager=get_manager,
         get_config=lambda: config,
         manager_lock=MANAGER_RELOAD_LOCK,
-        get_comparison_limiter=lambda: TRACKING_COMPARISON_LIMITER,
-        ensure_event_clip=lambda *args, **kwargs: (
-            _recording_media_runtime._ensure_event_clip(*args, **kwargs)
-        ),
-        dependency_status=lambda: ultralytics_fasttrack_dependency_status(),
-        comparison_runner=lambda *args, **kwargs: TrackingComparisonRunner(
-            *args, **kwargs
-        ),
-        sample_video_frames=lambda *args, **kwargs: sampled_video_frames(
-            *args, **kwargs
-        ),
         manager_access=MANAGER_ACCESS,
     )
 )
 app.include_router(_detection_route_bundle.router)
 
 detect_event_snapshot = _detection_route_bundle.handlers["detect_event_snapshot"]
-tracking_comparison_history = _detection_route_bundle.handlers[
-    "tracking_comparison_history"
-]
-update_tracking_comparison_verdict = _detection_route_bundle.handlers[
-    "update_tracking_comparison_verdict"
-]
-compare_event_tracking = _detection_route_bundle.handlers["compare_event_tracking"]
 detect_debug_frame = _detection_route_bundle.handlers["detect_debug_frame"]
 
 

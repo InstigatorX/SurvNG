@@ -83,20 +83,6 @@ class EventSnapshotPathTest(unittest.TestCase):
                 (docker_storage / relative).resolve(),
             )
 
-    def test_converts_verified_legacy_mount_to_portable_path(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            storage = Path(tmpdir) / "media"
-            snapshot = storage / "motion_samples" / "gate" / "audit.jpg"
-            snapshot.parent.mkdir(parents=True)
-            snapshot.write_bytes(b"jpeg")
-
-            self.assertEqual(
-                portable_media_path(
-                    storage,
-                    "/mnt/frigate/SurvNG/motion_samples/gate/audit.jpg",
-                ),
-                "motion_samples/gate/audit.jpg",
-            )
 
     def test_does_not_convert_unverified_external_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

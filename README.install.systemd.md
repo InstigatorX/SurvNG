@@ -101,32 +101,18 @@ The production UI lands in `survng/static/`.
 ```bash
 cd "$SURVNG_ROOT"
 if [ ! -f config.json ]; then
-  sudo -u survng cp config.example.json config.json
+  sudo -u survng "$SURVNG_ROOT/.venv/bin/python" -m survng.app.config_init \
+    --template config.example.json --config config.json \
+    --storage-dir "$SURVNG_MEDIA_DIR" --ffmpeg-path /usr/bin/ffmpeg
 fi
-sudo chmod 600 config.json
-sudo chown survng:survng config.json
-
-sudo -u survng "$SURVNG_ROOT/.venv/bin/python" - <<PY
-import json, os
-from pathlib import Path
-path = Path("$SURVNG_ROOT/config.json")
-config = json.loads(path.read_text())
-config["storage_dir"] = "$SURVNG_MEDIA_DIR"
-locations = (config.get("media_storage") or {}).get("locations") or []
-if locations:
-    locations[0]["path"] = "$SURVNG_MEDIA_DIR"
-config["ffmpeg_path"] = "/usr/bin/ffmpeg"
-path.write_text(json.dumps(config, indent=2) + "\n")
-os.chmod(path, 0o600)
-print("Wrote", path)
-PY
 ```
 
-Camera, MQTT, and AI credentials belong in this file (or Admin), not in the
-systemd unit. After the first Admin save, SurvNG also writes a colocated
-AES-GCM `secrets.json` plus `secrets.key` (`0600`) for those credentials and
-keeps placeholders in `config.json` — back up `config.json`, `secrets.json`,
-and `secrets.key` together.
+Initialization creates owner-only `config.json`, encrypted `secrets.json`, and
+`secrets.key`. Set credentials through Admin; normal loading requires the
+sidecar and rejects inline secrets. Back up all three files together.
+
+This build supports current configuration and database shapes only. See
+[current-only compatibility](docs/current-only.md) before replacing an older build.
 
 ## 6. Optional: go2rtc restreamer
 

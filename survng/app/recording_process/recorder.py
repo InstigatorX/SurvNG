@@ -103,7 +103,6 @@ class Recorder(RecordingIndexMixin):
         self._validation_pending: deque[str] = deque()
         self._validation_pending_set: set[str] = set()
         self._validation_lock = threading.Lock()
-        self._location_backfill_lock = threading.Lock()
         self._external_protected_recording_paths = protected_recording_paths or set
         self._migrate_snapshot_sizes = migrate_snapshot_sizes
         self._playback_lease_lock = threading.Lock()
@@ -438,8 +437,6 @@ class Recorder(RecordingIndexMixin):
         directories: list[Path] = []
         for root in self.recording_roots:
             directories.append(root / camera_id / normalized)
-            if normalized == "main":
-                directories.append(root / camera_id)
         return directories
 
     def _keep_recording_dirs(self, camera_dir: Path, stop_event: threading.Event) -> None:
@@ -724,7 +721,7 @@ class Recorder(RecordingIndexMixin):
     def _owned_ffmpeg_recorders(self, keys: set[RecorderKey]) -> dict[RecorderKey, list[int]]:
         result: dict[RecorderKey, list[int]] = {key: [] for key in keys}
         # A camera ID is not an installation boundary. Match the terminal output
-        # under an exact configured root, including legacy main-stream layouts.
+        # under an exact configured root and current stream layout.
         outputs = {
             key: [
                 re.compile(

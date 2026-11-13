@@ -36,7 +36,7 @@ def test_home_assistant_metadata_is_bounded_and_credential_free() -> None:
     dependencies = _route_dependencies(get_config=lambda: config)
     payload = create_system_router(dependencies).handlers["home_assistant_metadata"]()
 
-    assert payload["incident_notifications"] == {"enabled": True, "schema_version": 2, "transport": "sse", "mqtt_required": False}
+    assert payload["incident_notifications"] == {"enabled": True, "schema_version": 3, "transport": "sse", "mqtt_required": False}
     assert payload["schema_version"] == 1
     assert payload["cameras"] == [{
         "id": "gate", "name": "Gate",

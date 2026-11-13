@@ -24,6 +24,12 @@ class ResolvedMotionPipelineGraphs:
 
 
 def _stage_configs(selections: list[MotionStageSelection]) -> tuple[MotionStageConfig, ...]:
+    for selection in selections:
+        if (
+            selection.implementation == "buffered_evidence_fusion"
+            and "depth_object" in _normalized_sources(selection.options.get("sources", ()))
+        ):
+            raise ValueError("rolling depth-object motion fusion is unsupported")
     return tuple(
         MotionStageConfig(
             stage_id=selection.stage_id,
@@ -35,74 +41,19 @@ def _stage_configs(selections: list[MotionStageSelection]) -> tuple[MotionStageC
     )
 
 
-def _retire_depth_object_fusion(
-    stages: tuple[MotionStageConfig, ...],
-) -> tuple[tuple[MotionStageConfig, ...], bool]:
-    """Remove Phase-1 rolling depth fusion from saved pipeline graphs."""
-    migrated = False
-    resolved: list[MotionStageConfig] = []
-    for stage in stages:
-        if stage.implementation == "depth_object_evidence":
-            migrated = True
-            continue
-        if stage.implementation == "buffered_evidence_fusion":
-            sources = _normalized_sources(stage.options.get("sources", ()))
-            filtered = tuple(source for source in sources if source != "depth_object")
-            if filtered != sources:
-                migrated = True
-                resolved.append(MotionStageConfig(
-                    stage_id=stage.stage_id,
-                    implementation=stage.implementation,
-                    options={**stage.options, "sources": list(filtered)},
-                    parallel_group=stage.parallel_group,
-                ))
-                continue
-        resolved.append(stage)
-    return tuple(resolved), migrated
-
-
 def _resolve_graph(
     graph_name: str,
     global_stages: list[MotionStageSelection],
     camera_stages: list[MotionStageSelection] | None,
     defaults: list[MotionStageConfig],
 ) -> tuple[tuple[MotionStageConfig, ...], str]:
-    def migrate_legacy(
-        stages: list[MotionStageSelection],
-        origin: str,
-    ) -> tuple[tuple[MotionStageConfig, ...], str]:
-        if (
-            len(stages) == 1
-            and stages[0].implementation in {"legacy_qualifier", "legacy_motion_scorer"}
-        ):
-            return tuple(defaults), f"{origin}_legacy_migrated"
-        if graph_name == "fusion":
-            migrated = [
-                stage
-                for stage in stages
-                if stage.implementation not in {"score_event_state", "score_trigger"}
-            ]
-            if len(migrated) != len(stages):
-                return (
-                    _stage_configs(migrated) if migrated else tuple(defaults),
-                    f"{origin}_episode_v2_migrated",
-                )
-        resolved = _stage_configs(stages)
-        if graph_name == "fusion":
-            resolved, depth_migrated = _retire_depth_object_fusion(resolved)
-            if depth_migrated:
-                return (
-                    resolved or tuple(defaults),
-                    f"{origin}_depth_object_retired_migrated",
-                )
-        return resolved, origin
 
     if camera_stages is not None:
         if not camera_stages:
             raise ValueError(f"camera motion {graph_name} graph cannot be empty")
-        return migrate_legacy(camera_stages, "camera")
+        return _stage_configs(camera_stages), "camera"
     if global_stages:
-        return migrate_legacy(global_stages, "global")
+        return _stage_configs(global_stages), "global"
     return tuple(defaults), "default"
 
 
@@ -138,12 +89,10 @@ def _validate_trigger_source_separation(
 
 
 def resolved_trigger_mode(mode: str) -> str:
-    """Resolve legacy modes to an explicit trigger model."""
-    if mode in {"adaptive", "enforce"}:
-        return "adaptive"
-    if mode == "camera_rescue":
-        return "camera_rescue"
-    return "camera"
+    """Return the validated trigger model."""
+    if mode not in {"camera", "camera_rescue", "adaptive"}:
+        raise ValueError(f"unsupported motion mode: {mode}")
+    return mode
 
 
 def resolve_motion_pipeline_graphs(

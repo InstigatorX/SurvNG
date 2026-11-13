@@ -4,12 +4,14 @@ import json
 import os
 import shutil
 import stat
+import sys
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from survng.app.config import load_config
+from survng.app.config_init import initialize_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +21,10 @@ class DockerPackagingTest(unittest.TestCase):
     def test_docker_config_is_valid_camera_free_and_secret_free(self) -> None:
         path = ROOT / "docker" / "config.example.json"
         payload = json.loads(path.read_text(encoding="utf-8"))
-        config = load_config(path)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            destination = Path(tmpdir) / "config.json"
+            initialize_config(path, destination)
+            config = load_config(destination)
 
         self.assertEqual(config.cameras, [])
         self.assertFalse(config.detector.enabled)
@@ -200,13 +205,19 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("quantize=16", text)
         self.assertNotIn("resolve_survng_root", text)
 
-    def test_install_docker_models_runs_without_repo_checkout(self) -> None:
+    def test_install_docker_models_runs_with_packaged_config_tooling_without_repo_checkout(self) -> None:
         script = ROOT / "scripts" / "install-docker-models.sh"
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             standalone = tmp_path / "install-docker-models.sh"
             shutil.copy2(script, standalone)
             standalone.chmod(0o755)
+            # Match the installer image's minimal configuration package.
+            for relative in ("survng/__init__.py", "survng/app/__init__.py", "survng/app/config.py", "survng/app/config_secrets.py", "survng/app/config_init.py", "survng/app/proxy.py", "survng/app/system_review.py"):
+                destination = tmp_path / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / relative, destination)
+            shutil.copy2(ROOT / "docker/config.example.json", tmp_path / "config.docker.example.json")
             models = tmp_path / "models"
             config_path = tmp_path / "config" / "config.json"
             models.mkdir()
@@ -222,6 +233,7 @@ class DockerPackagingTest(unittest.TestCase):
                 [
                     str(standalone),
                     "--native",
+                    "--python", sys.executable,
                     "--models-dir",
                     str(models),
                     "--config",
@@ -242,6 +254,8 @@ class DockerPackagingTest(unittest.TestCase):
             self.assertIn("SurvNG Docker model installer", completed.stdout)
             self.assertNotIn("Could not locate SurvNG repository root", completed.stdout)
             payload = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertTrue((config_path.parent / "secrets.json").is_file())
+            self.assertTrue((config_path.parent / "secrets.key").is_file())
             self.assertEqual(
                 payload["detector"]["model_path"],
                 "/models/yolo26s_openvino_model/yolo26s.xml",
@@ -414,7 +428,8 @@ class DockerPackagingTest(unittest.TestCase):
             tracking = updated["detector"]["tracking"]
             self.assertTrue(tracking["reid_enabled"])
             self.assertTrue(tracking["vehicle_reid_enabled"])
-            self.assertNotIn("semantic_search", updated)
+            self.assertFalse(updated["semantic_search"]["enabled"])
+            self.assertEqual(updated["semantic_search"]["model_dir"], "")
             self.assertFalse(updated["detector"].get("face_recognition_enabled", False))
 
     def test_model_installer_dockerfile_and_notices_exist(self) -> None:

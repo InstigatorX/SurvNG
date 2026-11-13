@@ -141,6 +141,29 @@ def public_config_dict(config: AppConfig) -> dict[str, Any]:
     return payload
 
 
+def assert_public_config(raw: dict[str, Any]) -> None:
+    """Reject credential material in the public configuration without logging it."""
+    fields = []
+    for section, key in (("mqtt", "password"), ("audit_ai", "api_key"), ("web_auth", "session_key")):
+        value = (raw.get(section) or {}).get(key)
+        if value and value != SECRET_PLACEHOLDER:
+            fields.append(f"{section}.{key}")
+    for section, collection, key in (("api_auth", "tokens", "token_hash"), ("web_auth", "users", "password_hash")):
+        for item in (raw.get(section) or {}).get(collection, []):
+            if item.get(key) and item[key] != SECRET_PLACEHOLDER:
+                fields.append(f"{section}.{collection}.{key}")
+    for camera in raw.get("cameras", []):
+        for key in ("stream_url", "live_stream_url"):
+            value = camera.get(key)
+            if value and mask_url_password(value) != value:
+                fields.append(f"cameras.{key}")
+        password = (camera.get("onvif") or {}).get("password")
+        if password and password != SECRET_PLACEHOLDER:
+            fields.append("cameras.onvif.password")
+    if fields:
+        raise ValueError("inline secrets are unsupported; use secrets.json: " + ", ".join(fields))
+
+
 def apply_secrets_to_raw_config(
     raw: dict[str, Any],
     secrets_payload: dict[str, Any] | None,

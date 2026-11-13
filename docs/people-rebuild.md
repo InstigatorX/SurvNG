@@ -81,7 +81,7 @@ the original evidence. Cancellation remains attached to the existing evidence jo
 | `face_evidence_enabled` | `true` | Enable refinement when face recognition is enabled |
 | `face_evidence_max_extra_frames` | `4` | At most 0–8 extra decoded frames per sampling pass |
 | `face_evidence_timeout_seconds` | `4` | Additional admission window, bounded by the existing event deadline |
-| `face_embedding_profile` | `legacy_openvino` | Explicit embedding model input contract |
+| `face_embedding_profile` | `openvino_raw` | Explicit embedding model input contract |
 
 The time window stops new work; already admitted synchronous inference can finish
 after it. Existing inference timeouts still apply. Timings include
@@ -100,7 +100,8 @@ neural model or a probability of correct recognition.
 
 ## Pretrained model profiles
 
-The legacy profile preserves existing unnormalized OpenVINO input behavior.
+The `openvino_raw` profile uses unnormalized OpenVINO input pixels. It replaces
+the old `legacy_openvino` name without changing preprocessing or fingerprints.
 The `adaface` profile takes aligned 112×112 **BGR** pixels normalized by
 `(pixel - 127.5) / 127.5`; `arcface` uses the same normalization with **RGB**.
 Supply a local OpenVINO IR or compatible ONNX export with one image input and

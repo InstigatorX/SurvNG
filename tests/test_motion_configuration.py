@@ -75,7 +75,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
     def test_guided_fusion_normalizes_scalar_source_for_status(self) -> None:
         graphs = resolve_motion_pipeline_graphs(
             MotionQualificationConfig.model_validate({
-                "mode": "enforce",
+                "mode": "adaptive",
                 "pipeline": {
                     "fusion": [
                         {
@@ -83,8 +83,6 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                             "implementation": "buffered_evidence_fusion",
                             "options": {"policy": " ALL ", "sources": " AUX "},
                         },
-                        {"stage_id": "event_state", "implementation": "score_event_state"},
-                        {"stage_id": "trigger", "implementation": "score_trigger"},
                     ],
                 },
             }),
@@ -97,7 +95,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
 
     def test_empty_global_graphs_resolve_to_compatible_defaults(self) -> None:
         graphs = resolve_motion_pipeline_graphs(
-            MotionQualificationConfig(mode="enforce"),
+            MotionQualificationConfig(mode="adaptive"),
             CameraMotionQualificationConfig(),
         )
 
@@ -115,21 +113,6 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         self.assertTrue(graphs.fusion[0].options["include_primary"])
         self.assertTrue(graphs.fusion[0].options["fail_open"])
 
-    def test_saved_depth_object_fusion_is_retired_without_losing_other_sources(self) -> None:
-        graphs = resolve_motion_pipeline_graphs(
-            MotionQualificationConfig.model_validate({
-                "mode": "enforce",
-                "pipeline": {"fusion": [
-                    {"stage_id": "depth", "implementation": "depth_object_evidence"},
-                    {"stage_id": "fusion", "implementation": "buffered_evidence_fusion", "options": {"sources": ["depth_object", "aux"]}},
-                ]},
-            }),
-            CameraMotionQualificationConfig(),
-        )
-
-        self.assertEqual(graphs.origins["fusion"], "global_depth_object_retired_migrated")
-        self.assertEqual(len(graphs.fusion), 1)
-        self.assertEqual(graphs.fusion[0].options["sources"], ["aux"])
 
     def test_camera_visual_backup_mode_is_preserved_through_resolution(self) -> None:
         graphs = resolve_motion_pipeline_graphs(
@@ -140,37 +123,6 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         self.assertEqual(resolved_trigger_mode("camera_rescue"), "camera_rescue")
         self.assertTrue(graphs.fusion[0].options["include_primary"])
 
-    def test_legacy_graphs_are_migrated_to_adaptive_defaults(self) -> None:
-        global_config = MotionQualificationConfig.model_validate({
-            "pipeline": {
-                "qualification": [{
-                    "stage_id": "global_qualification",
-                    "implementation": "legacy_qualifier",
-                    "options": {"profile": "global"},
-                }],
-            },
-        })
-        inherited = resolve_motion_pipeline_graphs(
-            global_config,
-            CameraMotionQualificationConfig(),
-        )
-        overridden = resolve_motion_pipeline_graphs(
-            global_config,
-            CameraMotionQualificationConfig.model_validate({
-                "pipeline": {
-                    "qualification": [{
-                        "stage_id": "camera_qualification",
-                        "implementation": "legacy_qualifier",
-                        "options": {"profile": "camera"},
-                    }],
-                },
-            }),
-        )
-
-        self.assertEqual(inherited.origins["qualification"], "global_legacy_migrated")
-        self.assertEqual(inherited.qualification[1].implementation, "adaptive_ema_background")
-        self.assertEqual(overridden.origins["qualification"], "camera_legacy_migrated")
-        self.assertEqual(overridden.qualification[1].implementation, "adaptive_ema_background")
 
     def test_scalar_onvif_source_cannot_bypass_new_mode_separation(self) -> None:
         config = MotionQualificationConfig.model_validate({
@@ -210,24 +162,6 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ONVIF cannot be a validation source"):
             resolve_motion_pipeline_graphs(config, CameraMotionQualificationConfig())
 
-    def test_legacy_mode_keeps_onvif_fusion_loadable_for_migration(self) -> None:
-        config = MotionQualificationConfig.model_validate({
-            "mode": "enforce",
-            "pipeline": {
-                "fusion": [
-                    {
-                        "stage_id": "evidence_fusion",
-                        "implementation": "buffered_evidence_fusion",
-                        "options": {"policy": "all", "sources": ["onvif"]},
-                    },
-                    {"stage_id": "event_state", "implementation": "score_event_state"},
-                    {"stage_id": "trigger", "implementation": "score_trigger"},
-                ],
-            },
-        })
-
-        graphs = resolve_motion_pipeline_graphs(config, CameraMotionQualificationConfig())
-        self.assertEqual(graphs.fusion[0].options["sources"], ["onvif"])
 
     def test_camera_graph_cannot_explicitly_override_with_empty_list(self) -> None:
         camera_config = CameraMotionQualificationConfig.model_validate({
@@ -286,8 +220,8 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                 "pipeline": {
                     "qualification": [{
                         "stage_id": "qualification",
-                        "implementation": "legacy_qualifier",
-                        "options": {"diagnostic": True},
+                        "implementation": "gray_blur",
+                        "options": {"blur_kernel_size": 7},
                     }],
                 },
             }),
@@ -299,10 +233,10 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         )
 
         self.assertEqual(
-            pipeline.status()["configuration"][1]["implementation"],
-            "adaptive_ema_background",
+            pipeline.status()["configuration"][0]["implementation"],
+            "gray_blur",
         )
-        self.assertEqual(graphs.origins["qualification"], "global_legacy_migrated")
+        self.assertEqual(graphs.origins["qualification"], "global")
 
     def test_application_preflight_rejects_invalid_graph_before_runtime(self) -> None:
         config = AppConfig.model_validate({
@@ -335,10 +269,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                 "stream_url": "rtsp://example.invalid/main",
                 "motion_qualification": {
                     "pipeline": {
-                        "qualification": [{
-                            "stage_id": "qualification",
-                            "implementation": "legacy_qualifier",
-                        }],
+                        "qualification": [stage.model_dump() for stage in analysis_preset_selections("adaptive")],
                     },
                 },
             }],
@@ -349,28 +280,12 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
     def test_application_preflight_rejects_retired_mog2_flag(self) -> None:
         with self.assertRaisesRegex(
             ValidationError,
-            "MOG2 has been retired.*EMA",
+            "mog2_audit_enabled",
         ):
             AppConfig.model_validate({
                 "motion_qualification": {"mog2_audit_enabled": True},
             })
 
-    def test_disabled_retired_mog2_flags_remain_loadable(self) -> None:
-        config = AppConfig.model_validate({
-            "motion_qualification": {"mog2_audit_enabled": False},
-            "cameras": [{
-                "id": "gate",
-                "name": "Gate",
-                "stream_url": "rtsp://example.invalid/main",
-                "motion_qualification": {"mog2_audit_enabled": None},
-            }],
-        })
-
-        self.assertNotIn("mog2_audit_enabled", config.motion_qualification.model_dump())
-        self.assertNotIn(
-            "mog2_audit_enabled",
-            config.cameras[0].motion_qualification.model_dump(),
-        )
 
     def test_application_preflight_rejects_retired_camera_mog2_source(self) -> None:
         config = AppConfig.model_validate({

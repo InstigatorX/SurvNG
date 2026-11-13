@@ -37,7 +37,6 @@ import { formatDateTime } from "./format.js";
 import { useStoredState, useModalFocus } from "./hooks.js";
 import { eventSnapshotUrl, eventThumbnailUrl, eventClipUrl } from "./mediaUrls.js";
 import { AI_DETECTION_SAMPLE_MS, advanceDebugDetectionTracks, debugDetectionIou, updateDebugDetectionTracks } from "../debugDetectionTracks.mjs";
-import { TRACKING_SAMPLING_PROFILES, successfulTrackingComparisonEngines, trackingComparisonEngines, trackingComparisonRequestUrl, trackingComparisonResultsArtifact, trackingEngineLabel, trackingHistorySummaryEntries, trackingHistoryVerdictLabel } from "../trackingComparison.mjs";
 
 export function eventObjects(event) {
   return event.objects || [];
@@ -902,20 +901,12 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
   const scenePlayback = useIncidentPlayback(event);
   const modalRef = useModalFocus(onClose);
   const mediaRef = useRef(null);
-  const comparisonPanelRef = useRef(null);
   const gestureRef = useRef({ mode: null, pointerId: null, startX: 0, startY: 0, panX: 0, panY: 0, moved: false, pinchDistance: 0, scale: 1 });
   const [playbackBounds, setPlaybackBounds] = useState(null);
   const [videoActive, setVideoActive] = useState(false);
   const [detectionDebug, setDetectionDebug] = useState(false);
   const [detectionDebugStats, setDetectionDebugStats] = useState(null);
   const [trackingVisible, setTrackingVisible] = useState(false);
-  const [trackingComparison, setTrackingComparison] = useState(null);
-  const [trackingSamplingProfile, setTrackingSamplingProfile] = useState("fixed_2fps");
-  const [trackingComparisonEngine, setTrackingComparisonEngine] = useState(null);
-  const [trackingComparisonLoading, setTrackingComparisonLoading] = useState(false);
-  const [trackingComparisonError, setTrackingComparisonError] = useState("");
-  const [trackingComparisonHistory, setTrackingComparisonHistory] = useState({ items: [], summary: null });
-  const [trackingVerdictLoading, setTrackingVerdictLoading] = useState(false);
   const [analysisToolsOpen, setAnalysisToolsOpen] = useState(false);
   const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0 });
   const [mediaSize, setMediaSize] = useState(() => incidentTrackingFrameSize(event));
@@ -928,7 +919,6 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
   useEffect(() => {
     if (scenePlayback.selection) {
       setManualDetection(null);
-      setTrackingComparisonEngine(null);
       setTrackingVisible(false);
       setPlaybackBounds(null);
       setVideoActive(true);
@@ -946,18 +936,7 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
     events: event.events || [],
   } : event);
   const displayedEvent = manualDetection ? { ...viewerEvent, objects: manualDetection.objects || [] } : viewerEvent;
-  const comparisonTracking = trackingComparisonEngine ? trackingComparison?.engines?.[trackingComparisonEngine] : null;
-  const trackingEvent = comparisonTracking
-    ? {
-      ...displayedEvent, object_tracking: {
-        ...comparisonTracking,
-        sample_fps: trackingComparison.sample_fps,
-        lost_timeout_seconds: trackingComparison.lost_timeout_seconds,
-        frame_width: trackingComparison.frame_width,
-        frame_height: trackingComparison.frame_height,
-      }
-    }
-    : displayedEvent;
+  const trackingEvent = displayedEvent;
   const storedTracks = storedObjectTracks(trackingEvent);
   const reidDiagnostics = trackingEvent.object_tracking?.reid_diagnostics || {};
   const reidAttemptReasons = reidDiagnostics.inference_attempts_by_reason || {};
@@ -970,21 +949,6 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
   useEffect(() => {
     setTrackingVisible(false);
   }, [event.id]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const cameraId = String(event.camera_id || "");
-    setTrackingComparisonHistory({ items: [], summary: null });
-    if (!cameraId) return undefined;
-    fetch(`/api/tracking-comparisons?camera_id=${encodeURIComponent(cameraId)}&limit=10`)
-      .then(async (response) => {
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(payload.detail || "Comparison history unavailable");
-        if (!cancelled) setTrackingComparisonHistory(payload);
-      })
-      .catch(() => { });
-    return () => { cancelled = true; };
-  }, [event.camera_id]);
 
   const sceneBounds = incidentRecordingBounds(scenePlayback.clip || viewerEvent);
   const activeBounds = playbackBounds
@@ -1171,22 +1135,10 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
     setDetectionDebugStats(null);
     setTrackingVisible(false);
     setAnalysisToolsOpen(false);
-    setTrackingComparison(null);
-    setTrackingComparisonEngine(null);
-    setTrackingComparisonLoading(false);
-    setTrackingComparisonError("");
     setManualDetection(null);
     setManualError("");
     setManualLoading(false);
   }, [event.id]);
-
-  useEffect(() => {
-    if (!trackingComparison || !comparisonPanelRef.current) return undefined;
-    const frame = window.requestAnimationFrame(() => {
-      comparisonPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [trackingComparison]);
 
   const mediaStyle = useMemo(() => {
     if (!mediaSize?.width || !mediaSize?.height) return undefined;
@@ -1221,91 +1173,6 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
     }
   }
 
-  async function runTrackingComparison() {
-    if (!Number.isFinite(manualEventId) || trackingComparisonLoading) return;
-    setAnalysisToolsOpen(true);
-    setTrackingComparisonLoading(true);
-    setTrackingComparisonError("");
-    setTrackingComparisonEngine(null);
-    try {
-      const response = await fetch(trackingComparisonRequestUrl(manualEventId, trackingSamplingProfile), { method: "POST" });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.detail || "Tracking comparison failed");
-      setTrackingComparison(payload);
-      setTrackingComparisonHistory((current) => ({
-        items: payload.comparison
-          ? [payload.comparison, ...current.items.filter((item) => Number(item.id) !== Number(payload.comparison.id))].slice(0, 10)
-          : current.items,
-        summary: payload.evidence_summary || current.summary,
-      }));
-    } catch (error) {
-      setTrackingComparisonError(error.message || "Tracking comparison failed");
-    } finally {
-      setTrackingComparisonLoading(false);
-    }
-  }
-
-  async function saveTrackingVerdict(verdict) {
-    const comparisonId = Number(trackingComparison?.comparison_id);
-    if (!Number.isFinite(comparisonId) || trackingVerdictLoading) return;
-    setTrackingVerdictLoading(true);
-    setTrackingComparisonError("");
-    try {
-      const response = await fetch(`/api/tracking-comparisons/${comparisonId}/verdict`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ verdict }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.detail || "Could not save comparison verdict");
-      setTrackingComparison((current) => ({ ...current, verdict }));
-      setTrackingComparisonHistory((current) => {
-        const comparison = payload.comparison;
-        const items = comparison
-          ? [comparison, ...current.items.filter((item) => Number(item.id) !== Number(comparison.id))].slice(0, 10)
-          : current.items;
-        return { items, summary: payload.summary || current.summary };
-      });
-    } catch (error) {
-      setTrackingComparisonError(error.message || "Could not save comparison verdict");
-    } finally {
-      setTrackingVerdictLoading(false);
-    }
-  }
-
-  function replayTrackingComparison(implementation) {
-    const engine = trackingComparison?.engines?.[implementation];
-    const anchorEpoch = eventEpoch(viewerEvent);
-    if (!engine || !viewerEvent.camera_id || !Number.isFinite(anchorEpoch)) return;
-    const after = Math.max(0.1, Number(trackingComparison.requested_duration_seconds || trackingComparison.duration_seconds || 0));
-    setTrackingComparisonEngine(implementation);
-    setTrackingVisible(true);
-    setDetectionDebug(false);
-    setPlaybackBounds({ cameraId: viewerEvent.camera_id, startEpoch: anchorEpoch, endEpoch: anchorEpoch + after });
-    setVideoActive(true);
-  }
-
-  function downloadTrackingComparisonArtifact(data, filename) {
-    if (!data) return;
-    const artifact = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(artifact);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-  }
-
-  function downloadTrackingComparisonInputs() {
-    downloadTrackingComparisonArtifact(trackingComparison?.replay, `survng-tracking-replay-${manualEventId}.json`);
-  }
-
-  function downloadTrackingComparisonResults() {
-    downloadTrackingComparisonArtifact(trackingComparisonResultsArtifact(trackingComparison), `survng-tracking-results-${manualEventId}.json`);
-  }
-
   useEffect(() => {
     function onKey(keyEvent) {
       if (keyEvent.key !== "ArrowLeft" && keyEvent.key !== "ArrowRight") return;
@@ -1338,21 +1205,6 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
             >
               <Siren size={16} /> Incident
             </a>
-            <label className="tracking-comparison-profile">
-              <span className="sr-only">Comparison sampling</span>
-              <select value={trackingSamplingProfile} onChange={(changeEvent) => setTrackingSamplingProfile(changeEvent.target.value)} disabled={trackingComparisonLoading}>
-                {TRACKING_SAMPLING_PROFILES.map((profile) => <option value={profile.value} key={profile.value}>{profile.label}</option>)}
-              </select>
-            </label>
-            <button
-              type="button"
-              className="tile-control-button"
-              onClick={runTrackingComparison}
-              disabled={trackingComparisonLoading || !Number.isFinite(manualEventId)}
-              title="Run the available trackers on the same 30-second recording window"
-            >
-              <Gauge size={16} /> {trackingComparisonLoading ? "Comparing" : "Compare"}
-            </button>
             <button
               type="button"
               className={`tile-control-button tracking-trail-toggle ${trackingVisible ? "active" : ""}`}
@@ -1436,7 +1288,7 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
           />
           {recordingActive ? (
             <IncidentRecordingPlayer
-              key={`${activeBounds.cameraId}:${activeBounds.startEpoch}:${activeBounds.endEpoch}:${trackingComparisonEngine || ""}`}
+              key={`${activeBounds.cameraId}:${activeBounds.startEpoch}:${activeBounds.endEpoch}`}
               cameraId={activeBounds.cameraId}
               startEpoch={activeBounds.startEpoch}
               endEpoch={activeBounds.endEpoch}
@@ -1478,96 +1330,14 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
             <div className="event-analysis-details-body">
               {storedTracks.length ? (
                 <div className="event-track-summary">
-                  <span className="muted">{trackingComparisonEngine ? "Comparison replay" : "Stored tracking"}</span>
+                  <span className="muted">Stored tracking</span>
                   <strong>{storedTracks.length} track{storedTracks.length === 1 ? "" : "s"} · {String(trackingEvent.object_tracking?.implementation || "tracker").replaceAll("_", " ")} · {Number(trackingEvent.object_tracking?.sample_fps || 0) || "?"} FPS</strong>
                   <small>{replayTrackCount ? `${replayTrackCount} track${replayTrackCount === 1 ? "" : "s"} can replay over video. Dashed, faded boxes are estimated positions during the configured lost-object grace period. Snapshot boxes mark each track's last stored position.` : "Paths show sampled object centers over time. The box marks each track's last stored position."}</small>
                   {Number(reidDiagnostics.inference_attempts || 0) || Number(reidDiagnostics.reid_avoided_geometry_matches || 0) ? (
-                    <div className="tracking-comparison-shared">
+                    <div className="tracking-diagnostics">
                       <span>Appearance checks <strong>{Number(reidDiagnostics.inference_attempts || 0)}</strong></span>
                       <span>Checks avoided <strong>{Number(reidDiagnostics.reid_avoided_geometry_matches || 0)}</strong></span>
                       {Object.entries(reidAttemptReasons).map(([reason, count]) => <span key={reason}>{String(reason).replaceAll("_", " ")} <strong>{count}</strong></span>)}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-              {trackingComparisonError ? <div className="tracking-comparison-error">{trackingComparisonError}</div> : null}
-              {trackingComparison ? (
-                <div className="tracking-comparison-panel" ref={comparisonPanelRef}>
-                  <div className="tracking-comparison-head">
-                    <div><span className="muted">Same-frame comparison</span><strong>{trackingComparison.frames_processed} frames · {Number(trackingComparison.duration_seconds || 0).toFixed(1)}s · {trackingComparison.effective_sample_fps ?? trackingComparison.sample_fps} effective FPS · {(Number(trackingComparison.elapsed_ms || 0) / 1000).toFixed(1)}s analysis</strong></div>
-                    <small>Detection and appearance extraction are shared by all engines. Fragmentation proxy is a comparison signal, not a true ID-switch measure without annotations.</small>
-                  </div>
-                  {trackingComparison.sampling_note ? <small className="tracking-comparison-note">{trackingComparison.sampling_note}</small> : null}
-                  <div className="tracking-comparison-shared"><span>Recording decode <strong>{trackingComparison.average_frame_decode_ms} ms/frame</strong></span><span>OpenVINO detection <strong>{trackingComparison.average_detection_ms_per_frame} ms/frame</strong></span>{Number(trackingComparison.appearance_ms || 0) > 0 ? <span>Appearance extraction <strong>{trackingComparison.average_appearance_ms_per_frame} ms/frame</strong></span> : null}{trackingComparison.appearance_failures ? <span>Appearance failures <strong>{trackingComparison.appearance_failures}</strong></span> : null}<span>Clip preparation <strong>{(Number(trackingComparison.clip_preparation_ms || 0) / 1000).toFixed(1)}s</strong></span></div>
-                  <div className="tracking-comparison-download-actions">
-                    {trackingComparison.replay ? <button type="button" className="tile-control-button" onClick={downloadTrackingComparisonInputs}><Download size={15} /> Download replay inputs</button> : null}
-                    <button type="button" className="tile-control-button" onClick={downloadTrackingComparisonResults}><Download size={15} /> Download results</button>
-                  </div>
-                  <div className="tracking-comparison-grid">
-                    {trackingComparisonEngines(trackingComparison).map(([implementation, engine]) => {
-                      const failed = Boolean(engine?.error);
-                      const comparisonEvent = {
-                        ...viewerEvent, object_tracking: {
-                          ...engine,
-                          sample_fps: trackingComparison.sample_fps,
-                          frame_width: trackingComparison.frame_width,
-                          frame_height: trackingComparison.frame_height,
-                        }
-                      };
-                      return (
-                        <article className={`tracking-comparison-card ${trackingComparisonEngine === implementation ? "active" : ""} ${failed ? "error" : ""}`} key={implementation}>
-                          <header><strong>{trackingEngineLabel(implementation)}</strong>{failed ? <span>Unavailable</span> : <span>{engine.average_ms_per_frame} ms/frame · {engine.initialization_ms} ms init</span>}</header>
-                          {failed ? <div className="tracking-comparison-error">{engine.error}</div> : <>
-                            <SnapshotImage event={comparisonEvent} alt={`${trackingEngineLabel(implementation)} tracking result`} allowObjectFocus={false} showAnnotations={false} showTracking />
-                            <dl>
-                              <div><dt>Tracks</dt><dd>{engine.track_count}</dd></div>
-                              <div><dt>Fragmentation proxy</dt><dd>{engine.fragmentation_proxy}</dd></div>
-                              <div><dt>Observations</dt><dd>{engine.observations}</dd></div>
-                              <div><dt>Appearance inputs</dt><dd>{engine.appearance_input_count ?? "—"}</dd></div>
-                              {engine.appearance_input_count === 0 ? <div className="tracking-identity-needed"><dt>Appearance</dt><dd>No appearance embeddings supplied</dd></div> : null}
-                              <div><dt>ReID recoveries</dt><dd>{engine.reid_recoveries ?? "—"}</dd></div>
-                              <div><dt>Geometry matches</dt><dd>{engine.reid_diagnostics?.association_counts?.geometry ?? "—"}</dd></div>
-                              {engine.identity_metrics && Object.keys(engine.identity_metrics).length ? <>
-                                <div><dt>IDF1</dt><dd>{engine.identity_metrics.idf1}</dd></div>
-                                <div><dt>ID switches</dt><dd>{engine.identity_metrics.id_switches}</dd></div>
-                                <div><dt>Fragmentations</dt><dd>{engine.identity_metrics.fragmentations}</dd></div>
-                                <div><dt>False merges</dt><dd>{engine.identity_metrics.false_merges}</dd></div>
-                              </> : <div className="tracking-identity-needed"><dt>Identity metrics</dt><dd>Ground-truth labels needed</dd></div>}
-                            </dl>
-                            <button type="button" className="tile-control-button" onClick={() => replayTrackingComparison(implementation)}><Play size={15} /> Replay this result</button>
-                          </>}
-                        </article>
-                      );
-                    })}
-                  </div>
-                  {successfulTrackingComparisonEngines(trackingComparison).length >= 2 ? <div className="tracking-comparison-verdict">
-                    <div><span className="muted">Your visual review</span><strong>Which replay kept identities most accurately?</strong></div>
-                    <div className="tracking-comparison-verdict-actions">
-                      {[...successfulTrackingComparisonEngines(trackingComparison).map(([implementation]) => [implementation, `${trackingEngineLabel(implementation)} looked better`]), ["inconclusive", "No clear winner"]].map(([verdict, label]) => (
-                        <button type="button" className={`tile-control-button ${trackingComparison.verdict === verdict ? "active" : ""}`} disabled={trackingVerdictLoading} onClick={() => saveTrackingVerdict(verdict)} key={verdict}>{label}</button>
-                      ))}
-                    </div>
-                  </div> : null}
-                </div>
-              ) : null}
-              {trackingComparisonHistory.summary?.total ? (
-                <div className="tracking-comparison-history">
-                  <div className="tracking-comparison-head">
-                    <div><span className="muted">{event.camera_id} comparison evidence</span><strong>{trackingComparisonHistory.summary.reviewed} reviewed · {trackingComparisonHistory.summary.verdicts?.unreviewed || 0} awaiting review</strong></div>
-                    <small>SurvNG records your judgment but never changes the configured tracker automatically.</small>
-                  </div>
-                  <div className="tracking-comparison-shared">
-                    {trackingHistorySummaryEntries(trackingComparisonHistory.summary.verdicts, trackingComparisonHistory.items).map((entry) => <span key={entry.verdict}>{entry.label} <strong>{entry.count}</strong></span>)}
-                  </div>
-                  {trackingComparisonHistory.items.some((item) => item.verdict) ? (
-                    <div className="tracking-comparison-history-list">
-                      {trackingComparisonHistory.items.filter((item) => item.verdict).slice(0, 5).map((item) => (
-                        <div key={item.id}>
-                          <time>{formatDateTime(item.event_created_at || item.created_at, timeZone)}</time>
-                          <strong>{trackingHistoryVerdictLabel(item.verdict, item.result)}</strong>
-                          <span>{item.result?.frames_processed || 0} frames</span>
-                        </div>
-                      ))}
                     </div>
                   ) : null}
                 </div>

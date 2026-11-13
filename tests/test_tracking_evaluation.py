@@ -1,14 +1,8 @@
 import copy
-import json
-from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
-from survng.app.config import CameraConfig, ObjectTrackingConfig
-from survng.app.object_track.bytetrack import ByteTrackObjectTracker
-from survng.app.object_track.registry import ObjectTrackerRegistry
-from survng.app.tracking_comparison import TrackingComparisonRunner
+from survng.app.config import ObjectTrackingConfig
 from survng.app.tracking_evaluation import identity_metrics, replay_digest, selected_frames, validate_labels, validate_replay
 
 
@@ -101,37 +95,6 @@ def test_sampling_keeps_source_indexes_and_deliberate_gaps():
     assert replay["frames"][3]["captured_at"] == slow[1]["captured_at"]
 
 
-def test_capture_replay_does_not_repeat_inference_or_mutate_shared_inputs():
-    calls = []
-    class Detector:
-        config = SimpleNamespace(confidence_threshold=.7, require_incident_zone=False)
-        def detect(self, frame, confidence_threshold=None):
-            calls.append(1)
-            return [detection()]
-    registry = ObjectTrackerRegistry()
-    registry.register("survng_hybrid", ByteTrackObjectTracker)
-    registry.register("survng_sparse_identity", ByteTrackObjectTracker)
-    runner = TrackingComparisonRunner(config=ObjectTrackingConfig(min_confirmations=1), detector=Detector(), tracker_registry=registry)
-    result = runner.run(CameraConfig(id="gate", name="Gate", stream_url="rtsp://secret.invalid"),
-                        [(100+i*.5, np.zeros((100,120,3), dtype=np.uint8)) for i in range(4)])
-    assert len(calls) == 4
-    exported = json.loads(json.dumps(result["replay"], allow_nan=False))
-    before = copy.deepcopy(exported)
-    again = runner.replay(exported, tracker_registry=registry)
-    assert len(calls) == 4 and exported == before
-    assert again["engines"]["survng_hybrid"]["frame_observations"] == result["engines"]["survng_hybrid"]["frame_observations"]
-    assert "error" in again["engines"]["ultralytics_tracktrack"]
-    assert "secret.invalid" not in json.dumps(exported)
-    assert "identity_metrics" not in again["engines"]["survng_hybrid"]
-
-
-def test_capture_distinguishes_deferred_inference_from_empty_detection():
-    detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=.7), detect=lambda *a, **k: [{"status": "inference_deferred"}])
-    runner = TrackingComparisonRunner(config=ObjectTrackingConfig(), detector=detector)
-    with pytest.raises(RuntimeError, match="deferred"):
-        runner.run(CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid"), [(100,np.zeros((100,120,3), dtype=np.uint8))])
-
-
 def test_idf1_preserves_all_admissible_edges_before_global_assignment():
     replay = replay_fixture(2)
     labels = truth(replay)
@@ -208,25 +171,6 @@ def test_sampling_handles_long_recording_gap_without_iterating_empty_slots():
     assert [f["frame_index"] for f in selected_frames(replay, "fixed_2fps")] == [0, 1, 2]
 
 
-def test_genuine_empty_detection_is_retained_and_scored_as_missing_truth():
-    detector = SimpleNamespace(
-        config=SimpleNamespace(confidence_threshold=.7), detect=lambda *a, **k: [],
-    )
-    registry = ObjectTrackerRegistry()
-    registry.register("survng_hybrid", ByteTrackObjectTracker)
-    registry.register("survng_sparse_identity", ByteTrackObjectTracker)
-    runner = TrackingComparisonRunner(config=ObjectTrackingConfig(), detector=detector, tracker_registry=registry)
-    result = runner.run(
-        CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid"),
-        [(100, np.zeros((100, 120, 3), dtype=np.uint8))],
-    )
-    replay = result["replay"]
-    assert replay["frames"][0]["detections"] == []
-    obs = result["engines"]["survng_hybrid"]["frame_observations"]
-    score = identity_metrics(obs, truth(replay), replay)
-    assert score["idtp"] == 0 and score["idfn"] == 1 and score["idf1"] == 0
-
-
 def test_class_mismatch_and_true_absence_have_explicit_metric_effects():
     replay = replay_fixture(3)
     labels = truth(replay)
@@ -241,7 +185,8 @@ def test_class_mismatch_and_true_absence_have_explicit_metric_effects():
 
 @pytest.mark.parametrize("implementation", ["survng_hybrid_candidate", "ultralytics_tracktrack", "ultralytics_botsort"])
 def test_evaluation_engines_cannot_be_selected_by_production_config(implementation):
-    assert ObjectTrackingConfig(implementation=implementation).implementation == "survng_hybrid"
+    with pytest.raises(ValueError):
+        ObjectTrackingConfig(implementation=implementation)
 
 
 def test_sparse_identity_remains_selectable_for_production():

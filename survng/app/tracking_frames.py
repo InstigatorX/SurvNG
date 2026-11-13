@@ -20,7 +20,7 @@ from .recording_media import mp4_video_dimensions
 from .config import CameraConfig
 from .object_track.types import TrackingFrameBatch
 from .security import redact_secret_text
-from .tracking_comparison import sampled_video_frames, video_frame_at_reference
+from .recorded_video_frames import sampled_video_frames, video_frame_at_reference
 from .video_frames import DecodedVideoFrame, VideoFrameReference
 
 LOGGER = logging.getLogger(__name__)

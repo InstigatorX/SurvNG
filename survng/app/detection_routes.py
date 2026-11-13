@@ -1,4 +1,4 @@
-"""Manual detection and tracking-comparison HTTP boundary."""
+"""Manual detection HTTP boundary."""
 
 from __future__ import annotations
 
@@ -16,31 +16,19 @@ from typing import Any
 import cv2
 import numpy as np
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
 
 from .config import AppConfig, camera_by_id
 from .detector import detection_failure, objects_to_json
 from .domain_events import ObjectDetected
 from .event_store import EventSnapshotChangedError
 from .incident_presenter import _event_row
-from .incident_utils import event_epoch, event_snapshot_path
+from .incident_utils import event_snapshot_path
 from .manager import AppManager
 from .manager_access import ManagerAccessCoordinator, guard_manager_generation
-from .tracking_comparison import TRACKING_COMPARISON_IMPLEMENTATIONS
-from .tracking_evaluation import PROFILES
 from .inference_runtime.types import InferenceWorkload
 from .zones import apply_detection_zones, detection_threshold
 
 LOGGER = logging.getLogger(__name__)
-TRACKING_COMPARISON_MIN_DURATION_SECONDS = 3.0
-TRACKING_COMPARISON_DEFAULT_DURATION_SECONDS = 30.0
-TRACKING_COMPARISON_MAX_DURATION_SECONDS = 30.0
-
-
-class TrackingComparisonVerdictRequest(BaseModel):
-    verdict: str = Field(
-        pattern=r"^(survng_hybrid|survng_sparse_identity|survng_hybrid_candidate|ultralytics_tracktrack|ultralytics_botsort|ultralytics_deepocsort|ultralytics_fasttrack|inconclusive)$"
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,11 +36,6 @@ class DetectionRouteDependencies:
     get_manager: Callable[[], AppManager]
     get_config: Callable[[], AppConfig]
     manager_lock: threading.RLock
-    get_comparison_limiter: Callable[[], Any]
-    ensure_event_clip: Callable[..., Any]
-    dependency_status: Callable[[], dict[str, Any]]
-    comparison_runner: Callable[..., Any]
-    sample_video_frames: Callable[..., Any]
     manager_access: ManagerAccessCoordinator | None = None
 
 
@@ -60,63 +43,6 @@ class DetectionRouteDependencies:
 class DetectionRouteBundle:
     router: APIRouter
     handlers: dict[str, Callable[..., Any]]
-
-
-def _tracking_comparison_evidence(result: dict[str, Any]) -> dict[str, Any]:
-    engines: dict[str, dict[str, Any]] = {}
-    for implementation, engine in result.get("engines", {}).items():
-        if implementation not in TRACKING_COMPARISON_IMPLEMENTATIONS:
-            continue
-        engines[implementation] = {
-            key: engine.get(key)
-            for key in (
-                "track_count",
-                "observations",
-                "reid_recoveries",
-                "fragmentation_proxy",
-                "initialization_ms",
-                "processing_ms",
-                "average_ms_per_frame",
-                "labels",
-                "error",
-                "identity_metrics",
-                "simulated_lost_track_cutoff_seconds",
-            )
-        }
-    return {
-        key: result.get(key)
-        for key in (
-            "sample_fps",
-            "sampling_profile",
-            "replay_id",
-            "evaluation_source_sha256",
-            "ultralytics_version",
-            "dependency_versions",
-            "python_version",
-            "frames_processed",
-            "duration_seconds",
-            "frame_width",
-            "frame_height",
-            "average_frame_decode_ms",
-            "average_detection_ms_per_frame",
-            "average_appearance_ms_per_frame",
-            "appearance_failures",
-            "clip_preparation_ms",
-            "elapsed_ms",
-        )
-    } | {"engines": engines}
-
-
-def _tracking_comparison_duration(duration_seconds: float | None) -> float:
-    requested = (
-        float(duration_seconds)
-        if duration_seconds is not None
-        else TRACKING_COMPARISON_DEFAULT_DURATION_SECONDS
-    )
-    return max(
-        TRACKING_COMPARISON_MIN_DURATION_SECONDS,
-        min(TRACKING_COMPARISON_MAX_DURATION_SECONDS, requested),
-    )
 
 
 def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteBundle:
@@ -260,137 +186,6 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
             },
         }
 
-    @router.get("/api/tracking-comparisons")
-    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
-    def tracking_comparison_history(
-        camera_id: str = "", limit: int = 25
-    ) -> dict[str, Any]:
-        active_manager = deps.get_manager()
-        normalized = str(camera_id or "").strip()
-        return {
-            "items": active_manager.events.tracking_comparison_history(
-                camera_id=normalized, limit=limit
-            ),
-            "summary": active_manager.events.tracking_comparison_summary(
-                camera_id=normalized
-            ),
-        }
-
-    @router.put("/api/tracking-comparisons/{comparison_id}/verdict")
-    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
-    def update_tracking_comparison_verdict(
-        comparison_id: int, payload: TrackingComparisonVerdictRequest
-    ) -> dict[str, Any]:
-        active_manager = deps.get_manager()
-        try:
-            comparison = active_manager.events.set_tracking_comparison_verdict(
-                comparison_id, payload.verdict
-            )
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        if comparison is None:
-            raise HTTPException(
-                status_code=404, detail="tracking comparison not found"
-            )
-        return {
-            "comparison": comparison,
-            "summary": active_manager.events.tracking_comparison_summary(
-                camera_id=str(comparison.get("camera_id") or "")
-            ),
-        }
-
-    @router.post("/api/events/{event_id}/tracking-comparison")
-    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
-    def compare_event_tracking(
-        event_id: int, duration_seconds: float | None = None, sampling_profile: str = "fixed_2fps"
-    ) -> dict[str, Any]:
-        if sampling_profile not in PROFILES:
-            raise HTTPException(status_code=422, detail="unknown sampling profile")
-        if duration_seconds is not None and not math.isfinite(duration_seconds):
-            raise HTTPException(
-                status_code=422, detail="duration_seconds must be finite"
-            )
-        active_manager, active_config = generation()
-        event = active_manager.events.get(event_id)
-        duration = _tracking_comparison_duration(duration_seconds)
-        if event is None:
-            raise HTTPException(status_code=404, detail="event not found")
-        camera = camera_by_id(active_config, str(event.get("camera_id") or ""))
-        if camera is None:
-            raise HTTPException(
-                status_code=404, detail="event camera is not configured"
-            )
-        limiter = deps.get_comparison_limiter()
-        if not limiter.acquire(blocking=False):
-            raise HTTPException(
-                status_code=429,
-                detail="another tracking comparison is already running",
-                headers={"Retry-After": "3"},
-            )
-        try:
-            request_started = time.perf_counter()
-            enriched = _event_row(event)
-            clip_started = time.perf_counter()
-            comparison_input = deps.ensure_event_clip(
-                enriched, before=0.0, after=duration, source="main"
-            )
-            clip_ms = (time.perf_counter() - clip_started) * 1000.0
-            runner = deps.comparison_runner(
-                config=active_config.detector.tracking,
-                detector=active_manager.detector,
-                appearance_encoder=active_manager.person_reidentifier,
-            )
-            detector_dimensions = [
-                int(value)
-                for value in (
-                    getattr(active_manager.detector, "input_shape", None) or []
-                )
-                if isinstance(value, (int, float)) and int(value) > 0
-            ]
-            frames = deps.sample_video_frames(
-                comparison_input,
-                start_epoch=event_epoch(enriched),
-                sample_fps=max(2.0, active_config.detector.tracking.sample_fps),
-                duration_seconds=duration,
-                ffmpeg_path=active_config.ffmpeg_path,
-                maximum_width=max([640, *detector_dimensions]),
-            )
-            result = runner.run(camera, frames, sampling_profile=sampling_profile)
-            response = {
-                "event_id": event_id,
-                "camera_id": camera.id,
-                "created_at": str(enriched.get("created_at") or ""),
-                "requested_duration_seconds": duration,
-                "clip_preparation_ms": round(clip_ms, 1),
-                "elapsed_ms": round(
-                    (time.perf_counter() - request_started) * 1000.0, 1
-                ),
-                **result,
-            }
-            comparison = active_manager.events.save_tracking_comparison(
-                event_id=event_id,
-                camera_id=camera.id,
-                event_created_at=str(enriched.get("created_at") or ""),
-                result=_tracking_comparison_evidence(response),
-            )
-            response.update(
-                comparison_id=comparison["id"],
-                verdict=comparison["verdict"],
-                comparison=comparison,
-                evidence_summary=active_manager.events.tracking_comparison_summary(
-                    camera_id=camera.id
-                ),
-            )
-            return response
-        except HTTPException:
-            raise
-        except Exception:
-            LOGGER.exception("tracking comparison failed for event %d", event_id)
-            raise HTTPException(
-                status_code=422, detail="tracking comparison failed"
-            ) from None
-        finally:
-            limiter.release()
 
     @router.post("/api/detector/frame")
     async def detect_debug_frame(

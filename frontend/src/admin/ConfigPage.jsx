@@ -176,7 +176,6 @@ export function MotionDecisionEditor({
   const effective = inherited ? inheritedParsed : parsed;
   const settings = effective.settings;
   const effectiveMode = mode === "inherit" ? globalMode : mode;
-  const legacyMode = ["audit", "off", "enforce"].includes(effectiveMode);
   const fullyInherited = Boolean(onSetInherited && inherited && mode === "inherit");
   const custom = (!inherited && parsed.custom) || (fullyInherited && inheritedParsed.custom);
   const effectiveBehavior = motionBehaviorValue(effectiveMode, settings);
@@ -184,20 +183,16 @@ export function MotionDecisionEditor({
     ? "inherit"
     : custom
       ? "custom"
-      : legacyMode
-        ? `legacy:${effectiveMode}`
-        : effectiveBehavior;
+      : effectiveBehavior;
   const behaviorInfo = custom
     ? {
       status: fullyInherited ? "Global advanced configuration" : "Advanced custom configuration",
       description: "This pipeline was created outside the guided editor. Selecting a standard behavior will replace its decision stages.",
     }
-    : legacyMode
-      ? motionModeInfo(effectiveMode)
-      : motionBehaviorOption(effectiveBehavior);
+    : motionBehaviorOption(effectiveBehavior);
   const statusLabel = onRestoreDefaults
     ? configurationInherited ? "Inherited" : "Custom"
-    : fullyInherited ? "Inherited" : custom ? "Advanced" : legacyMode ? "Legacy" : parsed.usesDefaults ? "Recommended default" : "Customized";
+    : fullyInherited ? "Inherited" : custom ? "Advanced" : parsed.usesDefaults ? "Recommended default" : "Customized";
 
   function selectBehavior(value) {
     if (value === "inherit") {
@@ -205,7 +200,7 @@ export function MotionDecisionEditor({
       onSetInherited?.(true);
       return;
     }
-    if (value === "custom" || value.startsWith("legacy:")) return;
+    if (value === "custom") return;
     const next = motionBehaviorSettings(settings, value);
     onModeChange(next.mode);
     onSetInherited?.(false);
@@ -213,7 +208,7 @@ export function MotionDecisionEditor({
   }
 
   return (
-    <div className={`motion-decision-editor${custom || legacyMode ? " motion-decision-custom" : ""}`}>
+    <div className={`motion-decision-editor${custom ? " motion-decision-custom" : ""}`}>
       <div className="motion-decision-heading">
         <div>
           <strong>Motion behavior</strong>
@@ -229,7 +224,6 @@ export function MotionDecisionEditor({
         <label>What starts object detection?<select value={selectedBehavior} onChange={(event) => selectBehavior(event.target.value)}>
           {onSetInherited ? <option value="inherit">Use global setting</option> : null}
           {custom ? <option value="custom">Advanced custom configuration</option> : null}
-          {legacyMode ? <option value={`legacy:${effectiveMode}`}>{motionModeInfo(effectiveMode).label}</option> : null}
           {MOTION_BEHAVIOR_OPTIONS.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
         </select></label>
         <div className={`motion-decision-mode mode-${effectiveMode}`}>
@@ -4940,7 +4934,7 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
           <div className="motion-runtime-summary">
             <strong>Motion processing</strong>
             <span>{motionModeInfo(status.motion_qualification.mode).status} · {status.motion_qualification.sensitivity} sensitivity · {status.motion_qualification.frame_width || 320}px</span>
-            <span>{status.motion_qualification.passed || 0} accepted · {status.motion_qualification.audit_rejected || 0} legacy preview rejects · {status.motion_qualification.suppressed || 0} filtered</span>
+            <span>{status.motion_qualification.passed || 0} accepted · {status.motion_qualification.suppressed || 0} filtered</span>
             <span>{status.motion_qualification.continuous_frames || 0} visual frames analyzed · {status.motion_qualification.continuous_candidates || 0} accepted analysis frames · {status.motion_qualification.triggers || 0} triggers delivered · {status.motion_qualification.analysis_frames_dropped || 0} stale requests replaced</span>
             <span>Capture-to-analysis p95 {formatMilliseconds(status.motion_qualification.analysis_runtime?.capture_to_analysis_p95_ms)} · preprocessing p99 {formatMilliseconds(status.motion_qualification.analysis_runtime?.preprocess_p99_ms)} · {formatBytes(status.motion_qualification.analysis_runtime?.copy_bytes || 0)} copied for motion analysis</span>
             <span>Light and shadow filtering {status.motion_qualification.illumination_filter_enabled ? "enabled" : "measuring only"} · {status.motion_qualification.illumination_evaluations || 0} evaluated · {status.motion_qualification.illumination_candidates || 0} likely illumination changes · {status.motion_qualification.illumination_filtered || 0} filtered</span>

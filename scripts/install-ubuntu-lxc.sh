@@ -204,21 +204,9 @@ as_survng bash -lc "cd '$SURVNG_ROOT/frontend' && npm ci --no-audit --no-fund &&
 config_path="$SURVNG_ROOT/config.json"
 if [[ ! -f "$config_path" ]]; then
   log "Writing $config_path"
-  as_survng cp "$SURVNG_ROOT/config.example.json" "$config_path"
-  as_survng "$SURVNG_ROOT/.venv/bin/python" - "$config_path" "$SURVNG_MEDIA_DIR" <<'PY'
-import json, os, sys
-from pathlib import Path
-path, media = Path(sys.argv[1]), sys.argv[2]
-config = json.loads(path.read_text())
-config["storage_dir"] = media
-locations = (config.get("media_storage") or {}).get("locations") or []
-if locations:
-    locations[0]["path"] = media
-config["ffmpeg_path"] = "/usr/bin/ffmpeg"
-path.write_text(json.dumps(config, indent=2) + "\n")
-os.chmod(path, 0o600)
-print("Wrote", path)
-PY
+  as_survng env PYTHONPATH="$SURVNG_ROOT" "$SURVNG_ROOT/.venv/bin/python" -m survng.app.config_init \
+    --template "$SURVNG_ROOT/config.example.json" --config "$config_path" \
+    --storage-dir "$SURVNG_MEDIA_DIR" --ffmpeg-path /usr/bin/ffmpeg
 fi
 chown survng:survng "$config_path"
 chmod 600 "$config_path"

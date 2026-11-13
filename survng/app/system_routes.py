@@ -141,7 +141,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
         return {
             "schema_version": 1,
             "base_path": config.base_path,
-            "incident_notifications": {"enabled": config.integration_notifications.enabled, "schema_version": 2, "transport": "sse", "mqtt_required": False},
+            "incident_notifications": {"enabled": config.integration_notifications.enabled, "schema_version": 3, "transport": "sse", "mqtt_required": False},
             "mqtt": {
                 "enabled": config.mqtt.enabled,
                 "topic_prefix": config.mqtt.topic_prefix,
@@ -210,7 +210,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                     snapshot_sequence = active_manager.state_events.sequence(connection_cursor)
                     if incidents_only:
                         yield _sse_message("incident_notifications_state", {
-                            "schema_version": 2,
+                            "schema_version": 3,
                             "incidents": [active_manager.incident_notification_payload(item)
                                           for item in await asyncio.to_thread(active_manager.incidents.snapshot)
                                           if active_manager.incident_notification_allowed(item)],

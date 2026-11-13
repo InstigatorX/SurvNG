@@ -1591,13 +1591,6 @@ class SemanticIndex:
             ),
             _semantic_dimensions(manifest),
         )
-        chosen = fresh
-        # Hash the legacy whole-directory key only when an older generation
-        # might already hold these image vectors.
-        if not self._generation_recorded(fresh) and self._has_recorded_generation():
-            legacy = legacy_semantic_model_identity(model_dir, manifest)
-            if self._generation_recorded(legacy):
-                chosen = legacy
         with self._lock, self._connect() as connection:
             connection.execute("begin immediate")
             row = self._generation_source_row(connection, contract)
@@ -1612,10 +1605,10 @@ class SemanticIndex:
                 """,
                 (
                     contract,
-                    chosen.implementation,
-                    chosen.model_fingerprint,
-                    chosen.preprocessing_fingerprint,
-                    chosen.dimensions,
+                    fresh.implementation,
+                    fresh.model_fingerprint,
+                    fresh.preprocessing_fingerprint,
+                    fresh.dimensions,
                 ),
             )
             row = self._generation_source_row(connection, contract)
@@ -1647,27 +1640,6 @@ class SemanticIndex:
             int(row["dimensions"]),
         )
 
-    def _generation_recorded(self, identity: SemanticModelIdentity) -> bool:
-        with self._connect() as connection:
-            for table in ("semantic_embeddings", "semantic_projection_receipts"):
-                row = connection.execute(
-                    f"""
-                    select 1 from {table}
-                    where model_fingerprint = ? and preprocessing_fingerprint = ?
-                    limit 1
-                    """,
-                    (identity.model_fingerprint, identity.preprocessing_fingerprint),
-                ).fetchone()
-                if row is not None:
-                    return True
-        return False
-
-    def _has_recorded_generation(self) -> bool:
-        with self._connect() as connection:
-            for table in ("semantic_embeddings", "semantic_projection_receipts"):
-                if connection.execute(f"select 1 from {table} limit 1").fetchone() is not None:
-                    return True
-        return False
 
     def backfill_state(self, identity: SemanticModelIdentity) -> SemanticBackfillState:
         with self._connect() as connection:
@@ -2200,19 +2172,6 @@ def _semantic_package_path(model_dir: Path, value: object, default: str) -> Path
 
 def _semantic_implementation(manifest: dict[str, Any]) -> str:
     return str(manifest.get("implementation") or "openvino_manifest")
-
-
-def legacy_semantic_model_identity(
-    model_dir: Path,
-    manifest: dict[str, Any],
-) -> SemanticModelIdentity:
-    """Generation key used before image vectors were bound to the image tower."""
-    return SemanticModelIdentity(
-        _semantic_implementation(manifest),
-        fingerprint_model_package(model_dir),
-        _preprocessing_fingerprint(manifest, include_text=True),
-        _semantic_dimensions(manifest),
-    )
 
 
 def _semantic_model_identity(

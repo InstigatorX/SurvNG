@@ -155,7 +155,7 @@ def test_simultaneous_overlapping_people_are_not_temporal_matches(tmp_path):
 
 
 @pytest.mark.parametrize("difference", ["none", "timestamp", "geometry", "event"])
-def test_legacy_bridge_requires_same_event_exact_timestamp_and_box(tmp_path, difference):
+def test_missing_provenance_does_not_bridge_to_acquired_frames(tmp_path, difference):
     store = EventStore(tmp_path)
     legacy = observation(0)
     for key in ("scene_track_key", "frame_source", "frame_timestamp_exact", "recording_path", "captured_at_epoch"):
@@ -168,4 +168,4 @@ def test_legacy_bridge_requires_same_event_exact_timestamp_and_box(tmp_path, dif
         add(store, [tracked])
     else:
         store.record_scene_observations(event["id"], [tracked])
-    assert len(store.scene_incident(event_id=event["id"])["scene_objects"]) == (1 if difference == "none" else 2)
+    assert len(store.scene_incident(event_id=event["id"])["scene_objects"]) == 2

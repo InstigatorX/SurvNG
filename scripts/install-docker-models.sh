@@ -779,11 +779,21 @@ patch_config() {
   fi
 
   mkdir -p "$(dirname "$CONFIG_PATH")"
+  if [[ ! -e "$CONFIG_PATH" ]]; then
+    local config_package_root="$SCRIPT_DIR/.."
+    local config_template="$SCRIPT_DIR/../docker/config.example.json"
+    if [[ -f "$SCRIPT_DIR/survng/app/config_init.py" ]]; then
+      config_package_root="$SCRIPT_DIR"
+      config_template="$SCRIPT_DIR/config.docker.example.json"
+    fi
+    env PYTHONPATH="$config_package_root${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" \
+      -m survng.app.config_init --template "$config_template" --config "$CONFIG_PATH" || return
+  fi
   "$PYTHON_BIN" - "$CONFIG_PATH" "$DEVICE" "$ENABLE" \
     "$detector_container" "$labels_container" "$person_container" \
     "$vehicle_container" "$semantic_container" \
     "$face_embed_container" "$face_landmark_container" "$face_detector_container" \
-    "$depth_container" "$speech_vad_container" "$speech_whisper_container" <<'PY'
+    "$depth_container" "$speech_vad_container" "$speech_whisper_container" <<'PY' || return
 import json
 import os
 import sys
@@ -806,108 +816,7 @@ enable = sys.argv[3] == "1"
     speech_whisper,
 ) = sys.argv[4:15]
 
-DOCKER_DEFAULT = {
-    "base_path": "/survng",
-    "storage_dir": "/media",
-    "database_dir": "/data/database",
-    "recording_index_dir": "/data/recording-index",
-    "ffmpeg_path": "/usr/bin/ffmpeg",
-    "hardware_acceleration": "auto",
-    "recording_segment_seconds": 10.0,
-    "recording_cache_prewarm": True,
-    "image_storage": {"format": "webp", "quality": 95},
-    "retention": {
-        "enabled": True,
-        "automatic_cleanup": False,
-        "storage_limit_tb": 1.0,
-        "minimum_free_percent": 15.0,
-        "target_free_percent": 20.0,
-        "emergency_free_percent": 5.0,
-        "main_days": 7,
-        "live_days": 21,
-        "cleanup_batch_files": 2000,
-    },
-    "motion_qualification": {
-        "mode": "camera",
-        "sensitivity": "balanced",
-        "frame_width": 320,
-        "sample_fps": 5.0,
-        "window_seconds": 1.6,
-        "post_trigger_seconds": 2.5,
-        "burst_quiet_seconds": 0.5,
-        "rejected_sample_rate": 1.0,
-        "borderline_rescue_enabled": True,
-        "borderline_margin": 0.03,
-        "pipeline": {"qualification": [], "observation": [], "fusion": []},
-    },
-    "audit_ai": {
-        "enabled": False,
-        "provider": "openai",
-        "api_key": "",
-        "base_url": "",
-        "model": "",
-        "timeout_seconds": 45.0,
-        "allow_apply_recommendations": False,
-    },
-    "mqtt": {
-        "enabled": False,
-        "host": "",
-        "port": 1883,
-        "username": "",
-        "password": "",
-        "client_id": "survng",
-        "topic_prefix": "survng",
-        "qos": 0,
-        "tls": False,
-        "discovery_enabled": True,
-        "discovery_prefix": "homeassistant",
-        "incident_events_enabled": True,
-    },
-    "detector": {
-        "enabled": False,
-        "model_path": "/models/detector/model.xml",
-        "labels_path": "/models/detector/classes.txt",
-        "device": "CPU",
-        "cache_enabled": True,
-        "cache_dir": "/data/openvino-cache",
-        "confidence_threshold": 0.45,
-        "nms_threshold": 0.45,
-        "event_confirmation_frames": 2,
-        "event_class_confirmation_frames": {},
-        "event_class_confidence_thresholds": {},
-        "labels": [],
-        "tracking": {
-            "enabled": True,
-            "implementation": "survng_hybrid",
-            "excluded_labels": ["face"],
-            "sample_fps": 2.0,
-            "max_session_seconds": 15.0,
-            "lost_timeout_seconds": 3.0,
-            "min_confirmations": 2,
-            "low_confidence_threshold": 0.25,
-            "match_iou_threshold": 0.2,
-            "match_center_distance_ratio": 0.65,
-            "max_active_cameras": 2,
-            "max_tracks_per_session": 100,
-            "reid_enabled": False,
-            "reid_model_path": "",
-            "reid_device": "AUTO",
-            "reid_match_threshold": 0.7,
-            "reid_max_age_seconds": 30.0,
-            "reid_max_embeddings_per_frame": 8,
-            "reid_refresh_interval_frames": 8,
-            "botsort_match_threshold": 0.8,
-            "botsort_proximity_threshold": 0.1,
-            "botsort_fuse_score": True,
-        },
-    },
-    "cameras": [],
-}
-
-if config_path.exists():
-    payload = json.loads(config_path.read_text(encoding="utf-8"))
-else:
-    payload = json.loads(json.dumps(DOCKER_DEFAULT))
+payload = json.loads(config_path.read_text(encoding="utf-8"))
 
 if not isinstance(payload, dict):
     raise SystemExit("config.json must contain a JSON object")
@@ -963,6 +872,7 @@ if face_embed or face_landmark or face_detector:
     if face_detector:
         detector["face_detection_model_path"] = face_detector
     detector.setdefault("face_recognition_device", "AUTO")
+    detector.setdefault("face_embedding_profile", "openvino_raw")
     if enable and face_embed and face_landmark:
         detector["face_recognition_enabled"] = True
 

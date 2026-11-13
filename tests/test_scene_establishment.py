@@ -162,31 +162,6 @@ def test_coalesced_generation_admits_later_evidence_without_identity_collision(t
     assert store.scene_incident(event_id=second['id'])['incident_id']==store.scene_incident(event_id=outcome.event_id)['incident_id']
 
 
-def test_historical_reclassification_preserves_inventory_and_links_without_alerts(tmp_path):
-    store=EventStore(tmp_path)
-    event=store.add_event('gate','motion',created_at=datetime.fromtimestamp(1000,timezone.utc).isoformat(),objects_json=json.dumps([detection()]))
-    original=store.scene_incident(event_id=event['id'])
-    with store._connect() as conn:
-        conn.execute("update events set topic='scene/discovery',objects_json=? where id=?",
-            (json.dumps([detection(),{'status':'motion_qualification','motion_qualification':{'scene_discovery':True}}]),event['id']))
-        conn.execute('delete from scene_activity_admissions')
-        conn.execute('delete from scene_event_establishment')
-        conn.execute('delete from scene_notification_outbox')
-        before=[tuple(r) for r in conn.execute('select id,object_id,payload_json from scene_observations order by id')]
-    restarted=EventStore(tmp_path)
-    migrated=restarted.scene_incident(event_id=event['id'])
-    assert migrated['incident_id']==original['incident_id']
-    assert migrated['state']=='unconfirmed'
-    assert restarted.scene_incident_facets()["camera_ids"]==[]
-    assert restarted.scene_incident_facets()["labels"]==[]
-    assert migrated['establishment']['reason']=='historical_activity_unverified'
-    assert restarted.scene_observation_reviews(start_epoch=990,end_epoch=1010)['total']==1
-    assert restarted.scene_pending_notifications()==[]
-    with restarted._connect() as conn:
-        assert [tuple(r) for r in conn.execute('select id,object_id,payload_json from scene_observations order by id')]==before
-    later=restarted.add_event('gate','motion',created_at=datetime.fromtimestamp(1010,timezone.utc).isoformat(),objects_json=json.dumps([detection()]))
-    assert restarted.scene_incident(event_id=later['id'])['incident_id']!=migrated['incident_id']
-    assert restarted.scene_incident(event_id=event['id'])['state']=='unconfirmed'
 
 
 @pytest.mark.parametrize('legacy_sample_ids', [False, True])

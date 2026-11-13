@@ -85,7 +85,7 @@ def _secret_config() -> AppConfig:
 
 
 class ConfigSecretsTest(unittest.TestCase):
-    def test_legacy_monolithic_config_still_loads(self) -> None:
+    def test_monolithic_config_without_sidecar_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "config.json"
             config = _secret_config()
@@ -93,9 +93,8 @@ class ConfigSecretsTest(unittest.TestCase):
                 json.dumps(config.model_dump(mode="json"), indent=2) + "\n",
                 encoding="utf-8",
             )
-            loaded = load_config(str(path))
-            self.assertEqual(loaded.mqtt.password, "mqtt-secret")
-            self.assertEqual(loaded.cameras[0].onvif.password, "onvif-secret")
+            with self.assertRaisesRegex(FileNotFoundError, "required secrets sidecar"):
+                load_config(str(path))
             self.assertFalse((Path(tmpdir) / "secrets.json").exists())
 
     def test_save_splits_secrets_and_round_trips(self) -> None:
@@ -258,11 +257,8 @@ class ConfigSecretsTest(unittest.TestCase):
                 json.dumps(public_config_dict(config), indent=2) + "\n",
                 encoding="utf-8",
             )
-            with self.assertRaises(ValueError) as raised:
+            with self.assertRaisesRegex(FileNotFoundError, "required secrets sidecar"):
                 load_config(str(path))
-            message = str(raised.exception)
-            self.assertIn("web_auth.session_key", message)
-            self.assertIn("web_auth.users.alex.password_hash", message)
             self.assertFalse((Path(tmpdir) / "secrets.key").exists())
 
             forged = encode_session("alex", SECRET_PLACEHOLDER, session_epoch=0)

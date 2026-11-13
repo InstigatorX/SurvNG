@@ -63,7 +63,7 @@ if [ "$(id -u)" = "0" ]; then
 fi
 
 if [ ! -e "$config_path" ]; then
-    install -m 600 /usr/share/survng/config.docker.example.json "$config_path"
+    python -m survng.app.config_init --template /usr/share/survng/config.docker.example.json --config "$config_path"
     echo "Created private SurvNG configuration at $config_path" >&2
 fi
 
@@ -76,6 +76,12 @@ fi
 
 if [ "$(id -u)" = "0" ] && [ "$runtime_uid:$runtime_gid" != "0:0" ]; then
     chown "$runtime_uid:$runtime_gid" "$config_dir" /data "$config_path"
+    for private_path in "${SURVNG_SECRETS_PATH:-$config_dir/secrets.json}" "${SURVNG_SECRETS_KEY_PATH:-$config_dir/secrets.key}"; do
+        if [ -e "$private_path" ]; then
+            chown "$runtime_uid:$runtime_gid" "$private_path"
+            chmod 600 "$private_path"
+        fi
+    done
     if [ -e "$go2rtc_config" ]; then
         chown "$runtime_uid:$runtime_gid" "$go2rtc_config"
         chmod 600 "$go2rtc_config"

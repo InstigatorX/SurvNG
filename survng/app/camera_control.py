@@ -44,7 +44,6 @@ class CameraControlService:
         mqtt: MqttLifecycle,
         runtime_monitor: ApplicationRuntimeMonitor,
         state_path: Path,
-        legacy_state_paths: Sequence[Path] = (),
     ) -> None:
         self._cameras = {camera.id: camera for camera in cameras}
         self._workers = dict(workers)
@@ -55,9 +54,6 @@ class CameraControlService:
         self._mqtt = mqtt
         self._runtime_monitor = runtime_monitor
         self._state_path = state_path
-        self._legacy_state_paths = tuple(
-            path for path in legacy_state_paths if path != state_path
-        )
         self._lock = threading.RLock()
         self._recording_enabled: dict[str, bool] = {}
         self._detection_enabled: dict[str, bool] = {}
@@ -66,22 +62,13 @@ class CameraControlService:
         self._load_persisted_state()
 
     def _load_persisted_state(self) -> None:
-        state_path: Path | None = None
-        for candidate in (self._state_path, *self._legacy_state_paths):
-            try:
-                candidate.stat()
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                LOGGER.warning(
-                    "camera control state could not be inspected at %s: %s; using defaults",
-                    candidate,
-                    exc,
-                )
-                return
-            state_path = candidate
-            break
-        if state_path is None:
+        state_path = self._state_path
+        try:
+            state_path.stat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            LOGGER.warning("camera control state could not be inspected at %s: %s; using defaults", state_path, exc)
             return
         try:
             if state_path.stat().st_size > 1024 * 1024:
@@ -96,13 +83,6 @@ class CameraControlService:
                 exc,
             )
             return
-
-        if state_path != self._state_path:
-            LOGGER.info(
-                "restored legacy camera control state from %s; next write migrates it to %s",
-                state_path,
-                self._state_path,
-            )
 
         camera_ids = set(self._cameras)
 

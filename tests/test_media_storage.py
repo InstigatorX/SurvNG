@@ -7,7 +7,6 @@ import pytest
 from pydantic import ValidationError
 
 from survng.app.config import (
-    AppConfig,
     MediaStorageConfig,
     MediaStorageLocationConfig,
     primary_media_storage,
@@ -36,12 +35,6 @@ def test_empty_locations_are_rejected() -> None:
         MediaStorageConfig(locations=[])
 
 
-def test_app_config_seeds_primary_location_from_storage_dir(tmp_path: Path) -> None:
-    config = AppConfig(storage_dir=str(tmp_path))
-
-    assert len(config.media_storage.locations) == 1
-    assert config.media_storage.locations[0].id == "primary"
-    assert config.media_storage.locations[0].path == str(tmp_path)
 
 
 def test_role_selection_uses_only_eligible_locations(tmp_path: Path) -> None:

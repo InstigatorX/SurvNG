@@ -85,7 +85,6 @@ from .security import redact_secret_text
 from .telemetry_store import TelemetryStore
 from .speech import SpeechLifecycle
 from .speech.attach import ATTACH_PAD_SECONDS
-from .telemetry_migration import migrate_legacy_runtime_telemetry
 
 
 LOGGER = logging.getLogger("uvicorn.error")
@@ -309,12 +308,9 @@ class AppManager:
         )
         self.ema_route_candidates = EmaRouteCandidateCache(
             self.database_dir / "ema-route-cache.sqlite3",
-            legacy_jobs_path=self.events.jobs_db_path,
         )
         self._restore_detection_watches()
         self.telemetry = TelemetryStore(self.database_dir)
-        with self.database_write_lock:
-            migrate_legacy_runtime_telemetry(self.events.db_path, self.telemetry)
         self.appearance_index = AppearanceIndex(
             self.events.db_path, self.database_write_lock
         )
@@ -531,7 +527,6 @@ class AppManager:
             mqtt=self.mqtt,
             runtime_monitor=self.runtime_monitor,
             state_path=self.database_dir / "runtime_state.json",
-            legacy_state_paths=(self.storage_dir / "runtime_state.json",),
         )
 
     def _publish_activity_transition(
@@ -1751,26 +1746,13 @@ class AppManager:
     def incident_notification_allowed(self, payload: dict) -> bool:
         if not self.config.integration_notifications.enabled or payload.get("historical"):
             return False
-        if payload.get("schema_version") == 3:
-            return any(self._scene_alert_enabled(decision, payload) for decision in payload.get("alert_decisions", []))
-        camera = next((camera for camera in self.config.cameras if camera.id == payload.get("camera_id")), None)
-        if camera is not None and not camera.incident_notifications_enabled:
+        if payload.get("schema_version") != 3:
             return False
-        if not self.config.integration_notifications.exclude_motion:
-            return True
-        return bool(
-            payload.get("has_objects") is True
-            or payload.get("classes")
-            or any(item.get("label") for item in (payload.get("objects") or []) if isinstance(item, dict))
-        )
+        return any(self._scene_alert_enabled(decision, payload) for decision in payload.get("alert_decisions", []))
 
     def incident_notification_payload(self, payload: dict) -> dict:
         camera = next((camera for camera in self.config.cameras if camera.id == payload.get("camera_id")), None)
-        settings = {zone.name: zone.notifications_enabled for zone in camera.zones} if camera else {}
-        zones = payload.get("zones") or []
-        result = {**payload, "notifications_enabled": self.config.integration_notifications.enabled and (camera is None or camera.incident_notifications_enabled) and (not zones or any(settings.get(zone, True) for zone in zones))}
-        if payload.get("schema_version") == 3:
-            result["notifications_enabled"] = self.incident_notification_allowed(payload)
+        result = {**payload, "notifications_enabled": self.incident_notification_allowed(payload)}
         if camera is not None or payload.get("camera_id"):
             result["camera_name"] = camera.name if camera else payload["camera_id"]
         base_url = self.config.integration_notifications.base_url

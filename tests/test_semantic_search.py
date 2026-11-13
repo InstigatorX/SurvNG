@@ -482,55 +482,6 @@ class SemanticIndexTest(unittest.TestCase):
             "text": {"tokenizer_kind": "openclip_bpe", "max_length": 77},
         }
 
-    def test_extra_package_file_keeps_legacy_generation(self) -> None:
-        from survng.app.config import SemanticSearchConfig
-        from survng.app.semantic_search import legacy_semantic_model_identity
-
-        model_dir = Path(self.temporary.name) / "model"
-        manifest = self._image_manifest(model_dir)
-        legacy = legacy_semantic_model_identity(model_dir, manifest)
-        captured_at = "2026-01-01T00:00:00+00:00"
-        self.index.upsert(
-            [SemanticEvidence(1, "gate", captured_at, "full_frame", "frame", "snap.jpg")],
-            [[1, 0, 0]],
-            legacy,
-        )
-
-        self.assertEqual(self.index.resolve_model_identity(model_dir, manifest), legacy)
-        (model_dir / "notes.txt").write_text("unrelated", encoding="utf-8")
-        self.assertNotEqual(fingerprint_model_package(model_dir), legacy.model_fingerprint)
-        self.assertEqual(self.index.resolve_model_identity(model_dir, manifest), legacy)
-
-        encoded: list = []
-
-        class Encoder:
-            identity = legacy
-
-            def encode_images(self, images):
-                encoded.append(len(images))
-                return np.asarray([[1, 0, 0]], dtype=np.float32)
-
-        service = SemanticSearchService(
-            SemanticSearchConfig(enabled=True, index_object_crops=False),
-            self.index,
-            model_dir,
-            manifest,
-        )
-        service.encoder = Encoder()
-        service._backfill(type("Store", (), {
-            "recent_compact": lambda self, *_args, **_kwargs: [{
-                "id": 1,
-                "camera_id": "gate",
-                "created_at": captured_at,
-                "snapshot_path": "snap.jpg",
-                "evidence_revision": 0,
-                "objects_json": '[{"label":"person","box":{"x1":1,"y1":1,"x2":2,"y2":2}}]',
-            }],
-        })())
-
-        self.assertEqual(encoded, [])
-        self.assertTrue(service._queue.empty())
-        self.assertTrue(self.index.backfill_state(legacy).complete)
 
     def test_changed_embedding_tower_starts_new_generation_and_keeps_old_rows(self) -> None:
         model_dir = Path(self.temporary.name) / "model"

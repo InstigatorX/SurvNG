@@ -1,18 +1,16 @@
 """Portable offline tracking inputs and explicitly defined identity metrics.
 
-Run with ``python -m survng.app.tracking_evaluation replay.json --output result.json``.
+Metrics and replay validation used by tracker regression tests.
 No recording, detector, encoder or live incident mutations are needed for replay.
 """
 from __future__ import annotations
 
-import argparse
 import copy
 import hashlib
 import json
 import math
 from collections import Counter
 from collections.abc import Iterable
-from pathlib import Path
 from typing import Any
 
 from .config import ObjectTrackingConfig
@@ -337,29 +335,3 @@ def promotion_gate(
         "baseline": {key: baseline[key] for key in required},
         "candidate": {key: candidate[key] for key in required},
     }
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("replay", type=Path)
-    parser.add_argument("--labels", type=Path)
-    parser.add_argument("--profile", choices=PROFILES, default="recorded")
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--label-template", action="store_true", help="write blank annotation frames instead of executing trackers")
-    args = parser.parse_args()
-    if args.replay.stat().st_size > MAX_REPLAY_BYTES:
-        parser.error("replay exceeds 32 MiB")
-    if args.labels and args.labels.stat().st_size > MAX_REPLAY_BYTES:
-        parser.error("labels exceed 32 MiB")
-    replay = json.loads(args.replay.read_text())
-    validate_replay(replay)
-    if args.label_template:
-        result = {"schema_version": 1, "replay_id": replay["replay_id"], "frames": [{"frame_index": f["frame_index"], "objects": [{"identity": None, "label": d["label"], "box": d["box"]} for d in f["detections"]]} for f in replay["frames"]]}
-    else:
-        from .tracking_comparison import TrackingComparisonRunner
-        result = TrackingComparisonRunner.replay(replay, sampling_profile=args.profile, labels=json.loads(args.labels.read_text()) if args.labels else None)
-    args.output.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
-
-
-if __name__ == "__main__":
-    main()

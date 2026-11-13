@@ -18,8 +18,8 @@ deployment and upgrade guidance is in [Docker installation](docs/docker.md).
 Local visual-language search setup is documented in [Smart Search model packages](docs/semantic-search.md).
 Importing original incident images and model-generated boxes into an external
 annotation workflow is documented in the [Training samples API](docs/training-api.md).
-The production Hybrid object tracker, optional FastTrack comparison engine, and
-evidence-based selection process are covered in [Object tracking](README.tracking.md).
+The production Sparse Identity and Hybrid object trackers are covered in
+[Object tracking](README.tracking.md).
 
 SurvNG is licensed under the [MIT License](LICENSE). Third-party notices for
 bundled and notable dependencies are in [NOTICE](NOTICE) and

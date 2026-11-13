@@ -131,7 +131,7 @@ def test_fresh_stream_sends_one_snapshot_then_a_lightweight_heartbeat(monkeypatc
 
 def test_native_incident_snapshot_avoids_camera_and_storage_telemetry():
     broker = StateEventBroker()
-    incidents = [{"incident_id": "incident-gate-41", "revision": 3, "state": "complete"}]
+    incidents = [{"schema_version": 3, "alert_decisions": [{"event_id": 1, "objects": []}], "incident_id": "incident-gate-41", "revision": 3, "state": "complete"}]
     manager = SimpleNamespace(state_events=broker, statuses=Mock(),
                               incident_notification_allowed=lambda item: True,
                               incident_notification_payload=lambda item: {**item, "notifications_enabled": False},
@@ -141,6 +141,7 @@ def test_native_incident_snapshot_avoids_camera_and_storage_telemetry():
     request.query_params["incidents_only"] = "1"
     chunks = asyncio.run(read_chunks(stream_handler(manager, telemetry), request, 3))
     assert "event: incident_notifications_state" in chunks[1]
+    assert '"schema_version":3' in chunks[1]
     assert '"revision":3' in chunks[1]
     assert '"notifications_enabled":false' in chunks[1]
     assert "event: connected" in chunks[2]
@@ -184,8 +185,8 @@ def notification_manager():
 def test_motion_filter_applies_to_recovery_snapshot():
     manager = notification_manager()
     manager.incidents.snapshot = lambda: [
-        {"incident_id": "motion", "has_objects": False},
-        {"incident_id": "person", "classes": ["person"]},
+        {"schema_version": 3, "alert_decisions": [{"event_id": 1, "objects": []}], "incident_id": "motion", "has_objects": False},
+        {"schema_version": 3, "alert_decisions": [{"event_id": 1, "objects": [{"label": "person", "eligible": True, "zones": []}]}], "incident_id": "person", "classes": ["person"]},
     ]
     request = StreamRequest()
     request.query_params["incidents_only"] = "1"
@@ -230,8 +231,8 @@ def test_native_stream_forwards_zone_occupancy_snapshots():
 def test_motion_filter_applies_to_replay_and_advances_past_skipped_events():
     manager = notification_manager()
     first = manager.state_events.publish("camera_state", {})
-    manager.state_events.publish("incident_lifecycle", {"incident_id": "person", "classes": ["person"]})
-    last = manager.state_events.publish("incident_lifecycle", {"incident_id": "motion"})
+    manager.state_events.publish("incident_lifecycle", {"schema_version": 3, "alert_decisions": [{"event_id": 1, "objects": [{"label": "person", "eligible": True, "zones": []}]}], "incident_id": "person", "classes": ["person"]})
+    last = manager.state_events.publish("incident_lifecycle", {"schema_version": 3, "alert_decisions": [{"event_id": 1, "objects": []}], "incident_id": "motion"})
     request = StreamRequest(header_cursor=first.id)
     request.query_params["incidents_only"] = "1"
     chunks = asyncio.run(read_chunks(stream_handler(manager, Mock()), request, 3))
@@ -250,21 +251,21 @@ def test_live_motion_filter_keeps_sequence_and_allows_object_promotion():
         try:
             for _ in range(3):
                 await anext(iterator)
-            manager.state_events.publish("incident_lifecycle", {"incident_id": "same", "state": "new"})
+            manager.state_events.publish("incident_lifecycle", {"schema_version": 3, "alert_decisions": [{"event_id": 1, "objects": []}], "incident_id": "same", "state": "new"})
             manager.state_events.publish("camera_state", {"running": True})
-            promoted = manager.state_events.publish("incident_lifecycle", {
+            promoted = manager.state_events.publish("incident_lifecycle", {"schema_version": 3, "alert_decisions": [{"event_id": 1, "objects": [{"label": "person", "eligible": True, "zones": []}]}],
                 "incident_id": "same", "state": "updated", "classes": ["person"],
             })
             chunk = await asyncio.wait_for(anext(iterator), 1)
             assert f"id: {promoted.id}" in chunk
             assert '"state":"updated"' in chunk
-            complete = manager.state_events.publish("incident_lifecycle", {
+            complete = manager.state_events.publish("incident_lifecycle", {"schema_version": 3, "alert_decisions": [{"event_id": 1, "objects": [{"label": "person", "eligible": True, "zones": []}]}],
                 "incident_id": "same", "state": "complete", "classes": ["person"],
             })
             assert f"id: {complete.id}" in await asyncio.wait_for(anext(iterator), 1)
             # A hot setting change permits subsequent motion-only notifications.
             manager.config.integration_notifications.exclude_motion = False
-            motion = manager.state_events.publish("incident_lifecycle", {"incident_id": "motion"})
+            motion = manager.state_events.publish("incident_lifecycle", {"schema_version": 3, "alert_decisions": [{"event_id": 1, "objects": []}], "incident_id": "motion"})
             assert f"id: {motion.id}" in await asyncio.wait_for(anext(iterator), 1)
         finally:
             await iterator.aclose()
@@ -340,7 +341,7 @@ def test_disabled_camera_is_filtered_from_snapshot_and_replay():
     from survng.app.config import CameraConfig
     manager = notification_manager()
     manager.config.cameras = [CameraConfig(id="gate", name="Gate", stream_url="rtsp://example", incident_notifications_enabled=False)]
-    payload = {"camera_id": "gate", "incident_id": "hidden", "classes": ["person"]}
+    payload = {"schema_version": 3, "alert_decisions": [{"event_id": 1, "objects": [{"label": "person", "eligible": True, "zones": []}]}], "camera_id": "gate", "incident_id": "hidden", "classes": ["person"]}
     manager.incidents.snapshot = lambda: [payload]
     request = StreamRequest()
     request.query_params["incidents_only"] = "1"
@@ -357,7 +358,7 @@ def test_disabled_camera_is_filtered_from_snapshot_and_replay():
 def test_global_notifications_off_filters_recovery_and_replay():
     manager = notification_manager()
     manager.config.integration_notifications.enabled = False
-    payload = {"camera_id": "gate", "incident_id": "suppressed", "classes": ["person"]}
+    payload = {"schema_version": 3, "alert_decisions": [{"event_id": 1, "objects": [{"label": "person", "eligible": True, "zones": []}]}], "camera_id": "gate", "incident_id": "suppressed", "classes": ["person"]}
     manager.incidents.snapshot = lambda: [payload]
     request = StreamRequest()
     request.query_params["incidents_only"] = "1"
@@ -395,6 +396,7 @@ def test_state_stream_sends_camera_and_light_system_snapshots_before_connected()
     chunks = asyncio.run(read_chunks(stream_handler(manager, telemetry), _state_request(), 5))
 
     assert "event: incident_notifications_state" in chunks[1]
+    assert '"schema_version":3' in chunks[1]
     assert "event: cameras_state" in chunks[2] and '"id":"gate"' in chunks[2]
     assert "event: system_state" in chunks[3] and "id:" not in chunks[3]
     assert "event: connected" in chunks[4]

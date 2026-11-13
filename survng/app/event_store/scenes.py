@@ -8,14 +8,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import sqlite3
 import time
 import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from ..incident_utils import portable_media_path
 from ..scene_identity import observation_identity
-from .scene_history import legacy_track_observations
 from ..motion_topics import SPEECH_TOPIC
 
 # Each camera episode's recorded analysis is recomputed from all of its
@@ -185,7 +183,6 @@ def _overlap(a, b):
 
 
 class EventStoreSceneMixin:
-    _scene_outbox_legacy_rowid = 0
 
     def _init_scene_db(self):
         with self._lock, self._connect() as conn:
@@ -357,7 +354,6 @@ class EventStoreSceneMixin:
                 create table if not exists scene_identities (
                     event_id integer primary key references events(id) on delete cascade, payload_json text not null
                 );
-                create table if not exists scene_migrations (name text primary key,cursor_event_id integer not null);
                 create table if not exists scene_expired_snapshots (snapshot_path text primary key);
                 create table if not exists scene_snapshot_assets (
                     snapshot_path text primary key,camera_id text not null,created_at text not null,
@@ -380,79 +376,6 @@ class EventStoreSceneMixin:
                 "create index if not exists scene_observation_recording "
                 "on scene_observations(recording_path) where recording_path != ''"
             )
-            self._scene_outbox_legacy_rowid = self._mark_legacy_scene_notifications(conn)
-        # Bounded transactions, resumable and silent. Never infer historical
-        # video or replay notifications during migration.
-        while True:
-            with self._lock, self._connect() as conn:
-                rows = conn.execute("select e.* from events e where e.id in (select id from events "
-                                    "except select event_id from scene_event_membership "
-                                    "except select event_id from scene_event_establishment) "
-                                    "order by e.created_at,e.id limit 200").fetchall()
-                if not rows:
-                    break
-                for row in rows:
-                    self._scene_ingest(conn, row, historical=True, notify=False)
-
-        # Earlier partial imports did not read legacy track histories. Upgrade
-        # mapped events as well, with a durable cursor and no alert publication.
-        while True:
-            with self._lock,self._connect() as conn:
-                progress=conn.execute("select cursor_event_id from scene_migrations where name='legacy_tracks_v1'").fetchone()
-                cursor=progress[0] if progress else 0
-                rows=conn.execute("select e.* from events e join scene_event_membership m on m.event_id=e.id "
-                                  "where e.id>? order by e.id limit 200",(cursor,)).fetchall()
-                if not rows:
-                    break
-                for row in rows:
-                    if legacy_track_observations(_objects(row["objects_json"])):
-                        self._scene_ingest(conn,row,historical=True,notify=False,activity=False)
-                conn.execute("insert into scene_migrations values('legacy_tracks_v1',?) on conflict(name) do update set cursor_event_id=excluded.cursor_event_id",(rows[-1]["id"],))
-        self._backfill_scene_facets()
-        self._backfill_observation_zones()
-
-    def _backfill_scene_facets(self):
-        """Build feed filters once. Later observations maintain them as they are stored."""
-        with self._lock, self._connect() as conn:
-            have_zones = conn.execute("select 1 from scene_migrations where name='scene_facets_v1'").fetchone()
-            have_labels = conn.execute("select 1 from scene_migrations where name='scene_facet_labels_v1'").fetchone()
-            have_cameras = conn.execute("select 1 from scene_migrations where name='scene_facet_cameras_v1'").fetchone()
-            if have_zones and have_labels and have_cameras:
-                return
-            conn.execute("begin immediate")
-            if not have_zones:
-                conn.execute(
-                    "update scene_objects set facet_label=coalesce(("
-                    "select json_extract(o.payload_json,'$.label') from scene_observations o "
-                    "where o.object_id=scene_objects.id order by o.captured_epoch,o.id limit 1),'') "
-                    "where facet_label=''"
-                )
-                conn.execute(
-                    "insert or ignore into scene_facet_zones(value) "
-                    "select distinct j.value from scene_observations o, json_each("
-                    "case when json_type(o.payload_json,'$.zones')='array' "
-                    "then json_extract(o.payload_json,'$.zones') else '[]' end) j "
-                    "where j.value!=''"
-                )
-                conn.execute("insert into scene_migrations values('scene_facets_v1',0)")
-            if not have_labels:
-                conn.execute(
-                    "insert or ignore into scene_facet_labels(value) "
-                    "select distinct coalesce(nullif(s.label_override,''), nullif(s.facet_label,'')) "
-                    "from scene_objects s join scene_episodes p on p.id=s.episode_id "
-                    "join scene_incidents i on i.id=p.incident_id "
-                    "where i.state!='unconfirmed' and coalesce(nullif(s.label_override,''), nullif(s.facet_label,''))!=''"
-                )
-                conn.execute("insert into scene_migrations values('scene_facet_labels_v1',0)")
-            if not have_cameras:
-                conn.execute(
-                    "insert or ignore into scene_facet_cameras(value) "
-                    "select distinct p.camera_id from scene_episodes p "
-                    "join scene_incidents i on i.id=p.incident_id "
-                    "where i.state!='unconfirmed' and p.camera_id!=''"
-                )
-                conn.execute("insert into scene_migrations values('scene_facet_cameras_v1',0)")
-
     def _note_scene_camera(self, conn, camera_id):
         if isinstance(camera_id, str) and camera_id:
             conn.execute("insert or ignore into scene_facet_cameras(value) values(?)", (camera_id,))
@@ -547,37 +470,6 @@ class EventStoreSceneMixin:
             rows,
         )
 
-    def _backfill_observation_zones(self):
-        """Index zones already stored in observation documents, one bounded batch at a time."""
-        with self._lock, self._connect() as conn:
-            if conn.execute(
-                "select 1 from scene_migrations where name='scene_observation_zones_v1'"
-            ).fetchone():
-                return
-        last_id = ""
-        while True:
-            with self._lock, self._connect() as conn:
-                conn.execute("begin immediate")
-                rows = conn.execute(
-                    "select id,episode_id,payload_json from scene_observations "
-                    "where id>? order by id limit 400",
-                    (last_id,),
-                ).fetchall()
-                if not rows:
-                    conn.execute(
-                        "insert into scene_migrations values('scene_observation_zones_v1',0)"
-                    )
-                    return
-                for row in rows:
-                    try:
-                        item = json.loads(row["payload_json"])
-                    except (TypeError, json.JSONDecodeError):
-                        continue
-                    try:
-                        self._record_observation_zones(conn, row["id"], row["episode_id"], item)
-                    except sqlite3.IntegrityError:
-                        continue
-                last_id = rows[-1]["id"]
 
     def _scene_resolve(self, conn, incident_id):
         seen = set()
@@ -641,12 +533,6 @@ class EventStoreSceneMixin:
 
     def _scene_same_source_frame(self, row, item, *, event_id, captured):
         original=json.loads(row["payload_json"])
-        if (row["event_id"]==event_id and abs(row["captured_epoch"]-captured)<=1e-6
-                and "legacy" in {original.get("frame_source","legacy"),item.get("frame_source","legacy")}
-                and _overlap(original,item)>=1-1e-9):
-            # Legacy covers have no frame provenance. Only an exact same-event
-            # timestamp and box bridge them to acquired observations.
-            return True
         recording=portable_media_path(self.storage_dir,str(item.get("recording_path") or ""))
         return bool(recording and recording==row["recording_path"]
                     and original.get("frame_timestamp_exact") and item.get("frame_timestamp_exact"))
@@ -695,7 +581,6 @@ class EventStoreSceneMixin:
                 candidates.extend((None, dict(o)) for o in item.get("observations", []) if isinstance(o,dict) and o.get("label"))
             if item.get("status") == "object_tracking" and isinstance(item.get("object_tracking"),dict):
                 candidates.extend((None, dict(o)) for o in item["object_tracking"].get("scene_observations",[]) if isinstance(o,dict) and o.get("label"))
-        legacy_candidates = [(None,o) for o in legacy_track_observations(objects)]
         if not candidates:
             candidates=presentation
         else:
@@ -725,7 +610,6 @@ class EventStoreSceneMixin:
                 if len(matched_frames)==1:
                     for position in matches:
                         candidates[position]=(index,{**candidates[position][1],"snapshot_path":row.get("snapshot_path") or ""})
-        candidates.extend(legacy_candidates)
         return objects, candidates, presentation
 
     def _scene_refresh_alerts(self, conn, event_id):
@@ -996,51 +880,6 @@ class EventStoreSceneMixin:
                 )
         return incident_id
 
-    def _mark_legacy_scene_notifications(self, conn):
-        """Retire per-revision payload rows from before outbox coalescing.
-
-        Legacy rows embedded a full snapshot per revision. They are purged in
-        small batches after startup; unfinished incidents are re-queued as one
-        pending marker each so their latest state is still published.
-        """
-        row = conn.execute(
-            "select cursor_event_id from scene_migrations where name='notification_outbox_coalesce_v1'"
-        ).fetchone()
-        if row is not None:
-            return int(row[0])
-        cutoff = int(conn.execute("select coalesce(max(rowid),0) from scene_notification_outbox").fetchone()[0])
-        if cutoff:
-            pending = conn.execute(
-                "select id, revision from scene_incidents where state not in ('complete','merged','unconfirmed') "
-                "and id in (select distinct incident_id from scene_notification_outbox)"
-            ).fetchall()
-            for incident in pending:
-                conn.execute(
-                    "delete from scene_notification_outbox where incident_id=? and revision=?",
-                    (incident["id"], incident["revision"]),
-                )
-                conn.execute(
-                    "insert into scene_notification_outbox values(?,?,'')",
-                    (incident["id"], incident["revision"]),
-                )
-        conn.execute(
-            "insert into scene_migrations values('notification_outbox_coalesce_v1',?)", (cutoff,),
-        )
-        return cutoff
-
-    def purge_legacy_scene_notifications(self, limit=10):
-        """Delete a bounded batch of retired outbox rows; returns rows removed."""
-        if not self._scene_outbox_legacy_rowid:
-            return 0
-        with self._lock, self._connect() as conn:
-            removed = conn.execute(
-                "delete from scene_notification_outbox where rowid in (select rowid from "
-                "scene_notification_outbox where rowid <= ? and payload_json != '' limit ?)",
-                (self._scene_outbox_legacy_rowid, max(1, int(limit))),
-            ).rowcount
-        if not removed:
-            self._scene_outbox_legacy_rowid = 0
-        return max(0, int(removed))
 
     def _scene_changed(self,conn,incident_id,*,notify=True):
         incident_id=self._scene_resolve(conn,incident_id)

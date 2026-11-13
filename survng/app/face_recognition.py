@@ -85,9 +85,9 @@ class OpenVinoFaceRecognizer:
                 raise ValueError("Face embeddings require an exported single-image, single-embedding model.")
             self.input_layout, self.input_shape = self._image_input(model.input(0).shape)
             profile = self.config.face_embedding_profile
-            if profile != "legacy_openvino" and self.input_shape != (112, 112):
+            if profile != "openvino_raw" and self.input_shape != (112, 112):
                 raise ValueError("AdaFace/ArcFace profiles require a 112×112 aligned input.")
-            if profile == "arcface" or (profile == "legacy_openvino" and "arcface" in model_path.name.lower()):
+            if profile == "arcface" or (profile == "openvino_raw" and "arcface" in model_path.name.lower()):
                 self.input_color_order = "RGB"
             else:
                 self.input_color_order = "BGR"
@@ -130,7 +130,7 @@ class OpenVinoFaceRecognizer:
             output_shape = [int(value) for value in self._output.shape]
             self.embedding_size = int(np.prod(output_shape[1:] or output_shape))
             self.model_fingerprint = self._fingerprint(model_path, landmark_path)
-            if profile != "legacy_openvino":
+            if profile != "openvino_raw":
                 self.model_fingerprint = hashlib.sha256(
                     f"{self.model_fingerprint}:{profile}:112:mean127.5:scale127.5:alignment-v1".encode()
                 ).hexdigest()[:24]

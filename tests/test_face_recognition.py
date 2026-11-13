@@ -14,7 +14,7 @@ from survng.app.face_recognition import OpenVinoFaceRecognizer
 
 
 @pytest.mark.parametrize("profile,color,expected", [
-    ("legacy_openvino", "BGR", [0., 127.5, 255.]),
+    ("openvino_raw", "BGR", [0., 127.5, 255.]),
     ("adaface", "BGR", [-1., 0., 1.]),
     ("arcface", "RGB", [1., 0., -1.]),
 ])
@@ -44,7 +44,7 @@ def test_profiles_load_and_produce_distinct_fingerprints(tmp_path):
     landmark_path = tmp_path / "landmarks.xml"
     ov.serialize(landmarks, landmark_path)
     fingerprints = []
-    for profile in ("legacy_openvino", "adaface", "arcface"):
+    for profile in ("openvino_raw", "adaface", "arcface"):
         recognizer = OpenVinoFaceRecognizer(DetectorConfig(
             face_recognition_enabled=True, face_embedding_profile=profile,
             face_embedding_model_path=str(model_path),

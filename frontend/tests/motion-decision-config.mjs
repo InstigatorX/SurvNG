@@ -21,8 +21,6 @@ assert.match(motionBehaviorOption("camera_rescue").description, /does not filter
 assert.match(motionModeInfo("adaptive").description, /ONVIF notices.*cannot trigger detection/);
 assert.equal(motionModeInfo("unknown").value, "camera_rescue");
 assert.equal(motionBehaviorOption("unknown").value, "camera_rescue");
-assert.equal(motionModeInfo("audit").value, "audit");
-assert.match(motionModeInfo("enforce").description, /ambiguous hybrid/);
 
 const defaults = readMotionDecisionFusion(undefined);
 assert.equal(defaults.custom, false);
@@ -103,12 +101,5 @@ assert.equal(readMotionDecisionFusion(extended).custom, true);
 const alternateMinimum = structuredClone(graph);
 alternateMinimum[0].options.minimum_sources = 2;
 assert.equal(readMotionDecisionFusion(alternateMinimum).custom, true);
-
-const legacyThreeStage = [
-  graph[0],
-  { stage_id: "event_state", implementation: "score_event_state", options: {} },
-  { stage_id: "trigger", implementation: "score_trigger", options: {} },
-];
-assert.equal(readMotionDecisionFusion(legacyThreeStage).custom, false);
 
 console.log("motion decision configuration tests passed");

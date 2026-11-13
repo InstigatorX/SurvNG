@@ -7,21 +7,7 @@ SurvNG uses one production tracker and an offline evaluation workflow:
   quality-gated ReID galleries, and entity relink.
 - **SurvNG Hybrid** (`survng_hybrid`) remains selectable as the prior production
   engine.
-- **TrackTrack** and **BoT-SORT** remain offline comparison engines.
-- Historic Hybrid-candidate, FastTrack, and Deep OC-SORT results remain readable.
-
-See [the evaluation guide](docs/tracking-evaluation.md) and
-[corpus checklist](docs/tracking-corpus.md) for saved-input replay, annotation,
-scoring, sampling profiles, and the promotion criteria.
-
-Comparison engines receive the same saved detections and available
-SurvNG person and vehicle embeddings. Missing optional engines are reported
-individually; Hybrid and Sparse Identity evaluation and input capture remain
-available. Compare never changes the production tracker. Historical verdicts
-remain readable. None of the comparison alternatives is selectable for
-production.
-
-## Why SurvNG Hybrid is the default
+## SurvNG Hybrid behavior
 
 “Better” here means better suited to SurvNG's normal operating constraints. It
 does not mean Hybrid will draw the best path in every recording.
@@ -34,10 +20,6 @@ time, predicted box movement, overlap, center distance, object class, and
 configurable lost-track grace to associate those sparse samples. Its lifecycle
 therefore matches SurvNG's delayed samples, segment boundaries, and temporary
 detection gaps directly.
-
-Production therefore remains on Hybrid. Upstream trackers are exercised only
-inside bounded offline comparisons and never participate in camera-event
-lifecycle decisions.
 
 ### Appearance recovery is selective and shared with SurvNG
 
@@ -52,20 +34,12 @@ index, related-incident suggestions, and cross-camera investigation features.
 This keeps live tracking and later incident intelligence on the same identity
 evidence and model thresholds.
 
-The alternative trackers do not replace or improve the ReID models. Comparison
-uses the same supplied embeddings, with each engine's association behavior and
-appearance gates recorded in its diagnostics.
-
 ### It has a smaller and more predictable runtime footprint
 
 Hybrid is implemented with the NumPy/OpenCV stack SurvNG already uses. It does
 not require PyTorch, Ultralytics, LAP, CUDA Python packages, or a second model
 runtime. This matters on an NVR that is simultaneously recording many streams,
 decoding event windows, running OpenVINO inference, and serving playback.
-
-The optional Ultralytics installation is substantially larger and has more
-upstream dependencies. SurvNG loads it lazily only when an offline comparison
-starts; routine status checks and production tracking do not load it.
 
 `detector.tracking.sample_fps` is a memory setting as much as an accuracy one.
 Each camera keeps twelve seconds of catch-up history for its main and live
@@ -89,48 +63,12 @@ The implementation is maintained and regression-tested with SurvNG's event,
 recording, zone, replay, and persistence behavior. It does not depend on private
 tracker internals from another package.
 
-## How Compare works
+## Production runtime
 
-The incident viewer's **Compare** action evaluates a bounded 30-second window.
-Detection and available appearance extraction run once. It retains their exact
-outputs in a checksummed replay bundle, then runs current Hybrid, Sparse Identity,
-TrackTrack and BoT-SORT independently. Download the replay inputs before leaving
-the viewer to preserve the full input data; history stores compact results only.
+Sparse Identity is the default; Hybrid remains selectable. Both use the
+existing NumPy/OpenCV stack. Configure the implementation in Admin and inspect
+stored tracks and runtime diagnostics to assess behavior.
 
-Select a 2 FPS target, a 0.75 FPS target, or deliberate sample gaps. These profiles
-select saved source frames and preserve timestamps. They do not simulate the
-production adaptive policy or full session/capacity lifecycle. An explicit
-lost-track cutoff diagnostic shows when the backend's live-track predicate first
-becomes false, while offline replay continues to observe possible recovery.
-
-The viewer shows paths, timing, supplied appearance count and a fragmentation
-proxy. Actual identity metrics require human-labeled ground truth and the offline
-CLI described in the evaluation guide. Neither proxy counts nor visual verdicts
-change the live tracker. Only one comparison can run at a time.
-
-## Production and optional comparison runtime
-
-Use **SurvNG Hybrid** when you want the normal recommended configuration:
-
-- lowest dependency and memory overhead;
-- behavior tuned for sparse, timestamped SurvNG samples;
-- selective person and vehicle appearance recovery;
-- direct integration with stored tracks and cross-camera intelligence; and
-- stable configuration that SurvNG owns and tests end to end.
-
-Production always uses Hybrid. Install the optional comparison
-runtime with:
-
-```bash
-.venv/bin/pip install -r requirements-ultralytics-tracking.txt
-```
-
-TrackTrack and BoT-SORT require the tested Ultralytics 8.4.148 API. These
-adapters reuse supplied embeddings and do not download another model.
-
-## Practical conclusion
-
-Hybrid is purpose-built for how SurvNG obtains, timestamps, stores, and reviews
-detections. The alternative engines are offline evaluation candidates. Any
-production change requires evidence from representative recordings. Accumulated side-by-side evidence helps expose difficult
-camera scenes without allowing a comparison to alter runtime behavior.
+The comparison UI, comparison APIs, offline replay command, and optional
+Ultralytics backends have been removed. Identity metrics remain available to
+production tracker regression tests.

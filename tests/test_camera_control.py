@@ -59,43 +59,6 @@ class CameraControlServiceTest(unittest.TestCase):
                 "camera_enabled": {"gate": False},
             })
 
-    def test_legacy_media_state_is_loaded_then_migrated_to_local_state_path(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            local = root / "database" / "runtime_state.json"
-            legacy = root / "media" / "runtime_state.json"
-            legacy.parent.mkdir(parents=True)
-            legacy.write_text(
-                '{"recording_enabled":{"gate":false},'
-                '"detection_enabled":{"gate":false},'
-                '"camera_enabled":{"gate":true}}',
-                encoding="utf-8",
-            )
-            camera = CameraConfig(
-                id="gate",
-                name="Gate",
-                stream_url="rtsp://camera/main",
-            )
-            worker = Mock()
-            controls = CameraControlService(
-                cameras=[camera],
-                workers={"gate": worker},
-                recording=Mock(),
-                fleet=Mock(),
-                mqtt=Mock(),
-                runtime_monitor=Mock(),
-                state_path=local,
-                legacy_state_paths=(legacy,),
-            )
-
-            self.assertFalse(controls.recording_enabled("gate"))
-            self.assertFalse(controls.detection_enabled("gate"))
-            self.assertFalse(local.exists())
-
-            controls.persist()
-
-            self.assertTrue(local.exists())
-            self.assertIn('"gate": false', local.read_text(encoding="utf-8"))
 
     def test_malformed_persisted_controls_fall_back_to_safe_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

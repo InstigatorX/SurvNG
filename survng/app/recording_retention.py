@@ -620,11 +620,6 @@ class RecordingRetentionService:
                     result["deleted_files"] += 1
                     result["deleted_bytes"] += int(row["size_bytes"] or 0)
                     location_id = str(row["location_id"] or "default")
-                    if location_id == "default" and self.media_storage is not None:
-                        location_id = str(
-                            self.media_storage.location_id_for(path, "recordings")
-                            or "default"
-                        )
                     deleted_by_location = result["recording_deleted_bytes_by_location"]
                     deleted_by_location[location_id] = (
                         int(deleted_by_location.get(location_id) or 0)
@@ -1112,28 +1107,6 @@ class RecordingRetentionService:
             placeholders = ",".join("?" for _ in location_ids)
             location_clause = f" AND location_id IN ({placeholders})"
             location_parameters = tuple(location_ids)
-            if self.media_storage is not None:
-                # Legacy rows use 'default' for any volume. Filter their path
-                # before LIMIT, otherwise older rows from a healthy volume can
-                # crowd out every candidate on the pressured volume. This is a
-                # lexical selection hint; resolved-path checks still authorize
-                # each deletion below, without NFS probes for every index row.
-                legacy_clauses: list[str] = []
-                legacy_parameters: list[object] = []
-                for root in self.media_storage.configured_roots_for("recordings"):
-                    if self.media_storage.location_id_for(root, "recordings") not in location_ids:
-                        continue
-                    prefix = str(root) + os.sep
-                    legacy_clauses.append("substr(path, 1, ?) = ?")
-                    legacy_parameters.extend((len(prefix), prefix))
-                legacy_predicate = " OR ".join(legacy_clauses) or "0"
-                location_clause = (
-                    f" AND ((location_id != 'default' AND location_id IN ({placeholders}))"
-                    f" OR (location_id = 'default' AND ({legacy_predicate})))"
-                )
-                location_parameters += tuple(legacy_parameters)
-        # The existing range index keeps upgrades non-blocking. A location-first
-        # index on millions of legacy rows would otherwise be built at startup.
         index_name = "recordings_range"
         for group in groups:
             cutoff = protected_cutoff
@@ -1262,13 +1235,6 @@ class RecordingRetentionService:
             selected_by_location: dict[str, int] = {}
             for row in candidates.values():
                 location_id = str(row["location_id"] or "default")
-                if location_id == "default" and self.media_storage is not None:
-                    location_id = str(
-                        self.media_storage.location_id_for(
-                            Path(str(row["path"])), "recordings"
-                        )
-                        or "default"
-                    )
                 selected_by_location[location_id] = (
                     selected_by_location.get(location_id, 0)
                     + int(row["size_bytes"] or 0)
@@ -1301,20 +1267,6 @@ class RecordingRetentionService:
                 for row in self._merge_oldest_rows(row_groups):
                     path_key = str(row["path"])
                     row_location = str(row["location_id"] or "default")
-                    resolved_location = row_location
-                    if row_location == "default" and self.media_storage is not None:
-                        resolved_location = str(
-                            self.media_storage.location_id_for(
-                                Path(path_key), "recordings"
-                            )
-                            or "default"
-                        )
-                    if (
-                        row_location == "default"
-                        and self.media_storage is not None
-                        and resolved_location not in member_ids
-                    ):
-                        continue
                     if (
                         path_key not in candidates
                         and self._candidate_retry_ready(path_key)
@@ -1322,8 +1274,8 @@ class RecordingRetentionService:
                         candidates[path_key] = row
                         row_bytes = int(row["size_bytes"] or 0)
                         selected_bytes += row_bytes
-                        selected_by_location[resolved_location] = (
-                            selected_by_location.get(resolved_location, 0) + row_bytes
+                        selected_by_location[row_location] = (
+                            selected_by_location.get(row_location, 0) + row_bytes
                         )
                     group_selected = sum(
                         selected_by_location.get(member_id, 0)

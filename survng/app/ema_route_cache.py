@@ -82,7 +82,6 @@ class EmaRouteCandidateCache:
         self,
         path: Path,
         *,
-        legacy_jobs_path: Path | None = None,
         capacity: int = 4096,
         per_camera_capacity: int = 256,
         batch_size: int = 64,
@@ -91,7 +90,6 @@ class EmaRouteCandidateCache:
         maximum_payload_bytes: int = 16 * 1024,
     ) -> None:
         self.path = Path(path)
-        self.legacy_jobs_path = Path(legacy_jobs_path) if legacy_jobs_path else None
         self.capacity = max(1, int(capacity))
         self.per_camera_capacity = max(1, int(per_camera_capacity))
         self.batch_size = max(1, int(batch_size))
@@ -294,7 +292,6 @@ class EmaRouteCandidateCache:
             try:
                 connection.execute("pragma journal_mode = wal")
                 self._initialize(connection)
-                self._migrate_legacy(connection)
                 with self._condition:
                     self._status["alive"] = True
                     self._ready.set()
@@ -337,53 +334,6 @@ class EmaRouteCandidateCache:
                 "on ema_route_candidates(captured_at)"
             )
 
-    def _migrate_legacy(self, connection: sqlite3.Connection) -> None:
-        legacy = self.legacy_jobs_path
-        if legacy is None or legacy == self.path or not legacy.exists():
-            return
-        cutoff = time.time() - self.retention_seconds
-        with sqlite3.connect(legacy, timeout=2.0) as source:
-            exists = source.execute(
-                "select 1 from sqlite_master where type='table' "
-                "and name='ema_route_candidates'"
-            ).fetchone()
-            if not exists:
-                return
-            cursor = source.execute(
-                "select camera_id, captured_at, payload_json, created_at "
-                "from ema_route_candidates where captured_at >= ? "
-                "order by captured_at",
-                (cutoff,),
-            )
-            while True:
-                rows = cursor.fetchmany(256)
-                if not rows:
-                    break
-                compact_rows: list[tuple[str, float, str, str]] = []
-                for camera_id, captured_at, payload_json, created_at in rows:
-                    try:
-                        payload = json.loads(str(payload_json))
-                        if not isinstance(payload, dict):
-                            continue
-                        compact_json = durable_json_dumps(
-                            compact_ema_candidate(payload), sort_keys=True
-                        )
-                    except (TypeError, ValueError):
-                        continue
-                    if len(compact_json.encode("utf-8")) > self.maximum_payload_bytes:
-                        continue
-                    compact_rows.append(
-                        (str(camera_id), float(captured_at), compact_json, str(created_at))
-                    )
-                if compact_rows:
-                    with connection:
-                        connection.executemany(
-                            "insert or replace into ema_route_candidates "
-                            "(camera_id,captured_at,payload_json,created_at) values (?,?,?,?)",
-                            compact_rows,
-                        )
-            source.execute("drop table ema_route_candidates")
-            source.commit()
 
     def _writer_loop(self, connection: sqlite3.Connection) -> None:
         last_prune = 0.0

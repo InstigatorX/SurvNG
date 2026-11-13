@@ -10,8 +10,6 @@ from copy import deepcopy
 from .incident_payload import canonical_incident_payload
 
 LOGGER = logging.getLogger(__name__)
-LEGACY_OUTBOX_PURGE_BUDGET_SECONDS = 0.2
-LEGACY_OUTBOX_PURGE_YIELD_SECONDS = 0.02
 
 
 class CanonicalIncidentLifecycle:
@@ -79,7 +77,6 @@ class CanonicalIncidentLifecycle:
             if self._stop.is_set():
                 return delivered
             self._events.settle_scene_incidents()
-            self._purge_legacy_outbox()
             for entry in self._events.scene_pending_notifications():
                 if self._stop.is_set():
                     break
@@ -99,15 +96,6 @@ class CanonicalIncidentLifecycle:
                     break
         return delivered
 
-    def _purge_legacy_outbox(self) -> None:
-        purge = getattr(self._events, "purge_legacy_scene_notifications", None)
-        if not callable(purge):
-            return
-        deadline = time.monotonic() + LEGACY_OUTBOX_PURGE_BUDGET_SECONDS
-        # Small slices with a pause between them so writers can take the lock.
-        while purge() and time.monotonic() < deadline:
-            if self._stop.wait(LEGACY_OUTBOX_PURGE_YIELD_SECONDS):
-                return
 
     def _log_failure(self) -> None:
         now = time.monotonic()

@@ -1,4 +1,3 @@
-import json
 import sqlite3
 import threading
 from unittest.mock import patch
@@ -87,31 +86,6 @@ def test_decision_sample_references_follow_atomic_writes_and_deletes(tmp_path):
         assert conn.execute("select count(*) from scene_decision_samples").fetchone()[0] == 0
 
 
-def test_legacy_decision_reference_backfill_resumes_and_keeps_new_writes(tmp_path):
-    ledger = Ledger(tmp_path)
-    sample(ledger)
-    for index in range(3):
-        decision(ledger, f"old-{index}")
-    with ledger._connect() as conn:
-        conn.execute("drop trigger scene_decision_samples_insert")
-        conn.execute("drop trigger scene_decision_samples_update")
-        conn.execute("drop table scene_decision_samples")
-        conn.execute("delete from scene_acquisition_migrations where name='decision_sample_refs_v1'")
-        conn.execute("update scene_activity_decisions set sample_ids_json='[\"s\",\"missing-legacy-frame\"]' where id='old-0'")
-    ledger = Ledger(tmp_path)
-    assert ledger.backfill_scene_decision_samples(batch_size=2) == {"processed": 2, "complete": False}
-    decision(ledger, "new")
-    ledger = Ledger(tmp_path)
-    while not ledger.backfill_scene_decision_samples(batch_size=2)["complete"]:
-        pass
-    with ledger._connect() as conn:
-        refs = {tuple(r) for r in conn.execute("select * from scene_decision_samples")}
-        assert refs == {(f"old-{i}", "s") for i in range(3)} | {
-            ("old-0", "missing-legacy-frame"), ("new", "s"),
-        }
-    assert ledger.backfill_scene_decision_samples() == {"processed": 0, "complete": True}
-
-
 def test_supported_decision_admits_atomically_and_only_once(tmp_path):
     ledger=Ledger(tmp_path)
     sample(ledger)
@@ -182,22 +156,6 @@ def test_expired_snapshot_does_not_resurrect_on_new_sample(tmp_path):
     second=sample(ledger,"second",observations=[{**observed(),"snapshot_path":"snapshots/test.jpg"}])
     assert second["observations"][0]["snapshot_path"] == ""
     assert ledger.scene_acquired_observation(first["observation_ids"][0])["snapshot_path"] == ""
-
-
-def test_historical_backfill_is_bounded_silent_and_preserves_original_ids(tmp_path):
-    ledger=Ledger(tmp_path)
-    with ledger._connect() as conn:
-        conn.execute("create table scene_observations(id text primary key,event_id integer,camera_id text,captured_epoch real,payload_json text,snapshot_path text,recording_path text)")
-        for index in range(3):
-            conn.execute("insert into scene_observations values(?,?,?,?,?,?,?)",
-                         (f"old-{index}",1,"gate",100+index,json.dumps(observed()),"",""))
-    assert ledger.backfill_existing_scene_acquisitions(batch_size=2) == {"processed":2,"complete":False}
-    assert Ledger(tmp_path).backfill_existing_scene_acquisitions(batch_size=2) == {"processed":1,"complete":True}
-    assert ledger.backfill_existing_scene_acquisitions()["processed"] == 0
-    with ledger._connect() as conn:
-        assert conn.execute("select count(*) from acquired_observations").fetchone()[0] == 3
-        assert [row[0] for row in conn.execute("select source_observation_id from scene_observations order by id")] == ["old-0","old-1","old-2"]
-        assert conn.execute("select count(*) from scene_activity_decisions").fetchone()[0] == 0
 
 
 def test_acquisition_registers_media_without_filesystem_dependency(tmp_path):

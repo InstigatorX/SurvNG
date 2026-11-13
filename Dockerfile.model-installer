@@ -1,5 +1,5 @@
 # One-shot SurvNG model downloader/exporter for Docker hosts.
-# Does not include SurvNG runtime or model weights — only tooling to fetch them.
+# Includes configuration initialization and model tooling, without the service or weights.
 # License notices: docker/model-installer/NOTICE and THIRD_PARTY_MODELS.md
 FROM ubuntu:24.04 AS model-installer
 
@@ -26,7 +26,16 @@ RUN apt-get update \
         python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
+# Configuration initialization uses the same lightweight dependencies as SurvNG.
+RUN python3 -m venv /opt/config-venv \
+    && /opt/config-venv/bin/pip install --no-cache-dir 'pydantic>=2.13.5,<3' 'cryptography>=41,<47'
+ENV PATH="/opt/config-venv/bin:$PATH"
+
 WORKDIR /opt/install
+COPY survng/__init__.py ./survng/
+COPY survng/app/__init__.py survng/app/config.py survng/app/config_secrets.py \
+     survng/app/config_init.py survng/app/proxy.py survng/app/system_review.py ./survng/app/
+COPY docker/config.example.json ./config.docker.example.json
 
 COPY scripts/install-docker-models.sh \
      scripts/export-mobileclip2-openvino.py \

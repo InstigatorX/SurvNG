@@ -28,8 +28,8 @@ INCIDENT_ACTIVITY_REASONS = frozenset({"event_state_active", "event_state_cooldo
 # Durable refinement jobs replay a completion shortly after it lands, so recent
 # ids are all that must be remembered to stay idempotent across a restart.
 COMPLETED_REFINEMENT_MEMORY = 512
-ENFORCING_MODES = frozenset({"camera", "camera_rescue", "adaptive", "enforce"})
-AUDITED_MODES = frozenset({"audit", *ENFORCING_MODES})
+ENFORCING_MODES = frozenset({"camera", "camera_rescue", "adaptive"})
+AUDITED_MODES = ENFORCING_MODES
 
 
 class MotionAuditRecorder(Protocol):
@@ -518,8 +518,7 @@ class MotionDecisionOrchestrator:
             if route_intent_id:
                 qualification["detection_intent_id"] = route_intent_id
         effective_accepted = bool(
-            mode in {"off", "audit"}
-            or result.accepted
+            result.accepted
             or borderline_candidate
             or suppression_verification_candidate
         )
@@ -609,9 +608,7 @@ class MotionDecisionOrchestrator:
             ),
             None,
         )
-        if mode == "off":
-            result = MotionQualificationResult(True, 1.0, 0.0, "disabled", 0, {})
-        elif mode == "camera_rescue" and not adaptive_only:
+        if mode == "camera_rescue" and not adaptive_only:
             # Camera + EMA Backup makes the camera notice authoritative. EMA
             # remains an independent rescue source and must never delay or
             # suppress the primary camera-triggered object check.
@@ -793,8 +790,6 @@ class MotionDecisionOrchestrator:
                     self._state.increment_stat("camera_uncertainty_checks", 1)
                     if found_object:
                         self._state.increment_stat("camera_uncertainty_rescues", 1)
-            if mode == "audit" and not result.accepted and found_object:
-                self._state.increment_stat("audit_object_matches", 1)
             if visual_backup:
                 self._record_visual_backup_audit(
                     triggers=triggers,

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.parse import unquote, urlsplit
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from .proxy import ProxyConfig
 
@@ -351,23 +351,6 @@ def _validate_unique_motion_stage_ids(
             raise ValueError(f"duplicate motion stage ID in {graph_name} graph")
 
 
-def _reject_enabled_retired_mog2(value: object) -> object:
-    """Reject active legacy MOG2 flags while accepting disabled old config files."""
-    if not isinstance(value, dict):
-        return value
-    raw = value.get("mog2_audit_enabled")
-    enabled = (
-        raw.strip().lower() in {"1", "true", "yes", "on"}
-        if isinstance(raw, str)
-        else bool(raw)
-    )
-    if enabled:
-        raise ValueError(
-            "MOG2 has been retired; use Enhanced Motion Analysis (EMA) validation"
-        )
-    return value
-
-
 class MotionPipelineConfig(BaseModel):
     qualification: list[MotionStageSelection] = Field(default_factory=list)
     observation: list[MotionStageSelection] = Field(default_factory=list)
@@ -403,17 +386,14 @@ class CameraMotionPipelineConfig(BaseModel):
 
 
 class MotionQualificationConfig(BaseModel):
-    # Legacy off/audit/enforce values remain loadable for backward
-    # compatibility; the GUI emits camera/camera_rescue/adaptive for new saves.
-    mode: Literal["camera", "camera_rescue", "adaptive", "off", "audit", "enforce"] = "camera_rescue"
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["camera", "camera_rescue", "adaptive"] = "camera_rescue"
     sensitivity: Literal["low", "balanced", "high"] = "balanced"
     stationary_object_tolerance: Literal["low", "balanced", "high"] = "balanced"
     illumination_filter_enabled: bool = False
     frame_width: int = Field(default=320, ge=240, le=960)
     sample_fps: float = Field(default=5.0, ge=2.0, le=10.0)
-    # Retained so v1.1/v1.2 configuration files remain loadable. The old
-    # pre-pipeline filter prevented EMA from learning quiet scene state.
-    temporal_filter_threshold: float = Field(default=0.005, ge=0.0, le=1.0)
     camera_mode_background_fps: float = Field(default=2.0, ge=0.5, le=5.0)
     visual_backup_warmup_seconds: float = Field(default=10.0, ge=0.0, le=120.0)
     visual_backup_grace_seconds: float = Field(default=1.5, ge=0.0, le=5.0)
@@ -432,11 +412,6 @@ class MotionQualificationConfig(BaseModel):
     borderline_margin: float = Field(default=0.03, ge=0.0, le=0.10)
     pipeline: MotionPipelineConfig = Field(default_factory=MotionPipelineConfig)
 
-    @model_validator(mode="before")
-    @classmethod
-    def reject_enabled_retired_mog2(cls, value: object) -> object:
-        return _reject_enabled_retired_mog2(value)
-
 
 class MotionSpatialAlignmentConfig(BaseModel):
     mode: Literal["auto", "identity", "affine", "untrusted"] = "auto"
@@ -448,7 +423,9 @@ class MotionSpatialAlignmentConfig(BaseModel):
 
 
 class CameraMotionQualificationConfig(BaseModel):
-    mode: Literal["inherit", "camera", "camera_rescue", "adaptive", "off", "audit", "enforce"] = "inherit"
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["inherit", "camera", "camera_rescue", "adaptive"] = "inherit"
     sensitivity: Literal["inherit", "low", "balanced", "high"] = "inherit"
     stationary_object_tolerance: Literal["inherit", "low", "balanced", "high"] = "inherit"
     illumination_filter_enabled: bool | None = None
@@ -465,11 +442,6 @@ class CameraMotionQualificationConfig(BaseModel):
         default_factory=MotionSpatialAlignmentConfig
     )
     pipeline: CameraMotionPipelineConfig = Field(default_factory=CameraMotionPipelineConfig)
-
-    @model_validator(mode="before")
-    @classmethod
-    def reject_enabled_retired_mog2(cls, value: object) -> object:
-        return _reject_enabled_retired_mog2(value)
 
 
 class CameraRetentionConfig(BaseModel):
@@ -804,7 +776,7 @@ class ObjectTrackingConfig(BaseModel):
     visit_min_quality: float = Field(default=0.4, ge=0.0, le=1.0)
     visit_max_seconds: float = Field(default=1200.0, ge=30.0, le=7200.0)
     enabled: bool = True
-    implementation: str = Field(default="survng_sparse_identity", min_length=1, max_length=64)
+    implementation: Literal["survng_sparse_identity", "survng_hybrid"] = "survng_sparse_identity"
     excluded_labels: list[str] = Field(default_factory=lambda: ["face"], max_length=128)
     sample_fps: float = Field(default=2.0, ge=0.5, le=5.0)
     adaptive_sampling_enabled: bool = True
@@ -859,20 +831,6 @@ class ObjectTrackingConfig(BaseModel):
     entity_relink_enabled: bool = False
     ambiguity_min_person_tracks: int = Field(default=2, ge=1, le=32)
 
-    @field_validator("implementation", mode="before")
-    @classmethod
-    def normalize_tracking_implementation(cls, value: object) -> str:
-        implementation = str(value or "").strip().lower()
-        if implementation in {
-            "survng_hybrid_candidate",
-            "ultralytics_tracktrack",
-            "bytetrack",
-            "ultralytics_botsort",
-            "ultralytics_deepocsort",
-            "ultralytics_fasttrack",
-        }:
-            return "survng_hybrid"
-        return implementation
 
     @model_validator(mode="after")
     def validate_reid_model(self) -> "ObjectTrackingConfig":
@@ -951,7 +909,7 @@ class DetectorConfig(BaseModel):
     warmup_enabled: bool = True
     face_max_observations: int = Field(default=1000, ge=100, le=100000)
     face_recognition_enabled: bool = False
-    face_embedding_profile: Literal["legacy_openvino", "adaface", "arcface"] = "legacy_openvino"
+    face_embedding_profile: Literal["openvino_raw", "adaface", "arcface"] = "openvino_raw"
     face_evidence_enabled: bool = True
     face_evidence_max_extra_frames: int = Field(default=4, ge=0, le=8)
     face_evidence_timeout_seconds: float = Field(default=4.0, ge=0.5, le=10.0)
@@ -1239,51 +1197,15 @@ class PropertyCameraPlacement(BaseModel):
         return value
 
 
-def property_rectangle_points(x: float, y: float, width: float, height: float, rotation_deg: float = 0) -> list[dict[str, float]]:
-    """Four corners of a rotated rectangle, in the same y-down space as the canvas."""
-    half_w = width / 2
-    half_h = height / 2
-    radians = math.radians(rotation_deg)
-    cosine = math.cos(radians)
-    sine = math.sin(radians)
-    points = []
-    for dx, dy in ((-half_w, -half_h), (half_w, -half_h), (half_w, half_h), (-half_w, half_h)):
-        points.append({
-            "x": min(1.0, max(0.0, x + dx * cosine - dy * sine)),
-            "y": min(1.0, max(0.0, y + dx * sine + dy * cosine)),
-        })
-    return points
-
-
 class PropertyZoneOverlay(BaseModel):
     """Visual stand-in for a configured detection zone. It does not edit that zone."""
+
+    model_config = ConfigDict(extra="forbid")
 
     camera_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     zone_name: str = Field(min_length=1, max_length=128)
     points: list[ZonePoint] = Field(default_factory=list, max_length=32)
 
-    @model_validator(mode="before")
-    @classmethod
-    def rectangle_to_points(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or "points" in value:
-            return value
-        required = ("x", "y", "width", "height")
-        if not all(key in value for key in required):
-            return value
-        try:
-            rotation = float(value.get("rotation_deg") or 0)
-            points = property_rectangle_points(
-                float(value["x"]),
-                float(value["y"]),
-                float(value["width"]),
-                float(value["height"]),
-                rotation,
-            )
-        except (TypeError, ValueError):
-            return value
-        converted = dict(value)
-        converted["points"] = points
-        return converted
 
     @field_validator("zone_name")
     @classmethod
@@ -1352,21 +1274,6 @@ class AppConfig(BaseModel):
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
 
-    @model_validator(mode="before")
-    @classmethod
-    def seed_media_storage_from_storage_dir(cls, value: object) -> object:
-        """When media_storage is omitted, seed one primary location at storage_dir.
-
-        Explicit empty ``locations`` remain invalid; operators must configure at
-        least one media filesystem for new installs and migrated configs.
-        """
-        if not isinstance(value, dict):
-            return value
-        if "media_storage" in value:
-            return value
-        storage_dir = str(value.get("storage_dir") or "survng/storage").strip() or "survng/storage"
-        value["media_storage"] = primary_media_storage(storage_dir).model_dump(mode="json")
-        return value
 
     @field_validator("base_path", mode="before")
     @classmethod
@@ -1484,6 +1391,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         assert_secrets_materialized,
         load_secrets_file,
         secrets_path,
+        assert_public_config,
     )
 
     config_path = _config_path(path)
@@ -1495,10 +1403,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         config_path = Path("config.example.json")
     with config_path.open("r", encoding="utf-8") as handle:
         raw = json.load(handle)
-    # Prefer sidecar secrets when present; legacy monolithic config.json still loads.
-    sidecar = load_secrets_file(secrets_path(config_path))
-    if sidecar is not None:
-        raw = apply_secrets_to_raw_config(raw, sidecar)
+    sidecar_path = secrets_path(config_path)
+    sidecar = load_secrets_file(sidecar_path)
+    if sidecar is None:
+        raise FileNotFoundError(f"required secrets sidecar does not exist: {sidecar_path}")
+    assert_public_config(raw)
+    raw = apply_secrets_to_raw_config(raw, sidecar)
     config = normalize_config(AppConfig.model_validate(raw), assign_ids=False)
     assert_secrets_materialized(config)
     return config
@@ -1521,8 +1431,7 @@ def save_config(
     config_path = _config_path(path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     # Write secrets first so a crash mid-save never leaves redacted config.json
-    # without a matching secrets.json. Legacy plaintext configs remain readable
-    # until this save completes and replaces them. Both files are forced 0600.
+    # without a matching secrets.json. Both files are forced 0600.
     save_secrets_file(extract_secrets(config), secrets_path(config_path))
     public_payload = public_config_dict(config)
     temporary_path: Path | None = None

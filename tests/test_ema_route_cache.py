@@ -166,35 +166,6 @@ class EmaRouteCandidateCacheTest(unittest.TestCase):
             cache.close()
             self.assertFalse(cache.status()["alive"])
 
-    def test_start_migrates_recent_legacy_rows_and_removes_legacy_table(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            legacy = root / "detection-jobs.sqlite3"
-            captured_at = time.time()
-            with sqlite3.connect(legacy) as connection:
-                connection.execute(
-                    "create table ema_route_candidates ("
-                    "camera_id text not null, captured_at real not null, "
-                    "payload_json text not null, created_at text not null, "
-                    "primary key(camera_id,captured_at))"
-                )
-                connection.execute(
-                    "insert into ema_route_candidates values (?,?,?,?)",
-                    ("gate", captured_at, '{"accepted":true,"score":0.8}', "now"),
-                )
-            cache = EmaRouteCandidateCache(
-                root / "ema-route-cache.sqlite3", legacy_jobs_path=legacy
-            )
-            cache.start()
-            self.assertEqual(len(cache.between("gate", captured_at - 1, captured_at + 1)), 1)
-            with sqlite3.connect(legacy) as connection:
-                self.assertIsNone(
-                    connection.execute(
-                        "select 1 from sqlite_master where type='table' "
-                        "and name='ema_route_candidates'"
-                    ).fetchone()
-                )
-            cache.close()
 
     def test_shutdown_deadline_discards_optional_work_under_persistent_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

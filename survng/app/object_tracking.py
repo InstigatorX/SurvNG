@@ -13,10 +13,6 @@ from .object_track.limiter import AdaptiveTrackingLimiter
 from .object_track.registry import (
     ObjectTrackerRegistry,
     build_builtin_object_tracker_registry,
-    ultralytics_deepocsort_dependency_status,
-    ultralytics_fasttrack_dependency_status,
-    ultralytics_botsort_dependency_status,
-    ultralytics_tracktrack_dependency_status,
 )
 from .object_track.sparse_identity import SparseIdentityObjectTracker
 from .object_track.session import (
@@ -69,10 +65,6 @@ __all__ = [
     "TrackingSnapshotWriter",
     "TrackingUpdate",
     "build_builtin_object_tracker_registry",
-    "ultralytics_deepocsort_dependency_status",
-    "ultralytics_fasttrack_dependency_status",
-    "ultralytics_botsort_dependency_status",
-    "ultralytics_tracktrack_dependency_status",
     "_appearance",
     "_box",
     "_confidence",
