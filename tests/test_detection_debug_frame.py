@@ -72,11 +72,6 @@ class DetectionDebugFrameRouteTests(TestCase):
             get_config=lambda: self.manager.config,
             manager_lock=self.generation_lock,
             manager_access=self.access,
-            get_comparison_limiter=Mock(),
-            ensure_event_clip=Mock(),
-            dependency_status=Mock(return_value={"available": True}),
-            comparison_runner=Mock(),
-            sample_video_frames=Mock(),
         )
         self.handler = create_detection_router(dependencies).handlers["detect_debug_frame"]
 
