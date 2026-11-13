@@ -8,7 +8,8 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, Literal
 
 from .runtime_metrics import LatencyHistogram
 
@@ -128,10 +129,10 @@ class ClosingDatabaseConnection(sqlite3.Connection):
 
     def __exit__(
         self,
-        exc_type: object,
-        exc_value: object,
-        traceback: object,
-    ) -> bool:
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
         error = exc_value if isinstance(exc_value, BaseException) else None
         try:
             try:
