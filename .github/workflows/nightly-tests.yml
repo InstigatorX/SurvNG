@@ -64,7 +64,11 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -r requirements.txt
+          if [ -f requirements.lock ]; then
+            .venv/bin/pip install --require-hashes -r requirements.lock
+          else
+            .venv/bin/pip install -r requirements.txt
+          fi
       - name: Run nightly benchmarks
         run: .venv/bin/python scripts/run-benchmarks.py --repetitions 3 --output benchmark-results/nightly-benchmarks.json
       - name: Upload benchmark results
