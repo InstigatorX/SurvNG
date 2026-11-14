@@ -1,7 +1,7 @@
 import { EventEmitter, once } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import type { CameraRecordingConfiguration, CameraRecordingDelegate, RecordingPacket } from '@homebridge/hap-nodejs';
-import { SyntheticMedia, tiers, stopChild } from './media.js';
+import { type MediaSource, tiers, stopChild } from './media.js';
 
 const MAX_BYTES = 64 * 1024 * 1024;
 export function boxes(data: Buffer): Array<{ type: string; data: Buffer }> {
@@ -55,7 +55,33 @@ export function producerReferenceTime(track: number, mediaTime: bigint, wallMs: 
   return box;
 }
 
-export interface Fragment { sequence: number; start: number; data: Buffer }
+export function fragmentDuration(moof: Buffer, track: number, scale: number): number {
+  const root = boxes(moof).find(box => box.type === 'moof');
+  if (!root) throw new Error('missing moof');
+  for (const traf of boxes(root.data).filter(box => box.type === 'traf')) {
+    const items = boxes(traf.data);
+    const tfhd = items.find(box => box.type === 'tfhd')!.data;
+    if (tfhd.readUInt32BE(4) !== track) continue;
+    const flags = tfhd.readUInt32BE(0) & 0xffffff;
+    let offset = 8 + (flags & 1 ? 8 : 0) + (flags & 2 ? 4 : 0);
+    const defaultDuration = flags & 8 ? tfhd.readUInt32BE(offset) : 0;
+    let total = 0;
+    for (const trun of items.filter(box => box.type === 'trun')) {
+      const data = trun.data, options = data.readUInt32BE(0) & 0xffffff, count = data.readUInt32BE(4);
+      offset = 8 + (options & 1 ? 4 : 0) + (options & 4 ? 4 : 0);
+      if (count > 10000) throw new Error('fragment sample limit exceeded');
+      for (let i = 0; i < count; i++) {
+        total += options & 0x100 ? data.readUInt32BE(offset) : defaultDuration;
+        offset += (options & 0x100 ? 4 : 0) + (options & 0x200 ? 4 : 0) + (options & 0x400 ? 4 : 0) + (options & 0x800 ? 4 : 0);
+      }
+    }
+    if (!total || !scale) throw new Error('missing fragment duration');
+    return total / scale;
+  }
+  throw new Error('missing video track');
+}
+
+export interface Fragment { sequence: number; start: number; duration: number; data: Buffer }
 /** A bounded lab prebuffer. Cursors never retain evicted fragments. */
 export class FragmentRing {
   readonly changed = new EventEmitter();
@@ -64,25 +90,29 @@ export class FragmentRing {
   private bytes = 0;
   closed = false;
   constructor(private maxBytes = MAX_BYTES, private historySeconds = 12) {}
-  append(data: Buffer, start: number): void {
+  append(data: Buffer, start: number, duration = 2): void {
     if (this.closed) throw new Error('fragment source closed');
     if (data.length > this.maxBytes) throw new Error('fragment exceeds buffer capacity');
     const last = this.fragments.at(-1);
     if (last && start <= last.start) throw new Error('media discontinuity');
-    this.fragments.push({ sequence: ++this.sequence, start, data }); this.bytes += data.length;
-    while (this.bytes > this.maxBytes || this.fragments[0].start < start - this.historySeconds + 2) {
+    if (!Number.isFinite(duration) || duration <= 0 || duration > this.historySeconds) throw new Error('invalid fragment duration');
+    if (last && start > last.start + last.duration + 0.1) throw new Error('media discontinuity');
+    this.fragments.push({ sequence: ++this.sequence, start, duration, data }); this.bytes += data.length;
+    while (this.bytes > this.maxBytes || this.fragments[0].start + this.fragments[0].duration <= start + duration - this.historySeconds) {
       this.bytes -= this.fragments.shift()!.data.length;
     }
     this.changed.emit('change');
   }
   get coverage(): number {
-    return this.fragments.length ? this.fragments.at(-1)!.start - this.fragments[0].start + 2 : 0;
+    const last = this.fragments.at(-1);
+    return last ? last.start + last.duration - this.fragments[0].start : 0;
   }
   get size(): number { return this.bytes; }
   cursor(preRoll = 4): number {
     if (this.coverage < preRoll) throw new Error('prebuffer not ready');
-    const end = this.fragments.at(-1)!.start + 2;
-    return this.fragments.find(fragment => fragment.start >= end - preRoll)!.sequence;
+    const last = this.fragments.at(-1)!;
+    const end = last.start + last.duration;
+    return [...this.fragments].reverse().find(fragment => fragment.start <= end - preRoll + 0.001)!.sequence;
   }
   async read(sequence: number, signal: AbortSignal): Promise<Fragment> {
     while (true) {
@@ -131,6 +161,7 @@ export class LabRecording implements CameraRecordingDelegate {
   ring = new FragmentRing();
   private init?: Buffer;
   private child?: ChildProcess;
+  private watchdog?: NodeJS.Timeout;
   private config?: CameraRecordingConfiguration;
   private active = false;
   private desired = false;
@@ -141,7 +172,7 @@ export class LabRecording implements CameraRecordingDelegate {
   private motionStopped = 0;
   private producerKey = '';
   readonly counters = { streams: 0, completed: 0, failed: 0, producerFailures: 0 };
-  constructor(private media: SyntheticMedia, private allowed: () => boolean) {}
+  constructor(private media: MediaSource, private allowed: () => boolean) {}
   setMotion(value: boolean): void { this.motion = value; if (!value) this.motionStopped = Date.now(); }
   updateRecordingConfiguration(config?: CameraRecordingConfiguration): void { this.config = config; this.reconcile(); }
   updateRecordingActive(active: boolean): void { this.desired = active; this.reconcile(); }
@@ -151,34 +182,38 @@ export class LabRecording implements CameraRecordingDelegate {
       const key = this.desired && this.config && this.allowed() ? JSON.stringify([this.config, this.audio]) : '';
       if (this.active && key === this.producerKey) return;
       await this.stopProducer();
-      if (key) { this.startProducer(); this.producerKey = key; }
-    }).catch(() => { this.counters.producerFailures++; console.error('Recording producer transition failed.'); });
+      if (key) { await this.startProducer(); this.producerKey = key; }
+    }).catch(() => { this.active = false; this.counters.producerFailures++; console.error('Recording producer transition failed.'); });
   }
-  private startProducer(): void {
+  private async startProducer(): Promise<void> {
     const resolution = this.config!.videoCodec.resolution;
     const tier = tiers.find(t => t.width === resolution[0] && t.height === resolution[1] && t.frameRate === resolution[2])
       ?? tiers.find(t => t.width === resolution[0] && t.height === resolution[1]);
     if (!tier) throw new Error('unsupported recording resolution');
     this.ring = new FragmentRing(); this.init = undefined; this.active = true;
     const wall = Date.now();
+    let lastFragment = Date.now();
     let clock: { track: number; scale: number };
     const parser = new FragmentParser(init => { this.init = init; clock = videoClock(init); }, fragment => {
+      lastFragment = Date.now();
       if (!clock) throw new Error('fragment before init');
       const time = decodeTime(fragment, clock.track);
       const start = Number(time) / clock.scale;
-      this.ring.append(Buffer.concat([producerReferenceTime(clock.track, time, wall + start * 1000), fragment]), start);
+      this.ring.append(Buffer.concat([producerReferenceTime(clock.track, time, wall + start * 1000), fragment]), start,
+        fragmentDuration(fragment, clock.track, clock.scale));
     });
-    const child = this.media.start([...this.media.input(tier), '-map', '0:v:0',
-      ...(this.audio ? ['-map', '0:a:0'] : []), '-c', 'copy', '-tag:v', 'hvc1',
+    const child = await this.media.start([...this.media.recording(tier, this.audio), '-tag:v', 'hvc1',
       '-movflags', '+frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', 'pipe:1']);
     this.child = child;
     const fail = () => {
       if (this.child !== child) return;
       this.counters.producerFailures++; this.active = false; this.ring.close();
+      clearInterval(this.watchdog);
       this.stream?.abort.abort(); child.kill('SIGTERM');
     };
     child.stdout!.on('data', (data: Buffer) => { try { parser.push(data); } catch { fail(); } });
     child.on('error', fail); child.on('close', fail);
+    this.watchdog = setInterval(() => { if (Date.now() - lastFragment > 15000) fail(); }, 1000);
   }
   async *handleRecordingStreamRequest(id: number, signal?: AbortSignal): AsyncGenerator<RecordingPacket> {
     if (this.stream || !this.active || !this.init || !this.allowed()) throw new Error('recording unavailable');
@@ -201,6 +236,7 @@ export class LabRecording implements CameraRecordingDelegate {
   closeRecordingStream(id: number): void { if (this.stream?.id === id) this.stream.abort.abort(); }
   acknowledgeStream(id: number): void { this.closeRecordingStream(id); }
   private async stopProducer(): Promise<void> {
+    clearInterval(this.watchdog);
     this.active = false; this.stream?.abort.abort(); this.ring.close(); this.init = undefined;
     this.producerKey = '';
     const child = this.child; this.child = undefined;

@@ -1,10 +1,12 @@
 # HKSV3 protocol acceptance lab
 
-This is **milestone 1**, a synthetic-camera protocol worker for the native HKSV3
-implementation. It is not connected to SurvNG cameras, configuration, motion,
-recording, or the admin UI. Passing its automated tests does not prove that Apple
-Home can record from it. Production integration is gated on the real-device
-acceptance checklist below.
+This optional worker now has two entry points: the isolated synthetic protocol
+lab (`lab.js`) and SurvNG's experimental per-camera runtime (`camera.js`).
+Real-camera HomeKit is disabled by default. The QSV candidate is work in
+progress with a failing opt-in hardware regression; software fallback requires
+per-camera opt-in. The complete hardware acceptance gate remains unverified.
+See [implementation status](../docs/homekit-implementation.md) for architecture,
+validation and remaining qualification.
 
 The lab implements separately controlled local SRTP, remote WebRTC/SFrame,
 snapshots, and HDS recording with a bounded synthetic HEVC prebuffer. It does not
@@ -42,6 +44,36 @@ Git. HAP is pinned to secure-video `d0359d529de18ef318b09a74b71380a879023ec4`
 (HAP-NodeJS 2.3.0 merged on 2026-11-03). An upstream update requires deliberate
 review and a lockfile update. Third-party notices are retained in `licenses/` and
 `src/vendor/`.
+
+## Enable real cameras in SurvNG
+
+After building the pinned dependencies, open **Admin → HomeKit** under
+Integrations. Set the server's LAN IPv4 address and the service account's Node.js
+24 executable path. Enable the HomeKit service, select cameras, opt into software
+HEVC encoding, and save. The worker reports missing build/runtime/encoder
+requirements in the same panel; startup never downloads packages.
+
+Choose the main or live camera source and enable camera audio only when that
+source has audio. Use **Pair with Apple Home** to reveal the setup code and QR.
+In Apple Home, choose Add Accessory, scan the QR, and allow the experimental
+accessory when prompted. Pair every camera separately. Configure recording and
+privacy in Home. Object-triggered motion is opt-in in SurvNG and requires the
+camera's Detection switch; keep Home activity zones off for these unlocated
+motion events.
+
+Each camera's identity persists in the private database/storage `homekit`
+directory. Disable/enable preserves pairing. **Reset pairing** removes only the
+selected camera's HomeKit identity; remove its old Home tile and pair again.
+Backing up this directory preserves pairing across moves/reinstalls. The paired
+synthetic lab's separate state is never reused or modified.
+
+The runtime is supervised by SurvNG and must not be launched manually alongside
+it. Its configuration and media admission use an inherited versioned pipe;
+private Unix sockets carry status/control and shared encoded media. Same-tier
+viewers and recording reuse a demand-driven HEVC encoder. Snapshots have separate
+JPEG admission. Resource exhaustion fails visibly rather than bypassing limits.
+HomeKit Off closes its pipelines and clears its ring without changing SurvNG's
+own recording or detection settings. Talkback remains unavailable.
 
 ## Run the synthetic camera
 

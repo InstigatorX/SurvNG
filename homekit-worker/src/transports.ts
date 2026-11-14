@@ -5,7 +5,7 @@ import { MediaStreamTrack, RTCPeerConnection, RTCRtpCodecParameters, RTCRtpHeade
 import type { MultiTierRTPStreamingDelegate, MultiTierPrepareStreamRequest, MultiTierPrepareStreamResponse,
   MultiTierStreamStartRequest, WebRTCStreamingDelegate, WebRTCSolicitOfferRequest, WebRTCOffer,
   WebRTCProvideAnswerRequest, WebRTCReofferRequest, WebRTCReofferAnswer, WebRTCUpdateSessionRequest } from '@homebridge/hap-nodejs';
-import { SyntheticMedia, RtpFeed, tiers, udp, type Tier } from './media.js';
+import { type MediaSource, RtpFeed, tiers, udp, type Tier } from './media.js';
 import { SecureVideoSFrame } from './vendor/sframe.js';
 import { HevcAccessUnitAssembler, SFrameRtpPacketizer } from './vendor/sframeRtp.js';
 import { ReceiverFeedback } from './diagnostics.js';
@@ -30,7 +30,7 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
   readonly feedback = { video: new ReceiverFeedback(90000), audio: new ReceiverFeedback(48000), invalidPackets: 0 };
   readonly sent = { videoPackets: 0, audioPackets: 0 };
   negotiation?: { videoTier: number; audioTier?: number; videoSSRCMatchesPrepared: boolean; audioSSRCMatchesPrepared: boolean };
-  constructor(private media: SyntheticMedia, private allowed: () => boolean) {}
+  constructor(private media: MediaSource, private allowed: () => boolean) {}
   async prepareStream(request: MultiTierPrepareStreamRequest): Promise<MultiTierPrepareStreamResponse> {
     const id = request.sessionIdentifier;
     if (!this.allowed() || this.sessions.size + this.preparing.size >= 5 || this.sessions.has(id) || this.preparing.has(id)) throw new Error('local session unavailable');
@@ -167,7 +167,7 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
   readonly sessions = new Map<string, RemoteSession>();
   readonly counters = { started: 0, failures: 0 };
   readonly feedback = { video: new ReceiverFeedback(90000), audio: new ReceiverFeedback(48000) };
-  constructor(private media: SyntheticMedia, private allowed: () => boolean, private address: string) {}
+  constructor(private media: MediaSource, private allowed: () => boolean, private address: string) {}
   async handleSolicitOffer(request: WebRTCSolicitOfferRequest): Promise<WebRTCOffer> {
     const id = request.sessionIdentifier;
     if (!this.allowed() || this.sessions.size >= 6 || this.sessions.has(id)) throw new Error('remote session unavailable');

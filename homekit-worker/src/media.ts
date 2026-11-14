@@ -12,6 +12,16 @@ export const tiers = [
 ];
 export type Tier = typeof tiers[number];
 
+export interface MediaSource {
+  readonly children: Set<ChildProcess>;
+  start(args: string[]): ChildProcess | Promise<ChildProcess>;
+  input(tier: Tier): string[];
+  video(tier: Tier): string[];
+  recording(tier: Tier, audio: boolean): string[];
+  snapshot(): Promise<Buffer>;
+  stop(): Promise<void>;
+}
+
 /** The lab only accepts generated fixtures; it cannot open a production camera. */
 export class SyntheticMedia {
   readonly children = new Set<ChildProcess>();
@@ -57,6 +67,11 @@ export class SyntheticMedia {
 
   input(tier: Tier): string[] { return ['-re', '-stream_loop', '-1', '-i', this.path(tier)]; }
 
+  video(_tier: Tier): string[] { return ['-c:v', 'copy']; }
+  recording(tier: Tier, audio: boolean): string[] {
+    return [...this.input(tier), '-map', '0:v:0', ...(audio ? ['-map', '0:a:0'] : []), '-c', 'copy'];
+  }
+
   async snapshot(): Promise<Buffer> {
     const child = this.start(['-i', this.path(tiers[0]), '-frames:v', '1', '-an', '-c:v', 'mjpeg', '-f', 'image2pipe', 'pipe:1']);
     const chunks: Buffer[] = [];
@@ -73,8 +88,12 @@ export class SyntheticMedia {
   async stop(): Promise<void> { await Promise.all([...this.children].map(stopChild)); }
 }
 
+const stoppedChildren = new WeakSet<ChildProcess>();
+export function childStopRequested(child: ChildProcess): boolean { return stoppedChildren.has(child); }
+
 export async function stopChild(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
+  stoppedChildren.add(child);
   const closed = once(child, 'close');
   child.kill('SIGTERM');
   const timer = setTimeout(() => child.kill('SIGKILL'), 2000);
@@ -90,37 +109,45 @@ export async function udp(address = '127.0.0.1'): Promise<Socket> {
 
 export class RtpFeed {
   private child?: ChildProcess;
+  private startingChild?: Promise<ChildProcess>;
   private sockets: Socket[] = [];
   private stopped = false;
-  constructor(private media: SyntheticMedia, private tier: Tier) {}
+  private watchdog?: NodeJS.Timeout;
+  constructor(private media: MediaSource, private tier: Tier) {}
   async start(video: (packet: RtpPacket) => void, audio: (packet: RtpPacket) => void, failed: () => void): Promise<void> {
+    let lastVideo = Date.now();
     try {
-      for (const handler of [video, audio]) {
+      for (const [index, handler] of [video, audio].entries()) {
         const socket = await udp();
         this.sockets.push(socket);
         // A copied HEVC keyframe arrives as a burst over loopback. The default
         // receive queue can drop fragments before the JavaScript handler runs.
         socket.setRecvBufferSize(1024 * 1024);
-        socket.on('message', data => { try { handler(RtpPacket.deSerialize(data)); } catch { failed(); } });
+        socket.on('message', data => { try { if (index === 0) lastVideo = Date.now(); handler(RtpPacket.deSerialize(data)); } catch { failed(); } });
         socket.on('error', failed);
       }
       if (this.stopped) { await this.stop(); return; }
       const [v, a] = this.sockets.map(socket => socket.address().port);
-      this.child = this.media.start([...this.media.input(this.tier),
+      this.startingChild = Promise.resolve(this.media.start([...this.media.input(this.tier),
         // x265's informational SEI exceeds Apple's observed 2 KiB header limit.
         // Keep the decoder parameter sets and picture data, omit live SEI metadata.
-        '-map', '0:v:0', '-c:v', 'copy', '-bsf:v', 'hevc_mp4toannexb,filter_units=remove_types=39|40', '-an', '-payload_type', '99', '-f', 'rtp', `rtp://127.0.0.1:${v}?pkt_size=1200`,
+        '-map', '0:v:0', ...this.media.video(this.tier), '-bsf:v', 'hevc_mp4toannexb,filter_units=remove_types=39|40', '-an', '-payload_type', '99', '-f', 'rtp', `rtp://127.0.0.1:${v}?pkt_size=1200`,
         // HKSV capture is 16/24 kHz; Opus RTP still uses its fixed 48 kHz clock.
         '-map', '0:a:0', '-c:a', 'libopus', '-ac', '1', '-ar', '16000', '-b:a', '24k', '-frame_duration', '20',
-        '-vn', '-payload_type', '110', '-f', 'rtp', `rtp://127.0.0.1:${a}?pkt_size=1200`]);
+        '-vn', '-payload_type', '110', '-f', 'rtp', `rtp://127.0.0.1:${a}?pkt_size=1200`]));
+      this.child = await this.startingChild;
+      if (this.stopped) { await stopChild(this.child); return; }
       this.child.stdout!.resume();
       this.child.on('error', failed);
       this.child.on('close', () => { if (!this.stopped) failed(); });
+      this.watchdog = setInterval(() => { if (Date.now() - lastVideo > 15000) failed(); }, 1000);
     } catch (error) { await this.stop(); throw error; }
   }
   async stop(): Promise<void> {
     this.stopped = true;
-    if (this.child) await stopChild(this.child);
+    clearInterval(this.watchdog);
+    const child = this.child ?? await this.startingChild?.catch(() => undefined);
+    if (child) await stopChild(child);
     for (const socket of this.sockets.splice(0)) socket.close();
   }
 }

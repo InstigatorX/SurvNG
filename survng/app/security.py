@@ -504,6 +504,9 @@ _READ_ONLY_POST_PATHS = frozenset({
 
 def required_api_scope(method: str, path: str) -> ApiScope:
     normalized_method = method.upper()
+    # Pairing and camera administration never belong to read-only integrations.
+    if path.startswith("/api/homekit"):
+        return "admin"
     # Process logs can contain operationally sensitive context even after
     # redaction, so they are not part of the integration-facing read surface.
     if path == "/api/logs":

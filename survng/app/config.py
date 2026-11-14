@@ -654,7 +654,41 @@ class CameraSpeechConfig(BaseModel):
     notify: Literal["motion", "always", "never"] = "motion"
 
 
+class CameraHomeKitConfig(BaseModel):
+    enabled: bool = False
+    allow_software_encoding: bool = False
+    source: Literal["main", "live"] = "live"
+    audio: bool = False
+    object_motion: bool = False
+    port: int = Field(default=0, ge=0, le=65535)
+
+    @field_validator("port")
+    @classmethod
+    def validate_port(cls, value: int) -> int:
+        if value and value < 1024:
+            raise ValueError("HomeKit port must be zero (automatic) or at least 1024")
+        return value
+
+
+class HomeKitConfig(BaseModel):
+    enabled: bool = False
+    bind: str = Field(default="", max_length=64)
+    node_path: str = Field(default="node", min_length=1, max_length=4096)
+
+    @field_validator("bind")
+    @classmethod
+    def validate_bind(cls, value: str) -> str:
+        import ipaddress
+        value = value.strip()
+        if value:
+            address = ipaddress.IPv4Address(value)
+            if address.is_unspecified or address.is_multicast or address.is_loopback:
+                raise ValueError("HomeKit bind must be a LAN IPv4 address")
+        return value
+
+
 class CameraConfig(BaseModel):
+    homekit: CameraHomeKitConfig = Field(default_factory=CameraHomeKitConfig)
     incident_notifications_enabled: bool = True
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     name: str = Field(min_length=1, max_length=128)
@@ -1237,6 +1271,8 @@ class PropertyViewConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
+    homekit: HomeKitConfig = Field(default_factory=HomeKitConfig)
+
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
     property: PropertyViewConfig = Field(default_factory=PropertyViewConfig)
     base_path: str = "/survng"
@@ -1273,6 +1309,17 @@ class AppConfig(BaseModel):
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_homekit(self) -> "AppConfig":
+        import hashlib
+        if self.homekit.enabled and not self.homekit.bind:
+            raise ValueError("Set the HomeKit LAN IPv4 address before enabling HomeKit")
+        ports = [camera.homekit.port or 52000 + int.from_bytes(hashlib.sha256(camera.id.encode()).digest()[:4], "big") % 10000
+                 for camera in self.cameras if camera.homekit.enabled]
+        if len(ports) != len(set(ports)):
+            raise ValueError("HomeKit cameras require different ports; set a custom port for a conflicting camera")
+        return self
 
 
     @field_validator("base_path", mode="before")

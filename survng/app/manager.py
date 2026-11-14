@@ -12,6 +12,7 @@ from typing import Any
 
 from .tracking_window import recorded_tracking_window
 from .activity_events import ActivityEventBus, ActivityTransition
+from .homekit import HomeKitService
 from .camera import CameraWorker
 from .camera_capture import (
     CaptureOpenLimiter,
@@ -263,6 +264,7 @@ def validate_motion_pipeline_configuration(config: AppConfig) -> None:
 
 
 def validate_manager_configuration(config: AppConfig) -> None:
+    config.validate_homekit()
     validate_media_storage_configuration(config)
     validate_motion_pipeline_configuration(config)
 
@@ -356,6 +358,9 @@ class AppManager:
         )
         self.state_events = StateEventBroker()
         self.activity_events = ActivityEventBus(self._publish_activity_transition)
+        self.homekit = HomeKitService(config, self.media_sessions, self.media_session_generation,
+            lambda camera_id: self.camera_fleet.camera_enabled(camera_id),
+            lambda camera_id: self.camera_controls.detection_enabled(camera_id))
         try:
             self.incidents = IncidentLifecycle(
                 self.events, self._publish_incident_notification,
@@ -912,6 +917,8 @@ class AppManager:
                     on_complete=self._camera_startup_completed,
                 )
                 self._start_speech()
+                if getattr(self, "homekit", None) is not None:
+                    self.homekit.start()
                 phase_started = time.monotonic()
                 self.inference.start_auxiliary()
                 self._startup_timings["auxiliary_services_seconds"] = round(
@@ -1106,6 +1113,10 @@ class AppManager:
                 LOGGER.exception("SurvNG shutdown step failed: %s", label)
 
         started = time.monotonic()
+        if getattr(self, "homekit", None) is not None:
+            # Retain this generation and its dependencies if an owned worker
+            # cannot be drained; a replacement must not share its identity.
+            self.homekit.close()
         self.camera_controls.quiesce()
         self.ema_route_candidates.close_admission()
         media_sessions = getattr(self, "media_sessions", None)
@@ -1884,6 +1895,8 @@ class AppManager:
                 camera_id, int(payload.get("event_id") or 0), allow_new=event_type == "incident",
             )
         if event_type == "object":
+            if getattr(self, "homekit", None) is not None:
+                self.homekit.observe_objects(payload)
             objects = payload.get("objects") or []
             incident_objects = payload.get("incident_objects")
             alert_objects = (

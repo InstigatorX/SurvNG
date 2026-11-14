@@ -59,25 +59,117 @@ The user authorized real-camera implementation on 2026-11-14 while these checks
 remain open. Build that integration disabled by default and retain its
 experimental designation until real-camera qualification and acceptance pass.
 
-## Remaining implementation after the protocol gate
+## Real-camera integration (experimental, disabled by default)
 
-1. Add independent ActivityEventBus subscriptions with atomic snapshots, ordered
-   acknowledged replay, duplicate suppression, and explicit replay gaps.
-2. Add HomeKit leases and separate encoder/bandwidth budgets to MediaSessionManager;
-   count shared producers once and release capacity only after resource teardown.
-3. Add a Python-owned live EncodedFragmentSource and demand-driven profiles,
-   hardware qualification, HEVC passthrough/transcoding, bounded pre-roll,
-   monotonic timing, and explicit reconnect discontinuities. Preserve indexed
-   recording playback behavior.
-4. Connect the TypeScript protocol delegates to Python over a private versioned
-   control socket and a separate media channel. Replace synthetic process ownership
-   with Python-owned shared producers and integrate camera/mode/generation teardown.
-5. Qualify spatial motion for HomeKit zones without changing SurvNG incident zones;
-   unlocated ONVIF events need visual qualification when HomeKit zones are active.
-6. Integrate stable per-camera identities, persistent pairing, authenticated admin
-   enablement/qualification/pairing/reset APIs, and the HomeKit settings panel.
-7. Package the optional worker under systemd and expose sanitized observability.
-8. Complete two-camera hardware acceptance and the 24-hour soak; retain the
-   experimental designation until these pass.
+**QSV checkpoint, not accepted:** the worker now attempts a real QSV HEVC
+encode/decode probe before choosing hardware, with explicitly permitted and
+probed software fallback. The admin status includes the selected backend and
+bounded encoder progress counters. This work was interrupted before deployment
+or an Apple playback retest. A 125-frame 1080p hardware probe encoded in about
+one second and decoded successfully, but the stricter hardware regression failed:
+123 of 125 pictures were reported as B pictures despite `-bf 0 -gpb 0`. Tests
+with low-power encoding enabled/disabled and `GopRefDist=1` also emitted B
+pictures. Whether these are low-delay generalized B pictures or introduce
+presentation reordering remains unresolved. The startup two-frame probe does
+not establish the complete GOP/latency contract. Do not treat QSV smoothness or
+HomeKit hardware acceptance as verified. The failing opt-in regression is kept
+as evidence rather than weakened to make this checkpoint pass.
 
-No production configuration migration or service restart is required for the lab.
+The synthetic soak monitor was stopped at the user's request. Its partial
+capture was preserved; future soak validation will use real cameras.
+
+The admin sidebar now groups HomeKit under Integrations. The HomeKit section
+contains service enablement, LAN bind address and Node.js 24 path, camera
+enrollment, main/live source selection, camera audio, software encoder opt-in,
+object motion, runtime status, pairing code/QR, and an explicit pairing reset.
+Existing Cameras setup remains the place to add camera connections.
+
+`homekit.enabled` and each `camera.homekit.enabled` default to false. Software
+fallback requires `camera.homekit.allow_software_encoding`; it also defaults to false.
+The candidate runtime prefers QSV, with libx265 fallback, AAC and libopus.
+Full QSV acceptance and HEVC passthrough qualification remain future work. Enabling camera
+audio requires an audio track in the selected source. Otherwise the worker
+supplies silence for Home's live audio transport. Home's Record Audio Off omits
+the recording audio track entirely.
+
+The first paired RTSP camera exposed an input-option mismatch: this FFmpeg
+build rejects the generic `rw_timeout` option on its RTSP demuxer. RTSP/RTSPS
+inputs now use the demuxer's `timeout` option; HTTP keeps `rw_timeout`. A bounded
+one-frame probe against the configured camera failed before the correction and
+decoded successfully afterward. Intentional child shutdown is also distinguished
+from encoder failure, including FFmpeg's exit code 255 on SIGTERM, so closing a
+viewer does not create a misleading source-failure warning. Regression tests cover
+the option selection and shutdown classification.
+
+The Python manager owns one optional Node worker process group per enabled
+camera. Camera URLs travel over an inherited pipe, not the Node command line or
+persisted worker configuration. A versioned admission protocol reserves media
+capacity before each child starts, records its actual process PID, and releases
+its lease after child closure. Crashed workers and their FFmpeg descendants are
+terminated as a group before reservations are released. Disabled/off cameras stop
+workers; restart, disable/enable and independent camera changes preserve identity.
+
+Each demanded video tier has one shared live HEVC/AAC MPEG-TS producer. Recording
+and viewers using that tier reuse it. Media travels over mode-0600 Unix sockets
+inside the camera's private state directory, with no network media endpoint.
+Slow consumers are disconnected at a bounded queue size without blocking other
+consumers. The producer ends when its last consumer closes. Source failures and
+fifteen-second stalls terminate dependent streams; recording retries on a
+five-second reconciliation interval. Encoders consume the existing transcode
+budget, packetizing consumers the relay budget, and snapshots the JPEG budget.
+Two same-tier recording prebuffers therefore consume two encoders; live viewers
+can join them without starting two more encoders. A different requested tier
+still requires available encoder capacity. No indexed recording is used as a
+pretend live source.
+
+The recording ring is bounded by time and bytes. Coverage and pre-roll now use
+MP4 sample durations, including AAC alignment, rather than an assumed two-second
+fragment. Timestamp gaps fail explicitly. MPEG-TS AAC is converted with
+`aac_adtstoasc` before fMP4 muxing. Live HEVC retains the lab's parameter-set/SEI
+fix and remote RID fix. HomeKit Off closes viewers, snapshots and the prebuffer;
+it does not disable SurvNG recording or detection.
+
+Object-triggered motion is selectable per camera and defaults off. Only recent
+persisted detector object events are admitted, while camera power and Detection
+must both be on. Historical events, manual reviews and stale detections are
+excluded. Each event extends a ten-second monotonic motion window. A one-second
+supervisor reconciliation sends retained state after reconnect; the worker
+expires motion after five seconds without a heartbeat. HomeKit motion permissions
+are enforced again in the worker. Home activity zones suppress this unlocated
+motion, with a visible admin explanation; spatial Home zone qualification remains
+future work. SurvNG incident zones continue to govern the existing detector path.
+
+State is under `<database_dir or storage_dir>/homekit/<camera-id>` with private
+permissions and an exclusive owner lock. Stable automatic ports derive from the
+camera ID; collisions require a custom port. Backup this state with the database.
+Only an explicit reset removes HomeKit identity and HAP state for that camera.
+Disablement, camera removal, startup failure and service shutdown never reset it.
+
+All `/api/homekit` routes require admin scope. Status is allowlisted; pairing uses
+an explicit POST and no-store response. QR generation uses existing OpenCV,
+without an external QR service or another dependency. The UI clears setup
+material on backgrounding, navigation, connection failure, successful pairing,
+or after two minutes. Reset requires camera-specific confirmation.
+
+Validation covers real H.264/AAC input over a local HTTP fixture, shared live and
+recording normalization to HEVC, Opus RTP, decoded fMP4 with/without audio,
+recording durations, snapshot independence, media admission/privacy races,
+private media socket permissions, and actual Node worker lifecycle/identity/reset.
+The admin browser tests exercise loading, empty, pairing/hiding, object-motion
+editing, reset confirmation, connection recovery, and narrow-screen layout.
+
+## Remaining qualification
+
+- Pair actual deployed cameras and repeat local/cellular/Apple TV, recording,
+  audio-off, motion on/off, camera power, privacy and reconnect acceptance.
+- Complete exported Home clip/pre-roll inspection, end-of-stream ACK diagnosis,
+  and the 24-hour soak review described above.
+- Resolve the QSV GOP/latency regression and qualify Apple playback; HEVC passthrough remains future work.
+- Qualify spatial Home activity zones before emitting motion with zones active.
+
+Worker dependencies must be built using the pinned bootstrap process. SurvNG's
+service account needs Node.js 24, the documented FFmpeg encoders, private writable
+state, and LAN access to Apple devices. The worker is an optional child of the
+existing SurvNG service; no separate systemd unit is needed. Loading this feature
+into an already-running service requires the normal application deployment. This
+implementation work does not restart the production service or the paired lab.
