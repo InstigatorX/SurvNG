@@ -14,6 +14,7 @@ These helpers encode upstream interoperability observations. Automated crypto
 and packet tests do not establish Apple-device compatibility.
 
 The SDP decoration in `../transports.ts` is also adapted from the same revision's
-`webrtcSessions.ts` under this MIT license. SurvNG adds negotiated on-wire RTP
-stream identifiers and explicit BUNDLE selection; these are covered by the
-local-peer media test.
+`webrtcSessions.ts` under this MIT license. SurvNG retains stream identifiers in
+signaling and uses explicit BUNDLE selection. The local-peer media test checks
+that RID is absent on wire, following Scrypted's documented interoperability
+behavior at `fb679504ce2d8bc150bb504a7098826644627100`.

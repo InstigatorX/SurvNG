@@ -118,7 +118,7 @@ test('HEVC access units retain NAL lengths and SFrame packets remain bounded', (
   assert.equal(packets.at(-1)!.header.marker, true);
 });
 
-test('remote SDP has tier bounds and a unique RTP stream extension', () => {
+test('remote SDP has tier bounds and a unique RTP stream extension advertisement', () => {
   const offer = videoOffer('v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 99\r\nc=IN IP4 0.0.0.0\r\na=extmap:1 existing\r\nm=audio 9 UDP/TLS/RTP/SAVPF 110\r\n', tiers[0]);
   assert.match(offer, /b=TIAS:1800000/); assert.match(offer, /a=extmap:2 urn:ietf/);
   assert.match(offer, /max-width=1920;max-height=1080/);

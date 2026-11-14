@@ -8,7 +8,11 @@ acceptance checklist below.
 
 The lab implements separately controlled local SRTP, remote WebRTC/SFrame,
 snapshots, and HDS recording with a bounded synthetic HEVC prebuffer. It does not
-advertise direct CMAF upload or talkback. The camera name is **SurvNG HKSV3 Lab**.
+advertise direct CMAF upload. A temporary, user-authorized hardware experiment
+advertises a Speaker service (`twoWayAudio: true`) to test Home's live-view
+selection. The talk button may appear, but talkback is unimplemented. Revert this
+advertisement after the experiment if it does not restore stream setup.
+The camera name is **SurvNG HKSV3 Lab**.
 
 ## Build
 
@@ -89,6 +93,15 @@ requests has not yet exercised the media producers; verify the exact iPhone and
 active home hub OS versions and repeat live view before attributing the failure
 to an encoder or VLAN routing.
 
+The `services` section separates cached operating-mode and streaming flags by
+service, including HAP status codes and linked service IDs. It reads only an
+allowlist of flags and the capabilities version; transport values remain excluded.
+Microphone/speaker mute and volume are included. `receiverFeedback` summarizes
+authenticated RTCP receiver reports separately for local/remote video and audio:
+report count, maximum reported packet loss, fractional loss, jitter in
+milliseconds, and keyframe requests. Local packets that cannot be parsed or
+authenticated increment an invalid-packet counter; raw feedback is never kept.
+
 HomeKit privacy stops synthetic delivery and buffering. Synthetic motion has no
 spatial evidence, so requests are rejected when Apple motion zones are active;
 disable zones for the initial protocol test. Production spatial qualification is
@@ -107,6 +120,62 @@ with no snapshot or stream setup. That Apple TV was tvOS 18.6. Repeat the
 checklist on an iOS/tvOS 27 hub. Record the device model and exact OS build for
 both the iPhone and Apple TV 4K. Use a Home with an iCloud+ plan that supports
 recording. Keep the existing state directory so the paired accessory is reused.
+
+Hardware progress (2026-11-13–14; gate still unverified): the user reports iOS 27.2
+and tvOS 27.2.1 on the active Family Room Apple TV. Exact OS builds are unknown.
+
+| Check | Evidence and result |
+| --- | --- |
+| Snapshot/setup requests | Restored after the user-authorized Speaker advertisement; JPEG requests complete and local SRTP/remote WebRTC start. Talkback is unimplemented. |
+| Local video/audio | **Pass (2026-11-14 user retest):** smooth video and audible tone after filtering live SEI metadata. |
+| Cellular video/audio | **Pass (2026-11-14 user retest):** smooth video and tone after omitting the on-wire RID extension; 1080p tier and signaling metadata retained. |
+| Direct Apple TV live playback | **Pass (2026-11-14):** user confirmed it was playing before the privacy check. |
+| HDS recording | Earlier session's handoff reports a playable 1080p30/four-second-fragment clip, ending on the library's end-of-stream ACK timeout. Pre-roll unverified. |
+| Pairing across restart | Preserved with the same state directory; hub reselects recording configuration. |
+| HomeKit Off/privacy | **Pass (2026-11-14):** active TV viewer stopped; runtime shows both streaming paths disabled, zero viewers/children, recording inactive/not ready, and zero buffer bytes/seconds. |
+| Audio-off recording | Motion triggered 2026-11-14 11:13:32 Eastern after readiness; producer maps video without audio, and user confirmed the Home clip plays silently. Exported clip track inspection remains pending. |
+| Pre-roll | Exported clip timing inspection pending. |
+| 24-hour soak | Read-only health capture started 2026-11-14 11:18:05 Eastern, sampling once a minute. Results need review after the window; not yet passed. |
+
+Powering off the older Alex Room Apple TV did not restore LIVE. Cached mode flags
+show streaming/snapshots enabled and microphone unmuted at volume 100.
+
+Producer probes found missing in-band HEVC parameter sets, dropped loopback RTP
+fragments, 48 kHz capture, and CRA frames in fixtures intended to have closed
+GOPs. Corrections are `hevc_mp4toannexb`, a 1 MiB feed receive buffer, 16 kHz
+capture, and `open-gop=0`. The supplied HKSV Compatibility Guide (June 2026
+preview), section 2/page 6, distinguishes capture at 16/24 kHz from the advertised
+48 kHz Opus transmission clock. The four-second GOP interval is retained.
+
+Regression coverage verifies 300 decodable frames across a fixture loop, RTP
+sequence continuity, parameter sets, no CRA frames, Opus bandwidth, and 960-tick
+steps for 20 ms audio packets. Real-media tests pass. An independent FFmpeg SRTP
+receiver decoded 299 frames and about ten seconds of non-silent audio without
+authentication or decode errors using the accessory's returned parameters. Those
+results do not establish negotiation compatibility with Apple's controller.
+
+Home sends repeated video keyframe requests with little cumulative packet loss.
+Feedback counters normalize signed 24-bit loss and match both media SSRCs across
+compound reports on either socket; earlier audio-report absence was inconclusive
+because the counters originally classified reports by socket. Safe START
+negotiation summaries and sent-packet counters are available under `localMedia`.
+The direct Apple TV comparison reproduced the iPhone failure. Comparing Scrypted
+at `fb679504ce2d8bc150bb504a7098826644627100` identified a negotiation difference:
+its multi-tier RTP delegate uses the controller-provided SRTP parameters for both
+directions, while this lab generated replacements for outbound media. The lab now
+retains the controller parameters; regression coverage decrypts video and audio
+using the original controller offer. Prepared accessory SSRCs are still retained,
+which agrees with Scrypted even when START supplies different SSRCs. Hardware
+validation of the SRTP-parameter correction failed: playback still buffers with
+no sound. See [upstream investigation notes](UPSTREAM-NOTES.md) for the Scrypted
+PR review, applicability, and remaining sender/signaling differences.
+The subsequent Apple Console capture reports an oversized 2,048-byte parameter
+set and decoder-format creation failures. The fixture's x265 SEI metadata is
+2,403 bytes although VPS/SPS/PPS are small. Live output now filters SEI NAL units
+39/40 while preserving decoder parameter sets and picture data; the filtered
+real-media suite passes. The user then confirmed smooth local LIVE video and
+tone. Cellular playback and the remaining recording/privacy/soak checks still
+require acceptance.
 
 1. Pair the lab camera and confirm its snapshot appears.
 2. Open local live view and confirm moving video and the test tone.

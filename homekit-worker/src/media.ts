@@ -25,13 +25,13 @@ export class SyntheticMedia {
       try { if ((await stat(file)).size > 0) continue; } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
-      // One-time fixture encoding, never a camera URL. Deterministic 2-second closed GOPs.
+      // One-time fixture encoding, never a camera URL. Deterministic 4-second closed GOPs.
       const temporary = `${file}.partial.mp4`;
       const child = this.start(['-f', 'lavfi', '-i', `testsrc2=size=${tier.width}x${tier.height}:rate=${tier.frameRate}`,
         '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=32000', '-t', '8',
         '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
         '-b:v', `${tier.targetAverageBitrate}k`, '-maxrate', `${tier.peakBitrate}k`, '-bufsize', `${tier.peakBitrate * 2}k`,
-        '-x265-params', `pools=2:frame-threads=2:keyint=${tier.frameRate * 2}:min-keyint=${tier.frameRate * 2}:scenecut=0:bframes=0:repeat-headers=1:log-level=error`,
+        '-x265-params', `pools=2:frame-threads=2:keyint=${tier.frameRate * 4}:min-keyint=${tier.frameRate * 4}:open-gop=0:scenecut=0:bframes=0:repeat-headers=1:log-level=error`,
         '-tag:v', 'hvc1', '-c:a', 'aac', '-ac', '1', '-ar', '32000', '-b:a', '32k', '-y', temporary]);
       const [code] = await once(child, 'close');
       if (code !== 0) throw new Error('synthetic fixture encoding failed');
@@ -98,14 +98,20 @@ export class RtpFeed {
       for (const handler of [video, audio]) {
         const socket = await udp();
         this.sockets.push(socket);
+        // A copied HEVC keyframe arrives as a burst over loopback. The default
+        // receive queue can drop fragments before the JavaScript handler runs.
+        socket.setRecvBufferSize(1024 * 1024);
         socket.on('message', data => { try { handler(RtpPacket.deSerialize(data)); } catch { failed(); } });
         socket.on('error', failed);
       }
       if (this.stopped) { await this.stop(); return; }
       const [v, a] = this.sockets.map(socket => socket.address().port);
       this.child = this.media.start([...this.media.input(this.tier),
-        '-map', '0:v:0', '-c:v', 'copy', '-an', '-payload_type', '99', '-f', 'rtp', `rtp://127.0.0.1:${v}?pkt_size=1200`,
-        '-map', '0:a:0', '-c:a', 'libopus', '-ac', '1', '-ar', '48000', '-b:a', '24k', '-frame_duration', '20',
+        // x265's informational SEI exceeds Apple's observed 2 KiB header limit.
+        // Keep the decoder parameter sets and picture data, omit live SEI metadata.
+        '-map', '0:v:0', '-c:v', 'copy', '-bsf:v', 'hevc_mp4toannexb,filter_units=remove_types=39|40', '-an', '-payload_type', '99', '-f', 'rtp', `rtp://127.0.0.1:${v}?pkt_size=1200`,
+        // HKSV capture is 16/24 kHz; Opus RTP still uses its fixed 48 kHz clock.
+        '-map', '0:a:0', '-c:a', 'libopus', '-ac', '1', '-ar', '16000', '-b:a', '24k', '-frame_duration', '20',
         '-vn', '-payload_type', '110', '-f', 'rtp', `rtp://127.0.0.1:${a}?pkt_size=1200`]);
       this.child.stdout!.resume();
       this.child.on('error', failed);

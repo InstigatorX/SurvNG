@@ -6,37 +6,58 @@ per-camera opt-in. Apple Home privacy affects HomeKit only. HomeKit motion follo
 SurvNG detection enablement. Direct CMAF uploads, legacy HKSV, and talkback are
 out of scope.
 
-## Gate 1: protocol acceptance
+## Protocol lab: implementation and acceptance
 
-The [synthetic worker](../homekit-worker/README.md) provides an isolated protocol
-test. HAP is pinned to `d0359d529de18ef318b09a74b71380a879023ec4`, with
-`werift` 0.24.4 and retained MIT-licensed media helpers. It intentionally has no
-production camera input and no integration-enable setting.
+The isolated [synthetic worker](../homekit-worker/README.md) uses Node.js 24,
+HAP-NodeJS `d0359d529de18ef318b09a74b71380a879023ec4`, and werift 0.24.4.
+It has no production camera input. Pairing state and controls are private, and
+status exposes allowlisted state without credentials, SDP, or transport keys.
 
-Automated tests exercise generated media and local peers. Real Apple pairing,
-cellular viewing, and Home recording acceptance remain required. The original
-implementation plan explicitly requires resolving this gate before production
-camera integration. A lab build is not a finished native HomeKit feature.
+Hardware validation on 2026-11-14 used an iPhone reporting iOS 27.2 and the
+Family Room Apple TV reporting tvOS 27.2.1. Exact OS builds were not captured.
+The user confirmed local and cellular LIVE with smooth video and the test tone,
+direct Apple TV playback, and privacy shutdown. HomeKit Off stopped the active TV
+viewer; runtime showed disabled streaming, zero media children/viewers, and an
+empty, inactive recording buffer. Pairing survived repeated same-directory
+restarts. A motion event at 11:13:32 Eastern with recording audio disabled produced
+a playable silent Home clip; the producer mapped video without audio.
 
-Initial validation: the Node 24 build, repeat bootstrap from locked dependencies,
-and 16 tests pass, including real FFmpeg HEVC/AAC fragments, Opus conversion,
-SRTP decryption, SFrame HEVC/audio reception through a local WebRTC peer, and
-startup/restart/shutdown.
+The main interoperability fixes are:
 
-Hardware check (2026-09-26): the synthetic accessory paired successfully and
-received HAP accessory reads across VLANs, but Apple Home displayed “No Response”.
-No snapshot handler or local/remote stream setup was invoked. The Apple TV was
-then confirmed to run tvOS 18.6, below the planned tvOS 27 target.
+- Advertise the Speaker service required by the tested Home setup to request
+  snapshots and streams. Return-audio playback/talkback remains unimplemented.
+- Supply HEVC parameter sets in-band and omit live prefix/suffix SEI metadata.
+  Apple's Console capture reported a 2,048-byte oversized parameter set and
+  compressed-frame creation failures; the synthetic x265 SEI was 2,403 bytes.
+  Local video and sound passed after filtering that metadata.
+- Preserve HomeKit RID/bitrate signaling, but omit the on-wire RID RTP extension.
+  Cellular video and sound passed after this separate change.
+- Use closed four-second GOPs, advertise compatible recording fragment lengths
+  and 15/30 fps resolutions, and allow same-size recording fixture fallback.
+- Capture Opus at 16 kHz while preserving its advertised 48 kHz transmission
+  clock; retain controller-negotiated SRTP parameters and prepared accessory SSRCs.
+- Increase live feed receive buffers to avoid loopback keyframe burst loss, and
+  add bounded receiver loss/jitter/keyframe counters plus per-service mode/audio
+  flags. Compound feedback is matched by media SSRC and signed loss is normalized.
 
-The hub-version blocker is cleared: a compatible Apple TV is available for a
-repeat test. The lab now tracks the secure-video revision above, which merges
-HAP-NodeJS 2.3.0. That revision answers an Identify write of false instead of
-letting the characteristic time out, and it drops malformed data-stream frames
-instead of crashing the process. Both happen when a tvOS 27 hub opens the camera
-tile and the HDS snapshot relay. Automated tests were rerun on this revision and
-passed. Snapshots, local and cellular viewing, Home recording, and the 24-hour
-soak have not been run on the new hub. Retain the existing pairing for the retry.
-This is not a successful video or recording acceptance result.
+Regression validation includes decoding 300 HEVC frames across a fixture loop,
+parameter-set/SEI/GOP checks, RTP continuity and audio bandwidth/clock checks,
+controller-offer SRTP decryption, authenticated compound receiver feedback,
+SFrame/DTLS-SRTP peers without wire RID, and privacy teardown. The real-media
+suite and protocol tests passed. An independent FFmpeg SRTP receiver also decoded
+299 frames and about ten seconds of non-silent audio; peer tests alone did not
+establish Apple compatibility. See the [upstream investigation](../homekit-worker/UPSTREAM-NOTES.md)
+for the Scrypted PR comparison and the limitations of generic peer fixtures.
+
+Remaining lab acceptance: inspect an exported clip for absent audio tracks and
+pre-roll timing, review the 24-hour health capture started at 11:18:05 Eastern on
+2026-11-14, and resolve the earlier session's reported end-of-stream ACK timeout.
+The complete hardware gate remains unverified. Runtime state, captures, fixtures,
+setup codes, and keys are excluded from Git.
+
+The user authorized real-camera implementation on 2026-11-14 while these checks
+remain open. Build that integration disabled by default and retain its
+experimental designation until real-camera qualification and acceptance pass.
 
 ## Remaining implementation after the protocol gate
 

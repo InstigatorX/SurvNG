@@ -6,12 +6,12 @@ import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
-import { RtpPacket, SrtpSession, RTCPeerConnection, RTCRtpCodecParameters, RTCRtpHeaderExtensionParameters } from 'werift';
-import { SyntheticMedia, tiers, udp } from '../src/media.js';
+import { RtpPacket, SrtpSession, SrtcpSession, RtcpRrPacket, RtcpReceiverInfo, RTCPeerConnection, RTCRtpCodecParameters, RTCRtpHeaderExtensionParameters } from 'werift';
+import { SyntheticMedia, RtpFeed, tiers, udp } from '../src/media.js';
 import { LabRecording, boxes, videoClock, decodeTime } from '../src/fragments.js';
 import { LocalStreams, RemoteStreams, STREAM_ID_URI } from '../src/transports.js';
 import { SFrameCipherSuite, SFrameReceiver } from '../src/vendor/sframe.js';
-import { SFrameRtpDepacketizer } from '../src/vendor/sframeRtp.js';
+import { HevcAccessUnitAssembler, SFrameRtpDepacketizer } from '../src/vendor/sframeRtp.js';
 import type { CameraRecordingConfiguration } from '@homebridge/hap-nodejs';
 
 const execute = promisify(execFile);
@@ -42,6 +42,59 @@ test('real HEVC fixtures, fMP4 prebuffer, local SRTP, and remote encrypted media
       }
       const jpeg = await media.snapshot(); assert.equal(jpeg.readUInt16BE(0), 0xffd8);
     });
+    await t.test('live HEVC decodes across fixture loops without losing RTP fragments', async () => {
+      const feed = new RtpFeed(media, tiers[0]);
+      const assembler = new HevcAccessUnitAssembler();
+      const chunks: Buffer[] = [];
+      const nalTypes = new Set<number>();
+      const parameterSetSizes: number[] = [];
+      const opusConfigurations = new Set<number>();
+      const audioTimestampSteps = new Set<number>();
+      let audioPackets = 0, previousAudioTimestamp: number | undefined;
+      let previousSequence: number | undefined;
+      let missingPackets = 0, frames = 0, failures = 0;
+      try {
+        await feed.start(packet => {
+          if (previousSequence !== undefined) missingPackets += (packet.header.sequenceNumber - previousSequence - 1) & 0xffff;
+          previousSequence = packet.header.sequenceNumber;
+          const frame = assembler.push(packet);
+          if (!frame) return;
+          frames++;
+          for (let offset = 0; offset < frame.data.length;) {
+            const length = frame.data.readUInt32BE(offset);
+            const nal = frame.data.subarray(offset + 4, offset + 4 + length);
+            nalTypes.add((nal[0] >> 1) & 0x3f);
+            if ([32, 33, 34].includes((nal[0] >> 1) & 0x3f)) parameterSetSizes.push(nal.length);
+            chunks.push(Buffer.from([0, 0, 0, 1]), nal);
+            offset += 4 + length;
+          }
+        }, packet => {
+          audioPackets++;
+          opusConfigurations.add(packet.payload[0] >> 3);
+          if (previousAudioTimestamp !== undefined) audioTimestampSteps.add((packet.header.timestamp - previousAudioTimestamp) >>> 0);
+          previousAudioTimestamp = packet.header.timestamp;
+        }, () => failures++);
+        // Fixtures last eight seconds: include a loop and multiple keyframes.
+        await until(() => frames >= 300, 15000);
+        await feed.stop();
+        assert.equal(failures, 0); assert.equal(missingPackets, 0);
+        assert.ok(audioPackets > 400);
+        // 20 ms at the Opus transmission clock is 960 ticks, even with 16 kHz capture.
+        assert.ok(audioTimestampSteps.has(960));
+        for (const config of opusConfigurations) {
+          assert.ok(config < 12 || (config >= 16 && config < 24), `Opus exceeds 16 kHz capture bandwidth: ${config}`);
+        }
+        for (const type of [32, 33, 34]) assert.ok(nalTypes.has(type), `missing HEVC parameter set ${type}`);
+        assert.ok(parameterSetSizes.every(size => size < 2048), 'Apple rejects oversized decoder headers');
+        assert.equal(nalTypes.has(39), false, 'live output must omit x265 prefix SEI metadata');
+        assert.equal(nalTypes.has(40), false, 'live output must omit suffix SEI metadata');
+        assert.ok(nalTypes.has(19) || nalTypes.has(20), 'missing IDR frame');
+        assert.equal(nalTypes.has(21), false, 'closed GOP fixture must not emit CRA frames');
+        const file = join(root, 'live.hevc'); await writeFile(file, Buffer.concat(chunks));
+        const decoded = await execute('ffmpeg', ['-v', 'error', '-i', file, '-f', 'null', '-'], { timeout: 15000 });
+        assert.equal(decoded.stderr, '');
+      } finally { await feed.stop(); }
+    });
     await t.test('HDS pre-roll has monotonic decode time, prft, and playable HEVC/AAC', async () => {
       recording.updateRecordingConfiguration({
         prebufferLength: 4000, eventTriggerTypes: [1], mediaContainerConfiguration: { type: 0, fragmentLength: 2000 },
@@ -69,14 +122,20 @@ test('real HEVC fixtures, fMP4 prebuffer, local SRTP, and remote encrypted media
       const receiver = await udp(); const audioReceiver = await udp();
       try {
         const parameters = { cryptoSuite: 0, masterKey: Buffer.alloc(16, 1), masterSalt: Buffer.alloc(14, 2) };
+        const audioParameters = { cryptoSuite: 0, masterKey: Buffer.alloc(16, 3), masterSalt: Buffer.alloc(14, 4) };
         const result = await local.prepareStream({ sessionIdentifier: 'local', addressVersion: 'ipv4',
           targetAddress: '127.0.0.1', sourceAddress: '127.0.0.1', controllerVideoPort: receiver.address().port,
-          controllerAudioPort: audioReceiver.address().port, video: parameters, audio: parameters });
+          controllerAudioPort: audioReceiver.address().port, video: parameters, audio: audioParameters });
+        assert.ok(result.video.masterKey.equals(parameters.masterKey));
+        assert.ok(result.video.masterSalt.equals(parameters.masterSalt));
+        assert.ok(result.audio.masterKey.equals(audioParameters.masterKey));
+        assert.ok(result.audio.masterSalt.equals(audioParameters.masterSalt));
         const decrypt = (value: typeof result.video) => new SrtpSession({ profile: 1, keys: {
           localMasterKey: value.masterKey, localMasterSalt: value.masterSalt,
           remoteMasterKey: value.masterKey, remoteMasterSalt: value.masterSalt,
         } });
-        const videoCipher = decrypt(result.video); const audioCipher = decrypt(result.audio);
+        // Decode with the controller's offer, not whatever the accessory echoes back.
+        const videoCipher = decrypt(parameters); const audioCipher = decrypt(audioParameters);
         let videoCount = 0; let audioCount = 0;
         receiver.on('message', bytes => {
           if (bytes[1] >= 192 && bytes[1] <= 223) return;
@@ -89,7 +148,22 @@ test('real HEVC fixtures, fMP4 prebuffer, local SRTP, and remote encrypted media
           assert.equal(packet.header.ssrc, result.audioSSRC); assert.equal(packet.header.payloadType, 110); audioCount++;
         });
         await local.startStream({ sessionIdentifier: 'local', videoTier: 3, videoSSRC: 999, audioTier: 1, audioSSRC: 998 });
-        await until(() => videoCount > 10 && audioCount > 10); await local.stopStream('local');
+        await until(() => videoCount > 10 && audioCount > 10);
+        const feedbackCipher = new SrtcpSession({ profile: 1, keys: {
+          localMasterKey: parameters.masterKey, localMasterSalt: parameters.masterSalt,
+          remoteMasterKey: parameters.masterKey, remoteMasterSalt: parameters.masterSalt,
+        } });
+        receiver.send(feedbackCipher.encrypt(new RtcpRrPacket({ reports: [
+          new RtcpReceiverInfo({ ssrc: result.videoSSRC, packetsLost: 3, fractionLost: 64, jitter: 900 }),
+          new RtcpReceiverInfo({ ssrc: result.audioSSRC, packetsLost: 2, fractionLost: 0, jitter: 480 }),
+        ] }).serialize()), result.videoPort!, '127.0.0.1');
+        await until(() => local.feedback.video.stats.reports > 0);
+        assert.equal(local.feedback.video.stats.maxPacketsLost, 3);
+        assert.equal(local.feedback.video.stats.maxJitterMs, 10);
+        assert.equal(local.feedback.audio.stats.reports, 1);
+        assert.equal(local.feedback.audio.stats.maxJitterMs, 10);
+        assert.ok(local.sent.videoPackets > 10 && local.sent.audioPackets > 10);
+        await local.stopStream('local');
         assert.equal(local.sessions.size, 0);
       } finally { receiver.close(); audioReceiver.close(); }
     });
@@ -103,12 +177,17 @@ test('real HEVC fixtures, fMP4 prebuffer, local SRTP, and remote encrypted media
       } });
       try {
         const offer = await remote.handleSolicitOffer({ sessionIdentifier: 'remote', options: { sframeEnabled: true } });
+        assert.ok(offer.sdpOffer.includes(STREAM_ID_URI));
         assert.ok(offer.sframe); let packets = 0; let videoFrames = 0; let videoPackets = 0;
         const failures: string[] = [];
         viewer.onTrack.subscribe(track => {
           const depacketizer = new SFrameRtpDepacketizer();
           track.onReceiveRtp.subscribe(packet => {
-            if (track.kind === 'video') videoPackets++;
+            if (track.kind === 'video') {
+              videoPackets++;
+              // RID is negotiated, but no sender encoding/RID is put on wire.
+              assert.equal(packet.header.extensions.length, 0);
+            }
             try {
             const sealed = depacketizer.push(packet); if (!sealed) return;
             const cryptor = new SFrameReceiver(new Map([[offer.sframe!.kid, offer.sframe!.key]]), packet.header.ssrc,
@@ -119,7 +198,11 @@ test('real HEVC fixtures, fMP4 prebuffer, local SRTP, and remote encrypted media
             } catch (error) { if (failures.length < 5) failures.push(String(error)); }
           });
         });
-        await viewer.setRemoteDescription({ type: 'offer', sdp: offer.sdpOffer });
+        // HomeKit treats RID constraints as metadata. Stock werift interprets any
+        // RID line as requiring RID-demultiplexed RTP. Use its SSRC receiver for
+        // the wire-format check; protocol.test verifies the actual HomeKit offer.
+        const receiverOffer = offer.sdpOffer.replace(/^a=(?:rid|simulcast):.*\r?\n/gm, '');
+        await viewer.setRemoteDescription({ type: 'offer', sdp: receiverOffer });
         await viewer.setLocalDescription(await viewer.createAnswer());
         await remote.handleProvideAnswer({ sessionIdentifier: 'remote', sdpAnswer: viewer.localDescription!.sdp, candidates: [] });
         try { await until(() => packets > 5 && videoFrames > 5, 20000); }

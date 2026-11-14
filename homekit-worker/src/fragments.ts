@@ -156,7 +156,8 @@ export class LabRecording implements CameraRecordingDelegate {
   }
   private startProducer(): void {
     const resolution = this.config!.videoCodec.resolution;
-    const tier = tiers.find(t => t.width === resolution[0] && t.height === resolution[1] && t.frameRate === resolution[2]);
+    const tier = tiers.find(t => t.width === resolution[0] && t.height === resolution[1] && t.frameRate === resolution[2])
+      ?? tiers.find(t => t.width === resolution[0] && t.height === resolution[1]);
     if (!tier) throw new Error('unsupported recording resolution');
     this.ring = new FragmentRing(); this.init = undefined; this.active = true;
     const wall = Date.now();

@@ -10,6 +10,7 @@ import { controlServer, identity, privateDirectory } from './control.js';
 import { SyntheticMedia, tiers } from './media.js';
 import { LabRecording } from './fragments.js';
 import { LocalStreams, RemoteStreams } from './transports.js';
+import { serviceStatus } from './diagnostics.js';
 
 async function main(): Promise<void> {
   const { values } = parseArgs({ options: {
@@ -72,15 +73,21 @@ async function main(): Promise<void> {
     controller = new SecureVideoController({
       sensor: { uuid: uuid.generate(`${saved.id}:sensor`), width: 1920, height: 1080 },
       video: { codec: StreamTierVideoCodec.H265, payloadType: 99, tiers },
-      audio: { payloadType: 110, twoWayAudio: false, tier: { identifier: 1, targetAverageBitrate: 24000,
+      // Temporary hardware experiment: advertise Speaker; talkback remains unimplemented.
+      audio: { payloadType: 110, twoWayAudio: true, tier: { identifier: 1, targetAverageBitrate: 24000,
         sampleRate: StreamTierAudioSampleRate.KHZ_48, bitDepth: StreamTierAudioBitDepth.BITS_16, packetTime: 20, channels: 1 } },
       rtp: { delegate: local }, webrtc: { delegate: remote, maxSessions: 6 },
       recording: { delegate: recording, options: {
         prebufferLength: 4000,
-        mediaContainerConfiguration: { type: MediaContainerType.FRAGMENTED_MP4, fragmentLength: 2000 },
+        mediaContainerConfiguration: { type: MediaContainerType.FRAGMENTED_MP4, fragmentLength: 4000 },
         // The pinned HKSV3 controller uses the legacy HDS configuration schema while carrying HEVC.
+        // Home will not select a profile that lacks 15 fps or uses a fragment length other than 4 seconds.
         video: { type: VideoCodecType.H264, parameters: { levels: [H264Level.LEVEL4_0], profiles: [H264Profile.MAIN] },
-          resolutions: tiers.slice(0, 2).map(tier => [tier.width, tier.height, tier.frameRate]) },
+          resolutions: [
+            [1920, 1080, 30], [1920, 1080, 15],
+            [1280, 720, 30], [1280, 720, 15],
+            [640, 360, 15],
+          ] },
         audio: { codecs: [{ type: AudioRecordingCodecType.AAC_LC, bitrateMode: AudioBitrate.VARIABLE,
           samplerate: AudioRecordingSamplerate.KHZ_32, audioChannels: 1 }] },
       } },
@@ -93,6 +100,10 @@ async function main(): Promise<void> {
       },
     });
     accessory.configureController(controller);
+    // Hardware experiment: report no third-party camera activity. This alone has not
+    // caused the test hub to request a snapshot or live stream.
+    controller.globalOperatingModeService?.setCharacteristic(
+      Characteristic.ThirdPartyCameraActive, Characteristic.ThirdPartyCameraActive.OFF);
     const setMotion = (active: boolean) => {
       const allowed = cameraAllowed() && !!controller!.motionService?.getCharacteristic(Characteristic.MotionEnabled).value;
       controller!.setMotionDetected(active && allowed); recording!.setMotion(active && allowed);
@@ -111,6 +122,20 @@ async function main(): Promise<void> {
         paired: !!accessory!._accessoryInfo?.paired(),
         localSessions: local!.sessions.size, remoteSessions: remote!.sessions.size,
         local: local!.counters, remote: remote!.counters, snapshots, requests, characteristics,
+        localMedia: { sent: local!.sent, negotiation: local!.negotiation },
+        receiverFeedback: {
+          local: { video: local!.feedback.video.stats, audio: local!.feedback.audio.stats, invalidPackets: local!.feedback.invalidPackets },
+          remote: { video: remote!.feedback.video.stats, audio: remote!.feedback.audio.stats },
+        },
+        services: {
+          capabilities: serviceStatus(controller!.capabilitiesService),
+          globalOperatingMode: serviceStatus(controller!.globalOperatingModeService),
+          recordingOperatingMode: serviceStatus(accessory!.getService(Service.CameraOperatingMode)),
+          localStreaming: serviceStatus(controller!.multiTierStreamManagementService),
+          remoteStreaming: serviceStatus(controller!.webrtcStreamManagementService),
+          microphone: serviceStatus(controller!.microphoneService),
+          speaker: serviceStatus(controller!.speakerService),
+        },
         localAllowed: controller!.streamingAllowed(controller!.multiTierStreamManagementService),
         remoteAllowed: controller!.streamingAllowed(controller!.webrtcStreamManagementService),
         childProcesses: media.children.size, homeKitActive: cameraAllowed(), recording: recording!.status() };

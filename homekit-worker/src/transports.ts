@@ -1,17 +1,17 @@
-import { randomBytes, randomInt } from 'node:crypto';
+import { randomInt } from 'node:crypto';
 import { isIP } from 'node:net';
 import type { Socket } from 'node:dgram';
-import { MediaStreamTrack, RTCPeerConnection, RTCRtpCodecParameters, RTCRtpHeaderExtensionParameters, RtpPacket, SrtpSession, SrtcpSession, RtcpSrPacket, RtcpSenderInfo } from 'werift';
+import { MediaStreamTrack, RTCPeerConnection, RTCRtpCodecParameters, RTCRtpHeaderExtensionParameters, RtpPacket, SrtpSession, SrtcpSession, RtcpSrPacket, RtcpSenderInfo, RtcpPacketConverter, isRtcp } from 'werift';
 import type { MultiTierRTPStreamingDelegate, MultiTierPrepareStreamRequest, MultiTierPrepareStreamResponse,
   MultiTierStreamStartRequest, WebRTCStreamingDelegate, WebRTCSolicitOfferRequest, WebRTCOffer,
   WebRTCProvideAnswerRequest, WebRTCReofferRequest, WebRTCReofferAnswer, WebRTCUpdateSessionRequest } from '@homebridge/hap-nodejs';
 import { SyntheticMedia, RtpFeed, tiers, udp, type Tier } from './media.js';
 import { SecureVideoSFrame } from './vendor/sframe.js';
 import { HevcAccessUnitAssembler, SFrameRtpPacketizer } from './vendor/sframeRtp.js';
+import { ReceiverFeedback } from './diagnostics.js';
 
 type Crypto = { cryptoSuite: number; masterKey: Buffer; masterSalt: Buffer };
 export const STREAM_ID_URI = 'urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id';
-function crypto(): Crypto { return { cryptoSuite: 0, masterKey: randomBytes(16), masterSalt: randomBytes(14) }; }
 function keys(value: Crypto) {
   return { profile: 1, keys: { localMasterKey: value.masterKey, localMasterSalt: value.masterSalt,
     remoteMasterKey: value.masterKey, remoteMasterSalt: value.masterSalt } };
@@ -27,6 +27,9 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
   private preparing = new Set<string>();
   private generation = 0;
   readonly counters = { started: 0, failures: 0 };
+  readonly feedback = { video: new ReceiverFeedback(90000), audio: new ReceiverFeedback(48000), invalidPackets: 0 };
+  readonly sent = { videoPackets: 0, audioPackets: 0 };
+  negotiation?: { videoTier: number; audioTier?: number; videoSSRCMatchesPrepared: boolean; audioSSRCMatchesPrepared: boolean };
   constructor(private media: SyntheticMedia, private allowed: () => boolean) {}
   async prepareStream(request: MultiTierPrepareStreamRequest): Promise<MultiTierPrepareStreamResponse> {
     const id = request.sessionIdentifier;
@@ -46,9 +49,21 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
       if (!this.allowed() || generation !== this.generation) throw new Error('streaming disabled');
       const response = { addressOverride: request.sourceAddress,
         videoPort: sockets[0].address().port, audioPort: sockets[1].address().port,
-        videoSSRC: randomInt(1, 0x7fffffff), audioSSRC: randomInt(1, 0x7fffffff), video: crypto(), audio: crypto() };
+        // HKSV3 uses the controller's negotiated SRTP parameters in both directions.
+        videoSSRC: randomInt(1, 0x7fffffff), audioSSRC: randomInt(1, 0x7fffffff), video: request.video, audio: request.audio };
       const session: LocalSession = { request, response, sockets, closed: false,
         timeout: setTimeout(() => void this.stopStream(id), 60_000) };
+      const incoming = [request.video, request.audio].map(value => new SrtcpSession(keys(value)));
+      sockets.forEach((socket, index) => socket.on('message', data => {
+        if (session.closed || !isRtcp(data)) return;
+        try {
+          for (const packet of RtcpPacketConverter.deSerialize(incoming[index].decrypt(data))) {
+            // A compound report may cover both media streams on either socket.
+            this.feedback.video.observe(packet, response.videoSSRC);
+            this.feedback.audio.observe(packet, response.audioSSRC);
+          }
+        } catch { this.feedback.invalidPackets++; }
+      }));
       this.sessions.set(id, session);
       sockets.forEach(socket => socket.on('error', () => {
         if (!session.closed) this.counters.failures++;
@@ -63,6 +78,9 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
     const session = this.sessions.get(id);
     const tier = tiers.find(t => t.identifier === request.videoTier);
     if (!session || session.feed || !tier || !this.allowed()) throw new Error('local stream unavailable');
+    this.negotiation = { videoTier: request.videoTier, audioTier: request.audioTier,
+      videoSSRCMatchesPrepared: request.videoSSRC === session.response.videoSSRC,
+      audioSSRCMatchesPrepared: request.audioSSRC === session.response.audioSSRC };
     clearTimeout(session.timeout);
     const fail = () => { if (!session.closed) this.counters.failures++; void this.stopStream(id); };
     const response = session.response;
@@ -75,6 +93,7 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
     const send = (index: number, packet: RtpPacket) => {
       if (session.closed) return;
       const state = states[index];
+      if (index === 0) this.sent.videoPackets++; else this.sent.audioPackets++;
       packet.header.ssrc = state.ssrc; packet.header.payloadType = index === 0 ? 99 : 110;
       state.count++; state.bytes += packet.payload.length; state.timestamp = packet.header.timestamp; state.wall = Date.now();
       session.sockets[index].send(state.srtp.encrypt(packet.payload, packet.header),
@@ -124,7 +143,7 @@ interface RemoteSession {
  * Apple's video offer needs bitrate and an RTP stream ID. Adapted from camera.ui
  * webrtcSessions.ts at 91ce370391c0f18e63faeb26a876967315a317bc; MIT copyright
  * seydx. See vendor/LICENSE.camera-ui.md. SurvNG also sends the negotiated RID
- * on RTP packets and uses a single bundled transport with owned teardown.
+ * in signaling and uses a single bundled transport with owned teardown.
  */
 export function videoOffer(sdp: string, tier: Tier): string {
   const lines = sdp.split(/\r?\n/);
@@ -147,6 +166,7 @@ export function videoOffer(sdp: string, tier: Tier): string {
 export class RemoteStreams implements WebRTCStreamingDelegate {
   readonly sessions = new Map<string, RemoteSession>();
   readonly counters = { started: 0, failures: 0 };
+  readonly feedback = { video: new ReceiverFeedback(90000), audio: new ReceiverFeedback(48000) };
   constructor(private media: SyntheticMedia, private allowed: () => boolean, private address: string) {}
   async handleSolicitOffer(request: WebRTCSolicitOfferRequest): Promise<WebRTCOffer> {
     const id = request.sessionIdentifier;
@@ -165,6 +185,8 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
     const vtrack = new MediaStreamTrack({ kind: 'video' }); const atrack = new MediaStreamTrack({ kind: 'audio' });
     const video = pc.addTransceiver(vtrack, { direction: 'sendonly' });
     const audio = pc.addTransceiver(atrack, { direction: 'sendonly' });
+    video.sender.onRtcp.subscribe(packet => this.feedback.video.observe(packet, video.sender.ssrc));
+    audio.sender.onRtcp.subscribe(packet => this.feedback.audio.observe(packet, audio.sender.ssrc));
     const fail = () => { const current = this.sessions.get(id); if (current && !current.closed) this.counters.failures++; void this.handleEndSession(id); };
     const session: RemoteSession = { pc, frame: new SecureVideoSFrame(true), closed: false, answered: false,
       timeout: setTimeout(fail, 60_000) };
@@ -189,8 +211,8 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
       void session.feed.start(packet => {
         const frame = assembler.push(packet);
         if (frame) for (const value of vp.packetize(vc.protectFrame(frame.data), frame.timestamp, true)) {
-          const extension = video.headerExtensions.find(extension => extension.uri === STREAM_ID_URI);
-          if (extension) value.header.extensions.push({ id: extension.id, payload: Buffer.from('1') });
+          // Match Scrypted's signaling-only RID interoperability behavior.
+          // camera-webrtc.ts at fb679504ce2d8bc150bb504a7098826644627100.
           vtrack.writeRtp(value);
         }
       }, packet => {
@@ -224,7 +246,8 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
   async handleUpdateSession(request: WebRTCUpdateSessionRequest): Promise<void> {
     const session = this.sessions.get(request.sessionIdentifier);
     if (!session || session.closed) throw new Error('unknown remote session');
-    // No talkback is advertised, but handle the controller's receive-key lifecycle.
+    // Speaker advertisement is under hardware test; only the receive-key lifecycle
+    // is handled here. Return audio is not decoded or played.
     session.frame.addReceiveKeys(request.receiveKeysToAdd); session.frame.removeReceiveKeys(request.receiveKIDsToRemove);
   }
   async handleEndSession(id: string): Promise<void> {
