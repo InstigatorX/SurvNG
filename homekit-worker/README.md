@@ -2,9 +2,10 @@
 
 This optional worker now has two entry points: the isolated synthetic protocol
 lab (`lab.js`) and SurvNG's experimental per-camera runtime (`camera.js`).
-Real-camera HomeKit is disabled by default. The QSV candidate is work in
-progress with a failing opt-in hardware regression; software fallback requires
-per-camera opt-in. The complete hardware acceptance gate remains unverified.
+Real-camera HomeKit is disabled by default. QSV HEVC passes full-GOP temporal
+qualification at all advertised tiers, and Gate Wi-Fi LIVE is hardware-confirmed
+with timestamp-paced RTP. Software fallback requires per-camera opt-in and the
+same temporal qualification. The complete hardware acceptance gate remains unverified.
 See [implementation status](../docs/homekit-implementation.md) for architecture,
 validation and remaining qualification.
 

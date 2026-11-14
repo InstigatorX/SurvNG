@@ -141,6 +141,7 @@ test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio tr
       child.stdout!.on('data', (chunk: Buffer) => chunks.push(chunk));
       if (audio) {
         let frames = 0, audioPackets = 0;
+        let firstFrame = 0, lastFrame = 0;
         const assembler = new HevcAccessUnitAssembler();
         const annexB: Buffer[] = [];
         const feed = new RtpFeed(media, tiers[2]);
@@ -149,17 +150,23 @@ test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio tr
             const frame = assembler.push(packet);
             if (!frame) return;
             frames++;
+            lastFrame = performance.now(); if (frames === 1) firstFrame = lastFrame;
             for (let offset = 0; offset < frame.data.length;) {
               const length = frame.data.readUInt32BE(offset);
               annexB.push(Buffer.from([0, 0, 0, 1]), frame.data.subarray(offset + 4, offset + 4 + length));
               offset += 4 + length;
             }
           }, () => audioPackets++, () => {});
-          await until(() => frames >= 5 && audioPackets >= 10);
-          assert.equal(encoderAcquires, 1, 'live and recording share one HEVC producer');
           const sockets = (await readdir(root)).filter(name => name.endsWith('.sock'));
           assert.equal(sockets.length, 1);
           assert.equal((await lstat(join(root, sockets[0]))).mode & 0o777, 0o600);
+          await until(() => frames >= 60 && audioPackets >= 10);
+          const mediaSpan = (frames - 1) / tiers[2].frameRate * 1000;
+          // Allow codec startup latency, but reject demuxer's multi-second dump
+          // and its default half-second readrate burst over a four-second window.
+          assert.ok(lastFrame - firstFrame >= mediaSpan - 300,
+            'startup probe must not dump buffered video faster than its media clock');
+          assert.equal(encoderAcquires, 1, 'live and recording share one HEVC producer');
           const snapshot = await media.snapshot();
           assert.equal(snapshot.readUInt16BE(0), 0xffd8);
           assert.equal(encoderAcquires, 1, 'snapshot does not start another HEVC encoder');

@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tiers, stopChild, type Tier } from './media.js';
 import type { MediaAdmission } from './camera-media.js';
+import { LowDelayProof } from './low-delay.js';
 
 export interface VideoEncoding { backend: 'qsv' | 'software'; device?: string; fallbackReason?: 'qsv_unavailable' }
 export function deviceArgs(encoding: VideoEncoding): string[] {
@@ -26,9 +27,11 @@ export async function qualifyEncoding(ffmpeg: string, directory: string, admissi
   signal.throwIfAborted();
   await admission('acquire', 'qsv-qualification', { purpose: 'encoder' });
   let root: string | undefined;
-  const run = async (args: string[]): Promise<boolean> => {
+  const run = async (args: string[], proof?: LowDelayProof): Promise<boolean> => {
     signal.throwIfAborted();
-    const child = spawn(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', ...args], { stdio: ['ignore', 'ignore', 'ignore'] });
+    const child = spawn(ffmpeg, ['-hide_banner', '-loglevel', proof ? 'info' : 'error', '-nostdin', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.on('data', (chunk: Buffer) => proof?.push('packets', chunk));
+    child.stderr.on('data', (chunk: Buffer) => proof?.push('headers', chunk));
     const closed = once(child, 'close'); void closed.catch(() => {});
     const abort = () => { void stopChild(child); };
     signal.addEventListener('abort', abort, { once: true });
@@ -42,17 +45,20 @@ export async function qualifyEncoding(ffmpeg: string, directory: string, admissi
   };
   try {
     root = await mkdtemp(join(directory, 'qsv-probe-'));
-    const path = join(root, 'probe.hevc');
+    const path = join(root, 'probe.mp4');
+    const frames = tiers[0].frameRate * 4 + 5;
     if (!await run([...deviceArgs(encoding), '-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=30',
-      '-frames:v', '2', ...encodeVideo(tiers[0], encoding), '-f', 'hevc', path])) return false;
-    return await run(['-i', path, '-frames:v', '2', '-f', 'null', '-']);
+      '-frames:v', String(frames), ...encodeVideo(tiers[0], encoding), '-tag:v', 'hvc1', '-f', 'mp4', path])) return false;
+    const proof = new LowDelayProof();
+    if (!await run(['-i', path, '-map', '0:v:0', '-c:v', 'copy', '-bsf:v', 'hevc_mp4toannexb,trace_headers', '-f', 'framehash', 'pipe:1'], proof) || !proof.valid(frames)) return false;
+    return await run(['-i', path, '-f', 'null', '-']);
   } catch (error) {
     signal.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
     throw error;
   } finally {
-    if (root) await rm(root, { recursive: true, force: true });
-    await admission('release', 'qsv-qualification');
+    try { if (root) await rm(root, { recursive: true, force: true }); }
+    finally { await admission('release', 'qsv-qualification'); }
   }
 }
 

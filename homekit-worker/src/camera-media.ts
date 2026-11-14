@@ -25,7 +25,10 @@ export class CameraMedia implements MediaSource {
   constructor(private url: string, private audio: boolean, private ffmpeg: string,
     private transport: 'tcp' | 'udp', private admission: MediaAdmission, private allowed: () => boolean = () => true, private directory = tmpdir(), readonly encoding: VideoEncoding = { backend: 'software' }) {}
 
-  input(tier: Tier): string[] { return ['-rw_timeout', '15000000', '-f', 'mpegts', '-i', `survng-homekit:${tier.identifier}`]; }
+  // The shared stream is already live, but avformat probing queues seconds of
+  // packets. Pace that queue by its timestamps instead of dumping it into RTP.
+  // FFmpeg treats an exact zero burst as its default half-second burst.
+  input(tier: Tier): string[] { return ['-re', '-readrate_initial_burst', '0.001', '-readrate_catchup', '1', '-rw_timeout', '15000000', '-f', 'mpegts', '-i', `survng-homekit:${tier.identifier}`]; }
   protected directInput(): string[] {
     // RTSP is a demuxer with its own socket timeout; rw_timeout applies to
     // protocol inputs such as HTTP and is rejected by the RTSP demuxer.

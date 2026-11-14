@@ -47,6 +47,6 @@ test('receiver diagnostics retain only bounded loss, jitter, and keyframe counte
   feedback.observe(new RtcpPayloadSpecificFeedback({ feedback: new PictureLossIndication({ mediaSsrc: 1 }) }), 1);
   feedback.observe(new RtcpPayloadSpecificFeedback({ feedback: new PictureLossIndication({ mediaSsrc: 9 }) }), 1);
   assert.deepEqual(feedback.stats, { reports: 2, maxPacketsLost: 3, maxFractionLost: 0.25,
-    maxJitterMs: 10, keyframeRequests: 1 });
+    maxJitterMs: 10, keyframeRequests: 1, packetsLost: 3, fractionLost: 0.25, jitterMs: 10 });
   assert.equal(Object.hasOwn(feedback.stats, 'ssrc'), false);
 });

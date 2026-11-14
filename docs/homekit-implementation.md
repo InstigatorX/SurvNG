@@ -61,19 +61,39 @@ experimental designation until real-camera qualification and acceptance pass.
 
 ## Real-camera integration (experimental, disabled by default)
 
-**QSV checkpoint, not accepted:** the worker now attempts a real QSV HEVC
-encode/decode probe before choosing hardware, with explicitly permitted and
-probed software fallback. The admin status includes the selected backend and
-bounded encoder progress counters. This work was interrupted before deployment
-or an Apple playback retest. A 125-frame 1080p hardware probe encoded in about
-one second and decoded successfully, but the stricter hardware regression failed:
-123 of 125 pictures were reported as B pictures despite `-bf 0 -gpb 0`. Tests
-with low-power encoding enabled/disabled and `GopRefDist=1` also emitted B
-pictures. Whether these are low-delay generalized B pictures or introduce
-presentation reordering remains unresolved. The startup two-frame probe does
-not establish the complete GOP/latency contract. Do not treat QSV smoothness or
-HomeKit hardware acceptance as verified. The failing opt-in regression is kept
-as evidence rather than weakened to make this checkpoint pass.
+QSV low-delay qualification and Gate Wi-Fi LIVE passed on 2026-11-14.
+The startup probe now encodes a complete four-second GOP plus five frames,
+checks every packet's decode/presentation order, verifies zero signaled reorder
+depth and no future-reference entries, requires repeated closed IDRs without CRA,
+and decodes the result. Real hardware tests apply this contract at all three
+tiers. Explicit software fallback must pass the same checks.
+
+The original B-picture assertion was an incorrect proxy for reordering. This
+Intel runtime reports GPB ON even when P pictures are requested. Its GPB slices
+are labeled B by ffprobe, but their packet PTS equals DTS, VPS/SPS reorder depth
+is zero, and their references are to past pictures. These are low-delay generalized
+P/B pictures, not temporally reordered B pictures. See Intel's
+[driver discussion](https://github.com/intel/vpl-gpu-rt/issues/336). The regression
+now rejects actual temporal reordering, future references and open GOPs, including
+negative tests for each; it does not reject an otherwise valid GPB picture label.
+
+Playback also had a separate, reproduced pacing bug. FFmpeg's demuxer probe
+buffered video and then dumped roughly eight seconds of media into RTP in 2.93
+seconds. Shared-source consumers now use timestamp-based real-time reads, a
+one-millisecond initial burst and no accelerated catch-up. An exact zero burst
+would restore FFmpeg's default half-second burst, so it is deliberately avoided.
+The same 120-frame diagnostic then spanned about 7.84 seconds for eight seconds
+of media, with no local sequence gaps. The automated real-input test checks
+pacing over a four-second window, allowing bounded codec-startup latency.
+
+Gate's paired worker was restarted without resetting its identity. The user
+confirmed continuous Wi-Fi LIVE for 45 seconds without buffering/freezing.
+A subsequent active-session snapshot showed QSV at 29.54 fps and 1.0x speed,
+zero media failures, zero current video loss and 26.6 ms receiver jitter.
+Before the fix, receiver maxima included 71.9% fractional loss, 3.49 seconds
+of jitter and repeated keyframe requests. Maxima span startup and reconnects;
+latest loss/jitter are also exposed to distinguish history from current behavior.
+Full real-camera cellular/Apple TV, recording and soak acceptance remain open.
 
 The synthetic soak monitor was stopped at the user's request. Its partial
 capture was preserved; future soak validation will use real cameras.
@@ -87,7 +107,7 @@ Existing Cameras setup remains the place to add camera connections.
 `homekit.enabled` and each `camera.homekit.enabled` default to false. Software
 fallback requires `camera.homekit.allow_software_encoding`; it also defaults to false.
 The candidate runtime prefers QSV, with libx265 fallback, AAC and libopus.
-Full QSV acceptance and HEVC passthrough qualification remain future work. Enabling camera
+Broader QSV hardware acceptance and HEVC passthrough qualification remain future work. Enabling camera
 audio requires an audio track in the selected source. Otherwise the worker
 supplies silence for Home's live audio transport. Home's Record Audio Off omits
 the recording audio track entirely.
@@ -160,11 +180,11 @@ editing, reset confirmation, connection recovery, and narrow-screen layout.
 
 ## Remaining qualification
 
-- Pair actual deployed cameras and repeat local/cellular/Apple TV, recording,
-  audio-off, motion on/off, camera power, privacy and reconnect acceptance.
+- Gate is paired and QSV Wi-Fi LIVE is confirmed; complete real-camera cellular/Apple TV,
+  recording, audio-off, motion on/off, camera power, privacy and reconnect acceptance.
 - Complete exported Home clip/pre-roll inspection, end-of-stream ACK diagnosis,
   and the 24-hour soak review described above.
-- Resolve the QSV GOP/latency regression and qualify Apple playback; HEVC passthrough remains future work.
+- HEVC passthrough qualification remains future work; retain the QSV temporal and pacing regressions.
 - Qualify spatial Home activity zones before emitting motion with zones active.
 
 Worker dependencies must be built using the pinned bootstrap process. SurvNG's
