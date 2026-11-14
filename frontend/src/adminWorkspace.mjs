@@ -19,6 +19,7 @@ export const ADMIN_RESPONSIBILITY_GROUPS = Object.freeze([
       { id: "storage", label: "Storage", workspace: "general", subsection: "storage" },
       { id: "integrations", label: "Integrations", workspace: "general", subsection: "mqtt" },
       { id: "access", label: "Access", workspace: "general", subsection: "access" },
+      { id: "homekit", label: "HomeKit", workspace: "general", subsection: "homekit" },
       { id: "server", label: "Server", workspace: "general", subsection: "general", secondary: true },
     ],
   },
@@ -59,6 +60,7 @@ export const ADMIN_NAV_GROUPS = Object.freeze([
     { id: "maintenance", label: "Storage Maintenance", workspace: "maintenance", description: "Reconcile and repair the media index." },
   ] },
   { id: "integrations", label: "Integrations", items: [
+    { id: "homekit", label: "HomeKit", workspace: "general", subsection: "homekit", description: "Pair cameras with Apple Home and configure motion triggers." },
     { id: "integrations", label: "API & MQTT", workspace: "general", subsection: "mqtt", description: "Connect SurvNG to other services." },
   ] },
   { id: "security", label: "Security", items: [
@@ -121,6 +123,7 @@ export const GENERAL_SECTION_LABELS = Object.freeze({
   general: "Server",
   storage: "Storage & Retention",
   mqtt: "Integrations",
+  homekit: "HomeKit",
   access: "Access",
   detection: "Object Detection",
 });
@@ -179,8 +182,13 @@ export function configValuesEqual(left, right) {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
-// Per-camera speech switches live on the Detection page, which saves through
-// the system (general) configuration path rather than the Cameras workspace.
+// HomeKit camera controls save with the HomeKit system settings.
+export function cameraHomeKitDirty(cameras = [], baselineCameras = []) {
+  const baseline = new Map(baselineCameras.map((camera) => [camera.id, camera]));
+  return cameras.some((camera) => !configValuesEqual(camera.homekit ?? null, baseline.get(camera.id)?.homekit ?? null));
+}
+
+// Per-camera speech switches save with the Detection system settings.
 export function cameraSpeechDirty(cameras = [], baselineCameras = []) {
   const baseline = new Map((baselineCameras || []).map((camera) => [camera.id, camera]));
   return (cameras || []).some((camera) => !configValuesEqual(

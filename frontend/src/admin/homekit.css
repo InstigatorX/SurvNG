@@ -1,0 +1,20 @@
+.homekit-settings { display: grid; gap: 20px; }
+.homekit-settings .settings-help { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.homekit-settings h2 { font-size: 18px; }
+.homekit-settings .check-field { display: flex; align-items: center; gap: 8px; color: var(--ink); }
+.homekit-settings .check-field input { width: 16px; height: 16px; min-height: 16px; margin: 0; flex-shrink: 0; accent-color: var(--accent); }
+.homekit-settings .homekit-error { color: var(--danger, #b34d43); }
+.homekit-settings .settings-heading, .homekit-camera-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.homekit-settings h2, .homekit-camera h4 { display: flex; align-items: center; gap: 8px; margin: 0; }
+.homekit-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 16px 0; }
+.homekit-fields label { min-width: 0; }
+.homekit-fields small { color: var(--muted); font-size: 12px; }
+.homekit-badge { flex-shrink: 0; padding: 5px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 11px; }
+.homekit-cameras { display: grid; gap: 14px; }
+.homekit-camera { display: grid; gap: 14px; }
+.homekit-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.homekit-error { color: var(--danger, #e17c73); }
+.homekit-pairing { display: grid; grid-template-columns: 192px minmax(0, 1fr); gap: 22px; align-items: center; padding: 18px; border: 1px solid var(--line); border-radius: 12px; }
+.homekit-pairing img { border-radius: 8px; background: #fff; }
+.homekit-code { display: block; font-size: 26px; letter-spacing: .08em; font-variant-numeric: tabular-nums; }
+@media (max-width: 760px) { .homekit-fields, .homekit-pairing { grid-template-columns: minmax(0, 1fr); } .homekit-settings .settings-heading { flex-wrap: wrap; } }

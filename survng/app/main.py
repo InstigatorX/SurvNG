@@ -61,6 +61,7 @@ from .help_docs import HelpRouteDependencies, create_help_router
 from .onvif_inspector_routes import create_onvif_inspector_router
 from .manager import AppManager, validate_manager_configuration
 from .media_sessions import MediaSessionManager
+from .homekit_routes import HomeKitRouteDependencies, create_homekit_router
 from .manager_access import ManagerAccessCoordinator
 from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
 from .local_observability import LocalObservabilityServer, build_runtime_status
@@ -1046,6 +1047,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SurvNG", lifespan=lifespan)
+app.include_router(create_homekit_router(HomeKitRouteDependencies(get_manager=get_manager)))
 app.include_router(create_weather_router(lambda: config.weather))
 
 

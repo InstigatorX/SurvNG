@@ -1,3 +1,4 @@
+import { HomeKitSettings } from "./HomeKitSettings.jsx";
 import { WeatherSettings } from "./WeatherSettings.jsx";
 import { SystemReviewPanel } from "./SystemReviewPanel.jsx";
 import React, { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -24,6 +25,7 @@ import {
   Layers,
   GripVertical,
   HardDrive,
+  House,
   Search,
   ListTree,
   LayoutDashboard,
@@ -58,7 +60,7 @@ import { logPayloadSignature } from "../pollingPolicy.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { motionAuditRegions } from "../motionAudit.mjs";
 import { clampZoneView, insertZonePointWithIndex, zoomZoneView } from "../zoneGeometry.mjs";
-import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminHomeDestinations, adminWorkspaceSearch, cameraConfigDirtyState, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, resolveAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
+import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminHomeDestinations, adminWorkspaceSearch, cameraConfigDirtyState, cameraHomeKitDirty, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, resolveAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
 import { appUrl, mediaUrl, fetch } from "../shared/api.js";
 import { MEDIA_STORAGE_ROLES, CAMERA_ADMIN_SECTIONS, TELEMETRY_ADMIN_SECTIONS, HEALTH_TELEMETRY_SECTIONS, GENERAL_ADMIN_SECTIONS, US_TIME_ZONES, THEMES } from "../shared/constants.js";
 import { CameraScopePicker } from "../shared/CameraScopePicker.jsx";
@@ -79,6 +81,7 @@ export const ADMIN_DESTINATION_ICONS = {
   detection: Cpu,
   storage: HardDrive,
   integrations: Radio,
+  homekit: House,
   access: KeyRound,
   preferences: Cog,
   server: Cog,
@@ -1398,6 +1401,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const generalDirty = Boolean(config && baselineConfig) && (
     !configValuesEqual(comparableSystemConfig(config), comparableSystemConfig(baselineConfig))
     || cameraSpeechDirty(config.cameras || [], baselineConfig.cameras || [])
+    || cameraHomeKitDirty(config.cameras || [], baselineConfig.cameras || [])
   );
   const selectedCameraSettingsDirty = Boolean(selectedCamera) && !configValuesEqual(comparableCameraSettings(selectedCamera), comparableCameraSettings(baselineCamera));
   const selectedZonesDirty = Boolean(selectedCamera) && !configValuesEqual(selectedCamera.zones || [], baselineCamera?.zones || []);
@@ -2092,6 +2096,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 <button type="button" aria-current={generalSection === "storage" ? "page" : undefined} className={generalSection === "storage" ? "active" : ""} onClick={() => selectAdminSubsection("storage", setGeneralSection, "general")}><HardDrive size={16} /><span>Storage &amp; Retention</span></button>
                 <button type="button" aria-current={generalSection === "mqtt" ? "page" : undefined} className={generalSection === "mqtt" ? "active" : ""} onClick={() => selectAdminSubsection("mqtt", setGeneralSection, "general")}><Radio size={16} /><span>API &amp; MQTT/HA</span></button>
                 <button type="button" aria-current={generalSection === "access" ? "page" : undefined} className={generalSection === "access" ? "active" : ""} onClick={() => selectAdminSubsection("access", setGeneralSection, "general")}><KeyRound size={16} /><span>Access</span></button>
+                <button type="button" aria-current={generalSection === "homekit" ? "page" : undefined} className={generalSection === "homekit" ? "active" : ""} onClick={() => selectAdminSubsection("homekit", setGeneralSection, "general")}><House size={16} /><span>HomeKit</span></button>
                 <span className="tree-group-label">Intelligence</span>
                 <button type="button" aria-current={generalSection === "detection" ? "page" : undefined} className={generalSection === "detection" ? "active" : ""} onClick={() => selectAdminSubsection("detection", setGeneralSection, "general")}><Cpu size={16} /><span>Object Detection</span></button>
               </div>
@@ -4143,6 +4148,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       ) : null}
 
 
+      {section === "homekit" ? <HomeKitSettings config={config} updateConfig={updateConfig} /> : null}
       {section === "mqtt" ? (
         <div className="sub-panel subsection-workspace">
           <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="API and MQTT/HA settings">
