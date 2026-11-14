@@ -1,5 +1,7 @@
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { createInterface } from 'node:readline';
-import { isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { isIPv4 } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { fstatSync } from 'node:fs';
@@ -8,10 +10,9 @@ import { Accessory, Categories, Characteristic, HAPStorage, Service, SecureVideo
   StreamTierVideoCodec, StreamTierAudioSampleRate, StreamTierAudioBitDepth, MediaContainerType,
   VideoCodecType, H264Level, H264Profile, AudioRecordingCodecType, AudioBitrate, AudioRecordingSamplerate, uuid } from '@homebridge/hap-nodejs';
 import { controlServer, identity, privateDirectory } from './control.js';
-import { tiers } from './media.js';
 import { LabRecording } from './fragments.js';
 import { LocalStreams, RemoteStreams } from './transports.js';
-import { qualifyEncoding, selectEncoding, EncodingUnavailableError, type VideoEncoding } from './encoding.js';
+import { qualifyEncoding, selectEncoding, streamProfile, EncodingUnavailableError, type VideoEncoding } from './encoding.js';
 import { CameraMedia, type MediaAdmission } from './camera-media.js';
 
 async function main(): Promise<void> {
@@ -81,8 +82,12 @@ async function main(): Promise<void> {
       () => qualifyEncoding(config.ffmpeg, state, admission, qualificationAbort.signal, { backend: 'software' }));
     const encoding = await qualifying;
     if (closing) throw new Error('camera stopping');
+    let frame = { width: 1920, height: 1080 };
+    try { frame = await probeFrame(config.ffmpeg, config.url, config.transport); }
+    catch { console.error('HomeKit camera frame probe failed; using 16:9.'); }
+    const profile = streamProfile(frame.width, frame.height);
     media = new CameraMedia(config.url, config.audio, config.ffmpeg, config.transport, admission,
-      () => !closing && !!controller?.homeKitCameraActive, state, encoding);
+      () => !closing && !!controller?.homeKitCameraActive, state, encoding, profile.tiers);
     const saved = await identity(state);
     const persist = join(state, 'hap'); await privateDirectory(persist);
     HAPStorage.setCustomStoragePath(persist);
@@ -93,12 +98,12 @@ async function main(): Promise<void> {
       .setCharacteristic(Characteristic.SerialNumber, saved.id)
       .setCharacteristic(Characteristic.FirmwareRevision, '0.1.0');
     const cameraAllowed = () => !closing && !!controller?.homeKitCameraActive;
-    local = new LocalStreams(media, () => !closing && !!controller?.streamingAllowed(controller.multiTierStreamManagementService));
-    remote = new RemoteStreams(media, () => !closing && !!controller?.streamingAllowed(controller.webrtcStreamManagementService), address!);
-    recording = new LabRecording(media, cameraAllowed);
+    local = new LocalStreams(media, () => !closing && !!controller?.streamingAllowed(controller.multiTierStreamManagementService), profile.tiers);
+    remote = new RemoteStreams(media, () => !closing && !!controller?.streamingAllowed(controller.webrtcStreamManagementService), address!, profile.tiers);
+    recording = new LabRecording(media, cameraAllowed, profile.tiers);
     controller = new SecureVideoController({
-      sensor: { uuid: uuid.generate(`${saved.id}:sensor`), width: 1920, height: 1080 },
-      video: { codec: StreamTierVideoCodec.H265, payloadType: 99, tiers },
+      sensor: { uuid: uuid.generate(`${saved.id}:sensor`), width: profile.width, height: profile.height },
+      video: { codec: StreamTierVideoCodec.H265, payloadType: 99, tiers: profile.tiers },
       // Apple compatibility requires Speaker advertisement; talkback remains unavailable.
       audio: { payloadType: 110, twoWayAudio: true, tier: { identifier: 1, targetAverageBitrate: 24000,
         sampleRate: StreamTierAudioSampleRate.KHZ_48, bitDepth: StreamTierAudioBitDepth.BITS_16, packetTime: 20, channels: 1 } },
@@ -109,11 +114,7 @@ async function main(): Promise<void> {
         // The pinned HKSV3 controller uses the legacy HDS configuration schema while carrying HEVC.
         // Home will not select a profile that lacks 15 fps or uses a fragment length other than 4 seconds.
         video: { type: VideoCodecType.H264, parameters: { levels: [H264Level.LEVEL4_0], profiles: [H264Profile.MAIN] },
-          resolutions: [
-            [1920, 1080, 30], [1920, 1080, 15],
-            [1280, 720, 30], [1280, 720, 15],
-            [640, 360, 15],
-          ] },
+          resolutions: profile.resolutions },
         audio: { codecs: [{ type: AudioRecordingCodecType.AAC_LC, bitrateMode: AudioBitrate.VARIABLE,
           samplerate: AudioRecordingSamplerate.KHZ_32, audioChannels: 1 }] },
       } },
@@ -170,6 +171,25 @@ async function main(): Promise<void> {
     if (!closing) exitStatus = error instanceof EncodingUnavailableError ? 42 : 1;
     await stop(); throw error;
   }
+}
+
+async function probeFrame(ffmpeg: string, url: string, transport: 'tcp' | 'udp'): Promise<{ width: number; height: number }> {
+  const args = ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,sample_aspect_ratio', '-of', 'json'];
+  if (/^rtsps?:/i.test(url)) args.unshift('-rtsp_transport', transport);
+  const child = spawn(join(dirname(ffmpeg), 'ffprobe'), [...args, url], { stdio: ['ignore', 'pipe', 'ignore'] });
+  const chunks: Buffer[] = [];
+  child.stdout!.on('data', (chunk: Buffer) => { if (chunks.reduce((sum, item) => sum + item.length, 0) < 65536) chunks.push(chunk); });
+  const timer = setTimeout(() => child.kill('SIGKILL'), 15000);
+  try {
+    const [code] = await once(child, 'close');
+    if (code !== 0) throw new Error('camera frame probe failed');
+    const stream = JSON.parse(Buffer.concat(chunks).toString('utf8'))?.streams?.[0];
+    const width = Number(stream?.width), height = Number(stream?.height);
+    if (!Number.isInteger(width) || !Number.isInteger(height)) throw new Error('camera frame probe failed');
+    const sar = /^(\d+):(\d+)$/.exec(String(stream?.sample_aspect_ratio ?? ''));
+    if (!sar || !Number(sar[1]) || !Number(sar[2])) return { width, height };
+    return { width: Math.max(2, Math.round(width * Number(sar[1]) / Number(sar[2]) / 2) * 2), height };
+  } finally { clearTimeout(timer); }
 }
 
 main().catch(error => { console.error('SurvNG HomeKit camera stopped with an error.'); process.exitCode = error instanceof EncodingUnavailableError ? 42 : 1; });

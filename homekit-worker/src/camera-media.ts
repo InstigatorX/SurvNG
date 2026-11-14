@@ -23,7 +23,7 @@ export class CameraMedia implements MediaSource {
   get encoderStatus(): object { return { backend: this.encoding.backend, fallbackReason: this.encoding.fallbackReason, sources: [...this.progress.values()] }; }
   readonly counters = { failures: 0, warningChunks: 0, admissionFailures: 0 };
   constructor(private url: string, private audio: boolean, private ffmpeg: string,
-    private transport: 'tcp' | 'udp', private admission: MediaAdmission, private allowed: () => boolean = () => true, private directory = tmpdir(), readonly encoding: VideoEncoding = { backend: 'software' }) {}
+    private transport: 'tcp' | 'udp', private admission: MediaAdmission, private allowed: () => boolean = () => true, private directory = tmpdir(), readonly encoding: VideoEncoding = { backend: 'software' }, private catalog: readonly Tier[] = tiers) {}
 
   // The shared stream is already live, but avformat probing queues seconds of
   // packets. Pace that queue by its timestamps instead of dumping it into RTP.
@@ -63,7 +63,7 @@ export class CameraMedia implements MediaSource {
   private async startAdmitted(args: string[]): Promise<ChildProcess> {
     const sourceIndex = args.findIndex(value => value.startsWith('survng-homekit:'));
     if (sourceIndex < 0) return this.spawnAdmitted(args, args.includes('mjpeg') ? 'snapshot' : 'relay');
-    const tier = tiers.find(tier => `survng-homekit:${tier.identifier}` === args[sourceIndex]);
+    const tier = this.catalog.find(tier => `survng-homekit:${tier.identifier}` === args[sourceIndex]);
     if (!tier) throw new Error('unsupported camera tier');
     const { source, url } = await this.acquireSource(tier);
     try {

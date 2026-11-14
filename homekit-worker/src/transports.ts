@@ -30,7 +30,7 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
   readonly feedback = { video: new ReceiverFeedback(90000), audio: new ReceiverFeedback(48000), invalidPackets: 0 };
   readonly sent = { videoPackets: 0, audioPackets: 0 };
   negotiation?: { videoTier: number; audioTier?: number; videoSSRCMatchesPrepared: boolean; audioSSRCMatchesPrepared: boolean };
-  constructor(private media: MediaSource, private allowed: () => boolean) {}
+  constructor(private media: MediaSource, private allowed: () => boolean, private catalog: readonly Tier[] = tiers) {}
   async prepareStream(request: MultiTierPrepareStreamRequest): Promise<MultiTierPrepareStreamResponse> {
     const id = request.sessionIdentifier;
     if (!this.allowed() || this.sessions.size + this.preparing.size >= 5 || this.sessions.has(id) || this.preparing.has(id)) throw new Error('local session unavailable');
@@ -76,7 +76,7 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
   async startStream(request: MultiTierStreamStartRequest): Promise<void> {
     const id = request.sessionIdentifier;
     const session = this.sessions.get(id);
-    const tier = tiers.find(t => t.identifier === request.videoTier);
+    const tier = this.catalog.find(t => t.identifier === request.videoTier);
     if (!session || session.feed || !tier || !this.allowed()) throw new Error('local stream unavailable');
     this.negotiation = { videoTier: request.videoTier, audioTier: request.audioTier,
       videoSSRCMatchesPrepared: request.videoSSRC === session.response.videoSSRC,
@@ -167,7 +167,7 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
   readonly sessions = new Map<string, RemoteSession>();
   readonly counters = { started: 0, failures: 0 };
   readonly feedback = { video: new ReceiverFeedback(90000), audio: new ReceiverFeedback(48000) };
-  constructor(private media: MediaSource, private allowed: () => boolean, private address: string) {}
+  constructor(private media: MediaSource, private allowed: () => boolean, private address: string, private catalog: readonly Tier[] = tiers) {}
   async handleSolicitOffer(request: WebRTCSolicitOfferRequest): Promise<WebRTCOffer> {
     const id = request.sessionIdentifier;
     if (!this.allowed() || this.sessions.size >= 6 || this.sessions.has(id)) throw new Error('remote session unavailable');
@@ -206,7 +206,7 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
       const vc = session.frame.videoStream(video.sender.ssrc); const ac = session.frame.audioStream(audio.sender.ssrc);
       const vp = new SFrameRtpPacketizer({ ssrc: video.sender.ssrc, payloadType: video.sender.codec?.payloadType ?? 99, maxPayload: 1200 });
       const ap = new SFrameRtpPacketizer({ ssrc: audio.sender.ssrc, payloadType: audio.sender.codec?.payloadType ?? 110, maxPayload: 1200 });
-      session.feed = new RtpFeed(this.media, tiers[0]);
+      session.feed = new RtpFeed(this.media, this.catalog[0]);
       this.counters.started++;
       void session.feed.start(packet => {
         const frame = assembler.push(packet);
@@ -222,7 +222,7 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
     try {
       const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
       if (session.closed || !this.allowed()) throw new Error('remote session cancelled');
-      return { sdpOffer: videoOffer(pc.localDescription!.sdp, tiers[0]), candidates, sframe: session.frame.senderKey };
+      return { sdpOffer: videoOffer(pc.localDescription!.sdp, this.catalog[0]), candidates, sframe: session.frame.senderKey };
     } catch (error) { await this.handleEndSession(id); throw error; }
   }
   async handleProvideAnswer(request: WebRTCProvideAnswerRequest): Promise<void> {

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { encodeVideo, deviceArgs, selectEncoding, qualifyEncoding, EncodingUnavailableError } from '../src/encoding.js';
+import { encodeVideo, deviceArgs, selectEncoding, qualifyEncoding, streamProfile, EncodingUnavailableError } from '../src/encoding.js';
 import { LowDelayProof } from '../src/low-delay.js';
 import { tiers } from '../src/media.js';
 
@@ -27,6 +27,15 @@ test('hardware qualification respects cancellation before acquiring resources', 
   await assert.rejects(qualifyEncoding('unused', '/unused', async () => { admitted = true; }, abort.signal,
     { backend: 'qsv', device: '/unused' }));
   assert.equal(admitted, false);
+});
+
+test('stream geometry follows the camera aspect instead of padding into 16:9', () => {
+  const landscape = streamProfile(896, 672);
+  assert.deepEqual(landscape.tiers.map(tier => [tier.width, tier.height]), [[1600, 1200], [1440, 1080], [640, 480]]);
+  const portrait = streamProfile(672, 896);
+  assert.deepEqual(portrait.tiers.map(tier => [tier.width, tier.height]), [[1200, 1600], [960, 1280], [480, 640]]);
+  assert.deepEqual(streamProfile(1920, 1080).tiers.map(tier => [tier.width, tier.height]), [[1920, 1080], [1280, 720], [640, 360]]);
+  assert.equal(encodeVideo(landscape.tiers[0], { backend: 'software' }).join(' ').includes('pad='), false);
 });
 
 test('temporal qualification rejects reordering, future references, missing headers and open GOPs', () => {

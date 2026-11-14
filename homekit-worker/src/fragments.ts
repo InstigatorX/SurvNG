@@ -1,7 +1,7 @@
 import { EventEmitter, once } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import type { CameraRecordingConfiguration, CameraRecordingDelegate, RecordingPacket } from '@homebridge/hap-nodejs';
-import { type MediaSource, tiers, stopChild } from './media.js';
+import { type MediaSource, tiers, stopChild, type Tier } from './media.js';
 
 const MAX_BYTES = 64 * 1024 * 1024;
 export function boxes(data: Buffer): Array<{ type: string; data: Buffer }> {
@@ -172,7 +172,7 @@ export class LabRecording implements CameraRecordingDelegate {
   private motionStopped = 0;
   private producerKey = '';
   readonly counters = { streams: 0, completed: 0, failed: 0, producerFailures: 0 };
-  constructor(private media: MediaSource, private allowed: () => boolean) {}
+  constructor(private media: MediaSource, private allowed: () => boolean, private catalog: readonly Tier[] = tiers) {}
   setMotion(value: boolean): void { this.motion = value; if (!value) this.motionStopped = Date.now(); }
   updateRecordingConfiguration(config?: CameraRecordingConfiguration): void { this.config = config; this.reconcile(); }
   updateRecordingActive(active: boolean): void { this.desired = active; this.reconcile(); }
@@ -187,8 +187,8 @@ export class LabRecording implements CameraRecordingDelegate {
   }
   private async startProducer(): Promise<void> {
     const resolution = this.config!.videoCodec.resolution;
-    const tier = tiers.find(t => t.width === resolution[0] && t.height === resolution[1] && t.frameRate === resolution[2])
-      ?? tiers.find(t => t.width === resolution[0] && t.height === resolution[1]);
+    const tier = this.catalog.find(t => t.width === resolution[0] && t.height === resolution[1] && t.frameRate === resolution[2])
+      ?? this.catalog.find(t => t.width === resolution[0] && t.height === resolution[1]);
     if (!tier) throw new Error('unsupported recording resolution');
     this.ring = new FragmentRing(); this.init = undefined; this.active = true;
     const wall = Date.now();

@@ -10,8 +10,35 @@ export interface VideoEncoding { backend: 'qsv' | 'software'; device?: string; f
 export function deviceArgs(encoding: VideoEncoding): string[] {
   return encoding.backend === 'qsv' ? ['-qsv_device', encoding.device!] : [];
 }
+const FAMILIES = [
+  { ratio: 16 / 9, sizes: [[1920, 1080], [1280, 720], [640, 360]] },
+  { ratio: 4 / 3, sizes: [[1600, 1200], [1440, 1080], [640, 480]] },
+  { ratio: 9 / 16, sizes: [[1080, 1920], [720, 1280], [360, 640]] },
+  { ratio: 3 / 4, sizes: [[1200, 1600], [960, 1280], [480, 640]] },
+  { ratio: 1, sizes: [[1440, 1440], [1080, 1080], [480, 480]] },
+] as const;
+const TIER_RATES = [
+  { identifier: 1, quality: 2, frameRate: 30, targetAverageBitrate: 1700, peakBitrate: 1800 },
+  { identifier: 2, quality: 3, frameRate: 30, targetAverageBitrate: 768, peakBitrate: 800 },
+  { identifier: 3, quality: 4, frameRate: 15, targetAverageBitrate: 180, peakBitrate: 190 },
+] as const;
+
+/** Required HomeKit resolutions for the camera's real aspect. Padding a 4:3 or 3:4 picture into 16:9 is what draws the side bars. */
+export function streamProfile(width: number, height: number): { width: number; height: number; tiers: Tier[]; resolutions: [number, number, number][] } {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 2 || height < 2) throw new Error('invalid frame');
+  const ratio = Math.log(width / height);
+  const family = FAMILIES.reduce((best, item) => Math.abs(Math.log(item.ratio) - ratio) < Math.abs(Math.log(best.ratio) - ratio) ? item : best);
+  const selected = family.sizes.map((size, index) => ({ ...TIER_RATES[index], width: size[0], height: size[1] }));
+  return { width, height, tiers: selected, resolutions: [
+    [selected[0].width, selected[0].height, 30], [selected[0].width, selected[0].height, 15],
+    [selected[1].width, selected[1].height, 30], [selected[1].width, selected[1].height, 15],
+    [selected[2].width, selected[2].height, 15],
+  ] };
+}
+
 export function encodeVideo(tier: Tier, encoding: VideoEncoding): string[] {
-  const filter = `scale=${tier.width}:${tier.height}:force_original_aspect_ratio=decrease,pad=${tier.width}:${tier.height}:(ow-iw)/2:(oh-ih)/2,fps=${tier.frameRate}`;
+  // Fill the tier. decrease+pad keeps unused 16:9 margins and Home shows them as side bars.
+  const filter = `scale=${tier.width}:${tier.height}:force_original_aspect_ratio=increase,crop=${tier.width}:${tier.height},setsar=1,fps=${tier.frameRate}`;
   const rate = ['-b:v', `${tier.targetAverageBitrate}k`, '-maxrate', `${tier.peakBitrate}k`, '-bufsize', `${tier.peakBitrate * 2}k`];
   if (encoding.backend === 'qsv') return ['-vf', `${filter},format=nv12`, '-c:v', 'hevc_qsv',
     '-preset', 'veryfast', '-profile:v', 'main', '-g', String(tier.frameRate * 4), '-bf', '0',
