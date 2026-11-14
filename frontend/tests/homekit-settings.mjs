@@ -49,8 +49,11 @@ try {
     statusRequests++;
     if (statusRequests === 1) await waitForInitial;
     await route.fulfill({ status: mode === "error" ? 503 : 200, contentType: "application/json",
-      body: JSON.stringify({ enabled: true, cameras: [{ id: "porch", state: "running", paired: false, port: 52001 }] }) });
+      body: JSON.stringify({ enabled: true, nodes: [{ id: "abc123abc123abcd", name: "Gate box", online: true, hardware: "qsv", cameras: [] }],
+        cameras: [{ id: "porch", state: "running", paired: false, port: 52001, encoder: "local" }] }) });
   });
+  await page.route("**/api/homekit/nodes", route => route.fulfill({ contentType: "application/json",
+    body: JSON.stringify({ command: "curl -fsSL 'https://survng.example/api/homekit/enroll/token' | sh" }) }));
   await page.route("**/api/homekit/cameras/porch/pairing", route => route.fulfill({ contentType: "application/json",
     body: JSON.stringify({ setupCode: "123-45-679", qrSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>' }) }));
   await page.route("**/api/homekit/cameras/porch/reset-pairing", route => {
@@ -62,6 +65,13 @@ try {
   await page.getByText("Loading HomeKit status…").waitFor();
   initialStatus();
   await page.getByText("Ready to pair", { exact: true }).waitFor();
+  await page.getByRole("heading", { name: "Gate box" }).waitFor();
+  await page.getByText("Online", { exact: true }).waitFor();
+  await page.locator(".homekit-camera select").first().selectOption("abc123abc123abcd");
+  assert.equal(JSON.parse(await page.getByTestId("config").textContent()).cameras[0].homekit.encoder, "abc123abc123abcd");
+  await page.getByRole("button", { name: "Add encoder" }).click();
+  await page.getByText("curl -fsSL 'https://survng.example/api/homekit/enroll/token' | sh").waitFor();
+  await page.getByRole("button", { name: "Hide installer" }).click();
   await page.getByRole("checkbox", { name: "Trigger HomeKit motion from object detection" }).check();
   assert.equal(JSON.parse(await page.getByTestId("config").textContent()).cameras[0].homekit.object_motion, true);
   await page.getByRole("button", { name: "Pair with Apple Home" }).click();

@@ -661,6 +661,7 @@ class CameraHomeKitConfig(BaseModel):
     audio: bool = False
     object_motion: bool = False
     port: int = Field(default=0, ge=0, le=65535)
+    encoder: str = "local"
 
     @field_validator("port")
     @classmethod
@@ -668,6 +669,14 @@ class CameraHomeKitConfig(BaseModel):
         if value and value < 1024:
             raise ValueError("HomeKit port must be zero (automatic) or at least 1024")
         return value
+
+    @field_validator("encoder")
+    @classmethod
+    def validate_encoder(cls, value: str) -> str:
+        value = value.strip()
+        if value == "local" or re.fullmatch(r"[a-f0-9]{16}", value):
+            return value
+        raise ValueError("HomeKit encoder must be local or an enrolled node")
 
 
 class HomeKitConfig(BaseModel):

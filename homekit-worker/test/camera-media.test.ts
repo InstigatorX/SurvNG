@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { execFile, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
-import { CameraMedia } from '../src/camera-media.js';
+import { CameraMedia, encoderCommand, remoteCopyCommand } from '../src/camera-media.js';
 import { RtpFeed, tiers } from '../src/media.js';
 import { FragmentParser, FragmentRing, videoClock, decodeTime, fragmentDuration } from '../src/fragments.js';
 import { HevcAccessUnitAssembler } from '../src/vendor/sframeRtp.js';
@@ -24,6 +24,27 @@ class FileCameraMedia extends CameraMedia {
   // A file-backed test camera must advance in real time like an RTSP source.
   protected override directInput(): string[] { return ['-re', ...super.directInput()]; }
 }
+
+test('a remote feed is copied and a local encoder keeps the source', () => {
+  const remote = remoteCopyCommand('/srv/homekit/feeds/gate/1.sock').join(' ');
+  assert.equal(remote.includes('unix:///srv/homekit/feeds/gate/1.sock'), true);
+  assert.equal(remote.includes('+genpts+igndts'), true);
+  assert.equal(remote.includes('-analyzeduration 0'), true);
+  assert.equal(remote.includes('-c:v copy'), true);
+  assert.equal(remote.includes('-map 0:a:0 -c:a copy'), true);
+  assert.equal(remote.includes('pad='), false);
+  const local = encoderCommand('rtsp://camera/live', 'tcp', false, tiers[0], { backend: 'software' }).join(' ');
+  assert.equal(local.includes('rtsp://camera/live'), true);
+  assert.equal(local.includes('libx265'), true);
+});
+
+test('a live viewer identifies the shared stream without the default five-second probe', () => {
+  const media = new CameraMedia('rtsp://not-opened/camera', false, 'ffmpeg', 'tcp', async () => {});
+  const args = media.input(tiers[0]);
+  assert.equal(args[args.indexOf('-analyzeduration') + 1], '0');
+  assert.equal(args.includes('-re'), true);
+  assert.equal(args.includes('-readrate_initial_burst'), true);
+});
 
 test('RTSP sources use the demuxer timeout while HTTP uses the protocol timeout', () => {
   class Inputs extends CameraMedia { args(): string[] { return this.directInput(); } }

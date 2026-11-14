@@ -457,6 +457,14 @@ def is_public_api_path(method: str, path: str) -> bool:
         return True
     if path == "/api/auth/bootstrap" and normalized == "POST":
         return True
+    # The installer and encoder node authenticate with their own one-time token
+    # or node secret. They have no browser session.
+    if re.fullmatch(r"/api/homekit/enroll/[A-Za-z0-9_-]{32,}", path) and normalized in {"GET", "POST"}:
+        return True
+    if normalized == "POST" and path in {"/api/homekit/nodes/sync", "/api/homekit/nodes/media", "/api/homekit/nodes/snapshot"}:
+        return True
+    if normalized == "GET" and path in {"/api/homekit/nodes/agent", "/api/homekit/nodes/ffmpeg", "/api/homekit/nodes/runtime"}:
+        return True
     return False
 
 

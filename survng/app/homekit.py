@@ -34,6 +34,25 @@ def camera_port(camera) -> int:
     return camera.homekit.port or 52000 + int.from_bytes(hashlib.sha256(camera.id.encode()).digest()[:4], "big") % 10000
 
 
+def worker_settings(config, camera, remote: dict | None = None) -> dict:
+    """Local workers receive the source URL. Remote workers receive only the feed path."""
+    settings = {"version": 1, "bind": config.homekit.bind, "port": camera_port(camera), "name": camera.name,
+        "ffmpeg": config.ffmpeg_path, "audio": bool(camera.homekit.audio),
+        "allowSoftwareEncoding": bool(camera.homekit.allow_software_encoding),
+        "transport": config.capture_rtsp_transport, "remote": remote is not None}
+    if remote is None:
+        settings["url"] = camera.source_url(camera.homekit.source)
+    else:
+        settings["feeds"] = remote["feeds"]
+        settings["profile"] = remote["profile"]
+        settings["encoding"] = remote["encoding"]
+    return settings
+
+
+_GATE_ERRORS = {"offline": "encoder_offline", "software_not_allowed": "encoder_software_not_allowed",
+    "waiting": "encoder_waiting", "unavailable": "encoding_unavailable"}
+
+
 def private_directory(path: Path) -> None:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = path.lstat()
@@ -109,6 +128,9 @@ class CameraWorker:
                         ok = True
                 except ProcessLookupError:
                     pass
+        elif message.get("method") == "snapshot":
+            destination = self.path / "remote-snapshot.jpg"
+            ok = self.service.nodes.request_snapshot(self.camera.id, destination, 12)
         elif message.get("method") == "acquire" and not self.stopping.is_set() and token not in self.leases:
             try:
                 purpose = message.get("purpose", "encoder")
@@ -198,6 +220,17 @@ class CameraWorker:
                     self._state(state="paused", error="camera_off")
                     self.stopping.wait(1)
                     continue
+                decision = self.service.nodes.decision(self.camera)
+                if decision not in {"local", "remote"}:
+                    self._state(state="blocked" if decision != "waiting" else "starting", error=_GATE_ERRORS[decision])
+                    self.stopping.wait(2)
+                    continue
+                remote = None if decision == "local" else self.service.nodes.remote_for(self.camera)
+                if decision == "remote" and remote is None:
+                    self._state(state="starting", error="encoder_waiting")
+                    self.stopping.wait(2)
+                    continue
+                node_left = False
                 try:
                     # Only this lock owner may remove a dead worker's stale socket.
                     (self.path / "control.sock").unlink(missing_ok=True)
@@ -208,12 +241,8 @@ class CameraWorker:
                     self.process = subprocess.Popen([self.config.homekit.node_path, str(WORKER)],
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                         start_new_session=True, env=env, umask=0o077, pass_fds=(owner.fileno(),))
-                    settings = {"version": 1, "state": str(self.path.resolve()), "bind": self.config.homekit.bind,
-                        "port": camera_port(self.camera), "name": self.camera.name, "ffmpeg": self.config.ffmpeg_path,
-                        "url": self.camera.source_url(self.camera.homekit.source), "audio": self.camera.homekit.audio,
-                        "allowSoftwareEncoding": self.camera.homekit.allow_software_encoding,
-                        "ownerFd": owner.fileno(),
-                        "transport": self.config.capture_rtsp_transport}
+                    settings = worker_settings(self.config, self.camera, remote)
+                    settings.update(state=str(self.path.resolve()), ownerFd=owner.fileno())
                     self.process.stdin.write(json.dumps(settings).encode() + b"\n")
                     self.process.stdin.flush()
                     self._state(state="starting", error=None)
@@ -239,6 +268,13 @@ class CameraWorker:
                             poll_at = time.monotonic() + 1
                             try:
                                 snapshot = control(self.path, "status")
+                                if remote is not None:
+                                    encoder = self.service.nodes.encoder_status(self.camera)
+                                    if encoder:
+                                        snapshot = {**snapshot, "encoder": encoder}
+                                    if self.service.nodes.decision(self.camera) != "remote":
+                                        node_left = True
+                                        break
                                 self._state(state="running", error=None, runtime=snapshot, paired=bool(snapshot.get("paired")))
                                 if not snapshot.get("homeKitActive"):
                                     self.service.clear_motion(self.camera.id)
@@ -250,12 +286,16 @@ class CameraWorker:
                     if self.process.poll() == 42:
                         self._state(state="blocked", error="encoding_unavailable")
                         return
-                    if not self.stopping.is_set():
+                    if node_left:
+                        pass
+                    elif not self.stopping.is_set():
                         self._state(state="restarting", error="worker_stopped")
                 except (OSError, ValueError, RuntimeError):
                     self._state(state="restarting", error="worker_start_failed")
                 finally:
                     self._terminate()
+                if node_left:
+                    continue
                 failures += 1
                 self.stopping.wait(min(30, 2 ** min(failures, 5)))
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
@@ -278,6 +318,8 @@ class HomeKitService:
         self.started = False
         self.operations = threading.RLock()
         self.detection_active = detection_active or camera_active
+        from .homekit_nodes import NodeRegistry
+        self.nodes = NodeRegistry(self.directory)
 
     def start(self) -> None:
         with self.operations, self.lock:
@@ -340,6 +382,7 @@ class HomeKitService:
             self.workers.clear()
             self.motion.clear()
             self.started = False
+            self.nodes.close()
 
     def observe_objects(self, payload: dict) -> None:
         if not self.config.homekit.enabled:
@@ -379,10 +422,36 @@ class HomeKitService:
         with self.lock:
             return self.motion.get(camera_id, 0) > time.monotonic()
 
+    def node_assignments(self) -> list[dict]:
+        with self.lock:
+            config = self.config
+        if not config.homekit.enabled:
+            return []
+        assignments = []
+        for camera in config.cameras:
+            encoder = camera.homekit.encoder or "local"
+            if not camera.homekit.enabled or encoder == "local":
+                continue
+            with self.nodes.lock:
+                node = self.nodes.nodes.get(encoder)
+                hardware = node.get("hardware") if node else ""
+            backend = (node.get("backends") or {}).get(camera.id) if node else ""
+            if backend in {"software", "unavailable"} and not camera.homekit.allow_software_encoding:
+                continue
+            if hardware == "qsv" or (hardware == "software" and camera.homekit.allow_software_encoding):
+                assignments.append({"id": camera.id, "encoder": encoder,
+                    "url": camera.source_url(camera.homekit.source), "audio": bool(camera.homekit.audio),
+                    "transport": config.capture_rtsp_transport,
+                    "allowSoftwareEncoding": bool(camera.homekit.allow_software_encoding)})
+        return assignments
+
     def status(self) -> dict:
         with self.lock:
-            return {"enabled": self.config.homekit.enabled, "experimental": True, "cameras": [
+            return {"enabled": self.config.homekit.enabled, "experimental": True,
+                "nodes": self.nodes.public_status(self.config.cameras),
+                "cameras": [
                 {"id": camera.id, "name": camera.name, "enabled": camera.homekit.enabled,
+                 "encoder": camera.homekit.encoder,
                  **(self.workers[camera.id].status() if camera.id in self.workers else {"state": "disabled", "paired": None, "port": camera_port(camera)})}
                 for camera in self.config.cameras
             ]}

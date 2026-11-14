@@ -36,6 +36,8 @@ test('stream geometry follows the camera aspect instead of padding into 16:9', (
   assert.deepEqual(portrait.tiers.map(tier => [tier.width, tier.height]), [[1200, 1600], [960, 1280], [480, 640]]);
   assert.deepEqual(streamProfile(1920, 1080).tiers.map(tier => [tier.width, tier.height]), [[1920, 1080], [1280, 720], [640, 360]]);
   assert.equal(encodeVideo(landscape.tiers[0], { backend: 'software' }).join(' ').includes('pad='), false);
+  assert.equal(encodeVideo(landscape.tiers[0], { backend: 'qsv', device: '/dev/dri/renderD128' }).join(' ').includes('-fps_mode cfr'), true);
+  assert.equal(encodeVideo(landscape.tiers[0], { backend: 'qsv', device: '/dev/dri/renderD128' }).join(' ').includes('dump_extra=freq=keyframe'), true);
 });
 
 test('temporal qualification rejects reordering, future references, missing headers and open GOPs', () => {

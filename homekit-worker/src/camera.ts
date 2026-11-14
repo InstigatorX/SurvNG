@@ -1,7 +1,5 @@
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { createInterface } from 'node:readline';
-import { dirname, isAbsolute, join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { isIPv4 } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { fstatSync } from 'node:fs';
@@ -12,7 +10,8 @@ import { Accessory, Categories, Characteristic, HAPStorage, Service, SecureVideo
 import { controlServer, identity, privateDirectory } from './control.js';
 import { LabRecording } from './fragments.js';
 import { LocalStreams, RemoteStreams } from './transports.js';
-import { qualifyEncoding, selectEncoding, streamProfile, EncodingUnavailableError, type VideoEncoding } from './encoding.js';
+import { probeFrame, qualifyEncoding, selectEncoding, streamProfile, EncodingUnavailableError, type VideoEncoding } from './encoding.js';
+import type { Tier } from './media.js';
 import { CameraMedia, type MediaAdmission } from './camera-media.js';
 
 async function main(): Promise<void> {
@@ -23,7 +22,9 @@ async function main(): Promise<void> {
   if (first.done || first.value.length > 16384) throw new Error('invalid supervisor configuration');
   const config = JSON.parse(first.value) as {
     version: number; state: string; bind: string; port: number; name: string;
-    url: string; audio: boolean; ffmpeg: string; transport: 'tcp' | 'udp'; allowSoftwareEncoding: boolean; ownerFd: number;
+    url?: string; audio: boolean; ffmpeg: string; transport: 'tcp' | 'udp'; allowSoftwareEncoding: boolean; ownerFd: number;
+    remote?: boolean; feeds?: string; profile?: { width: number; height: number; tiers: Tier[]; resolutions: [number, number, number][] };
+    encoding?: VideoEncoding;
   };
   if (process.versions.node.split('.')[0] !== '24' || config.version !== 1) throw new Error('Node.js 24 and protocol v1 required');
   // Retain the inherited flock descriptor for this process lifetime. A new
@@ -31,13 +32,16 @@ async function main(): Promise<void> {
   if (!Number.isInteger(config.ownerFd) || config.ownerFd < 3 || !fstatSync(config.ownerFd).isFile()) throw new Error('missing owner lock');
   const state = config.state, address = config.bind, port = config.port;
   if (!isAbsolute(state) || !isIPv4(address) || !Object.values(networkInterfaces()).flat().some(info => info?.address === address)) throw new Error('invalid private state or LAN bind');
-  if (!Number.isInteger(port) || port < 1024 || port > 65535 || !/^https?:|^rtsps?:/i.test(config.url)) throw new Error('invalid camera configuration');
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('invalid camera configuration');
+  if (config.remote) {
+    if (!config.feeds || !isAbsolute(config.feeds) || !config.profile?.tiers?.length) throw new Error('invalid remote encoder');
+  } else if (!config.url || !/^https?:|^rtsps?:/i.test(config.url)) throw new Error('invalid camera configuration');
   await privateDirectory(state);
   const waiting = new Map<number, { resolve(): void; reject(error: Error): void }>();
   let serial = 0;
   const admission: MediaAdmission = (method, token, detail) => new Promise((resolve, reject) => {
     const id = ++serial;
-    const timer = setTimeout(() => { waiting.delete(id); reject(new Error('supervisor unavailable')); }, 3000);
+    const timer = setTimeout(() => { waiting.delete(id); reject(new Error('supervisor unavailable')); }, method === 'snapshot' ? 15000 : 3000);
     waiting.set(id, { resolve: () => { clearTimeout(timer); resolve(); }, reject: error => { clearTimeout(timer); reject(error); } });
     process.stdout.write(JSON.stringify({ version: 1, id, method, token, ...detail }) + '\n');
   });
@@ -77,17 +81,24 @@ async function main(): Promise<void> {
     signalStop();
   })();
   try {
-    qualifying = selectEncoding(config.allowSoftwareEncoding,
-      () => qualifyEncoding(config.ffmpeg, state, admission, qualificationAbort.signal, { backend: 'qsv', device: '/dev/dri/renderD128' }),
-      () => qualifyEncoding(config.ffmpeg, state, admission, qualificationAbort.signal, { backend: 'software' }));
-    const encoding = await qualifying;
-    if (closing) throw new Error('camera stopping');
-    let frame = { width: 1920, height: 1080 };
-    try { frame = await probeFrame(config.ffmpeg, config.url, config.transport); }
-    catch { console.error('HomeKit camera frame probe failed; using 16:9.'); }
-    const profile = streamProfile(frame.width, frame.height);
-    media = new CameraMedia(config.url, config.audio, config.ffmpeg, config.transport, admission,
-      () => !closing && !!controller?.homeKitCameraActive, state, encoding, profile.tiers);
+    let encoding: VideoEncoding;
+    let profile: { width: number; height: number; tiers: Tier[]; resolutions: [number, number, number][] };
+    if (config.remote) {
+      encoding = config.encoding?.backend === 'qsv' || config.encoding?.backend === 'software' ? config.encoding : { backend: 'software' };
+      profile = config.profile!;
+    } else {
+      qualifying = selectEncoding(config.allowSoftwareEncoding,
+        () => qualifyEncoding(config.ffmpeg, state, admission, qualificationAbort.signal, { backend: 'qsv', device: '/dev/dri/renderD128' }),
+        () => qualifyEncoding(config.ffmpeg, state, admission, qualificationAbort.signal, { backend: 'software' }));
+      encoding = await qualifying;
+      if (closing) throw new Error('camera stopping');
+      let frame = { width: 1920, height: 1080 };
+      try { frame = await probeFrame(config.ffmpeg, config.url!, config.transport); }
+      catch { console.error('HomeKit camera frame probe failed; using 16:9.'); }
+      profile = streamProfile(frame.width, frame.height);
+    }
+    media = new CameraMedia(config.url || 'http://127.0.0.1/homekit-remote', config.audio, config.ffmpeg, config.transport, admission,
+      () => !closing && !!controller?.homeKitCameraActive, state, encoding, profile.tiers, config.remote ? config.feeds : '');
     const saved = await identity(state);
     const persist = join(state, 'hap'); await privateDirectory(persist);
     HAPStorage.setCustomStoragePath(persist);
@@ -171,25 +182,6 @@ async function main(): Promise<void> {
     if (!closing) exitStatus = error instanceof EncodingUnavailableError ? 42 : 1;
     await stop(); throw error;
   }
-}
-
-async function probeFrame(ffmpeg: string, url: string, transport: 'tcp' | 'udp'): Promise<{ width: number; height: number }> {
-  const args = ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,sample_aspect_ratio', '-of', 'json'];
-  if (/^rtsps?:/i.test(url)) args.unshift('-rtsp_transport', transport);
-  const child = spawn(join(dirname(ffmpeg), 'ffprobe'), [...args, url], { stdio: ['ignore', 'pipe', 'ignore'] });
-  const chunks: Buffer[] = [];
-  child.stdout!.on('data', (chunk: Buffer) => { if (chunks.reduce((sum, item) => sum + item.length, 0) < 65536) chunks.push(chunk); });
-  const timer = setTimeout(() => child.kill('SIGKILL'), 15000);
-  try {
-    const [code] = await once(child, 'close');
-    if (code !== 0) throw new Error('camera frame probe failed');
-    const stream = JSON.parse(Buffer.concat(chunks).toString('utf8'))?.streams?.[0];
-    const width = Number(stream?.width), height = Number(stream?.height);
-    if (!Number.isInteger(width) || !Number.isInteger(height)) throw new Error('camera frame probe failed');
-    const sar = /^(\d+):(\d+)$/.exec(String(stream?.sample_aspect_ratio ?? ''));
-    if (!sar || !Number(sar[1]) || !Number(sar[2])) return { width, height };
-    return { width: Math.max(2, Math.round(width * Number(sar[1]) / Number(sar[2]) / 2) * 2), height };
-  } finally { clearTimeout(timer); }
 }
 
 main().catch(error => { console.error('SurvNG HomeKit camera stopped with an error.'); process.exitCode = error instanceof EncodingUnavailableError ? 42 : 1; });

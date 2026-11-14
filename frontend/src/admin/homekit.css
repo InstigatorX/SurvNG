@@ -10,7 +10,9 @@
 .homekit-fields label { min-width: 0; }
 .homekit-fields small { color: var(--muted); font-size: 12px; }
 .homekit-badge { flex-shrink: 0; padding: 5px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 11px; }
-.homekit-cameras { display: grid; gap: 14px; }
+.homekit-cameras, .homekit-nodes { display: grid; gap: 14px; }
+.homekit-installer { display: grid; gap: 10px; }
+.homekit-installer code { overflow-wrap: anywhere; padding: 12px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
 .homekit-camera { display: grid; gap: 14px; }
 .homekit-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .homekit-error { color: var(--danger, #e17c73); }

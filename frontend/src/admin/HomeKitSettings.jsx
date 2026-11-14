@@ -10,6 +10,9 @@ const ERROR_LABELS = {
   worker_not_built: "Build the HomeKit worker before enabling cameras.",
   node_24_required: "HomeKit requires Node.js 24. Set its executable path below.",
   encoder_unavailable: "FFmpeg needs HEVC encoding plus libopus, AAC, and MJPEG support.",
+  encoder_offline: "The assigned encoder is offline. HomeKit stays on this server and is not using a local encoder.",
+  encoder_waiting: "Waiting for the encoder to measure this camera.",
+  encoder_software_not_allowed: "This encoder has no hardware HEVC. Allow software encoding or choose another encoder.",
   bind_address_unavailable: "The LAN address is not available on this server. Check the address below.",
   runtime_or_state_unavailable: "Check the Node/FFmpeg paths and private HomeKit state permissions.",
   worker_start_failed: "The camera worker could not start. Check the LAN address and port.",
@@ -23,6 +26,7 @@ export function HomeKitSettings({ config, updateConfig }) {
   const [error, setError] = useState("");
   const [pairing, setPairing] = useState(null);
   const [busy, setBusy] = useState("");
+  const [installer, setInstaller] = useState("");
   const settings = { enabled: false, bind: "", node_path: "node", ...config.homekit };
   const cameras = config.cameras || [];
   const update = (key, value) => updateConfig(["homekit"], { ...settings, [key]: value });
@@ -60,6 +64,17 @@ export function HomeKitSettings({ config, updateConfig }) {
     return () => document.removeEventListener("visibilitychange", hide);
   }, []);
 
+  async function addEncoder() {
+    setBusy("encoder"); setError(""); setInstaller("");
+    try {
+      const response = await fetch("/api/homekit/nodes", { method: "POST", headers: { "Content-Type": "application/json" }, cache: "no-store", body: "{}" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Could not create an encoder installer.");
+      setInstaller(payload.command || "");
+    } catch (failure) { setError(failure.message || "Could not create an encoder installer."); }
+    finally { setBusy(""); }
+  }
+
   async function cameraAction(camera, action) {
     if (action === "reset-pairing" && !window.confirm(`Reset HomeKit pairing for ${camera.name}? Remove its old tile from Apple Home, then pair it again. Other cameras keep their pairing.`)) return;
     setBusy(camera.id); setError(""); setPairing(null);
@@ -86,12 +101,17 @@ export function HomeKitSettings({ config, updateConfig }) {
         <label>Node.js 24 executable<input value={settings.node_path} placeholder="/usr/local/bin/node" maxLength={4096} onChange={(event) => update("node_path", event.target.value)} autoComplete="off" /><small>Use an absolute path when the server’s default Node version differs.</small></label>
       </div>
     </fieldset>
+    <section className="homekit-nodes" aria-label="HomeKit encoders">
+      <div className="telemetry-section-head"><div><h3>Encoders</h3><p>Run the installer once as root in a new container. It checks in here. Apple Home still reaches this server.</p></div><button type="button" disabled={!!busy} onClick={addEncoder}>{busy === "encoder" ? "Working…" : "Add encoder"}</button></div>
+      {installer ? <div className="homekit-installer" role="region" aria-label="Encoder installer"><p className="settings-help">This command is shown once and enrolls one encoder.</p><code>{installer}</code><button type="button" onClick={() => setInstaller("")}>Hide installer</button></div> : null}
+      {status?.nodes?.length ? status.nodes.map((node) => <article className="sub-panel homekit-node" key={node.id}><div className="homekit-camera-head"><h4>{node.name || "Encoder"}</h4><span className="homekit-badge">{node.online ? "Online" : "Offline"}</span></div><p className="settings-help">{node.hardware === "qsv" ? "Intel QSV HEVC" : node.hardware === "software" ? "Software HEVC" : "Encoder type not reported yet"}{node.cameras?.length ? ` · ${node.cameras.length} ${node.cameras.length === 1 ? "camera" : "cameras"}` : ""}</p></article>) : <p className="settings-help">No encoder nodes have checked in. Cameras continue to encode on this server.</p>}
+    </section>
     <section className="homekit-cameras" aria-label="HomeKit cameras">
       <div className="telemetry-section-head"><div><h3>Cameras</h3><p>Enable a camera, save, then use Pair with Apple Home to reveal its code and QR.</p></div><a className="button" href={appUrl("/admin?section=cameras")}><Camera size={15} />Camera setup</a></div>
       {error ? <p role="alert" className="settings-help homekit-error">{error} Status retries automatically.</p> : null}
       {!status && !error ? <p role="status">Loading HomeKit status…</p> : null}
       {!cameras.length ? <div className="empty-state">Add a camera in Camera setup, then enable it here.</div> : cameras.map((camera, index) => {
-        const options = { enabled: false, allow_software_encoding: false, source: "live", audio: false, object_motion: false, port: 0, ...camera.homekit };
+        const options = { enabled: false, allow_software_encoding: false, source: "live", audio: false, object_motion: false, port: 0, encoder: "local", ...camera.homekit };
         const live = status?.cameras?.find((item) => item.id === camera.id);
         const available = settings.enabled && options.enabled && live?.state === "running";
         return <article className="sub-panel homekit-camera" key={camera.id}>
@@ -102,6 +122,7 @@ export function HomeKitSettings({ config, updateConfig }) {
             <p className="settings-help">QSV is preferred automatically. This permits software encoding when QSV is unavailable. Viewers and recording share an encoder for the same video profile.</p>
             {live?.runtime?.encoder ? <p className="settings-help" role="status">Encoder: <strong>{live.runtime.encoder.backend === "qsv" ? "Intel QSV HEVC" : "Software HEVC"}</strong>{live.runtime.encoder.sources?.[0]?.fps != null ? ` · ${Number(live.runtime.encoder.sources[0].fps).toFixed(1)} fps` : ""}{live.runtime.encoder.fallbackReason ? " · QSV unavailable; using permitted software fallback" : ""}</p> : null}
             <div className="homekit-fields">
+              <label>Encoder<select value={options.encoder || "local"} onChange={(event) => updateCamera(index, "encoder", event.target.value)}><option value="local">This server</option>{(status?.nodes || []).map((node) => <option key={node.id} value={node.id}>{node.name || "Encoder"} ({node.online ? "online" : "offline"})</option>)}{options.encoder !== "local" && !(status?.nodes || []).some((node) => node.id === options.encoder) ? <option value={options.encoder}>Assigned encoder</option> : null}</select></label>
               <label>Video source<select value={options.source} onChange={(event) => updateCamera(index, "source", event.target.value)}><option value="live">Live stream</option><option value="main">Main stream</option></select></label>
               <label className="check-field"><input type="checkbox" checked={options.audio} onChange={(event) => updateCamera(index, "audio", event.target.checked)} />Include camera audio</label>
             </div>

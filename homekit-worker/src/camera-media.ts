@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { once } from 'node:events';
@@ -8,7 +9,25 @@ import { encodeVideo, deviceArgs, type VideoEncoding } from './encoding.js';
 import { CameraSource } from './camera-source.js';
 import { tiers, stopChild, childStopRequested, type MediaSource, type Tier } from './media.js';
 
-export type MediaAdmission = (method: 'acquire' | 'release' | 'started', token: string, detail?: { purpose?: 'encoder' | 'relay' | 'snapshot'; pid?: number }) => Promise<void>;
+export type MediaAdmission = (method: 'acquire' | 'release' | 'started' | 'snapshot', token: string, detail?: { purpose?: 'encoder' | 'relay' | 'snapshot'; pid?: number }) => Promise<void>;
+
+/** The encoder command shared by a local worker and a remote encoder node. */
+export function encoderCommand(url: string, transport: 'tcp' | 'udp', audio: boolean, tier: Tier, encoding: VideoEncoding): string[] {
+  const input = [...(/^rtsps?:/i.test(url)
+    ? ['-rtsp_transport', transport, '-timeout', '15000000']
+    : ['-rw_timeout', '15000000']), '-i', url, ...(!audio ? ['-re', '-f', 'lavfi', '-i', 'anullsrc=r=32000:cl=mono'] : [])];
+  return [...deviceArgs(encoding), ...input, '-map', '0:v:0', ...encodeVideo(tier, encoding),
+    '-map', audio ? '0:a:0' : '1:a:0', '-c:a', 'aac', '-ac', '1', '-ar', '32000', '-b:a', '32k',
+    '-mpegts_flags', '+resend_headers', '-muxdelay', '0', '-f', 'mpegts', 'pipe:1'];
+}
+
+/** Copy an already-encoded node feed. This path does not scale or pad. */
+export function remoteCopyCommand(socketPath: string): string[] {
+  // Quick Sync can repeat a DTS. Regenerating timestamps keeps the copy and the recorder running.
+  return ['-probesize', '32768', '-analyzeduration', '0', '-fflags', '+genpts+igndts', '-rw_timeout', '15000000', '-f', 'mpegts', '-i', `unix://${socketPath}`,
+    '-map', '0:v:0', '-c:v', 'copy', '-map', '0:a:0', '-c:a', 'copy',
+    '-mpegts_flags', '+resend_headers', '-muxdelay', '0', '-f', 'mpegts', 'pipe:1'];
+}
 
 /** Real inputs are supplied over the supervisor pipe, never command arguments to Node. */
 export class CameraMedia implements MediaSource {
@@ -23,12 +42,15 @@ export class CameraMedia implements MediaSource {
   get encoderStatus(): object { return { backend: this.encoding.backend, fallbackReason: this.encoding.fallbackReason, sources: [...this.progress.values()] }; }
   readonly counters = { failures: 0, warningChunks: 0, admissionFailures: 0 };
   constructor(private url: string, private audio: boolean, private ffmpeg: string,
-    private transport: 'tcp' | 'udp', private admission: MediaAdmission, private allowed: () => boolean = () => true, private directory = tmpdir(), readonly encoding: VideoEncoding = { backend: 'software' }, private catalog: readonly Tier[] = tiers) {}
+    private transport: 'tcp' | 'udp', private admission: MediaAdmission, private allowed: () => boolean = () => true, private directory = tmpdir(), readonly encoding: VideoEncoding = { backend: 'software' }, private catalog: readonly Tier[] = tiers, private remoteFeeds = '') {}
 
-  // The shared stream is already live, but avformat probing queues seconds of
-  // packets. Pace that queue by its timestamps instead of dumping it into RTP.
+  // The shared stream is already live. avformat's default five-second probe
+  // holds the first picture until that much media has arrived; identify the
+  // streams at once instead. Pace reads so a replayed GOP is not dumped into RTP.
   // FFmpeg treats an exact zero burst as its default half-second burst.
-  input(tier: Tier): string[] { return ['-re', '-readrate_initial_burst', '0.001', '-readrate_catchup', '1', '-rw_timeout', '15000000', '-f', 'mpegts', '-i', `survng-homekit:${tier.identifier}`]; }
+  input(tier: Tier): string[] {
+    return ['-probesize', '32768', '-analyzeduration', '0', '-re', '-readrate_initial_burst', '0.001', '-readrate_catchup', '1', '-rw_timeout', '15000000', '-f', 'mpegts', '-i', `survng-homekit:${tier.identifier}`];
+  }
   protected directInput(): string[] {
     // RTSP is a demuxer with its own socket timeout; rw_timeout applies to
     // protocol inputs such as HTTP and is rejected by the RTSP demuxer.
@@ -45,9 +67,12 @@ export class CameraMedia implements MediaSource {
   private async acquireSource(tier: Tier): Promise<{ source: CameraSource; url: string }> {
     let source = this.sources.get(tier.identifier);
     if (!source || source.closed) {
-      source = new CameraSource(join(this.directory, `source-${randomUUID()}.sock`), () => this.spawnAdmitted([...deviceArgs(this.encoding), ...this.directInput(), '-map', '0:v:0', ...encodeVideo(tier, this.encoding),
-        '-map', this.audio ? '0:a:0' : '1:a:0', '-c:a', 'aac', '-ac', '1', '-ar', '32000', '-b:a', '32k',
-        '-mpegts_flags', '+resend_headers', '-muxdelay', '0', '-f', 'mpegts', 'pipe:1'], 'encoder'));
+      const command = this.remoteFeeds
+        ? remoteCopyCommand(join(this.remoteFeeds, `${tier.identifier}.sock`))
+        : [...deviceArgs(this.encoding), ...this.directInput(), '-map', '0:v:0', ...encodeVideo(tier, this.encoding),
+          '-map', this.audio ? '0:a:0' : '1:a:0', '-c:a', 'aac', '-ac', '1', '-ar', '32000', '-b:a', '32k',
+          '-mpegts_flags', '+resend_headers', '-muxdelay', '0', '-f', 'mpegts', 'pipe:1'];
+      source = new CameraSource(join(this.directory, `source-${randomUUID()}.sock`), () => this.spawnAdmitted(command, this.remoteFeeds ? 'relay' : 'encoder'));
       this.sources.set(tier.identifier, source);
     }
     source.references++;
@@ -135,6 +160,12 @@ export class CameraMedia implements MediaSource {
     return child;
   }
   async snapshot(): Promise<Buffer> {
+    if (this.remoteFeeds) {
+      await this.admission('snapshot', String(++this.sequence));
+      const data = await readFile(join(this.directory, 'remote-snapshot.jpg'));
+      if (!data.length || data.length > 4 * 1024 * 1024) throw new Error('snapshot unavailable');
+      return data;
+    }
     const child = await this.start([...this.directInput(), '-map', '0:v:0', '-frames:v', '1', '-an', '-vf', 'scale=1280:-2', '-c:v', 'mjpeg', '-f', 'image2pipe', 'pipe:1']);
     this.snapshots.add(child);
     const chunks: Buffer[] = []; let size = 0;

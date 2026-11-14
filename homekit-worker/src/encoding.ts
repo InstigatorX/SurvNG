@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tiers, stopChild, type Tier } from './media.js';
 import type { MediaAdmission } from './camera-media.js';
 import { LowDelayProof } from './low-delay.js';
@@ -36,6 +36,25 @@ export function streamProfile(width: number, height: number): { width: number; h
   ] };
 }
 
+export async function probeFrame(ffmpeg: string, url: string, transport: 'tcp' | 'udp'): Promise<{ width: number; height: number }> {
+  const args = ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,sample_aspect_ratio', '-of', 'json'];
+  if (/^rtsps?:/i.test(url)) args.unshift('-rtsp_transport', transport);
+  const child = spawn(join(dirname(ffmpeg), 'ffprobe'), [...args, url], { stdio: ['ignore', 'pipe', 'ignore'] });
+  const chunks: Buffer[] = [];
+  child.stdout!.on('data', (chunk: Buffer) => { if (chunks.reduce((sum, item) => sum + item.length, 0) < 65536) chunks.push(chunk); });
+  const timer = setTimeout(() => child.kill('SIGKILL'), 15000);
+  try {
+    const [code] = await once(child, 'close');
+    if (code !== 0) throw new Error('camera frame probe failed');
+    const stream = JSON.parse(Buffer.concat(chunks).toString('utf8'))?.streams?.[0];
+    const width = Number(stream?.width), height = Number(stream?.height);
+    if (!Number.isInteger(width) || !Number.isInteger(height)) throw new Error('camera frame probe failed');
+    const sar = /^(\d+):(\d+)$/.exec(String(stream?.sample_aspect_ratio ?? ''));
+    if (!sar || !Number(sar[1]) || !Number(sar[2])) return { width, height };
+    return { width: Math.max(2, Math.round(width * Number(sar[1]) / Number(sar[2]) / 2) * 2), height };
+  } finally { clearTimeout(timer); }
+}
+
 export function encodeVideo(tier: Tier, encoding: VideoEncoding): string[] {
   // Fill the tier. decrease+pad keeps unused 16:9 margins and Home shows them as side bars.
   const filter = `scale=${tier.width}:${tier.height}:force_original_aspect_ratio=increase,crop=${tier.width}:${tier.height},setsar=1,fps=${tier.frameRate}`;
@@ -43,7 +62,8 @@ export function encodeVideo(tier: Tier, encoding: VideoEncoding): string[] {
   if (encoding.backend === 'qsv') return ['-vf', `${filter},format=nv12`, '-c:v', 'hevc_qsv',
     '-preset', 'veryfast', '-profile:v', 'main', '-g', String(tier.frameRate * 4), '-bf', '0',
     '-forced_idr', '1', '-idr_interval', '0', '-gpb', '0', '-adaptive_i', '0', '-adaptive_b', '0',
-    '-async_depth', '1', '-look_ahead_depth', '0', ...rate];
+    '-async_depth', '1', '-look_ahead_depth', '0', '-fps_mode', 'cfr',
+    '-bsf:v', 'dump_extra=freq=keyframe', ...rate];
   return ['-vf', filter, '-c:v', 'libx265', '-preset', 'ultrafast', '-tune', 'zerolatency', '-pix_fmt', 'yuv420p', ...rate,
     '-x265-params', `pools=2:frame-threads=2:keyint=${tier.frameRate * 4}:min-keyint=${tier.frameRate * 4}:open-gop=0:scenecut=0:bframes=0:repeat-headers=1:log-level=error`];
 }
