@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { Writable } from 'node:stream';
 import { createServer } from 'node:http';
 import { AgentFeeds, changedAssignments } from '../src/agent-state.js';
+import { post } from '../src/agent-http.js';
 
 const child = () => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
 
@@ -104,8 +105,7 @@ test('stopping a real stalled HTTP upload cancels the request and drains its chi
   const abort = new AbortController();
   const arrived = once(server, 'request');
   const port = (server.address() as { port: number }).port;
-  const upload = fetch(`http://127.0.0.1:${port}`, { method: 'POST', body: producer.stdout! as unknown as BodyInit,
-    duplex: 'half', signal: abort.signal } as RequestInit);
+  const upload = post(`http://127.0.0.1:${port}`, producer.stdout!, {}, abort.signal, true);
   feeds.track('camera:1', producer, upload, () => abort.abort());
   let rescue: NodeJS.Timeout | undefined;
   try {

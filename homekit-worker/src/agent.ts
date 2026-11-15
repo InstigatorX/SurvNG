@@ -12,6 +12,7 @@ import { stopChild, type Tier } from './media.js';
 import { AgentFeeds, AgentJobs, changedAssignments } from './agent-state.js';
 import { replaceUpdate, validateArchive } from './agent-update.js';
 import { AgentProgress, superviseAgent } from './agent-lifecycle.js';
+import { post } from './agent-http.js';
 
 const origin = process.env.SURVNG_ORIGIN?.replace(/\/$/, '');
 let mediaOrigin = origin;
@@ -49,9 +50,7 @@ function devicePresent(): 'qsv' | 'software' {
 
 async function request(path: string, body: BodyInit | ReadableStream | NodeJS.ReadableStream, headers: Record<string, string>, stream = false, base = origin, signal?: AbortSignal): Promise<Response> {
   const signals = [shutdown.signal, ...(signal ? [signal] : []), ...(!stream ? [AbortSignal.timeout(15000)] : [])];
-  return fetch(`${base}${path}`, { method: 'POST', headers: { authorization: `Bearer ${secret}`, ...headers }, body: body as BodyInit,
-    signal: AbortSignal.any(signals),
-    ...(stream ? { duplex: 'half' } : {}) } as RequestInit);
+  return post(`${base}${path}`, body, { authorization: `Bearer ${secret}`, ...headers }, AbortSignal.any(signals), stream);
 }
 
 function startFeed(camera: Assignment, tier: Tier, encoding: VideoEncoding): void {

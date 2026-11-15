@@ -199,3 +199,52 @@ consumer. All three start/stop cycles completed (about 6.3 seconds to first
 sample per cycle), with no shared-agent stall. No media was persisted. This
 crossed the 175-second failure point in the preceding failed check. A fresh
 Apple Home close/reopen check was requested separately.
+
+## Continuous-upload memory retention
+
+After 49 minutes without an agent restart, the operator observed service memory
+rising from about 385 MiB to more than 1.5 GiB. Process RSS identified the Node
+agent at about 1.3 GiB while the two FFmpeg producers remained near 160 MiB each.
+This distinguishes the growing component from an increase in encoder count or
+FFmpeg working memory.
+
+The installed toolchain's Node 24.22.3 bundles Undici 7.30.2. Its default fetch
+redirect-follow path clones the request body using `ReadableStream.tee()`, leaving
+an unread branch that retains previously transmitted bytes while the request is
+open. Camera uploads are deliberately continuous. This matches the upstream
+[request-stream retention report](https://github.com/nodejs/undici/issues/4058)
+and was reproduced locally rather than inferred solely from the memory graph.
+
+Fresh-process loopback measurements, taken after garbage collection while the
+upload was still open:
+
+| Client path | Bytes transmitted | ArrayBuffer memory | External memory | RSS |
+| --- | --- | --- | --- | --- |
+| Previous fetch redirect-follow default | 128 MiB | 128.3 MiB | 132.1 MiB | 251.4 MiB |
+| Production helper with streaming redirects rejected | 128 MiB | 0.3 MiB | 4.1 MiB | 134.4 MiB |
+| Production helper with streaming redirects rejected | 1 GiB | 0.2 MiB | 4.1 MiB | 150.6 MiB |
+
+These are isolated transport measurements, not the whole camera service's RAM
+requirement. RSS includes allocator high-water memory; the retained-buffer
+measurement demonstrates that memory no longer follows total transmitted bytes.
+
+A small shared POST helper now sets `redirect: error` for streaming media,
+avoiding the body clone. Media uploads cannot be replayed and must use the exact
+configured ingest endpoint. Finite JSON/snapshot POST behavior is preserved.
+There is no new dependency or Node installation requirement.
+
+Regressions transfer 64 MiB through an upload that remains open and require less
+than 8 MiB of retained ArrayBuffers; verify redirects are rejected without
+replaying elsewhere; and exercise actual stalled-HTTP cancellation through the
+production helper. The ordinary worker selection passed 47 tests, with five
+optional media/hardware tests skipped. Long-term live memory behavior still
+requires checking on the encoder after rollout.
+
+Post-rollout encoder readings supplied by the operator show the same Node PID
+56847 and unchanged NRestarts=15 in both samples. Node RSS decreased from
+85,052 KiB to 77,776 KiB (about 83 to 76 MiB); total service memory decreased from
+437,714,944 to 432,889,856 bytes (about 417 to 413 MiB). Both FFmpeg PIDs remained
+56985 and 57350, near 153–155 MiB RSS, confirming that this was not periodic
+process or stream recycling. The service peak in the second sample was about
+422 MiB. These readings confirm short-term stabilization after the transport
+fix; the longer live memory trend remains the appropriate sustained check.
