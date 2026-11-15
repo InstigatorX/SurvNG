@@ -92,10 +92,15 @@ const stoppedChildren = new WeakSet<ChildProcess>();
 export function childStopRequested(child: ChildProcess): boolean { return stoppedChildren.has(child); }
 
 export async function stopChild(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  const closePipes = () => { for (const pipe of child.stdio) pipe?.destroy(); };
+  if (child.exitCode !== null || child.signalCode !== null) { closePipes(); return; }
   stoppedChildren.add(child);
   const closed = once(child, 'close');
   child.kill('SIGTERM');
+  // 'close' waits for stdio as well as process exit. A backpressured upload
+  // can leave stdout paused after FFmpeg has died, so signals alone never
+  // complete that wait. Output is discarded once its owner requests stop.
+  closePipes();
   const timer = setTimeout(() => child.kill('SIGKILL'), 2000);
   try { await closed; } finally { clearTimeout(timer); }
 }

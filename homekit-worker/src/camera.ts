@@ -93,8 +93,9 @@ async function main(): Promise<void> {
       encoding = await qualifying;
       if (closing) throw new Error('camera stopping');
       let frame = { width: 1920, height: 1080 };
-      try { frame = await probeFrame(config.ffmpeg, config.url!, config.transport); }
+      try { frame = await probeFrame(config.ffmpeg, config.url!, config.transport, qualificationAbort.signal); }
       catch { console.error('HomeKit camera frame probe failed; using 16:9.'); }
+      qualificationAbort.signal.throwIfAborted();
       profile = streamProfile(frame.width, frame.height);
     }
     media = new CameraMedia(config.url || 'http://127.0.0.1/homekit-remote', config.audio, config.ffmpeg, config.transport, admission,

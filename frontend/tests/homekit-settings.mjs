@@ -42,7 +42,7 @@ try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } });
   const pageErrors = [];
   page.on("pageerror", error => pageErrors.push(error.message));
-  let mode = "ready", resets = 0, statusRequests = 0;
+  let mode = "ready", resets = 0, statusRequests = 0, delayPairing = false;
   let initialStatus;
   const waitForInitial = new Promise(resolve => { initialStatus = resolve; });
   await page.route("**/api/homekit/status", async route => {
@@ -54,8 +54,11 @@ try {
   });
   await page.route("**/api/homekit/nodes", route => route.fulfill({ contentType: "application/json",
     body: JSON.stringify({ command: "curl -fsSL 'https://survng.example/api/homekit/enroll/token' | sh" }) }));
-  await page.route("**/api/homekit/cameras/porch/pairing", route => route.fulfill({ contentType: "application/json",
-    body: JSON.stringify({ setupCode: "123-45-679", qrSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>' }) }));
+  await page.route("**/api/homekit/cameras/porch/pairing", async route => {
+    if (delayPairing) await new Promise(resolve => setTimeout(resolve, 400));
+    await route.fulfill({ contentType: "application/json",
+      body: JSON.stringify({ setupCode: "123-45-679", qrSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>' }) });
+  });
   await page.route("**/api/homekit/cameras/porch/reset-pairing", route => {
     resets++;
     assert.equal(route.request().postDataJSON().confirm_camera_id, "porch");
@@ -80,6 +83,15 @@ try {
   await page.screenshot({ path: "/tmp/survng-homekit-admin-desktop.png", fullPage: true });
   await page.getByRole("button", { name: "Hide pairing code" }).click();
   assert.equal(await page.getByText("123-45-679", { exact: true }).count(), 0);
+  delayPairing = true;
+  await Promise.all([
+    page.waitForRequest(request => request.url().endsWith("/pairing")),
+    page.getByRole("button", { name: "Pair with Apple Home" }).click(),
+  ]);
+  await page.getByRole("checkbox", { name: "Trigger HomeKit motion from object detection" }).uncheck();
+  await page.waitForTimeout(600);
+  assert.equal(await page.getByText("123-45-679", { exact: true }).count(), 0, "a delayed response must not restore hidden pairing material");
+  delayPairing = false;
   page.once("dialog", dialog => dialog.dismiss());
   await page.getByRole("button", { name: "Reset pairing" }).click();
   assert.equal(resets, 0);

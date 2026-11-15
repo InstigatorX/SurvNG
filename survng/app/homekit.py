@@ -22,6 +22,8 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
+from .homekit_nodes import assignment_revision
+
 from .media_sessions import (
     MediaResourceClass, MediaSessionKind, MediaSessionManager, MediaSessionRequest,
 )
@@ -88,6 +90,7 @@ class CameraWorker:
         self.state: dict = {"state": "starting", "paired": False, "port": camera_port(camera)}
         self.process: subprocess.Popen | None = None
         self.leases: dict = {}
+        self.pending_snapshot: tuple | None = None
 
     def status(self) -> dict:
         with self.lock:
@@ -129,8 +132,12 @@ class CameraWorker:
                 except ProcessLookupError:
                     pass
         elif message.get("method") == "snapshot":
-            destination = self.path / "remote-snapshot.jpg"
-            ok = self.service.nodes.request_snapshot(self.camera.id, destination, 12)
+            if (self.pending_snapshot is None and not self.stopping.is_set()
+                    and self.camera.homekit.encoder != "local"):
+                destination = self.path / "remote-snapshot.jpg"
+                waiter = self.service.nodes.begin_snapshot(self.camera.id, destination)
+                self.pending_snapshot = (message, waiter, time.monotonic() + 12)
+                return
         elif message.get("method") == "acquire" and not self.stopping.is_set() and token not in self.leases:
             try:
                 purpose = message.get("purpose", "encoder")
@@ -151,10 +158,28 @@ class CameraWorker:
                 ok = True
             except RuntimeError:
                 self._state(mediaCapacity="unavailable")
+        self._reply(message, ok)
+
+    def _reply(self, message: dict, ok: bool) -> None:
         self.process.stdin.write(json.dumps({"version": 1, "id": message.get("id"), "ok": ok}).encode() + b"\n")
         self.process.stdin.flush()
 
+    def _poll_snapshot(self, cancel: bool = False) -> None:
+        if self.pending_snapshot is None:
+            return
+        message, waiter, deadline = self.pending_snapshot
+        if cancel or waiter[0].is_set() or time.monotonic() >= deadline:
+            self.pending_snapshot = None
+            self.service.nodes.end_snapshot(self.camera.id, waiter)
+            if cancel:
+                waiter[1].unlink(missing_ok=True)
+            self._reply(message, not cancel and waiter[0].is_set() and waiter[1].is_file())
+
     def _terminate(self) -> None:
+        if self.pending_snapshot is not None:
+            _, waiter, _ = self.pending_snapshot
+            self.service.nodes.end_snapshot(self.camera.id, waiter)
+            self.pending_snapshot = None
         process = self.process
         if process is None:
             return
@@ -173,6 +198,7 @@ class CameraWorker:
         except ProcessLookupError:
             pass
         process.wait(timeout=2)
+        (self.path / "remote-snapshot.jpg").unlink(missing_ok=True)
         for stream in (process.stdin, process.stdout):
             if stream:
                 stream.close()
@@ -220,12 +246,13 @@ class CameraWorker:
                     self._state(state="paused", error="camera_off")
                     self.stopping.wait(1)
                     continue
-                decision = self.service.nodes.decision(self.camera)
+                revision = assignment_revision(self.config, self.camera)
+                decision = self.service.nodes.decision(self.camera, revision)
                 if decision not in {"local", "remote"}:
                     self._state(state="blocked" if decision != "waiting" else "starting", error=_GATE_ERRORS[decision])
                     self.stopping.wait(2)
                     continue
-                remote = None if decision == "local" else self.service.nodes.remote_for(self.camera)
+                remote = None if decision == "local" else self.service.nodes.remote_for(self.camera, revision)
                 if decision == "remote" and remote is None:
                     self._state(state="starting", error="encoder_waiting")
                     self.stopping.wait(2)
@@ -247,8 +274,10 @@ class CameraWorker:
                     self.process.stdin.flush()
                     self._state(state="starting", error=None)
                     pending = b""
+                    control_failures = 0
                     poll_at = time.monotonic() + 1
                     while not self.stopping.is_set() and self.process.poll() is None and self.service.camera_active(self.camera.id):
+                        self._poll_snapshot()
                         if any(lease.cancelled() for lease in self.leases.values()):
                             break
                         if select.select([self.process.stdout], [], [], 0.2)[0]:
@@ -272,16 +301,21 @@ class CameraWorker:
                                     encoder = self.service.nodes.encoder_status(self.camera)
                                     if encoder:
                                         snapshot = {**snapshot, "encoder": encoder}
-                                    if self.service.nodes.decision(self.camera) != "remote":
+                                    if self.service.nodes.decision(self.camera, revision) != "remote":
                                         node_left = True
                                         break
                                 self._state(state="running", error=None, runtime=snapshot, paired=bool(snapshot.get("paired")))
                                 if not snapshot.get("homeKitActive"):
                                     self.service.clear_motion(self.camera.id)
+                                    self._poll_snapshot(cancel=True)
                                 control(self.path, "motion", {"active": self.service.motion_active(self.camera.id)})
                                 failures = 0
+                                control_failures = 0
                             except (OSError, ValueError, RuntimeError):
                                 self._state(state="starting", error="control_unavailable")
+                                control_failures += 1
+                                if control_failures >= 3:
+                                    break
                     self.service.clear_motion(self.camera.id)
                     if self.process.poll() == 42:
                         self._state(state="blocked", error="encoding_unavailable")
@@ -325,6 +359,7 @@ class HomeKitService:
         with self.operations, self.lock:
             if self.started:
                 return
+            self.nodes.reopen()
             self.started = True
             self._start_workers()
 
@@ -342,6 +377,7 @@ class HomeKitService:
             self._reconfigure(config)
 
     def _reconfigure(self, config) -> None:
+        self.nodes.reopen()
         def signature(app, camera):
             settings = camera.homekit.model_dump(exclude={"object_motion"})
             return (app.homekit, app.ffmpeg_path, app.capture_rtsp_transport,
@@ -390,6 +426,8 @@ class HomeKitService:
         # Do not replay stored detections, manual reviews, or stale source events.
         if payload.get("historical") or str(payload.get("source") or "").startswith("manual"):
             return
+        if not isinstance(payload.get("timestamp"), str):
+            return
         try:
             observed = datetime.fromisoformat(payload["timestamp"].replace("Z", "+00:00"))
             if observed.tzinfo is None:
@@ -400,7 +438,7 @@ class HomeKitService:
         objects = payload.get("incident_objects")
         if objects is None:
             objects = payload.get("objects") or []
-        if not 0 <= age <= 30 or not any(isinstance(item, dict) and item.get("label")
+        if not isinstance(objects, list) or not 0 <= age <= 30 or not any(isinstance(item, dict) and item.get("label")
                 and item.get("incident_eligible") is not False for item in objects):
             return
         camera_id = str(payload.get("camera_id") or "")
@@ -430,24 +468,23 @@ class HomeKitService:
         assignments = []
         for camera in config.cameras:
             encoder = camera.homekit.encoder or "local"
-            if not camera.homekit.enabled or encoder == "local":
+            if not camera.homekit.enabled or encoder == "local" or not self.camera_active(camera.id):
                 continue
             with self.nodes.lock:
                 node = self.nodes.nodes.get(encoder)
                 hardware = node.get("hardware") if node else ""
-            backend = (node.get("backends") or {}).get(camera.id) if node else ""
-            if backend in {"software", "unavailable"} and not camera.homekit.allow_software_encoding:
-                continue
             if hardware == "qsv" or (hardware == "software" and camera.homekit.allow_software_encoding):
                 assignments.append({"id": camera.id, "encoder": encoder,
                     "url": camera.source_url(camera.homekit.source), "audio": bool(camera.homekit.audio),
                     "transport": config.capture_rtsp_transport,
-                    "allowSoftwareEncoding": bool(camera.homekit.allow_software_encoding)})
+                    "allowSoftwareEncoding": bool(camera.homekit.allow_software_encoding),
+                    "revision": assignment_revision(config, camera)})
         return assignments
 
     def status(self) -> dict:
         with self.lock:
             return {"enabled": self.config.homekit.enabled, "experimental": True,
+                "nodeError": self.nodes.error,
                 "nodes": self.nodes.public_status(self.config.cameras),
                 "cameras": [
                 {"id": camera.id, "name": camera.name, "enabled": camera.homekit.enabled,
@@ -473,16 +510,21 @@ class HomeKitService:
         if worker is None:
             raise RuntimeError("Enable this camera before resetting its pairing")
         worker.close()
-        private_directory(worker.path)
-        with open(worker.path / "owner.lock", "r+") as owner:
-            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            hap = worker.path / "hap"
-            if hap.exists():
-                private_directory(hap)
-                shutil.rmtree(hap)
-            (worker.path / "identity.json").unlink(missing_ok=True)
-        with self.lock:
-            replacement = CameraWorker(self, self.config, worker.camera)
-            self.workers[camera_id] = replacement
-            self.motion.pop(camera_id, None)
-            replacement.start()
+        try:
+            private_directory(worker.path)
+            fd = os.open(worker.path / "owner.lock", os.O_RDWR | os.O_NOFOLLOW)
+            with os.fdopen(fd, "r+") as owner:
+                fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                hap = worker.path / "hap"
+                if hap.exists():
+                    private_directory(hap)
+                    shutil.rmtree(hap)
+                (worker.path / "identity.json").unlink(missing_ok=True)
+        finally:
+            # A rejected reset must still restore supervision of the old identity.
+            with self.lock:
+                camera = next(camera for camera in self.config.cameras if camera.id == camera_id)
+                replacement = CameraWorker(self, self.config, camera)
+                self.workers[camera_id] = replacement
+                self.motion.pop(camera_id, None)
+                replacement.start()

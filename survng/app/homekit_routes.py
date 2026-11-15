@@ -10,9 +10,9 @@ from typing import Any
 import cv2
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from .homekit_nodes import ffmpeg_archive_iter, media_ingest_root, node_releases, public_api_root, runtime_archive_iter
+from .homekit_nodes import SNAPSHOT_LIMIT, ffmpeg_archive_iter, media_ingest_root, node_releases, public_api_root, runtime_archive_iter
 
 
 @dataclass(frozen=True)
@@ -25,12 +25,13 @@ class PairingReset(BaseModel):
 
 
 class NodeReport(BaseModel):
-    name: str = ""
-    hardware: str = ""
-    ffmpeg: str = ""
-    profiles: dict = {}
-    backends: dict = {}
-    fps: dict = {}
+    name: str = Field(default="", max_length=256)
+    hardware: str = Field(default="", max_length=32)
+    ffmpeg: str = Field(default="", max_length=256)
+    profiles: dict = Field(default_factory=dict, max_length=1024)
+    backends: dict = Field(default_factory=dict, max_length=1024)
+    fps: dict = Field(default_factory=dict, max_length=1024)
+    revisions: dict = Field(default_factory=dict, max_length=1024)
 
     model_config = {"extra": "ignore"}
 
@@ -103,9 +104,10 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
     def remove_node(node_id: str, response: Response) -> dict:
         response.headers["Cache-Control"] = "no-store"
         service = deps.get_manager().homekit
-        assigned = [camera.id for camera in service.config.cameras if camera.homekit.encoder == node_id]
         try:
-            service.nodes.remove(node_id, assigned)
+            with service.operations, service.lock:
+                assigned = [camera.id for camera in service.config.cameras if camera.homekit.encoder == node_id]
+                service.nodes.remove(node_id, assigned)
         except KeyError:
             raise HTTPException(status_code=404, detail="HomeKit encoder was not found") from None
         except RuntimeError:
@@ -133,7 +135,7 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         service = deps.get_manager().homekit
         node = _node(service, request)
         try:
-            payload = service.nodes.sync(node, report.model_dump(), service.node_assignments(), timeout=10)
+            payload = service.nodes.sync(node, report.model_dump(), service.node_assignments, timeout=10)
         except (KeyError, OSError, RuntimeError):
             raise HTTPException(status_code=401, detail="encoder authentication required") from None
         payload["releases"] = node_releases(service.config.ffmpeg_path)
@@ -149,11 +151,19 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         node = _node(service, request)
         camera_id = request.headers.get("x-survng-camera", "")
         tier = request.headers.get("x-survng-tier", "")
-        if not service.nodes.feed_allowed(node, camera_id, tier, service.node_assignments()):
+        with service.lock:
+            claim = service.nodes.claim_feed(node, camera_id, tier, service.node_assignments())
+        if claim is None:
             raise HTTPException(status_code=404, detail="encoder feed was not requested")
-        async for chunk in request.stream():
-            if chunk:
-                service.nodes.write_feed(camera_id, int(tier), chunk)
+        try:
+            async for chunk in request.stream():
+                if chunk:
+                    with service.lock:
+                        accepted = service.nodes.write_upload(node, camera_id, tier, claim, chunk, service.node_assignments())
+                    if not accepted:
+                        raise HTTPException(status_code=404, detail="encoder feed was not requested")
+        finally:
+            service.nodes.release_upload(camera_id, tier, claim)
         return Response(status_code=204)
 
     @router.post("/api/homekit/nodes/snapshot")
@@ -161,8 +171,14 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         service = deps.get_manager().homekit
         node = _node(service, request)
         camera_id = request.headers.get("x-survng-camera", "")
-        data = await request.body()
-        if not service.nodes.accept_snapshot(node, camera_id, data, service.node_assignments()):
+        data = bytearray()
+        async for chunk in request.stream():
+            if len(data) + len(chunk) > SNAPSHOT_LIMIT:
+                raise HTTPException(status_code=413, detail="snapshot is too large")
+            data.extend(chunk)
+        with service.lock:
+            accepted = service.nodes.accept_snapshot(node, camera_id, bytes(data), service.node_assignments(), request.headers.get("x-survng-request", ""))
+        if not accepted:
             raise HTTPException(status_code=404, detail="snapshot was not requested")
         return {"accepted": True}
 

@@ -9,7 +9,10 @@ import hashlib
 import hmac
 import io
 import json
+import math
 import os
+import platform
+import shutil
 from pathlib import Path
 import secrets
 import select
@@ -18,6 +21,7 @@ import stat
 import tarfile
 import threading
 import time
+from collections.abc import Callable
 from urllib.parse import urlsplit
 
 
@@ -28,6 +32,7 @@ def _private_directory(path: Path) -> None:
         raise RuntimeError("unsafe HomeKit state directory")
 
 ONLINE_SECONDS = 20
+SNAPSHOT_LIMIT = 4 * 1024 * 1024
 TOKEN_SECONDS = 30 * 60
 WORKER_ROOT = Path(__file__).resolve().parents[2] / "homekit-worker"
 
@@ -40,14 +45,19 @@ def _matches(value: str, digest: str) -> bool:
     return hmac.compare_digest(_hash(value), digest)
 
 
+def assignment_revision(config, camera) -> str:
+    return _hash(json.dumps([camera.source_url(camera.homekit.source), bool(camera.homekit.audio),
+        config.capture_rtsp_transport, bool(camera.homekit.allow_software_encoding), camera.homekit.encoder], separators=(",", ":")))
+
+
 def clean_profile(raw: object) -> dict | None:
     if not isinstance(raw, dict):
         return None
     width, height = raw.get("width"), raw.get("height")
     tiers, resolutions = raw.get("tiers"), raw.get("resolutions")
-    if not isinstance(width, int) or not isinstance(height, int) or not 2 <= width <= 4096 or not 2 <= height <= 4096:
+    if type(width) is not int or type(height) is not int or not 2 <= width <= 4096 or not 2 <= height <= 4096:
         return None
-    if not isinstance(tiers, list) or not 1 <= len(tiers) <= 3 or not isinstance(resolutions, list) or len(resolutions) > 8:
+    if not isinstance(tiers, list) or not 1 <= len(tiers) <= 3 or not isinstance(resolutions, list) or not 1 <= len(resolutions) <= 8:
         return None
     cleaned = []
     for tier in tiers:
@@ -59,7 +69,12 @@ def clean_profile(raw: object) -> dict | None:
             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100000:
                 return None
             item[key] = value
-        if item["identifier"] not in {1, 2, 3} or not item["width"] or not item["height"]:
+        if (item["identifier"] not in {1, 2, 3} or item["quality"] != item["identifier"] + 1
+                or any(existing["identifier"] == item["identifier"] for existing in cleaned)
+                or not all(2 <= item[key] <= 1920 and item[key] % 2 == 0 for key in ("width", "height"))
+                or item["width"] * item["height"] > 1920 * 1080
+                or item["frameRate"] not in {15, 30}
+                or not 0 < item["targetAverageBitrate"] <= item["peakBitrate"] <= 20000):
             return None
         cleaned.append(item)
     clean_resolutions = []
@@ -68,6 +83,9 @@ def clean_profile(raw: object) -> dict | None:
                 or not all(isinstance(part, int) and not isinstance(part, bool) and 0 < part <= 4096 for part in resolution)):
             return None
         clean_resolutions.append(resolution)
+        if not any(resolution[0] == tier["width"] and resolution[1] == tier["height"]
+                and resolution[2] in {15, 30} and resolution[2] <= tier["frameRate"] for tier in cleaned):
+            return None
     return {"width": width, "height": height, "tiers": cleaned, "resolutions": clean_resolutions}
 
 
@@ -120,6 +138,13 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 ORIGIN='{origin}'
 TOKEN='{token}'
+if [ "$(uname -m)" != '{platform.machine()}' ]; then
+  echo "This encoder must match the server architecture ({platform.machine()})." >&2
+  exit 1
+fi
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+trap 'exit 1' HUP INT TERM
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl xz-utils libdrm2
@@ -129,9 +154,9 @@ if ! command -v node >/dev/null 2>&1 || [ "$(node --version | cut -d. -f1)" != "
     aarch64) node_arch=arm64 ;;
     *) echo "This installer supports x86_64 and arm64." >&2; exit 1 ;;
   esac
-  curl -fsSL "https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-${{node_arch}}.tar.xz" -o /tmp/survng-node.tar.xz
-  tar -xJf /tmp/survng-node.tar.xz -C /usr/local --strip-components=1
-  rm -f /tmp/survng-node.tar.xz
+  curl -fsSL "https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-${{node_arch}}.tar.xz" -o "$work/survng-node.tar.xz"
+  tar -xJf "$work/survng-node.tar.xz" -C /usr/local --strip-components=1
+  rm -f "$work/survng-node.tar.xz"
 fi
 cred=$(curl -fsSL -X POST "$ORIGIN/api/homekit/enroll/$TOKEN")
 secret=$(printf '%s\\n' "$cred" | sed -n 's/^SURVNG_NODE_SECRET=//p')
@@ -141,34 +166,34 @@ esac
 install -d -m 0700 /etc/survng /opt/survng-homekit-node
 printf '%s\\nSURVNG_ORIGIN=%s\\nSURVNG_FFMPEG=%s\\n' "$cred" "$ORIGIN" /opt/survng-homekit-node/bin/ffmpeg > /etc/survng/homekit-node.env
 chmod 0600 /etc/survng/homekit-node.env
-curl -fsSL -H "Authorization: Bearer $secret" -o /tmp/survng-homekit-agent.tgz "$ORIGIN/api/homekit/nodes/agent"
+curl -fsSL -H "Authorization: Bearer $secret" -o "$work/survng-homekit-agent.tgz" "$ORIGIN/api/homekit/nodes/agent"
 rm -rf /opt/survng-homekit-node/dist /opt/survng-homekit-node/node_modules
-tar -xzf /tmp/survng-homekit-agent.tgz -C /opt/survng-homekit-node
-rm -f /tmp/survng-homekit-agent.tgz
-curl -fsSL -H "Authorization: Bearer $secret" -o /tmp/survng-homekit-ffmpeg.tgz "$ORIGIN/api/homekit/nodes/ffmpeg"
-if tar -tzf /tmp/survng-homekit-ffmpeg.tgz | grep -vxE 'ffmpeg|ffprobe'; then
+tar -xzf "$work/survng-homekit-agent.tgz" -C /opt/survng-homekit-node
+rm -f "$work/survng-homekit-agent.tgz"
+curl -fsSL -H "Authorization: Bearer $secret" -o "$work/survng-homekit-ffmpeg.tgz" "$ORIGIN/api/homekit/nodes/ffmpeg"
+if tar -tzf "$work/survng-homekit-ffmpeg.tgz" | grep -vxE 'ffmpeg|ffprobe'; then
   echo "Encoder tools were rejected." >&2
   exit 1
 fi
 install -d -m 0755 /opt/survng-homekit-node/bin
-tar -xzf /tmp/survng-homekit-ffmpeg.tgz -C /opt/survng-homekit-node/bin
+tar -xzf "$work/survng-homekit-ffmpeg.tgz" -C /opt/survng-homekit-node/bin
 chmod 0755 /opt/survng-homekit-node/bin/ffmpeg /opt/survng-homekit-node/bin/ffprobe
-rm -f /tmp/survng-homekit-ffmpeg.tgz
-/opt/survng-homekit-node/bin/ffmpeg -hide_banner -encoders > /tmp/survng-ffmpeg-encoders
-grep -q libx265 /tmp/survng-ffmpeg-encoders
-grep -q libopus /tmp/survng-ffmpeg-encoders
-grep -q ' aac ' /tmp/survng-ffmpeg-encoders
-grep -q mjpeg /tmp/survng-ffmpeg-encoders
-rm -f /tmp/survng-ffmpeg-encoders
-curl -fsSL -H "Authorization: Bearer $secret" -o /tmp/survng-homekit-runtime.tgz "$ORIGIN/api/homekit/nodes/runtime"
-if tar -tzf /tmp/survng-homekit-runtime.tgz | grep -vxE 'dri|dri/iHD_drv_video.so|lib[A-Za-z0-9._+-]+[.]so([.][A-Za-z0-9._+-]+)?'; then
+rm -f "$work/survng-homekit-ffmpeg.tgz"
+/opt/survng-homekit-node/bin/ffmpeg -hide_banner -encoders > "$work/survng-ffmpeg-encoders"
+grep -q libx265 "$work/survng-ffmpeg-encoders"
+grep -q libopus "$work/survng-ffmpeg-encoders"
+grep -q ' aac ' "$work/survng-ffmpeg-encoders"
+grep -q mjpeg "$work/survng-ffmpeg-encoders"
+rm -f "$work/survng-ffmpeg-encoders"
+curl -fsSL -H "Authorization: Bearer $secret" -o "$work/survng-homekit-runtime.tgz" "$ORIGIN/api/homekit/nodes/runtime"
+if tar -tzf "$work/survng-homekit-runtime.tgz" | grep -vxE 'dri|dri/iHD_drv_video.so|lib[A-Za-z0-9._+-]+[.]so([.][A-Za-z0-9._+-]+)?'; then
   echo "Encoder runtime was rejected." >&2
   exit 1
 fi
 rm -rf /opt/survng-homekit-node/lib
 install -d -m 0755 /opt/survng-homekit-node/lib
-tar -xzf /tmp/survng-homekit-runtime.tgz -C /opt/survng-homekit-node/lib
-rm -f /tmp/survng-homekit-runtime.tgz
+tar -xzf "$work/survng-homekit-runtime.tgz" -C /opt/survng-homekit-node/lib
+rm -f "$work/survng-homekit-runtime.tgz"
 node_bin=$(command -v node)
 cat > /etc/systemd/system/survng-homekit-node.service <<EOF
 [Unit]
@@ -183,7 +208,7 @@ Environment=LD_LIBRARY_PATH=/opt/survng-homekit-node/lib
 Environment=LIBVA_DRIVERS_PATH=/opt/survng-homekit-node/lib/dri
 WorkingDirectory=/opt/survng-homekit-node
 ExecStart=$node_bin dist/src/agent.js
-Restart=on-failure
+Restart=always
 RestartSec=3
 NoNewPrivileges=true
 PrivateTmp=true
@@ -224,6 +249,9 @@ class _TierFeed:
                 continue
             client.setblocking(False)
             with self.lock:
+                if self.closed:
+                    client.close()
+                    return
                 self.clients.add(client)
             self.bump()
 
@@ -259,7 +287,8 @@ class _TierFeed:
                 client.close()
 
     def close(self) -> None:
-        self.closed = True
+        with self.lock:
+            self.closed = True
         try:
             self.server.close()
         except OSError:
@@ -269,6 +298,9 @@ class _TierFeed:
                 client.close()
             self.clients.clear()
         self.path.unlink(missing_ok=True)
+        self.thread.join(timeout=1)
+        if self.thread.is_alive():
+            raise RuntimeError("HomeKit feed shutdown incomplete")
 
 
 class NodeRegistry:
@@ -278,12 +310,14 @@ class NodeRegistry:
         self.lock = threading.RLock()
         self.updates = threading.Condition()
         self.generation = 0
+        self.closed = True
+        self.error: str | None = None
         self.tokens: list[dict] = []
         self.nodes: dict[str, dict] = {}
         self.feeds: dict[tuple[str, int], _TierFeed] = {}
-        self.snapshots: dict[str, tuple[threading.Event, Path]] = {}
-        _private_directory(directory)
-        self._load()
+        self.uploads: dict[tuple[str, int], object] = {}
+        self.snapshots: dict[str, tuple[threading.Event, Path, str]] = {}
+        self.reopen()
 
     def _bump(self) -> None:
         with self.updates:
@@ -294,16 +328,41 @@ class NodeRegistry:
         try:
             info = self.path.lstat()
         except FileNotFoundError:
+            self.tokens = []
+            self.nodes = {}
             return
         if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise RuntimeError("unsafe HomeKit node state")
         saved = json.loads(self.path.read_text())
-        if saved.get("version") != 1:
+        if not isinstance(saved, dict) or saved.get("version") != 1:
             raise RuntimeError("unsupported HomeKit node state")
-        self.tokens = [item for item in saved.get("tokens", []) if isinstance(item, dict)]
-        self.nodes = {item["id"]: item for item in saved.get("nodes", []) if isinstance(item, dict) and isinstance(item.get("id"), str)}
+        tokens, nodes = saved.get("tokens", []), saved.get("nodes", [])
+        if not isinstance(tokens, list) or not isinstance(nodes, list):
+            raise RuntimeError("invalid HomeKit node state")
+        for node in nodes:
+            if (not isinstance(node, dict) or not isinstance(node.get("id"), str)
+                    or len(node["id"]) != 16 or any(character not in "0123456789abcdef" for character in node["id"])
+                    or not isinstance(node.get("secretHash"), str)
+                    or not isinstance(node.get("hardware", ""), str)
+                    or not isinstance(node.get("name", ""), str) or not isinstance(node.get("ffmpeg", ""), str)
+                    or not math.isfinite(float(node.get("lastSeen") or 0))
+                    or any(not isinstance(node.get(key, {}), dict) for key in ("profiles", "backends", "fps", "revisions"))):
+                raise RuntimeError("invalid HomeKit node state")
+            node["lastSeen"] = float(node.get("lastSeen") or 0)
+            node["profiles"] = {key: profile for key, value in node.get("profiles", {}).items() if (profile := clean_profile(value))}
+            node["backends"] = {key: value for key, value in node.get("backends", {}).items()
+                if isinstance(value, str) and value in {"qsv", "software", "unavailable"}}
+        for token in tokens:
+            if (not isinstance(token, dict) or not isinstance(token.get("hash"), str)
+                    or not isinstance(token.get("origin"), str) or not math.isfinite(float(token.get("expires") or 0))):
+                raise RuntimeError("invalid HomeKit enrollment state")
+            token["expires"] = float(token.get("expires") or 0)
+        self.tokens = tokens
+        self.nodes = {item["id"]: item for item in nodes}
 
     def _save(self) -> None:
+        if self.closed:
+            raise RuntimeError("HomeKit registry is closed")
         payload = {"version": 1, "tokens": self.tokens, "nodes": list(self.nodes.values())}
         temporary = self.path.with_suffix(".tmp")
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
@@ -368,6 +427,8 @@ class NodeRegistry:
         if not secret:
             return None
         with self.lock:
+            if self.closed:
+                return None
             for node in self.nodes.values():
                 digest = node.get("secretHash")
                 if isinstance(digest, str) and _matches(secret, digest):
@@ -376,11 +437,13 @@ class NodeRegistry:
 
     def update_report(self, node_id: str, report: dict) -> None:
         with self.lock:
+            if self.closed:
+                raise RuntimeError("HomeKit registry is closed")
             node = self.nodes.get(node_id)
             if node is None:
                 raise KeyError(node_id)
             hardware = report.get("hardware")
-            if hardware in {"qsv", "software"}:
+            if isinstance(hardware, str) and hardware in {"qsv", "software"}:
                 node["hardware"] = hardware
             ffmpeg = report.get("ffmpeg")
             if isinstance(ffmpeg, str):
@@ -391,13 +454,17 @@ class NodeRegistry:
             profiles = report.get("profiles") if isinstance(report.get("profiles"), dict) else {}
             backends = report.get("backends") if isinstance(report.get("backends"), dict) else {}
             fps = report.get("fps") if isinstance(report.get("fps"), dict) else {}
+            revisions = report.get("revisions") if isinstance(report.get("revisions"), dict) else {}
             node["profiles"] = {key: profile for key, value in profiles.items() if (profile := clean_profile(value))}
-            node["backends"] = {key: value for key, value in backends.items() if value in {"qsv", "software", "unavailable"}}
+            node["backends"] = {key: value for key, value in backends.items()
+                if isinstance(value, str) and value in {"qsv", "software", "unavailable"}}
             node["fps"] = {key: value for key, value in fps.items() if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 120}
+            node["revisions"] = {key: value for key, value in revisions.items()
+                if isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)}
             node["lastSeen"] = time.time()
             self._save()
 
-    def sync(self, node: dict, report: dict, assignments: list[dict], timeout: float) -> dict:
+    def sync(self, node: dict, report: dict, assignments: list[dict] | Callable[[], list[dict]], timeout: float) -> dict:
         with self.updates:
             seen = self.generation
         self.update_report(node["id"], report)
@@ -408,10 +475,12 @@ class NodeRegistry:
                 if remaining <= 0:
                     break
                 self.updates.wait(remaining)
-        return self.assignment_payload(node["id"], assignments)
+        return self.assignment_payload(node["id"], assignments() if callable(assignments) else assignments)
 
     def assignment_payload(self, node_id: str, assignments: list[dict]) -> dict:
         with self.lock:
+            if self.closed or node_id not in self.nodes:
+                raise KeyError(node_id)
             owned = [item for item in assignments if item.get("encoder") == node_id]
             feeds = []
             for item in owned:
@@ -419,10 +488,11 @@ class NodeRegistry:
                     if tier[0] == item["id"] and feed.wanted():
                         feeds.append({"camera": item["id"], "tier": tier[1]})
             snapshots = [camera_id for camera_id, _waiter in self.snapshots.items() if any(item["id"] == camera_id for item in owned)]
-            public = [{key: item[key] for key in ("id", "url", "audio", "transport", "allowSoftwareEncoding")} for item in owned]
-            return {"assignments": public, "feeds": feeds, "snapshots": snapshots}
+            public = [{key: item[key] for key in ("id", "url", "audio", "transport", "allowSoftwareEncoding", "revision")} for item in owned]
+            return {"assignments": public, "feeds": feeds, "snapshots": snapshots,
+                "snapshotRequests": {camera_id: self.snapshots[camera_id][2] for camera_id in snapshots}}
 
-    def decision(self, camera) -> str:
+    def decision(self, camera, revision: str | None = None) -> str:
         encoder = camera.homekit.encoder or "local"
         if encoder == "local":
             return "local"
@@ -430,6 +500,8 @@ class NodeRegistry:
             node = self.nodes.get(encoder)
             if node is None or time.time() - float(node.get("lastSeen") or 0) > ONLINE_SECONDS:
                 return "offline"
+            if revision is not None and (node.get("revisions") or {}).get(camera.id) != revision:
+                return "waiting"
             backend = (node.get("backends") or {}).get(camera.id)
             if node.get("hardware") != "qsv" and not camera.homekit.allow_software_encoding:
                 return "software_not_allowed"
@@ -437,14 +509,16 @@ class NodeRegistry:
                 return "software_not_allowed"
             if backend == "unavailable":
                 return "unavailable"
+            if backend not in {"qsv", "software"}:
+                return "waiting"
             if not (node.get("profiles") or {}).get(camera.id):
                 return "waiting"
             return "remote"
 
-    def remote_for(self, camera) -> dict | None:
-        if self.decision(camera) != "remote":
-            return None
+    def remote_for(self, camera, revision: str | None = None) -> dict | None:
         with self.lock:
+            if self.decision(camera, revision) != "remote":
+                return None
             node = self.nodes[camera.homekit.encoder]
             profile = node["profiles"][camera.id]
             backend = node["backends"].get(camera.id, "software")
@@ -458,9 +532,11 @@ class NodeRegistry:
 
     def prepare_feeds(self, camera_id: str, tiers: list[int]) -> Path:
         directory = self.directory / "feeds" / camera_id
-        _private_directory(self.directory / "feeds")
-        _private_directory(directory)
         with self.lock:
+            if self.closed:
+                raise RuntimeError("HomeKit registry is closed")
+            _private_directory(self.directory / "feeds")
+            _private_directory(directory)
             for tier in tiers:
                 if (camera_id, tier) not in self.feeds:
                     self.feeds[(camera_id, tier)] = _TierFeed(directory / f"{tier}.sock", self._bump)
@@ -473,9 +549,40 @@ class NodeRegistry:
             feed.write(data)
 
     def feed_allowed(self, node: dict, camera_id: str, tier: str, assignments: list[dict]) -> bool:
-        if not tier.isdigit() or int(tier) not in {1, 2, 3}:
+        if tier not in {"1", "2", "3"}:
             return False
-        return any(item["id"] == camera_id and item["encoder"] == node["id"] for item in assignments)
+        with self.lock:
+            return not self.closed and self.nodes.get(node["id"]) is node and any(
+                item["id"] == camera_id and item["encoder"] == node["id"] for item in assignments)
+
+    def claim_feed(self, node: dict, camera_id: str, tier: str, assignments: list[dict]) -> object | None:
+        with self.lock:
+            if not self.feed_allowed(node, camera_id, tier, assignments):
+                return None
+            key = (camera_id, int(tier))
+            feed = self.feeds.get(key)
+            if feed is None or not feed.wanted():
+                return None
+            claim = object()
+            self.uploads[key] = claim
+            return claim
+
+    def write_upload(self, node: dict, camera_id: str, tier: str, claim: object, data: bytes, assignments: list[dict]) -> bool:
+        with self.lock:
+            if not self.feed_allowed(node, camera_id, tier, assignments):
+                return False
+            key = (camera_id, int(tier))
+            feed = self.feeds.get(key)
+            if self.uploads.get(key) is not claim or feed is None or not feed.wanted():
+                return False
+            feed.write(data)
+            return True
+
+    def release_upload(self, camera_id: str, tier: str, claim: object) -> None:
+        with self.lock:
+            key = (camera_id, int(tier))
+            if self.uploads.get(key) is claim:
+                self.uploads.pop(key)
 
     def encoder_status(self, camera) -> dict | None:
         with self.lock:
@@ -493,37 +600,41 @@ class NodeRegistry:
                 status["sources"] = [{"fps": fps}]
             return status
 
-    def request_snapshot(self, camera_id: str, destination: Path, timeout: float) -> bool:
-        event = threading.Event()
+    def begin_snapshot(self, camera_id: str, destination: Path) -> tuple[threading.Event, Path, str]:
         with self.lock:
-            self.snapshots[camera_id] = (event, destination)
+            if self.closed or camera_id in self.snapshots:
+                raise RuntimeError("snapshot already pending")
+            waiter = (threading.Event(), destination, secrets.token_hex(16))
+            self.snapshots[camera_id] = waiter
             self._bump()
-        try:
-            return event.wait(timeout) and destination.is_file()
-        finally:
-            with self.lock:
-                if self.snapshots.get(camera_id, (None,))[0] is event:
-                    self.snapshots.pop(camera_id, None)
+            return waiter
 
-    def accept_snapshot(self, node: dict, camera_id: str, data: bytes, assignments: list[dict]) -> bool:
-        if not data or len(data) > 4 * 1024 * 1024 or not data.startswith(b"\xff\xd8"):
-            return False
-        if not any(item["id"] == camera_id and item["encoder"] == node["id"] for item in assignments):
+    def end_snapshot(self, camera_id: str, waiter: tuple) -> None:
+        with self.lock:
+            if self.snapshots.get(camera_id) is waiter:
+                self.snapshots.pop(camera_id)
+                self._bump()
+
+    def accept_snapshot(self, node: dict, camera_id: str, data: bytes, assignments: list[dict], request_id: str = "") -> bool:
+        if not data or len(data) > SNAPSHOT_LIMIT or not data.startswith(b"\xff\xd8"):
             return False
         with self.lock:
+            if self.closed or self.nodes.get(node["id"]) is not node or not any(
+                    item["id"] == camera_id and item["encoder"] == node["id"] for item in assignments):
+                return False
             waiter = self.snapshots.get(camera_id)
-        if waiter is None:
-            return False
-        temporary = waiter[1].with_suffix(".tmp")
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-        os.replace(temporary, waiter[1])
-        waiter[0].set()
-        return True
+            if waiter is None or waiter[2] != request_id or waiter[0].is_set():
+                return False
+            temporary = waiter[1].with_suffix(".tmp")
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+            os.replace(temporary, waiter[1])
+            waiter[0].set()
+            return True
 
     def remove(self, node_id: str, assigned: list[str]) -> None:
-        if node_id in assigned:
+        if assigned:
             raise RuntimeError("encoder is assigned to a camera")
         with self.lock:
             if node_id not in self.nodes:
@@ -546,10 +657,31 @@ class NodeRegistry:
 
     def close(self) -> None:
         with self.lock:
+            self.closed = True
             feeds = list(self.feeds.values())
             self.feeds.clear()
+            self.uploads.clear()
+            self.snapshots.clear()
+            self._bump()
         for feed in feeds:
             feed.close()
+
+    def reopen(self) -> None:
+        with self.lock:
+            if not self.closed:
+                return
+            try:
+                _private_directory(self.directory)
+                self._load()
+                self.closed = False
+                self.error = None
+            except (OSError, ValueError, RuntimeError, TypeError):
+                # A broken optional integration must not stop camera capture.
+                # Preserve the original state for repair; never replace it.
+                self.closed = True
+                self.error = "node_state_unavailable"
+                self.nodes.clear()
+                self.tokens.clear()
 
 
 _release_lock = threading.Lock()
@@ -594,7 +726,7 @@ def agent_release(root: Path = WORKER_ROOT) -> tuple[str, bytes]:
 
 
 def ffmpeg_binaries(ffmpeg_path: str) -> tuple[Path, Path]:
-    ffmpeg = Path(ffmpeg_path)
+    ffmpeg = Path(shutil.which(ffmpeg_path) or ffmpeg_path).resolve()
     if ffmpeg.name != "ffmpeg" or not ffmpeg.is_file() or ffmpeg.is_symlink():
         raise ValueError("configured ffmpeg is not a regular file")
     ffprobe = ffmpeg.with_name("ffprobe")

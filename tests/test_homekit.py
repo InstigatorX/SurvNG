@@ -59,7 +59,8 @@ def test_motion_is_opt_in_recent_object_evidence_and_expires(tmp_path):
     for changes in ({"historical": True}, {"source": "manual_openvino"}, {"objects": []}, {"incident_objects": []},
                     {"objects": [{"label": "person", "incident_eligible": False}]},
                     {"timestamp": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()},
-                    {"camera_id": "yard"}, {"timestamp": "invalid"}):
+                    {"camera_id": "yard"}, {"timestamp": "invalid"}, {"timestamp": None},
+                    {"timestamp": 123}, {"incident_objects": 1}):
         service.observe_objects({**payload, **changes})
         assert not service.motion_active("porch")
     active.return_value = False
@@ -342,17 +343,21 @@ def test_homekit_encoder_must_be_local_or_a_node_id():
 @pytest.mark.skipif(os.environ.get("HKSV_CAMERA_RUNTIME_TESTS") != "1", reason="optional Node 24 lifecycle integration")
 def test_real_workers_keep_identity_reconfigure_independently_and_reset(tmp_path):
     def until(predicate):
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 30
         while not predicate():
             if time.monotonic() > deadline:
-                raise AssertionError("HomeKit runtime condition timed out")
+                raise AssertionError(f"HomeKit runtime condition timed out: {service.status()}")
             time.sleep(0.05)
 
     config = configuration(tmp_path)
     # Isolated loopback publication only; the admin model requires a LAN address.
     config.homekit.bind = "127.0.0.1"
     config.homekit.node_path = os.environ["HKSV_NODE_PATH"]
+    config.ffmpeg_path = os.environ.get("HKSV_FFMPEG", config.ffmpeg_path)
     for camera in config.cameras:
+        # Geometry probing now opens the source. Keep this identity/lifecycle
+        # fixture on loopback and fail the probe immediately without a camera.
+        camera.stream_url = "rtsp://user:private-password@127.0.0.1:1/unavailable"
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             camera.homekit.port = reservation.getsockname()[1]
@@ -366,6 +371,17 @@ def test_real_workers_keep_identity_reconfigure_independently_and_reset(tmp_path
         identity = json.loads((first.path / "identity.json").read_text())["id"]
         assert all(not row["paired"] for row in service.status()["cameras"])
         assert "private-password" not in json.dumps(service.status())
+        from survng.app.homekit import control as runtime_control
+        original_pid = first.process.pid
+        def unavailable(path, method, params=None):
+            if path == first.path and method == "status":
+                raise RuntimeError("simulated unavailable control")
+            return runtime_control(path, method, params)
+        with patch("survng.app.homekit.control", side_effect=unavailable):
+            until(lambda: first.process is not None and first.process.pid != original_pid)
+        until(lambda: first.status()["state"] == "running")
+        assert json.loads((first.path / "identity.json").read_text())["id"] == identity
+        assert service.workers["yard"].process.pid == other_pid
         next_config = config.model_copy(deep=True)
         next_config.cameras[0].homekit.enabled = False
         service.reconfigure(next_config)

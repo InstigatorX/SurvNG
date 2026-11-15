@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { once } from 'node:events';
@@ -37,6 +37,7 @@ export class CameraMedia implements MediaSource {
   private sequence = 0;
   private sources = new Map<number, CameraSource>();
   private snapshots = new Set<ChildProcess>();
+  private remoteSnapshot?: Promise<Buffer>;
   lastError?: string;
   private progress = new Map<ChildProcess, { pid?: number; frame?: number; fps?: number; speed?: number; outTimeUs?: number; dupFrames?: number; dropFrames?: number }>();
   get encoderStatus(): object { return { backend: this.encoding.backend, fallbackReason: this.encoding.fallbackReason, sources: [...this.progress.values()] }; }
@@ -160,11 +161,19 @@ export class CameraMedia implements MediaSource {
     return child;
   }
   async snapshot(): Promise<Buffer> {
+    if (this.closed || !this.allowed()) throw new Error('snapshot unavailable');
     if (this.remoteFeeds) {
-      await this.admission('snapshot', String(++this.sequence));
-      const data = await readFile(join(this.directory, 'remote-snapshot.jpg'));
-      if (!data.length || data.length > 4 * 1024 * 1024) throw new Error('snapshot unavailable');
-      return data;
+      // Keep the request owned through file read/removal, not just the IPC
+      // reply. Concurrent Home thumbnails can share the same fresh image.
+      return this.remoteSnapshot ??= (async () => {
+        await this.admission('snapshot', String(++this.sequence));
+        const path = join(this.directory, 'remote-snapshot.jpg');
+        try {
+          const data = await readFile(path);
+          if (this.closed || !this.allowed() || !data.length || data.length > 4 * 1024 * 1024) throw new Error('snapshot unavailable');
+          return data;
+        } finally { await rm(path, { force: true }); }
+      })().finally(() => { this.remoteSnapshot = undefined; });
     }
     const child = await this.start([...this.directInput(), '-map', '0:v:0', '-frames:v', '1', '-an', '-vf', 'scale=1280:-2', '-c:v', 'mjpeg', '-f', 'image2pipe', 'pipe:1']);
     this.snapshots.add(child);
