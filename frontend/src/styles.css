@@ -4735,10 +4735,11 @@ button.live-overlay-backdrop:active {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.camera-connectivity-grid {
+.camera-connectivity-grid,
+.camera-presentation-grid {
   display: grid;
-  grid-template-columns: minmax(360px, 1.15fr) minmax(360px, 0.85fr);
-  align-items: start;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
   gap: 10px;
 }
 
@@ -4749,6 +4750,8 @@ button.live-overlay-backdrop:active {
 
 .camera-stream-panel,
 .camera-onvif-panel {
+  min-width: 0;
+  align-content: start;
   gap: 7px;
   padding: 9px 10px;
 }
@@ -4757,6 +4760,13 @@ button.live-overlay-backdrop:active {
 .camera-onvif-heading h3 {
   margin: 0;
   font-size: 12px;
+}
+
+.camera-stream-panel>h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
 }
 
 .camera-onvif-panel {
@@ -4779,6 +4789,8 @@ button.live-overlay-backdrop:active {
 
 .live-framing-editor {
   display: grid;
+  min-width: 0;
+  align-content: start;
   gap: 7px;
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -4823,6 +4835,18 @@ button.live-overlay-backdrop:active {
   min-width: 52px;
   min-height: 32px;
   padding: 0 8px;
+}
+
+.live-framing-source {
+  display: inline-flex;
+  gap: 4px;
+  justify-self: start;
+}
+
+.live-framing-source button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--control));
+  color: var(--accent);
 }
 
 .live-framing-workspace {
@@ -4943,8 +4967,19 @@ button.live-overlay-backdrop:active {
   padding-block: 4px;
 }
 
+@media (min-width: 1101px) {
+  .camera-presentation-grid .live-framing-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .camera-presentation-grid .live-framing-controls {
+    width: 100%;
+  }
+}
+
 @media (max-width: 1100px) {
-  .camera-connectivity-grid {
+  .camera-connectivity-grid,
+  .camera-presentation-grid {
     grid-template-columns: 1fr;
   }
 

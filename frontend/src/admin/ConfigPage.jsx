@@ -1,4 +1,4 @@
-import { HomeKitSettings } from "./HomeKitSettings.jsx";
+import { CameraHomeKitSettings, HomeKitSettings } from "./HomeKitSettings.jsx";
 import { WeatherSettings } from "./WeatherSettings.jsx";
 import { SystemReviewPanel } from "./SystemReviewPanel.jsx";
 import React, { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -60,7 +60,7 @@ import { logPayloadSignature } from "../pollingPolicy.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { motionAuditRegions } from "../motionAudit.mjs";
 import { clampZoneView, insertZonePointWithIndex, zoomZoneView } from "../zoneGeometry.mjs";
-import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminHomeDestinations, adminWorkspaceSearch, cameraConfigDirtyState, cameraHomeKitDirty, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, resolveAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
+import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminHomeDestinations, adminWorkspaceSearch, cameraConfigDirtyState, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, resolveAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
 import { appUrl, mediaUrl, fetch } from "../shared/api.js";
 import { MEDIA_STORAGE_ROLES, CAMERA_ADMIN_SECTIONS, TELEMETRY_ADMIN_SECTIONS, HEALTH_TELEMETRY_SECTIONS, GENERAL_ADMIN_SECTIONS, US_TIME_ZONES, THEMES } from "../shared/constants.js";
 import { CameraScopePicker } from "../shared/CameraScopePicker.jsx";
@@ -68,7 +68,7 @@ import { secretInputValue, secretInputHint } from "../shared/secrets.js";
 import { formatDateTime, formatTimeOnly, formatBytes, formatMilliseconds, formatAge, formatDuration, formatCompactDuration } from "../shared/format.js";
 import { useStoredState, useModalFocus } from "../shared/hooks.js";
 import { mediaStorageConfigurationError, slugify, inferredBackendLabel, cameraWithDerivedConnection, camerasWithGeneratedIds } from "../shared/cameras.js";
-import { defaultCamera, CameraOnvifEditor, LiveViewFramingEditor, defaultCameraMotionQualification, cameraMotionQualificationInherited } from "./cameraEditors.jsx";
+import { defaultCamera, CameraStreamsEditor, CameraOnvifEditor, LiveViewFramingEditor, defaultCameraMotionQualification, cameraMotionQualificationInherited } from "./cameraEditors.jsx";
 import { AccessSettings } from "./AccessSettings.jsx";
 import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
@@ -1401,7 +1401,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const generalDirty = Boolean(config && baselineConfig) && (
     !configValuesEqual(comparableSystemConfig(config), comparableSystemConfig(baselineConfig))
     || cameraSpeechDirty(config.cameras || [], baselineConfig.cameras || [])
-    || cameraHomeKitDirty(config.cameras || [], baselineConfig.cameras || [])
   );
   const selectedCameraSettingsDirty = Boolean(selectedCamera) && !configValuesEqual(comparableCameraSettings(selectedCamera), comparableCameraSettings(baselineCamera));
   const selectedZonesDirty = Boolean(selectedCamera) && !configValuesEqual(selectedCamera.zones || [], baselineCamera?.zones || []);
@@ -2318,28 +2317,13 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
 
                     {cameraSection === "settings" ? <>
                       <div className="camera-connectivity-grid">
-                        <section className="sub-panel camera-stream-panel" aria-labelledby={`camera-stream-title-${selectedCamera.id}`}>
-                          <h3 id={`camera-stream-title-${selectedCamera.id}`} className="section-heading-with-icon"><span className="section-heading-icon"><Camera size={16} /></span>Streams</h3>
-                          <div className="field-row stream-field-row camera-stream-url-fields">
-                            <div className="stream-field">
-                              <div className="stream-field-head">
-                                <label htmlFor={`main-stream-${selectedCamera.id}`}>Main Stream URL</label>
-                                <label className="stream-record-toggle"><input type="checkbox" checked={selectedCamera.record} onChange={(event) => updateCamera(selectedCamera.id, ["record"], event.target.checked)} /> Record</label>
-                              </div>
-                              <input id={`main-stream-${selectedCamera.id}`} value={selectedCamera.stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["stream_url"], event.target.value)} />
-                            </div>
-                            <div className="stream-field">
-                              <div className="stream-field-head">
-                                <label htmlFor={`sub-stream-${selectedCamera.id}`}>Live/Sub Stream URL</label>
-                                <label className="stream-record-toggle"><input type="checkbox" checked={selectedCamera.record_sub || false} onChange={(event) => updateCamera(selectedCamera.id, ["record_sub"], event.target.checked)} /> Record</label>
-                              </div>
-                              <input id={`sub-stream-${selectedCamera.id}`} value={selectedCamera.live_stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["live_stream_url"], event.target.value)} />
-                            </div>
-                          </div>
-                        </section>
+                        <CameraStreamsEditor camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
                         <CameraOnvifEditor camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
                       </div>
-                      <LiveViewFramingEditor camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
+                      <div className="camera-presentation-grid">
+                        <LiveViewFramingEditor camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
+                        <CameraHomeKitSettings camera={selectedCamera} enabled={config.homekit?.enabled ?? false} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
+                      </div>
                       <details className="camera-retention-details">
                         <summary>Camera recording retention</summary>
                         <div className="field-row">

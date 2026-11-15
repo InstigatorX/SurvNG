@@ -182,12 +182,6 @@ export function configValuesEqual(left, right) {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
-// HomeKit camera controls save with the HomeKit system settings.
-export function cameraHomeKitDirty(cameras = [], baselineCameras = []) {
-  const baseline = new Map(baselineCameras.map((camera) => [camera.id, camera]));
-  return cameras.some((camera) => !configValuesEqual(camera.homekit ?? null, baseline.get(camera.id)?.homekit ?? null));
-}
-
 // Per-camera speech switches save with the Detection system settings.
 export function cameraSpeechDirty(cameras = [], baselineCameras = []) {
   const baseline = new Map((baselineCameras || []).map((camera) => [camera.id, camera]));

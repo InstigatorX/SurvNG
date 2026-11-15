@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, adminHomeDestinations, adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, cameraHomeKitDirty, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, preferredStoredValue, readAdminSubsection, readAdminWorkspace, resolveAdminWorkspace, telemetryLocationOptions } from "../src/adminWorkspace.mjs";
+import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, adminHomeDestinations, adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, preferredStoredValue, readAdminSubsection, readAdminWorkspace, resolveAdminWorkspace, telemetryLocationOptions } from "../src/adminWorkspace.mjs";
 
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS.map((group) => group.label), ["Configure", "Observe", "Act"]);
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS[0].items.slice(0, 5).map((item) => item.label), ["Cameras", "Detection", "Storage", "Integrations", "Access"]);
@@ -82,5 +82,7 @@ assert.match(configPageSource, /\["speech", "Speech", Mic\]/);
 console.log("admin workspace tests passed");
 
 assert.equal(adminDestination("general", { generalSection: "homekit" }).id, "homekit");
-assert.equal(cameraHomeKitDirty([{ id: "gate", homekit: { enabled: true } }], [{ id: "gate", homekit: { enabled: false } }]), true);
-assert.equal(cameraHomeKitDirty([{ id: "gate", homekit: { enabled: true }, name: "Renamed" }], [{ id: "gate", homekit: { enabled: true } }]), false);
+const homekitBefore = { cameras: [{ id: "gate", homekit: { enabled: false } }] };
+const homekitAfter = { cameras: [{ id: "gate", homekit: { enabled: true } }] };
+assert.equal(configValuesEqual(comparableSystemConfig(homekitBefore), comparableSystemConfig(homekitAfter)), true);
+assert.equal(cameraConfigDirtyState(homekitAfter.cameras, homekitBefore.cameras).settings, true);

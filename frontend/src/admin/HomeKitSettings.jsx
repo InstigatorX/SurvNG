@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Camera, Home, KeyRound, RotateCcw } from "lucide-react";
+import { Home, KeyRound, RotateCcw } from "lucide-react";
 import { fetch, appUrl } from "../shared/api.js";
 import "./homekit.css";
 
@@ -21,7 +21,7 @@ const ERROR_LABELS = {
   camera_off: "Turn this camera on in SurvNG to resume HomeKit.",
 };
 
-export function HomeKitSettings({ config, updateConfig }) {
+export function HomeKitSettings({ config, updateConfig, cameraId = "" }) {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState("");
   const [pairing, setPairing] = useState(null);
@@ -105,6 +105,45 @@ export function HomeKitSettings({ config, updateConfig }) {
     finally { if (pairingRequest.current === controller) pairingRequest.current = null; setBusy(""); }
   }
 
+  if (cameraId) {
+    const index = cameras.findIndex((camera) => camera.id === cameraId);
+    if (index < 0) return null;
+    const camera = cameras[index];
+    const options = { enabled: false, allow_software_encoding: false, source: "live", audio: false, object_motion: false, port: 0, encoder: "local", ...camera.homekit };
+    const live = status?.cameras?.find((item) => item.id === camera.id);
+    const available = settings.enabled && options.enabled && live?.state === "running";
+    return <section className="sub-panel homekit-settings homekit-camera camera-homekit-panel" aria-labelledby={`camera-homekit-title-${camera.id}`}>
+      <div className="homekit-camera-head"><h3 id={`camera-homekit-title-${camera.id}`}><Home size={15} />HomeKit</h3><span className="homekit-badge">{live?.paired ? "Paired" : live?.state === "running" ? "Ready to pair" : live?.state || "Not enabled"}</span></div>
+      <p className="settings-help">Save camera settings to apply changes, then pair with Apple Home.</p>
+      {!settings.enabled ? <p className="settings-help">Enable the service in <a href={appUrl("/admin?section=general&subsection=homekit")}>HomeKit settings</a> to start this camera.</p> : null}
+      {error ? <p role="alert" className="settings-help homekit-error">{error} Status retries automatically.</p> : null}
+      {!status && !error ? <p role="status">Loading HomeKit status…</p> : null}
+      <label className="check-field"><input type="checkbox" checked={options.enabled} onChange={(event) => updateCamera(index, "enabled", event.target.checked)} />Enable HomeKit for this camera</label>
+      {options.enabled ? <>
+        <label className="check-field"><input type="checkbox" checked={options.allow_software_encoding} onChange={(event) => updateCamera(index, "allow_software_encoding", event.target.checked)} />Allow software HEVC fallback</label>
+        <p className="settings-help">QSV is preferred automatically. This permits software encoding when QSV is unavailable. Viewers and recording share an encoder for the same video profile.</p>
+        {live?.runtime?.encoder ? <p className="settings-help" role="status">Encoder: <strong>{live.runtime.encoder.backend === "qsv" ? "Intel QSV HEVC" : "Software HEVC"}</strong>{live.runtime.encoder.sources?.[0]?.fps != null ? ` · ${Number(live.runtime.encoder.sources[0].fps).toFixed(1)} fps` : ""}{live.runtime.encoder.fallbackReason ? " · QSV unavailable; using permitted software fallback" : ""}</p> : null}
+        <div className="homekit-fields">
+          <label>Encoder<select value={options.encoder || "local"} onChange={(event) => updateCamera(index, "encoder", event.target.value)}><option value="local">This server</option>{(status?.nodes || []).map((node) => <option key={node.id} value={node.id}>{node.name || "Encoder"} ({node.online ? "online" : "offline"})</option>)}{options.encoder !== "local" && !(status?.nodes || []).some((node) => node.id === options.encoder) ? <option value={options.encoder}>Assigned encoder</option> : null}</select></label>
+          <label>Video source<select value={options.source} onChange={(event) => updateCamera(index, "source", event.target.value)}><option value="live">Live stream</option><option value="main">Main stream</option></select></label>
+          <label className="check-field"><input type="checkbox" checked={options.audio} onChange={(event) => updateCamera(index, "audio", event.target.checked)} />Include camera audio</label>
+        </div>
+        <label className="check-field"><input type="checkbox" checked={options.object_motion} onChange={(event) => updateCamera(index, "object_motion", event.target.checked)} />Trigger HomeKit motion from object detection</label>
+        <p className="settings-help">Recent objects recognized by SurvNG trigger a ten-second motion window. Turn Detection on for this camera. Recordings also require Stream &amp; Allow Recording in Apple Home. Leave Home activity zones off for these motion events.</p>
+        {live?.error ? <p className="settings-help homekit-error">{ERROR_LABELS[live.error] || "HomeKit is unavailable."}</p> : null}
+        {live?.runtime?.zonesBlockMotion ? <p className="settings-help homekit-error">Home activity zones are suppressing object-triggered motion. Disable those zones in Apple Home to use this trigger.</p> : null}
+        {live?.mediaCapacity === "unavailable" ? <p className="settings-help homekit-error">Media capacity is full. Close another live viewer and retry.</p> : null}
+        {live?.runtime?.media?.failures ? <p className="settings-help homekit-error">The source encoder has reported failures. Check this camera’s source and audio availability.</p> : null}
+        <div className="homekit-actions"><button type="button" disabled={!available || !!busy || live?.paired} onClick={() => cameraAction(camera, "pairing")}><KeyRound size={15} />{busy === camera.id ? "Working…" : "Pair with Apple Home"}</button><button type="button" disabled={!available || !!busy} onClick={() => cameraAction(camera, "reset-pairing")}><RotateCcw size={15} />Reset pairing</button></div>
+        <details className="telemetry-technical"><summary>Connection details</summary><label>HomeKit port<input type="number" min={0} max={65535} value={options.port} onChange={(event) => updateCamera(index, "port", Number(event.target.value))} /></label><p className="settings-help">Zero uses this camera’s stable automatic port{live?.port ? ` (${live.port})` : ""}. Each camera needs a unique port. Talkback is unavailable.</p></details>
+      </> : null}
+      {pairing?.id === camera.id ? <div className="homekit-pairing" role="region" aria-label={`Pair ${camera.name}`}>
+        <img src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(pairing.qrSvg)}`} alt={`HomeKit pairing QR for ${camera.name}`} width="192" height="192" />
+        <div><h4>Add to Apple Home</h4><p>Open Home → Add Accessory and scan this QR, or choose More options and enter the setup code.</p><strong className="homekit-code">{pairing.setupCode}</strong><p className="settings-help">Keep this code private. It hides after two minutes.</p><button type="button" onClick={() => setPairing(null)}>Hide pairing code</button></div>
+      </div> : null}
+    </section>;
+  }
+
   return <div className="homekit-settings subsection-settings-content">
     <div className="settings-heading"><div><h2><Home size={21} /> HomeKit</h2><p className="settings-help">Share selected SurvNG cameras with Apple Home. Manage live viewing and secure recording permissions in the Home app.</p></div><span className="homekit-badge">Experimental HKSV3</span></div>
     <fieldset className="sub-panel">
@@ -122,41 +161,14 @@ export function HomeKitSettings({ config, updateConfig }) {
       {installer ? <div className="homekit-installer" role="region" aria-label="Encoder installer"><p className="settings-help">This command is shown once and enrolls one encoder.</p><code>{installer}</code><button type="button" onClick={() => setInstaller("")}>Hide installer</button></div> : null}
       {status?.nodes?.length ? status.nodes.map((node) => <article className="sub-panel homekit-node" key={node.id}><div className="homekit-camera-head"><h4>{node.name || "Encoder"}</h4><span className="homekit-badge">{node.online ? "Online" : "Offline"}</span></div><p className="settings-help">{node.hardware === "qsv" ? "Intel QSV HEVC" : node.hardware === "software" ? "Software HEVC" : "Encoder type not reported yet"}{node.cameras?.length ? ` · ${node.cameras.length} ${node.cameras.length === 1 ? "camera" : "cameras"}` : ""}</p></article>) : <p className="settings-help">No encoder nodes have checked in. Cameras continue to encode on this server.</p>}
     </section>
-    <section className="homekit-cameras" aria-label="HomeKit cameras">
-      <div className="telemetry-section-head"><div><h3>Cameras</h3><p>Enable a camera, save, then use Pair with Apple Home to reveal its code and QR.</p></div><a className="button" href={appUrl("/admin?section=cameras")}><Camera size={15} />Camera setup</a></div>
-      {error ? <p role="alert" className="settings-help homekit-error">{error} Status retries automatically.</p> : null}
-      {!status && !error ? <p role="status">Loading HomeKit status…</p> : null}
-      {!cameras.length ? <div className="empty-state">Add a camera in Camera setup, then enable it here.</div> : cameras.map((camera, index) => {
-        const options = { enabled: false, allow_software_encoding: false, source: "live", audio: false, object_motion: false, port: 0, encoder: "local", ...camera.homekit };
-        const live = status?.cameras?.find((item) => item.id === camera.id);
-        const available = settings.enabled && options.enabled && live?.state === "running";
-        return <article className="sub-panel homekit-camera" key={camera.id}>
-          <div className="homekit-camera-head"><h4><Camera size={17} />{camera.name}</h4><span className="homekit-badge">{live?.paired ? "Paired" : live?.state === "running" ? "Ready to pair" : live?.state || "Not enabled"}</span></div>
-          <label className="check-field"><input type="checkbox" checked={options.enabled} onChange={(event) => updateCamera(index, "enabled", event.target.checked)} />Enable HomeKit for this camera</label>
-          {options.enabled ? <>
-            <label className="check-field"><input type="checkbox" checked={options.allow_software_encoding} onChange={(event) => updateCamera(index, "allow_software_encoding", event.target.checked)} />Allow software HEVC fallback</label>
-            <p className="settings-help">QSV is preferred automatically. This permits software encoding when QSV is unavailable. Viewers and recording share an encoder for the same video profile.</p>
-            {live?.runtime?.encoder ? <p className="settings-help" role="status">Encoder: <strong>{live.runtime.encoder.backend === "qsv" ? "Intel QSV HEVC" : "Software HEVC"}</strong>{live.runtime.encoder.sources?.[0]?.fps != null ? ` · ${Number(live.runtime.encoder.sources[0].fps).toFixed(1)} fps` : ""}{live.runtime.encoder.fallbackReason ? " · QSV unavailable; using permitted software fallback" : ""}</p> : null}
-            <div className="homekit-fields">
-              <label>Encoder<select value={options.encoder || "local"} onChange={(event) => updateCamera(index, "encoder", event.target.value)}><option value="local">This server</option>{(status?.nodes || []).map((node) => <option key={node.id} value={node.id}>{node.name || "Encoder"} ({node.online ? "online" : "offline"})</option>)}{options.encoder !== "local" && !(status?.nodes || []).some((node) => node.id === options.encoder) ? <option value={options.encoder}>Assigned encoder</option> : null}</select></label>
-              <label>Video source<select value={options.source} onChange={(event) => updateCamera(index, "source", event.target.value)}><option value="live">Live stream</option><option value="main">Main stream</option></select></label>
-              <label className="check-field"><input type="checkbox" checked={options.audio} onChange={(event) => updateCamera(index, "audio", event.target.checked)} />Include camera audio</label>
-            </div>
-            <label className="check-field"><input type="checkbox" checked={options.object_motion} onChange={(event) => updateCamera(index, "object_motion", event.target.checked)} />Trigger HomeKit motion from object detection</label>
-            <p className="settings-help">Recent objects recognized by SurvNG trigger a ten-second motion window. Turn Detection on for this camera. Recordings also require Stream &amp; Allow Recording in Apple Home. Leave Home activity zones off for these motion events.</p>
-            {live?.error ? <p className="settings-help homekit-error">{ERROR_LABELS[live.error] || "HomeKit is unavailable."}</p> : null}
-            {live?.runtime?.zonesBlockMotion ? <p className="settings-help homekit-error">Home activity zones are suppressing object-triggered motion. Disable those zones in Apple Home to use this trigger.</p> : null}
-            {live?.mediaCapacity === "unavailable" ? <p className="settings-help homekit-error">Media capacity is full. Close another live viewer and retry.</p> : null}
-            {live?.runtime?.media?.failures ? <p className="settings-help homekit-error">The source encoder has reported failures. Check this camera’s source and audio availability.</p> : null}
-            <div className="homekit-actions"><button type="button" disabled={!available || !!busy || live?.paired} onClick={() => cameraAction(camera, "pairing")}><KeyRound size={15} />{busy === camera.id ? "Working…" : "Pair with Apple Home"}</button><button type="button" disabled={!available || !!busy} onClick={() => cameraAction(camera, "reset-pairing")}><RotateCcw size={15} />Reset pairing</button></div>
-            <details className="telemetry-technical"><summary>Connection details</summary><label>HomeKit port<input type="number" min={0} max={65535} value={options.port} onChange={(event) => updateCamera(index, "port", Number(event.target.value))} /></label><p className="settings-help">Zero uses this camera’s stable automatic port{live?.port ? ` (${live.port})` : ""}. Each camera needs a unique port. Talkback is unavailable.</p></details>
-          </> : null}
-          {pairing?.id === camera.id ? <div className="homekit-pairing" role="region" aria-label={`Pair ${camera.name}`}>
-            <img src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(pairing.qrSvg)}`} alt={`HomeKit pairing QR for ${camera.name}`} width="192" height="192" />
-            <div><h4>Add to Apple Home</h4><p>Open Home → Add Accessory and scan this QR, or choose More options and enter the setup code.</p><strong className="homekit-code">{pairing.setupCode}</strong><p className="settings-help">Keep this code private. It hides after two minutes.</p><button type="button" onClick={() => setPairing(null)}>Hide pairing code</button></div>
-          </div> : null}
-        </article>;
-      })}
-    </section>
+    <p className="settings-help">Configure HomeKit for each camera in <a href={appUrl("/admin?section=cameras")}>Camera settings</a>, alongside live view framing.</p>
+    {error ? <p role="alert" className="settings-help homekit-error">{error} Status retries automatically.</p> : null}
+    {!status && !error ? <p role="status">Loading HomeKit status…</p> : null}
   </div>;
+}
+
+export function CameraHomeKitSettings({ camera, enabled, onChange }) {
+  return <HomeKitSettings key={camera.id} cameraId={camera.id}
+    config={{ homekit: { enabled }, cameras: [camera] }}
+    updateConfig={(_path, value) => onChange(["homekit"], value)} />;
 }
