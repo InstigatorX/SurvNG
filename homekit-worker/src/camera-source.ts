@@ -122,7 +122,9 @@ export class TsReplay {
   /** PAT, PMT, and every packet since the latest keyframe. Empty before the first one. */
   snapshot(): Buffer {
     if (this.gopBytes === 0) return Buffer.alloc(0);
-    return Buffer.concat([this.pat, this.pmt, ...this.gop]);
+    // Live writes retain the producer's chunk boundaries. Include any partial
+    // packet already broadcast so the next live chunk completes it for a joiner.
+    return Buffer.concat([this.pat, this.pmt, ...this.gop, this.rest]);
   }
 }
 

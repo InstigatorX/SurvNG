@@ -1,14 +1,17 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createWriteStream, existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { encoderCommand } from './camera-media.js';
 import { probeFrame, qualifyEncoding, selectEncoding, streamProfile, EncodingUnavailableError, type VideoEncoding } from './encoding.js';
-import type { Tier } from './media.js';
+import { stopChild, type Tier } from './media.js';
+import { AgentFeeds, AgentJobs, changedAssignments } from './agent-state.js';
+import { replaceUpdate, validateArchive } from './agent-update.js';
+import { AgentProgress, superviseAgent } from './agent-lifecycle.js';
 
 const origin = process.env.SURVNG_ORIGIN?.replace(/\/$/, '');
 let mediaOrigin = origin;
@@ -26,27 +29,29 @@ if (!origin || !/^https?:\/\//i.test(origin) || !secret) {
   process.exit(1);
 }
 
-type Assignment = { id: string; url: string; audio: boolean; transport: 'tcp' | 'udp'; allowSoftwareEncoding: boolean };
+type Assignment = { id: string; url: string; audio: boolean; transport: 'tcp' | 'udp'; allowSoftwareEncoding: boolean; revision: string };
 type Profile = ReturnType<typeof streamProfile>;
 const profiles = new Map<string, Profile>();
 const encodings = new Map<string, VideoEncoding | 'unavailable'>();
 const rates = new Map<string, number>();
-const feeds = new Map<string, ChildProcess>();
+const revisions = new Map<string, string>();
+const feeds = new AgentFeeds();
+const previousAssignments = new Map<string, Assignment>();
+const preparations = new AgentJobs(1);
+const snapshots = new AgentJobs(2);
+const snapshotRequests = new Map<string, string>();
+const shutdown = new AbortController();
+const progress = new AgentProgress();
 
 function devicePresent(): 'qsv' | 'software' {
   return existsSync('/dev/dri/renderD128') ? 'qsv' : 'software';
 }
 
-async function request(path: string, body: BodyInit | ReadableStream | NodeJS.ReadableStream, headers: Record<string, string>, stream = false, base = origin): Promise<Response> {
+async function request(path: string, body: BodyInit | ReadableStream | NodeJS.ReadableStream, headers: Record<string, string>, stream = false, base = origin, signal?: AbortSignal): Promise<Response> {
+  const signals = [shutdown.signal, ...(signal ? [signal] : []), ...(!stream ? [AbortSignal.timeout(15000)] : [])];
   return fetch(`${base}${path}`, { method: 'POST', headers: { authorization: `Bearer ${secret}`, ...headers }, body: body as BodyInit,
+    signal: AbortSignal.any(signals),
     ...(stream ? { duplex: 'half' } : {}) } as RequestInit);
-}
-
-function stopFeed(key: string): void {
-  const child = feeds.get(key);
-  if (!child) return;
-  feeds.delete(key);
-  child.kill('SIGTERM');
 }
 
 function startFeed(camera: Assignment, tier: Tier, encoding: VideoEncoding): void {
@@ -54,8 +59,6 @@ function startFeed(camera: Assignment, tier: Tier, encoding: VideoEncoding): voi
   if (feeds.has(key)) return;
   const child = spawn(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-progress', 'pipe:3', '-stats_period', '1',
     ...encoderCommand(camera.url, camera.transport, camera.audio, tier, encoding)], { stdio: ['ignore', 'pipe', 'ignore', 'pipe'] });
-  feeds.set(key, child);
-  child.once('close', () => { if (feeds.get(key) === child) feeds.delete(key); });
   let pending = '';
   child.stdio[3]?.on('data', (chunk: Buffer) => {
     pending += chunk.toString('utf8');
@@ -71,23 +74,34 @@ function startFeed(camera: Assignment, tier: Tier, encoding: VideoEncoding): voi
       end = pending.indexOf('\n');
     }
   });
-  void request('/api/homekit/nodes/media', child.stdout!, {
+  const upload = new AbortController();
+  feeds.track(key, child, request('/api/homekit/nodes/media', child.stdout!, {
     'content-type': 'application/octet-stream', 'x-survng-camera': camera.id, 'x-survng-tier': String(tier.identifier),
-  }, true, mediaOrigin).catch(() => stopFeed(key));
+  }, true, mediaOrigin, upload.signal), () => upload.abort());
 }
 
-async function takeSnapshot(camera: Assignment): Promise<void> {
+async function takeSnapshot(camera: Assignment, requestId: string, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
   const child = spawn(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin',
     ...( /^rtsps?:/i.test(camera.url) ? ['-rtsp_transport', camera.transport, '-timeout', '15000000'] : ['-rw_timeout', '15000000']),
     '-i', camera.url, '-map', '0:v:0', '-frames:v', '1', '-an', '-vf', 'scale=1280:-2', '-c:v', 'mjpeg', '-f', 'image2pipe', 'pipe:1'],
-    { stdio: ['ignore', 'pipe', 'ignore'] });
+    { stdio: ['ignore', 'pipe', 'ignore'], signal });
   const chunks: Buffer[] = [];
-  child.stdout!.on('data', (chunk: Buffer) => { if (chunks.reduce((sum, item) => sum + item.length, 0) < 4 * 1024 * 1024) chunks.push(chunk); });
+  let size = 0;
+  child.stdout!.on('data', (chunk: Buffer) => {
+    size += chunk.length;
+    if (size > 4 * 1024 * 1024) child.kill('SIGKILL');
+    else chunks.push(chunk);
+  });
   const timer = setTimeout(() => child.kill('SIGKILL'), 10000);
-  const [code] = await new Promise<[number | null]>((resolve) => child.once('close', code => resolve([code])));
-  clearTimeout(timer);
-  if (code !== 0) return;
-  await request('/api/homekit/nodes/snapshot', Buffer.concat(chunks), { 'content-type': 'image/jpeg', 'x-survng-camera': camera.id }).catch(() => {});
+  try {
+    const [code] = await once(child, 'close');
+    signal.throwIfAborted();
+    if (code !== 0 || size === 0 || size > 4 * 1024 * 1024) return;
+    const response = await request('/api/homekit/nodes/snapshot', Buffer.concat(chunks), {
+      'content-type': 'image/jpeg', 'x-survng-camera': camera.id, 'x-survng-request': requestId }, false, origin, signal);
+    if (!response.ok && response.status !== 404) throw new Error('snapshot upload failed');
+  } finally { clearTimeout(timer); await stopChild(child); }
 }
 
 type Releases = { agent?: string; ffmpeg?: string; runtime?: string };
@@ -100,184 +114,189 @@ async function savedReleases(): Promise<Releases> {
 }
 
 async function pullArchive(path: string): Promise<string> {
-  const response = await fetch(`${origin}${path}`, { headers: { authorization: `Bearer ${secret}` } });
+  const response = await fetch(`${origin}${path}`, { headers: { authorization: `Bearer ${secret}` },
+    signal: AbortSignal.any([shutdown.signal, AbortSignal.timeout(60000)]) });
   if (!response.ok || !response.body) throw new Error('update rejected');
   const file = join(await mkdtemp(join(tmpdir(), 'survng-update-')), 'archive.tgz');
-  await pipeline(Readable.fromWeb(response.body as never), createWriteStream(file, { mode: 0o600 }));
-  return file;
-}
-
-async function tarNames(file: string): Promise<string[]> {
-  const child = spawn('tar', ['-tzf', file], { stdio: ['ignore', 'pipe', 'ignore'] });
-  const chunks: Buffer[] = [];
-  child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-  const [code] = await once(child, 'close');
-  if (code !== 0) throw new Error('update rejected');
-  return Buffer.concat(chunks).toString('utf8').split('\n').map(name => name.trim()).filter(Boolean);
-}
-
-function assertArchive(names: string[], allow: (name: string) => boolean): void {
-  if (!names.length || names.some(name => name.startsWith('/') || name.includes('\\') || name.split('/').includes('..') || !allow(name))) {
-    throw new Error('update rejected');
-  }
-}
-
-async function extractArchive(file: string, allow: (name: string) => boolean): Promise<string> {
-  assertArchive(await tarNames(file), allow);
-  // PrivateTmp makes /tmp a different filesystem from the install, so a rename into place fails.
-  const directory = await mkdtemp(join(home, '.update-'));
-  const child = spawn('tar', ['-xzf', file, '-C', directory, '--no-same-owner'], { stdio: 'ignore' });
-  const [code] = await once(child, 'close');
-  if (code !== 0) throw new Error('update rejected');
-  return directory;
-}
-
-async function replacePath(name: string, source: string): Promise<void> {
-  const destination = join(home, name);
-  const backup = `${destination}.previous`;
-  await rm(backup, { recursive: true, force: true });
-  if (existsSync(destination)) await rename(destination, backup);
+  let size = 0;
+  const limit = new Transform({ transform(chunk: Buffer, _encoding, done) {
+    size += chunk.length;
+    done(size > 512 * 1024 * 1024 ? new Error('update exceeds capacity') : null, chunk);
+  } });
   try {
-    await rename(source, destination);
-  } catch (error) {
-    if (existsSync(backup)) await rename(backup, destination);
-    throw error;
-  }
-  await rm(backup, { recursive: true, force: true });
+    await pipeline(Readable.fromWeb(response.body as never), limit, createWriteStream(file, { mode: 0o600 }));
+    return file;
+  } catch (error) { await rm(dirname(file), { recursive: true, force: true }); throw error; }
 }
 
-async function installFfmpeg(): Promise<void> {
-  const file = await pullArchive('/api/homekit/nodes/ffmpeg');
+type StagedUpdate = { directory: string; entries: { name: string; source: string }[] };
+async function stageUpdate(kind: 'agent' | 'ffmpeg' | 'runtime'): Promise<StagedUpdate> {
+  const file = await pullArchive(`/api/homekit/nodes/${kind}`);
+  let directory: string | undefined;
   try {
-    const directory = await extractArchive(file, name => name === 'ffmpeg' || name === 'ffprobe');
-    await mkdir(join(home, 'bin'), { recursive: true });
-    for (const name of ['ffmpeg', 'ffprobe']) {
-      const destination = join(home, 'bin', name);
-      await rename(join(directory, name), destination);
-      await chmod(destination, 0o755);
+    const allow = kind === 'agent'
+      ? (name: string) => name === 'package.json' || /^dist(?:\/|$)/.test(name) || /^node_modules(?:\/|$)/.test(name)
+      : kind === 'ffmpeg' ? (name: string) => name === 'ffmpeg' || name === 'ffprobe'
+      : (name: string) => /^(?:dri\/?|dri\/iHD_drv_video\.so|lib[A-Za-z0-9._+-]+\.so(?:\.[A-Za-z0-9._+-]+)?)$/.test(name);
+    const names = await validateArchive(file, allow);
+    const required = kind === 'agent' ? ['package.json', 'dist/src/agent.js']
+      : kind === 'ffmpeg' ? ['ffmpeg', 'ffprobe'] : ['libva.so.2', 'libva-drm.so.2', 'dri/iHD_drv_video.so'];
+    if (required.some(name => !names.includes(name))) throw new Error('update incomplete');
+    // Keep staging on the install filesystem; PrivateTmp can be on another mount.
+    directory = await mkdtemp(join(home, '.update-'));
+    const child = spawn('tar', ['-xzf', file, '-C', directory, '--no-same-owner', '--no-same-permissions'],
+      { stdio: 'ignore', timeout: 30000, killSignal: 'SIGKILL' });
+    const [code] = await once(child, 'close');
+    if (code !== 0) throw new Error('update rejected');
+    if (kind === 'ffmpeg') {
+      for (const name of ['ffmpeg', 'ffprobe']) await chmod(join(directory, name), 0o755);
     }
-    await rm(directory, { recursive: true, force: true });
-  } finally {
-    await rm(dirname(file), { recursive: true, force: true });
-  }
-}
-
-async function installAgent(): Promise<void> {
-  const file = await pullArchive('/api/homekit/nodes/agent');
-  try {
-    const allow = (name: string) => name === 'package.json' || name === 'dist' || name.startsWith('dist/') || name === 'node_modules' || name.startsWith('node_modules/');
-    const directory = await extractArchive(file, allow);
-    await replacePath('dist', join(directory, 'dist'));
-    await replacePath('node_modules', join(directory, 'node_modules'));
-    await replacePath('package.json', join(directory, 'package.json'));
-    await rm(directory, { recursive: true, force: true });
-  } finally {
-    await rm(dirname(file), { recursive: true, force: true });
-  }
-}
-
-async function installRuntime(): Promise<void> {
-  const file = await pullArchive('/api/homekit/nodes/runtime');
-  try {
-    const allow = (name: string) => /^(?:dri|dri\/iHD_drv_video\.so|lib[A-Za-z0-9._+-]+\.so(?:\.[A-Za-z0-9._+-]+)?)$/.test(name);
-    const names = await tarNames(file);
-    assertArchive(names, allow);
-    if (!names.includes('libva.so.2') || !names.includes('libva-drm.so.2') || !names.includes('dri/iHD_drv_video.so')) throw new Error('update rejected');
-    const directory = await extractArchive(file, allow);
-    await replacePath('lib', directory);
-  } finally {
-    await rm(dirname(file), { recursive: true, force: true });
-  }
+    const entries = kind === 'agent' ? ['dist', 'node_modules', 'package.json'].map(name => ({ name, source: join(directory!, name) }))
+      : [{ name: kind === 'ffmpeg' ? 'bin' : 'lib', source: directory }];
+    return { directory, entries };
+  } catch (error) {
+    if (directory) await rm(directory, { recursive: true, force: true });
+    throw error;
+  } finally { await rm(dirname(file), { recursive: true, force: true }); }
 }
 
 async function applyUpdates(releases: Releases): Promise<void> {
   if (Date.now() < updateRetryAt) return;
   const local = await savedReleases();
-  const ffmpegChanged = !!releases.ffmpeg && releases.ffmpeg !== local.ffmpeg;
-  const agentChanged = !!releases.agent && releases.agent !== local.agent;
-  const runtimeChanged = !!releases.runtime && releases.runtime !== local.runtime;
-  if (!ffmpegChanged && !agentChanged && !runtimeChanged) return;
+  const changed = (['agent', 'ffmpeg', 'runtime'] as const).filter(kind => releases[kind] && releases[kind] !== local[kind]);
+  if (!changed.length) return;
+  const staged: StagedUpdate[] = [];
+  let stampDirectory: string | undefined;
   try {
-    if (agentChanged) await installAgent();
-    if (ffmpegChanged) await installFfmpeg();
-    if (runtimeChanged) await installRuntime();
-    await writeFile(releasesPath, JSON.stringify({
-      agent: releases.agent || local.agent || '', ffmpeg: releases.ffmpeg || local.ffmpeg || '', runtime: releases.runtime || local.runtime || '',
-    }), { mode: 0o600 });
-    for (const key of [...feeds.keys()]) stopFeed(key);
-    process.exit(1);
+    for (const kind of changed) staged.push(await stageUpdate(kind));
+    stampDirectory = await mkdtemp(join(home, '.update-stamp-'));
+    const stamp = join(stampDirectory, '.releases.json');
+    await writeFile(stamp, JSON.stringify({ ...local, ...releases }), { mode: 0o600 });
+    await Promise.all([feeds.stopAll(), preparations.stopAll(), snapshots.stopAll()]);
+    await replaceUpdate(home, [...staged.flatMap(item => item.entries), { name: '.releases.json', source: stamp }]);
+    // Exit only after the entire release has committed. systemd starts the new program.
+    process.exitCode = 1;
+    shutdown.abort();
   } catch {
     updateRetryAt = Date.now() + 60_000;
     console.error('SurvNG HomeKit encoder update failed.');
+  } finally {
+    for (const item of staged) await rm(item.directory, { recursive: true, force: true });
+    if (stampDirectory) await rm(stampDirectory, { recursive: true, force: true });
   }
 }
 
-async function prepare(camera: Assignment): Promise<void> {
-  if (!profiles.has(camera.id)) {
-    try {
-      const frame = await probeFrame(ffmpeg, camera.url, camera.transport === 'udp' ? 'udp' : 'tcp');
-      profiles.set(camera.id, streamProfile(frame.width, frame.height));
-    } catch { return; }
-  }
+async function prepare(camera: Assignment, signal: AbortSignal): Promise<void> {
   if (encodings.has(camera.id)) return;
+  const frame = await probeFrame(ffmpeg, camera.url, camera.transport === 'udp' ? 'udp' : 'tcp', signal);
+  const profile = streamProfile(frame.width, frame.height);
   const allow = !!camera.allowSoftwareEncoding;
   const directory = tmpdir();
   const admission = async () => {};
   try {
-    encodings.set(camera.id, await selectEncoding(allow,
-      async () => devicePresent() === 'qsv' && await qualifyEncoding(ffmpeg, directory, admission, AbortSignal.timeout(20000), { backend: 'qsv', device: '/dev/dri/renderD128' }),
-      () => qualifyEncoding(ffmpeg, directory, admission, AbortSignal.timeout(20000), { backend: 'software' })));
+    const encoding = await selectEncoding(allow,
+      async () => devicePresent() === 'qsv' && await qualifyEncoding(ffmpeg, directory, admission, AbortSignal.any([signal, AbortSignal.timeout(20000)]), { backend: 'qsv', device: '/dev/dri/renderD128' }),
+      () => qualifyEncoding(ffmpeg, directory, admission, AbortSignal.any([signal, AbortSignal.timeout(20000)]), { backend: 'software' }));
+    signal.throwIfAborted();
+    profiles.set(camera.id, profile);
+    encodings.set(camera.id, encoding);
+    revisions.set(camera.id, camera.revision);
   } catch (error) {
-    if (error instanceof EncodingUnavailableError) encodings.set(camera.id, 'unavailable');
+    signal.throwIfAborted();
+    if (error instanceof EncodingUnavailableError) {
+      profiles.set(camera.id, profile); encodings.set(camera.id, 'unavailable');
+      revisions.set(camera.id, camera.revision);
+    } else throw error;
   }
 }
 
 async function main(): Promise<void> {
+  progress.enter('version', 10000);
   let ffmpegVersion = '';
-  const version = spawn(ffmpeg, ['-version'], { stdio: ['ignore', 'pipe', 'ignore'] });
+  const version = spawn(ffmpeg, ['-version'], { stdio: ['ignore', 'pipe', 'ignore'], signal: shutdown.signal,
+    timeout: 5000, killSignal: 'SIGKILL' });
   const banner: Buffer[] = [];
-  version.stdout!.on('data', (chunk: Buffer) => banner.push(chunk));
-  await new Promise(resolve => version.once('close', resolve));
+  let bannerSize = 0;
+  version.stdout!.on('data', (chunk: Buffer) => { if (bannerSize < 4096) banner.push(chunk.subarray(0, 4096 - bannerSize)); bannerSize += chunk.length; });
+  const [versionCode] = await once(version, 'close');
+  if (versionCode !== 0) throw new Error('FFmpeg unavailable');
   ffmpegVersion = Buffer.concat(banner).toString('utf8').split('\n')[0]?.slice(0, 80) || '';
-  const stopAll = () => { for (const key of [...feeds.keys()]) stopFeed(key); };
-  process.once('SIGTERM', () => { stopAll(); process.exit(0); });
-  process.once('SIGINT', () => { stopAll(); process.exit(0); });
-  for (;;) {
+  let preparationCursor = 0;
+  while (!shutdown.signal.aborted) {
     const backends = Object.fromEntries([...encodings].map(([id, value]) => [id, value === 'unavailable' ? 'unavailable' : value.backend]));
-    let desired: { assignments?: Assignment[]; feeds?: { camera: string; tier: number }[]; snapshots?: string[]; releases?: Releases; ingest?: string } = {};
+    let desired: { assignments?: Assignment[]; feeds?: { camera: string; tier: number }[]; snapshots?: string[];
+      snapshotRequests?: Record<string, string>; releases?: Releases; ingest?: string } = {};
     try {
+      progress.enter('sync', 20000);
       const response = await request('/api/homekit/nodes/sync', JSON.stringify({
         name: hostname().slice(0, 64), hardware: devicePresent(), ffmpeg: ffmpegVersion,
-        profiles: Object.fromEntries(profiles), backends, fps: Object.fromEntries(rates),
+        profiles: Object.fromEntries(profiles), backends, fps: Object.fromEntries(rates), revisions: Object.fromEntries(revisions),
       }), { 'content-type': 'application/json' });
       if (!response.ok) throw new Error('sync rejected');
+      progress.enter('sync body', 20000);
       desired = await response.json() as typeof desired & { releases?: Releases };
     } catch {
+      progress.enter('sync cleanup', 15000);
+      await Promise.all([feeds.stopAll(), preparations.stopAll(), snapshots.stopAll()]);
+      if (shutdown.signal.aborted) break;
+      progress.enter('retry', 10000);
       await new Promise(resolve => setTimeout(resolve, 3000));
       continue;
     }
     const ingest = typeof desired.ingest === 'string' ? desired.ingest.replace(/\/$/, '') : '';
     if (/^https?:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[A-Za-z0-9._~-]+)*$/.test(ingest)) mediaOrigin = ingest;
+    progress.enter('updates', 300000);
     await applyUpdates(desired.releases || {});
+    if (shutdown.signal.aborted) break;
     const assignments = desired.assignments || [];
+    progress.enter('assignment cleanup', 30000);
+    for (const id of changedAssignments(previousAssignments, assignments)) {
+      await preparations.stop(id); await snapshots.stop(id); snapshotRequests.delete(id);
+      await Promise.all(feeds.keys().filter(key => key.startsWith(`${id}:`)).map(key => feeds.stop(key)));
+      profiles.delete(id); encodings.delete(id); rates.delete(id); revisions.delete(id);
+    }
     const assigned = new Set(assignments.map(item => item.id));
     for (const id of [...profiles.keys()]) {
-      if (!assigned.has(id)) { profiles.delete(id); encodings.delete(id); rates.delete(id); }
+      if (!assigned.has(id)) { profiles.delete(id); encodings.delete(id); rates.delete(id); revisions.delete(id); }
     }
-    for (const camera of assignments) await prepare(camera);
     const wanted = new Set((desired.feeds || []).map(item => `${item.camera}:${item.tier}`));
-    for (const key of [...feeds.keys()]) if (!wanted.has(key)) stopFeed(key);
+    progress.enter('feed cleanup', 30000);
+    for (const key of feeds.keys()) if (!wanted.has(key)) await feeds.stop(key);
+    for (let offset = 0; offset < assignments.length; offset++) {
+      const index = (preparationCursor + offset) % assignments.length;
+      const camera = assignments[index];
+      if (!encodings.has(camera.id) && preparations.start(camera.id, signal => prepare(camera, signal),
+        () => console.error('SurvNG HomeKit camera qualification failed.'))) {
+        preparationCursor = (index + 1) % assignments.length;
+        break;
+      }
+    }
     for (const item of desired.feeds || []) {
       const camera = assignments.find(candidate => candidate.id === item.camera);
       const encoding = camera && encodings.get(camera.id);
       const tier = camera && profiles.get(camera.id)?.tiers.find(candidate => candidate.identifier === item.tier);
       if (camera && tier && encoding && encoding !== 'unavailable') startFeed(camera, tier, encoding);
     }
+    const wantedSnapshots = desired.snapshotRequests || {};
+    progress.enter('snapshots', 15000);
+    for (const id of snapshots.keys()) {
+      if (snapshotRequests.get(id) !== wantedSnapshots[id]) await snapshots.stop(id);
+    }
+    for (const id of [...snapshotRequests.keys()]) if (!wantedSnapshots[id]) snapshotRequests.delete(id);
     for (const id of desired.snapshots || []) {
       const camera = assignments.find(candidate => candidate.id === id);
-      if (camera) await takeSnapshot(camera);
+      const requestId = desired.snapshotRequests?.[id];
+      if (camera && requestId && snapshotRequests.get(id) !== requestId) {
+        if (snapshots.start(id, signal => takeSnapshot(camera, requestId, signal),
+          () => console.error('SurvNG HomeKit snapshot failed.'))) snapshotRequests.set(id, requestId);
+      }
     }
   }
 }
 
-main().catch(() => { console.error('SurvNG HomeKit encoder stopped.'); process.exitCode = 1; });
+const running = main().catch(() => { console.error('SurvNG HomeKit encoder stopped.'); process.exitCode = 1; })
+  .finally(async () => {
+    progress.enter('shutdown', 15000);
+    shutdown.abort(); await Promise.all([feeds.stopAll(), preparations.stopAll(), snapshots.stopAll()]);
+  });
+superviseAgent(running, shutdown, progress);

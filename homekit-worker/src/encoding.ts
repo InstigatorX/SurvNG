@@ -23,12 +23,17 @@ const TIER_RATES = [
   { identifier: 3, quality: 4, frameRate: 15, targetAverageBitrate: 180, peakBitrate: 190 },
 ] as const;
 
-/** Required HomeKit resolutions for the camera's real aspect. Padding a 4:3 or 3:4 picture into 16:9 is what draws the side bars. */
+/** Fit the camera's aspect inside each tier's encoding budget, including wide cameras. */
 export function streamProfile(width: number, height: number): { width: number; height: number; tiers: Tier[]; resolutions: [number, number, number][] } {
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 2 || height < 2) throw new Error('invalid frame');
   const ratio = Math.log(width / height);
   const family = FAMILIES.reduce((best, item) => Math.abs(Math.log(item.ratio) - ratio) < Math.abs(Math.log(best.ratio) - ratio) ? item : best);
-  const selected = family.sizes.map((size, index) => ({ ...TIER_RATES[index], width: size[0], height: size[1] }));
+  const selected = family.sizes.map((size, index) => {
+    const scale = Math.min(size[0] / width, size[1] / height);
+    return { ...TIER_RATES[index],
+      width: Math.max(2, Math.min(size[0], Math.round(width * scale / 2) * 2)),
+      height: Math.max(2, Math.min(size[1], Math.round(height * scale / 2) * 2)) };
+  });
   return { width, height, tiers: selected, resolutions: [
     [selected[0].width, selected[0].height, 30], [selected[0].width, selected[0].height, 15],
     [selected[1].width, selected[1].height, 30], [selected[1].width, selected[1].height, 15],
@@ -36,28 +41,36 @@ export function streamProfile(width: number, height: number): { width: number; h
   ] };
 }
 
-export async function probeFrame(ffmpeg: string, url: string, transport: 'tcp' | 'udp'): Promise<{ width: number; height: number }> {
+export async function probeFrame(ffmpeg: string, url: string, transport: 'tcp' | 'udp', signal?: AbortSignal): Promise<{ width: number; height: number }> {
+  signal?.throwIfAborted();
   const args = ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,sample_aspect_ratio', '-of', 'json'];
   if (/^rtsps?:/i.test(url)) args.unshift('-rtsp_transport', transport);
-  const child = spawn(join(dirname(ffmpeg), 'ffprobe'), [...args, url], { stdio: ['ignore', 'pipe', 'ignore'] });
+  const child = spawn(join(dirname(ffmpeg), 'ffprobe'), [...args, url], { stdio: ['ignore', 'pipe', 'ignore'], signal });
   const chunks: Buffer[] = [];
-  child.stdout!.on('data', (chunk: Buffer) => { if (chunks.reduce((sum, item) => sum + item.length, 0) < 65536) chunks.push(chunk); });
+  let size = 0;
+  child.stdout!.on('data', (chunk: Buffer) => {
+    size += chunk.length;
+    if (size > 65536) child.kill('SIGKILL'); else chunks.push(chunk);
+  });
   const timer = setTimeout(() => child.kill('SIGKILL'), 15000);
   try {
     const [code] = await once(child, 'close');
-    if (code !== 0) throw new Error('camera frame probe failed');
+    signal?.throwIfAborted();
+    if (code !== 0 || size > 65536) throw new Error('camera frame probe failed');
     const stream = JSON.parse(Buffer.concat(chunks).toString('utf8'))?.streams?.[0];
     const width = Number(stream?.width), height = Number(stream?.height);
-    if (!Number.isInteger(width) || !Number.isInteger(height)) throw new Error('camera frame probe failed');
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 2 || height < 2) throw new Error('camera frame probe failed');
     const sar = /^(\d+):(\d+)$/.exec(String(stream?.sample_aspect_ratio ?? ''));
     if (!sar || !Number(sar[1]) || !Number(sar[2])) return { width, height };
     return { width: Math.max(2, Math.round(width * Number(sar[1]) / Number(sar[2]) / 2) * 2), height };
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); await stopChild(child); }
 }
 
 export function encodeVideo(tier: Tier, encoding: VideoEncoding): string[] {
-  // Fill the tier. decrease+pad keeps unused 16:9 margins and Home shows them as side bars.
-  const filter = `scale=${tier.width}:${tier.height}:force_original_aspect_ratio=increase,crop=${tier.width}:${tier.height},setsar=1,fps=${tier.frameRate}`;
+  // Preserve the whole field of view. DAR handles non-square input pixels;
+  // padding covers only the mismatch from even-pixel tier rounding or a source
+  // resolution change after probing. Never enlarge-and-crop camera footage.
+  const filter = `scale=w='max(2,trunc(min(${tier.width},${tier.height}*dar)/2)*2)':h='max(2,trunc(min(${tier.height},${tier.width}/dar)/2)*2)',setsar=1,pad=${tier.width}:${tier.height}:(ow-iw)/2:(oh-ih)/2,fps=${tier.frameRate}`;
   const rate = ['-b:v', `${tier.targetAverageBitrate}k`, '-maxrate', `${tier.peakBitrate}k`, '-bufsize', `${tier.peakBitrate * 2}k`];
   if (encoding.backend === 'qsv') return ['-vf', `${filter},format=nv12`, '-c:v', 'hevc_qsv',
     '-preset', 'veryfast', '-profile:v', 'main', '-g', String(tier.frameRate * 4), '-bf', '0',

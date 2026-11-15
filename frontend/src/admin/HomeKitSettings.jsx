@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Camera, Home, KeyRound, RotateCcw } from "lucide-react";
 import { fetch, appUrl } from "../shared/api.js";
 import "./homekit.css";
@@ -27,11 +27,17 @@ export function HomeKitSettings({ config, updateConfig }) {
   const [pairing, setPairing] = useState(null);
   const [busy, setBusy] = useState("");
   const [installer, setInstaller] = useState("");
+  const pairingRequest = useRef(null);
+  const hidePairing = () => {
+    pairingRequest.current?.abort();
+    pairingRequest.current = null;
+    setPairing(null);
+  };
   const settings = { enabled: false, bind: "", node_path: "node", ...config.homekit };
   const cameras = config.cameras || [];
-  const update = (key, value) => updateConfig(["homekit"], { ...settings, [key]: value });
+  const update = (key, value) => { hidePairing(); updateConfig(["homekit"], { ...settings, [key]: value }); };
   const updateCamera = (index, key, value) => {
-    setPairing(null);
+    hidePairing();
     updateConfig(["cameras", index, "homekit"], { ...cameras[index].homekit, [key]: value });
   };
   useEffect(() => {
@@ -43,15 +49,17 @@ export function HomeKitSettings({ config, updateConfig }) {
         if (!response.ok) throw new Error("Unable to load HomeKit status.");
         const next = await response.json();
         setStatus(next); setError("");
-        setPairing((current) => current && next.cameras.some((camera) => camera.id === current.id && camera.state === "running" && !camera.paired) ? current : null);
+        const eligible = next.cameras.filter((camera) => camera.state === "running" && !camera.paired);
+        if (pairingRequest.current?.cameraId && !eligible.some(camera => camera.id === pairingRequest.current.cameraId)) pairingRequest.current.abort();
+        setPairing((current) => current && eligible.some((camera) => camera.id === current.id) ? current : null);
       } catch (failure) {
-        if (!controller.signal.aborted) { setError(failure.message || "HomeKit status unavailable."); setStatus(null); setPairing(null); }
+        if (!controller.signal.aborted) { setError(failure.message || "HomeKit status unavailable."); setStatus(null); hidePairing(); }
       } finally {
         if (!controller.signal.aborted) timer = setTimeout(refresh, 3000);
       }
     };
     void refresh();
-    return () => { controller.abort(); clearTimeout(timer); };
+    return () => { controller.abort(); pairingRequest.current?.abort(); clearTimeout(timer); };
   }, []);
   useEffect(() => {
     if (!pairing) return undefined;
@@ -59,7 +67,7 @@ export function HomeKitSettings({ config, updateConfig }) {
     return () => clearTimeout(timer);
   }, [pairing]);
   useEffect(() => {
-    const hide = () => { if (document.hidden) setPairing(null); };
+    const hide = () => { if (document.hidden) hidePairing(); };
     document.addEventListener("visibilitychange", hide);
     return () => document.removeEventListener("visibilitychange", hide);
   }, []);
@@ -78,16 +86,23 @@ export function HomeKitSettings({ config, updateConfig }) {
   async function cameraAction(camera, action) {
     if (action === "reset-pairing" && !window.confirm(`Reset HomeKit pairing for ${camera.name}? Remove its old tile from Apple Home, then pair it again. Other cameras keep their pairing.`)) return;
     setBusy(camera.id); setError(""); setPairing(null);
+    const controller = new AbortController();
+    if (action === "pairing") {
+      controller.cameraId = camera.id;
+      pairingRequest.current?.abort();
+      pairingRequest.current = controller;
+    }
     try {
       const response = await fetch(`/api/homekit/cameras/${encodeURIComponent(camera.id)}/${action}`, {
         method: "POST", headers: { "Content-Type": "application/json" }, cache: "no-store",
+        signal: controller.signal,
         body: JSON.stringify(action === "reset-pairing" ? { confirm_camera_id: camera.id } : {}),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "HomeKit request failed.");
-      if (action === "pairing") setPairing({ id: camera.id, name: camera.name, ...payload });
-    } catch (failure) { setError(failure.message || "HomeKit request failed."); }
-    finally { setBusy(""); }
+      if (action === "pairing" && !controller.signal.aborted && !document.hidden) setPairing({ id: camera.id, name: camera.name, ...payload });
+    } catch (failure) { if (!controller.signal.aborted) setError(failure.message || "HomeKit request failed."); }
+    finally { if (pairingRequest.current === controller) pairingRequest.current = null; setBusy(""); }
   }
 
   return <div className="homekit-settings subsection-settings-content">
@@ -102,6 +117,7 @@ export function HomeKitSettings({ config, updateConfig }) {
       </div>
     </fieldset>
     <section className="homekit-nodes" aria-label="HomeKit encoders">
+      {status?.nodeError ? <p role="alert" className="settings-help homekit-error">HomeKit encoder state is unavailable. Check its private directory permissions and saved state.</p> : null}
       <div className="telemetry-section-head"><div><h3>Encoders</h3><p>Run the installer once as root in a new container. It checks in here. Apple Home still reaches this server.</p></div><button type="button" disabled={!!busy} onClick={addEncoder}>{busy === "encoder" ? "Working…" : "Add encoder"}</button></div>
       {installer ? <div className="homekit-installer" role="region" aria-label="Encoder installer"><p className="settings-help">This command is shown once and enrolls one encoder.</p><code>{installer}</code><button type="button" onClick={() => setInstaller("")}>Hide installer</button></div> : null}
       {status?.nodes?.length ? status.nodes.map((node) => <article className="sub-panel homekit-node" key={node.id}><div className="homekit-camera-head"><h4>{node.name || "Encoder"}</h4><span className="homekit-badge">{node.online ? "Online" : "Offline"}</span></div><p className="settings-help">{node.hardware === "qsv" ? "Intel QSV HEVC" : node.hardware === "software" ? "Software HEVC" : "Encoder type not reported yet"}{node.cameras?.length ? ` · ${node.cameras.length} ${node.cameras.length === 1 ? "camera" : "cameras"}` : ""}</p></article>) : <p className="settings-help">No encoder nodes have checked in. Cameras continue to encode on this server.</p>}

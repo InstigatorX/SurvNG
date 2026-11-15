@@ -237,3 +237,24 @@ test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio tr
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('a remote snapshot removes its temporary JPEG and honors privacy', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'survng-remote-snapshot-'));
+  let allowed = true;
+  let requests = 0;
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+  const path = join(root, 'remote-snapshot.jpg');
+  const media = new CameraMedia('unused', false, 'ffmpeg', 'tcp', async method => {
+    assert.equal(method, 'snapshot'); requests++;
+    await writeFile(path, jpeg, { mode: 0o600 });
+  }, () => allowed, root, { backend: 'qsv', device: '/unused' }, tiers, '/unused-feed');
+  try {
+    const results = await Promise.all([media.snapshot(), media.snapshot()]);
+    assert.deepEqual(results, [jpeg, jpeg]);
+    assert.equal(requests, 1, 'concurrent thumbnails share one request through JPEG cleanup');
+    await assert.rejects(readFile(path), { code: 'ENOENT' });
+    allowed = false;
+    await assert.rejects(media.snapshot(), /unavailable/);
+    assert.equal(requests, 1);
+  } finally { await media.stop(); await rm(root, { recursive: true, force: true }); }
+});

@@ -99,3 +99,11 @@ test('a viewer that joins mid-GOP is given the keyframe already produced', async
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('joining between split TS packets preserves the replay-to-live boundary', () => {
+  const replay = new TsReplay();
+  const tail = video(1, 0x33);
+  replay.push(Buffer.concat([pat(), pmt(), video(32, 0x22), tail.subarray(0, 100)]));
+  const joined = Buffer.concat([replay.snapshot(), tail.subarray(100)]);
+  assert.deepEqual(joined, Buffer.concat([pat(), pmt(), video(32, 0x22), tail]));
+});

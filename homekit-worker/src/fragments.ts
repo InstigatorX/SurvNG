@@ -173,7 +173,10 @@ export class LabRecording implements CameraRecordingDelegate {
   private producerKey = '';
   readonly counters = { streams: 0, completed: 0, failed: 0, producerFailures: 0 };
   constructor(private media: MediaSource, private allowed: () => boolean, private catalog: readonly Tier[] = tiers) {}
-  setMotion(value: boolean): void { this.motion = value; if (!value) this.motionStopped = Date.now(); }
+  setMotion(value: boolean): void {
+    if (this.motion && !value) this.motionStopped = Date.now();
+    this.motion = value;
+  }
   updateRecordingConfiguration(config?: CameraRecordingConfiguration): void { this.config = config; this.reconcile(); }
   updateRecordingActive(active: boolean): void { this.desired = active; this.reconcile(); }
   setAudio(active: boolean): void { if (active !== this.audio) { this.audio = active; this.reconcile(); } }
@@ -226,6 +229,8 @@ export class LabRecording implements CameraRecordingDelegate {
       yield { data: this.init, isLast: false };
       while (true) {
         const fragment = await ring.read(sequence++, effective);
+        effective.throwIfAborted();
+        if (!this.allowed()) throw new Error('HomeKit privacy enabled');
         const last = !this.motion && Date.now() - this.motionStopped >= 4000;
         yield { data: fragment.data, isLast: last };
         if (last) { this.counters.completed++; return; }
