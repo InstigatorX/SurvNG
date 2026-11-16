@@ -4,6 +4,10 @@ import type { CameraRecordingConfiguration, CameraRecordingDelegate, RecordingPa
 import { type MediaSource, tiers, stopChild, type Tier } from './media.js';
 
 const MAX_BYTES = 64 * 1024 * 1024;
+const POST_ROLL_MS = 4000;
+// The hub discards a download that never receives end-of-stream. A person who
+// stays in frame must still finish a clip before that happens.
+const CLIP_LIMIT_MS = 60_000;
 export function boxes(data: Buffer): Array<{ type: string; data: Buffer }> {
   const result = [];
   for (let offset = 0; offset < data.length;) {
@@ -170,13 +174,19 @@ export class LabRecording implements CameraRecordingDelegate {
   private stream?: { id: number; abort: AbortController };
   private motion = false;
   private motionStopped = 0;
+  private finished = false;
   private producerKey = '';
-  readonly counters = { streams: 0, completed: 0, failed: 0, producerFailures: 0 };
+  private watcher?: () => void;
+  readonly counters = { streams: 0, completed: 0, closed: 0, failed: 0, producerFailures: 0 };
   constructor(private media: MediaSource, private allowed: () => boolean, private catalog: readonly Tier[] = tiers) {}
   setMotion(value: boolean): void {
     if (this.motion && !value) this.motionStopped = Date.now();
     this.motion = value;
   }
+  /** The sensor stays on through an open clip so the hub does not abandon the download. */
+  reportingMotion(): boolean { return this.allowed() && (this.motion || this.stream !== undefined); }
+  watch(watcher: () => void): void { this.watcher = watcher; }
+  private changed(): void { try { this.watcher?.(); } catch { /* a sensor update must not fail the clip */ } }
   updateRecordingConfiguration(config?: CameraRecordingConfiguration): void { this.config = config; this.reconcile(); }
   updateRecordingActive(active: boolean): void { this.desired = active; this.reconcile(); }
   setAudio(active: boolean): void { if (active !== this.audio) { this.audio = active; this.reconcile(); } }
@@ -212,7 +222,7 @@ export class LabRecording implements CameraRecordingDelegate {
       if (this.child !== child) return;
       this.counters.producerFailures++; this.active = false; this.ring.close();
       clearInterval(this.watchdog);
-      this.stream?.abort.abort(); child.kill('SIGTERM');
+      child.kill('SIGTERM');
     };
     child.stdout!.on('data', (data: Buffer) => { try { parser.push(data); } catch { fail(); } });
     child.on('error', fail); child.on('close', fail);
@@ -222,23 +232,41 @@ export class LabRecording implements CameraRecordingDelegate {
     if (this.stream || !this.active || !this.init || !this.allowed()) throw new Error('recording unavailable');
     const ring = this.ring;
     let sequence = ring.cursor();
-    const abort = new AbortController(); this.stream = { id, abort };
+    const abort = new AbortController(); this.stream = { id, abort }; this.finished = false;
+    const opened = Date.now();
     const effective = AbortSignal.any([abort.signal, ...(signal ? [signal] : []), AbortSignal.timeout(300_000)]);
     this.counters.streams++;
+    this.changed();
+    let sent: Buffer | undefined;
+    const ended = () => (!this.motion && this.motionStopped > 0 && Date.now() - this.motionStopped >= POST_ROLL_MS)
+      || Date.now() - opened >= CLIP_LIMIT_MS;
+    const finish = (data: Buffer) => {
+      this.finished = true; this.counters.completed++;
+      return { data, isLast: true };
+    };
     try {
       yield { data: this.init, isLast: false };
       while (true) {
-        const fragment = await ring.read(sequence++, effective);
+        let fragment: Fragment;
+        try { fragment = await ring.read(sequence++, effective); }
+        catch (error) {
+          if (sent && ring.closed && !abort.signal.aborted && !signal?.aborted) { yield finish(sent); return; }
+          throw error;
+        }
         effective.throwIfAborted();
         if (!this.allowed()) throw new Error('HomeKit privacy enabled');
-        const last = !this.motion && Date.now() - this.motionStopped >= 4000;
-        yield { data: fragment.data, isLast: last };
-        if (last) { this.counters.completed++; return; }
+        if (ended()) { yield finish(fragment.data); return; }
+        sent = fragment.data;
+        yield { data: fragment.data, isLast: false };
       }
     } catch (error) { if (!abort.signal.aborted && !signal?.aborted) this.counters.failed++; throw error; }
-    finally { if (this.stream?.id === id) this.stream = undefined; }
+    finally { if (this.stream?.id === id) this.stream = undefined; this.changed(); }
   }
-  closeRecordingStream(id: number): void { if (this.stream?.id === id) this.stream.abort.abort(); }
+  closeRecordingStream(id: number): void {
+    if (this.stream?.id !== id) return;
+    if (!this.finished) this.counters.closed++;
+    this.stream.abort.abort();
+  }
   acknowledgeStream(id: number): void { this.closeRecordingStream(id); }
   private async stopProducer(): Promise<void> {
     clearInterval(this.watchdog);

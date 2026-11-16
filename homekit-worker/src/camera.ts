@@ -141,10 +141,12 @@ async function main(): Promise<void> {
     // SurvNG does not report its own local viewers as third-party Home activity.
     controller.globalOperatingModeService?.setCharacteristic(
       Characteristic.ThirdPartyCameraActive, Characteristic.ThirdPartyCameraActive.OFF);
-    const setMotion = (active: boolean) => {
-      const allowed = cameraAllowed() && !!controller!.motionService?.getCharacteristic(Characteristic.MotionEnabled).value;
-      controller!.setMotionDetected(active && allowed); recording!.setMotion(active && allowed);
-    };
+    const motionPermitted = () => cameraAllowed()
+      && !!controller!.motionService?.getCharacteristic(Characteristic.MotionEnabled).value
+      && !(controller!.motionZones.active && controller!.motionZones.zones);
+    const publishMotion = () => controller!.setMotionDetected(motionPermitted() && recording!.reportingMotion());
+    const setMotion = (active: boolean) => { recording!.setMotion(active && motionPermitted()); publishMotion(); };
+    recording!.watch(publishMotion);
     controller.on('operating-mode-changed', () => {
       if (!controller!.streamingAllowed(controller!.multiTierStreamManagementService)) void local!.close();
       if (!controller!.streamingAllowed(controller!.webrtcStreamManagementService)) void remote!.close();
