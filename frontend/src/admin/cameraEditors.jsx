@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Camera } from "lucide-react";
 import { liveFramingStyle, normalizedLiveFraming } from "../liveFraming.mjs";
 import { appUrl } from "../shared/api.js";
 import { clearMaskedUrlPassword, clearMaskedSecret, secretInputValue, secretInputHint } from "../shared/secrets.js";
@@ -55,6 +56,28 @@ export function defaultCamera(cameras, seed = {}) {
   };
 }
 
+export function CameraStreamsEditor({ camera, onChange }) {
+  return <section className="sub-panel camera-stream-panel" aria-labelledby={`camera-stream-title-${camera.id}`}>
+    <h3 id={`camera-stream-title-${camera.id}`} className="section-heading-with-icon"><Camera size={16} />Streams</h3>
+    <div className="field-row stream-field-row camera-stream-url-fields">
+      <div className="stream-field">
+        <div className="stream-field-head">
+          <label htmlFor={`main-stream-${camera.id}`}>Main Stream URL</label>
+          <label className="stream-record-toggle"><input type="checkbox" checked={camera.record} onChange={(event) => onChange(["record"], event.target.checked)} /> Record</label>
+        </div>
+        <input id={`main-stream-${camera.id}`} value={camera.stream_url || ""} onChange={(event) => onChange(["stream_url"], event.target.value)} />
+      </div>
+      <div className="stream-field">
+        <div className="stream-field-head">
+          <label htmlFor={`sub-stream-${camera.id}`}>Live/Sub Stream URL</label>
+          <label className="stream-record-toggle"><input type="checkbox" checked={camera.record_sub || false} onChange={(event) => onChange(["record_sub"], event.target.checked)} /> Record</label>
+        </div>
+        <input id={`sub-stream-${camera.id}`} value={camera.live_stream_url || ""} onChange={(event) => onChange(["live_stream_url"], event.target.value)} />
+      </div>
+    </div>
+  </section>;
+}
+
 export function CameraOnvifEditor({ camera, onChange }) {
   const update = (field, value) => onChange(["onvif", field], value);
 
@@ -90,10 +113,6 @@ export function LiveViewFramingEditor({ camera, onChange }) {
         <h3 id={`live-framing-title-${camera.id}`}>Live view framing</h3>
         <p>Tile presentation only · recordings and detection are unchanged.</p>
       </div>
-      <div className="segmented live-framing-source" role="group" aria-label="Stream to frame">
-        <button type="button" className={source === "main" ? "active" : ""} aria-pressed={source === "main"} onClick={() => setSource("main")}>Main</button>
-        <button type="button" className={source === "live" ? "active" : ""} aria-pressed={source === "live"} onClick={() => setSource("live")} disabled={!camera.live_stream_url}>Sub</button>
-      </div>
     </div>
     <div className="live-framing-workspace">
       <div className="live-framing-preview" style={liveFramingStyle(camera, source)}>
@@ -105,6 +124,10 @@ export function LiveViewFramingEditor({ camera, onChange }) {
         <span>{sourceName} preview</span>
       </div>
       <div className="live-framing-controls">
+        <div className="segmented live-framing-source" role="group" aria-label="Stream to frame">
+          <button type="button" className={source === "main" ? "active" : ""} aria-pressed={source === "main"} onClick={() => setSource("main")}>Main</button>
+          <button type="button" className={source === "live" ? "active" : ""} aria-pressed={source === "live"} onClick={() => setSource("live")} disabled={!camera.live_stream_url}>Sub</button>
+        </div>
         <h4>Framing controls</h4>
         <label className="live-framing-field live-framing-fill"><span>Tile fill</span>
           <select value={framing.fit} onChange={(event) => update("fit", event.target.value)}>

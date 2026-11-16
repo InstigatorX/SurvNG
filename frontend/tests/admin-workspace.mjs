@@ -80,3 +80,9 @@ assert.equal(cameraSpeechDirty([], []), false);
 assert.match(configPageSource, /\["speech", "Speech", Mic\]/);
 
 console.log("admin workspace tests passed");
+
+assert.equal(adminDestination("general", { generalSection: "homekit" }).id, "homekit");
+const homekitBefore = { cameras: [{ id: "gate", homekit: { enabled: false } }] };
+const homekitAfter = { cameras: [{ id: "gate", homekit: { enabled: true } }] };
+assert.equal(configValuesEqual(comparableSystemConfig(homekitBefore), comparableSystemConfig(homekitAfter)), true);
+assert.equal(cameraConfigDirtyState(homekitAfter.cameras, homekitBefore.cameras).settings, true);

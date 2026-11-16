@@ -457,6 +457,14 @@ def is_public_api_path(method: str, path: str) -> bool:
         return True
     if path == "/api/auth/bootstrap" and normalized == "POST":
         return True
+    # The installer and encoder node authenticate with their own one-time token
+    # or node secret. They have no browser session.
+    if re.fullmatch(r"/api/homekit/enroll/[A-Za-z0-9_-]{32,}", path) and normalized in {"GET", "POST"}:
+        return True
+    if normalized == "POST" and path in {"/api/homekit/nodes/sync", "/api/homekit/nodes/media", "/api/homekit/nodes/snapshot"}:
+        return True
+    if normalized == "GET" and path in {"/api/homekit/nodes/agent", "/api/homekit/nodes/ffmpeg", "/api/homekit/nodes/runtime"}:
+        return True
     return False
 
 
@@ -504,6 +512,9 @@ _READ_ONLY_POST_PATHS = frozenset({
 
 def required_api_scope(method: str, path: str) -> ApiScope:
     normalized_method = method.upper()
+    # Pairing and camera administration never belong to read-only integrations.
+    if path.startswith("/api/homekit"):
+        return "admin"
     # Process logs can contain operationally sensitive context even after
     # redaction, so they are not part of the integration-facing read surface.
     if path == "/api/logs":

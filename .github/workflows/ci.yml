@@ -67,6 +67,8 @@ jobs:
             tests/test_camera_worker.py \
             tests/test_run_benchmarks.py \
             tests/test_config_reload.py
+      - name: Run HomeKit regression tests
+        run: scripts/run-tests.sh tests/test_homekit.py tests/test_homekit_nodes_review.py
       - name: Run face and identity regression tests
         run: |
           scripts/run-tests.sh \

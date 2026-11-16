@@ -1,3 +1,4 @@
+import { CameraHomeKitSettings, HomeKitSettings } from "./HomeKitSettings.jsx";
 import { WeatherSettings } from "./WeatherSettings.jsx";
 import { SystemReviewPanel } from "./SystemReviewPanel.jsx";
 import React, { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -24,6 +25,7 @@ import {
   Layers,
   GripVertical,
   HardDrive,
+  House,
   Search,
   ListTree,
   LayoutDashboard,
@@ -66,7 +68,7 @@ import { secretInputValue, secretInputHint } from "../shared/secrets.js";
 import { formatDateTime, formatTimeOnly, formatBytes, formatMilliseconds, formatAge, formatDuration, formatCompactDuration } from "../shared/format.js";
 import { useStoredState, useModalFocus } from "../shared/hooks.js";
 import { mediaStorageConfigurationError, slugify, inferredBackendLabel, cameraWithDerivedConnection, camerasWithGeneratedIds } from "../shared/cameras.js";
-import { defaultCamera, CameraOnvifEditor, LiveViewFramingEditor, defaultCameraMotionQualification, cameraMotionQualificationInherited } from "./cameraEditors.jsx";
+import { defaultCamera, CameraStreamsEditor, CameraOnvifEditor, LiveViewFramingEditor, defaultCameraMotionQualification, cameraMotionQualificationInherited } from "./cameraEditors.jsx";
 import { AccessSettings } from "./AccessSettings.jsx";
 import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
@@ -79,6 +81,7 @@ export const ADMIN_DESTINATION_ICONS = {
   detection: Cpu,
   storage: HardDrive,
   integrations: Radio,
+  homekit: House,
   access: KeyRound,
   preferences: Cog,
   server: Cog,
@@ -2092,6 +2095,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 <button type="button" aria-current={generalSection === "storage" ? "page" : undefined} className={generalSection === "storage" ? "active" : ""} onClick={() => selectAdminSubsection("storage", setGeneralSection, "general")}><HardDrive size={16} /><span>Storage &amp; Retention</span></button>
                 <button type="button" aria-current={generalSection === "mqtt" ? "page" : undefined} className={generalSection === "mqtt" ? "active" : ""} onClick={() => selectAdminSubsection("mqtt", setGeneralSection, "general")}><Radio size={16} /><span>API &amp; MQTT/HA</span></button>
                 <button type="button" aria-current={generalSection === "access" ? "page" : undefined} className={generalSection === "access" ? "active" : ""} onClick={() => selectAdminSubsection("access", setGeneralSection, "general")}><KeyRound size={16} /><span>Access</span></button>
+                <button type="button" aria-current={generalSection === "homekit" ? "page" : undefined} className={generalSection === "homekit" ? "active" : ""} onClick={() => selectAdminSubsection("homekit", setGeneralSection, "general")}><House size={16} /><span>HomeKit</span></button>
                 <span className="tree-group-label">Intelligence</span>
                 <button type="button" aria-current={generalSection === "detection" ? "page" : undefined} className={generalSection === "detection" ? "active" : ""} onClick={() => selectAdminSubsection("detection", setGeneralSection, "general")}><Cpu size={16} /><span>Object Detection</span></button>
               </div>
@@ -2313,28 +2317,13 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
 
                     {cameraSection === "settings" ? <>
                       <div className="camera-connectivity-grid">
-                        <section className="sub-panel camera-stream-panel" aria-labelledby={`camera-stream-title-${selectedCamera.id}`}>
-                          <h3 id={`camera-stream-title-${selectedCamera.id}`} className="section-heading-with-icon"><span className="section-heading-icon"><Camera size={16} /></span>Streams</h3>
-                          <div className="field-row stream-field-row camera-stream-url-fields">
-                            <div className="stream-field">
-                              <div className="stream-field-head">
-                                <label htmlFor={`main-stream-${selectedCamera.id}`}>Main Stream URL</label>
-                                <label className="stream-record-toggle"><input type="checkbox" checked={selectedCamera.record} onChange={(event) => updateCamera(selectedCamera.id, ["record"], event.target.checked)} /> Record</label>
-                              </div>
-                              <input id={`main-stream-${selectedCamera.id}`} value={selectedCamera.stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["stream_url"], event.target.value)} />
-                            </div>
-                            <div className="stream-field">
-                              <div className="stream-field-head">
-                                <label htmlFor={`sub-stream-${selectedCamera.id}`}>Live/Sub Stream URL</label>
-                                <label className="stream-record-toggle"><input type="checkbox" checked={selectedCamera.record_sub || false} onChange={(event) => updateCamera(selectedCamera.id, ["record_sub"], event.target.checked)} /> Record</label>
-                              </div>
-                              <input id={`sub-stream-${selectedCamera.id}`} value={selectedCamera.live_stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["live_stream_url"], event.target.value)} />
-                            </div>
-                          </div>
-                        </section>
+                        <CameraStreamsEditor camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
                         <CameraOnvifEditor camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
                       </div>
-                      <LiveViewFramingEditor camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
+                      <div className="camera-presentation-grid">
+                        <LiveViewFramingEditor camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
+                        <CameraHomeKitSettings camera={selectedCamera} enabled={config.homekit?.enabled ?? false} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
+                      </div>
                       <details className="camera-retention-details">
                         <summary>Camera recording retention</summary>
                         <div className="field-row">
@@ -4143,6 +4132,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       ) : null}
 
 
+      {section === "homekit" ? <HomeKitSettings config={config} updateConfig={updateConfig} /> : null}
       {section === "mqtt" ? (
         <div className="sub-panel subsection-workspace">
           <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="API and MQTT/HA settings">

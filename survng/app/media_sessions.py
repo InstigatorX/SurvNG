@@ -15,6 +15,7 @@ from .security import redact_secret_text
 
 
 class MediaSessionKind(StrEnum):
+    HOMEKIT = "homekit"
     GO2RTC_WEBRTC = "go2rtc_webrtc"
     GO2RTC_MSE = "go2rtc_mse"
     MJPEG = "mjpeg"

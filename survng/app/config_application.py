@@ -12,7 +12,7 @@ from .motion_pipeline.configuration import resolve_motion_pipeline_graphs
 
 LOGGER = logging.getLogger(__name__)
 
-HOT_CONFIG_FIELDS = frozenset({"weather", "property", "base_path", "event_clip_before_seconds", "event_clip_after_seconds", "incident_thumbnail_annotations", "incident_thumbnail_object_focus", "incident_thumbnail_object_focus_zoom", "image_storage", "recording_cache_max_gb", "recording_cache_max_days", "recording_cache_prewarm", "api_auth", "web_auth", "tls", "proxy", "audit_ai", "system_review", "integration_notifications", "mqtt", "retention", "database_retention", "semantic_search"})
+HOT_CONFIG_FIELDS = frozenset({"homekit", "weather", "property", "base_path", "event_clip_before_seconds", "event_clip_after_seconds", "incident_thumbnail_annotations", "incident_thumbnail_object_focus", "incident_thumbnail_object_focus_zoom", "image_storage", "recording_cache_max_gb", "recording_cache_max_days", "recording_cache_prewarm", "api_auth", "web_auth", "tls", "proxy", "audit_ai", "system_review", "integration_notifications", "mqtt", "retention", "database_retention", "semantic_search"})
 # The configured FFmpeg binary also owns live capture and reloads the manager.
 # Acceleration remains recorder/refinement-only and can be applied in place.
 RECORDER_CONFIG_FIELDS = frozenset({"hardware_acceleration", "recording_segment_seconds"})
@@ -70,6 +70,7 @@ def manager_owned_config(config: AppConfig) -> dict:
         camera.pop("incident_notifications_enabled", None)
         camera.pop("retention", None)
         camera.pop("live_view", None)
+        camera.pop("homekit", None)
         camera.pop("object_activity_attribution", None)
         camera.pop("stationary_subject_presence", None)
         camera.pop("motion_qualification", None)
@@ -180,6 +181,8 @@ def hot_config_changes(current: AppConfig, incoming: AppConfig) -> list[str]:
     changed = [field for field in sorted(HOT_CONFIG_FIELDS) if getattr(current, field) != getattr(incoming, field)]
     if {c.id: c.retention for c in current.cameras} != {c.id: c.retention for c in incoming.cameras} and "retention" not in changed:
         changed.append("retention")
+    if {c.id: c.homekit for c in current.cameras} != {c.id: c.homekit for c in incoming.cameras} and "homekit" not in changed:
+        changed.append("homekit")
     return changed
 
 
@@ -255,6 +258,7 @@ class TargetedConfigApplication:
             applied: list[str] = []
             try:
                 steps = [
+                    ("homekit" in changes, "homekit", lambda c: runtime.homekit.reconfigure(c), lambda c: runtime.homekit.reconfigure(c)),
                     (bool(recorder_changes), "recorders", lambda c: runtime.reconfigure_recorders(c), lambda c: runtime.reconfigure_recorders(c)),
                     (mqtt_changed, "mqtt", lambda c: runtime.reconfigure_mqtt(c.mqtt), lambda c: runtime.reconfigure_mqtt(c.mqtt)),
                     (retention_changed, "retention", runtime.reconfigure_recording_retention, runtime.reconfigure_recording_retention),
