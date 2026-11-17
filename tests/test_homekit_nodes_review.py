@@ -1,5 +1,8 @@
 """Regression coverage for remote encoder ownership and input boundaries."""
 import asyncio
+import socket
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -38,6 +41,70 @@ def request(secret, chunks, before=None, headers=()):
     return Request({"type": "http", "headers": [
         (b"authorization", f"Bearer {secret}".encode()), (b"x-survng-camera", b"porch"),
         (b"x-survng-tier", b"1"), *headers]}, receive)
+
+
+def test_paused_feed_reader_survives_a_full_send_buffer(tmp_path):
+    """A full kernel buffer is backpressure. Closing it drops the live view."""
+    from survng.app.homekit_nodes import _TierFeed
+
+    directory = tmp_path / "feeds"
+    directory.mkdir()
+    feed = _TierFeed(directory / "1.sock", lambda: None)
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    reader = None
+    try:
+        client.connect(str(directory / "1.sock"))
+        deadline = time.monotonic() + 2
+        while not feed.wanted() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        peer = next(iter(feed.clients))
+        payload = b"v" * (1024 * 1024)
+        feed.write(payload)
+        assert peer in feed.clients
+        assert feed._outbound.get(peer), "a full send buffer must queue the tail, not close the viewer"
+        received = bytearray()
+
+        def consume() -> None:
+            client.settimeout(0.2)
+            while len(received) < len(payload):
+                try:
+                    part = client.recv(256 * 1024)
+                except TimeoutError:
+                    continue
+                if not part:
+                    return
+                received.extend(part)
+
+        reader = threading.Thread(target=consume)
+        reader.start()
+        flush_deadline = time.monotonic() + 3
+        while len(received) < len(payload) and time.monotonic() < flush_deadline:
+            with feed.lock:
+                pending = feed._outbound.get(peer)
+                if pending:
+                    feed._flush(peer, pending)
+                    if not pending:
+                        feed._outbound.pop(peer, None)
+            time.sleep(0.01)
+        assert bytes(received) == payload
+
+        # Stop reading and exceed the per-viewer bound. Only this viewer goes.
+        reader.join(timeout=1)
+        reader = None
+        dropped = False
+        for _ in range(8):
+            feed.write(b"x" * (512 * 1024))
+            if peer not in feed.clients:
+                dropped = True
+                break
+        assert dropped
+        assert feed._outbound == {}
+        assert not feed.wanted()
+    finally:
+        client.close()
+        if reader is not None:
+            reader.join(timeout=1)
+        feed.close()
 
 
 def test_assigned_encoder_cannot_be_removed(remote):
