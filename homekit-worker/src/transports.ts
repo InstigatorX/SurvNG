@@ -165,11 +165,13 @@ export function videoOffer(sdp: string, tier: Tier): string {
 
 export class RemoteStreams implements WebRTCStreamingDelegate {
   readonly sessions = new Map<string, RemoteSession>();
-  readonly counters = { started: 0, failures: 0 };
+  readonly counters = { solicitations: 0, offers: 0, answers: 0, reoffers: 0, started: 0,
+    failures: 0, videoPackets: 0, audioPackets: 0, lastState: 'idle' };
   readonly feedback = { video: new ReceiverFeedback(90000), audio: new ReceiverFeedback(48000) };
   constructor(private media: MediaSource, private allowed: () => boolean, private address: string, private catalog: readonly Tier[] = tiers) {}
   async handleSolicitOffer(request: WebRTCSolicitOfferRequest): Promise<WebRTCOffer> {
     const id = request.sessionIdentifier;
+    this.counters.solicitations++;
     if (!this.allowed() || this.sessions.size >= 6 || this.sessions.has(id)) throw new Error('remote session unavailable');
     // Apple uses BUNDLE. max-compat gathers a second transport which this werift
     // revision loses when applying a bundled answer, leaving its UDP sockets open.
@@ -198,6 +200,7 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
       candidates.push({ candidate: value.candidate, sdpMid: value.sdpMid ?? undefined, sdpMLineIndex: value.sdpMLineIndex ?? undefined });
     });
     pc.connectionStateChange.subscribe(state => {
+      if (!session.closed) this.counters.lastState = state;
       if (state === 'failed' || state === 'disconnected' || state === 'closed') fail();
       if (state !== 'connected' || session.closed || session.feed) return;
       if (!this.allowed()) { fail(); return; }
@@ -214,14 +217,19 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
           // Match Scrypted's signaling-only RID interoperability behavior.
           // camera-webrtc.ts at fb679504ce2d8bc150bb504a7098826644627100.
           vtrack.writeRtp(value);
+          this.counters.videoPackets++;
         }
       }, packet => {
-        for (const value of ap.packetize(ac.protectFrame(packet.payload), packet.header.timestamp, packet.header.marker)) atrack.writeRtp(value);
+        for (const value of ap.packetize(ac.protectFrame(packet.payload), packet.header.timestamp, packet.header.marker)) {
+          atrack.writeRtp(value);
+          this.counters.audioPackets++;
+        }
       }, fail).catch(fail);
     });
     try {
       const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
       if (session.closed || !this.allowed()) throw new Error('remote session cancelled');
+      this.counters.offers++;
       return { sdpOffer: videoOffer(pc.localDescription!.sdp, this.catalog[0]), candidates, sframe: session.frame.senderKey };
     } catch (error) { await this.handleEndSession(id); throw error; }
   }
@@ -232,6 +240,7 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
       await session.pc.setRemoteDescription({ type: 'answer', sdp: request.sdpAnswer });
       session.answered = true;
       for (const candidate of request.candidates) await session.pc.addIceCandidate(candidate);
+      this.counters.answers++;
     } catch (error) { await this.handleEndSession(request.sessionIdentifier); throw error; }
   }
   async handleReoffer(request: WebRTCReofferRequest): Promise<WebRTCReofferAnswer> {
@@ -240,6 +249,7 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
     try {
       await session.pc.setRemoteDescription({ type: 'offer', sdp: request.sdpOffer });
       await session.pc.setLocalDescription(await session.pc.createAnswer());
+      this.counters.reoffers++;
       return { sdpAnswer: session.pc.localDescription!.sdp };
     } catch (error) { await this.handleEndSession(request.sessionIdentifier); throw error; }
   }

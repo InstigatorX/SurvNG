@@ -164,6 +164,8 @@ async function main(): Promise<void> {
         homeKitActive: cameraAllowed(), recording: recording!.status(), media: { ...media!.counters, lastError: media!.lastError },
         encoder: media!.encoderStatus,
         localMedia: { sent: local!.sent, feedback: { video: local!.feedback.video.stats, audio: local!.feedback.audio.stats } },
+        remoteMedia: { ...remote!.counters, videoFeedback: remote!.feedback.video.stats, audioFeedback: remote!.feedback.audio.stats },
+        motion: { permitted: motionPermitted(), detected: motionPermitted() && recording!.reportingMotion() },
         zonesBlockMotion: !!(controller!.motionZones.active && controller!.motionZones.zones),
       };
       if (method === 'pairing') return { setupCode: saved.pincode, setupUri: accessory!.setupURI() };
