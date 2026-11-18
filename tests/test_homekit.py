@@ -83,6 +83,7 @@ def test_worker_control_startup_and_health_deadlines(
         run=Mock(side_effect=[
             SimpleNamespace(stdout=b"v24.0.0"),
             SimpleNamespace(stdout=b"libopus aac mjpeg"),
+            SimpleNamespace(stdout=b"-readrate_initial_burst <seconds>\n-readrate_catchup <speed>"),
         ]),
         Popen=Mock(return_value=SimpleNamespace(stdin=io.BytesIO(), stdout=object(), poll=lambda: None)),
         PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL, SubprocessError=subprocess.SubprocessError,
@@ -98,6 +99,48 @@ def test_worker_control_startup_and_health_deadlines(
 
     assert [call.args[1] for call in mocked_control.call_args_list].count("motion") == expected_motion_calls
     assert stops == [terminated_at]
+
+
+@pytest.mark.parametrize(
+    "missing", [b"-readrate_catchup", b"-readrate_initial_burst", None],
+    ids=["missing-catchup", "missing-initial-burst", "cancelled"],
+)
+def test_worker_ffmpeg_pacing_preflight(tmp_path, monkeypatch, missing):
+    from survng.app import homekit
+
+    config = configuration(tmp_path)
+    service = HomeKitService(config, MediaSessionManager(), "test-generation", lambda _: True)
+    worker = CameraWorker(service, config, config.cameras[0])
+    built_worker = tmp_path / "camera.js"
+    built_worker.touch()
+    monkeypatch.setattr(homekit, "WORKER", built_worker)
+    monkeypatch.setattr(homekit.socket, "socket", MagicMock())
+
+    def run(args, **_kwargs):
+        if args[-1] == "--version":
+            return SimpleNamespace(stdout=b"v24.0.0")
+        if args[-1] == "-encoders":
+            if missing is None:
+                worker.stopping.set()
+            return SimpleNamespace(stdout=b"libopus aac mjpeg")
+        assert args[-2:] == ["-h", "full"]
+        assert missing is not None, "shutdown started before the pacing probe"
+        supported = {b"-readrate_initial_burst", b"-readrate_catchup"} - {missing}
+        return SimpleNamespace(stdout=b" ".join(supported) + b" <speed>  Description references " + missing)
+
+    monkeypatch.setattr(homekit.subprocess, "run", run)
+    spawn = Mock(side_effect=OSError("unexpected worker launch"))
+    monkeypatch.setattr(homekit.subprocess, "Popen", spawn)
+    monkeypatch.setattr(worker.stopping, "wait", lambda _delay: worker.stopping.set())
+    try:
+        worker._run()
+    finally:
+        service.nodes.close()
+
+    if missing is not None:
+        assert worker.status()["state"] == "blocked"
+        assert worker.status()["error"] == "ffmpeg_pacing_unsupported"
+    spawn.assert_not_called()
 
 
 def test_homekit_defaults_validation_and_stable_ports(tmp_path):

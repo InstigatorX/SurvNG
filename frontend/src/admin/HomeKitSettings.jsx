@@ -9,6 +9,7 @@ const ERROR_LABELS = {
   encoding_unavailable: "No permitted HEVC encoder passed its startup test. Check QSV device access or allow software fallback.",
   worker_not_built: "Build the HomeKit worker before enabling cameras.",
   node_24_required: "HomeKit requires Node.js 24. Set its executable path below.",
+  ffmpeg_pacing_unsupported: "Use a server FFmpeg build that supports -readrate_initial_burst and -readrate_catchup.",
   encoder_unavailable: "FFmpeg needs HEVC encoding plus libopus, AAC, and MJPEG support.",
   encoder_offline: "The assigned encoder is offline. HomeKit stays on this server and is not using a local encoder.",
   encoder_waiting: "Waiting for the encoder to measure this camera.",

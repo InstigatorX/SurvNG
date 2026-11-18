@@ -243,6 +243,15 @@ class CameraWorker:
             if any(codec not in encoders.stdout for codec in (b"libopus", b"aac", b"mjpeg")):
                 self._state(state="blocked", error="encoder_unavailable")
                 return
+            if self.stopping.is_set():
+                return
+            # Both local and remote encoders feed a shared stream paced by this host's FFmpeg.
+            help_output = subprocess.run([self.config.ffmpeg_path, "-hide_banner", "-h", "full"],
+                                         capture_output=True, timeout=5, check=True).stdout
+            options = {line.split(maxsplit=1)[0] for line in help_output.splitlines() if line.strip()}
+            if not {b"-readrate_initial_burst", b"-readrate_catchup"} <= options:
+                self._state(state="blocked", error="ffmpeg_pacing_unsupported")
+                return
             failures = 0
             while not self.stopping.is_set():
                 if not self.service.camera_active(self.camera.id):
