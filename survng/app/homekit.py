@@ -30,6 +30,9 @@ from .media_sessions import (
 
 LOGGER = logging.getLogger(__name__)
 WORKER = Path(__file__).resolve().parents[2] / "homekit-worker/dist/src/camera.js"
+# Local startup can run three 15-second qualification commands per backend
+# (QSV and software), then a 15-second source probe before opening control.sock.
+LOCAL_STARTUP_GRACE_SECONDS = 120
 
 
 def camera_port(camera) -> int:
@@ -275,7 +278,11 @@ class CameraWorker:
                     self._state(state="starting", error=None)
                     pending = b""
                     control_failures = 0
-                    poll_at = time.monotonic() + 1
+                    started_at = time.monotonic()
+                    # Forgive failed control polls during local qualification.
+                    # A successful exchange ends the grace period immediately.
+                    startup_grace_until = started_at + LOCAL_STARTUP_GRACE_SECONDS if remote is None else None
+                    poll_at = started_at + 1
                     while not self.stopping.is_set() and self.process.poll() is None and self.service.camera_active(self.camera.id):
                         self._poll_snapshot()
                         if any(lease.cancelled() for lease in self.leases.values()):
@@ -311,10 +318,14 @@ class CameraWorker:
                                 control(self.path, "motion", {"active": self.service.motion_active(self.camera.id)})
                                 failures = 0
                                 control_failures = 0
+                                startup_grace_until = None
                             except (OSError, ValueError, RuntimeError):
                                 self._state(state="starting", error="control_unavailable")
                                 control_failures += 1
-                                if control_failures >= 3:
+                                if startup_grace_until is not None:
+                                    if time.monotonic() >= startup_grace_until:
+                                        break
+                                elif control_failures >= 3:
                                     break
                     self.service.clear_motion(self.camera.id)
                     if self.process.poll() == 42:

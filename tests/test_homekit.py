@@ -8,7 +8,7 @@ import subprocess
 import tarfile
 import time
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -29,6 +29,75 @@ def configuration(tmp_path):
             homekit=CameraHomeKitConfig(enabled=True, object_motion=True, allow_software_encoding=True)),
         CameraConfig(id="yard", name="Yard", stream_url="rtsp://camera/yard", homekit=CameraHomeKitConfig(enabled=True, allow_software_encoding=True)),
     ])
+
+
+@pytest.mark.parametrize(
+    ("remote", "ready_at", "expected_motion_calls", "terminated_at"),
+    [(False, 6, 1, 9), (False, None, 0, 120), (True, None, 0, 3)],
+    ids=["slow-start-then-unhealthy", "local-grace-expires", "remote-restarts-promptly"],
+)
+def test_worker_control_startup_and_health_deadlines(
+    tmp_path, monkeypatch, remote, ready_at, expected_motion_calls, terminated_at,
+):
+    from survng.app import homekit
+
+    config = configuration(tmp_path)
+    service = HomeKitService(config, MediaSessionManager(), "test-generation", lambda _: True)
+    worker = CameraWorker(service, config, config.cameras[0])
+    if remote:
+        monkeypatch.setattr(service.nodes, "decision", lambda *_: "remote")
+        monkeypatch.setattr(service.nodes, "remote_for", lambda *_: {
+            "feeds": str(tmp_path / "feed"), "profile": {}, "encoding": {},
+        })
+    elapsed = 0
+    stops = []
+
+    def poll_pipe(*_args):
+        nonlocal elapsed
+        elapsed += 1
+        return [], [], []
+
+    def control(_path, method, _params=None):
+        if method == "status":
+            if elapsed != ready_at:
+                raise ConnectionRefusedError
+            return {"homeKitActive": True, "paired": False}
+        assert method == "motion"
+        assert elapsed == ready_at
+
+    def terminate():
+        if worker.process is not None:
+            stops.append(elapsed)
+            worker.process = None
+
+    fake_worker = tmp_path / "camera.js"
+    fake_worker.touch()
+    monkeypatch.setattr(homekit, "WORKER", fake_worker)
+    monkeypatch.setattr(homekit, "time", SimpleNamespace(monotonic=lambda: elapsed))
+    monkeypatch.setattr(homekit, "select", SimpleNamespace(select=poll_pipe))
+    # Keep preflight isolated from the host LAN address and installed tools.
+    monkeypatch.setattr(homekit, "socket", SimpleNamespace(
+        AF_INET=socket.AF_INET, SOCK_DGRAM=socket.SOCK_DGRAM, socket=MagicMock(),
+    ))
+    monkeypatch.setattr(homekit, "subprocess", SimpleNamespace(
+        run=Mock(side_effect=[
+            SimpleNamespace(stdout=b"v24.0.0"),
+            SimpleNamespace(stdout=b"libopus aac mjpeg"),
+        ]),
+        Popen=Mock(return_value=SimpleNamespace(stdin=io.BytesIO(), stdout=object(), poll=lambda: None)),
+        PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL, SubprocessError=subprocess.SubprocessError,
+    ))
+    mocked_control = Mock(side_effect=control)
+    monkeypatch.setattr(homekit, "control", mocked_control)
+    monkeypatch.setattr(worker, "_terminate", terminate)
+    monkeypatch.setattr(worker.stopping, "wait", lambda _delay: worker.stopping.set())
+    try:
+        worker._run()
+    finally:
+        service.nodes.close()
+
+    assert [call.args[1] for call in mocked_control.call_args_list].count("motion") == expected_motion_calls
+    assert stops == [terminated_at]
 
 
 def test_homekit_defaults_validation_and_stable_ports(tmp_path):
