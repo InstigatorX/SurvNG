@@ -76,6 +76,12 @@ JPEG admission. Resource exhaustion fails visibly rather than bypassing limits.
 HomeKit Off closes its pipelines and clears its ring without changing SurvNG's
 own recording or detection settings. Talkback remains unavailable.
 
+Remote encoder media uploads carry the current camera assignment revision.
+When upgrading the server, include the matching encoder agent build in the
+release. Older agents can still sync and receive the agent update, but their
+media uploads are rejected until they update. Allow for a brief remote media
+interruption during that handoff.
+
 ## Run the synthetic camera
 
 Choose an absolute directory owned by the account running the lab, mode 0700.

@@ -22,6 +22,7 @@ import tarfile
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 
@@ -303,6 +304,11 @@ class _TierFeed:
             raise RuntimeError("HomeKit feed shutdown incomplete")
 
 
+@dataclass(frozen=True, eq=False)
+class _UploadClaim:
+    revision: str
+
+
 class NodeRegistry:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
@@ -315,7 +321,7 @@ class NodeRegistry:
         self.tokens: list[dict] = []
         self.nodes: dict[str, dict] = {}
         self.feeds: dict[tuple[str, int], _TierFeed] = {}
-        self.uploads: dict[tuple[str, int], object] = {}
+        self.uploads: dict[tuple[str, int], _UploadClaim] = {}
         self.snapshots: dict[str, tuple[threading.Event, Path, str]] = {}
         self.reopen()
 
@@ -548,28 +554,29 @@ class NodeRegistry:
         if feed:
             feed.write(data)
 
-    def feed_allowed(self, node: dict, camera_id: str, tier: str, assignments: list[dict]) -> bool:
-        if tier not in {"1", "2", "3"}:
+    def feed_allowed(self, node: dict, camera_id: str, tier: str, assignments: list[dict], revision: str) -> bool:
+        if not revision or tier not in {"1", "2", "3"}:
             return False
         with self.lock:
             return not self.closed and self.nodes.get(node["id"]) is node and any(
-                item["id"] == camera_id and item["encoder"] == node["id"] for item in assignments)
+                item["id"] == camera_id and item["encoder"] == node["id"] and item["revision"] == revision
+                for item in assignments)
 
-    def claim_feed(self, node: dict, camera_id: str, tier: str, assignments: list[dict]) -> object | None:
+    def claim_feed(self, node: dict, camera_id: str, tier: str, assignments: list[dict], revision: str) -> _UploadClaim | None:
         with self.lock:
-            if not self.feed_allowed(node, camera_id, tier, assignments):
+            if not self.feed_allowed(node, camera_id, tier, assignments, revision):
                 return None
             key = (camera_id, int(tier))
             feed = self.feeds.get(key)
             if feed is None or not feed.wanted():
                 return None
-            claim = object()
+            claim = _UploadClaim(revision)
             self.uploads[key] = claim
             return claim
 
-    def write_upload(self, node: dict, camera_id: str, tier: str, claim: object, data: bytes, assignments: list[dict]) -> bool:
+    def write_upload(self, node: dict, camera_id: str, tier: str, claim: _UploadClaim, data: bytes, assignments: list[dict]) -> bool:
         with self.lock:
-            if not self.feed_allowed(node, camera_id, tier, assignments):
+            if not self.feed_allowed(node, camera_id, tier, assignments, claim.revision):
                 return False
             key = (camera_id, int(tier))
             feed = self.feeds.get(key)
@@ -578,7 +585,7 @@ class NodeRegistry:
             feed.write(data)
             return True
 
-    def release_upload(self, camera_id: str, tier: str, claim: object) -> None:
+    def release_upload(self, camera_id: str, tier: str, claim: _UploadClaim) -> None:
         with self.lock:
             key = (camera_id, int(tier))
             if self.uploads.get(key) is claim:

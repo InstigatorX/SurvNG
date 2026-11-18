@@ -151,8 +151,9 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         node = _node(service, request)
         camera_id = request.headers.get("x-survng-camera", "")
         tier = request.headers.get("x-survng-tier", "")
+        revision = request.headers.get("x-survng-revision", "")
         with service.lock:
-            claim = service.nodes.claim_feed(node, camera_id, tier, service.node_assignments())
+            claim = service.nodes.claim_feed(node, camera_id, tier, service.node_assignments(), revision)
         if claim is None:
             raise HTTPException(status_code=404, detail="encoder feed was not requested")
         try:

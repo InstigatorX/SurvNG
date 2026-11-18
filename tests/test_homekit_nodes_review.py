@@ -48,7 +48,7 @@ def test_assigned_encoder_cannot_be_removed(remote):
     assert node["id"] in service.nodes.nodes
 
 
-@pytest.mark.parametrize("change", ["reassign", "revoke", "power_off"])
+@pytest.mark.parametrize("change", ["reassign", "revoke", "power_off", "same_node_source"])
 def test_media_upload_revalidates_authority_between_chunks(remote, change):
     service, node, secret, endpoints = remote
     feed = SimpleNamespace(wanted=lambda: True, write=lambda data: written.append(data), close=lambda: None)
@@ -61,11 +61,36 @@ def test_media_upload_revalidates_authority_between_chunks(remote, change):
             service.config.cameras[0].homekit.encoder = "local"
         elif change == "revoke":
             service.nodes.remove(node["id"], [])
-        else:
+        elif change == "power_off":
             service.camera_active = lambda _: False
-    with pytest.raises(HTTPException):
-        asyncio.run(endpoints["/api/homekit/nodes/media"](request(secret, [b"first", b"stale"], before)))
+        else:
+            service.config.cameras[0].stream_url = "rtsp://replacement/main"
+
+    revision = service.node_assignments()[0]["revision"]
+    headers = [(b"x-survng-revision", revision.encode())]
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(endpoints["/api/homekit/nodes/media"](request(secret, [b"first", b"stale"], before, headers)))
+    assert error.value.status_code == 404
     assert written == [b"first"]
+
+
+def test_media_upload_requires_current_revision_at_reconnect(remote):
+    service, _, secret, endpoints = remote
+    written = []
+    service.nodes.feeds[("porch", 1)] = SimpleNamespace(wanted=lambda: True, write=written.append, close=lambda: None)
+    previous = service.node_assignments()[0]["revision"]
+    service.config.cameras[0].stream_url = "rtsp://replacement/main"
+    current = service.node_assignments()[0]["revision"]
+    assert current != previous
+
+    upload = endpoints["/api/homekit/nodes/media"]
+    for headers in ([], [(b"x-survng-revision", previous.encode())]):
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(upload(request(secret, [b"unread"], lambda _: pytest.fail("stale body read"), headers)))
+        assert error.value.status_code == 404
+    fresh = request(secret, [b"fresh"], headers=[(b"x-survng-revision", current.encode())])
+    assert asyncio.run(upload(fresh)).status_code == 204
+    assert written == [b"fresh"]
 
 
 def test_snapshot_rejects_oversized_body_while_reading(remote):
@@ -91,8 +116,8 @@ def test_upload_claim_prevents_interleaved_or_stale_writers(remote):
     written = []
     service.nodes.feeds[("porch", 1)] = SimpleNamespace(wanted=lambda: True, write=written.append, close=lambda: None)
     assignments = service.node_assignments()
-    first = service.nodes.claim_feed(node, "porch", "1", assignments)
-    second = service.nodes.claim_feed(node, "porch", "1", assignments)
+    first = service.nodes.claim_feed(node, "porch", "1", assignments, assignments[0]["revision"])
+    second = service.nodes.claim_feed(node, "porch", "1", assignments, assignments[0]["revision"])
     assert first is not None and second is not None
     assert not service.nodes.write_upload(node, "porch", "1", first, b"old", assignments)
     service.nodes.release_upload("porch", "1", first)
@@ -140,7 +165,7 @@ def test_closed_registry_rejects_stale_sync_and_writers(remote):
     assignments = service.node_assignments()
     service.close()
     assert service.nodes.authenticate(secret) is None
-    assert not service.nodes.feed_allowed(node, "porch", "1", assignments)
+    assert not service.nodes.feed_allowed(node, "porch", "1", assignments, assignments[0]["revision"])
     with pytest.raises((KeyError, RuntimeError)):
         service.nodes.sync(node, {}, assignments, timeout=0)
     with pytest.raises(RuntimeError):
