@@ -16,13 +16,15 @@ test('repeated false motion heartbeats do not extend recording post-roll', async
   const recording = ready();
   recording.setMotion(true);
   recording.setMotion(false);
-  now += 5000;
-  recording.setMotion(false);
   const stream = recording.handleRecordingStreamRequest(1);
   try {
     assert.equal((await stream.next()).value!.isLast, false);
+    assert.equal((await stream.next()).value!.isLast, false);
+    now += 1000;
+    recording.setMotion(false);
+    now += 3000;
+    recording.ring.append(Buffer.from('tail'), 4, 4);
     assert.equal((await stream.next()).value!.isLast, true);
-    assert.equal((await stream.next()).done, true);
   } finally { await stream.return(undefined); await recording.close(); }
 });
 
@@ -43,8 +45,15 @@ test('an open clip holds motion until end of stream, then a long event still end
     recording.ring.append(Buffer.from('tail'), 4, 4);
     assert.equal((await stream.next()).value!.isLast, true);
     assert.equal((await stream.next()).done, true);
-    assert.equal(recording.reportingMotion(), false);
+    assert.equal(recording.reportingMotion(), true);
     assert.equal(recording.counters.completed, 1);
+    assert.equal(recording.counters.acknowledged, 0);
+    recording.setMotion(true);
+    recording.acknowledgeStream(1);
+    assert.equal(recording.counters.acknowledged, 1);
+    assert.equal(recording.reportingMotion(), true);
+    recording.setMotion(false);
+    assert.equal(recording.reportingMotion(), false);
   } finally { await stream.return(undefined); await recording.close(); }
 
   now = 20_000;
@@ -58,6 +67,46 @@ test('an open clip holds motion until end of stream, then a long event still end
     assert.equal((await long.next()).value!.isLast, true);
     assert.equal(limited.counters.completed, 1);
   } finally { await long.return(undefined); await limited.close(); }
+});
+
+test('a hub close before acknowledgement releases the sensor without accepting the clip', async t => {
+  let now = 10_000;
+  t.mock.method(Date, 'now', () => now);
+  const recording = ready();
+  recording.setMotion(true);
+  recording.setMotion(false);
+  const stream = recording.handleRecordingStreamRequest(1);
+  try {
+    await stream.next();
+    assert.equal((await stream.next()).value!.isLast, false);
+    now += 5000;
+    recording.ring.append(Buffer.from('tail'), 4, 4);
+    assert.equal((await stream.next()).value!.isLast, true);
+    await stream.next();
+    assert.equal(recording.reportingMotion(), true);
+    recording.closeRecordingStream(1);
+    assert.equal(recording.reportingMotion(), false);
+    assert.equal(recording.counters.acknowledged, 0);
+    assert.equal(recording.counters.closed, 0);
+  } finally { await stream.return(undefined); await recording.close(); }
+});
+
+test('a late recording open still records a post-roll', async t => {
+  let now = 10_000;
+  t.mock.method(Date, 'now', () => now);
+  const recording = ready();
+  recording.setMotion(true);
+  recording.setMotion(false);
+  now += 5000;
+  const stream = recording.handleRecordingStreamRequest(1);
+  try {
+    assert.equal((await stream.next()).value!.isLast, false);
+    assert.equal((await stream.next()).value!.isLast, false);
+    now += 5000;
+    recording.ring.append(Buffer.from('tail'), 4, 4);
+    assert.equal((await stream.next()).value!.isLast, true);
+    assert.equal(recording.counters.completed, 1);
+  } finally { await stream.return(undefined); await recording.close(); }
 });
 
 test('privacy changed while a recording read waits prevents the next fragment', async () => {
