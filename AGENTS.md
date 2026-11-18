@@ -8,49 +8,36 @@ proportionate investigation, focused changes, and meaningful validation.
 
 ## Execution and model policy
 
-### One agent by default
+The primary agent owns the outcome, chooses the workflow, verifies delegated
+evidence, and integrates the result. Handle small, tightly coupled tasks directly.
+For substantial work, delegate bounded research, implementation, testing, and
+independent review where supported and useful. Use the smallest useful team.
+If delegation is unavailable or restricted, run the same stages locally and
+report the limits of review independence.
 
-- The primary agent owns the task end to end: investigation, design,
-  implementation, testing, and final review.
-- Use the user's selected model for all of that work, including routine
-  searches, mechanical edits, Git inspection, and known test runs.
-- Do not spawn subagents or delegate work unless the user explicitly requests
-  delegation or parallel agent work for the current task.
-- Do not ask about delegation for routine work. Continue directly.
-- Task size, complexity, or the availability of cheaper models does not by
-  itself authorize delegation.
-- Do not use a fixed orchestrator/worker topology, model-role matrix, or
-  automatic model-escalation ladder.
-- Independent tool calls may run concurrently when useful and safe. This
-  does not require additional agents.
+- Honor the user's model and reasoning choices. Inherit settings where possible
+  and report actual settings only when verifiable. Surface unavailable
+  settings before using a fallback. Avoid silent model or effort changes.
+- Give each delegate a question or deliverable, an exact baseline, scope and
+  permissions, owned paths, expected checks, and a reporting format.
+- Keep research and review read-only. Run independent work concurrently only
+  when inputs and outputs are independent. Keep one writer per path.
+- Prefer isolated worktrees for concurrent writes. If isolation is unavailable,
+  serialize writes in the current checkout and preserve existing user changes.
+- The primary agent reconciles findings, inspects changes and verifies the
+  integrated snapshot. Request independent review from someone who did not
+  implement the change. Repeat affected checks after substantive edits.
+- Subagents may delegate only when the user authorizes that structure.
+- Obtain explicit user approval before merging.
 
-### Respect the user's settings
+### Workflow skills
 
-- Honor explicit model and reasoning-effort instructions. Do not silently
-  substitute another model, reduce the selected model to a coordinator, or
-  change settings to pursue speculative cost savings.
-- This file defines working behavior; it does not select a model, change
-  reasoning settings, install agents, or override platform permissions.
-- Use only capabilities actually available in the current environment.
-  Never claim a model or reasoning setting was used unless verifiable.
-- If a specifically requested model is unavailable, disclose that limitation
-  and continue useful preparation within the user's authorized scope.
+Use the repository skills under `.agents/skills/` as appropriate:
 
-### When the user requests delegation
-
-- Keep delegation limited to the requested scope and the smallest useful
-  number of agents. Parallel work should have independent, bounded outcomes.
-- Before spawning, briefly state each subtask and why delegation helps.
-  Honor any model, effort, or agent-count limits the user specified.
-- Give each agent only the context, evidence, ownership boundaries, and
-  completion criteria needed for its subtask.
-- Do not delegate the same investigation to multiple agents unless the user
-  requested independent assessments. Do not let agents recursively delegate
-  unless the user explicitly authorized that structure.
-- Do not run parallel write agents against the same files.
-- The primary agent remains responsible for integration and must inspect
-  consequential diffs and supporting evidence. A summary alone is insufficient.
-- Report the delegated scope and models actually used when verifiable.
+- `survng-orchestration` for bounded delegation and integration.
+- `survng-research` for read-only investigations and design rationale.
+- `survng-architecture` for ownership, interfaces, lifecycle and design choices.
+- `survng-verification` for baseline evidence, regression checks and independent review.
 
 ## Context efficiency
 
@@ -149,7 +136,8 @@ For recording bugs:
 
 ## Testing
 
-Use the narrowest meaningful validation first:
+Define the observable pass condition before editing. Establish a baseline
+when practical, then use the narrowest meaningful validation first:
 
 1. Run directly affected tests.
 2. Run relevant lint/type checks if the changed area uses them.
@@ -158,6 +146,11 @@ Use the narrowest meaningful validation first:
 For a behavior-changing bug fix without suitable coverage, add a focused
 regression test when practical. Avoid tests that merely duplicate the
 implementation or add little protection for a cosmetic change.
+
+Use `scripts/verify-architecture.sh static` for the Codex guidance, CI test
+assignment, and dependency lock. Use its `lifecycle`, `recording`, or `media`
+suite when investigating those boundaries. Run the smallest individual test
+through `scripts/run-tests.sh` when it gives sufficient coverage.
 
 Once appropriate checks pass, do not repeat or expand them without new changes,
 failures, or unresolved concerns.
@@ -197,7 +190,7 @@ For a normal task:
 
 1. Identify the requested outcome.
 2. Inspect enough code to locate the real execution path.
-3. Make the smallest coherent change using the selected model directly.
+3. Make the smallest coherent change, delegating bounded work when appropriate.
 4. Validate proportionately.
 5. Report the result, supporting evidence, and remaining limitations concisely.
 
