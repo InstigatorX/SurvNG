@@ -76,6 +76,7 @@ function startFeed(camera: Assignment, tier: Tier, encoding: VideoEncoding): voi
   const upload = new AbortController();
   feeds.track(key, child, request('/api/homekit/nodes/media', child.stdout!, {
     'content-type': 'application/octet-stream', 'x-survng-camera': camera.id, 'x-survng-tier': String(tier.identifier),
+    'x-survng-revision': camera.revision,
   }, true, mediaOrigin, upload.signal), () => upload.abort());
 }
 
