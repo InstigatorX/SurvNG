@@ -34,7 +34,9 @@ if ! git rev-parse --verify "$UPSTREAM" >/dev/null 2>&1; then
 fi
 
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+SWITCHED=false
 if [[ "$CURRENT_BRANCH" != "$BRANCH" ]]; then
+  SWITCHED=true
   if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
     echo "Checking out $BRANCH"
     git switch "$BRANCH"
@@ -51,14 +53,36 @@ if [[ "${AHEAD:-0}" -gt 0 ]]; then
   echo "Local commits prevent a fast-forward update ($AHEAD ahead of $UPSTREAM)." >&2
   exit 1
 fi
-if [[ "${BEHIND:-0}" -le 0 ]]; then
-  echo "Already up to date with $UPSTREAM ($(git rev-parse --short HEAD))."
-  exit 0
+PYTHON=python3
+if [[ -x .venv/bin/python ]]; then
+  PYTHON=.venv/bin/python
 fi
 
-echo "Updating $(git rev-parse --short HEAD) -> $(git rev-parse --short "$UPSTREAM") ($BEHIND commit(s))"
-git pull --ff-only "$REMOTE" "$BRANCH"
-echo "Now at $(git rev-parse --short HEAD)"
+# Rebuild the HomeKit worker when this checkout has built it before. A failed
+# build leaves HomeKit blocked by the server's freshness check; the update
+# itself continues.
+build_homekit_worker() {
+  if [[ -d homekit-worker/dist || -d homekit-worker/node_modules ]] && command -v "$PYTHON" >/dev/null 2>&1; then
+    echo "Building HomeKit worker"
+    if ! "$PYTHON" -m survng.app.homekit_build --root homekit-worker --if-present; then
+      echo "Warning: HomeKit worker build failed; HomeKit stays blocked until it is rebuilt." >&2
+    fi
+  fi
+}
+
+NOTHING_NEW=false
+if [[ "${BEHIND:-0}" -le 0 ]]; then
+  echo "Already up to date with $UPSTREAM ($(git rev-parse --short HEAD))."
+  if [[ "$SWITCHED" == true ]]; then
+    echo "Switched to $BRANCH; deploying it."
+  else
+    NOTHING_NEW=true
+  fi
+else
+  echo "Updating $(git rev-parse --short HEAD) -> $(git rev-parse --short "$UPSTREAM") ($BEHIND commit(s))"
+  git pull --ff-only "$REMOTE" "$BRANCH"
+  echo "Now at $(git rev-parse --short HEAD)"
+fi
 
 # `compose ps` identifies project/service containers, regardless of the -f files
 # passed to that command. Recover the deployment's actual file list instead of
@@ -69,6 +93,15 @@ use_lxc=false
 if command -v docker >/dev/null 2>&1; then
   running_container="$(docker compose -f compose.yaml ps --status running -q survng 2>/dev/null || true)"
 fi
+if [[ "$NOTHING_NEW" == true ]]; then
+  if [[ -z "$running_container" ]]; then
+    # Nothing new to deploy; still retry a HomeKit worker build that failed or
+    # was skipped. A rebuilt worker is offered to encoders immediately.
+    build_homekit_worker
+  fi
+  exit 0
+fi
+
 if [[ -n "$running_container" ]]; then
   if [[ "$running_container" == *$'\n'* ]]; then
     echo "Multiple SurvNG containers found; update the intended Compose deployment explicitly." >&2
@@ -124,6 +157,8 @@ if [[ -f frontend/package.json ]] && command -v npm >/dev/null 2>&1; then
     npm run build
   )
 fi
+
+build_homekit_worker
 
 if command -v systemctl >/dev/null 2>&1 && systemctl cat survng.service >/dev/null 2>&1; then
   echo "Restarting survng.service"

@@ -22,6 +22,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
+from . import homekit_build
 from .homekit_nodes import assignment_revision
 
 from .media_sessions import (
@@ -29,10 +30,19 @@ from .media_sessions import (
 )
 
 LOGGER = logging.getLogger(__name__)
-WORKER = Path(__file__).resolve().parents[2] / "homekit-worker/dist/src/camera.js"
+WORKER_ROOT = homekit_build.WORKER_ROOT
+WORKER = WORKER_ROOT / "dist/src/camera.js"
+BUILD_RECHECK_SECONDS = 10.0
 # Local startup can run three 15-second qualification commands per backend
 # (QSV and software), then a 15-second source probe before opening control.sock.
 LOCAL_STARTUP_GRACE_SECONDS = 120
+
+
+def worker_build_problem() -> str | None:
+    """None when the built worker matches this checkout, else a blocking error code."""
+    if not WORKER.is_file():
+        return homekit_build.NOT_BUILT
+    return homekit_build.verify(WORKER_ROOT)
 
 
 def camera_port(camera) -> int:
@@ -226,9 +236,12 @@ class CameraWorker:
                     self._state(state="waiting", error="state_in_use")
                     if self.stopping.wait(1):
                         return
-            if not WORKER.is_file():
-                self._state(state="blocked", error="worker_not_built")
-                return
+            # A rebuild (updater retry or manual) must bring this camera back
+            # without a service restart, so keep checking while blocked.
+            while (build_problem := worker_build_problem()) is not None:
+                self._state(state="blocked", error=build_problem)
+                if self.stopping.wait(BUILD_RECHECK_SECONDS):
+                    return
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
                     probe.bind((self.config.homekit.bind, 0))
@@ -530,6 +543,7 @@ class HomeKitService:
                 for camera in config.cameras
             ]}
         status["nodes"] = self.nodes.public_status(config.cameras)
+        status["workerBuild"] = worker_build_problem()
         return status
 
     def pairing(self, camera_id: str) -> dict:

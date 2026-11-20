@@ -8,6 +8,8 @@ const ERROR_LABELS = {
   software_encoding_not_allowed: "This server needs an application restart to enable hardware-only HomeKit startup.",
   encoding_unavailable: "No permitted HEVC encoder passed its startup test. Check QSV device access or allow software fallback.",
   worker_not_built: "Build the HomeKit worker before enabling cameras.",
+  worker_build_stale: "The HomeKit worker was built from a different checkout. Rebuild it to resume HomeKit.",
+  worker_dependencies_stale: "The HomeKit worker packages do not match its lockfile. Rebuild it to resume HomeKit.",
   node_24_required: "HomeKit requires Node.js 24. Set its executable path below.",
   ffmpeg_pacing_unsupported: "Use a server FFmpeg build that supports -readrate_initial_burst.",
   encoder_unavailable: "FFmpeg needs HEVC encoding plus libopus, AAC, and MJPEG support.",
@@ -231,6 +233,7 @@ export function HomeKitSettings({ config, updateConfig, cameraId = "" }) {
       </div>
     </fieldset>
     <section className="homekit-nodes" aria-label="HomeKit encoders">
+      {status?.workerBuild && (status.enabled || status.nodes?.length) ? <p role="alert" className="settings-help homekit-error">{ERROR_LABELS[status.workerBuild] || "The HomeKit worker build is unavailable."} Until then encoders are not offered an update. After <code>python -m survng.app.homekit_build</code> succeeds, encoders update and cameras resume automatically.</p> : null}
       {status?.nodeError ? <p role="alert" className="settings-help homekit-error">HomeKit encoder state is unavailable. Check its private directory permissions and saved state.</p> : null}
       <div className="telemetry-section-head"><div><h3>Encoders</h3><p>Run the installer once as root in a new container. It checks in here. Apple Home still reaches this server.</p></div><button type="button" disabled={!!busy} onClick={addEncoder}>{busy === "encoder" ? "Working…" : "Add encoder"}</button></div>
       {installer ? <div className="homekit-installer" role="region" aria-label="Encoder installer"><p className="settings-help">This command is shown once and enrolls one encoder.</p><code>{installer}</code><button type="button" onClick={() => setInstaller("")}>Hide installer</button></div> : null}

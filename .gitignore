@@ -54,6 +54,9 @@ frames/
 # TypeScript source for the optional HomeKit protocol worker
 !homekit-worker/src/**/*.ts
 !homekit-worker/test/**/*.ts
+# HomeKit worker builder staging and lock (survng/app/homekit_build.py)
+homekit-worker/.build-*/
+homekit-worker/.build.lock
 *.webm
 *.jpg
 *.jpeg

@@ -26,6 +26,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from . import homekit_build
+
 
 def _private_directory(path: Path) -> None:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -819,6 +821,10 @@ def _dist_signature(root: Path) -> tuple:
 def agent_release(root: Path = WORKER_ROOT) -> tuple[str, bytes]:
     """Content stamp and archive for the encoder program. Rebuilt only when those files change."""
     global _agent_cache
+    # Never offer a bundle built from other sources or packages than this checkout.
+    problem = homekit_build.verify(root)
+    if problem is not None:
+        raise RuntimeError(problem)
     signature = _dist_signature(root)
     with _release_lock:
         if _agent_cache and _agent_cache[0] == signature:

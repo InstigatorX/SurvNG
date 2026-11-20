@@ -82,8 +82,13 @@ HomeKit Off closes its pipelines and clears its ring without changing SurvNG's
 own recording or detection settings. Talkback remains unavailable.
 
 Remote encoder media uploads carry the current camera assignment revision.
-When upgrading the server, include the matching encoder agent build in the
-release. Older agents can still sync and receive the agent update, but their
+Both SurvNG updaters (Admin and `scripts/update-from-git.sh`) rebuild this
+worker when the checkout has built it before; run
+`python -m survng.app.homekit_build` after a manual branch switch. Builds are
+staged and stamped with a fingerprint of their inputs. While the stamp does not
+match the checkout or the installed packages differ from the lockfile, HomeKit
+is blocked and encoders are not offered the bundle; a failed build keeps the
+previous bundle and leaves HomeKit blocked until a rebuild succeeds. Older agents can still sync and receive the agent update, but their
 media uploads are rejected until they update. Allow for a brief remote media
 interruption during that handoff.
 

@@ -63,14 +63,14 @@ try {
   let mode = "ready", resets = 0, statusRequests = 0, delayPairing = false;
   const olderVersion = "1".repeat(64);
   const availableVersion = "2".repeat(64);
-  let gateState = "outdated", rejectSync = false, syncRequests = 0;
+  let gateState = "outdated", rejectSync = false, syncRequests = 0, workerBuild = null;
   let initialStatus;
   const waitForInitial = new Promise(resolve => { initialStatus = resolve; });
   await page.route("**/api/homekit/status", async route => {
     statusRequests++;
     if (statusRequests === 1) await waitForInitial;
     await route.fulfill({ status: mode === "error" ? 503 : 200, contentType: "application/json",
-      body: JSON.stringify({ enabled: true, nodes: [
+      body: JSON.stringify({ enabled: true, workerBuild, nodes: [
         { id: "abc123abc123abcd", name: "Gate box", online: true, hardware: "qsv", cameras: [],
           runningVersion: gateState === "current" ? availableVersion : olderVersion, availableVersion, updateState: gateState },
         { id: "offline", name: "Offline box", online: false, runningVersion: olderVersion, availableVersion, updateState: "outdated" },
@@ -164,6 +164,10 @@ try {
   await gate.getByRole("status").filter({ hasText: "Encoder update failed" }).waitFor();
   assert.equal(await gateSync.isEnabled(), true);
   assert.equal(syncRequests, 3);
+  workerBuild = "worker_build_stale";
+  await page.getByRole("alert").filter({ hasText: "built from a different checkout" }).waitFor();
+  workerBuild = null;
+  await page.getByRole("alert").filter({ hasText: "built from a different checkout" }).waitFor({ state: "detached" });
   await page.getByRole("button", { name: "Add encoder" }).click();
   await page.getByText("curl -fsSL 'https://survng.example/api/homekit/enroll/token' | sh").waitFor();
   await page.getByRole("button", { name: "Hide installer" }).click();

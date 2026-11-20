@@ -167,6 +167,7 @@ def test_agent_release_digest_is_stable_across_cold_builds(tmp_path, monkeypatch
     (tmp_path / "dist/src").mkdir(parents=True)
     (tmp_path / "dist/src/agent.js").write_text("export {}")
     (tmp_path / "node_modules").mkdir()
+    monkeypatch.setattr(homekit_nodes.homekit_build, "verify", lambda _root: None)
     monkeypatch.setattr(homekit_nodes.time, "time", lambda: 100.0)
     first = homekit_nodes.agent_release(tmp_path)
     monkeypatch.setattr(homekit_nodes, "_agent_cache", None)

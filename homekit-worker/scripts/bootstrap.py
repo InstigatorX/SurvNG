@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Build the audited HAP revision before installing the locked worker packages."""
+"""Build the audited HAP revision, then build the worker with SurvNG's shared builder.
+
+`--hap-only` stops after packing HAP; the shared builder uses it when the
+pinned package is missing.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -8,6 +12,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import urllib.request
 
@@ -20,7 +25,7 @@ def run(*args: str, cwd: Path = ROOT) -> None:
     subprocess.run(args, cwd=cwd, check=True)
 
 
-def main() -> None:
+def prepare_hap() -> None:
     major = subprocess.check_output(["node", "-p", "process.versions.node.split('.')[0]"], text=True).strip()
     if major != "24":
         raise SystemExit("Node.js 24 is required; use npm exec --package=node@24 -- python3 scripts/bootstrap.py")
@@ -42,8 +47,17 @@ def main() -> None:
         ["npm", "pack", "--ignore-scripts", "--json", "--pack-destination", str(cache)], cwd=source, text=True,
     ))[0]["filename"]
     (cache / packed).replace(cache / "hap-nodejs.tgz")
-    run("npm", "ci" if (ROOT / "package-lock.json").exists() else "install", "--ignore-scripts", "--no-audit", "--no-fund")
-    run("npm", "run", "build")
+
+
+def main() -> None:
+    prepare_hap()
+    if "--hap-only" in sys.argv[1:]:
+        return
+    # One builder for bootstrap, updaters, and PR testing: staged, verified, and
+    # stamped with the input fingerprint the server checks before serving it.
+    node = shutil.which("node")
+    run(sys.executable, "-m", "survng.app.homekit_build", "--root", str(ROOT), "--force",
+        *(["--node", node] if node else []), cwd=ROOT.parent)
 
 
 if __name__ == "__main__":

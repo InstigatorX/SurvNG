@@ -108,3 +108,67 @@ esac
     result = subprocess.run(command,
                             cwd=root, env=environment, capture_output=True, text=True, timeout=20)
     return result, log.read_text().splitlines(), root
+
+
+def _run_native_update(tmp_path, *, behind=0, switched=False, build_exit=0):
+    """Native checkout (no Docker) with recording stand-ins for git and Python."""
+    repo = Path(__file__).resolve().parents[1]
+    root = tmp_path / "native checkout"
+    for directory in (root / ".git", root / "scripts", root / "bin", root / "homekit-worker" / "dist"):
+        directory.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(repo / "scripts" / "update-from-git.sh", root / "scripts" / "update-from-git.sh")
+    log = root / "commands.log"
+    current = "feature" if switched else "v1.2"
+    (root / "bin" / "git").write_text(f'''#!/bin/sh
+printf 'git %s\\n' "$*" >> "$UPDATE_TEST_LOG"
+case "$*" in
+  'rev-parse --abbrev-ref HEAD') if grep -q '^git switch' "$UPDATE_TEST_LOG"; then echo v1.2; else echo {current}; fi;;
+  'rev-list --left-right --count HEAD...origin/v1.2') printf '0\\t{behind}\\n';;
+  'rev-parse --short HEAD'|'rev-parse --short origin/v1.2'|'rev-parse HEAD') echo 1111111;;
+  *) exit 0;;
+esac
+''')
+    (root / "bin" / "python3").write_text(f'''#!/bin/sh
+printf 'python3 %s\\n' "$*" >> "$UPDATE_TEST_LOG"
+exit {build_exit}
+''')
+    for executable in (root / "bin").iterdir():
+        executable.chmod(0o700)
+    environment = dict(os.environ, PATH=f"{root / 'bin'}:/usr/bin:/bin", UPDATE_TEST_LOG=str(log),
+                       SURVNG_UPDATE_BRANCH="v1.2")
+    environment.pop("SURVNG_UPDATE_REMOTE", None)
+    # Hide host tools that would turn this into a Docker or systemd update.
+    for tool in ("docker", "systemctl", "npm"):
+        (root / "bin" / tool).write_text("#!/bin/sh\nexit 127\n")
+        (root / "bin" / tool).chmod(0o700)
+    result = subprocess.run(["/bin/bash", str(root / "scripts" / "update-from-git.sh")],
+                            cwd=root, env=environment, capture_output=True, text=True, timeout=20)
+    return result, log.read_text().splitlines()
+
+
+HOMEKIT_BUILD = "python3 -m survng.app.homekit_build --root homekit-worker --if-present"
+
+
+def test_up_to_date_native_update_retries_the_homekit_build_only(tmp_path):
+    result, commands = _run_native_update(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert HOMEKIT_BUILD in commands
+    assert not any(command.startswith("git pull") for command in commands)
+    assert "Native update complete" not in result.stdout
+
+
+def test_switching_to_an_up_to_date_branch_still_deploys_it(tmp_path):
+    result, commands = _run_native_update(tmp_path, switched=True)
+    assert result.returncode == 0, result.stderr
+    assert "git switch v1.2" in commands
+    assert HOMEKIT_BUILD in commands
+    assert "Native update complete" in result.stdout
+
+
+def test_failed_homekit_build_warns_without_failing_the_update(tmp_path):
+    result, commands = _run_native_update(tmp_path, behind=1, build_exit=1)
+    assert result.returncode == 0, result.stderr
+    assert "git pull --ff-only origin v1.2" in commands
+    assert HOMEKIT_BUILD in commands
+    assert "HomeKit stays blocked until it is rebuilt" in result.stderr
+    assert "Native update complete" in result.stdout

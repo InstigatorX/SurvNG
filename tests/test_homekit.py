@@ -73,6 +73,7 @@ def test_worker_control_startup_and_health_deadlines(
     fake_worker = tmp_path / "camera.js"
     fake_worker.touch()
     monkeypatch.setattr(homekit, "WORKER", fake_worker)
+    monkeypatch.setattr(homekit, "worker_build_problem", lambda: None)
     monkeypatch.setattr(homekit, "time", SimpleNamespace(monotonic=lambda: elapsed))
     monkeypatch.setattr(homekit, "select", SimpleNamespace(select=poll_pipe))
     # Keep preflight isolated from the host LAN address and installed tools.
@@ -120,6 +121,7 @@ def test_worker_ffmpeg_pacing_preflight(tmp_path, monkeypatch, help_output, expe
     built_worker = tmp_path / "camera.js"
     built_worker.touch()
     monkeypatch.setattr(homekit, "WORKER", built_worker)
+    monkeypatch.setattr(homekit, "worker_build_problem", lambda: None)
     monkeypatch.setattr(homekit.socket, "socket", MagicMock())
 
     def run(args, **_kwargs):

@@ -24,6 +24,8 @@ FETCH_TIMEOUT_SECONDS = 120.0
 PULL_TIMEOUT_SECONDS = 180.0
 PIP_TIMEOUT_SECONDS = 900.0
 FRONTEND_TIMEOUT_SECONDS = 900.0
+# Exceeds the builder's three per-step limits so its own timeouts fire first.
+HOMEKIT_BUILD_TIMEOUT_SECONDS = 3000.0
 HELPER_TIMEOUT_SECONDS = 3600.0
 MAX_COMMIT_PREVIEW = 12
 _URL_USERINFO = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]+@")
@@ -303,8 +305,10 @@ class ProductUpdateService:
         repo_root: Path | None = None,
         request_server_restart: Callable[[], dict[str, Any]] | None = None,
         active_storage_tasks: Callable[[], Sequence[str]] | None = None,
+        homekit_node_path: Callable[[], str | None] | None = None,
     ) -> None:
         self._configured_root = repo_root
+        self._homekit_node_path = homekit_node_path or (lambda: None)
         self._request_server_restart = request_server_restart
         self._active_storage_tasks = active_storage_tasks or (lambda: ())
         self._lock = threading.RLock()
@@ -733,6 +737,41 @@ class ProductUpdateService:
                 "phase": "Host helper finished",
             }
 
+    def _build_homekit_worker(self, repo_root: Path) -> None:
+        """Rebuild the HomeKit worker for the new checkout when this install uses it.
+
+        A failed build does not fail the update: the server's freshness check
+        keeps HomeKit blocked, and the warning stays in the update log.
+        """
+        worker = repo_root / "homekit-worker"
+        if not any((worker / name).exists() for name in ("dist", "node_modules")):
+            return
+        self._append_log("Building HomeKit worker")
+        command = [sys.executable, "-m", "survng.app.homekit_build", "--root", str(worker), "--if-present"]
+        try:
+            node = self._homekit_node_path()
+        except Exception:  # Configuration is optional here; the builder still finds Node 24.
+            LOGGER.warning("HomeKit Node.js path is unavailable for the update build", exc_info=True)
+            node = None
+        if node:
+            command += ["--node", str(node)]
+        try:
+            completed = subprocess.run(command, cwd=repo_root, check=False, capture_output=True, text=True,
+                timeout=HOMEKIT_BUILD_TIMEOUT_SECONDS)
+        except (OSError, subprocess.SubprocessError) as error:
+            detail = str(error)
+        else:
+            if completed.returncode == 0:
+                lines = completed.stdout.strip().splitlines()
+                self._append_log((lines[-1] if lines else "HomeKit worker build finished")[:240])
+                return
+            detail = (completed.stderr or completed.stdout or "build failed").strip()
+        warning = f"HomeKit worker build failed; HomeKit stays blocked until it is rebuilt: {detail[-400:]}"
+        LOGGER.warning("%s", warning)
+        self._append_log(warning[:240])
+        with self._lock:
+            self._state = {**self._state, "warnings": [*(self._state.get("warnings") or []), warning]}
+
     def _checkout_target_branch(self, repo_root: Path, branch: str) -> None:
         current = _git_output(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
         if current == branch:
@@ -855,6 +894,8 @@ class ProductUpdateService:
                 if build.returncode != 0:
                     detail = (build.stderr or build.stdout or "npm build failed").strip()
                     raise RuntimeError(detail[-500:])
+
+        self._build_homekit_worker(repo_root)
 
         if self._request_server_restart is None:
             with self._lock:
