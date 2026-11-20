@@ -1,13 +1,17 @@
 """Regression coverage for remote encoder ownership and input boundaries."""
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from fastapi import HTTPException, Request, Response
+from pydantic import ValidationError
 
+from survng.app import homekit_nodes
 from survng.app.homekit import HomeKitService
-from survng.app.homekit_routes import HomeKitRouteDependencies, create_homekit_router
+from survng.app.homekit_routes import HomeKitRouteDependencies, NodeReport, create_homekit_router
 from survng.app.media_sessions import MediaSessionManager
+from survng.app.security import is_public_api_path, required_api_scope
 from tests.test_homekit import configuration, _profile
 
 
@@ -46,6 +50,136 @@ def test_assigned_encoder_cannot_be_removed(remote):
         endpoints["/api/homekit/nodes/{node_id}"](node["id"], Response())
     assert error.value.status_code == 409
     assert node["id"] in service.nodes.nodes
+
+
+def test_encoder_version_reports_update_status_independently_of_liveness(remote, monkeypatch):
+    service, node, _, _ = remote
+    available = "a" * 64
+    release = Mock(return_value=(available, b"archive"))
+    monkeypatch.setattr(homekit_nodes, "agent_release", release)
+
+    assert service.status()["nodes"][0] == {
+        "id": node["id"], "name": "review", "online": True, "hardware": "qsv",
+        "lastSeen": int(node["lastSeen"]), "cameras": ["porch"],
+        "runningVersion": None, "availableVersion": available, "updateState": "unknown",
+    }
+    for running, state in (("b" * 64, "outdated"), (available, "current")):
+        service.nodes.update_report(node["id"], {"runningVersion": running})
+        status = service.status()["nodes"][0]
+        assert status["online"]
+        assert status["runningVersion"] == running
+        assert status["updateState"] == state
+    node["lastSeen"] = 0
+    assert service.status()["nodes"][0]["online"] is False
+    assert service.status()["nodes"][0]["updateState"] == "current"
+    release.side_effect = FileNotFoundError
+    status = service.status()["nodes"][0]
+    assert status["availableVersion"] is None
+    assert status["updateState"] == "unavailable"
+
+
+def test_resync_requests_are_scoped_and_retryable(remote, monkeypatch):
+    service, node, secret, endpoints = remote
+    available = "a" * 64
+    release = Mock(return_value=(available, b"archive"))
+    monkeypatch.setattr(homekit_nodes, "agent_release", release)
+    clock = Mock(return_value=100.0)
+    monkeypatch.setattr(homekit_nodes.time, "monotonic", clock)
+    real_sync = service.nodes.sync
+    monkeypatch.setattr(service.nodes, "sync", lambda node, report, assign, timeout: real_sync(node, report, assign, 0))
+    resync = endpoints["/api/homekit/nodes/{node_id}/resync"]
+    sync = endpoints["/api/homekit/nodes/sync"]
+    response = Response()
+    node_request = request(secret, [])
+    path = f"/api/homekit/nodes/{node['id']}/resync"
+    assert required_api_scope("POST", path) == "admin"
+    assert not is_public_api_path("POST", path)
+    with pytest.raises(HTTPException) as error:
+        resync("unknown", response)
+    assert error.value.status_code == 404
+
+    generation = service.nodes.generation
+    assert resync(node["id"], response) == {"requested": True}
+    assert response.headers["cache-control"] == "no-store"
+    assert service.nodes.generation > generation
+    first = sync(NodeReport(), node_request)["syncRequest"]
+    assert len(first) == 32
+    assert service.status()["nodes"][0]["updateState"] == "syncing"
+    enrollment = service.nodes.begin_enrollment("http://localhost")
+    token = enrollment["command"].split("/enroll/")[1].split("'")[0]
+    other = service.nodes.complete_enrollment(token, "other")
+    assert "syncRequest" not in sync(NodeReport(), request(other["secret"], []))
+    assert resync(node["id"], response) == {"requested": True}
+    assert sync(NodeReport(failedSyncRequest="0" * 32), node_request)["syncRequest"] == first
+    assert "syncRequest" not in sync(NodeReport(failedSyncRequest=first), node_request)
+    assert service.status()["nodes"][0]["updateState"] == "failed"
+
+    assert resync(node["id"], response) == {"requested": True}
+    second = sync(NodeReport(failedSyncRequest=first), node_request)["syncRequest"]
+    assert second != first
+    clock.return_value += 3600
+    assert "syncRequest" not in sync(NodeReport(), node_request)
+    assert service.status()["nodes"][0]["updateState"] == "failed"
+    assert resync(node["id"], response) == {"requested": True}
+    third = sync(NodeReport(), node_request)["syncRequest"]
+    assert third != second
+
+    available = "b" * 64
+    release.return_value = (available, b"archive-b")
+    assert "syncRequest" not in sync(NodeReport(), node_request)
+    assert resync(node["id"], response) == {"requested": True}
+    assert sync(NodeReport(), node_request)["syncRequest"] != third
+
+    assert "syncRequest" not in sync(NodeReport(runningVersion=available), node_request)
+    assert service.status()["nodes"][0]["updateState"] == "current"
+    with pytest.raises(HTTPException) as error:
+        resync(node["id"], response)
+    assert error.value.status_code == 409
+    node["lastSeen"] = 0
+    with pytest.raises(HTTPException) as error:
+        resync(node["id"], response)
+    assert error.value.status_code == 409
+    service.nodes.update_report(node["id"], {})
+    release.side_effect = FileNotFoundError
+    with pytest.raises(HTTPException) as error:
+        resync(node["id"], response)
+    assert error.value.status_code == 409
+
+
+def test_agent_archive_request_can_pin_release(remote, monkeypatch):
+    _, _, secret, endpoints = remote
+    available = "a" * 64
+    monkeypatch.setattr(homekit_nodes, "agent_release", lambda: (available, b"archive"))
+    download = endpoints["/api/homekit/nodes/agent"]
+    node_request = request(secret, [])
+    assert download(node_request).body == b"archive"
+    assert download(node_request, release=available).body == b"archive"
+    with pytest.raises(HTTPException) as error:
+        download(node_request, release="b" * 64)
+    assert error.value.status_code == 409
+    with pytest.raises(HTTPException) as error:
+        download(request("invalid", []), release=available)
+    assert error.value.status_code == 401
+
+
+def test_agent_release_digest_is_stable_across_cold_builds(tmp_path, monkeypatch):
+    (tmp_path / "package.json").write_text("{}")
+    (tmp_path / "dist/src").mkdir(parents=True)
+    (tmp_path / "dist/src/agent.js").write_text("export {}")
+    (tmp_path / "node_modules").mkdir()
+    monkeypatch.setattr(homekit_nodes.time, "time", lambda: 100.0)
+    first = homekit_nodes.agent_release(tmp_path)
+    monkeypatch.setattr(homekit_nodes, "_agent_cache", None)
+    monkeypatch.setattr(homekit_nodes.time, "time", lambda: 200.0)
+    assert homekit_nodes.agent_release(tmp_path) == first
+    (tmp_path / "dist/src/agent.js").write_text("export const changed = 1")
+    assert homekit_nodes.agent_release(tmp_path)[0] != first[0]
+
+
+@pytest.mark.parametrize("invalid", [{"runningVersion": "A" * 64}, {"failedSyncRequest": "g" * 32}, {"runningVersion": "1" * 65}])
+def test_encoder_report_rejects_invalid_version_metadata(invalid):
+    with pytest.raises(ValidationError):
+        NodeReport(**invalid)
 
 
 @pytest.mark.parametrize("change", ["reassign", "revoke", "power_off", "same_node_source"])

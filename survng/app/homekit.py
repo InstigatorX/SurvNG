@@ -494,15 +494,17 @@ class HomeKitService:
 
     def status(self) -> dict:
         with self.lock:
-            return {"enabled": self.config.homekit.enabled, "experimental": True,
+            config = self.config
+            status = {"enabled": config.homekit.enabled, "experimental": True,
                 "nodeError": self.nodes.error,
-                "nodes": self.nodes.public_status(self.config.cameras),
                 "cameras": [
                 {"id": camera.id, "name": camera.name, "enabled": camera.homekit.enabled,
                  "encoder": camera.homekit.encoder,
                  **(self.workers[camera.id].status() if camera.id in self.workers else {"state": "disabled", "paired": None, "port": camera_port(camera)})}
-                for camera in self.config.cameras
+                for camera in config.cameras
             ]}
+        status["nodes"] = self.nodes.public_status(config.cameras)
+        return status
 
     def pairing(self, camera_id: str) -> dict:
         with self.lock:

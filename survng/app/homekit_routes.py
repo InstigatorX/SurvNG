@@ -32,6 +32,8 @@ class NodeReport(BaseModel):
     backends: dict = Field(default_factory=dict, max_length=1024)
     fps: dict = Field(default_factory=dict, max_length=1024)
     revisions: dict = Field(default_factory=dict, max_length=1024)
+    runningVersion: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    failedSyncRequest: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
 
     model_config = {"extra": "ignore"}
 
@@ -114,6 +116,17 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
             raise HTTPException(status_code=409, detail="Move this encoder's cameras back to this server first") from None
         return {"removed": True}
 
+    @router.post("/api/homekit/nodes/{node_id}/resync")
+    def resync_node(node_id: str, response: Response) -> dict:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            deps.get_manager().homekit.nodes.request_sync(node_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="HomeKit encoder was not found") from None
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
+        return {"requested": True}
+
     @router.get("/api/homekit/enroll/{token}")
     def enrollment_script(token: str, request: Request) -> Response:
         try:
@@ -138,7 +151,11 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
             payload = service.nodes.sync(node, report.model_dump(), service.node_assignments, timeout=10)
         except (KeyError, OSError, RuntimeError):
             raise HTTPException(status_code=401, detail="encoder authentication required") from None
-        payload["releases"] = node_releases(service.config.ffmpeg_path)
+        releases = node_releases(service.config.ffmpeg_path)
+        payload["releases"] = releases
+        sync_request = service.nodes.pending_sync_request(node, releases.get("agent"))
+        if sync_request is not None:
+            payload["syncRequest"] = sync_request
         try:
             payload["ingest"] = media_ingest_root(request.scope.get("server"), service.config.homekit.bind, service.config.base_path)
         except (TypeError, ValueError):
@@ -184,14 +201,16 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         return {"accepted": True}
 
     @router.get("/api/homekit/nodes/agent")
-    def node_agent(request: Request) -> Response:
+    def node_agent(request: Request, release: str | None = None) -> Response:
         service = deps.get_manager().homekit
         _node(service, request)
         try:
             from .homekit_nodes import agent_release
-            payload = agent_release()[1]
-        except (OSError, FileNotFoundError, RuntimeError):
+            version, payload = agent_release()
+        except (OSError, RuntimeError):
             raise HTTPException(status_code=409, detail="HomeKit encoder agent is not built") from None
+        if release is not None and release != version:
+            raise HTTPException(status_code=409, detail="HomeKit encoder release has changed") from None
         return Response(payload, media_type="application/gzip", headers={"Cache-Control": "no-store"})
 
     @router.get("/api/homekit/nodes/ffmpeg")
