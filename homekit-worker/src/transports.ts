@@ -9,6 +9,7 @@ import { type MediaSource, RtpFeed, tiers, udp, type Tier } from './media.js';
 import { SecureVideoSFrame } from './vendor/sframe.js';
 import { HevcAccessUnitAssembler, SFrameRtpPacketizer } from './vendor/sframeRtp.js';
 import { ReceiverFeedback } from './diagnostics.js';
+import { preserveEarlyClientHello } from './early-dtls.js';
 
 type Crypto = { cryptoSuite: number; masterKey: Buffer; masterSalt: Buffer };
 export const STREAM_ID_URI = 'urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id';
@@ -137,6 +138,7 @@ interface RemoteSession {
   pc: RTCPeerConnection; frame: SecureVideoSFrame; feed?: RtpFeed; closed: boolean;
   timeout: NodeJS.Timeout; offerReady: boolean; signaling?: Promise<unknown>;
   stopping?: Promise<void>;
+  earlyDtls: ReturnType<typeof preserveEarlyClientHello>;
 }
 
 /**
@@ -170,6 +172,7 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
     lastIceState: 'idle', lastDtlsState: 'idle', lastFailure: '', mediaReady: 0,
     lastOfferTimeMs: 0, lastConnectTimeMs: 0, lastLocalCandidates: 0, lastRemoteCandidates: 0,
     lastVideoTier: null as { width: number; height: number; peakBitrate: number } | null,
+    earlyClientHellosReplayed: 0,
     selectedPair: null as { localType: string | null; remoteType: string | null; family: number } | null };
   readonly feedback = { video: new ReceiverFeedback(90000), audio: new ReceiverFeedback(48000) };
   constructor(private media: MediaSource, private allowed: () => boolean, private address: string,
@@ -190,7 +193,10 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
     }
     // Apple uses BUNDLE. max-compat gathers a second transport which this werift
     // revision loses when applying a bundled answer, leaving its UDP sockets open.
+    let earlyDtls: ReturnType<typeof preserveEarlyClientHello> | undefined;
     const pc = new RTCPeerConnection({ bundlePolicy: 'max-bundle', iceServers: [], iceUseIpv6: false,
+      // The candidate hook exposes source-aware UDP events before ICE selects a pair.
+      iceFilterCandidatePair: pair => { earlyDtls?.observe(pair); return true; },
       iceAdditionalHostAddresses: [this.address], iceInterfaceAddresses: { udp4: this.address },
       headerExtensions: { video: [new RTCRtpHeaderExtensionParameters({ id: 1, uri: STREAM_ID_URI })], audio: [] }, codecs: {
       video: [new RTCRtpCodecParameters({ mimeType: 'video/H265', clockRate: 90000, payloadType: 99,
@@ -211,10 +217,11 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
       this.counters.lastFailure = reason;
       void this.endSession(id).catch(() => console.error('HomeKit WebRTC session cleanup failed.'));
     };
-    const session: RemoteSession = { pc, frame: new SecureVideoSFrame(true), closed: false, offerReady: false,
+    const transport = video.dtlsTransport;
+    earlyDtls = preserveEarlyClientHello(transport, () => this.counters.earlyClientHellosReplayed++);
+    const session: RemoteSession = { pc, earlyDtls, frame: new SecureVideoSFrame(true), closed: false, offerReady: false,
       timeout: setTimeout(() => fail('negotiation_timeout'), 60_000) };
     this.sessions.set(id, session);
-    const transport = video.dtlsTransport;
     this.counters.lastState = pc.connectionState;
     this.counters.lastIceState = pc.iceConnectionState;
     this.counters.lastDtlsState = transport.state;
@@ -371,6 +378,7 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
     if (session.stopping) return session.stopping;
     if (session.closed) return; // close() can emit synchronously before the promise is assigned.
     session.closed = true; clearTimeout(session.timeout);
+    session.earlyDtls.stop();
     session.stopping = (async () => {
       try { await session.feed?.stop(); }
       finally {

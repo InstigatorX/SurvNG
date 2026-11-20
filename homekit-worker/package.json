@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@homebridge/hap-nodejs": "file:.cache/hap-nodejs.tgz",
-    "werift": "0.26.0"
+    "werift": "0.28.0"
   },
   "devDependencies": {
     "@types/node": "24.10.1",
