@@ -3,6 +3,7 @@ import { isAbsolute, join } from 'node:path';
 import { isIPv4 } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { fstatSync } from 'node:fs';
+import { readFile, writeFile } from 'node:fs/promises';
 
 import { Accessory, Categories, Characteristic, HAPStorage, Service,
   StreamTierVideoCodec, StreamTierAudioSampleRate, StreamTierAudioBitDepth, MediaContainerType,
@@ -170,6 +171,7 @@ async function main(): Promise<void> {
     // Hub activity, as in the protocol lab: allowlisted counters and per-characteristic
     // tallies only. Never retain characteristic values, pairing material, SDP, or addresses.
     const requests = { accessories: 0, reads: 0, writes: 0, resources: 0, lastAt: 0 };
+    let liveTierRefresh: 'unchanged' | 'advertised' | 'unavailable' = 'unchanged';
     const characteristics: Record<string, { reads: number; writes: number; subscriptions: number }> = {};
     control = await controlServer(join(state, 'control.sock'), (method, params) => {
       if (method === 'status') return { schemaVersion: 1, mode: 'camera', acceptance: 'experimental',
@@ -177,7 +179,7 @@ async function main(): Promise<void> {
         localSessions: local!.sessions.size, remoteSessions: remote!.sessions.size, remoteControllerSessions: controller!.activeWebRTCSessions.length,
         homeKitActive: cameraAllowed(), recording: { ...recording!.status(), sharedTier: hksv.sharedTier?.identifier ?? null }, media: { ...media!.counters, lastError: media!.lastError },
         encoder: media!.encoderStatus,
-        liveTiers: live.map(tier => tier.identifier),
+        liveTiers: live.map(tier => tier.identifier), liveTierRefresh,
         localMedia: { sent: local!.sent, ...local!.counters, negotiation: local!.negotiation ?? null,
           feedback: { video: local!.feedback.video.stats, audio: local!.feedback.audio.stats } },
         remoteMedia: { ...remote!.counters, videoFeedback: remote!.feedback.video.stats, audioFeedback: remote!.feedback.audio.stats },
@@ -205,6 +207,30 @@ async function main(): Promise<void> {
       }
       throw new Error('unknown control method');
     });
+    // Tier lists are characteristic values, which HAP leaves out of the
+    // configuration hash, so changing them alone never prompts controllers to
+    // refetch. Bump the configuration number once when the advertised live
+    // tiers change, after the first announcement is up, and re-advertise.
+    const liveSignature = JSON.stringify(live.map(({ identifier, width, height, frameRate, peakBitrate }) =>
+      [identifier, width, height, frameRate, peakBitrate]));
+    const signaturePath = join(state, 'live-tiers.json');
+    if (await readFile(signaturePath, 'utf8').catch(() => undefined) !== liveSignature) {
+      accessory.once('advertised', () => {
+        const hap = accessory as unknown as { _accessoryInfo?: { configVersion: number; save(): void };
+          _advertiser?: { updateAdvertisement(silent?: boolean): unknown } };
+        void (async () => {
+          if (!hap._accessoryInfo || !hap._advertiser) throw new Error('advertiser unavailable');
+          hap._accessoryInfo.configVersion = hap._accessoryInfo.configVersion % 0xffff + 1;
+          hap._accessoryInfo.save();
+          await hap._advertiser.updateAdvertisement();
+          await writeFile(signaturePath, liveSignature, { mode: 0o600 });
+          liveTierRefresh = 'advertised';
+        })().catch(() => {
+          liveTierRefresh = 'unavailable';
+          console.error('SurvNG HomeKit could not advertise a configuration change for the live tiers.');
+        });
+      });
+    }
     await accessory.publish({ username: saved.username, pincode: saved.pincode, category: Categories.IP_CAMERA, port, bind: address });
     const countCharacteristics = (items: { aid: number; iid: number; value?: unknown; ev?: boolean }[], operation: 'reads' | 'writes') => {
       for (const item of items) {
