@@ -10,6 +10,7 @@ import { Accessory, Categories, Characteristic, HAPStorage, Service,
 import { controlServer, identity, privateDirectory } from './control.js';
 import { HomeKitMotionController, motionZonesBlockUnlocatedMotion } from './homekit-motion.js';
 import { LabRecording } from './fragments.js';
+import { serviceStatus } from './diagnostics.js';
 import { LocalStreams, RemoteStreams } from './transports.js';
 import { probeFrame, qualifyEncoding, selectEncoding, streamProfile, recordingProfile, EncodingUnavailableError, type VideoEncoding } from './encoding.js';
 import type { Tier } from './media.js';
@@ -163,6 +164,10 @@ async function main(): Promise<void> {
       recording!.setAudio(controller!.recordingAudioActive);
     });
     producerRetry = setInterval(() => recording!.reconcile(), 5000);
+    // Hub activity, as in the protocol lab: allowlisted counters and per-characteristic
+    // tallies only. Never retain characteristic values, pairing material, SDP, or addresses.
+    const requests = { accessories: 0, reads: 0, writes: 0, resources: 0, lastAt: 0 };
+    const characteristics: Record<string, { reads: number; writes: number; subscriptions: number }> = {};
     control = await controlServer(join(state, 'control.sock'), (method, params) => {
       if (method === 'status') return { schemaVersion: 1, mode: 'camera', acceptance: 'experimental',
         paired: !!accessory!._accessoryInfo?.paired(), childProcesses: media!.children.size,
@@ -174,6 +179,16 @@ async function main(): Promise<void> {
         remoteMedia: { ...remote!.counters, videoFeedback: remote!.feedback.video.stats, audioFeedback: remote!.feedback.audio.stats },
         motion: { enabled: motionEnabled(), permitted: motionPermitted(), detected: motionPermitted() && recording!.reportingMotion() },
         zonesBlockMotion: zonesBlockMotion(),
+        hub: { ...requests, lastAt: undefined, lastRequestAgeSeconds: requests.lastAt ? Math.round((Date.now() - requests.lastAt) / 1000) : null,
+          characteristics },
+        services: {
+          globalOperatingMode: serviceStatus(controller!.globalOperatingModeService),
+          recordingOperatingMode: serviceStatus(accessory!.getService(Service.CameraOperatingMode)),
+          localStreaming: serviceStatus(controller!.multiTierStreamManagementService),
+          remoteStreaming: serviceStatus(controller!.webrtcStreamManagementService),
+        },
+        localAllowed: controller!.streamingAllowed(controller!.multiTierStreamManagementService),
+        remoteAllowed: controller!.streamingAllowed(controller!.webrtcStreamManagementService),
       };
       if (method === 'pairing') return { setupCode: saved.pincode, setupUri: accessory!.setupURI() };
       if (method === 'motion') {
@@ -187,6 +202,25 @@ async function main(): Promise<void> {
       throw new Error('unknown control method');
     });
     await accessory.publish({ username: saved.username, pincode: saved.pincode, category: Categories.IP_CAMERA, port, bind: address });
+    const countCharacteristics = (items: { aid: number; iid: number; value?: unknown; ev?: boolean }[], operation: 'reads' | 'writes') => {
+      for (const item of items) {
+        if (item.aid !== 1) continue;
+        const characteristic = accessory!.services.flatMap(service => service.characteristics)
+          .find(candidate => candidate.iid === item.iid);
+        if (!characteristic) continue;
+        const count = characteristics[characteristic.displayName] ??= { reads: 0, writes: 0, subscriptions: 0 };
+        if (operation === 'reads' || Object.hasOwn(item, 'value')) count[operation]++;
+        if (operation === 'writes' && item.ev !== undefined) count.subscriptions++;
+      }
+    };
+    accessory._server!.on('accessories', () => { requests.accessories++; requests.lastAt = Date.now(); });
+    accessory._server!.on('get-characteristics', (_connection, request) => {
+      requests.reads++; requests.lastAt = Date.now(); countCharacteristics(request.ids, 'reads');
+    });
+    accessory._server!.on('set-characteristics', (_connection, request) => {
+      requests.writes++; requests.lastAt = Date.now(); countCharacteristics(request.characteristics, 'writes');
+    });
+    accessory._server!.on('request-resource', () => { requests.resources++; requests.lastAt = Date.now(); });
     console.error('SurvNG HomeKit camera ready.');
   } catch (error) {
     if (!closing) exitStatus = error instanceof EncodingUnavailableError ? 42 : 1;

@@ -158,6 +158,8 @@ test('real HEVC fixtures, fMP4 prebuffer, local SRTP, and remote encrypted media
         assert.deepEqual(local.counters.tierRequests, { 3: 1, 2: 1 });
         assert.equal(local.counters.tierSwitchesRejected, 1);
         assert.equal(local.counters.startRequests, 2);
+        assert.equal(local.counters.prepareRequests, 1);
+        assert.equal(local.counters.prepareFailures, 0);
         const feedbackCipher = new SrtcpSession({ profile: 1, keys: {
           localMasterKey: parameters.masterKey, localMasterSalt: parameters.masterSalt,
           remoteMasterKey: parameters.masterKey, remoteMasterSalt: parameters.masterSalt,

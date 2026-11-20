@@ -31,7 +31,7 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
   // Which tier the controller asks for, and whether it asks again mid-session.
   // A home hub relaying a remote viewer uses this path too, so these show the
   // tier it chose for that relay. No addresses or keys are recorded.
-  readonly counters = { started: 0, failures: 0, startRequests: 0, tierSwitchesRejected: 0,
+  readonly counters = { prepareRequests: 0, prepareFailures: 0, started: 0, failures: 0, startRequests: 0, tierSwitchesRejected: 0,
     tierRequests: {} as Record<string, number>,
     lastTier: null as { identifier: number; width: number; height: number; frameRate: number; peakBitrate: number } | null };
   readonly feedback = { video: new ReceiverFeedback(90000), audio: new ReceiverFeedback(48000), invalidPackets: 0 };
@@ -39,6 +39,11 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
   negotiation?: { videoTier: number; audioTier?: number; videoSSRCMatchesPrepared: boolean; audioSSRCMatchesPrepared: boolean };
   constructor(private media: MediaSource, private allowed: () => boolean, private catalog: readonly Tier[] = tiers) {}
   async prepareStream(request: MultiTierPrepareStreamRequest): Promise<MultiTierPrepareStreamResponse> {
+    this.counters.prepareRequests++;
+    try { return await this.prepare(request); }
+    catch (error) { this.counters.prepareFailures++; throw error; }
+  }
+  private async prepare(request: MultiTierPrepareStreamRequest): Promise<MultiTierPrepareStreamResponse> {
     const id = request.sessionIdentifier;
     if (!this.allowed() || this.sessions.size + this.preparing.size >= 5 || this.sessions.has(id) || this.preparing.has(id)) throw new Error('local session unavailable');
     if (!isIP(request.targetAddress) || !isIP(request.sourceAddress)) throw new Error('invalid stream address');
