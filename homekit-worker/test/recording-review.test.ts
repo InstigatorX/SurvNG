@@ -165,7 +165,7 @@ test('recording activation waits for producer admission and retires it when disa
     snapshot: () => media.snapshot(),
     stop: () => media.stop(),
   }, () => true);
-  recording.updateRecordingConfiguration({ videoCodec: { resolution: [1920, 1080, 30] } } as CameraRecordingConfiguration);
+  recording.updateRecordingConfiguration({ videoCodec: { resolution: [1280, 720, 30] } } as CameraRecordingConfiguration);
   recording.updateRecordingActive(true);
   await admissionBegan;
   const duringAdmission = recording.status();

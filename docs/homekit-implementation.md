@@ -1,6 +1,6 @@
 # Native HKSV3 implementation status
 
-Target: two cameras, Linux/systemd, iOS/tvOS 27, 1080p/720p/360p HEVC,
+Target: two cameras, Linux/systemd, iOS/tvOS 27, 720p/540p/360p HEVC (16:9; sized to the cellular relay envelope),
 HDS recording. Hardware encoding is preferred; software encoding requires
 per-camera opt-in. Apple Home privacy affects HomeKit only. HomeKit motion follows
 SurvNG detection enablement. Direct CMAF uploads, legacy HKSV, and talkback are

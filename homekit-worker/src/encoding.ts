@@ -10,16 +10,20 @@ export interface VideoEncoding { backend: 'qsv' | 'software'; device?: string; f
 export function deviceArgs(encoding: VideoEncoding): string[] {
   return encoding.backend === 'qsv' ? ['-qsv_device', encoding.device!] : [];
 }
+// Every tier fits the cellular relay envelope (Scrypted #2152: about 720p and an
+// 800 kbit/s peak accepted, Full HD and a 1.078 Mbit/s relay cap rejected). A home
+// hub relays remote viewers over the local RTP path using the tier it requests,
+// and in real-camera testing it requested the top tier, so the top tier must fit.
 const FAMILIES = [
-  { ratio: 16 / 9, sizes: [[1920, 1080], [1280, 720], [640, 360]] },
-  { ratio: 4 / 3, sizes: [[1600, 1200], [1440, 1080], [640, 480]] },
-  { ratio: 9 / 16, sizes: [[1080, 1920], [720, 1280], [360, 640]] },
-  { ratio: 3 / 4, sizes: [[1200, 1600], [960, 1280], [480, 640]] },
-  { ratio: 1, sizes: [[1440, 1440], [1080, 1080], [480, 480]] },
+  { ratio: 16 / 9, sizes: [[1280, 720], [960, 540], [640, 360]] },
+  { ratio: 4 / 3, sizes: [[960, 720], [800, 600], [640, 480]] },
+  { ratio: 9 / 16, sizes: [[720, 1280], [540, 960], [360, 640]] },
+  { ratio: 3 / 4, sizes: [[720, 960], [600, 800], [480, 640]] },
+  { ratio: 1, sizes: [[720, 720], [600, 600], [480, 480]] },
 ] as const;
 const TIER_RATES = [
-  { identifier: 1, quality: 2, frameRate: 30, targetAverageBitrate: 1700, peakBitrate: 1800 },
-  { identifier: 2, quality: 3, frameRate: 30, targetAverageBitrate: 768, peakBitrate: 800 },
+  { identifier: 1, quality: 2, frameRate: 30, targetAverageBitrate: 768, peakBitrate: 800 },
+  { identifier: 2, quality: 3, frameRate: 30, targetAverageBitrate: 480, peakBitrate: 500 },
   { identifier: 3, quality: 4, frameRate: 15, targetAverageBitrate: 180, peakBitrate: 190 },
 ] as const;
 

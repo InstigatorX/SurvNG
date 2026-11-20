@@ -124,8 +124,8 @@ test('HEVC access units retain NAL lengths and SFrame packets remain bounded', (
 
 test('remote SDP has tier bounds and a unique RTP stream extension advertisement', () => {
   const offer = videoOffer('v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 99\r\nc=IN IP4 0.0.0.0\r\na=extmap:1 existing\r\nm=audio 9 UDP/TLS/RTP/SAVPF 110\r\n', tiers[0]);
-  assert.match(offer, /b=TIAS:1800000/); assert.match(offer, /a=extmap:2 urn:ietf/);
-  assert.match(offer, /max-width=1920;max-height=1080/);
+  assert.match(offer, /b=TIAS:800000/); assert.match(offer, /a=extmap:2 urn:ietf/);
+  assert.match(offer, /max-width=1280;max-height=720/);
   assert.ok(offer.indexOf('a=simulcast:send 1') < offer.indexOf('m=audio'));
 });
 
@@ -138,9 +138,9 @@ test('remote offers stay within the cellular video envelope', async t => {
   const square = streamProfile(1080, 1080).tiers;
   const portrait = streamProfile(1080, 1920).tiers;
   for (const { catalog, expected } of [
-    { catalog: tiers, expected: tiers[1] },
-    { catalog: square, expected: square[2] },
-    { catalog: portrait, expected: portrait[1] },
+    { catalog: tiers, expected: tiers[0] },
+    { catalog: square, expected: square[0] },
+    { catalog: portrait, expected: portrait[0] },
   ]) {
     const remote = new RemoteStreams(new SyntheticMedia(tmpdir()), () => true, '127.0.0.1', catalog);
     try {

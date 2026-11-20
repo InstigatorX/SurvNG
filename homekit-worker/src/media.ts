@@ -6,8 +6,9 @@ import { join } from 'node:path';
 import { RtpPacket } from 'werift';
 
 export const tiers = [
-  { identifier: 1, quality: 2, width: 1920, height: 1080, frameRate: 30, targetAverageBitrate: 1700, peakBitrate: 1800 },
-  { identifier: 2, quality: 3, width: 1280, height: 720, frameRate: 30, targetAverageBitrate: 768, peakBitrate: 800 },
+  // Matches streamProfile's 16:9 ladder; see the relay envelope note in encoding.ts.
+  { identifier: 1, quality: 2, width: 1280, height: 720, frameRate: 30, targetAverageBitrate: 768, peakBitrate: 800 },
+  { identifier: 2, quality: 3, width: 960, height: 540, frameRate: 30, targetAverageBitrate: 480, peakBitrate: 500 },
   { identifier: 3, quality: 4, width: 640, height: 360, frameRate: 15, targetAverageBitrate: 180, peakBitrate: 190 },
 ];
 export type Tier = typeof tiers[number];
