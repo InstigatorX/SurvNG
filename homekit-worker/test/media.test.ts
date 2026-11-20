@@ -98,7 +98,7 @@ test('real HEVC fixtures, fMP4 prebuffer, local SRTP, and remote encrypted media
     await t.test('HDS pre-roll has monotonic decode time, prft, and playable HEVC/AAC', async () => {
       recording.updateRecordingConfiguration({
         prebufferLength: 4000, eventTriggerTypes: [1], mediaContainerConfiguration: { type: 0, fragmentLength: 2000 },
-        videoCodec: { type: 0, parameters: { profile: 1, level: 2, bitRate: 768, iFrameInterval: 2000 }, resolution: [1280, 720, 30] },
+        videoCodec: { type: 0, parameters: { profile: 1, level: 2, bitRate: 1700, iFrameInterval: 2000 }, resolution: [1920, 1080, 30] },
         audioCodec: { type: 0, audioChannels: 1, bitrateMode: 0, samplerate: 3, bitrate: 32 },
       } as CameraRecordingConfiguration);
       recording.updateRecordingActive(true);
@@ -227,7 +227,7 @@ test('real HEVC fixtures, fMP4 prebuffer, local SRTP, and remote encrypted media
         try { await until(() => packets > 5 && videoFrames > 5, 20000); }
         catch (error) { st.diagnostic(JSON.stringify({ packets, videoPackets, videoFrames, failures, state: viewer.connectionState, remote: remote.counters })); throw error; }
         assert.deepEqual(failures, []);
-        assert.deepEqual(selectedTiers, [tiers[0].identifier]);
+        assert.deepEqual(selectedTiers, [tiers[1].identifier]);
         await remote.handleEndSession('remote'); assert.equal(remote.sessions.size, 0);
       } finally { await viewer.close(); }
     });

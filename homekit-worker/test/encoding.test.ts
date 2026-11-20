@@ -30,20 +30,12 @@ test('hardware qualification respects cancellation before acquiring resources', 
 });
 
 test('stream geometry follows the camera aspect within each tier budget', () => {
-  // Every tier, including the top one, fits the cellular relay envelope.
-  for (const [width, height] of [[1920, 1080], [2560, 1920], [1080, 1920], [1440, 1920], [1080, 1080], [3840, 1080]]) {
-    const profile = streamProfile(width, height);
-    assert.equal(selectCellularTier(profile.tiers), profile.tiers[0]);
-    for (const tier of profile.tiers) {
-      assert.ok(tier.peakBitrate <= 800 && Math.max(tier.width, tier.height) <= 1280 && Math.min(tier.width, tier.height) <= 720);
-    }
-  }
   const landscape = streamProfile(896, 672);
-  assert.deepEqual(landscape.tiers.map(tier => [tier.width, tier.height]), [[960, 720], [800, 600], [640, 480]]);
+  assert.deepEqual(landscape.tiers.map(tier => [tier.width, tier.height]), [[1600, 1200], [1440, 1080], [640, 480]]);
   const portrait = streamProfile(672, 896);
-  assert.deepEqual(portrait.tiers.map(tier => [tier.width, tier.height]), [[720, 960], [600, 800], [480, 640]]);
-  assert.deepEqual(streamProfile(1920, 1080).tiers.map(tier => [tier.width, tier.height]), [[1280, 720], [960, 540], [640, 360]]);
-  assert.deepEqual(streamProfile(1920, 832).tiers.map(tier => [tier.width, tier.height]), [[1280, 554], [960, 416], [640, 278]]);
+  assert.deepEqual(portrait.tiers.map(tier => [tier.width, tier.height]), [[1200, 1600], [960, 1280], [480, 640]]);
+  assert.deepEqual(streamProfile(1920, 1080).tiers.map(tier => [tier.width, tier.height]), [[1920, 1080], [1280, 720], [640, 360]]);
+  assert.deepEqual(streamProfile(1920, 832).tiers.map(tier => [tier.width, tier.height]), [[1920, 832], [1280, 554], [640, 278]]);
   assert.equal(encodeVideo(landscape.tiers[0], { backend: 'software' }).join(' ').includes('crop='), false);
   assert.equal(encodeVideo(landscape.tiers[0], { backend: 'qsv', device: '/dev/dri/renderD128' }).join(' ').includes('-fps_mode cfr'), true);
   assert.equal(encodeVideo(landscape.tiers[0], { backend: 'qsv', device: '/dev/dri/renderD128' }).join(' ').includes('dump_extra=freq=keyframe'), true);
@@ -144,5 +136,5 @@ test('opt-in HKSV exposes only the cellular tier and retains the 15 fps choice',
   assert.deepEqual(shared.resolutions, [[1280, 720, 30], [1280, 720, 15]]);
 
   const low = recordingProfile(streamProfile(1080, 1080), true);
-  assert.deepEqual(low.resolutions, [[720, 720, 30], [720, 720, 15]]);
+  assert.deepEqual(low.resolutions, [[480, 480, 15]]);
 });

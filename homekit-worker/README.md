@@ -102,15 +102,6 @@ which tier a controller requested (`lastTier`, `tierRequests`), how many
 sessions started or failed, and `tierSwitchesRejected` when a controller asks
 for a different tier on a running session, which is not supported yet.
 
-That test also showed the hub requests the **top** tier for a cellular viewer
-(1600×1200 at 1.8 Mbit/s for a 4:3 camera), and the phone reported No Response.
-Every advertised tier now fits the cellular relay envelope from Scrypted #2152:
-the top tier is 1280×720 for 16:9 cameras (960×720 for 4:3, 720×720 square) at
-a 768 kbit/s average and 800 kbit/s peak, then 960×540 at 500 kbit/s and
-640×360 at 15 fps. Wi-Fi live view and HKSV recordings use the same tiers, so
-their maximum quality is lower than before, and Home must reselect the recording
-configuration after the update.
-
 Remote encoder media uploads carry the current camera assignment revision.
 Both SurvNG updaters (Admin and `scripts/update-from-git.sh`) rebuild this
 worker when the checkout has built it before; run

@@ -86,9 +86,8 @@ async function main(): Promise<void> {
         // Home will not select a profile that lacks 15 fps or uses a fragment length other than 4 seconds.
         video: { type: VideoCodecType.H264, parameters: { levels: [H264Level.LEVEL4_0], profiles: [H264Profile.MAIN] },
           resolutions: [
-            // Matches the synthetic tier catalog in media.ts.
+            [1920, 1080, 30], [1920, 1080, 15],
             [1280, 720, 30], [1280, 720, 15],
-            [960, 540, 30], [960, 540, 15],
             [640, 360, 15],
           ] },
         audio: { codecs: [{ type: AudioRecordingCodecType.AAC_LC, bitrateMode: AudioBitrate.VARIABLE,
