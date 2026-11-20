@@ -168,6 +168,12 @@ test('real HEVC fixtures, fMP4 prebuffer, local SRTP, and remote encrypted media
       } finally { receiver.close(); audioReceiver.close(); }
     });
     await t.test('remote SDP carries SFrame-authenticated HEVC and Opus through DTLS-SRTP', async st => {
+      const selectedTiers: number[] = [];
+      const originalInput = media.input.bind(media);
+      st.mock.method(media, 'input', (tier: typeof tiers[number]) => {
+        selectedTiers.push(tier.identifier);
+        return originalInput(tier);
+      });
       const viewer = new RTCPeerConnection({ bundlePolicy: 'max-bundle', iceServers: [], iceUseIpv6: false,
         iceAdditionalHostAddresses: ['127.0.0.1'], iceInterfaceAddresses: { udp4: '127.0.0.1' },
         headerExtensions: { video: [new RTCRtpHeaderExtensionParameters({ id: 1, uri: STREAM_ID_URI })], audio: [] }, codecs: {
@@ -178,6 +184,8 @@ test('real HEVC fixtures, fMP4 prebuffer, local SRTP, and remote encrypted media
       try {
         const offer = await remote.handleSolicitOffer({ sessionIdentifier: 'remote', options: { sframeEnabled: true } });
         assert.ok(offer.sdpOffer.includes(STREAM_ID_URI));
+        assert.match(offer.sdpOffer, /b=TIAS:800000/);
+        assert.match(offer.sdpOffer, /max-width=1280;max-height=720/);
         assert.ok(offer.sframe); let packets = 0; let videoFrames = 0; let videoPackets = 0;
         const failures: string[] = [];
         viewer.onTrack.subscribe(track => {
@@ -208,6 +216,7 @@ test('real HEVC fixtures, fMP4 prebuffer, local SRTP, and remote encrypted media
         try { await until(() => packets > 5 && videoFrames > 5, 20000); }
         catch (error) { st.diagnostic(JSON.stringify({ packets, videoPackets, videoFrames, failures, state: viewer.connectionState, remote: remote.counters })); throw error; }
         assert.deepEqual(failures, []);
+        assert.deepEqual(selectedTiers, [tiers[1].identifier]);
         await remote.handleEndSession('remote'); assert.equal(remote.sessions.size, 0);
       } finally { await viewer.close(); }
     });

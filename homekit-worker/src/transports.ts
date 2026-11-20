@@ -169,6 +169,7 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
     failures: 0, videoPackets: 0, audioPackets: 0, lastState: 'idle',
     lastIceState: 'idle', lastDtlsState: 'idle', lastFailure: '', mediaReady: 0,
     lastOfferTimeMs: 0, lastConnectTimeMs: 0, lastLocalCandidates: 0, lastRemoteCandidates: 0,
+    lastVideoTier: null as { width: number; height: number; peakBitrate: number } | null,
     selectedPair: null as { localType: string | null; remoteType: string | null; family: number } | null };
   readonly feedback = { video: new ReceiverFeedback(90000), audio: new ReceiverFeedback(48000) };
   constructor(private media: MediaSource, private allowed: () => boolean, private address: string,
@@ -177,6 +178,16 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
     const id = request.sessionIdentifier;
     this.counters.solicitations++;
     if (!this.allowed() || this.sessions.size >= 6 || this.sessions.has(id)) throw new Error('remote session unavailable');
+    // Remote offers may be relayed over cellular. See the handset limits and
+    // matching medium-tier offer in Scrypted #2152.
+    const tier = this.catalog.filter(({ peakBitrate, width, height }) =>
+      peakBitrate <= 800 && Math.max(width, height) <= 1280 && Math.min(width, height) <= 720)
+      .sort((a, b) => b.peakBitrate - a.peakBitrate)[0];
+    if (!tier) {
+      this.counters.failures++;
+      this.counters.lastFailure = 'no_cellular_video_tier';
+      throw new Error('no compatible HomeKit remote video tier');
+    }
     // Apple uses BUNDLE. max-compat gathers a second transport which this werift
     // revision loses when applying a bundled answer, leaving its UDP sockets open.
     const pc = new RTCPeerConnection({ bundlePolicy: 'max-bundle', iceServers: [], iceUseIpv6: false,
@@ -244,7 +255,7 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
       const vc = session.frame.videoStream(video.sender.ssrc); const ac = session.frame.audioStream(audio.sender.ssrc);
       const vp = new SFrameRtpPacketizer({ ssrc: video.sender.ssrc, payloadType: video.sender.codec?.payloadType ?? 99, maxPayload: 1200 });
       const ap = new SFrameRtpPacketizer({ ssrc: audio.sender.ssrc, payloadType: audio.sender.codec?.payloadType ?? 110, maxPayload: 1200 });
-      session.feed = new RtpFeed(this.media, this.catalog[0]);
+      session.feed = new RtpFeed(this.media, tier);
       this.counters.started++;
       void session.feed.start(packet => {
         if (session.closed) return;
@@ -270,9 +281,10 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
       this.requireActive(session);
       await pc.setLocalDescription(offer);
       this.requireActive(session);
-      const sdpOffer = videoOffer(pc.localDescription!.sdp, this.catalog[0]);
+      const sdpOffer = videoOffer(pc.localDescription!.sdp, tier);
       session.offerReady = true;
       this.counters.offers++;
+      this.counters.lastVideoTier = { width: tier.width, height: tier.height, peakBitrate: tier.peakBitrate };
       this.counters.lastOfferTimeMs = Math.round(performance.now() - startedAt);
       this.counters.lastLocalCandidates = candidates.length;
       return { sdpOffer, candidates, sframe: session.frame.senderKey };

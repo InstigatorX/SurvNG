@@ -15,6 +15,7 @@ import { SecureVideoSFrame, SFrameCipherSuite, SFrameReceiver, encodeHeader } fr
 import { HevcAccessUnitAssembler, SFrameRtpPacketizer } from '../src/vendor/sframeRtp.js';
 import { LocalStreams, RemoteStreams, videoOffer } from '../src/transports.js';
 import { SyntheticMedia, tiers } from '../src/media.js';
+import { streamProfile } from '../src/encoding.js';
 
 test('fragment retention has an explicit gap instead of skipping a slow reader', async () => {
   const ring = new FragmentRing(32, 6);
@@ -126,6 +127,29 @@ test('remote SDP has tier bounds and a unique RTP stream extension advertisement
   assert.match(offer, /b=TIAS:1800000/); assert.match(offer, /a=extmap:2 urn:ietf/);
   assert.match(offer, /max-width=1920;max-height=1080/);
   assert.ok(offer.indexOf('a=simulcast:send 1') < offer.indexOf('m=audio'));
+});
+
+test('remote offers stay within the cellular video envelope', async t => {
+  t.mock.method(RTCPeerConnection.prototype, 'setLocalDescription', async function (
+    this: RTCPeerConnection, offer: RTCSessionDescriptionInit,
+  ) {
+    Object.defineProperty(this, 'localDescription', { value: offer });
+  });
+  const square = streamProfile(1080, 1080).tiers;
+  const portrait = streamProfile(1080, 1920).tiers;
+  for (const { catalog, expected } of [
+    { catalog: tiers, expected: tiers[1] },
+    { catalog: square, expected: square[2] },
+    { catalog: portrait, expected: portrait[1] },
+  ]) {
+    const remote = new RemoteStreams(new SyntheticMedia(tmpdir()), () => true, '127.0.0.1', catalog);
+    try {
+      const { sdpOffer } = await remote.handleSolicitOffer({ sessionIdentifier: 'mobile', options: { sframeEnabled: true } });
+      assert.ok(sdpOffer.includes(`b=AS:${expected.peakBitrate}\r\n`));
+      assert.ok(sdpOffer.includes(`b=TIAS:${expected.peakBitrate * 1000}\r\n`));
+      assert.ok(sdpOffer.includes(`max-width=${expected.width};max-height=${expected.height};max-fps=${expected.frameRate};max-br=${expected.peakBitrate * 1000}`));
+    } finally { await remote.close(); }
+  }
 });
 
 test('closing WebRTC transports releases the HAP session cap', async t => {
