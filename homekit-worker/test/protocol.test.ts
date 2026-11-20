@@ -139,7 +139,7 @@ test('remote offers stay within the cellular video envelope', async t => {
   const portrait = streamProfile(1080, 1920).tiers;
   for (const { catalog, expected } of [
     { catalog: tiers, expected: tiers[1] },
-    { catalog: square, expected: square[2] },
+    { catalog: square, expected: square[1] },
     { catalog: portrait, expected: portrait[1] },
   ]) {
     const remote = new RemoteStreams(new SyntheticMedia(tmpdir()), () => true, '127.0.0.1', catalog);

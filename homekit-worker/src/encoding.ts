@@ -10,12 +10,14 @@ export interface VideoEncoding { backend: 'qsv' | 'software'; device?: string; f
 export function deviceArgs(encoding: VideoEncoding): string[] {
   return encoding.backend === 'qsv' ? ['-qsv_device', encoding.device!] : [];
 }
+// Tier 1 is the recording tier Home selects. Tier 2 fits the cellular relay
+// envelope for every aspect, so live view can advertise it as its top tier.
 const FAMILIES = [
   { ratio: 16 / 9, sizes: [[1920, 1080], [1280, 720], [640, 360]] },
-  { ratio: 4 / 3, sizes: [[1600, 1200], [1440, 1080], [640, 480]] },
+  { ratio: 4 / 3, sizes: [[1600, 1200], [960, 720], [640, 480]] },
   { ratio: 9 / 16, sizes: [[1080, 1920], [720, 1280], [360, 640]] },
-  { ratio: 3 / 4, sizes: [[1200, 1600], [960, 1280], [480, 640]] },
-  { ratio: 1, sizes: [[1440, 1440], [1080, 1080], [480, 480]] },
+  { ratio: 3 / 4, sizes: [[1200, 1600], [720, 960], [480, 640]] },
+  { ratio: 1, sizes: [[1440, 1440], [720, 720], [480, 480]] },
 ] as const;
 const TIER_RATES = [
   { identifier: 1, quality: 2, frameRate: 30, targetAverageBitrate: 1700, peakBitrate: 1800 },
@@ -23,11 +25,24 @@ const TIER_RATES = [
   { identifier: 3, quality: 4, frameRate: 15, targetAverageBitrate: 180, peakBitrate: 190 },
 ] as const;
 
+/** Bitrate and dimensions Apple accepted on the cellular relay in Scrypted #2152. */
+export function fitsCellularEnvelope({ peakBitrate, width, height }: Tier): boolean {
+  return peakBitrate <= 800 && Math.max(width, height) <= 1280 && Math.min(width, height) <= 720;
+}
+
 export function selectCellularTier(catalog: readonly Tier[]): Tier | undefined {
-  // Match the bitrate and dimensions Apple accepted on the cellular relay in Scrypted #2152.
-  return catalog.filter(({ peakBitrate, width, height }) =>
-    peakBitrate <= 800 && Math.max(width, height) <= 1280 && Math.min(width, height) <= 720)
-    .sort((a, b) => b.peakBitrate - a.peakBitrate)[0];
+  return catalog.filter(fitsCellularEnvelope).sort((a, b) => b.peakBitrate - a.peakBitrate)[0];
+}
+
+/**
+ * Tiers advertised for live view. A home hub relays cellular viewers over the
+ * local RTP path at the top advertised tier (observed: 1600x1200 at 1.8 Mbit/s,
+ * then No Response), so live view advertises only relay-sized tiers. Recording
+ * keeps the full ladder. `all` restores the previous advertisement.
+ */
+export function liveTiers(catalog: readonly Tier[], all = false): Tier[] {
+  const fitting = catalog.filter(fitsCellularEnvelope);
+  return all || !fitting.length ? [...catalog] : fitting;
 }
 
 export function recordingProfile(profile: { tiers: Tier[]; resolutions: [number, number, number][] }, shareCellularTier: boolean) {

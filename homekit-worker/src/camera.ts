@@ -12,7 +12,7 @@ import { HomeKitMotionController, motionZonesBlockUnlocatedMotion } from './home
 import { LabRecording } from './fragments.js';
 import { serviceStatus } from './diagnostics.js';
 import { LocalStreams, RemoteStreams } from './transports.js';
-import { probeFrame, qualifyEncoding, selectEncoding, streamProfile, recordingProfile, EncodingUnavailableError, type VideoEncoding } from './encoding.js';
+import { probeFrame, qualifyEncoding, selectEncoding, streamProfile, recordingProfile, liveTiers, EncodingUnavailableError, type VideoEncoding } from './encoding.js';
 import type { Tier } from './media.js';
 import { CameraMedia, type MediaAdmission } from './camera-media.js';
 
@@ -113,14 +113,17 @@ async function main(): Promise<void> {
       .setCharacteristic(Characteristic.SerialNumber, saved.id)
       .setCharacteristic(Characteristic.FirmwareRevision, '0.1.0');
     const cameraAllowed = () => !closing && !!controller?.homeKitCameraActive;
+    // Live view advertises relay-sized tiers; recording keeps the full ladder.
+    // Local lookup keeps every tier so a hub with a cached tier list still streams.
+    const live = liveTiers(profile.tiers, process.env.SURVNG_HOMEKIT_LIVE_ALL_TIERS === '1');
     local = new LocalStreams(media, () => !closing && !!controller?.streamingAllowed(controller.multiTierStreamManagementService), profile.tiers);
     remote = new RemoteStreams(media, () => !closing && !!controller?.streamingAllowed(controller.webrtcStreamManagementService),
-      address!, profile.tiers, id => controller!.endWebRTCSession(id));
+      address!, live, id => controller!.endWebRTCSession(id));
     const hksv = recordingProfile(profile, process.env.SURVNG_HOMEKIT_SHARED_RECORDING_TIER === '1');
     recording = new LabRecording(media, cameraAllowed, hksv.tiers);
     controller = new HomeKitMotionController({
       sensor: { uuid: uuid.generate(`${saved.id}:sensor`), width: profile.width, height: profile.height },
-      video: { codec: StreamTierVideoCodec.H265, payloadType: 99, tiers: profile.tiers },
+      video: { codec: StreamTierVideoCodec.H265, payloadType: 99, tiers: live },
       // Apple compatibility requires Speaker advertisement; talkback remains unavailable.
       audio: { payloadType: 110, twoWayAudio: true, tier: { identifier: 1, targetAverageBitrate: 24000,
         sampleRate: StreamTierAudioSampleRate.KHZ_48, bitDepth: StreamTierAudioBitDepth.BITS_16, packetTime: 20, channels: 1 } },
@@ -174,6 +177,7 @@ async function main(): Promise<void> {
         localSessions: local!.sessions.size, remoteSessions: remote!.sessions.size, remoteControllerSessions: controller!.activeWebRTCSessions.length,
         homeKitActive: cameraAllowed(), recording: { ...recording!.status(), sharedTier: hksv.sharedTier?.identifier ?? null }, media: { ...media!.counters, lastError: media!.lastError },
         encoder: media!.encoderStatus,
+        liveTiers: live.map(tier => tier.identifier),
         localMedia: { sent: local!.sent, ...local!.counters, negotiation: local!.negotiation ?? null,
           feedback: { video: local!.feedback.video.stats, audio: local!.feedback.audio.stats } },
         remoteMedia: { ...remote!.counters, videoFeedback: remote!.feedback.video.stats, audioFeedback: remote!.feedback.audio.stats },

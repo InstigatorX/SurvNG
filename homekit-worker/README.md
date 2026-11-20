@@ -102,6 +102,19 @@ which tier a controller requested (`lastTier`, `tierRequests`), how many
 sessions started or failed, and `tierSwitchesRejected` when a controller asks
 for a different tier on a running session, which is not supported yet.
 
+That test also showed the hub requests the **top advertised** tier for a
+cellular viewer (1600×1200 at 1.8 Mbit/s for a 4:3 camera), and the phone
+reported No Response. Capping every tier to the relay envelope stopped Home
+from selecting a recording configuration, so live view and recording now use
+the same encoder tiers differently: recording keeps the full ladder, and live
+view advertises only tiers within the Scrypted #2152 envelope (≤1280×720,
+≤800 kbit/s peak). Tier 2 is sized to fit that envelope for every aspect
+(1280×720, 960×720 for 4:3, 720×720 square). A hub with a cached tier list can
+still start tier 1 locally. Watching live while recording runs a second encode.
+`liveTiers` in status lists the advertised tiers;
+`SURVNG_HOMEKIT_LIVE_ALL_TIERS=1` in the server environment restores the
+previous advertisement.
+
 Remote encoder media uploads carry the current camera assignment revision.
 Both SurvNG updaters (Admin and `scripts/update-from-git.sh`) rebuild this
 worker when the checkout has built it before; run

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { encodeVideo, deviceArgs, selectEncoding, qualifyEncoding, streamProfile, recordingProfile, selectCellularTier, EncodingUnavailableError } from '../src/encoding.js';
+import { encodeVideo, deviceArgs, selectEncoding, qualifyEncoding, streamProfile, recordingProfile, selectCellularTier, liveTiers, EncodingUnavailableError } from '../src/encoding.js';
 import { LowDelayProof } from '../src/low-delay.js';
 import { tiers } from '../src/media.js';
 
@@ -31,9 +31,9 @@ test('hardware qualification respects cancellation before acquiring resources', 
 
 test('stream geometry follows the camera aspect within each tier budget', () => {
   const landscape = streamProfile(896, 672);
-  assert.deepEqual(landscape.tiers.map(tier => [tier.width, tier.height]), [[1600, 1200], [1440, 1080], [640, 480]]);
+  assert.deepEqual(landscape.tiers.map(tier => [tier.width, tier.height]), [[1600, 1200], [960, 720], [640, 480]]);
   const portrait = streamProfile(672, 896);
-  assert.deepEqual(portrait.tiers.map(tier => [tier.width, tier.height]), [[1200, 1600], [960, 1280], [480, 640]]);
+  assert.deepEqual(portrait.tiers.map(tier => [tier.width, tier.height]), [[1200, 1600], [720, 960], [480, 640]]);
   assert.deepEqual(streamProfile(1920, 1080).tiers.map(tier => [tier.width, tier.height]), [[1920, 1080], [1280, 720], [640, 360]]);
   assert.deepEqual(streamProfile(1920, 832).tiers.map(tier => [tier.width, tier.height]), [[1920, 832], [1280, 554], [640, 278]]);
   assert.equal(encodeVideo(landscape.tiers[0], { backend: 'software' }).join(' ').includes('crop='), false);
@@ -136,5 +136,18 @@ test('opt-in HKSV exposes only the cellular tier and retains the 15 fps choice',
   assert.deepEqual(shared.resolutions, [[1280, 720, 30], [1280, 720, 15]]);
 
   const low = recordingProfile(streamProfile(1080, 1080), true);
-  assert.deepEqual(low.resolutions, [[480, 480, 15]]);
+  assert.deepEqual(low.resolutions, [[720, 720, 30], [720, 720, 15]]);
+});
+
+test('live view advertises only relay-sized tiers while recording keeps the full ladder', () => {
+  for (const [width, height] of [[1920, 1080], [896, 672], [1080, 1920], [672, 896], [1080, 1080], [1920, 832]]) {
+    const profile = streamProfile(width, height);
+    const live = liveTiers(profile.tiers);
+    assert.deepEqual(live.map(tier => tier.identifier), [2, 3]);
+    assert.equal(selectCellularTier(profile.tiers), profile.tiers[1]);
+    for (const tier of live) assert.ok(tier.peakBitrate <= 800 && Math.max(tier.width, tier.height) <= 1280 && Math.min(tier.width, tier.height) <= 720);
+    // Recording is unchanged: Home selected the full-size tier 1 profile before.
+    assert.deepEqual(profile.resolutions.slice(0, 2).map(([w, h]) => [w, h]), [[profile.tiers[0].width, profile.tiers[0].height], [profile.tiers[0].width, profile.tiers[0].height]]);
+    assert.deepEqual(liveTiers(profile.tiers, true), profile.tiers);
+  }
 });
