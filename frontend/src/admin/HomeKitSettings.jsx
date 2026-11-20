@@ -8,8 +8,8 @@ const ERROR_LABELS = {
   software_encoding_not_allowed: "This server needs an application restart to enable hardware-only HomeKit startup.",
   encoding_unavailable: "No permitted HEVC encoder passed its startup test. Check QSV device access or allow software fallback.",
   worker_not_built: "Build the HomeKit worker before enabling cameras.",
-  worker_build_stale: "The HomeKit worker was built from a different checkout. Rebuild it to resume HomeKit.",
-  worker_dependencies_stale: "The HomeKit worker packages do not match its lockfile. Rebuild it to resume HomeKit.",
+  worker_build_stale: "The HomeKit worker was built from a different checkout.",
+  worker_dependencies_stale: "The HomeKit worker packages do not match its lockfile.",
   node_24_required: "HomeKit requires Node.js 24. Set its executable path below.",
   ffmpeg_pacing_unsupported: "Use a server FFmpeg build that supports -readrate_initial_burst.",
   encoder_unavailable: "FFmpeg needs HEVC encoding plus libopus, AAC, and MJPEG support.",
@@ -39,6 +39,24 @@ function EncoderVersion({ label, version, fallback }) {
     <summary>{label} <code title={version}>{version.slice(0, 12)}</code></summary>
     <code className="homekit-node-digest">{version}</code>
   </details>;
+}
+
+function WorkerBuild({ problem, job, onRetry, busy }) {
+  const reason = ERROR_LABELS[problem] || "The HomeKit worker build is unavailable.";
+  if (job?.state === "building") {
+    return <p role="status" className="settings-help">{reason} Rebuilding it now. Encoders update and cameras resume automatically when it finishes.</p>;
+  }
+  if (job?.state === "failed") {
+    return <div role="alert" className="settings-help homekit-error">
+      <p>{reason} The automatic rebuild failed, so HomeKit stays blocked and encoders keep their current version. It retries automatically.</p>
+      {job.error ? <pre className="homekit-build-error">{job.error}</pre> : null}
+      <button type="button" disabled={busy} onClick={onRetry}>{busy ? "Starting…" : "Retry build"}</button>
+    </div>;
+  }
+  if (job && job.available === false) {
+    return <p role="alert" className="settings-help homekit-error">{reason} Automatic rebuilds are off for this server. Run <code>python -m survng.app.homekit_build</code> in the SurvNG checkout; encoders update and cameras resume when it succeeds.</p>;
+  }
+  return <p role="status" className="settings-help">{reason} A rebuild starts automatically.</p>;
 }
 
 function HomeKitEncoder({ node }) {
@@ -149,6 +167,17 @@ export function HomeKitSettings({ config, updateConfig, cameraId = "" }) {
     return () => document.removeEventListener("visibilitychange", hide);
   }, []);
 
+  async function rebuildWorker() {
+    setBusy("rebuild"); setError("");
+    try {
+      const response = await fetch("/api/homekit/worker/rebuild", { method: "POST", cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Could not start the HomeKit worker build.");
+      setStatus((current) => current && { ...current, workerBuildJob: payload.job || current.workerBuildJob });
+    } catch (failure) { setError(failure.message || "Could not start the HomeKit worker build."); }
+    finally { setBusy(""); }
+  }
+
   async function addEncoder() {
     setBusy("encoder"); setError(""); setInstaller("");
     try {
@@ -233,7 +262,7 @@ export function HomeKitSettings({ config, updateConfig, cameraId = "" }) {
       </div>
     </fieldset>
     <section className="homekit-nodes" aria-label="HomeKit encoders">
-      {status?.workerBuild && (status.enabled || status.nodes?.length) ? <p role="alert" className="settings-help homekit-error">{ERROR_LABELS[status.workerBuild] || "The HomeKit worker build is unavailable."} Until then encoders are not offered an update. After <code>python -m survng.app.homekit_build</code> succeeds, encoders update and cameras resume automatically.</p> : null}
+      {status?.workerBuild && (status.enabled || status.nodes?.length) ? <WorkerBuild problem={status.workerBuild} job={status.workerBuildJob} onRetry={rebuildWorker} busy={busy === "rebuild"} /> : null}
       {status?.nodeError ? <p role="alert" className="settings-help homekit-error">HomeKit encoder state is unavailable. Check its private directory permissions and saved state.</p> : null}
       <div className="telemetry-section-head"><div><h3>Encoders</h3><p>Run the installer once as root in a new container. It checks in here. Apple Home still reaches this server.</p></div><button type="button" disabled={!!busy} onClick={addEncoder}>{busy === "encoder" ? "Working…" : "Add encoder"}</button></div>
       {installer ? <div className="homekit-installer" role="region" aria-label="Encoder installer"><p className="settings-help">This command is shown once and enrolls one encoder.</p><code>{installer}</code><button type="button" onClick={() => setInstaller("")}>Hide installer</button></div> : null}

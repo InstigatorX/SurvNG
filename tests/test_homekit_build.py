@@ -206,9 +206,11 @@ def test_blocked_camera_worker_resumes_after_a_rebuild(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     states: list[dict] = []
+    builds: list[int] = []
     checks = iter([homekit_build.STALE, homekit_build.STALE, None])
     worker = SimpleNamespace(
-        service=SimpleNamespace(directory=tmp_path / "state"), path=tmp_path / "state" / "camera",
+        service=SimpleNamespace(directory=tmp_path / "state", ensure_worker_build=lambda: builds.append(1)),
+        path=tmp_path / "state" / "camera",
         stopping=SimpleNamespace(wait=lambda _delay: False),
         config=SimpleNamespace(homekit=SimpleNamespace(bind="bad address")),
         _state=lambda **values: states.append(values), _terminate=lambda: None)
@@ -217,3 +219,112 @@ def test_blocked_camera_worker_resumes_after_a_rebuild(tmp_path, monkeypatch):
     # Blocked twice on the stale build, then proceeded to the next preflight step.
     assert states[:2] == [{"state": "blocked", "error": homekit_build.STALE}] * 2
     assert states[-1] == {"state": "blocked", "error": "bind_address_unavailable"}
+    assert builds == [1, 1], "each blocked check asks the service to rebuild"
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _auto_builder(root: Path, outcomes: list, clock: FakeClock) -> tuple[homekit_build.AutoBuilder, list]:
+    """AutoBuilder whose build process either builds with the fake toolchain or fails."""
+    commands: list = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        if outcomes.pop(0):
+            _build(root, FakeToolchain())
+            return subprocess.CompletedProcess(command, 0, stdout="built", stderr="")
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="Node.js 24 was not found")
+
+    builder = homekit_build.AutoBuilder(root, runner=runner, clock=clock, log=lambda _line: None,
+        enabled=True, retry_seconds=60)
+    return builder, commands
+
+
+def _settle(builder: homekit_build.AutoBuilder) -> dict:
+    if builder.thread is not None:
+        builder.thread.join(5)
+    return builder.status()
+
+
+def test_auto_builder_rebuilds_a_stale_worker_in_the_background(tmp_path):
+    root = _worker(tmp_path)
+    builder, commands = _auto_builder(root, [True], FakeClock())
+    assert builder.ensure("/opt/node24/bin/node") is True
+    assert _settle(builder)["state"] == "idle"
+    assert homekit_build.verify(root) is None
+    assert commands[0][1:] == ["-m", "survng.app.homekit_build", "--root", str(root), "--node", "/opt/node24/bin/node"]
+    # Current builds start nothing.
+    assert builder.ensure("/opt/node24/bin/node") is False
+    assert len(commands) == 1
+
+
+def test_auto_builder_backs_off_after_a_failure_and_force_retries(tmp_path):
+    root = _worker(tmp_path)
+    clock = FakeClock()
+    builder, commands = _auto_builder(root, [False, False, True], clock)
+    builder.ensure(None)
+    job = _settle(builder)
+    assert job["state"] == "failed" and "Node.js 24 was not found" in job["error"]
+
+    assert builder.ensure(None) is False, "automatic retries wait for the backoff"
+    assert builder.ensure(None, force=True) is True, "an operator retry starts immediately"
+    assert _settle(builder)["state"] == "failed"
+    clock.now += 61
+    assert builder.ensure(None) is True
+    job = _settle(builder)
+    assert (job["state"], job["error"], job["available"]) == ("idle", None, True)
+    assert len(commands) == 3
+
+
+def test_auto_builder_clears_a_failure_once_another_build_succeeds(tmp_path):
+    root = _worker(tmp_path)
+    builder, _commands = _auto_builder(root, [False], FakeClock())
+    builder.ensure(None)
+    assert _settle(builder)["state"] == "failed"
+    _build(root, FakeToolchain())  # e.g. the Admin updater's rebuild job
+    assert builder.status()["state"] == "idle"
+    assert builder.status()["error"] is None
+
+
+def test_waiting_for_another_build_is_bounded(tmp_path):
+    import fcntl
+
+    root = _worker(tmp_path)
+    with open(root / ".build.lock", "a+") as holder, open(root / ".build.lock", "a+") as waiter:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        with pytest.raises(homekit_build.BuildError, match="Timed out waiting"):
+            homekit_build._acquire(waiter, lambda _line: None, wait_seconds=0)
+
+
+def test_auto_builder_is_inert_without_sources_or_when_disabled(tmp_path):
+    root = _worker(tmp_path)
+    disabled = homekit_build.AutoBuilder(root, runner=lambda *a, **k: pytest.fail("no build"), enabled=False)
+    assert disabled.ensure(None) is False
+    assert disabled.status()["available"] is False, "the UI must offer the manual command instead"
+    missing = homekit_build.AutoBuilder(tmp_path / "absent", runner=lambda *a, **k: pytest.fail("no build"), enabled=True)
+    assert missing.ensure(None) is False
+
+
+def test_service_auto_builds_only_while_homekit_is_in_use(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    service = SimpleNamespace(config=SimpleNamespace(homekit=SimpleNamespace(enabled=False, node_path="/opt/node24/bin/node")),
+        nodes=SimpleNamespace(nodes={}), builder=Mock())
+    service.builder.ensure.return_value = True
+    assert homekit.HomeKitService.ensure_worker_build(service) is False
+    service.builder.ensure.assert_not_called()
+    assert homekit.HomeKitService.ensure_worker_build(service, force=True) is True
+    service.nodes.nodes = {"encoder": {}}
+    homekit.HomeKitService.ensure_worker_build(service)
+    service.config.homekit.enabled = True
+    service.nodes.nodes = {}
+    homekit.HomeKitService.ensure_worker_build(service)
+    assert [call.kwargs["force"] for call in service.builder.ensure.call_args_list] == [True, False, False]
+    assert {call.args[0] for call in service.builder.ensure.call_args_list} == {"/opt/node24/bin/node"}

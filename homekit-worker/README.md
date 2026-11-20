@@ -88,7 +88,14 @@ worker when the checkout has built it before; run
 staged and stamped with a fingerprint of their inputs. While the stamp does not
 match the checkout or the installed packages differ from the lockfile, HomeKit
 is blocked and encoders are not offered the bundle; a failed build keeps the
-previous bundle and leaves HomeKit blocked until a rebuild succeeds. Older agents can still sync and receive the agent update, but their
+previous bundle and leaves HomeKit blocked until a rebuild succeeds.
+
+While HomeKit is enabled or encoders are enrolled, the server rebuilds a stale
+or missing worker itself in the background (for example after an update
+applied by an older updater or a manual `git switch`). A failed automatic
+build is retried after 15 minutes; **Admin → HomeKit → Retry build** or
+**Rebuild HomeKit worker** in the product updater retries immediately. Set
+`SURVNG_HOMEKIT_AUTO_BUILD=0` to leave builds to the updaters. Older agents can still sync and receive the agent update, but their
 media uploads are rejected until they update. Allow for a brief remote media
 interruption during that handoff.
 

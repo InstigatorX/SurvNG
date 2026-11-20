@@ -220,6 +220,32 @@ def _activate(root: Path, staging: Path) -> None:
         (staging / name).rename(current)
 
 
+LOCK_WAIT_SECONDS = 3 * BUILD_TIMEOUT_SECONDS
+
+
+def _acquire(lock, log: Callable[[str], None], wait_seconds: float | None = None) -> None:
+    """Take the build lock, waiting a bounded time for another builder to finish.
+
+    The holder (server auto-build or an updater) usually leaves the worker
+    current, which the caller then re-checks.
+    """
+    import time
+
+    deadline = time.monotonic() + (LOCK_WAIT_SECONDS if wait_seconds is None else wait_seconds)
+    announced = False
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise BuildError("Timed out waiting for another HomeKit worker build to finish") from None
+            if not announced:
+                log("Waiting for another HomeKit worker build to finish")
+                announced = True
+            time.sleep(1)
+
+
 def build(root: Path = WORKER_ROOT, *, node: str | None = None, force: bool = False,
           runner: Runner = subprocess.run, log: Callable[[str], None] = print) -> bool:
     """Build the worker unless it is already current. Returns True when it rebuilt.
@@ -230,10 +256,7 @@ def build(root: Path = WORKER_ROOT, *, node: str | None = None, force: bool = Fa
     root = root.resolve()
     lock_path = root / ".build.lock"
     with open(lock_path, "a+") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise BuildError("Another HomeKit worker build is running") from None
+        _acquire(lock, log)
         for stale in root.glob(f"{STAGING_PREFIX}*"):
             if stale.is_dir() and not stale.is_symlink():
                 shutil.rmtree(stale, ignore_errors=True)
@@ -276,6 +299,114 @@ def build(root: Path = WORKER_ROOT, *, node: str | None = None, force: bool = Fa
         return True
 
 
+def previously_built(root: Path = WORKER_ROOT) -> bool:
+    return any((root / name).exists() for name in ("dist", "node_modules"))
+
+
+def rebuild_needed(root: Path = WORKER_ROOT) -> str | None:
+    """The verify error for a checkout that has built the worker before, else None."""
+    return verify(root) if previously_built(root) else None
+
+
+def _build_command(root: Path, node: str | None) -> list[str]:
+    return [sys.executable, "-m", "survng.app.homekit_build", "--root", str(root),
+        *(["--node", node] if node else [])]
+
+
+class AutoBuilder:
+    """Rebuilds a stale or missing worker in the background for the running server.
+
+    Builds run as a separate process (the CLI above) so the server never imports
+    Node tooling or blocks on it. One build runs at a time; after a failure the
+    next automatic attempt waits ``retry_seconds`` unless a caller forces it.
+    """
+
+    def __init__(self, root: Path = WORKER_ROOT, *, runner: Runner = subprocess.run,
+                 retry_seconds: float = 15 * 60, clock: Callable[[], float] | None = None,
+                 log: Callable[[str], None] | None = None, enabled: bool | None = None) -> None:
+        import logging
+        import time
+
+        self.root = root
+        # SURVNG_HOMEKIT_AUTO_BUILD=0 leaves builds to the updaters and operators.
+        self.enabled = os.environ.get("SURVNG_HOMEKIT_AUTO_BUILD", "1") != "0" if enabled is None else enabled
+        self.runner = runner
+        self.retry_seconds = retry_seconds
+        self.clock = clock or time.monotonic
+        self.wall = time.time
+        self.log = log or logging.getLogger(__name__).warning
+        self.lock = threading.Lock()
+        self.thread: threading.Thread | None = None
+        self.state = "idle"
+        self.error: str | None = None
+        self.failed_at: float | None = None
+        self.finished_at: float | None = None
+
+    def available(self) -> bool:
+        # Docker images and installs without the worker sources have nothing to build.
+        return self.enabled and (self.root / "package.json").is_file() and (self.root / "package-lock.json").is_file()
+
+    def ensure(self, node: str | None, *, force: bool = False) -> bool:
+        """Start a build when the worker is not current. Returns True when one is running."""
+        if not self.available():
+            return False
+        with self.lock:
+            if self.thread is not None and self.thread.is_alive():
+                return True
+            # Inside the backoff nothing can start, so skip the freshness walk.
+            if (not force and self.state == "failed" and self.failed_at is not None
+                    and self.clock() - self.failed_at < self.retry_seconds):
+                return False
+        if verify(self.root) is None:
+            with self.lock:
+                if self.state == "failed":
+                    self.state, self.error = "idle", None
+            return False
+        with self.lock:
+            if self.thread is not None and self.thread.is_alive():
+                return True
+            if (not force and self.state == "failed" and self.failed_at is not None
+                    and self.clock() - self.failed_at < self.retry_seconds):
+                return False
+            self.state, self.error = "building", None
+            self.thread = threading.Thread(target=self._run, args=(node,), name="homekit-worker-build", daemon=True)
+            self.thread.start()
+            return True
+
+    def _run(self, node: str | None) -> None:
+        command = _build_command(self.root, node)
+        try:
+            completed = self.runner(command, cwd=self.root.parent, check=False, capture_output=True, text=True,
+                timeout=4 * BUILD_TIMEOUT_SECONDS)
+            error = None if completed.returncode == 0 else (
+                (completed.stderr or completed.stdout or "").strip()[-400:] or "build failed")
+        except (OSError, subprocess.SubprocessError) as failure:
+            error = str(failure)[-400:] or type(failure).__name__
+        problem = verify(self.root) if error is None else None
+        if problem is not None:
+            error = f"build finished but the worker is still {problem}"
+        with self.lock:
+            self.finished_at = self.wall()
+            if error is None:
+                self.state, self.error, self.failed_at = "idle", None, None
+            else:
+                self.state, self.error, self.failed_at = "failed", error, self.clock()
+        if error is not None:
+            self.log(f"HomeKit worker build failed: {error}")
+
+    def status(self) -> dict:
+        with self.lock:
+            failed = self.state == "failed"
+        # A build by an updater, the CLI, or a later retry clears an old failure.
+        if failed and verify(self.root) is None:
+            with self.lock:
+                if self.state == "failed":
+                    self.state, self.error, self.failed_at = "idle", None, None
+        with self.lock:
+            return {"state": self.state, "error": self.error, "available": self.available(),
+                "finishedAt": int(self.finished_at) if self.finished_at else None}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, default=WORKER_ROOT)
@@ -290,7 +421,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         problem = verify(root)
         print(problem or "current")
         return 0 if problem is None else 1
-    if args.if_present and not any((root / name).exists() for name in ("dist", "node_modules")):
+    if args.if_present and not previously_built(root):
         print("HomeKit worker was never built here; skipping")
         return 0
     try:

@@ -127,6 +127,15 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
             raise HTTPException(status_code=409, detail=str(error)) from None
         return {"requested": True}
 
+    @router.post("/api/homekit/worker/rebuild")
+    def rebuild_worker(response: Response) -> dict:
+        response.headers["Cache-Control"] = "no-store"
+        service = deps.get_manager().homekit
+        if not service.builder.available():
+            raise HTTPException(status_code=409, detail="HomeKit worker builds are not available in this installation")
+        building = service.ensure_worker_build(force=True)
+        return {"building": building, "job": service.builder.status()}
+
     @router.get("/api/homekit/enroll/{token}")
     def enrollment_script(token: str, request: Request) -> Response:
         try:
@@ -152,6 +161,9 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         except (KeyError, OSError, RuntimeError):
             raise HTTPException(status_code=401, detail="encoder authentication required") from None
         releases = node_releases(service.config.ffmpeg_path)
+        if "agent" not in releases:
+            # A stale or missing build is never offered; rebuild it for the encoders.
+            service.ensure_worker_build()
         payload["releases"] = releases
         sync_request = service.nodes.pending_sync_request(node, releases.get("agent"))
         if sync_request is not None:

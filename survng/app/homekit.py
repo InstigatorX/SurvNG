@@ -240,6 +240,7 @@ class CameraWorker:
             # without a service restart, so keep checking while blocked.
             while (build_problem := worker_build_problem()) is not None:
                 self._state(state="blocked", error=build_problem)
+                self.service.ensure_worker_build()
                 if self.stopping.wait(BUILD_RECHECK_SECONDS):
                     return
             try:
@@ -389,6 +390,18 @@ class HomeKitService:
         self.detection_active = detection_active or camera_active
         from .homekit_nodes import NodeRegistry
         self.nodes = NodeRegistry(self.directory)
+        self.builder = homekit_build.AutoBuilder(WORKER_ROOT)
+
+    def ensure_worker_build(self, *, force: bool = False) -> bool:
+        """Rebuild a stale or missing worker in the background while HomeKit is in use.
+
+        Covers updates applied by an older updater, manual branch switches, and
+        failed builds (retried after a backoff, or immediately when forced).
+        """
+        config = self.config
+        if not force and not (config.homekit.enabled or self.nodes.nodes):
+            return False
+        return self.builder.ensure(config.homekit.node_path, force=force)
 
     def start(self) -> None:
         with self.operations, self.lock:
@@ -397,6 +410,7 @@ class HomeKitService:
             self.nodes.reopen()
             self._start_workers()
             self.started = True
+        self.ensure_worker_build()
 
     def _start_workers(self) -> None:
         if not self.config.homekit.enabled:
@@ -544,6 +558,9 @@ class HomeKitService:
             ]}
         status["nodes"] = self.nodes.public_status(config.cameras)
         status["workerBuild"] = worker_build_problem()
+        if status["workerBuild"] is not None:
+            self.ensure_worker_build()
+        status["workerBuildJob"] = self.builder.status()
         return status
 
     def pairing(self, camera_id: str) -> dict:

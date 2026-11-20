@@ -18,6 +18,8 @@ def isolate_runtime():
     os.environ['SURVNG_CONFIG_PATH'] = str(_CONFIG_PATH)
     os.environ.pop('SURVNG_SECRETS_PATH', None)
     os.environ.pop('SURVNG_SECRETS_KEY_PATH', None)
+    # Never build the checkout's real HomeKit worker from a test.
+    os.environ['SURVNG_HOMEKIT_AUTO_BUILD'] = '0'
     if not _CONFIG_PATH.exists():
         save_config(AppConfig(
             storage_dir=str(_ROOT / 'storage'),

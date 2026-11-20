@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import homekit_build
+
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_REMOTE = "origin"
@@ -24,8 +26,9 @@ FETCH_TIMEOUT_SECONDS = 120.0
 PULL_TIMEOUT_SECONDS = 180.0
 PIP_TIMEOUT_SECONDS = 900.0
 FRONTEND_TIMEOUT_SECONDS = 900.0
-# Exceeds the builder's three per-step limits so its own timeouts fire first.
-HOMEKIT_BUILD_TIMEOUT_SECONDS = 3000.0
+# Exceeds the builder's bounded lock wait and per-step limits so its own
+# timeouts fire first, matching the server's automatic build.
+HOMEKIT_BUILD_TIMEOUT_SECONDS = 4 * homekit_build.BUILD_TIMEOUT_SECONDS
 HELPER_TIMEOUT_SECONDS = 3600.0
 MAX_COMMIT_PREVIEW = 12
 _URL_USERINFO = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]+@")
@@ -533,8 +536,15 @@ class ProductUpdateService:
             if payload["update_method"] is None and mode == "native_git":
                 payload["update_method"] = "native_git"
             needs_change = not on_target_tip
+            # A current checkout can still need its HomeKit worker rebuilt (for
+            # example after a failed build); Update then retries only that build.
+            homekit_rebuild = (
+                homekit_build.rebuild_needed(repo_root / "homekit-worker")
+                if payload["update_method"] == "native_git" else None
+            )
+            payload["homekit_rebuild"] = homekit_rebuild
             can_update = (
-                needs_change
+                (needs_change or homekit_rebuild is not None)
                 and ahead_count == 0
                 and not dirty
                 and payload["status"] not in {"running", "restarting"}
@@ -559,6 +569,11 @@ class ProductUpdateService:
                         f"Local branch {target_branch} has commits that are not "
                         f"on {upstream}. Fast-forward updates are blocked."
                     )
+            elif on_target_tip and homekit_rebuild is not None:
+                payload["message"] = (
+                    f"SurvNG is up to date with {upstream}, but the HomeKit worker "
+                    "build is not current. Update rebuilds it."
+                )
             elif on_target_tip:
                 if len(branches) <= 1:
                     payload["message"] = (
@@ -737,11 +752,13 @@ class ProductUpdateService:
                 "phase": "Host helper finished",
             }
 
-    def _build_homekit_worker(self, repo_root: Path) -> None:
+    def _build_homekit_worker(self, repo_root: Path, *, strict: bool = False) -> None:
         """Rebuild the HomeKit worker for the new checkout when this install uses it.
 
-        A failed build does not fail the update: the server's freshness check
-        keeps HomeKit blocked, and the warning stays in the update log.
+        During an update a failed build does not fail the update: the server's
+        freshness check keeps HomeKit blocked, the warning stays in the update
+        log, and the server retries the build. A retry-only job (``strict``)
+        fails with the build error instead.
         """
         worker = repo_root / "homekit-worker"
         if not any((worker / name).exists() for name in ("dist", "node_modules")):
@@ -766,6 +783,8 @@ class ProductUpdateService:
                 self._append_log((lines[-1] if lines else "HomeKit worker build finished")[:240])
                 return
             detail = (completed.stderr or completed.stdout or "build failed").strip()
+        if strict:
+            raise RuntimeError(f"HomeKit worker build failed: {detail[-400:]}")
         warning = f"HomeKit worker build failed; HomeKit stays blocked until it is rebuilt: {detail[-400:]}"
         LOGGER.warning("%s", warning)
         self._append_log(warning[:240])
@@ -826,6 +845,7 @@ class ProductUpdateService:
         if not upstream_exists:
             raise RuntimeError(f"Remote branch {upstream} was not found after fetch")
 
+        branch_before = _git_output(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
         self._checkout_target_branch(repo_root, branch)
 
         counts = _git_output(
@@ -840,6 +860,14 @@ class ProductUpdateService:
         if behind_count <= 0 and current_sha == upstream_sha:
             self._append_log(f"Already on {branch} at {current_sha[:12]}")
             new_sha = current_sha
+            if branch_before == branch:
+                # Nothing new to deploy: this job is a HomeKit worker build retry.
+                # Workers and encoders pick up the rebuilt worker without a restart.
+                self._build_homekit_worker(repo_root, strict=True)
+                with self._lock:
+                    self._state = {**self._state, "status": "complete", "finished_at": _utc_now(),
+                        "phase": "HomeKit worker rebuilt", "current_sha": new_sha}
+                return
         else:
             if behind_count <= 0:
                 raise RuntimeError("No remote commits are available to apply")
