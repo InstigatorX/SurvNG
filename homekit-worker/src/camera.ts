@@ -171,7 +171,7 @@ async function main(): Promise<void> {
     // Hub activity, as in the protocol lab: allowlisted counters and per-characteristic
     // tallies only. Never retain characteristic values, pairing material, SDP, or addresses.
     const requests = { accessories: 0, reads: 0, writes: 0, resources: 0, lastAt: 0 };
-    let liveTierRefresh: 'unchanged' | 'advertised' | 'unavailable' = 'unchanged';
+    let liveTierRefresh: 'unchanged' | 'pending' | 'advertised' | 'unavailable' = 'unchanged';
     const characteristics: Record<string, { reads: number; writes: number; subscriptions: number }> = {};
     control = await controlServer(join(state, 'control.sock'), (method, params) => {
       if (method === 'status') return { schemaVersion: 1, mode: 'camera', acceptance: 'experimental',
@@ -215,6 +215,8 @@ async function main(): Promise<void> {
       [identifier, width, height, frameRate, peakBitrate]));
     const signaturePath = join(state, 'live-tiers.json');
     if (await readFile(signaturePath, 'utf8').catch(() => undefined) !== liveSignature) {
+      // Stays pending until the first advertisement; a stuck pending means it never came.
+      liveTierRefresh = 'pending';
       accessory.once('advertised', () => {
         const hap = accessory as unknown as { _accessoryInfo?: { configVersion: number; save(): void };
           _advertiser?: { updateAdvertisement(silent?: boolean): unknown } };
