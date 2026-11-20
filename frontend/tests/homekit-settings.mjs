@@ -64,13 +64,14 @@ try {
   const olderVersion = "1".repeat(64);
   const availableVersion = "2".repeat(64);
   let gateState = "outdated", rejectSync = false, syncRequests = 0;
+  let workerBuild = null, workerBuildJob = { state: "idle" }, rebuilds = 0, rejectRebuild = false;
   let initialStatus;
   const waitForInitial = new Promise(resolve => { initialStatus = resolve; });
   await page.route("**/api/homekit/status", async route => {
     statusRequests++;
     if (statusRequests === 1) await waitForInitial;
     await route.fulfill({ status: mode === "error" ? 503 : 200, contentType: "application/json",
-      body: JSON.stringify({ enabled: true, nodes: [
+      body: JSON.stringify({ enabled: true, workerBuild, workerBuildJob, nodes: [
         { id: "abc123abc123abcd", name: "Gate box", online: true, hardware: "qsv", cameras: [],
           runningVersion: gateState === "current" ? availableVersion : olderVersion, availableVersion, updateState: gateState },
         { id: "offline", name: "Offline box", online: false, runningVersion: olderVersion, availableVersion, updateState: "outdated" },
@@ -85,6 +86,14 @@ try {
     assert.equal(route.request().postData(), null);
     if (rejectSync) return route.fulfill({ status: 503, body: "Unavailable" });
     return route.fulfill({ contentType: "application/json", body: '{"requested":true}' });
+  });
+  await page.route("**/api/homekit/worker/rebuild", route => {
+    rebuilds++;
+    assert.equal(route.request().method(), "POST");
+    if (rejectRebuild) return route.fulfill({ status: 503, contentType: "application/json",
+      body: JSON.stringify({ detail: "Rebuild could not start" }) });
+    workerBuildJob = { state: "building", error: null };
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ requested: true, job: workerBuildJob }) });
   });
   await page.route("**/api/homekit/nodes", route => route.fulfill({ contentType: "application/json",
     body: JSON.stringify({ command: "curl -fsSL 'https://survng.example/api/homekit/enroll/token' | sh" }) }));
@@ -164,6 +173,25 @@ try {
   await gate.getByRole("status").filter({ hasText: "Encoder update failed" }).waitFor();
   assert.equal(await gateSync.isEnabled(), true);
   assert.equal(syncRequests, 3);
+  workerBuild = "worker_build_stale";
+  await page.getByRole("button", { name: "Rebuild worker" }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Add encoder" }).isDisabled(), true);
+  workerBuildJob = { state: "building", error: null };
+  await page.getByRole("status").filter({ hasText: "Rebuilding it now" }).waitFor();
+  workerBuildJob = { state: "failed", error: "Node.js 24 was not found" };
+  await page.getByRole("alert").filter({ hasText: "The rebuild failed" }).waitFor();
+  await page.getByText("Node.js 24 was not found").waitFor();
+  rejectRebuild = true;
+  await page.getByRole("button", { name: "Retry build" }).click();
+  await page.getByRole("alert").filter({ hasText: "Rebuild could not start" }).waitFor();
+  rejectRebuild = false;
+  await page.getByRole("button", { name: "Retry build" }).click();
+  await page.getByRole("status").filter({ hasText: "Rebuilding it now" }).waitFor();
+  assert.equal(rebuilds, 2);
+  workerBuildJob = { state: "idle", available: false };
+  await page.getByRole("alert").filter({ hasText: "Automatic rebuilds are off" }).getByText("python -m survng.app.homekit_build").waitFor();
+  workerBuild = null; workerBuildJob = { state: "idle", available: true };
+  await page.getByRole("alert").filter({ hasText: "Automatic rebuilds are off" }).waitFor({ state: "detached" });
   await page.getByRole("button", { name: "Add encoder" }).click();
   await page.getByText("curl -fsSL 'https://survng.example/api/homekit/enroll/token' | sh").waitFor();
   await page.getByRole("button", { name: "Hide installer" }).click();

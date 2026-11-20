@@ -374,6 +374,7 @@ sudo -u survng git fetch --prune origin
 sudo -u survng git pull --ff-only origin "$SURVNG_GIT_BRANCH"
 sudo -u survng "$SURVNG_ROOT/.venv/bin/pip" install -r requirements.txt
 sudo -u survng bash -lc "cd '$SURVNG_ROOT/frontend' && npm ci --no-audit --no-fund && npm run build"
+sudo -u survng "$SURVNG_ROOT/.venv/bin/python" -m survng.app.homekit_build --if-present
 sudo systemctl restart survng.service
 curl -fsS http://127.0.0.1:8088/api/health
 ```

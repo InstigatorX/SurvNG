@@ -457,3 +457,157 @@ def test_product_update_start_fast_forwards_and_restarts(tmp_path: Path, monkeyp
     assert status["status"] == "restarting", status
     assert (repo / "survng" / "marker.txt").read_text(encoding="utf-8") == "next\n"
     restart.assert_called_once_with()
+
+
+@pytest.mark.parametrize("build_exit", [0, 1])
+@pytest.mark.parametrize("legacy_build", [True, False])
+def test_product_update_rebuilds_homekit_worker_without_failing_the_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, build_exit: int, legacy_build: bool,
+) -> None:
+    repo = _init_survng_repo(tmp_path)
+    bare = tmp_path / "remote.git"
+    _git(tmp_path, "clone", "--bare", str(repo), str(bare))
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "fetch", "origin")
+    work = tmp_path / "publisher"
+    _git(tmp_path, "clone", str(bare), str(work))
+    _git(work, "config", "user.email", "test@example.com")
+    _git(work, "config", "user.name", "Test")
+    (work / "survng" / "marker.txt").write_text("next\n", encoding="utf-8")
+    _git(work, "add", "survng/marker.txt")
+    _git(work, "commit", "-m", "next change")
+    _git(work, "push", "origin", "main")
+    # This install built the worker before, so the update must rebuild it.
+    (repo / "survng" / "app").mkdir()
+    (repo / "survng" / "app" / "homekit_build.py").touch()
+    worker = repo / "homekit-worker"
+    if legacy_build:
+        (worker / "dist").mkdir(parents=True)
+    else:
+        releases = worker / ".releases"
+        (releases / "previous").mkdir(parents=True)
+        (releases / "current").symlink_to("previous", target_is_directory=True)
+
+    restart = Mock(return_value={"ok": True, "status": "restart_scheduled"})
+    service = ProductUpdateService(repo_root=repo, request_server_restart=restart,
+        homekit_node_path=lambda: "/opt/node24/bin/node")
+    builds: list[list[str]] = []
+    real_run = subprocess.run
+
+    def fake_run(command, **kwargs):
+        cmd = [str(part) for part in command]
+        if len(cmd) >= 4 and cmd[1:4] == ["-m", "pip", "install"]:
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+        if cmd[1:3] == ["-m", "survng.app.homekit_build"]:
+            builds.append(cmd)
+            assert kwargs["cwd"] == repo
+            if build_exit:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="Node.js 24 was not found")
+            return subprocess.CompletedProcess(command, 0, stdout="HomeKit worker built (abc)\n", stderr="")
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr("survng.app.product_update.subprocess.run", fake_run)
+    monkeypatch.setattr("survng.app.product_update.time.sleep", lambda _seconds: None)
+
+    service.start()
+    for _ in range(200):
+        status = service.status(refresh_remote=False)
+        if status["status"] in {"restarting", "complete", "failed"}:
+            break
+        threading.Event().wait(0.05)
+    status = service.status(refresh_remote=False)
+
+    assert status["status"] == "restarting", status
+    restart.assert_called_once_with()
+    assert builds == [[builds[0][0], "-m", "survng.app.homekit_build", "--root", str(repo / "homekit-worker"),
+        "--if-present", "--node", "/opt/node24/bin/node"]]
+    warnings = status["job"].get("warnings") or []
+    if build_exit:
+        assert len(warnings) == 1 and "need a current release" in warnings[0] and "Node.js 24" in warnings[0]
+    else:
+        assert warnings == []
+        assert "HomeKit worker built (abc)" in status["job"]["log"]
+
+
+def test_product_update_skips_homekit_build_for_installs_without_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _init_survng_repo(tmp_path)
+    (repo / "survng" / "app").mkdir()
+    (repo / "survng" / "app" / "homekit_build.py").touch()
+    service = ProductUpdateService(repo_root=repo)
+    monkeypatch.setattr("survng.app.product_update.subprocess.run",
+        Mock(side_effect=AssertionError("no build expected")))
+    service._build_homekit_worker(repo)
+
+
+def test_product_update_skips_homekit_build_after_switch_to_older_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _init_survng_repo(tmp_path)
+    (repo / "homekit-worker" / "dist").mkdir(parents=True)
+    service = ProductUpdateService(repo_root=repo)
+    monkeypatch.setattr("survng.app.product_update.subprocess.run",
+        Mock(side_effect=AssertionError("this checkout has no builder")))
+    service._build_homekit_worker(repo)
+
+
+def _current_checkout_with_stale_worker(tmp_path: Path) -> Path:
+    repo = _init_survng_repo(tmp_path)
+    bare = tmp_path / "remote.git"
+    _git(tmp_path, "clone", "--bare", str(repo), str(bare))
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "fetch", "origin")
+    _git(repo, "branch", "--set-upstream-to=origin/main", "main")
+    # A build left behind by a failed or skipped rebuild (no manifest).
+    (repo / "survng" / "app").mkdir()
+    (repo / "survng" / "app" / "homekit_build.py").touch()
+    (repo / "homekit-worker" / "dist").mkdir(parents=True)
+    return repo
+
+
+def test_up_to_date_checkout_offers_a_homekit_worker_rebuild(tmp_path: Path) -> None:
+    repo = _current_checkout_with_stale_worker(tmp_path)
+    service = ProductUpdateService(repo_root=repo)
+    status = service.status(refresh_remote=False)
+    assert status["behind_count"] == 0
+    assert status["homekit_rebuild"] == "worker_build_stale"
+    assert status["can_update"] is True
+    assert "HomeKit worker build is not current" in status["message"]
+
+
+@pytest.mark.parametrize("build_exit", [0, 1])
+def test_homekit_rebuild_job_only_builds_and_reports_the_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, build_exit: int,
+) -> None:
+    repo = _current_checkout_with_stale_worker(tmp_path)
+    restart = Mock()
+    service = ProductUpdateService(repo_root=repo, request_server_restart=restart)
+    real_run = subprocess.run
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        cmd = [str(part) for part in command]
+        if cmd[1:3] == ["-m", "survng.app.homekit_build"]:
+            commands.append(cmd)
+            if build_exit:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="HAP download refused")
+            return subprocess.CompletedProcess(command, 0, stdout="HomeKit worker built (abc)\n", stderr="")
+        if cmd[1:3] == ["-m", "pip"] or Path(cmd[0]).name == "npm":
+            pytest.fail(f"a rebuild-only job must not run {cmd}")
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr("survng.app.product_update.subprocess.run", fake_run)
+    service.start()
+    for _ in range(200):
+        status = service.status(refresh_remote=False)
+        if status["status"] in {"restarting", "complete", "failed"}:
+            break
+        threading.Event().wait(0.05)
+
+    assert len(commands) == 1
+    restart.assert_not_called()
+    if build_exit:
+        assert status["status"] == "failed"
+        assert "HAP download refused" in status["job"]["error"]
+    else:
+        assert status["status"] == "complete"
+        assert status["job"]["phase"] == "HomeKit worker rebuilt"

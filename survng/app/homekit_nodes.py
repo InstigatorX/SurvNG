@@ -5,7 +5,6 @@ Status and the installer contain neither.
 """
 from __future__ import annotations
 
-import gzip
 import hashlib
 import hmac
 import io
@@ -26,6 +25,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from . import homekit_build
+from .homekit_build import WORKER_ROOT, agent_archive as agent_archive
+
 
 def _private_directory(path: Path) -> None:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -37,7 +39,6 @@ ONLINE_SECONDS = 20
 SNAPSHOT_LIMIT = 4 * 1024 * 1024
 TOKEN_SECONDS = 30 * 60
 SYNC_REQUEST_SECONDS = 5 * 60
-WORKER_ROOT = Path(__file__).resolve().parents[2] / "homekit-worker"
 
 
 def _hash(value: str) -> str:
@@ -776,7 +777,6 @@ class NodeRegistry:
 
 
 _release_lock = threading.Lock()
-_agent_cache: tuple[tuple, str, bytes] | None = None
 _ffmpeg_stamp_cache: tuple[tuple, str] | None = None
 
 
@@ -790,35 +790,18 @@ def _file_signature(paths: list[Path]) -> tuple:
     return tuple(rows)
 
 
-def _dist_signature(root: Path) -> tuple:
-    files = [root / "package.json", root / "package-lock.json"]
-    dist = root / "dist"
-    if dist.is_dir() and not dist.is_symlink():
-        files.extend(path for path in dist.rglob("*") if path.is_file() and not path.is_symlink())
-    modules = root / "node_modules"
-    if modules.is_dir() and not modules.is_symlink():
-        files.extend(path for path in modules.glob("*/package.json") if path.is_file() and not path.is_symlink())
-        files.extend(path for path in modules.glob("@*/*/package.json") if path.is_file() and not path.is_symlink())
-    return _file_signature(files)
-
-
 def agent_release(root: Path = WORKER_ROOT) -> tuple[str, bytes]:
-    """Content stamp and archive for the encoder program. Rebuilt only when those files change."""
-    global _agent_cache
-    signature = _dist_signature(root)
-    with _release_lock:
-        if _agent_cache and _agent_cache[0] == signature:
-            return _agent_cache[1], _agent_cache[2]
-    payload = agent_archive(root)
-    digest = hashlib.sha256(payload).hexdigest()
-    with _release_lock:
-        _agent_cache = (signature, digest, payload)
-    return digest, payload
+    """Read the checksum and archive from the same verified release."""
+    release, problem = homekit_build.verified_release(root)
+    if release is None:
+        raise RuntimeError(problem)
+    return homekit_build.read_release_archive(release)
 
 
 def available_agent_version(root: Path = WORKER_ROOT) -> str | None:
     try:
-        return agent_release(root)[0]
+        release, _ = homekit_build.verified_release(root)
+        return homekit_build.release_archive_version(release) if release is not None else None
     except (OSError, RuntimeError):
         return None
 
@@ -984,24 +967,3 @@ def ffmpeg_archive_iter(ffmpeg_path: str):
     with os.fdopen(read_fd, "rb") as raw:
         while chunk := raw.read(1024 * 1024):
             yield chunk
-
-
-def agent_archive(root: Path = WORKER_ROOT) -> bytes:
-    required = [root / "package.json", root / "dist" / "src" / "agent.js", root / "node_modules"]
-    if any(not path.exists() for path in required):
-        raise FileNotFoundError("HomeKit encoder agent is not built")
-    buffer = io.BytesIO()
-
-    def accept(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
-        name = member.name
-        if any(part in {".cache", ".git"} for part in Path(name).parts):
-            return None
-        if member.issym() or member.islnk() or member.isdev():
-            return None
-        return member
-
-    # Hashes are release identities. The gzip wrapper must not encode build time.
-    with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as compressed, tarfile.open(fileobj=compressed, mode="w") as archive:
-        for relative in ("package.json", "dist", "node_modules"):
-            archive.add(root / relative, arcname=relative, filter=accept)
-    return buffer.getvalue()

@@ -22,6 +22,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
+from . import homekit_build
 from .homekit_nodes import assignment_revision
 
 from .media_sessions import (
@@ -29,7 +30,7 @@ from .media_sessions import (
 )
 
 LOGGER = logging.getLogger(__name__)
-WORKER = Path(__file__).resolve().parents[2] / "homekit-worker/dist/src/camera.js"
+BUILD_RECHECK_SECONDS = 10.0
 # Local startup can run three 15-second qualification commands per backend
 # (QSV and software), then a 15-second source probe before opening control.sock.
 LOCAL_STARTUP_GRACE_SECONDS = 120
@@ -226,9 +227,6 @@ class CameraWorker:
                     self._state(state="waiting", error="state_in_use")
                     if self.stopping.wait(1):
                         return
-            if not WORKER.is_file():
-                self._state(state="blocked", error="worker_not_built")
-                return
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
                     probe.bind((self.config.homekit.bind, 0))
@@ -260,6 +258,12 @@ class CameraWorker:
                     self._state(state="starting", error="encoder_waiting")
                     self.stopping.wait(2)
                     continue
+                release, build_problem = homekit_build.verified_release()
+                if release is None:
+                    self._state(state="blocked", error=build_problem)
+                    self.service.ensure_worker_build()
+                    self.stopping.wait(BUILD_RECHECK_SECONDS)
+                    continue
                 node_left = False
                 try:
                     # Only this lock owner may remove a dead worker's stale socket.
@@ -268,7 +272,7 @@ class CameraWorker:
                         if stat.S_ISSOCK(endpoint.lstat().st_mode):
                             endpoint.unlink()
                     env = {**os.environ, "DEBUG": "", "NODE_DEBUG": ""}
-                    self.process = subprocess.Popen([self.config.homekit.node_path, str(WORKER)],
+                    self.process = subprocess.Popen([self.config.homekit.node_path, str(release / "dist/src/camera.js")],
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                         start_new_session=True, env=env, umask=0o077, pass_fds=(owner.fileno(),))
                     settings = worker_settings(self.config, self.camera, remote)
@@ -365,6 +369,17 @@ class HomeKitService:
         self.detection_active = detection_active or camera_active
         from .homekit_nodes import NodeRegistry
         self.nodes = NodeRegistry(self.directory)
+        self.builder = homekit_build.AutoBuilder()
+
+    def ensure_worker_build(self, *, force: bool = False) -> bool:
+        with self.lock:
+            config = self.config
+            started = self.started
+        with self.nodes.lock:
+            enrolled = bool(self.nodes.nodes)
+        if not force and not (started and (config.homekit.enabled or enrolled)):
+            return False
+        return self.builder.ensure(config.homekit.node_path, force=force)
 
     def start(self) -> None:
         with self.operations, self.lock:
@@ -373,6 +388,7 @@ class HomeKitService:
             self.nodes.reopen()
             self.started = True
             self._start_workers()
+        self.ensure_worker_build()
 
     def _start_workers(self) -> None:
         if not self.config.homekit.enabled:
@@ -386,6 +402,7 @@ class HomeKitService:
     def reconfigure(self, config) -> None:
         with self.operations:
             self._reconfigure(config)
+        self.ensure_worker_build()
 
     def _reconfigure(self, config) -> None:
         self.nodes.reopen()
@@ -504,6 +521,8 @@ class HomeKitService:
                 for camera in config.cameras
             ]}
         status["nodes"] = self.nodes.public_status(config.cameras)
+        status["workerBuild"] = homekit_build.verify()
+        status["workerBuildJob"] = self.builder.status()
         return status
 
     def pairing(self, camera_id: str) -> dict:

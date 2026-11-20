@@ -16,6 +16,7 @@ def isolate_runtime():
     # Override inherited deployment settings: tests must opt into their own
     # fixtures, never fall through to the live application's configuration.
     os.environ['SURVNG_CONFIG_PATH'] = str(_CONFIG_PATH)
+    os.environ['SURVNG_HOMEKIT_AUTO_BUILD'] = '0'
     os.environ.pop('SURVNG_SECRETS_PATH', None)
     os.environ.pop('SURVNG_SECRETS_KEY_PATH', None)
     if not _CONFIG_PATH.exists():

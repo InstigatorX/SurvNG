@@ -52,11 +52,24 @@ def test_assigned_encoder_cannot_be_removed(remote):
     assert node["id"] in service.nodes.nodes
 
 
+def test_encoder_installer_requires_a_published_release(remote, monkeypatch):
+    from survng.app import homekit_routes
+
+    service, _, _, endpoints = remote
+    monkeypatch.setattr(homekit_routes, "available_agent_version", lambda: None)
+    enroll = Mock()
+    monkeypatch.setattr(service.nodes, "begin_enrollment", enroll)
+    with pytest.raises(HTTPException) as error:
+        endpoints["/api/homekit/nodes"](request("admin", []), Response())
+    assert error.value.status_code == 409
+    enroll.assert_not_called()
+
+
 def test_encoder_version_reports_update_status_independently_of_liveness(remote, monkeypatch):
     service, node, _, _ = remote
     available = "a" * 64
-    release = Mock(return_value=(available, b"archive"))
-    monkeypatch.setattr(homekit_nodes, "agent_release", release)
+    release = Mock(return_value=available)
+    monkeypatch.setattr(homekit_nodes, "available_agent_version", release)
 
     assert service.status()["nodes"][0] == {
         "id": node["id"], "name": "review", "online": True, "hardware": "qsv",
@@ -72,7 +85,7 @@ def test_encoder_version_reports_update_status_independently_of_liveness(remote,
     node["lastSeen"] = 0
     assert service.status()["nodes"][0]["online"] is False
     assert service.status()["nodes"][0]["updateState"] == "current"
-    release.side_effect = FileNotFoundError
+    release.return_value = None
     status = service.status()["nodes"][0]
     assert status["availableVersion"] is None
     assert status["updateState"] == "unavailable"
@@ -81,8 +94,8 @@ def test_encoder_version_reports_update_status_independently_of_liveness(remote,
 def test_resync_requests_are_scoped_and_retryable(remote, monkeypatch):
     service, node, secret, endpoints = remote
     available = "a" * 64
-    release = Mock(return_value=(available, b"archive"))
-    monkeypatch.setattr(homekit_nodes, "agent_release", release)
+    release = Mock(return_value=available)
+    monkeypatch.setattr(homekit_nodes, "available_agent_version", release)
     clock = Mock(return_value=100.0)
     monkeypatch.setattr(homekit_nodes.time, "monotonic", clock)
     real_sync = service.nodes.sync
@@ -125,7 +138,7 @@ def test_resync_requests_are_scoped_and_retryable(remote, monkeypatch):
     assert third != second
 
     available = "b" * 64
-    release.return_value = (available, b"archive-b")
+    release.return_value = available
     assert "syncRequest" not in sync(NodeReport(), node_request)
     assert resync(node["id"], response) == {"requested": True}
     assert sync(NodeReport(), node_request)["syncRequest"] != third
@@ -140,7 +153,7 @@ def test_resync_requests_are_scoped_and_retryable(remote, monkeypatch):
         resync(node["id"], response)
     assert error.value.status_code == 409
     service.nodes.update_report(node["id"], {})
-    release.side_effect = FileNotFoundError
+    release.return_value = None
     with pytest.raises(HTTPException) as error:
         resync(node["id"], response)
     assert error.value.status_code == 409
@@ -162,18 +175,15 @@ def test_agent_archive_request_can_pin_release(remote, monkeypatch):
     assert error.value.status_code == 401
 
 
-def test_agent_release_digest_is_stable_across_cold_builds(tmp_path, monkeypatch):
+def test_unstamped_legacy_worker_is_not_offered(tmp_path):
     (tmp_path / "package.json").write_text("{}")
     (tmp_path / "dist/src").mkdir(parents=True)
     (tmp_path / "dist/src/agent.js").write_text("export {}")
     (tmp_path / "node_modules").mkdir()
-    monkeypatch.setattr(homekit_nodes.time, "time", lambda: 100.0)
-    first = homekit_nodes.agent_release(tmp_path)
-    monkeypatch.setattr(homekit_nodes, "_agent_cache", None)
-    monkeypatch.setattr(homekit_nodes.time, "time", lambda: 200.0)
-    assert homekit_nodes.agent_release(tmp_path) == first
-    (tmp_path / "dist/src/agent.js").write_text("export const changed = 1")
-    assert homekit_nodes.agent_release(tmp_path)[0] != first[0]
+    (tmp_path / "dist/src/camera.js").write_text("export {}")
+    assert homekit_nodes.available_agent_version(tmp_path) is None
+    with pytest.raises(RuntimeError):
+        homekit_nodes.agent_release(tmp_path)
 
 
 @pytest.mark.parametrize("invalid", [{"runningVersion": "A" * 64}, {"failedSyncRequest": "g" * 32}, {"runningVersion": "1" * 65}])

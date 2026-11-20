@@ -70,9 +70,7 @@ def test_worker_control_startup_and_health_deadlines(
             stops.append(elapsed)
             worker.process = None
 
-    fake_worker = tmp_path / "camera.js"
-    fake_worker.touch()
-    monkeypatch.setattr(homekit, "WORKER", fake_worker)
+    monkeypatch.setattr(homekit.homekit_build, "verified_release", lambda: (tmp_path, None))
     monkeypatch.setattr(homekit, "time", SimpleNamespace(monotonic=lambda: elapsed))
     monkeypatch.setattr(homekit, "select", SimpleNamespace(select=poll_pipe))
     # Keep preflight isolated from the host LAN address and installed tools.
@@ -115,6 +113,30 @@ def test_homekit_defaults_validation_and_stable_ports(tmp_path):
     config.cameras[1].homekit.port = camera_port(config.cameras[0])
     with pytest.raises(ValidationError, match="different ports"):
         AppConfig.model_validate(config.model_dump())
+
+
+def test_worker_status_is_read_only_and_admin_can_retry(tmp_path, monkeypatch):
+    from survng.app import homekit_build
+
+    config = configuration(tmp_path)
+    service = HomeKitService(config, MediaSessionManager(), "generation", lambda _: True)
+    ensure = Mock(return_value=True)
+    monkeypatch.setattr(service.builder, "ensure", ensure)
+    monkeypatch.setattr(homekit_build, "verify", lambda: homekit_build.STALE)
+    assert service.status()["workerBuild"] == homekit_build.STALE
+    ensure.assert_not_called()
+
+    router = create_homekit_router(HomeKitRouteDependencies(get_manager=lambda: SimpleNamespace(homekit=service)))
+    path = "/api/homekit/worker/rebuild"
+    assert required_api_scope("POST", path) == "admin"
+    assert not is_public_api_path("POST", path)
+    retry = next(route.endpoint for route in router.routes if route.path == path)
+    response = Response()
+    result = retry(response)
+    assert result["requested"] is True
+    assert result["job"] == service.builder.status()
+    ensure.assert_called_once_with(config.homekit.node_path, force=True)
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_motion_is_opt_in_recent_object_evidence_and_expires(tmp_path):

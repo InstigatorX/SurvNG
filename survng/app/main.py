@@ -174,6 +174,7 @@ def __getattr__(name: str):
 PRODUCT_UPDATE = ProductUpdateService(
     request_server_restart=lambda: _request_server_restart(),
     active_storage_tasks=lambda: _active_storage_tasks(get_manager()),
+    homekit_node_path=lambda: config.homekit.node_path,
 )
 MODEL_EVALUATION = ModelEvaluationRunner(get_manager, lambda: config)
 SERVER_RESTART_LOCK = threading.Lock()

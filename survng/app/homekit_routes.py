@@ -12,7 +12,10 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from .homekit_nodes import SNAPSHOT_LIMIT, ffmpeg_archive_iter, media_ingest_root, node_releases, public_api_root, runtime_archive_iter
+from .homekit_nodes import (
+    SNAPSHOT_LIMIT, available_agent_version, ffmpeg_archive_iter, media_ingest_root,
+    node_releases, public_api_root, runtime_archive_iter,
+)
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,16 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         response.headers["Cache-Control"] = "no-store"
         return deps.get_manager().homekit.status()
 
+    @router.post("/api/homekit/worker/rebuild")
+    def rebuild_worker(response: Response) -> dict:
+        response.headers["Cache-Control"] = "no-store"
+        homekit = deps.get_manager().homekit
+        requested = homekit.ensure_worker_build(force=True)
+        job = homekit.builder.status()
+        if not requested and job["state"] != "building":
+            raise HTTPException(status_code=409, detail="HomeKit worker rebuild is unavailable")
+        return {"requested": True, "job": job}
+
     @router.post("/api/homekit/cameras/{camera_id}/pairing")
     def pairing(camera_id: str, response: Response) -> dict:
         response.headers["Cache-Control"] = "no-store"
@@ -97,6 +110,8 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
     @router.post("/api/homekit/nodes")
     def begin_enrollment(request: Request, response: Response) -> dict:
         response.headers["Cache-Control"] = "no-store"
+        if available_agent_version() is None:
+            raise HTTPException(status_code=409, detail="Build the HomeKit worker before enrolling an encoder")
         try:
             return deps.get_manager().homekit.nodes.begin_enrollment(installer_root(request))
         except (OSError, RuntimeError, ValueError):
