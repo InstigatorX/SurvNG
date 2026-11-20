@@ -377,6 +377,8 @@ def test_encoder_enrollment_is_one_time_and_keeps_secrets_off_status(tmp_path):
         assert f"TOKEN='{token}'" in script
         assert "linux-${node_arch}" in script
         assert "SURVNG_FFMPEG=%s" in script and "/opt/survng-homekit-node/bin/ffmpeg" in script
+        assert 'agent_checksum=$(sha256sum "$work/survng-homekit-agent.tgz")' in script
+        assert 'agent: process.argv[1]' in script and '\' "$agent_checksum"' in script
         assert "/api/homekit/nodes/ffmpeg" in script
         assert "apt-get install -y --no-install-recommends ca-certificates curl ffmpeg" not in script
         assert "private-password" not in script and "rtsp://" not in script
