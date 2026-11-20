@@ -1,5 +1,30 @@
 # HKSV3 upstream investigation — 2026-11-14
 
+## Production refactor follow-up
+
+- Current Scrypted keeps direct CMAF ingestion disabled and requests native
+  HEVC/AAC for HKSV3 over HDS. camera.ui also keeps CMAF disabled in its
+  accessory while providing an experimental implementation. SurvNG retains
+  HDS, including fMP4 pre-roll and hub acknowledgement.
+  [Scrypted recording delegate](https://github.com/koush/scrypted/blob/568b18e7aa679f8d4d565b1d5b5e1546680909e5/plugins/homekit/src/types/camera/camera-secure-video.ts#L125)
+  · [camera.ui accessory](https://github.com/cameraui/plugins/blob/bb4aee534b21fbec8666ffe73498218548ed7e2c/camera-ui-homekit/src/camera/accessory.ts#L631)
+- Scrypted's receiver trace separates offer limits, early DTLS packets, and
+  reoffer ordering. The Scrypted playback-hint fix is specific to its
+  signaling adapter. SurvNG serializes signaling on each accessory session,
+  supplies HAP ICE candidates before connection starts, and exposes
+  allowlisted negotiation stages. The werift upgrade includes its fix for
+  the random used in the DTLS signature after the cookie challenge.
+  [Scrypted device trace](https://github.com/koush/scrypted/issues/2152#issuecomment-6282843553)
+  · [werift DTLS fix](https://github.com/shinyoshiaki/werift-webrtc/pull/759)
+- Two reports describe motion without recordings. Scrypted's report did not
+  identify a cause. camera.ui traced its case to an empty event trigger
+  selection after a mode change. SurvNG records whether the Home recording
+  configuration reached the delegate and whether the producer and prebuffer
+  were ready. A delegate request counter covers only requests that reach
+  the delegate after HAP admission.
+  [Scrypted report](https://github.com/koush/scrypted/issues/2227)
+  · [camera.ui issue](https://github.com/cameraui/plugins/issues/355)
+
 Current result: the user confirmed smooth local LIVE video and the tone after
 filtering oversized live SEI metadata (see receiver evidence below), then smooth
 cellular video and tone after omitting the on-wire RID extension. The remaining

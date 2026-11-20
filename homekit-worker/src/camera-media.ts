@@ -43,14 +43,18 @@ export class CameraMedia implements MediaSource {
   get encoderStatus(): object { return { backend: this.encoding.backend, fallbackReason: this.encoding.fallbackReason, sources: [...this.progress.values()] }; }
   readonly counters = { failures: 0, warningChunks: 0, admissionFailures: 0 };
   constructor(private url: string, private audio: boolean, private ffmpeg: string,
-    private transport: 'tcp' | 'udp', private admission: MediaAdmission, private allowed: () => boolean = () => true, private directory = tmpdir(), readonly encoding: VideoEncoding = { backend: 'software' }, private catalog: readonly Tier[] = tiers, private remoteFeeds = '') {}
+    private transport: 'tcp' | 'udp', private admission: MediaAdmission, private allowed: () => boolean = () => true, private directory = tmpdir(), readonly encoding: VideoEncoding = { backend: 'software' }, private catalog: readonly Tier[] = tiers, private remoteFeeds = '', private readrateCatchup = true) {}
 
   // The shared stream is already live. avformat's default five-second probe
   // holds the first picture until that much media has arrived; identify the
   // streams at once instead. Pace reads so a replayed GOP is not dumped into RTP.
   // FFmpeg treats an exact zero burst as its default half-second burst.
   input(tier: Tier): string[] {
-    return ['-probesize', '32768', '-analyzeduration', '0', '-re', '-readrate_initial_burst', '0.001', '-readrate_catchup', '1', '-rw_timeout', '15000000', '-f', 'mpegts', '-i', `survng-homekit:${tier.identifier}`];
+    const pacing = ['-re', '-readrate_initial_burst', '0.001'];
+    // Older FFmpeg builds pace reads without exposing a catch-up override.
+    if (this.readrateCatchup) pacing.push('-readrate_catchup', '1');
+    return ['-probesize', '32768', '-analyzeduration', '0', ...pacing,
+      '-rw_timeout', '15000000', '-f', 'mpegts', '-i', `survng-homekit:${tier.identifier}`];
   }
   protected directInput(): string[] {
     // RTSP is a demuxer with its own socket timeout; rw_timeout applies to

@@ -249,7 +249,7 @@ class CameraWorker:
             help_output = subprocess.run([self.config.ffmpeg_path, "-hide_banner", "-h", "full"],
                                          capture_output=True, timeout=5, check=True).stdout
             options = {line.split(maxsplit=1)[0] for line in help_output.splitlines() if line.strip()}
-            if not {b"-readrate_initial_burst", b"-readrate_catchup"} <= options:
+            if b"-readrate_initial_burst" not in options:
                 self._state(state="blocked", error="ffmpeg_pacing_unsupported")
                 return
             failures = 0
@@ -281,7 +281,8 @@ class CameraWorker:
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                         start_new_session=True, env=env, umask=0o077, pass_fds=(owner.fileno(),))
                     settings = worker_settings(self.config, self.camera, remote)
-                    settings.update(state=str(self.path.resolve()), ownerFd=owner.fileno())
+                    settings.update(state=str(self.path.resolve()), ownerFd=owner.fileno(),
+                                    readrateCatchup=b"-readrate_catchup" in options)
                     self.process.stdin.write(json.dumps(settings).encode() + b"\n")
                     self.process.stdin.flush()
                     self._state(state="starting", error=None)
@@ -368,6 +369,7 @@ class HomeKitService:
         self.directory = Path(config.database_dir or config.storage_dir).resolve() / "homekit"
         self.lock = threading.RLock()
         self.workers: dict[str, CameraWorker] = {}
+        self.retiring: set[str] = set()
         self.motion: dict[str, float] = {}
         self.started = False
         self.operations = threading.RLock()
@@ -380,17 +382,36 @@ class HomeKitService:
             if self.started:
                 return
             self.nodes.reopen()
-            self.started = True
             self._start_workers()
+            self.started = True
 
     def _start_workers(self) -> None:
         if not self.config.homekit.enabled:
             return
         for camera in self.config.cameras:
-            if camera.homekit.enabled:
+            if camera.homekit.enabled and camera.id not in self.workers:
                 worker = CameraWorker(self, self.config, camera)
-                self.workers[camera.id] = worker
                 worker.start()
+                self.workers[camera.id] = worker
+
+    def _retire_workers(self, workers: dict[str, CameraWorker]) -> None:
+        with self.lock:
+            self.retiring.update(workers)
+        errors: list[Exception] = []
+        # Workers consult motion while exiting. Keep the service lock available.
+        for camera_id, worker in workers.items():
+            try:
+                worker.close()
+            except Exception as error:
+                errors.append(error)
+            else:
+                with self.lock:
+                    self.workers.pop(camera_id)
+                    self.retiring.remove(camera_id)
+        if errors:
+            raise RuntimeError("HomeKit worker shutdown incomplete") from ExceptionGroup(
+                "HomeKit worker cleanup failures", errors,
+            )
 
     def reconfigure(self, config) -> None:
         with self.operations:
@@ -405,25 +426,23 @@ class HomeKitService:
         with self.lock:
             previous = self.config
             incoming = {camera.id: camera for camera in config.cameras}
-            retiring = [worker for key, worker in self.workers.items()
-                if not config.homekit.enabled or key not in incoming
-                or signature(previous, worker.camera) != signature(config, incoming[key])]
-        # Close outside the service lock: workers consult motion while exiting.
-        for worker in retiring:
-            worker.close()
+            retiring = {key: worker for key, worker in self.workers.items()
+                if key in self.retiring or not config.homekit.enabled or key not in incoming
+                or signature(previous, worker.camera) != signature(config, incoming[key])}
+        try:
+            self._retire_workers(retiring)
+        except RuntimeError:
+            # The previous configuration is still published. Restore its drained
+            # workers while retaining ownership of any workers still shutting down.
+            with self.lock:
+                self._start_workers()
+            raise
         with self.lock:
-            for worker in retiring:
-                self.workers.pop(worker.camera.id, None)
             self.config = config
             self.motion = {key: value for key, value in self.motion.items()
                 if key in incoming and incoming[key].homekit.enabled and incoming[key].homekit.object_motion}
+            self._start_workers()
             self.started = True
-            if config.homekit.enabled:
-                for camera in config.cameras:
-                    if camera.homekit.enabled and camera.id not in self.workers:
-                        worker = CameraWorker(self, config, camera)
-                        self.workers[camera.id] = worker
-                        worker.start()
 
     def close(self) -> None:
         with self.operations:
@@ -431,14 +450,12 @@ class HomeKitService:
 
     def _close(self) -> None:
         with self.lock:
-            workers = list(self.workers.values())
-        for worker in workers:
-            worker.close()
+            workers = dict(self.workers)
+        self._retire_workers(workers)
         with self.lock:
-            self.workers.clear()
             self.motion.clear()
             self.started = False
-            self.nodes.close()
+        self.nodes.close()
 
     def observe_objects(self, payload: dict) -> None:
         if not self.config.homekit.enabled:
@@ -515,7 +532,7 @@ class HomeKitService:
 
     def pairing(self, camera_id: str) -> dict:
         with self.lock:
-            worker = self.workers.get(camera_id)
+            worker = self.workers.get(camera_id) if camera_id not in self.retiring else None
         if worker is None or worker.status().get("state") != "running":
             raise RuntimeError("Enable this camera and wait for HomeKit to start")
         return control(worker.path, "pairing")
@@ -529,7 +546,7 @@ class HomeKitService:
             worker = self.workers.get(camera_id)
         if worker is None:
             raise RuntimeError("Enable this camera before resetting its pairing")
-        worker.close()
+        self._retire_workers({camera_id: worker})
         try:
             private_directory(worker.path)
             fd = os.open(worker.path / "owner.lock", os.O_RDWR | os.O_NOFOLLOW)
@@ -545,6 +562,6 @@ class HomeKitService:
             with self.lock:
                 camera = next(camera for camera in self.config.cameras if camera.id == camera_id)
                 replacement = CameraWorker(self, self.config, camera)
-                self.workers[camera_id] = replacement
                 self.motion.pop(camera_id, None)
                 replacement.start()
+                self.workers[camera_id] = replacement

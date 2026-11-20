@@ -54,10 +54,10 @@ Integrations. Set the server's LAN IPv4 address and the service account's Node.j
 HEVC encoding, and save. The worker reports missing build/runtime/encoder
 requirements in the same panel; startup never downloads packages.
 
-The server's configured FFmpeg must list `-readrate_initial_burst` and
-`-readrate_catchup` in `ffmpeg -hide_banner -h full`. The server uses both
-options to pace shared media feeds, including feeds from a remote encoder.
-HomeKit reports a blocked camera if either option is missing.
+The server's configured FFmpeg must list `-readrate_initial_burst` in
+`ffmpeg -hide_banner -h full`. Shared live and recording consumers use the
+small initial burst even with a remote encoder. When FFmpeg provides
+`-readrate_catchup`, SurvNG limits catch-up to real time.
 
 Choose the main or live camera source and enable camera audio only when that
 source has audio. Use **Pair with Apple Home** to reveal the setup code and QR.

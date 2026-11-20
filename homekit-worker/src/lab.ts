@@ -3,10 +3,11 @@ import { isAbsolute, join } from 'node:path';
 import { isIPv4 } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { open, unlink } from 'node:fs/promises';
-import { Accessory, Categories, Characteristic, HAPStorage, Service, SecureVideoController,
+import { Accessory, Categories, Characteristic, HAPStorage, Service,
   StreamTierVideoCodec, StreamTierAudioSampleRate, StreamTierAudioBitDepth, MediaContainerType,
   VideoCodecType, H264Level, H264Profile, AudioRecordingCodecType, AudioBitrate, AudioRecordingSamplerate, uuid } from '@homebridge/hap-nodejs';
 import { controlServer, identity, privateDirectory } from './control.js';
+import { HomeKitMotionController, motionZonesBlockUnlocatedMotion } from './homekit-motion.js';
 import { SyntheticMedia, tiers } from './media.js';
 import { LabRecording } from './fragments.js';
 import { LocalStreams, RemoteStreams } from './transports.js';
@@ -62,15 +63,16 @@ async function main(): Promise<void> {
       .setCharacteristic(Characteristic.Model, 'Synthetic HKSV3 acceptance camera')
       .setCharacteristic(Characteristic.SerialNumber, saved.id)
       .setCharacteristic(Characteristic.FirmwareRevision, '0.1.0');
-    let controller: SecureVideoController | undefined;
+    let controller: HomeKitMotionController | undefined;
     const cameraAllowed = () => !closing && !!controller?.homeKitCameraActive;
     local = new LocalStreams(media, () => !closing && !!controller?.streamingAllowed(controller.multiTierStreamManagementService));
-    remote = new RemoteStreams(media, () => !closing && !!controller?.streamingAllowed(controller.webrtcStreamManagementService), address!);
+    remote = new RemoteStreams(media, () => !closing && !!controller?.streamingAllowed(controller.webrtcStreamManagementService),
+      address!, tiers, id => controller!.endWebRTCSession(id));
     recording = new LabRecording(media, cameraAllowed);
     const snapshots = { requested: 0, completed: 0, failed: 0 };
     const requests = { accessories: 0, reads: 0, writes: 0, resources: 0 };
     const characteristics: Record<string, { reads: number; writes: number; subscriptions: number }> = {};
-    controller = new SecureVideoController({
+    controller = new HomeKitMotionController({
       sensor: { uuid: uuid.generate(`${saved.id}:sensor`), width: 1920, height: 1080 },
       video: { codec: StreamTierVideoCodec.H265, payloadType: 99, tiers },
       // Temporary hardware experiment: advertise Speaker; talkback remains unimplemented.
@@ -104,13 +106,17 @@ async function main(): Promise<void> {
     // caused the test hub to request a snapshot or live stream.
     controller.globalOperatingModeService?.setCharacteristic(
       Characteristic.ThirdPartyCameraActive, Characteristic.ThirdPartyCameraActive.OFF);
-    const motionPermitted = () => cameraAllowed() && !!controller!.motionService?.getCharacteristic(Characteristic.MotionEnabled).value;
+    const motionEnabled = () => !!controller!.motionService?.getCharacteristic(Characteristic.MotionEnabled).value;
+    const zonesBlockMotion = () => motionZonesBlockUnlocatedMotion(controller!.motionZones);
+    const motionPermitted = () => cameraAllowed() && motionEnabled() && !zonesBlockMotion();
     const publishMotion = () => controller!.setMotionDetected(motionPermitted() && recording!.reportingMotion());
     const setMotion = (active: boolean) => { recording!.setMotion(active && motionPermitted()); publishMotion(); };
     recording!.watch(publishMotion);
     controller.on('operating-mode-changed', () => {
       if (!controller!.streamingAllowed(controller!.multiTierStreamManagementService)) void local!.close();
-      if (!controller!.streamingAllowed(controller!.webrtcStreamManagementService)) void remote!.close();
+      if (!controller!.streamingAllowed(controller!.webrtcStreamManagementService)) {
+        void remote!.close().catch(() => console.error('HomeKit WebRTC session cleanup failed.'));
+      }
       if (!cameraAllowed()) setMotion(false);
       recording!.setAudio(controller!.recordingAudioActive); recording!.reconcile();
     });
@@ -120,7 +126,7 @@ async function main(): Promise<void> {
     control = await controlServer(join(state, 'control.sock'), (method, params) => {
       if (method === 'status') return { schemaVersion: 1, mode: 'synthetic-lab', acceptance: 'unverified',
         paired: !!accessory!._accessoryInfo?.paired(),
-        localSessions: local!.sessions.size, remoteSessions: remote!.sessions.size,
+        localSessions: local!.sessions.size, remoteSessions: remote!.sessions.size, remoteControllerSessions: controller!.activeWebRTCSessions.length,
         local: local!.counters, remote: remote!.counters, snapshots, requests, characteristics,
         localMedia: { sent: local!.sent, negotiation: local!.negotiation },
         receiverFeedback: {
@@ -138,12 +144,14 @@ async function main(): Promise<void> {
         },
         localAllowed: controller!.streamingAllowed(controller!.multiTierStreamManagementService),
         remoteAllowed: controller!.streamingAllowed(controller!.webrtcStreamManagementService),
-        childProcesses: media.children.size, homeKitActive: cameraAllowed(), recording: recording!.status() };
+        childProcesses: media.children.size, homeKitActive: cameraAllowed(), recording: recording!.status(),
+        motion: { enabled: motionEnabled(), permitted: motionPermitted(), detected: motionPermitted() && recording!.reportingMotion() },
+        zonesBlockMotion: zonesBlockMotion() };
       if (method === 'pairing') return { setupCode: saved.pincode, setupUri: accessory!.setupURI() };
       if (method === 'motion') {
         const seconds = (params as { seconds?: unknown } | undefined)?.seconds ?? 10;
         if (typeof seconds !== 'number' || seconds < 1 || seconds > 60 || !cameraAllowed()) throw new Error('invalid motion request');
-        if (controller!.motionZones.active && controller!.motionZones.zones) throw new Error('disable zones for unlocated synthetic motion');
+        if (zonesBlockMotion()) throw new Error('disable zones for unlocated synthetic motion');
         clearTimeout(motionTimer); setMotion(true); motionTimer = setTimeout(() => setMotion(false), seconds * 1000);
         return { accepted: true };
       }

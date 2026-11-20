@@ -5,13 +5,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { connect } from 'node:net';
 import { once } from 'node:events';
-import { RtpHeader, RtpPacket } from 'werift';
-import { FragmentRing, FragmentParser, producerReferenceTime, boxes } from '../src/fragments.js';
+import { RTCPeerConnection, RTCRtpCodecParameters, RtpHeader, RtpPacket, type RTCSessionDescriptionInit } from 'werift';
+import { Accessory, AudioBitrate, AudioRecordingCodecType, AudioRecordingSamplerate, Characteristic,
+  H264Level, H264Profile, MediaContainerType, SecureVideoController, StreamTierVideoCodec,
+  VideoCodecType, uuid } from '@homebridge/hap-nodejs';
+import { FragmentRing, FragmentParser, LabRecording, producerReferenceTime, boxes } from '../src/fragments.js';
 import { privateDirectory, identity, controlServer } from '../src/control.js';
 import { SecureVideoSFrame, SFrameCipherSuite, SFrameReceiver, encodeHeader } from '../src/vendor/sframe.js';
 import { HevcAccessUnitAssembler, SFrameRtpPacketizer } from '../src/vendor/sframeRtp.js';
-import { videoOffer } from '../src/transports.js';
-import { tiers } from '../src/media.js';
+import { LocalStreams, RemoteStreams, videoOffer } from '../src/transports.js';
+import { SyntheticMedia, tiers } from '../src/media.js';
 
 test('fragment retention has an explicit gap instead of skipping a slow reader', async () => {
   const ring = new FragmentRing(32, 6);
@@ -123,4 +126,143 @@ test('remote SDP has tier bounds and a unique RTP stream extension advertisement
   assert.match(offer, /b=TIAS:1800000/); assert.match(offer, /a=extmap:2 urn:ietf/);
   assert.match(offer, /max-width=1920;max-height=1080/);
   assert.ok(offer.indexOf('a=simulcast:send 1') < offer.indexOf('m=audio'));
+});
+
+test('closing WebRTC transports releases the HAP session cap', async t => {
+  // Build real offers and exercise HAP's characteristic handler without opening ICE sockets.
+  let beforeLocalDescription: (() => Promise<void>) | undefined;
+  t.mock.method(RTCPeerConnection.prototype, 'setLocalDescription', async function (
+    this: RTCPeerConnection, offer: RTCSessionDescriptionInit,
+  ) {
+    await beforeLocalDescription?.();
+    Object.defineProperty(this, 'localDescription', { value: offer });
+  });
+  const media = new SyntheticMedia(tmpdir());
+  const remote = new RemoteStreams(media, () => true, '127.0.0.1', tiers,
+    (id): Promise<void> => controller.endWebRTCSession(id));
+  const controller = new SecureVideoController({
+    sensor: { uuid: uuid.generate('webrtc-session-cap-sensor'), width: 1920, height: 1080 },
+    video: { codec: StreamTierVideoCodec.H265, tiers },
+    rtp: { delegate: new LocalStreams(media, () => true) },
+    webrtc: { delegate: remote, maxSessions: 6 },
+    recording: {
+      delegate: new LabRecording(media, () => true),
+      options: {
+        prebufferLength: 4000,
+        mediaContainerConfiguration: { type: MediaContainerType.FRAGMENTED_MP4, fragmentLength: 4000 },
+        video: { type: VideoCodecType.H264, parameters: { levels: [H264Level.LEVEL4_0], profiles: [H264Profile.MAIN] },
+          resolutions: [[1920, 1080, 30]] },
+        audio: { codecs: [{ type: AudioRecordingCodecType.AAC_LC, bitrateMode: AudioBitrate.VARIABLE,
+          samplerate: AudioRecordingSamplerate.KHZ_32, audioChannels: 1 }] },
+      },
+    },
+  });
+  const accessory = new Accessory('WebRTC Session Cap', uuid.generate('webrtc-session-cap'));
+  accessory.configureController(controller);
+  const solicit = controller.webrtcStreamManagementService!.getCharacteristic(Characteristic.WebRTCSolicitOffer);
+  try {
+    for (let i = 0; i < 6; i++) await solicit.handleSetRequest('');
+    assert.equal(controller.activeWebRTCSessions.length, 6);
+    assert.equal(remote.sessions.size, 6);
+
+    const [failed] = controller.activeWebRTCSessions;
+    remote.sessions.get(failed)!.pc.connectionStateChange.execute('failed');
+    await remote.handleEndSession(failed);
+    assert.equal(controller.activeWebRTCSessions.length, 5);
+    await Promise.all([remote.close(), remote.close(), controller.endWebRTCSession(controller.activeWebRTCSessions[0])]);
+    assert.equal(remote.sessions.size, 0);
+
+    // Home can solicit a seventh offer even though no peer sent an END command.
+    await solicit.handleSetRequest('');
+    assert.equal(remote.counters.offers, 7);
+    assert.equal(controller.activeWebRTCSessions.length, 1);
+
+    let resumeOffer!: () => void;
+    const pausedOffer = new Promise<void>(entered => {
+      beforeLocalDescription = () => new Promise<void>(resume => {
+        resumeOffer = resume;
+        entered();
+      });
+    });
+    const pending = solicit.handleSetRequest('');
+    await pausedOffer;
+    await remote.close();
+    resumeOffer();
+    await pending;
+    assert.equal(remote.counters.offers, 7);
+    assert.equal(remote.sessions.size, 0);
+    assert.equal(controller.activeWebRTCSessions.length, 0);
+  } finally {
+    await remote.close();
+    await Promise.all(controller.activeWebRTCSessions.map(id => controller.endWebRTCSession(id)));
+  }
+});
+
+test('remote answer queues HAP candidates before ICE and an early reoffer waits for the answer', { timeout: 5000 }, async t => {
+  t.mock.method(RTCPeerConnection.prototype, 'setLocalDescription', async function (
+    this: RTCPeerConnection, description: RTCSessionDescriptionInit,
+  ) {
+    Object.defineProperty(this, 'localDescription', { value: description, configurable: true });
+  });
+  const remote = new RemoteStreams(new SyntheticMedia(tmpdir()), () => true, '127.0.0.1');
+  const id = 'signaling';
+  try {
+    await remote.handleSolicitOffer({ sessionIdentifier: id, options: { sframeEnabled: true } });
+    const pc = remote.sessions.get(id)!.pc;
+    const calls: string[] = [];
+    let finishAnswer!: () => void;
+    const pendingAnswer = new Promise<void>(resolve => { finishAnswer = resolve; });
+    let applyingAnswer!: () => void;
+    const answerStarted = new Promise<void>(resolve => { applyingAnswer = resolve; });
+    t.mock.method(pc, 'addIceCandidate', async () => { calls.push('candidate'); });
+    t.mock.method(pc, 'setRemoteDescription', async (description: RTCSessionDescriptionInit) => {
+      assert.ok(description.type);
+      calls.push(description.type);
+      if (description.type === 'answer') {
+        applyingAnswer();
+        await pendingAnswer;
+      }
+    });
+    t.mock.method(pc, 'createAnswer', async () => ({ type: 'answer', sdp: 'v=0\r\n' }));
+    const request = { sessionIdentifier: id, sdpAnswer: 'v=0\r\n',
+      candidates: [{ candidate: 'candidate:1 1 udp 1 127.0.0.1 9 typ host', sdpMid: '0' }] };
+    const answer = remote.handleProvideAnswer(request);
+    await answerStarted;
+    const reoffer = remote.handleReoffer({ sessionIdentifier: id, sdpOffer: 'v=0\r\n' });
+    try {
+      await remote.handleUpdateSession({ sessionIdentifier: id, receiveKeysToAdd: [], receiveKIDsToRemove: [] });
+      assert.deepEqual(calls, ['candidate', 'answer']);
+    } finally {
+      finishAnswer();
+      await Promise.allSettled([answer, reoffer]);
+    }
+    assert.deepEqual(await reoffer, { sdpAnswer: 'v=0\r\n' });
+    assert.deepEqual(calls, ['candidate', 'answer', 'offer']);
+  } finally { await remote.close(); }
+});
+
+test('the bundled ICE transport receives a separate HAP candidate despite an SDP end marker', { timeout: 5000 }, async t => {
+  // Keep real werift SDP parsing and candidate admission without network I/O.
+  const prototype = RTCPeerConnection.prototype as unknown as { gatherCandidates(): Promise<void> };
+  t.mock.method(prototype, 'gatherCandidates', async () => {});
+  const remote = new RemoteStreams(new SyntheticMedia(tmpdir()), () => true, '127.0.0.1');
+  const viewer = new RTCPeerConnection({ bundlePolicy: 'max-bundle', codecs: {
+    video: [new RTCRtpCodecParameters({ mimeType: 'video/H265', clockRate: 90000, payloadType: 99 })],
+    audio: [new RTCRtpCodecParameters({ mimeType: 'audio/opus', clockRate: 48000, channels: 2, payloadType: 110 })],
+  } });
+  const id = 'bundled-candidate';
+  try {
+    const offer = await remote.handleSolicitOffer({ sessionIdentifier: id, options: { sframeEnabled: true } });
+    await viewer.setRemoteDescription({ type: 'offer', sdp: offer.sdpOffer });
+    await viewer.setLocalDescription(await viewer.createAnswer());
+    const sdpAnswer = viewer.localDescription!.sdp.replace(/(\r\nm=[^\r\n]+\r\n)/, '$1a=end-of-candidates\r\n');
+    assert.match(sdpAnswer, /^a=end-of-candidates$/m);
+    const ice = remote.sessions.get(id)!.pc.dtlsTransports[0].iceTransport;
+    t.mock.method(ice, 'start', () => new Promise<void>(() => {}));
+    await remote.handleProvideAnswer({ sessionIdentifier: id, sdpAnswer, candidates: [
+      { candidate: 'candidate:1 1 udp 2122260223 192.0.2.20 41000 typ host' },
+    ] });
+    assert.equal(ice.getRemoteCandidates().length, 1);
+    assert.equal(remote.counters.lastRemoteCandidates, 1);
+  } finally { await Promise.all([remote.close(), viewer.close()]); }
 });

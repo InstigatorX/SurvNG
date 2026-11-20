@@ -9,7 +9,7 @@ out of scope.
 ## Protocol lab: implementation and acceptance
 
 The isolated [synthetic worker](../homekit-worker/README.md) uses Node.js 24,
-HAP-NodeJS `d0359d529de18ef318b09a74b71380a879023ec4`, and werift 0.24.4.
+HAP-NodeJS `d0359d529de18ef318b09a74b71380a879023ec4`, and werift 0.26.0.
 It has no production camera input. Pairing state and controls are private, and
 status exposes allowlisted state without credentials, SDP, or transport keys.
 

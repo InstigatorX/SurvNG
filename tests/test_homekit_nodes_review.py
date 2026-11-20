@@ -1,6 +1,7 @@
 """Regression coverage for remote encoder ownership and input boundaries."""
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from fastapi import HTTPException, Request, Response
@@ -172,6 +173,31 @@ def test_closed_registry_rejects_stale_sync_and_writers(remote):
         service.nodes.prepare_feeds("porch", [1])
     service.nodes.reopen()
     assert service.nodes.authenticate(secret) is not None
+
+
+def test_registry_shutdown_retries_only_feeds_that_failed_to_close(remote):
+    service, _, secret, _ = remote
+    registry = service.nodes
+    failed, other = Mock(), Mock()
+    first_key, other_key = ("porch", 1), ("porch", 2)
+    registry.feeds.update({first_key: failed, other_key: other})
+    failed.close.side_effect = RuntimeError("HomeKit feed shutdown incomplete")
+
+    with pytest.raises(RuntimeError, match="HomeKit feed shutdown incomplete"):
+        registry.close()
+    other.close.assert_called_once_with()
+    assert registry.feeds == {first_key: failed}
+    assert registry.authenticate(secret) is None
+    with pytest.raises(RuntimeError, match="HomeKit feed shutdown incomplete"):
+        registry.reopen()
+
+    failed.close.side_effect = None
+    registry.close()
+    assert failed.close.call_count == 2
+    other.close.assert_called_once_with()
+    assert not registry.feeds
+    registry.reopen()
+    assert registry.authenticate(secret) is not None
 
 
 def test_sync_evaluates_assignments_after_the_new_report(remote):

@@ -102,10 +102,16 @@ def test_worker_control_startup_and_health_deadlines(
 
 
 @pytest.mark.parametrize(
-    "missing", [b"-readrate_catchup", b"-readrate_initial_burst", None],
-    ids=["missing-catchup", "missing-initial-burst", "cancelled"],
+    ("help_output", "expected_catchup"),
+    [
+        (b"-readrate_initial_burst <seconds>   Description references -readrate_catchup", False),
+        (b"-readrate_initial_burst <seconds>\n   -readrate_catchup <speed>", True),
+        (b"-readrate_catchup <speed>   Description references -readrate_initial_burst", None),
+        (None, None),
+    ],
+    ids=["missing-catchup", "supports-catchup", "missing-initial-burst", "cancelled"],
 )
-def test_worker_ffmpeg_pacing_preflight(tmp_path, monkeypatch, missing):
+def test_worker_ffmpeg_pacing_preflight(tmp_path, monkeypatch, help_output, expected_catchup):
     from survng.app import homekit
 
     config = configuration(tmp_path)
@@ -120,27 +126,31 @@ def test_worker_ffmpeg_pacing_preflight(tmp_path, monkeypatch, missing):
         if args[-1] == "--version":
             return SimpleNamespace(stdout=b"v24.0.0")
         if args[-1] == "-encoders":
-            if missing is None:
+            if help_output is None:
                 worker.stopping.set()
             return SimpleNamespace(stdout=b"libopus aac mjpeg")
         assert args[-2:] == ["-h", "full"]
-        assert missing is not None, "shutdown started before the pacing probe"
-        supported = {b"-readrate_initial_burst", b"-readrate_catchup"} - {missing}
-        return SimpleNamespace(stdout=b" ".join(supported) + b" <speed>  Description references " + missing)
+        assert help_output is not None, "shutdown started before the pacing probe"
+        return SimpleNamespace(stdout=help_output)
 
     monkeypatch.setattr(homekit.subprocess, "run", run)
-    spawn = Mock(side_effect=OSError("unexpected worker launch"))
+    stdin = io.BytesIO()
+    spawn = Mock(return_value=SimpleNamespace(stdin=stdin, poll=lambda: 42))
     monkeypatch.setattr(homekit.subprocess, "Popen", spawn)
-    monkeypatch.setattr(worker.stopping, "wait", lambda _delay: worker.stopping.set())
+    monkeypatch.setattr(worker, "_terminate", lambda: setattr(worker, "process", None))
     try:
         worker._run()
     finally:
         service.nodes.close()
 
-    if missing is not None:
+    if expected_catchup is not None:
+        spawn.assert_called_once()
+        assert json.loads(stdin.getvalue())["readrateCatchup"] is expected_catchup
+    else:
+        spawn.assert_not_called()
+    if help_output is not None and expected_catchup is None:
         assert worker.status()["state"] == "blocked"
         assert worker.status()["error"] == "ffmpeg_pacing_unsupported"
-    spawn.assert_not_called()
 
 
 def test_homekit_defaults_validation_and_stable_ports(tmp_path):
@@ -237,6 +247,58 @@ def test_per_camera_reconfiguration_preserves_other_workers_and_pairing(tmp_path
         other.close.assert_not_called()
         service.close()
         other.close.assert_called_once()
+
+
+def test_failed_homekit_retirement_restores_other_workers_and_retries_owner(tmp_path):
+    current = configuration(tmp_path)
+    service = HomeKitService(current, MediaSessionManager(), "generation", lambda _: True)
+    incoming = current.model_copy(deep=True)
+    incoming.homekit.enabled = False
+    import threading
+    runtime = Mock(config=current, homekit=service)
+    application = TargetedConfigApplication(lock=threading.RLock(), save=Mock(), active_exports=lambda: [])
+    with patch("survng.app.homekit.CameraWorker") as factory:
+        factory.side_effect = lambda service, app, camera: SimpleNamespace(camera=camera, start=Mock(), close=Mock())
+        service.start()
+        first, failed = service.workers.values()
+        failed.close.side_effect = RuntimeError("HomeKit worker shutdown incomplete")
+        with pytest.raises(RuntimeError, match="HomeKit worker shutdown incomplete"):
+            application.apply(current, incoming, runtime, persist=False)
+
+        restored = service.workers["porch"]
+        assert restored is not first
+        restored.start.assert_called_once_with()
+        first.close.assert_called_once_with()
+        assert service.workers["yard"] is failed
+        assert service.config is current
+        assert runtime.config is current
+
+        failed.close.side_effect = None
+        service.reconfigure(current)
+        assert service.workers["porch"] is restored
+        assert service.workers["yard"] is not failed
+        service.workers["yard"].start.assert_called_once_with()
+        service.close()
+
+
+def test_homekit_shutdown_attempts_siblings_and_retains_failed_owner(tmp_path):
+    service = HomeKitService(configuration(tmp_path), MediaSessionManager(), "generation", lambda _: True)
+    with patch("survng.app.homekit.CameraWorker") as factory:
+        factory.side_effect = lambda service, app, camera: SimpleNamespace(camera=camera, start=Mock(), close=Mock())
+        service.start()
+        failed, other = service.workers.values()
+        failed.close.side_effect = RuntimeError("HomeKit worker shutdown incomplete")
+        with pytest.raises(RuntimeError, match="HomeKit worker shutdown incomplete"):
+            service.close()
+
+        other.close.assert_called_once_with()
+        assert service.workers == {"porch": failed}
+        assert not service.nodes.closed
+        failed.close.side_effect = None
+        service.close()
+        assert failed.close.call_count == 2
+        other.close.assert_called_once_with()
+        assert service.nodes.closed
 
 
 def test_config_homekit_is_targeted_not_camera_reload(tmp_path):

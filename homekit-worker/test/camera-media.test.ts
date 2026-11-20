@@ -46,6 +46,16 @@ test('a live viewer identifies the shared stream without the default five-second
   assert.equal(args.includes('-readrate_initial_burst'), true);
 });
 
+test('shared live and recording feeds omit only the unsupported catch-up override', () => {
+  const media = new CameraMedia('unused', false, 'ffmpeg', 'tcp', async () => {},
+    undefined, undefined, undefined, undefined, undefined, false);
+  for (const args of [media.input(tiers[0]), media.recording(tiers[0], true)]) {
+    assert.ok(args.includes('-re'));
+    assert.equal(args[args.indexOf('-readrate_initial_burst') + 1], '0.001');
+    assert.ok(!args.includes('-readrate_catchup'));
+  }
+});
+
 test('RTSP sources use the demuxer timeout while HTTP uses the protocol timeout', () => {
   class Inputs extends CameraMedia { args(): string[] { return this.directInput(); } }
   for (const scheme of ['rtsp', 'rtsps', 'RTSP']) {
@@ -137,6 +147,8 @@ test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio tr
   let media: CameraMedia | undefined;
   const server = createServer();
   try {
+    const { stdout: ffmpegHelp } = await execute('ffmpeg', ['-hide_banner', '-h', 'full'], { maxBuffer: 8 * 1024 * 1024 });
+    const readrateCatchup = /^\s*-readrate_catchup\s/m.test(ffmpegHelp);
     await execute('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=15',
       '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=32000', '-t', '8', '-c:v', 'libx264', '-preset', 'ultrafast',
       '-c:a', 'aac', '-movflags', '+faststart', '-y', input]);
@@ -154,7 +166,7 @@ test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio tr
     media = new FileCameraMedia(`http://127.0.0.1:${address.port}/camera.mp4`, true, 'ffmpeg', 'tcp', async (method, token, detail) => {
       if (method === 'acquire' && detail?.purpose === 'encoder') encoderAcquires++;
       if (method === 'acquire') admitted.add(token); else if (method === 'release') admitted.delete(token);
-    }, () => true, root, encoding);
+    }, () => true, root, encoding, tiers, '', readrateCatchup);
     for (const audio of [true, false]) {
       const child: ChildProcess = await media.start([...media.recording(tiers[2], audio), '-tag:v', 'hvc1',
         '-movflags', '+frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', 'pipe:1']);
@@ -220,7 +232,7 @@ test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio tr
       await execute('ffmpeg', ['-v', 'error', '-i', file, '-f', 'null', '-']);
     }
     await media.stop();
-    media = new FileCameraMedia(`http://127.0.0.1:${address.port}/camera.mp4`, false, 'ffmpeg', 'tcp', async () => {}, () => true, root, encoding);
+    media = new FileCameraMedia(`http://127.0.0.1:${address.port}/camera.mp4`, false, 'ffmpeg', 'tcp', async () => {}, () => true, root, encoding, tiers, '', readrateCatchup);
     const silentChild: ChildProcess = await media.start([...media.recording(tiers[2], true), '-t', '4', '-tag:v', 'hvc1',
       '-movflags', '+frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', 'pipe:1']);
     const silentChunks: Buffer[] = [];

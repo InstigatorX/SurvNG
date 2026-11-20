@@ -4,10 +4,11 @@ import { isIPv4 } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { fstatSync } from 'node:fs';
 
-import { Accessory, Categories, Characteristic, HAPStorage, Service, SecureVideoController,
+import { Accessory, Categories, Characteristic, HAPStorage, Service,
   StreamTierVideoCodec, StreamTierAudioSampleRate, StreamTierAudioBitDepth, MediaContainerType,
   VideoCodecType, H264Level, H264Profile, AudioRecordingCodecType, AudioBitrate, AudioRecordingSamplerate, uuid } from '@homebridge/hap-nodejs';
 import { controlServer, identity, privateDirectory } from './control.js';
+import { HomeKitMotionController, motionZonesBlockUnlocatedMotion } from './homekit-motion.js';
 import { LabRecording } from './fragments.js';
 import { LocalStreams, RemoteStreams } from './transports.js';
 import { probeFrame, qualifyEncoding, selectEncoding, streamProfile, EncodingUnavailableError, type VideoEncoding } from './encoding.js';
@@ -24,7 +25,7 @@ async function main(): Promise<void> {
     version: number; state: string; bind: string; port: number; name: string;
     url?: string; audio: boolean; ffmpeg: string; transport: 'tcp' | 'udp'; allowSoftwareEncoding: boolean; ownerFd: number;
     remote?: boolean; feeds?: string; profile?: { width: number; height: number; tiers: Tier[]; resolutions: [number, number, number][] };
-    encoding?: VideoEncoding;
+    encoding?: VideoEncoding; readrateCatchup?: boolean;
   };
   if (process.versions.node.split('.')[0] !== '24' || config.version !== 1) throw new Error('Node.js 24 and protocol v1 required');
   // Retain the inherited flock descriptor for this process lifetime. A new
@@ -45,7 +46,7 @@ async function main(): Promise<void> {
     waiting.set(id, { resolve: () => { clearTimeout(timer); resolve(); }, reject: error => { clearTimeout(timer); reject(error); } });
     process.stdout.write(JSON.stringify({ version: 1, id, method, token, ...detail }) + '\n');
   });
-  let controller: SecureVideoController | undefined;
+  let controller: HomeKitMotionController | undefined;
   let media: CameraMedia | undefined;
   let qualifying: Promise<VideoEncoding> | undefined;
   const qualificationAbort = new AbortController();
@@ -99,7 +100,8 @@ async function main(): Promise<void> {
       profile = streamProfile(frame.width, frame.height);
     }
     media = new CameraMedia(config.url || 'http://127.0.0.1/homekit-remote', config.audio, config.ffmpeg, config.transport, admission,
-      () => !closing && !!controller?.homeKitCameraActive, state, encoding, profile.tiers, config.remote ? config.feeds : '');
+      () => !closing && !!controller?.homeKitCameraActive, state, encoding, profile.tiers, config.remote ? config.feeds : '',
+      config.readrateCatchup ?? true);
     const saved = await identity(state);
     const persist = join(state, 'hap'); await privateDirectory(persist);
     HAPStorage.setCustomStoragePath(persist);
@@ -111,9 +113,10 @@ async function main(): Promise<void> {
       .setCharacteristic(Characteristic.FirmwareRevision, '0.1.0');
     const cameraAllowed = () => !closing && !!controller?.homeKitCameraActive;
     local = new LocalStreams(media, () => !closing && !!controller?.streamingAllowed(controller.multiTierStreamManagementService), profile.tiers);
-    remote = new RemoteStreams(media, () => !closing && !!controller?.streamingAllowed(controller.webrtcStreamManagementService), address!, profile.tiers);
+    remote = new RemoteStreams(media, () => !closing && !!controller?.streamingAllowed(controller.webrtcStreamManagementService),
+      address!, profile.tiers, id => controller!.endWebRTCSession(id));
     recording = new LabRecording(media, cameraAllowed, profile.tiers);
-    controller = new SecureVideoController({
+    controller = new HomeKitMotionController({
       sensor: { uuid: uuid.generate(`${saved.id}:sensor`), width: profile.width, height: profile.height },
       video: { codec: StreamTierVideoCodec.H265, payloadType: 99, tiers: profile.tiers },
       // Apple compatibility requires Speaker advertisement; talkback remains unavailable.
@@ -141,15 +144,17 @@ async function main(): Promise<void> {
     // SurvNG does not report its own local viewers as third-party Home activity.
     controller.globalOperatingModeService?.setCharacteristic(
       Characteristic.ThirdPartyCameraActive, Characteristic.ThirdPartyCameraActive.OFF);
-    const motionPermitted = () => cameraAllowed()
-      && !!controller!.motionService?.getCharacteristic(Characteristic.MotionEnabled).value
-      && !(controller!.motionZones.active && controller!.motionZones.zones);
+    const motionEnabled = () => !!controller!.motionService?.getCharacteristic(Characteristic.MotionEnabled).value;
+    const zonesBlockMotion = () => motionZonesBlockUnlocatedMotion(controller!.motionZones);
+    const motionPermitted = () => cameraAllowed() && motionEnabled() && !zonesBlockMotion();
     const publishMotion = () => controller!.setMotionDetected(motionPermitted() && recording!.reportingMotion());
     const setMotion = (active: boolean) => { recording!.setMotion(active && motionPermitted()); publishMotion(); };
     recording!.watch(publishMotion);
     controller.on('operating-mode-changed', () => {
       if (!controller!.streamingAllowed(controller!.multiTierStreamManagementService)) void local!.close();
-      if (!controller!.streamingAllowed(controller!.webrtcStreamManagementService)) void remote!.close();
+      if (!controller!.streamingAllowed(controller!.webrtcStreamManagementService)) {
+        void remote!.close().catch(() => console.error('HomeKit WebRTC session cleanup failed.'));
+      }
       if (!cameraAllowed()) { setMotion(false); void media!.cancelSnapshots(); }
       recording!.setAudio(controller!.recordingAudioActive); recording!.reconcile();
     });
@@ -160,22 +165,20 @@ async function main(): Promise<void> {
     control = await controlServer(join(state, 'control.sock'), (method, params) => {
       if (method === 'status') return { schemaVersion: 1, mode: 'camera', acceptance: 'experimental',
         paired: !!accessory!._accessoryInfo?.paired(), childProcesses: media!.children.size,
-        localSessions: local!.sessions.size, remoteSessions: remote!.sessions.size,
+        localSessions: local!.sessions.size, remoteSessions: remote!.sessions.size, remoteControllerSessions: controller!.activeWebRTCSessions.length,
         homeKitActive: cameraAllowed(), recording: recording!.status(), media: { ...media!.counters, lastError: media!.lastError },
         encoder: media!.encoderStatus,
         localMedia: { sent: local!.sent, feedback: { video: local!.feedback.video.stats, audio: local!.feedback.audio.stats } },
         remoteMedia: { ...remote!.counters, videoFeedback: remote!.feedback.video.stats, audioFeedback: remote!.feedback.audio.stats },
-        motion: { permitted: motionPermitted(), detected: motionPermitted() && recording!.reportingMotion() },
-        zonesBlockMotion: !!(controller!.motionZones.active && controller!.motionZones.zones),
+        motion: { enabled: motionEnabled(), permitted: motionPermitted(), detected: motionPermitted() && recording!.reportingMotion() },
+        zonesBlockMotion: zonesBlockMotion(),
       };
       if (method === 'pairing') return { setupCode: saved.pincode, setupUri: accessory!.setupURI() };
       if (method === 'motion') {
         const active = (params as { active?: unknown })?.active;
         if (typeof active !== 'boolean') throw new Error('invalid motion state');
         clearTimeout(motionTimer);
-        // These events have no HomeKit spatial coordinates. Fail closed for
-        // Home activity zones rather than triggering outside a selected zone.
-        setMotion(active && !(controller!.motionZones.active && controller!.motionZones.zones));
+        setMotion(active);
         motionTimer = setTimeout(() => setMotion(false), 5000);
         return { accepted: true };
       }

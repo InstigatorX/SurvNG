@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LabRecording } from '../src/fragments.js';
+import { EventEmitter } from 'node:events';
+import type { ChildProcess } from 'node:child_process';
+import type { CameraRecordingConfiguration } from '@homebridge/hap-nodejs';
+import { FragmentRing, LabRecording } from '../src/fragments.js';
 import { SyntheticMedia } from '../src/media.js';
 
 function ready(allowed = () => true): LabRecording {
@@ -46,11 +49,15 @@ test('an open clip holds motion until end of stream, then a long event still end
     assert.equal((await stream.next()).value!.isLast, true);
     assert.equal((await stream.next()).done, true);
     assert.equal(recording.reportingMotion(), true);
+    assert.equal(recording.status().download, 'awaiting_ack');
+    await assert.rejects(recording.handleRecordingStreamRequest(3).next(), /download already active/);
+    assert.equal(recording.status().openRejected.busy, 1);
     assert.equal(recording.counters.completed, 1);
     assert.equal(recording.counters.acknowledged, 0);
     recording.setMotion(true);
     recording.acknowledgeStream(1);
     assert.equal(recording.counters.acknowledged, 1);
+    assert.equal(recording.status().download, 'idle');
     assert.equal(recording.reportingMotion(), true);
     recording.setMotion(false);
     assert.equal(recording.reportingMotion(), false);
@@ -107,6 +114,69 @@ test('a late recording open still records a post-roll', async t => {
     assert.equal((await stream.next()).value!.isLast, true);
     assert.equal(recording.counters.completed, 1);
   } finally { await stream.return(undefined); await recording.close(); }
+});
+
+test('producer loss fails an open recording without resending its last fragment', async () => {
+  const recording = ready();
+  recording.setMotion(true);
+  const stream = recording.handleRecordingStreamRequest(1);
+  try {
+    await stream.next();
+    assert.deepEqual((await stream.next()).value, { data: Buffer.from('first'), isLast: false });
+    recording.setMotion(false);
+    const waiting = stream.next();
+    recording.ring.close();
+    await assert.rejects(waiting, /fragment source closed/);
+    assert.equal(recording.counters.failed, 1);
+    assert.equal(recording.counters.completed, 0);
+    assert.equal(recording.counters.acknowledged, 0);
+    assert.equal(recording.reportingMotion(), false);
+  } finally { await stream.return(undefined); await recording.close(); }
+});
+
+test('recording status distinguishes a rejected open from an idle download', async () => {
+  const recording = ready();
+  recording.ring = new FragmentRing();
+  try {
+    await assert.rejects(recording.handleRecordingStreamRequest(10).next(), /prebuffer not ready/);
+    assert.equal(recording.status().openRequests, 1);
+    assert.equal(recording.status().openRejected.prebuffer, 1);
+    assert.equal(recording.counters.streams, 0);
+    assert.equal(recording.counters.failed, 0);
+  } finally { await recording.close(); }
+});
+
+test('recording activation waits for producer admission and retires it when disabled', async () => {
+  const child = Object.assign(new EventEmitter(), {
+    exitCode: null, signalCode: null, stdio: [], stdout: new EventEmitter(),
+    kill: () => { queueMicrotask(() => child.emit('close')); return true; },
+  });
+  let beginAdmission!: () => void;
+  const admissionBegan = new Promise<void>(resolve => { beginAdmission = resolve; });
+  let admit!: (producer: ChildProcess) => void;
+  const admitted = new Promise<ChildProcess>(resolve => { admit = resolve; });
+  const media = new SyntheticMedia('/unused-review-fixture');
+  const recording = new LabRecording({
+    children: media.children,
+    start: () => { beginAdmission(); return admitted; },
+    input: tier => media.input(tier),
+    video: tier => media.video(tier),
+    recording: (tier, audio) => media.recording(tier, audio),
+    snapshot: () => media.snapshot(),
+    stop: () => media.stop(),
+  }, () => true);
+  recording.updateRecordingConfiguration({ videoCodec: { resolution: [1920, 1080, 30] } } as CameraRecordingConfiguration);
+  recording.updateRecordingActive(true);
+  await admissionBegan;
+  const duringAdmission = recording.status();
+  const closed = recording.close();
+  admit(child as unknown as ChildProcess);
+  await closed;
+  assert.equal(duringAdmission.requested, true);
+  assert.equal(duringAdmission.active, false);
+  assert.equal(recording.status().active, false);
+  assert.equal(recording.counters.producerFailures, 0);
+  assert.equal(child.listenerCount('close'), 0);
 });
 
 test('privacy changed while a recording read waits prevents the next fragment', async () => {

@@ -314,6 +314,7 @@ class NodeRegistry:
         self.directory = directory
         self.path = directory / "nodes.json"
         self.lock = threading.RLock()
+        self.lifecycle = threading.Lock()
         self.updates = threading.Condition()
         self.generation = 0
         self.closed = True
@@ -663,20 +664,33 @@ class NodeRegistry:
             return rows
 
     def close(self) -> None:
-        with self.lock:
-            self.closed = True
-            feeds = list(self.feeds.values())
-            self.feeds.clear()
-            self.uploads.clear()
-            self.snapshots.clear()
-            self._bump()
-        for feed in feeds:
-            feed.close()
+        with self.lifecycle:
+            with self.lock:
+                self.closed = True
+                feeds = list(self.feeds.items())
+                self.uploads.clear()
+                self.snapshots.clear()
+                self._bump()
+            errors: list[Exception] = []
+            for key, feed in feeds:
+                try:
+                    feed.close()
+                except Exception as error:
+                    errors.append(error)
+                else:
+                    with self.lock:
+                        self.feeds.pop(key)
+            if errors:
+                raise RuntimeError("HomeKit feed shutdown incomplete") from ExceptionGroup(
+                    "HomeKit feed cleanup failures", errors,
+                )
 
     def reopen(self) -> None:
-        with self.lock:
+        with self.lifecycle, self.lock:
             if not self.closed:
                 return
+            if self.feeds:
+                raise RuntimeError("HomeKit feed shutdown incomplete")
             try:
                 _private_directory(self.directory)
                 self._load()
