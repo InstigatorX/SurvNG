@@ -81,6 +81,17 @@ JPEG admission. Resource exhaustion fails visibly rather than bypassing limits.
 HomeKit Off closes its pipelines and clears its ring without changing SurvNG's
 own recording or detection settings. Talkback remains unavailable.
 
+To test recording and cellular live view on a single encoder per camera, set
+`SURVNG_HOMEKIT_SHARED_RECORDING_TIER=1` in the **SurvNG server process**
+environment and restart SurvNG. The worker advertises only the recording
+resolution used by its cellular tier, typically 1280×720 for widescreen cameras.
+Apple Home must select the new recording configuration before the prebuffer
+becomes ready. This changes the recording profile and bitrate for enabled HomeKit
+cameras. Remove the variable and restart to restore the usual recording profiles.
+Wait for Home to reselect a profile after either change. Keep the existing pairing.
+During the test, check `recording.sharedTier`, `recording.ready`,
+`remoteMedia.lastVideoTier`, and `media.admissionFailures` in HomeKit status.
+
 Remote encoder media uploads carry the current camera assignment revision.
 Both SurvNG updaters (Admin and `scripts/update-from-git.sh`) rebuild this
 worker when the checkout has built it before; run

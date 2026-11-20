@@ -23,6 +23,25 @@ const TIER_RATES = [
   { identifier: 3, quality: 4, frameRate: 15, targetAverageBitrate: 180, peakBitrate: 190 },
 ] as const;
 
+export function selectCellularTier(catalog: readonly Tier[]): Tier | undefined {
+  // Match the bitrate and dimensions Apple accepted on the cellular relay in Scrypted #2152.
+  return catalog.filter(({ peakBitrate, width, height }) =>
+    peakBitrate <= 800 && Math.max(width, height) <= 1280 && Math.min(width, height) <= 720)
+    .sort((a, b) => b.peakBitrate - a.peakBitrate)[0];
+}
+
+export function recordingProfile(profile: { tiers: Tier[]; resolutions: [number, number, number][] }, shareCellularTier: boolean) {
+  const sharedTier = shareCellularTier ? selectCellularTier(profile.tiers) : undefined;
+  if (!sharedTier) return { ...profile, sharedTier };
+
+  const { width, height, frameRate } = sharedTier;
+  // Home requires a 15 fps choice. The recording delegate can use the same-size
+  // producer when Home selects 15 fps for a 30 fps tier.
+  const resolutions: [number, number, number][] = [[width, height, frameRate]];
+  if (frameRate !== 15) resolutions.push([width, height, 15]);
+  return { tiers: [sharedTier], resolutions, sharedTier };
+}
+
 /** Fit the camera's aspect inside each tier's encoding budget, including wide cameras. */
 export function streamProfile(width: number, height: number): { width: number; height: number; tiers: Tier[]; resolutions: [number, number, number][] } {
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 2 || height < 2) throw new Error('invalid frame');

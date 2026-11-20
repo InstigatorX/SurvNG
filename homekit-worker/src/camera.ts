@@ -11,7 +11,7 @@ import { controlServer, identity, privateDirectory } from './control.js';
 import { HomeKitMotionController, motionZonesBlockUnlocatedMotion } from './homekit-motion.js';
 import { LabRecording } from './fragments.js';
 import { LocalStreams, RemoteStreams } from './transports.js';
-import { probeFrame, qualifyEncoding, selectEncoding, streamProfile, EncodingUnavailableError, type VideoEncoding } from './encoding.js';
+import { probeFrame, qualifyEncoding, selectEncoding, streamProfile, recordingProfile, EncodingUnavailableError, type VideoEncoding } from './encoding.js';
 import type { Tier } from './media.js';
 import { CameraMedia, type MediaAdmission } from './camera-media.js';
 
@@ -115,7 +115,8 @@ async function main(): Promise<void> {
     local = new LocalStreams(media, () => !closing && !!controller?.streamingAllowed(controller.multiTierStreamManagementService), profile.tiers);
     remote = new RemoteStreams(media, () => !closing && !!controller?.streamingAllowed(controller.webrtcStreamManagementService),
       address!, profile.tiers, id => controller!.endWebRTCSession(id));
-    recording = new LabRecording(media, cameraAllowed, profile.tiers);
+    const hksv = recordingProfile(profile, process.env.SURVNG_HOMEKIT_SHARED_RECORDING_TIER === '1');
+    recording = new LabRecording(media, cameraAllowed, hksv.tiers);
     controller = new HomeKitMotionController({
       sensor: { uuid: uuid.generate(`${saved.id}:sensor`), width: profile.width, height: profile.height },
       video: { codec: StreamTierVideoCodec.H265, payloadType: 99, tiers: profile.tiers },
@@ -129,7 +130,7 @@ async function main(): Promise<void> {
         // The pinned HKSV3 controller uses the legacy HDS configuration schema while carrying HEVC.
         // Home will not select a profile that lacks 15 fps or uses a fragment length other than 4 seconds.
         video: { type: VideoCodecType.H264, parameters: { levels: [H264Level.LEVEL4_0], profiles: [H264Profile.MAIN] },
-          resolutions: profile.resolutions },
+          resolutions: hksv.resolutions },
         audio: { codecs: [{ type: AudioRecordingCodecType.AAC_LC, bitrateMode: AudioBitrate.VARIABLE,
           samplerate: AudioRecordingSamplerate.KHZ_32, audioChannels: 1 }] },
       } },
@@ -166,7 +167,7 @@ async function main(): Promise<void> {
       if (method === 'status') return { schemaVersion: 1, mode: 'camera', acceptance: 'experimental',
         paired: !!accessory!._accessoryInfo?.paired(), childProcesses: media!.children.size,
         localSessions: local!.sessions.size, remoteSessions: remote!.sessions.size, remoteControllerSessions: controller!.activeWebRTCSessions.length,
-        homeKitActive: cameraAllowed(), recording: recording!.status(), media: { ...media!.counters, lastError: media!.lastError },
+        homeKitActive: cameraAllowed(), recording: { ...recording!.status(), sharedTier: hksv.sharedTier?.identifier ?? null }, media: { ...media!.counters, lastError: media!.lastError },
         encoder: media!.encoderStatus,
         localMedia: { sent: local!.sent, feedback: { video: local!.feedback.video.stats, audio: local!.feedback.audio.stats } },
         remoteMedia: { ...remote!.counters, videoFeedback: remote!.feedback.video.stats, audioFeedback: remote!.feedback.audio.stats },

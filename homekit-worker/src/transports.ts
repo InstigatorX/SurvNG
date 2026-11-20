@@ -10,6 +10,7 @@ import { SecureVideoSFrame } from './vendor/sframe.js';
 import { HevcAccessUnitAssembler, SFrameRtpPacketizer } from './vendor/sframeRtp.js';
 import { ReceiverFeedback } from './diagnostics.js';
 import { preserveEarlyClientHello } from './early-dtls.js';
+import { selectCellularTier } from './encoding.js';
 
 type Crypto = { cryptoSuite: number; masterKey: Buffer; masterSalt: Buffer };
 export const STREAM_ID_URI = 'urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id';
@@ -181,11 +182,7 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
     const id = request.sessionIdentifier;
     this.counters.solicitations++;
     if (!this.allowed() || this.sessions.size >= 6 || this.sessions.has(id)) throw new Error('remote session unavailable');
-    // Remote offers may be relayed over cellular. See the handset limits and
-    // matching medium-tier offer in Scrypted #2152.
-    const tier = this.catalog.filter(({ peakBitrate, width, height }) =>
-      peakBitrate <= 800 && Math.max(width, height) <= 1280 && Math.min(width, height) <= 720)
-      .sort((a, b) => b.peakBitrate - a.peakBitrate)[0];
+    const tier = selectCellularTier(this.catalog);
     if (!tier) {
       this.counters.failures++;
       this.counters.lastFailure = 'no_cellular_video_tier';

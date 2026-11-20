@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { createServer } from 'node:http';
 import { CameraMedia, encoderCommand, remoteCopyCommand } from '../src/camera-media.js';
 import { RtpFeed, tiers } from '../src/media.js';
+import { recordingProfile, selectCellularTier, streamProfile } from '../src/encoding.js';
 import { FragmentParser, FragmentRing, videoClock, decodeTime, fragmentDuration } from '../src/fragments.js';
 import { HevcAccessUnitAssembler } from '../src/vendor/sframeRtp.js';
 
@@ -167,8 +168,12 @@ test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio tr
       if (method === 'acquire' && detail?.purpose === 'encoder') encoderAcquires++;
       if (method === 'acquire') admitted.add(token); else if (method === 'release') admitted.delete(token);
     }, () => true, root, encoding, tiers, '', readrateCatchup);
+    const profile = streamProfile(1920, 1080);
+    const [recordingTier] = recordingProfile(profile, true).tiers;
+    const liveTier = selectCellularTier(profile.tiers)!;
+    assert.equal(recordingTier.identifier, liveTier.identifier);
     for (const audio of [true, false]) {
-      const child: ChildProcess = await media.start([...media.recording(tiers[2], audio), '-tag:v', 'hvc1',
+      const child: ChildProcess = await media.start([...media.recording(recordingTier, audio), '-tag:v', 'hvc1',
         '-movflags', '+frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', 'pipe:1']);
       const chunks: Buffer[] = [];
       child.stdout!.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -177,7 +182,7 @@ test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio tr
         let firstFrame = 0, lastFrame = 0;
         const assembler = new HevcAccessUnitAssembler();
         const annexB: Buffer[] = [];
-        const feed = new RtpFeed(media, tiers[2]);
+        const feed = new RtpFeed(media, liveTier);
         try {
           await feed.start(packet => {
             const frame = assembler.push(packet);
@@ -193,8 +198,8 @@ test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio tr
           const sockets = (await readdir(root)).filter(name => name.endsWith('.sock'));
           assert.equal(sockets.length, 1);
           assert.equal((await lstat(join(root, sockets[0]))).mode & 0o777, 0o600);
-          await until(() => frames >= 60 && audioPackets >= 10);
-          const mediaSpan = (frames - 1) / tiers[2].frameRate * 1000;
+          await until(() => frames >= liveTier.frameRate * 4 && audioPackets >= 10);
+          const mediaSpan = (frames - 1) / liveTier.frameRate * 1000;
           // Allow codec startup latency, but reject demuxer's multi-second dump
           // and its default half-second readrate burst over a four-second window.
           assert.ok(lastFrame - firstFrame >= mediaSpan - 300,
@@ -217,7 +222,7 @@ test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio tr
       const file = join(root, `recording-${audio}.mp4`); await writeFile(file, output);
       const probe = JSON.parse((await execute('ffprobe', ['-v', 'error', '-show_streams', '-of', 'json', file])).stdout);
       const video = probe.streams.find((stream: { codec_type: string }) => stream.codec_type === 'video');
-      assert.equal(video.codec_name, 'hevc'); assert.equal(video.width, 640); assert.equal(video.height, 360);
+      assert.equal(video.codec_name, 'hevc'); assert.equal(video.width, 1280); assert.equal(video.height, 720);
       assert.equal(probe.streams.filter((stream: { codec_type: string }) => stream.codec_type === 'audio').length, audio ? 1 : 0);
       let clock: { track: number; scale: number } | undefined;
       const ring = new FragmentRing();

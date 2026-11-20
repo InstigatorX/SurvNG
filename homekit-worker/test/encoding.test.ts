@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { encodeVideo, deviceArgs, selectEncoding, qualifyEncoding, streamProfile, EncodingUnavailableError } from '../src/encoding.js';
+import { encodeVideo, deviceArgs, selectEncoding, qualifyEncoding, streamProfile, recordingProfile, selectCellularTier, EncodingUnavailableError } from '../src/encoding.js';
 import { LowDelayProof } from '../src/low-delay.js';
 import { tiers } from '../src/media.js';
 
@@ -126,4 +126,15 @@ test('QSV produces decodable Main HEVC with periodic IDRs and zero temporal reor
       assert.equal(decoded.stderr, '');
     }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('opt-in HKSV exposes only the cellular tier and retains the 15 fps choice', () => {
+  const profile = streamProfile(1920, 1080);
+  assert.deepEqual(recordingProfile(profile, false).resolutions, profile.resolutions);
+  const shared = recordingProfile(profile, true);
+  assert.deepEqual(shared.tiers, [selectCellularTier(profile.tiers)]);
+  assert.deepEqual(shared.resolutions, [[1280, 720, 30], [1280, 720, 15]]);
+
+  const low = recordingProfile(streamProfile(1080, 1080), true);
+  assert.deepEqual(low.resolutions, [[480, 480, 15]]);
 });
