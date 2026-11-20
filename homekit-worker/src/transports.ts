@@ -28,7 +28,12 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
   readonly sessions = new Map<string, LocalSession>();
   private preparing = new Set<string>();
   private generation = 0;
-  readonly counters = { started: 0, failures: 0 };
+  // Which tier the controller asks for, and whether it asks again mid-session.
+  // A home hub relaying a remote viewer uses this path too, so these show the
+  // tier it chose for that relay. No addresses or keys are recorded.
+  readonly counters = { started: 0, failures: 0, startRequests: 0, tierSwitchesRejected: 0,
+    tierRequests: {} as Record<string, number>,
+    lastTier: null as { identifier: number; width: number; height: number; frameRate: number; peakBitrate: number } | null };
   readonly feedback = { video: new ReceiverFeedback(90000), audio: new ReceiverFeedback(48000), invalidPackets: 0 };
   readonly sent = { videoPackets: 0, audioPackets: 0 };
   negotiation?: { videoTier: number; audioTier?: number; videoSSRCMatchesPrepared: boolean; audioSSRCMatchesPrepared: boolean };
@@ -79,6 +84,13 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
     const id = request.sessionIdentifier;
     const session = this.sessions.get(id);
     const tier = this.catalog.find(t => t.identifier === request.videoTier);
+    this.counters.startRequests++;
+    const key = String(request.videoTier);
+    this.counters.tierRequests[key] = (this.counters.tierRequests[key] ?? 0) + 1;
+    if (tier) this.counters.lastTier = { identifier: tier.identifier, width: tier.width, height: tier.height,
+      frameRate: tier.frameRate, peakBitrate: tier.peakBitrate };
+    // A second start on a running session is a mid-stream tier change, which is not supported yet.
+    if (session?.feed) this.counters.tierSwitchesRejected++;
     if (!session || session.feed || !tier || !this.allowed()) throw new Error('local stream unavailable');
     this.negotiation = { videoTier: request.videoTier, audioTier: request.audioTier,
       videoSSRCMatchesPrepared: request.videoSSRC === session.response.videoSSRC,

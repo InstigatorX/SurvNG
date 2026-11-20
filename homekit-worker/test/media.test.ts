@@ -149,6 +149,15 @@ test('real HEVC fixtures, fMP4 prebuffer, local SRTP, and remote encrypted media
         });
         await local.startStream({ sessionIdentifier: 'local', videoTier: 3, videoSSRC: 999, audioTier: 1, audioSSRC: 998 });
         await until(() => videoCount > 10 && audioCount > 10);
+        const requested = tiers.find(tier => tier.identifier === 3)!;
+        assert.deepEqual(local.counters.lastTier, { identifier: 3, width: requested.width, height: requested.height,
+          frameRate: requested.frameRate, peakBitrate: requested.peakBitrate });
+        assert.equal(local.counters.started, 1);
+        // A mid-session tier change is reported, not silently applied.
+        await assert.rejects(local.startStream({ sessionIdentifier: 'local', videoTier: 2, videoSSRC: 999, audioTier: 1, audioSSRC: 998 }));
+        assert.deepEqual(local.counters.tierRequests, { 3: 1, 2: 1 });
+        assert.equal(local.counters.tierSwitchesRejected, 1);
+        assert.equal(local.counters.startRequests, 2);
         const feedbackCipher = new SrtcpSession({ profile: 1, keys: {
           localMasterKey: parameters.masterKey, localMasterSalt: parameters.masterSalt,
           remoteMasterKey: parameters.masterKey, remoteMasterSalt: parameters.masterSalt,

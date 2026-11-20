@@ -91,6 +91,16 @@ cameras. Remove the variable and restart to restore the usual recording profiles
 Wait for Home to reselect a profile after either change. Keep the existing pairing.
 During the test, check `recording.sharedTier`, `recording.ready`,
 `remoteMedia.lastVideoTier`, and `media.admissionFailures` in HomeKit status.
+In the 2026-11-20 real-camera test, Home never selected a recording
+configuration (`recording.configurationSelected: false`) while this variable
+was set; removing it restored selection and recording on two of three cameras.
+
+In that test, cellular viewing never reached the WebRTC path
+(`remoteMedia.solicitations` stayed 0). The home hub instead pulled the
+camera's stream over the local RTP path and relayed it. `localMedia` reports
+which tier a controller requested (`lastTier`, `tierRequests`), how many
+sessions started or failed, and `tierSwitchesRejected` when a controller asks
+for a different tier on a running session, which is not supported yet.
 
 Remote encoder media uploads carry the current camera assignment revision.
 Both SurvNG updaters (Admin and `scripts/update-from-git.sh`) rebuild this
