@@ -37,6 +37,7 @@ from .manager_access import ManagerAccessCoordinator, guard_manager_generation
 from .recording_media import (
     RECORDING_FMP4_VERSION,
     hls_map_transition,
+    hls_segment_duration,
     playback_segment_duration,
     resolve_stream_fingerprints,
 )
@@ -1119,7 +1120,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                 [
                     "#EXT-X-PROGRAM-DATE-TIME:"
                     f"{datetime.fromtimestamp(row_start, timezone.utc).isoformat()}",
-                    f"#EXTINF:{float(row['duration_seconds']):.3f},",
+                    f"#EXTINF:{hls_segment_duration(row['duration_seconds'])},",
                     f"day/segment/{segment_name}/media.m4s?{segment_query}",
                 ]
             )
@@ -1406,7 +1407,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                 [
                     "#EXT-X-PROGRAM-DATE-TIME:"
                     f"{datetime.fromtimestamp(row_start, timezone.utc).isoformat()}",
-                    f"#EXTINF:{clip_duration:.3f},",
+                    f"#EXTINF:{hls_segment_duration(clip_duration)},",
                     deps.public_url(
                         f"/api/cameras/{encoded_camera}/recordings/day/segment/"
                         f"{segment_name}/media.m4s?{segment_query}"

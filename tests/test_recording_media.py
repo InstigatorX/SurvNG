@@ -187,3 +187,13 @@ class RecordingMediaTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_hls_segment_duration_keeps_microseconds_and_three_decimal_minimum():
+    from survng.app.recording_media import hls_segment_duration
+    assert hls_segment_duration(9.964577777777778) == "9.964578"
+    assert hls_segment_duration(2) == "2.000"
+    assert hls_segment_duration(300.0) == "300.000"
+    assert hls_segment_duration(0.1) == "0.100"
+    assert hls_segment_duration(10.0000004) == "10.000"
+    assert hls_segment_duration(4.25) == "4.250"

@@ -235,6 +235,38 @@ class RecordingRouteLifecycleTests(TestCase):
             )
         self.assertEqual(stale.exception.status_code, 409)
 
+    def test_day_playlist_extinf_sums_match_media_offsets(self) -> None:
+        # Recordings hold 9.964578 s of video in a 10 s slot. Players locate a
+        # playlist time by summing EXTINF; rounding each to 9.965 put the 16th
+        # recording's start 6 ms inside the 15th, the exact spot iPhone Safari
+        # could not start from.
+        manager = _Manager("current")
+        duration = 9.964577777777778
+        rows = [{
+            "name": f"segment-{index:02d}.mp4",
+            "start_epoch": 100.0 + index * 10,
+            "end_epoch": 100.0 + index * 10 + duration,
+            "duration_seconds": duration,
+            "stream_fingerprint": "h264",
+        } for index in range(16)]
+        handlers = create_recording_router(
+            replace(
+                _dependencies(lambda: manager),
+                recording_day_rows=lambda *_args, **_kwargs: rows,
+            )
+        ).handlers
+        body = handlers["recording_day_hls_playlist"]("gate", 100, 300, "main").body.decode()
+        extinf = [float(line.split(":", 1)[1].rstrip(",")) for line in body.splitlines() if line.startswith("#EXTINF:")]
+        offsets = [float(line.split("media_offset=", 1)[1].split("&", 1)[0]) for line in body.splitlines() if "media.m4s?" in line]
+        self.assertEqual(len(extinf), 16)
+        for index in range(16):
+            # The playlist position of each segment matches its media offset.
+            self.assertAlmostEqual(sum(extinf[:index]), offsets[index], delta=0.0006)
+        last_start = sum(extinf[:15])
+        self.assertGreaterEqual(15 * duration + 1e-4, last_start)
+        self.assertLess(abs(last_start - 15 * duration), 1e-5)
+        self.assertIn("#EXTINF:9.964578,", body)
+
     def test_day_playlist_emits_ext_x_start_for_native_safari(self) -> None:
         manager = _Manager("current")
         rows = [{
