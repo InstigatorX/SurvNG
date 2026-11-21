@@ -805,6 +805,9 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
   </main>;
 }
 
+// How long a seek may stay in progress before the watchdog treats it as stuck.
+const STALLED_SEEK_RELOAD_MS = 15_000;
+
 export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssistant = null }) {
   const { cameras: sharedCameras, appConfig } = usePollingData();
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
@@ -1433,6 +1436,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     const isCurrent = () => video === videoRef.current && video.getAttribute("src") === requestedSource;
     let waits = 0;
     let wrote = false;
+    const startedAt = performance.now();
     const retryDelay = local ? 400 : (prefersJpegScrubPreview() ? 400 : 150);
     const tick = () => {
       seekWatchdogRef.current = null;
@@ -1451,9 +1455,16 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           seekWatchdogRef.current = window.setTimeout(tick, retryDelay);
           return;
         }
-        // Neither the seek nor the retry write landed. Completing would refuse
-        // (the target is not reached) and leave the seek pending with nothing
-        // playing; recover instead.
+        // A seek still in progress is slow, not lost (for example a fragment
+        // prepared on demand): its seeked event completes it. Keep watching,
+        // and recover only if it stays stuck for a long time.
+        if (video.seeking && performance.now() - startedAt < STALLED_SEEK_RELOAD_MS) {
+          seekWatchdogRef.current = window.setTimeout(tick, retryDelay);
+          return;
+        }
+        // The seek and its retry write were dropped (not seeking, not at the
+        // target). Completing would refuse and leave the seek pending with
+        // nothing playing; recover instead.
         recoverStalledSeek(video);
         return;
       }

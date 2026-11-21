@@ -293,26 +293,25 @@ const readyHandler = source.slice(source.indexOf("  function handleRecordingRead
 // iPhone Safari occasionally drops a currentTime seek on native HLS. The
 // watchdog must not leave such a seek pending with nothing playing: it reloads
 // the playlist at the target once (EXT-X-START), and if that also misses it
-// plays from wherever the video is.
-{
-  let now = 0;
+// plays from wherever the video is. A seek that is still in progress is slow,
+// not lost: it is left to finish through its seeked event unless it stays
+// stuck for STALLED_SEEK_RELOAD_MS.
+function seekWatchdogHarness(video) {
+  const clock = { now: 0 };
   const timers = [];
-  const runTimers = () => { while (timers.length) { const [callback] = timers.splice(0, 1); callback(); } };
-  const writes = [];
-  // A video that ignores every seek: currentTime stays at 2 s.
-  const video = {
-    paused: true, seeking: false, dispatched: [],
-    get currentTime() { return 2; }, set currentTime(value) { writes.push(value); },
-    getAttribute: () => "day.m3u8?reload=0",
-    dispatchEvent(event) { this.dispatched.push(event.detail.action); return true; },
+  const runTimers = (untilMs = Infinity) => {
+    while (timers.length && clock.now < untilMs) {
+      const { callback, delay } = timers.shift();
+      clock.now += delay;
+      callback();
+    }
   };
   const plays = [];
-  const notices = [];
-  let reloads = 0;
+  const reloads = [];
   const context = vm.createContext({
     Number, Math, CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init.detail; } },
-    performance: { now: () => now },
-    window: { setTimeout: (callback) => { timers.push(callback); return timers.length; }, clearTimeout: () => { timers.length = 0; } },
+    performance: { now: () => clock.now }, STALLED_SEEK_RELOAD_MS: 15_000,
+    window: { setTimeout: (callback, delay = 0) => { timers.push({ callback, delay }); return timers.length; }, clearTimeout: () => { timers.length = 0; } },
     videoReachedSeekTarget, recordingSeekToleranceSeconds, prefersJpegScrubPreview: () => false, seekWatchdogDelayMs: () => 400,
     videoRef: { current: video }, seekWatchdogRef: { current: null },
     pendingSeekEpochRef: { current: 1050 }, pendingSeekModeRef: { current: "local" }, desiredEpochRef: { current: 1000 },
@@ -320,31 +319,70 @@ const readyHandler = source.slice(source.indexOf("  function handleRecordingRead
     ignorePauseAfterSeekMs: () => 400, shouldResumePlaybackAfterSeek: ({ autoplay }) => autoplay,
     epochToPlaybackMediaTime: (epoch) => epoch - 1000, mediaTimeToEpoch: (time) => 1000 + time,
     requestRecordingPlay: (element) => plays.push(element),
-    setManifestRetryToken: () => { reloads += 1; }, setPlayhead() {}, setHeroSeeking() {},
-    setPlaybackNotice: (message) => notices.push(message),
+    setManifestRetryToken: () => reloads.push(clock.now), setPlayhead() {}, setHeroSeeking() {}, setPlaybackNotice() {},
   });
-  const watchdog = source.slice(source.indexOf("  function clearSeekWatchdog("), source.indexOf("  function completePendingNativeSeek("));
-  vm.runInContext(watchdog, context);
+  vm.runInContext(source.slice(source.indexOf("  function clearSeekWatchdog("), source.indexOf("  function completePendingNativeSeek(")), context);
+  return { context, clock, runTimers, plays, reloads };
+}
+// Keeps accessors (a spread would turn a dropped-write setter into a value).
+const stubVideo = (state) => Object.defineProperties({
+  paused: true, dispatched: [],
+  getAttribute: () => "day.m3u8?reload=0",
+  dispatchEvent(event) { this.dispatched.push(event.detail.action); return true; },
+}, Object.getOwnPropertyDescriptors(state));
+{
+  // Dropped: not seeking, and neither the seek nor its retry write lands.
+  const writes = [];
+  const video = stubVideo({ seeking: false, get currentTime() { return 2; }, set currentTime(value) { writes.push(value); } });
+  const { context, runTimers, plays, reloads } = seekWatchdogHarness(video);
   context.scheduleSeekWatchdog(video, 50, { local: true });
   runTimers();
   assert.deepEqual(writes, [50], "the watchdog retries the dropped seek once");
-  assert.equal(reloads, 1, "a seek that still did not land reloads the playlist at the target");
+  assert.equal(reloads.length, 1, "a dropped seek reloads the playlist at the target");
+  assert.ok(reloads[0] < 2000, "a dropped seek is recovered promptly");
   assert.equal(context.pendingSeekModeRef.current, "window-ready");
   assert.equal(context.pendingSeekEpochRef.current, 1050);
   assert.equal(context.desiredEpochRef.current, 1050, "the reload starts at the requested time (EXT-X-START)");
-  assert.ok(context.ignorePauseUntilRef.current > now, "the reload's pause is not the user's");
+  assert.ok(context.ignorePauseUntilRef.current > 0, "the reload's pause is not the user's");
   assert.deepEqual(video.dispatched, ["seek-reload"]);
   assert.equal(plays.length, 0);
   // The reloaded playlist also missed: play from where the video is.
   context.scheduleSeekWatchdog(video, 50);
   runTimers();
-  assert.equal(reloads, 1, "only one reload per seek");
+  assert.equal(reloads.length, 1, "only one reload per seek");
   assert.equal(context.pendingSeekEpochRef.current, null, "the seek is no longer left pending");
   assert.equal(context.pendingSeekModeRef.current, null);
   assert.equal(context.desiredEpochRef.current, 1002);
   assert.deepEqual(plays, [video], "playback resumes instead of staying paused");
   assert.deepEqual(video.dispatched, ["seek-reload", "seek-settled"]);
   assert.equal(context.seekRecoveryRef.current, null, "a later seek to the same time can recover again");
+}
+{
+  // Slow: still seeking well past the old 3.2 s budget, then it lands.
+  const video = stubVideo({ seeking: true, currentTime: 2 });
+  const { context, runTimers, plays, reloads } = seekWatchdogHarness(video);
+  context.scheduleSeekWatchdog(video, 50, { local: true });
+  runTimers(8000);
+  assert.equal(reloads.length, 0, "a seek still in progress is not interrupted by a reload");
+  assert.equal(context.pendingSeekEpochRef.current, 1050, "it stays pending while Safari is still seeking");
+  video.seeking = false;
+  video.currentTime = 50;
+  context.completePendingRecordingSeek(video); // the seeked event
+  runTimers();
+  assert.equal(reloads.length, 0);
+  assert.equal(context.pendingSeekEpochRef.current, null);
+  assert.deepEqual(plays, [video], "the slow seek completes and plays normally");
+  assert.deepEqual(video.dispatched, []);
+}
+{
+  // Stuck: still seeking and never landing; recover after the long limit.
+  const video = stubVideo({ seeking: true, currentTime: 2 });
+  const { context, runTimers, reloads } = seekWatchdogHarness(video);
+  context.scheduleSeekWatchdog(video, 50, { local: true });
+  runTimers();
+  assert.equal(reloads.length, 1, "a seek stuck in progress is eventually reloaded");
+  assert.ok(reloads[0] >= 15_000 && reloads[0] < 16_000, `only after the long limit (${reloads[0]} ms)`);
+  assert.deepEqual(video.dispatched, ["seek-reload"]);
 }
 
 // Subsequent scrubs within the current native HLS playlist must also bypass
@@ -544,7 +582,7 @@ for (const secondTick of [false, true]) {
     let src = "day.m3u8?reload=0";
     const video = { currentTime: 0, getAttribute: () => src };
     const context = vm.createContext({
-    seekRecoveryRef: { current: null },
+      seekRecoveryRef: { current: null }, performance: { now: () => 0 }, STALLED_SEEK_RELOAD_MS: 15_000,
       Number, videoRef: { current: video }, seekWatchdogRef: {}, clearSeekWatchdog() {},
       recordingSeekToleranceSeconds: () => .35, seekWatchdogDelayMs: () => 3000,
       pendingSeekEpochRef: { current: 125 }, pendingSeekModeRef: { current: "window-ready" },
