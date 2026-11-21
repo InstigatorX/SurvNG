@@ -1082,10 +1082,16 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         lines = [
             "#EXTM3U",
             "#EXT-X-VERSION:7",
+            # The recorder's segment muxer stream-copies video and can only cut
+            # at keyframes, so every recording file (and so every segment)
+            # decodes on its own. Apple's player uses this to start or seek in
+            # any segment without fetching the one before it.
+            "#EXT-X-INDEPENDENT-SEGMENTS",
             f"#EXT-X-TARGETDURATION:{target_duration}",
             "#EXT-X-MEDIA-SEQUENCE:0",
             "#EXT-X-PLAYLIST-TYPE:VOD",
         ]
+        header_lines = len(lines)
         media_offset = 0.0
         previous_fingerprint: str | None = None
         fingerprints = resolve_stream_fingerprints(
@@ -1128,7 +1134,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         ):
             start_offset = min(float(start), max(0.0, media_offset - 0.01))
             lines.insert(
-                5,
+                header_lines,
                 f"#EXT-X-START:TIME-OFFSET={start_offset:.3f},PRECISE=YES",
             )
         lines.append("#EXT-X-ENDLIST")

@@ -893,11 +893,15 @@
     overflow: hidden;
   }
 
-  .recordings-v2-page.timeline-layout-rail.has-investigation,
-  .recordings-v2-page.timeline-layout-cameras.has-investigation,
-  .recordings-v2-page.timeline-layout-catchup.has-investigation {
-    height: auto;
-    overflow: visible;
+  /* The phone rail views have no Nearby toggle (the rail is the navigation and
+     highlights the selected event), so a selected event from the URL (?event=,
+     reload, back/forward) must not open the incident panel below the player:
+     shell/mobile.css would show it at 42svh, squeeze the rail to its controls
+     and leave no way to close it. Classic keeps its panel. */
+  .recordings-v2-page.timeline-layout-rail.has-investigation .recordings-v2-incidents,
+  .recordings-v2-page.timeline-layout-cameras.has-investigation .recordings-v2-incidents,
+  .recordings-v2-page.timeline-layout-catchup.has-investigation .recordings-v2-incidents {
+    display: none !important;
   }
 
   .recordings-v2-page.timeline-layout-rail .recordings-v2-workspace,

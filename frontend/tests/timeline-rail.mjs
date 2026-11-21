@@ -106,7 +106,8 @@ function fixturePlugin() {
         if (kind === "updates") { json(res, { availability: [], incidents: [] }); return; }
         if (kind === "day.m3u8") {
           const lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:10", "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:VOD"];
-          for (let i = 0; i < Math.ceil((end - start) / 10); i++) lines.push("#EXTINF:10.000,", `/timeline-rail-media/0.ts?part=${i}`);
+          // Every part is the same 10 s file, so each restarts its timestamps.
+          for (let i = 0; i < Math.ceil((end - start) / 10); i++) { if (i) lines.push("#EXT-X-DISCONTINUITY"); lines.push("#EXTINF:10.000,", `/timeline-rail-media/0.ts?part=${i}`); }
           lines.push("#EXT-X-ENDLIST"); res.setHeader("Content-Type", "application/vnd.apple.mpegurl"); res.end(lines.join("\n") + "\n"); return;
         }
         if (kind === "segment.mp4") { serveFile(req, res, join(media, "segment.mp4")); return; }
@@ -120,8 +121,8 @@ function fixturePlugin() {
   } };
 }
 const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
-async function open(viewport, query, mobile = false) {
-  const page = await browser.newPage(mobile ? { viewport, hasTouch: true, isMobile: true, deviceScaleFactor: 2 } : { viewport, deviceScaleFactor: 1 });
+async function open(viewport, query, mobile = false, options = {}) {
+  const page = await browser.newPage({ ...(mobile ? { viewport, hasTouch: true, isMobile: true, deviceScaleFactor: 2 } : { viewport, deviceScaleFactor: 1 }), ...options });
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`${base}timeline?${query}`);
