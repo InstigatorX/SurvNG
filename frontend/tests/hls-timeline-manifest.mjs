@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { mergeRecordingAvailability } from "../src/recordingPlayback.mjs";
+import { mergeRecordingAvailability, recordingPlaybackTimeline } from "../src/recordingPlayback.mjs";
 
 const source = readFileSync(new URL("../src/timeline/TimelinePages.jsx", import.meta.url), "utf8");
 const urls = readFileSync(new URL("../src/shared/mediaUrls.js", import.meta.url), "utf8");
@@ -23,7 +23,7 @@ const context = vm.createContext({
   transport: "hls", useSegmentPlayback: false, isAllCameras: false,
   activeCameraId: "gate", source: "main", manifestRetryToken: 0,
 });
-vm.runInContext(section(source, "export function recordingPlaybackTimeline(", "export function RecordingGridTile("), context);
+context.recordingPlaybackTimeline = recordingPlaybackTimeline;
 vm.runInContext(section(source, "  function epochToPlaybackMediaTime(", "  function windowAround("), context);
 vm.runInContext(section(urls, "export function recordingDayHlsUrl(", "export function recordingSegmentUrl("), context);
 context.playbackTimeline = context.recordingPlaybackTimeline([{ start_epoch: 100, end_epoch: 1000 }]);

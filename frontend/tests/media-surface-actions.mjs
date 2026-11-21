@@ -10,6 +10,7 @@ const appSource = [
   readFileSync(join(directory, "../src/incidents/IncidentCard.jsx"), "utf8"),
   readFileSync(join(directory, "../src/incidents/IncidentsPage.jsx"), "utf8"),
   readFileSync(join(directory, "../src/timeline/TimelinePages.jsx"), "utf8"),
+  readFileSync(join(directory, "../src/timeline/AllCamerasGrid.jsx"), "utf8"),
 ].join("\n");
 const styles = [
   readFileSync(join(directory, "../src/styles.css"), "utf8"),
@@ -22,7 +23,7 @@ for (const control of [
   "camera-open-target",
   "incident-card-open",
   "incident-preview-media-action",
-  "recording-grid-focus-hit",
+  "all-cameras-tile-hit",
 ]) {
   const declaration = new RegExp(`className=["'][^"']*${control}[^"']*media-surface-action[^"']*["']`);
   assert.match(appSource, declaration, `${control} must use the shared transparent media-surface contract`);

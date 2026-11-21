@@ -185,7 +185,7 @@ function scrubKeyHandler(lineEpoch, spanSeconds, bottomEpoch, topEpoch, scrollTo
 export function EventRail({
   cameraId, source, dayStart, dayEnd, topEpoch, playhead, recordings, events, densityEvents,
   spanMinutes, onSpanChange, filter, onFilterChange, selectedEventId, onEventSelect, onSeek, timeZone, extraControls = null,
-  onPreviousDay = null, onNextDay = null,
+  onPreviousDay = null, onNextDay = null, cameraNames = null,
 }) {
   const spanSeconds = spanMinutes * 60;
   const scrub = useVerticalScrub({ topEpoch, bottomEpoch: dayStart, spanSeconds, playhead, onSeek });
@@ -290,7 +290,7 @@ export function EventRail({
                   </span>
                   <span className="event-rail-card-text">
                     <strong>{railEventTitle(card.event)}</strong>
-                    <small>{short.format(new Date(card.event.incident_epoch * 1000))}{duration ? ` · ${formatDuration(duration)}` : ""}</small>
+                    <small>{cameraNames?.[card.event.camera_id] ? `${cameraNames[card.event.camera_id]} · ` : ""}{short.format(new Date(card.event.incident_epoch * 1000))}{duration ? ` · ${formatDuration(duration)}` : ""}</small>
                   </span>
                   {card.events.length > 1 ? <span className="event-rail-more">+{card.events.length - 1}</span> : null}
                 </button>

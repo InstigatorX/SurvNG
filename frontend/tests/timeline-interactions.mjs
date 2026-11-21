@@ -196,7 +196,7 @@ async function runInteractions(page, url, engine) {
   await page.waitForFunction(() => new URL(location.href).searchParams.get("date") === "2026-09-08");
   await waitReady();
   const camera = page.getByLabel("Timeline camera", { exact: true });
-  assert.equal(await camera.locator("option").count(), 3, "every fixture camera must remain selectable");
+  assert.deepEqual(await camera.locator("option").allTextContents(), ["All cameras", "Gate", "Yard", "Driveway"], "every fixture camera, and All cameras, must remain selectable");
   await camera.selectOption("yard");
   await page.waitForFunction(() => window.timelineFixture.snapshot().context?.camera_id === "yard");
   await waitReady();

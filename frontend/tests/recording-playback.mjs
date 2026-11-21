@@ -8,6 +8,7 @@ import {
   gridPlaybackNeedsSeek,
   isUnsupportedPlaybackError,
   mergeRecordingAvailability,
+  recordingCoverageUnion,
   playbackMediaTimeForEpoch,
   playbackRowsCoverEpoch,
   prefersJpegScrubPreview,
@@ -54,7 +55,9 @@ assert.ok(Math.abs(playbackMediaTimeForEpoch([
   { start_epoch: 110, end_epoch: 120, media_start: 10, media_end: 20 },
 ], 110.2, 0.4) - 10.2) < 0.0001);
 assert.equal(gridPlaybackNeedsSeek({ currentTime: 4, targetTime: 5.2, playing: true, epochDelta: 0.5 }), false);
-assert.equal(gridPlaybackNeedsSeek({ currentTime: 1, targetTime: 5.2, playing: true, epochDelta: 0.5 }), false);
+assert.equal(gridPlaybackNeedsSeek({ currentTime: 3.4, targetTime: 5.2, playing: true, epochDelta: 0.5 }), false, "normal lag on a running clock is left alone");
+assert.equal(gridPlaybackNeedsSeek({ currentTime: 1, targetTime: 5.2, playing: true, epochDelta: 0.5 }), true, "a stalled tile is pulled back to the clock");
+assert.equal(gridPlaybackNeedsSeek({ currentTime: 1.5, targetTime: 5.2, playing: true, epochDelta: 2 }), false, "a 4x clock steps 2 s per tick and tolerates more lag");
 assert.equal(gridPlaybackNeedsSeek({ currentTime: 4, targetTime: 5.2, playing: true, epochDelta: 10 }), true);
 assert.equal(gridPlaybackNeedsSeek({ currentTime: 5, targetTime: 5.2, playing: false, epochDelta: 0 }), true);
 
@@ -129,3 +132,14 @@ assert.equal(recordingSegmentAt(mobileRows, 190), null);
 assert.equal(recordingEpochAfterSegment(mobileSegment, mobileRows), 200);
 assert.equal(recordingEpochAfterSegment(mobileRows[1], mobileRows), null);
 assert.equal(recordingEpochAfterSegment(mobileRows[1], [...mobileRows, { start_epoch: 210, end_epoch: 220 }]), 210.01);
+
+// All cameras: the rail draws the union of every camera's (and source's) ranges.
+assert.deepEqual(recordingCoverageUnion([
+  { camera_id: "b", source: "main", start_epoch: 100, end_epoch: 160 },
+  { camera_id: "a", source: "live", start_epoch: 100, end_epoch: 130 },
+  { camera_id: "a", source: "main", start_epoch: 140, end_epoch: 150 },
+  { camera_id: "c", source: "live", start_epoch: 160, end_epoch: 170 },
+  { camera_id: "a", source: "live", start_epoch: 200, end_epoch: 210 },
+  { camera_id: "a", source: "live", start_epoch: "bad", end_epoch: 210 },
+]), [{ start_epoch: 100, end_epoch: 170 }, { start_epoch: 200, end_epoch: 210 }], "overlapping and touching ranges merge; real gaps stay");
+assert.deepEqual(recordingCoverageUnion(null), []);

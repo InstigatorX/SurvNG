@@ -1,11 +1,6 @@
-export function recordingCameraAspect(camera, source = "live") {
-  const dimensions = camera?.stream_dimensions?.[source]
-    || camera?.stream_dimensions?.live
-    || camera?.stream_dimensions?.main;
-  const width = Number(dimensions?.width);
-  const height = Number(dimensions?.height);
-  if (!(width > 0) || !(height > 0)) return 16 / 9;
-  return Math.max(0.25, Math.min(4, width / height));
+// All cameras grid: the smallest square-ish grid that holds every camera.
+export function allCamerasGridColumns(count) {
+  return Math.max(1, Math.ceil(Math.sqrt(Math.max(1, Number(count) || 0))));
 }
 
 export function recordingGridBestEpoch(ranges, requestedEpoch, lookbackSeconds = 300) {

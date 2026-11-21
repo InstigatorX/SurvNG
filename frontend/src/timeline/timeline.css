@@ -1560,21 +1560,6 @@
     min-height: 0;
   }
 
-  .recording-camera-grid.stage-layout {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(230px, 1fr) 86px;
-  }
-
-  .recording-grid-companions {
-    display: flex;
-    gap: 5px;
-    overflow-x: auto;
-  }
-
-  .recording-grid-companions .recording-grid-tile {
-    flex: 0 0 118px;
-  }
-
   .recordings-v2-player.selected-camera-stage:has(.recording-selected-companions) {
     --timeline-hero-inset-right: 0;
     --timeline-hero-inset-bottom: 86px;
@@ -1717,3 +1702,120 @@
   padding: 1px 8px;
   font: inherit;
 }
+
+/* All cameras: a grid of camera tiles in the single-camera player's spot. */
+.all-cameras-grid {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: repeat(var(--all-cameras-columns, 2), minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 3px;
+  background: #030506;
+}
+
+/* Enlarged: that tile spans the top; the others share the row below. */
+.all-cameras-grid.has-enlarged {
+  grid-template-rows: minmax(0, 3fr) minmax(0, 1fr);
+  grid-auto-rows: minmax(0, 1fr);
+}
+
+.all-cameras-grid.has-enlarged .all-cameras-tile.enlarged {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+
+/* Desktop: the transport row overlays the bottom of the player; keep tiles
+   (and their labels) above it. Phones stack the row below the player. */
+@media (min-width: 761px) {
+  .recordings-v2-player.all-cameras-player { --timeline-hero-inset-bottom: 58px; }
+}
+
+.all-cameras-tile {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #000;
+}
+
+.all-cameras-tile video,
+.all-cameras-still {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.all-cameras-tile video { z-index: 1; }
+.all-cameras-tile.gap video { visibility: hidden; }
+.all-cameras-tile.gap .all-cameras-still { opacity: 0.45; }
+
+.all-cameras-status {
+  position: absolute;
+  z-index: 2;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.62);
+  color: rgba(255, 255, 255, 0.86);
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.all-cameras-tile-hit {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #fff;
+  padding: 5px 6px;
+  cursor: pointer;
+}
+
+.all-cameras-tile-hit:focus-visible { outline: 2px solid var(--accent, #3ddbc0); outline-offset: -2px; }
+
+.all-cameras-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: calc(100% - 24px);
+  overflow: hidden;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.58);
+  padding: 2px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.all-cameras-label em {
+  border-radius: 3px;
+  background: rgba(255, 196, 0, 0.85);
+  color: #111;
+  padding: 0 4px;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.all-cameras-tile-hit > svg {
+  flex: 0 0 auto;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.58);
+  padding: 2px;
+  box-sizing: content-box;
+}
+
+.all-cameras-tile.enlarged { outline: 2px solid var(--accent, #3ddbc0); outline-offset: -2px; }

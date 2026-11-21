@@ -351,7 +351,6 @@
   .recordings-v2-events,
   .recordings-event-inspector,
   .recordings-inspector-toggle,
-  .recording-grid-companions,
   .recording-stage-pagination {
     display: none !important;
   }
@@ -386,26 +385,6 @@
     aspect-ratio: 16 / 9;
   }
 
-  .recordings-v2-player.all-camera-grid .recording-grid-tile:not(:first-child),
-  .recording-camera-grid.stage-layout .recording-grid-tile:not(.primary) {
-    display: none !important;
-  }
-
-  .recordings-v2-player.all-camera-grid .recording-grid-tile:first-child,
-  .recording-camera-grid.stage-layout .recording-grid-tile.primary {
-    position: absolute !important;
-    inset: 0 !important;
-    width: 100% !important;
-    height: 100% !important;
-  }
-
-  .recording-camera-grid.stage-layout {
-    display: block !important;
-    width: 100% !important;
-    height: 100% !important;
-    min-height: 0 !important;
-  }
-
   .recordings-v2-player {
     position: relative !important;
     width: 100% !important;
@@ -422,8 +401,7 @@
 
   .recordings-v2-player.selected-camera-stage .recording-hero-media>video,
   .recordings-v2-player.selected-camera-stage video,
-  .recordings-v2-player>video,
-  .recordings-v2-player.all-camera-grid video {
+  .recordings-v2-player>video {
     inset: 0 !important;
     width: 100% !important;
     height: 100% !important;

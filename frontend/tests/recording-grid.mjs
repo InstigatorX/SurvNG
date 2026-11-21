@@ -1,18 +1,10 @@
 import assert from "node:assert/strict";
 import {
-  recordingCameraAspect,
+  allCamerasGridColumns,
   recordingGridBestEpoch,
 } from "../src/recordingGrid.mjs";
 
-const cameras = [
-  { id: "wide-1", stream_dimensions: { live: { width: 1920, height: 1080 } } },
-  { id: "portrait", stream_dimensions: { live: { width: 720, height: 1280 } } },
-  { id: "wide-2", stream_dimensions: { live: { width: 1920, height: 1080 } } },
-  { id: "four-three", stream_dimensions: { live: { width: 640, height: 480 } } },
-];
-
-assert.equal(recordingCameraAspect(cameras[0], "live"), 16 / 9);
-assert.equal(recordingCameraAspect({ stream_dimensions: {} }, "live"), 16 / 9);
+assert.deepEqual([0, 1, 2, 3, 4, 5, 9, 10, 16].map(allCamerasGridColumns), [1, 1, 2, 2, 2, 3, 3, 4, 4], "the grid stays roughly square");
 
 const ranges = [
   { camera_id: "ahead", start_epoch: 980, end_epoch: 1000 },

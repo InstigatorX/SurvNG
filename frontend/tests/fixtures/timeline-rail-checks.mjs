@@ -223,7 +223,7 @@ export async function checks({ open, shot, query, at, assert }) {
   const bar = await mobile.locator(".recordings-commandbar").boundingBox();
   const selectBox = await cameraSelect.boundingBox();
   assert.ok(selectBox.y >= bar.y && selectBox.y + selectBox.height <= bar.y + bar.height && selectBox.width >= 100, "the camera selector fits the command bar");
-  assert.equal(await cameraSelect.locator("option").count(), 3, "every camera is selectable on a phone");
+  assert.deepEqual(await cameraSelect.locator("option").allTextContents(), ["All cameras", "Gate", "Front Door", "Upper Garage"], "every camera, and All cameras, is selectable on a phone");
   await cameraSelect.selectOption("front-door");
   await waitParam(mobile, "camera", "value === 'front-door'", "the phone camera selector switches camera");
   await mobile.locator(".edge-rail").getByRole("button", { name: "Previous day" }).click();
@@ -232,4 +232,59 @@ export async function checks({ open, shot, query, at, assert }) {
   await waitParam(mobile, "date", "value === '2026-09-09'", "the edge rail steps to the next day");
   assert.deepEqual(mobile.errors, [], "mobile interactions must not raise errors");
   await mobile.close();
+
+  // All cameras: a grid of every camera in the player's spot, driven by the
+  // same playhead; tapping a tile enlarges it in place without reloading it.
+  for (const [viewport, isMobile] of [[{ width: 1440, height: 900 }, false], [{ width: 390, height: 844 }, true]]) {
+    const grid = await open(viewport, query.replace("camera=gate", "camera=all"), isMobile);
+    await settle(grid);
+    await grid.waitForFunction(() => [...document.querySelectorAll(".all-cameras-tile video")].filter((video) => video.readyState >= 2).length === 3, null, { timeout: 8000 })
+      .catch(() => { throw new Error("every All cameras tile loads its recording"); });
+    assert.deepEqual(await grid.locator(".all-cameras-tile").evaluateAll((tiles) => tiles.map((tile) => tile.dataset.cameraId)), ["gate", "front-door", "upper-garage"]);
+    assert.equal(await grid.locator(".recording-hero-media > video").count(), 0, "the single-camera player is replaced, not stacked");
+    const media = await grid.locator(".all-cameras-media").boundingBox();
+    const tiles = await grid.locator(".all-cameras-tile").evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().toJSON()));
+    assert.ok(tiles.every((tile) => tile.y >= media.y - 1 && tile.y + tile.height <= media.y + media.height + 1 && tile.height > 60), "tiles fill the player area");
+    const controls = await grid.locator(".all-cameras-controls").boundingBox();
+    assert.ok(tiles.every((tile) => tile.y + tile.height <= controls.y + 1), "the grid controls do not cover the tiles");
+    assert.ok((await grid.locator(".event-rail-card small").first().textContent()).includes(" · "), "rail cards name their camera");
+    await grid.evaluate(() => { document.querySelectorAll(".all-cameras-tile video").forEach((video, index) => { video.dataset.mount = String(index); }); });
+    const front = grid.locator('.all-cameras-tile[data-camera-id="front-door"]');
+    await front.locator(".all-cameras-tile-hit").click();
+    await grid.waitForSelector('.all-cameras-tile.enlarged[data-camera-id="front-door"]');
+    assert.equal(await front.locator("video").getAttribute("data-mount"), "1", "enlarging keeps the tile's video element");
+    const enlarged = await front.boundingBox();
+    const other = await grid.locator('.all-cameras-tile[data-camera-id="gate"]').boundingBox();
+    assert.ok(enlarged.width > other.width && enlarged.height > other.height && other.y >= enlarged.y + enlarged.height - 1, "the enlarged tile is large with the others below");
+    assert.equal(await front.locator(".all-cameras-tile-hit").evaluate((button) => getComputedStyle(button).backgroundColor), "rgba(0, 0, 0, 0)", "the pressed, hovered tile stays see-through");
+    await shot(grid, `all-cameras-${isMobile ? "mobile" : "desktop"}`);
+    await front.locator(".all-cameras-tile-hit").click();
+    assert.equal(await grid.locator(".all-cameras-tile.enlarged").count(), 0, "tapping again returns to the even grid");
+    if (!isMobile) {
+      const exportButton = grid.getByRole("button", { name: "Select camera" });
+      assert.ok(await exportButton.isDisabled(), "export needs one camera");
+      const before = await grid.locator(".all-cameras-tile video").evaluateAll((videos) => videos.map((video) => video.currentTime));
+      await grid.getByRole("button", { name: "Back 10 seconds" }).click();
+      await grid.waitForFunction((previous) => [...document.querySelectorAll(".all-cameras-tile video")].every((video, index) => Math.abs(video.currentTime - (previous[index] - 10)) < 1.5), before, { timeout: 5000 })
+        .catch(() => { throw new Error("skipping moves every tile with the playhead"); });
+      assert.equal(param(grid, "camera"), "all", "the URL keeps All cameras");
+      assert.equal(await grid.locator(".all-cameras-still").count(), 0, "tiles showing video stop requesting stills");
+      // Play/Pause is a choice that survives the index reload a Main/Sub flip makes.
+      const controls = grid.locator(".all-cameras-controls");
+      const flip = async (name, value) => {
+        await controls.getByRole("button", { name, exact: true }).click();
+        await waitParam(grid, "source", `value === '${value}'`, `the grid switches to ${name}`);
+        await grid.waitForFunction(() => document.querySelectorAll(".all-cameras-tile video").length === 3, null, { timeout: 8000 });
+        await grid.waitForTimeout(1500);
+      };
+      await controls.getByRole("button", { name: "Play", exact: true }).click();
+      await flip("Sub", "live");
+      assert.ok(await controls.getByRole("button", { name: "Pause", exact: true }).isVisible(), "a playing grid keeps playing after Main/Sub");
+      await controls.getByRole("button", { name: "Pause", exact: true }).click();
+      await flip("Main", "main");
+      assert.ok(await controls.getByRole("button", { name: "Play", exact: true }).isVisible(), "a paused grid stays paused after Main/Sub");
+    }
+    assert.deepEqual(grid.errors, [], "All cameras must not raise errors");
+    await grid.close();
+  }
 }
