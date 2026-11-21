@@ -40,7 +40,7 @@ import { browserStorage } from "../storage.mjs";
 import { canSetClipBoundaryAtPlayhead, clipPreviewReachedEnd, clipRangeIsValid, setClipBoundaryAtPlayhead } from "../recordingClipSelection.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
-import { recordingPlaybackTransport, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
+import { nativeHlsSafeMediaTime, recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { SpeechSearchWorkspace } from "../search/SpeechSearchResults.jsx";
@@ -72,6 +72,7 @@ import { ShakaVideo } from "../shared/media.jsx";
 import { CameraLanes, CatchUpStory, EventRail } from "./TimelineRail.jsx";
 import { condenseStory, nextStoryEvent, railEventDurationSeconds, railEventKind, railEventTitle, storyEventAt } from "../timelineRail.mjs";
 import { RecordingHlsVideo } from "../shared/RecordingHlsVideo.jsx";
+import { PlaybackDiagnostics, playbackDiagnosticsEnabled } from "./PlaybackDiagnostics.jsx";
 import { NativeRecordingVideo } from "../shared/NativeRecordingVideo.jsx";
 import { DebugDetectionOverlay } from "../shared/evidence.jsx";
 import { MobileCameraSelect } from "../shared/MobileCameraSelect.jsx";
@@ -804,6 +805,9 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
   </main>;
 }
 
+// How long a seek may stay in progress before the watchdog treats it as stuck.
+const STALLED_SEEK_RELOAD_MS = 15_000;
+
 export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssistant = null }) {
   const { cameras: sharedCameras, appConfig } = usePollingData();
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
@@ -821,6 +825,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const failedSubScopeRef = useRef(null);
   const [transcodeScope, setTranscodeScope] = useState(null);
   const [nativeHls] = useState(supportsNativeRecordingHls);
+  const [transportOverride] = useState(recordingTransportOverride);
+  const [showPlaybackDiagnostics] = useState(() => playbackDiagnosticsEnabled(transportOverride));
+  const heroMediaRef = useRef(null);
+  // The seek target already reloaded once by recoverStalledSeek.
+  const seekRecoveryRef = useRef(null);
   const [playbackTransport, setPlaybackTransport] = useState(null);
   const playbackTransportRef = useRef(null);
   const playbackRequestRef = useRef(0);
@@ -944,6 +953,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const loadedPlaybackWindow = playbackDetail?.scope === nativeScope ? playbackDetail : null;
   const requestedTransport = recordingPlaybackTransport({
     nativeHls, rate: playbackRate, incompatible: transcodeScope === nativeScope, preferOriginal: originalScope === nativeScope,
+    override: transportOverride,
   });
   const transport = playbackTransport?.scope === nativeScope ? playbackTransport.mode : requestedTransport;
   const useTranscodedPlayback = transport === "transcode";
@@ -1392,7 +1402,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
         if (!nearest) return item;
         return Math.abs(item.start_epoch - epoch) < Math.abs(nearest.start_epoch - epoch) ? item : nearest;
       }, null);
-    return clip.media_start + Math.max(0, Math.min(clip.media_end - clip.media_start - 0.01, epoch - clip.start_epoch));
+    const mediaTime = clip.media_start + Math.max(0, Math.min(clip.media_end - clip.media_start - 0.01, epoch - clip.start_epoch));
+    // Starts, seeks and their completion checks all map through here, so the
+    // native-HLS segment-end guard applies to each consistently.
+    return nativeHls ? nativeHlsSafeMediaTime(playbackTimeline, mediaTime) : mediaTime;
   }
 
   function windowAround(epoch) {
@@ -1426,6 +1439,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     const isCurrent = () => video === videoRef.current && video.getAttribute("src") === requestedSource;
     let waits = 0;
     let wrote = false;
+    const startedAt = performance.now();
     const retryDelay = local ? 400 : (prefersJpegScrubPreview() ? 400 : 150);
     const tick = () => {
       seekWatchdogRef.current = null;
@@ -1444,6 +1458,18 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           seekWatchdogRef.current = window.setTimeout(tick, retryDelay);
           return;
         }
+        // A seek still in progress is slow, not lost (for example a fragment
+        // prepared on demand): its seeked event completes it. Keep watching,
+        // and recover only if it stays stuck for a long time.
+        if (video.seeking && performance.now() - startedAt < STALLED_SEEK_RELOAD_MS) {
+          seekWatchdogRef.current = window.setTimeout(tick, retryDelay);
+          return;
+        }
+        // The seek and its retry write were dropped (not seeking, not at the
+        // target). Completing would refuse and leave the seek pending with
+        // nothing playing; recover instead.
+        recoverStalledSeek(video);
+        return;
       }
       completePendingRecordingSeek(video, {
         fromSeeked: Boolean(video.seeking) && videoReachedSeekTarget(video, mediaTime, tolerance),
@@ -1453,6 +1479,40 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       tick,
       local ? seekWatchdogDelayMs({ local: true }) : seekWatchdogDelayMs(),
     );
+  }
+
+  // iPhone Safari occasionally drops or never finishes a currentTime seek on
+  // native HLS, while a playlist start (EXT-X-START) is honored. Reload once at
+  // the target; if that also misses, play from wherever the video is rather
+  // than staying paused on a seek that will not complete.
+  function recoverStalledSeek(video) {
+    const target = pendingSeekEpochRef.current;
+    if (!Number.isFinite(target)) return;
+    if (seekRecoveryRef.current !== target) {
+      seekRecoveryRef.current = target;
+      clearSeekWatchdog();
+      pendingSeekModeRef.current = "window-ready";
+      desiredEpochRef.current = target;
+      // Replacing the source pauses the element; keep the user's play intent.
+      ignorePauseUntilRef.current = performance.now() + 2000;
+      setPlaybackNotice("Reloading recording at the selected time...");
+      video.dispatchEvent(new CustomEvent("survngplayback", { bubbles: true, detail: { action: "seek-reload" } }));
+      setManifestRetryToken((token) => token + 1);
+      return;
+    }
+    seekRecoveryRef.current = null;
+    clearSeekWatchdog();
+    pendingSeekEpochRef.current = null;
+    pendingSeekModeRef.current = null;
+    const epoch = mediaTimeToEpoch(video.currentTime);
+    if (Number.isFinite(epoch)) {
+      desiredEpochRef.current = epoch;
+      setPlayhead(epoch);
+    }
+    setHeroSeeking(false);
+    setPlaybackNotice("");
+    video.dispatchEvent(new CustomEvent("survngplayback", { bubbles: true, detail: { action: "seek-settled" } }));
+    if (autoplayRef.current && video.paused) requestRecordingPlay(video);
   }
 
   function completePendingRecordingSeek(video, options = {}) {
@@ -1467,6 +1527,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     const target = epochToPlaybackMediaTime(pendingSeekEpochRef.current);
     if (!videoReachedSeekTarget(video, target, recordingSeekToleranceSeconds())) return;
     clearSeekWatchdog();
+    seekRecoveryRef.current = null;
     const epoch = mediaTimeToEpoch(video.currentTime);
     if (Number.isFinite(epoch)) {
       desiredEpochRef.current = epoch;
@@ -2893,7 +2954,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             playing={gridPlaying}
             onSelect={(selectedCameraId) => { selectPlaybackCamera(selectedCameraId); }}
           /> : null}
-          {!isAllCameras ? <div className="recording-hero-media">
+          {!isAllCameras ? <div className="recording-hero-media" ref={heroMediaRef}>
+          {showPlaybackDiagnostics ? <PlaybackDiagnostics containerRef={heroMediaRef} transport={transport} override={transportOverride} /> : null}
           {nativeSegmentUrl ? (
             <NativeRecordingVideo
               key={nativeScope}

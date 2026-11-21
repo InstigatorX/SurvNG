@@ -23,19 +23,75 @@ export function supportsNativeRecordingHls(nav = typeof navigator === "undefined
     && Boolean(document.createElement("video").canPlayType("application/vnd.apple.mpegurl"));
 }
 
+export const RECORDING_TRANSPORT_STORAGE_KEY = "survng.recordingTransport";
+const RECORDING_TRANSPORT_OVERRIDES = new Set(["hls", "original"]);
+
+/**
+ * A per-browser test switch for Timeline playback: `?transport=hls` or
+ * `?transport=original` forces that transport and is remembered in this
+ * browser; `?transport=auto` returns to the automatic choice.
+ */
+export function recordingTransportOverride(win = typeof window === "undefined" ? null : window) {
+  if (!win) return null;
+  let requested = null;
+  try {
+    requested = new URLSearchParams(win.location?.search || "").get("transport");
+  } catch {
+    requested = null;
+  }
+  try {
+    if (requested === "auto") {
+      win.localStorage?.removeItem(RECORDING_TRANSPORT_STORAGE_KEY);
+      return null;
+    }
+    if (RECORDING_TRANSPORT_OVERRIDES.has(requested)) {
+      win.localStorage?.setItem(RECORDING_TRANSPORT_STORAGE_KEY, requested);
+      return requested;
+    }
+    const stored = win.localStorage?.getItem(RECORDING_TRANSPORT_STORAGE_KEY);
+    return RECORDING_TRANSPORT_OVERRIDES.has(stored) ? stored : null;
+  } catch {
+    // Storage can be unavailable (private mode); the URL still applies.
+    return RECORDING_TRANSPORT_OVERRIDES.has(requested) ? requested : null;
+  }
+}
+
 export function recordingPlaybackTransport({
   nativeHls,
   rate,
   incompatible = false,
   preferOriginal = false,
   mobileNative = PREFER_NATIVE_HLS,
+  override = null,
 } = {}) {
   if (incompatible) return "transcode";
+  // A playback failure still falls back to original files, even when forced.
+  if (preferOriginal) return "original";
+  if (override === "hls" || override === "original") return override;
   // iPhone cannot seek these archive HLS playlists: precise playlist starts and
   // currentTime writes stall or never resume. Original MP4 files answer byte-range
   // seeks directly. Desktop HLS above 2× has the same I-frame limitation.
-  if (preferOriginal || mobileNative || (nativeHls && rate > 2)) return "original";
+  if (mobileNative || (nativeHls && rate > 2)) return "original";
   return "hls";
+}
+
+/**
+ * Safari's native HLS player can fail to start when asked to begin in the last
+ * fraction of a second of a segment: it refetches that segment endlessly and
+ * never plays (seen on iPhone starting 0.17 s before a recording's end).
+ * Targets that close to a segment's end start at the next segment instead,
+ * which begins on a keyframe. The last segment of a playlist is left alone.
+ */
+// Half a second was not reliable on iPhone; one second is.
+export const NATIVE_HLS_SEGMENT_END_GUARD_SECONDS = 1;
+
+export function nativeHlsSafeMediaTime(rows, mediaTime, guardSeconds = NATIVE_HLS_SEGMENT_END_GUARD_SECONDS) {
+  if (!Number.isFinite(mediaTime) || !Array.isArray(rows)) return mediaTime;
+  const index = rows.findIndex((row) => Number(row.media_start) <= mediaTime && mediaTime < Number(row.media_end));
+  if (index < 0 || index >= rows.length - 1) return mediaTime;
+  if (Number(rows[index].media_end) - mediaTime > guardSeconds) return mediaTime;
+  const nextStart = Number(rows[index + 1].media_start);
+  return Number.isFinite(nextStart) ? nextStart : mediaTime;
 }
 
 export function prefersJpegScrubPreview(options = {}) {

@@ -1677,3 +1677,35 @@
   transform: scale(var(--live-view-zoom, 1));
   transform-origin: var(--live-object-position, 50% 50%);
 }
+
+/* Opt-in playback readout (?transport=… or ?playbackdebug=1). */
+.playback-diagnostics {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 5;
+  display: grid;
+  gap: 2px;
+  max-width: calc(100% - 12px);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #e8f0f2;
+  padding: 6px 8px;
+  font: 500 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  pointer-events: auto;
+}
+
+.playback-diagnostics strong { color: #7ee0c8; font-weight: 700; }
+.playback-diagnostics-error { color: #ff9b8a; }
+
+.playback-diagnostics button {
+  justify-self: start;
+  min-height: 0;
+  margin-top: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  padding: 1px 8px;
+  font: inherit;
+}

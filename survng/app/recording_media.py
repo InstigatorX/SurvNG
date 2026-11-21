@@ -367,6 +367,20 @@ def resolve_stream_fingerprints(values: list[str | None]) -> list[str]:
     return [str(value or "") for value in values]
 
 
+def hls_segment_duration(seconds: float) -> str:
+    """Format an EXTINF duration to the microsecond (at least 3 decimals).
+
+    Players locate a playlist time by summing EXTINF values, while each
+    segment's media is placed by its exact cumulative duration. Rounding each
+    EXTINF to milliseconds (9.964578 s -> 9.965) drifts the two apart by up to
+    0.5 ms per segment, about 6 ms by the 15th 10 s recording: enough for a
+    start exactly at a segment boundary to land at the very end of the previous
+    segment instead.
+    """
+    whole, _, fraction = f"{float(seconds):.6f}".rstrip("0").partition(".")
+    return f"{whole}.{fraction.ljust(3, '0')}"
+
+
 def hls_map_transition(previous: str | None, current: str, map_uri: str) -> tuple[list[str], str]:
     # A known identical fingerprint can safely reuse the current map. Unknown
     # segments each receive their own map because compatibility is unproven.

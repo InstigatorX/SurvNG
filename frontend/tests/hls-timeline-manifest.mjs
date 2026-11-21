@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { mergeRecordingAvailability } from "../src/recordingPlayback.mjs";
+import { mergeRecordingAvailability, nativeHlsSafeMediaTime } from "../src/recordingPlayback.mjs";
 
 const source = readFileSync(new URL("../src/timeline/TimelinePages.jsx", import.meta.url), "utf8");
 const urls = readFileSync(new URL("../src/shared/mediaUrls.js", import.meta.url), "utf8");
@@ -22,6 +22,7 @@ const context = vm.createContext({
   playbackDetail: { start: 100, end: 1000, revision: 1 },
   transport: "hls", useSegmentPlayback: false, isAllCameras: false,
   activeCameraId: "gate", source: "main", manifestRetryToken: 0,
+  nativeHls: false, nativeHlsSafeMediaTime,
 });
 vm.runInContext(section(source, "export function recordingPlaybackTimeline(", "export function RecordingGridTile("), context);
 vm.runInContext(section(source, "  function epochToPlaybackMediaTime(", "  function windowAround("), context);
@@ -74,5 +75,22 @@ assert.equal(render(), "", "an unloaded camera must not retain the outgoing play
 context.desiredEpochRef.current = null;
 context.playbackTimeline = context.recordingPlaybackTimeline([{ start_epoch: 1000, end_epoch: 1900 }]);
 assert.equal(start(render()), 0, "without a retained position, start at the loaded window's first recording");
+
+// Native HLS (Safari) does not start in a segment's last second: a start
+// 0.17 s before a recording's end begins at the next recording instead.
+context.activeCameraId = "back-left";
+context.playbackTimeline = context.recordingPlaybackTimeline([
+  { start_epoch: 2000, end_epoch: 2009.965, duration_seconds: 9.965 },
+  { start_epoch: 2010, end_epoch: 2019.965, duration_seconds: 9.965 },
+]);
+context.desiredEpochRef.current = 2009.8;
+context.manifestRetryToken += 1;
+assert.equal(start(render()), 9.8, "other players start where asked");
+context.nativeHls = true;
+context.manifestRetryToken += 1;
+assert.equal(start(render()), 9.965, "native HLS starts at the next recording instead");
+context.desiredEpochRef.current = 2005;
+context.manifestRetryToken += 1;
+assert.equal(start(render()), 5, "mid-recording starts are unchanged");
 
 console.log("Timeline playlist stability, retry, transport, and window transition tests passed");

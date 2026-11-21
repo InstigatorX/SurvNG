@@ -141,6 +141,47 @@ export async function checks({ open, shot, query, at, assert }) {
   assert.deepEqual(days.errors, [], "day navigation must not raise errors");
   await days.close();
 
+  // iPhone playback transport: per-file MP4 by default; ?transport=hls forces
+  // the HLS playlist (remembered per browser) and shows the diagnostics readout.
+  const iphone = { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1" };
+  const phone = { width: 390, height: 844 };
+  const readout = (page) => page.locator(".playback-diagnostics strong").textContent();
+  const defaultIphone = await open(phone, `${query}&playbackdebug=1`, true, iphone);
+  await defaultIphone.waitForSelector(".playback-diagnostics");
+  await defaultIphone.waitForFunction(() => /per-file MP4/.test(document.querySelector(".playback-diagnostics strong")?.textContent || ""));
+  assert.match(await readout(defaultIphone), /^original · per-file MP4/, "an iPhone plays original files by default");
+  await defaultIphone.close();
+  const forced = await open(phone, `${query}&transport=hls`, true, iphone);
+  await forced.waitForSelector(".playback-diagnostics");
+  await forced.waitForFunction(() => /^hls \(forced\)/.test(document.querySelector(".playback-diagnostics strong")?.textContent || ""));
+  await forced.waitForFunction(() => document.querySelector(".recording-hero-media video")?.readyState >= 2);
+  await forced.waitForTimeout(1500);
+  assert.match(await readout(forced), /^hls \(forced\)/, "forced HLS stays on HLS without falling back");
+  assert.equal(await forced.locator(".playback-diagnostics-error").count(), 0, "forced HLS plays the fixture without media errors");
+  assert.equal(await forced.evaluate(() => [...document.querySelectorAll(".recording-hero-media video")].some((video) => /segment\.mp4/.test(video.getAttribute("src") || ""))), false, "forced HLS does not load per-file MP4");
+  await forced.goto(forced.url().replace("&transport=hls", ""));
+  await forced.waitForFunction(() => /^hls \(forced\)/.test(document.querySelector(".playback-diagnostics strong")?.textContent || ""));
+  await forced.goto(`${forced.url()}&transport=auto`);
+  await forced.waitForSelector(".recording-hero-media video");
+  await forced.waitForTimeout(500);
+  assert.equal(await forced.locator(".playback-diagnostics").count(), 0, "transport=auto clears the forced choice and its readout");
+  assert.deepEqual(forced.errors, [], "forced transport pages must not raise errors");
+  await forced.close();
+
+  // A selected event in the URL (a shared link, reload or back/forward) must not
+  // open the incident panel over the phone rail and squeeze it to its controls.
+  const linked = await open({ width: 390, height: 844 }, `${query}&event=8`, true);
+  await settle(linked);
+  for (const pass of ["opened", "reloaded"]) {
+    if (pass === "reloaded") { await linked.reload(); await settle(linked); }
+    assert.match(await linked.locator(".recordings-v2-page").getAttribute("class"), /has-investigation/, `the event link selects its incident (${pass})`);
+    const railHeight = await linked.locator(".event-rail-scroller").evaluate((element) => element.getBoundingClientRect().height);
+    assert.ok(railHeight > 200, `the phone rail keeps its height with an event in the URL (${pass}: ${railHeight}px)`);
+    assert.equal(await linked.locator(".recordings-v2-incidents").isVisible(), false, `the phone rail view does not open the incident panel (${pass})`);
+  }
+  assert.deepEqual(linked.errors, [], "event links on the phone rail must not raise errors");
+  await linked.close();
+
   // Classic layout remains available.
   const classic = await open({ width: 1440, height: 900 }, `${query}&view=classic`);
   await settle(classic);
