@@ -299,13 +299,16 @@ export class LabRecording implements CameraRecordingDelegate {
   }
   private async stopProducer(): Promise<void> {
     clearInterval(this.watchdog);
-    clearTimeout(this.commitTimer);
-    this.commit = undefined;
+    // A finished clip is waiting on the hub, not on this process. Ack, close, or
+    // the commit timer releases that hold.
     this.active = false; this.stream?.abort.abort(); this.ring.close(); this.init = undefined;
     this.producerKey = '';
     const child = this.child; this.child = undefined;
     if (child) await stopChild(child);
   }
-  async close(): Promise<void> { this.desired = false; await this.transition; await this.stopProducer(); }
+  async close(): Promise<void> {
+    this.desired = false; await this.transition; await this.stopProducer();
+    this.clearCommit();
+  }
   status(): object { return { active: this.active, ready: this.ring.coverage >= 4, bufferSeconds: this.ring.coverage, bufferBytes: this.ring.size, ...this.counters }; }
 }

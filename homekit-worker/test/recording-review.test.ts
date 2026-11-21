@@ -91,6 +91,35 @@ test('a hub close before acknowledgement releases the sensor without accepting t
   } finally { await stream.return(undefined); await recording.close(); }
 });
 
+test('a producer restart keeps the motion hold until the hub accepts the clip', async t => {
+  let now = 10_000;
+  t.mock.method(Date, 'now', () => now);
+  const recording = ready();
+  let sensor = false;
+  recording.watch(() => { sensor = recording.reportingMotion(); });
+  recording.setMotion(true);
+  recording.setMotion(false);
+  const stream = recording.handleRecordingStreamRequest(1);
+  try {
+    await stream.next();
+    now += 5000;
+    recording.ring.append(Buffer.from('tail'), 4, 4);
+    assert.equal((await stream.next()).value!.isLast, true);
+    assert.equal((await stream.next()).done, true);
+    assert.equal(sensor, true);
+    Object.assign(recording, { producerKey: 'stale' });
+    recording.reconcile();
+    await (recording as unknown as { transition: Promise<void> }).transition;
+    assert.equal(recording.ring.closed, true);
+    assert.equal(recording.reportingMotion(), true);
+    assert.equal(sensor, true);
+    recording.acknowledgeStream(1);
+    assert.equal(recording.counters.acknowledged, 1);
+    assert.equal(recording.reportingMotion(), false);
+    assert.equal(sensor, false);
+  } finally { await stream.return(undefined); await recording.close(); }
+});
+
 test('a late recording open still records a post-roll', async t => {
   let now = 10_000;
   t.mock.method(Date, 'now', () => now);
