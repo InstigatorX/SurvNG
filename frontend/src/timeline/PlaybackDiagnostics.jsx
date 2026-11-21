@@ -6,7 +6,7 @@ function emptyStats() {
   return {
     waits: 0, stalls: 0, waitMs: 0, longestWaitMs: 0,
     seeks: 0, lastSeekMs: null, longestSeekMs: 0,
-    loads: 0, errors: 0, lastError: "",
+    loads: 0, errors: 0, lastError: "", seekReloads: 0, seekSettles: 0,
   };
 }
 
@@ -81,10 +81,17 @@ export function PlaybackDiagnostics({ containerRef, transport, override }) {
         stats.lastError = `${video.error?.code ?? "?"} ${video.error?.message || "media error"}`.trim();
       }
     };
+    // Timeline reports its own seek recoveries (see recoverStalledSeek).
+    const onRecovery = (event) => {
+      if (event.detail?.action === "seek-reload") statsRef.current.seekReloads += 1;
+      if (event.detail?.action === "seek-settled") statsRef.current.seekSettles += 1;
+    };
     for (const name of MEDIA_EVENTS) container.addEventListener(name, onMediaEvent, true);
+    container.addEventListener("survngplayback", onRecovery, true);
     const timer = window.setInterval(() => setTick((tick) => tick + 1), 500);
     return () => {
       for (const name of MEDIA_EVENTS) container.removeEventListener(name, onMediaEvent, true);
+      container.removeEventListener("survngplayback", onRecovery, true);
       window.clearInterval(timer);
     };
   }, [containerRef]);
@@ -98,6 +105,7 @@ export function PlaybackDiagnostics({ containerRef, transport, override }) {
       <span>{video ? `${video.paused ? "paused" : "playing"} · t ${video.currentTime.toFixed(2)} · ready ${video.readyState} · ahead ${bufferedAhead(video).toFixed(1)} s` : "no video"}</span>
       <span>waits {stats.waits} · stalls {stats.stalls} · waited {seconds(stats.waitMs)} (max {seconds(stats.longestWaitMs)})</span>
       <span>seeks {stats.seeks} · last {seconds(stats.lastSeekMs)} · max {seconds(stats.longestSeekMs)} · loads {stats.loads}</span>
+      {stats.seekReloads || stats.seekSettles ? <span className="playback-diagnostics-error">stuck seeks: reloaded {stats.seekReloads} · played from nearest {stats.seekSettles}</span> : null}
       {stats.errors ? <span className="playback-diagnostics-error">errors {stats.errors} · {stats.lastError}</span> : null}
       <button type="button" onClick={() => { statsRef.current = emptyStats(); waitStartRef.current.clear(); seekStartRef.current.clear(); setTick((tick) => tick + 1); }}>Reset</button>
     </aside>

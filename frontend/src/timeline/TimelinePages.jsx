@@ -825,6 +825,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [transportOverride] = useState(recordingTransportOverride);
   const [showPlaybackDiagnostics] = useState(() => playbackDiagnosticsEnabled(transportOverride));
   const heroMediaRef = useRef(null);
+  // The seek target already reloaded once by recoverStalledSeek.
+  const seekRecoveryRef = useRef(null);
   const [playbackTransport, setPlaybackTransport] = useState(null);
   const playbackTransportRef = useRef(null);
   const playbackRequestRef = useRef(0);
@@ -1449,6 +1451,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           seekWatchdogRef.current = window.setTimeout(tick, retryDelay);
           return;
         }
+        // Neither the seek nor the retry write landed. Completing would refuse
+        // (the target is not reached) and leave the seek pending with nothing
+        // playing; recover instead.
+        recoverStalledSeek(video);
+        return;
       }
       completePendingRecordingSeek(video, {
         fromSeeked: Boolean(video.seeking) && videoReachedSeekTarget(video, mediaTime, tolerance),
@@ -1458,6 +1465,40 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       tick,
       local ? seekWatchdogDelayMs({ local: true }) : seekWatchdogDelayMs(),
     );
+  }
+
+  // iPhone Safari occasionally drops or never finishes a currentTime seek on
+  // native HLS, while a playlist start (EXT-X-START) is honored. Reload once at
+  // the target; if that also misses, play from wherever the video is rather
+  // than staying paused on a seek that will not complete.
+  function recoverStalledSeek(video) {
+    const target = pendingSeekEpochRef.current;
+    if (!Number.isFinite(target)) return;
+    if (seekRecoveryRef.current !== target) {
+      seekRecoveryRef.current = target;
+      clearSeekWatchdog();
+      pendingSeekModeRef.current = "window-ready";
+      desiredEpochRef.current = target;
+      // Replacing the source pauses the element; keep the user's play intent.
+      ignorePauseUntilRef.current = performance.now() + 2000;
+      setPlaybackNotice("Reloading recording at the selected time...");
+      video.dispatchEvent(new CustomEvent("survngplayback", { bubbles: true, detail: { action: "seek-reload" } }));
+      setManifestRetryToken((token) => token + 1);
+      return;
+    }
+    seekRecoveryRef.current = null;
+    clearSeekWatchdog();
+    pendingSeekEpochRef.current = null;
+    pendingSeekModeRef.current = null;
+    const epoch = mediaTimeToEpoch(video.currentTime);
+    if (Number.isFinite(epoch)) {
+      desiredEpochRef.current = epoch;
+      setPlayhead(epoch);
+    }
+    setHeroSeeking(false);
+    setPlaybackNotice("");
+    video.dispatchEvent(new CustomEvent("survngplayback", { bubbles: true, detail: { action: "seek-settled" } }));
+    if (autoplayRef.current && video.paused) requestRecordingPlay(video);
   }
 
   function completePendingRecordingSeek(video, options = {}) {
@@ -1472,6 +1513,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     const target = epochToPlaybackMediaTime(pendingSeekEpochRef.current);
     if (!videoReachedSeekTarget(video, target, recordingSeekToleranceSeconds())) return;
     clearSeekWatchdog();
+    seekRecoveryRef.current = null;
     const epoch = mediaTimeToEpoch(video.currentTime);
     if (Number.isFinite(epoch)) {
       desiredEpochRef.current = epoch;

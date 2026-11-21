@@ -278,6 +278,30 @@ async function runInteractions(page, url, engine) {
     assert.equal(after.src, initial.src, "same-window seeks must retain their source");
   }
   assert.equal(playlistCount(), initialManifests, "same-window seeks must reuse the loaded playlist");
+  // iPhone Safari occasionally drops a currentTime seek on native HLS. Drop the
+  // seek and its retry write: the Timeline must reload at the target rather
+  // than leave the seek pending with nothing playing.
+  await page.evaluate(() => {
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "currentTime");
+    window.__droppedSeeks = 0;
+    window.__restoreSeeks = () => Object.defineProperty(HTMLMediaElement.prototype, "currentTime", descriptor);
+    Object.defineProperty(HTMLMediaElement.prototype, "currentTime", {
+      configurable: true,
+      get() { return descriptor.get.call(this); },
+      set(value) {
+        if (window.__droppedSeeks < 2) { window.__droppedSeeks += 1; return; }
+        descriptor.set.call(this, value);
+      },
+    });
+  });
+  const beforeDropped = playlistCount();
+  const dropped = await tapAtFraction(0.55);
+  await page.evaluate(() => window.__restoreSeeks());
+  assert.equal(await page.evaluate(() => window.__droppedSeeks), 2, "the fixture dropped the seek and its retry");
+  assert.ok(playlistCount() > beforeDropped, "a stuck seek reloads the playlist at the target");
+  await page.waitForFunction(() => !window.timelineFixture.snapshot().paused, null, { timeout: 5000 })
+    .catch(() => { throw new Error("playback must resume after recovering a stuck seek"); });
+  assert.ok(Number.isFinite(dropped.playhead));
   if ((await read()).paused) await page.locator(".recording-hero-controls").getByRole("button", { name: "Play", exact: true }).click();
   let releaseWindow;
   let windowRequested;
