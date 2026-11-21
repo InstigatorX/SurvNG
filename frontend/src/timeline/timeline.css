@@ -1703,26 +1703,12 @@
   font: inherit;
 }
 
-/* All cameras: a grid of camera tiles in the single-camera player's spot. */
+/* All cameras: camera tiles in the single-camera player's spot, positioned
+   by Live's Automatic and Focus layouts (see AllCamerasGrid). */
 .all-cameras-grid {
   position: absolute;
   inset: 0;
-  display: grid;
-  grid-template-columns: repeat(var(--all-cameras-columns, 2), minmax(0, 1fr));
-  grid-auto-rows: minmax(0, 1fr);
-  gap: 3px;
   background: #030506;
-}
-
-/* Enlarged: that tile spans the top; the others share the row below. */
-.all-cameras-grid.has-enlarged {
-  grid-template-rows: minmax(0, 3fr) minmax(0, 1fr);
-  grid-auto-rows: minmax(0, 1fr);
-}
-
-.all-cameras-grid.has-enlarged .all-cameras-tile.enlarged {
-  grid-column: 1 / -1;
-  grid-row: 1;
 }
 
 /* Desktop: the transport row overlays the bottom of the player; keep tiles
@@ -1732,7 +1718,7 @@
 }
 
 .all-cameras-tile {
-  position: relative;
+  position: absolute;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -1819,7 +1805,7 @@
   box-sizing: content-box;
 }
 
-.all-cameras-tile.enlarged { outline: 2px solid var(--accent, #3ddbc0); outline-offset: -2px; }
+.all-cameras-tile.primary { outline: 2px solid var(--accent, #3ddbc0); outline-offset: -2px; }
 
 /* All cameras status, centered between the time and the stream switch. */
 .recording-hero-controls.all-cameras-controls .all-cameras-summary {
@@ -1836,16 +1822,38 @@
 
 .all-cameras-summary em { font-style: normal; }
 
-@media (max-width: 760px) {
-  /* Phones: the count, then the cameras without recording on a second line. */
-  .recording-hero-controls.all-cameras-controls .all-cameras-summary { font-size: 11px; line-height: 1.3; }
-  .all-cameras-summary em { display: block; overflow: hidden; text-overflow: ellipsis; }
-}
-.all-cameras-summary-icon { display: none; vertical-align: -1px; margin-right: 3px; }
 
-@media (max-width: 760px) {
-  .all-cameras-summary-separator,
-  .all-cameras-summary-prefix,
-  .all-cameras-play-label { display: none; }
-  .all-cameras-summary-icon { display: inline; }
+/* All cameras layout controls (Live's density and layout groups), on the
+   right of the command bar as in Live. Phones never show All cameras. */
+@media (min-width: 1051px) {
+  .recordings-v2-page .recordings-tabs.recordings-commandbar:has(.timeline-grid-layout) {
+    grid-template-columns: minmax(140px, 240px) auto minmax(0, 1fr);
+  }
+}
+
+.timeline-grid-layout {
+  display: flex;
+  grid-row: 1;
+  grid-column: 3;
+  justify-self: end;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.timeline-camera-checklist .timeline-camera-picker-toggle small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.timeline-camera-checklist { flex: 0 0 auto; }
+.timeline-camera-checklist .timeline-camera-picker-menu { right: 0; left: auto; }
+
+/* Tablets: the command bar's second row (beside Archive) has the room. */
+@media (min-width: 761px) and (max-width: 1050px) {
+  .timeline-grid-layout {
+    grid-row: 2;
+    grid-column: 2;
+  }
 }

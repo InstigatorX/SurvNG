@@ -1,3 +1,5 @@
+import { liveDensityPage, normalizedLiveDensity } from "./liveWorkspace.mjs";
+
 // All cameras tiles each play one window playlist of this length.
 export const ALL_CAMERAS_WINDOW_SECONDS = 15 * 60;
 // Today, All cameras starts this far behind the newest recording so tiles have footage ahead
@@ -21,9 +23,52 @@ export function allCamerasWithRecording(cameras, ranges, epoch) {
   return (cameras || []).filter((camera) => recorded.has(camera.id));
 }
 
-// All cameras grid: the smallest square-ish grid that holds every camera.
-export function allCamerasGridColumns(count) {
-  return Math.max(1, Math.ceil(Math.sqrt(Math.max(1, Number(count) || 0))));
+export const ALL_CAMERAS_LAYOUT_MODES = Object.freeze(["auto", "focus", "custom"]);
+
+// The Custom camera set: stored camera ids that still exist, in camera order.
+// Nothing stored (or nothing left) means every camera.
+export function allCamerasCustomIds(stored, cameras) {
+  let ids = [];
+  try {
+    const parsed = JSON.parse(stored || "[]");
+    if (Array.isArray(parsed)) ids = parsed.map(String);
+  } catch {
+    ids = [];
+  }
+  const chosen = (cameras || []).filter((camera) => ids.includes(camera.id)).map((camera) => camera.id);
+  return chosen.length ? chosen : (cameras || []).map((camera) => camera.id);
+}
+
+/**
+ * What the All cameras grid shows, with Live's layout rules: Automatic pages
+ * every camera by density, Focus shows every camera around one primary (or
+ * the chosen set, when entered from Custom: focusScope "custom"), and Custom
+ * shows the chosen set (Focus and Custom at "fit"). Only cameras with recording
+ * in the playhead's window get a tile. Without desktop width
+ * (layoutsAvailable false), Automatic applies at "fit", as Live's density
+ * buttons are hidden there.
+ */
+export function allCamerasGridSelection({ cameras, ranges, epoch, mode, density, page, customIds, focusCameraId, focusScope = "all", layoutsAvailable = true }) {
+  const layoutMode = layoutsAvailable && ALL_CAMERAS_LAYOUT_MODES.includes(mode) ? mode : "auto";
+  const all = cameras || [];
+  const useCustom = layoutMode === "custom" || (layoutMode === "focus" && focusScope === "custom");
+  const chosen = useCustom ? all.filter((camera) => (customIds || []).includes(camera.id)) : all;
+  const recorded = allCamerasWithRecording(chosen, ranges, epoch);
+  // Live hides its density buttons below desktop width, so there it is "fit".
+  const effectiveDensity = layoutMode === "auto" && layoutsAvailable ? normalizedLiveDensity(density) : "fit";
+  const paged = liveDensityPage(recorded, effectiveDensity, page);
+  const focusId = recorded.some((camera) => camera.id === focusCameraId) ? focusCameraId : recorded[0]?.id || "";
+  return {
+    layoutMode,
+    density: effectiveDensity,
+    chosen,
+    recorded,
+    unrecorded: chosen.filter((camera) => !recorded.includes(camera)),
+    shown: paged.cameras,
+    page: paged.page,
+    pageCount: paged.pageCount,
+    focusCameraId: focusId,
+  };
 }
 
 export function recordingGridBestEpoch(ranges, requestedEpoch, lookbackSeconds = 300) {

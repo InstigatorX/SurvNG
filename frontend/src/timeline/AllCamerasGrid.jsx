@@ -1,7 +1,9 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Camera, Maximize2, Minimize2 } from "lucide-react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Camera, Maximize2 } from "lucide-react";
 import { gridPlaybackNeedsSeek, playbackMediaTimeForEpoch, recordingPlaybackTimeline } from "../recordingPlayback.mjs";
-import { ALL_CAMERAS_WINDOW_SECONDS, allCamerasGridColumns, allCamerasWindowStart } from "../recordingGrid.mjs";
+import { ALL_CAMERAS_WINDOW_SECONDS, allCamerasWindowStart } from "../recordingGrid.mjs";
+import { focusLiveMosaicLayout } from "../liveFocusLayout.mjs";
+import { uniformLiveGridLayout } from "../liveWorkspace.mjs";
 import { fetch } from "../shared/api.js";
 import { recordingDayHlsUrl, recordingPreviewUrl, recordingWindowUrl } from "../shared/mediaUrls.js";
 import { RecordingHlsVideo } from "../shared/RecordingHlsVideo.jsx";
@@ -28,7 +30,7 @@ const HOLD_MAX_MS = 4000;
  * player (native HLS starts at EXT-X-START), applies play/pause at once, and
  * re-seeks only after its start has settled and only when it is off the clock.
  */
-function CameraGridTile({ camera, source, epoch, playing, rate, enlarged, onToggle }) {
+function CameraGridTile({ camera, source, epoch, playing, rate, primary, canFocus, onFocus, placement }) {
   const videoRef = useRef(null);
   const previousEpochRef = useRef(null);
   const lastCorrectionRef = useRef(-Infinity);
@@ -206,7 +208,7 @@ function CameraGridTile({ camera, source, epoch, playing, rate, enlarged, onTogg
   const status = error || (playback && !hasCoverage ? "No recording" : "");
   const fallback = playback?.rows?.length && playback.source !== source ? (playback.source === "main" ? "Main" : "Sub") : "";
   return (
-    <article className={`all-cameras-tile${enlarged ? " enlarged" : ""}${hasCoverage ? "" : " gap"}`} data-camera-id={camera.id}>
+    <article className={`all-cameras-tile${primary ? " primary" : ""}${hasCoverage ? "" : " gap"}`} data-camera-id={camera.id} style={placement}>
       {/* The still covers loading and gaps; while video shows, it stops requesting frames. */}
       {showingVideo || holding ? null : <img className="all-cameras-still" src={recordingPreviewUrl(camera.id, previewEpoch, source)} alt="" />}
       {manifestUrl ? (
@@ -235,49 +237,75 @@ function CameraGridTile({ camera, source, epoch, playing, rate, enlarged, onTogg
       <button
         type="button"
         className="all-cameras-tile-hit media-surface-action"
-        onClick={() => onToggle(camera.id)}
-        aria-pressed={enlarged}
-        aria-label={enlarged ? `Show ${camera.name} in the grid` : `Enlarge ${camera.name}`}
+        onClick={() => onFocus(camera.id)}
+        disabled={!canFocus}
+        aria-pressed={canFocus ? primary : undefined}
+        aria-label={canFocus ? `Focus ${camera.name}` : camera.name}
       >
         <span className="all-cameras-label">
           <Camera size={13} aria-hidden="true" />{camera.name}
           {fallback ? <em title={`Playing the ${fallback} stream; the selected one has no recording here`}>{fallback}</em> : null}
         </span>
-        {enlarged ? <Minimize2 size={14} aria-hidden="true" /> : <Maximize2 size={14} aria-hidden="true" />}
+        {canFocus && !primary ? <Maximize2 size={14} aria-hidden="true" /> : null}
       </button>
     </article>
   );
 }
 
+const GRID_GAP = 3;
+
 /**
- * All cameras: every camera's recording at the Timeline playhead, in the
- * spot of the single-camera player. Tapping a tile enlarges it (the others
- * move to a strip below); tapping it again returns to the even grid.
+ * All cameras: the cameras with recording at the Timeline playhead, in the
+ * spot of the single-camera player, laid out like Live (Automatic's uniform
+ * grid, or Focus's mosaic around one primary camera). Tiles stay in camera
+ * order in the DOM and are only positioned, so a layout change never moves or
+ * reloads a tile that stays shown; a tile that leaves (another page, another
+ * set) stops its player, which is what keeps fewer streams running.
  */
-export function AllCamerasGrid({ cameras, source, epoch, playing, rate, enlargedCameraId, onEnlargedChange }) {
-  const enlarged = cameras.find((camera) => camera.id === enlargedCameraId) || null;
-  const others = enlarged ? cameras.filter((camera) => camera.id !== enlarged.id) : cameras;
-  const toggle = (cameraId) => onEnlargedChange(cameraId === enlargedCameraId ? null : cameraId);
-  const tile = (camera, isEnlarged) => (
-    <CameraGridTile
-      key={camera.id}
-      camera={camera}
-      source={source}
-      epoch={epoch}
-      playing={playing}
-      rate={rate}
-      enlarged={isEnlarged}
-      onToggle={toggle}
-    />
-  );
+export function AllCamerasGrid({ cameras, source, epoch, playing, rate, layoutMode, focusCameraId, canFocus, onFocusCamera }) {
+  const gridRef = useRef(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  useLayoutEffect(() => {
+    const grid = gridRef.current;
+    if (!grid) return undefined;
+    const measure = () => setSize((current) => (current.width === grid.clientWidth && current.height === grid.clientHeight ? current : { width: grid.clientWidth, height: grid.clientHeight }));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(grid);
+    return () => observer.disconnect();
+  }, [cameras.length > 0]);
+  const placements = useMemo(() => {
+    const layout = layoutMode === "focus"
+      ? focusLiveMosaicLayout(cameras, size.width, size.height, focusCameraId, GRID_GAP)
+      : uniformLiveGridLayout(cameras, size.width, size.height, GRID_GAP);
+    // Live's uniform grid is top-aligned; in the player's spot it is centred.
+    const bottom = layout.reduce((edge, item) => Math.max(edge, item.y + item.height), 0);
+    const offsetY = layoutMode === "focus" ? 0 : Math.max(0, (size.height - bottom) / 2);
+    return new Map(layout.map((item) => [item.camera.id, {
+      primary: Boolean(item.primary),
+      style: { left: item.x, top: item.y + offsetY, width: item.width, height: item.height },
+    }]));
+  }, [cameras, focusCameraId, layoutMode, size.height, size.width]);
   if (!cameras.length) return <div className="all-cameras-grid empty"><span className="all-cameras-status">No camera has recording in this 15-minute window</span></div>;
-  // Every tile stays in one container in camera order, so enlarging only
-  // changes CSS placement and never reloads a tile's video.
-  const strip = enlarged && others.length > 0;
-  const columns = strip ? others.length : enlarged ? 1 : allCamerasGridColumns(cameras.length);
   return (
-    <div className={`all-cameras-grid${strip ? " has-enlarged" : ""}`} style={{ "--all-cameras-columns": columns }} aria-label="All cameras">
-      {cameras.map((camera) => tile(camera, camera.id === enlarged?.id))}
+    <div ref={gridRef} className={`all-cameras-grid layout-${layoutMode}`} aria-label="All cameras">
+      {cameras.map((camera) => {
+        const placement = placements.get(camera.id);
+        return (
+          <CameraGridTile
+            key={camera.id}
+            camera={camera}
+            source={source}
+            epoch={epoch}
+            playing={playing}
+            rate={rate}
+            primary={layoutMode === "focus" && Boolean(placement?.primary)}
+            canFocus={canFocus}
+            onFocus={onFocusCamera}
+            placement={placement ? placement.style : { visibility: "hidden" }}
+          />
+        );
+      })}
     </div>
   );
 }

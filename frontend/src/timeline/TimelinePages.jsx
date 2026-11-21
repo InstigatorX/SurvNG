@@ -34,7 +34,7 @@ import {
   Rows3,
   Columns3,
   FastForward,
-  VideoOff,
+  RotateCcw,
 } from "lucide-react";
 import { liveFramingStyle } from "../liveFraming.mjs";
 import { browserStorage } from "../storage.mjs";
@@ -42,7 +42,9 @@ import { canSetClipBoundaryAtPlayhead, clipPreviewReachedEnd, clipRangeIsValid, 
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
 import { nativePlaylistStart, nativePlaylistStartStep, recordingCoverageUnion, recordingPlaybackTimeline, recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
-import { ALL_CAMERAS_LIVE_DELAY_SECONDS, allCamerasWindowStart, allCamerasWithRecording, recordingGridBestEpoch } from "../recordingGrid.mjs";
+import { ALL_CAMERAS_LIVE_DELAY_SECONDS, allCamerasCustomIds, allCamerasGridSelection, allCamerasWindowStart, recordingGridBestEpoch } from "../recordingGrid.mjs";
+import { CameraDensityControl, CameraLayoutModeControl } from "../shared/CameraLayoutControls.jsx";
+import { useStoredState, useViewportQuery } from "../shared/hooks.js";
 import { AllCamerasGrid } from "./AllCamerasGrid.jsx";
 import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { SpeechSearchWorkspace } from "../search/SpeechSearchResults.jsx";
@@ -141,17 +143,13 @@ export function RecordingCompanionStrip({ cameras, routes, activeCameraId, sourc
   </div>;
 }
 
-export function TimelineCameraPicker({ cameras, value, onChange, allOption = null, ariaLabel = "Select timeline camera" }) {
+// A camera picker menu: focuses its search when opened, and closes on Escape
+// or a press outside it.
+function useCameraPickerMenu() {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const rootRef = useRef(null);
   const searchRef = useRef(null);
-  const allSelected = Boolean(allOption) && value === allOption.value;
-  const selectedCamera = cameras.find((camera) => camera.id === value);
-  const selected = allSelected
-    ? { id: allOption.value, name: allOption.label, recording: cameras.some((camera) => camera.recording || camera.sub_recording) }
-    : selectedCamera || cameras[0] || (allOption ? { id: allOption.value, name: allOption.label, recording: false } : null);
-  const matches = filteredTimelineCameras(cameras, query);
   useEffect(() => {
     if (!open) return undefined;
     searchRef.current?.focus();
@@ -168,6 +166,17 @@ export function TimelineCameraPicker({ cameras, value, onChange, allOption = nul
       document.removeEventListener("keydown", onKey);
     };
   }, [open]);
+  return { open, setOpen, query, setQuery, rootRef, searchRef };
+}
+
+export function TimelineCameraPicker({ cameras, value, onChange, allOption = null, ariaLabel = "Select timeline camera" }) {
+  const { open, setOpen, query, setQuery, rootRef, searchRef } = useCameraPickerMenu();
+  const allSelected = Boolean(allOption) && value === allOption.value;
+  const selectedCamera = cameras.find((camera) => camera.id === value);
+  const selected = allSelected
+    ? { id: allOption.value, name: allOption.label, recording: cameras.some((camera) => camera.recording || camera.sub_recording) }
+    : selectedCamera || cameras[0] || (allOption ? { id: allOption.value, name: allOption.label, recording: false } : null);
+  const matches = filteredTimelineCameras(cameras, query);
   if (!selected) return null;
   return (
     <div ref={rootRef} className={`timeline-camera-picker${open ? " open" : ""}`}>
@@ -217,6 +226,64 @@ export function TimelineCameraPicker({ cameras, value, onChange, allOption = nul
                 <i className={(camera.recording || camera.sub_recording) ? "online" : ""} />
               </button>
             ))}
+            {!matches.length ? <p>No matching cameras</p> : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Choose a set of cameras (All cameras' Custom layout); one always stays. */
+export function TimelineCameraChecklist({ cameras, selectedIds, onChange }) {
+  const { open, setOpen, query, setQuery, rootRef, searchRef } = useCameraPickerMenu();
+  const matches = filteredTimelineCameras(cameras, query);
+  const toggle = (cameraId) => {
+    const selected = selectedIds.includes(cameraId);
+    if (selected && selectedIds.length === 1) return;
+    const next = new Set(selected ? selectedIds.filter((id) => id !== cameraId) : [...selectedIds, cameraId]);
+    onChange(cameras.filter((camera) => next.has(camera.id)).map((camera) => camera.id));
+  };
+  return (
+    <div ref={rootRef} className={`timeline-camera-picker timeline-camera-checklist${open ? " open" : ""}`}>
+      <button
+        type="button"
+        className="timeline-camera-picker-toggle"
+        aria-expanded={open}
+        aria-haspopup="true"
+        onClick={() => { setQuery(""); setOpen((current) => !current); }}
+      >
+        <Camera size={15} />
+        <strong>Choose cameras</strong>
+        <small>{selectedIds.length}/{cameras.length}</small>
+      </button>
+      {open ? (
+        <div className="timeline-camera-picker-menu" role="group" aria-label="Cameras to show">
+          <label className="timeline-camera-picker-search">
+            <Search size={14} aria-hidden="true" />
+            <span className="sr-only">Search cameras</span>
+            <input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search cameras" />
+          </label>
+          <div className="timeline-camera-picker-list">
+            {matches.map((camera) => {
+              const checked = selectedIds.includes(camera.id);
+              return (
+                <button
+                  key={camera.id}
+                  type="button"
+                  role="checkbox"
+                  aria-checked={checked}
+                  className={checked ? "active" : ""}
+                  disabled={checked && selectedIds.length === 1}
+                  title={checked && selectedIds.length === 1 ? "At least one camera stays selected" : undefined}
+                  onClick={() => toggle(camera.id)}
+                >
+                  {checked ? <Check size={15} /> : <Camera size={15} />}
+                  <span>{camera.name}</span>
+                  <i className={(camera.recording || camera.sub_recording) ? "online" : ""} />
+                </button>
+              );
+            })}
             {!matches.length ? <p>No matching cameras</p> : null}
           </div>
         </div>
@@ -727,10 +794,21 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     frameSearchRequestRef.current = null;
   }, []);
 
-  const isAllCameras = cameraId === ALL_RECORDING_CAMERAS_ID;
-  // All cameras: the camera tile shown large (null for the even grid).
-  const [enlargedCameraId, setEnlargedCameraId] = useState(null);
+  // All cameras is a desktop and tablet view; a phone opens the first camera.
+  const phoneTimeline = useViewportQuery("(max-width: 760px)");
+  const isAllCameras = cameraId === ALL_RECORDING_CAMERAS_ID && !phoneTimeline;
+  // Its layout follows Live: Automatic (density and pages), Focus, and Custom
+  // (here, a chosen set of cameras); Focus and Custom need desktop width.
+  const gridLayoutsAvailable = useViewportQuery("(min-width: 1051px)");
+  const [gridLayoutMode, setGridLayoutMode] = useStoredState("survng.timelineGridLayoutMode.v1", "auto");
+  const [gridDensity, setGridDensity] = useStoredState("survng.timelineGridDensity.v1", "fit");
+  const [gridFocusCamera, setGridFocusCamera] = useStoredState("survng.timelineGridFocusCamera.v1", "");
+  const [gridCustomCameras, setGridCustomCameras] = useStoredState("survng.timelineGridCameras.v1", "");
+  // Focus entered from Custom keeps the chosen cameras around the primary.
+  const [gridFocusScope, setGridFocusScope] = useStoredState("survng.timelineGridFocusScope.v1", "all");
+  const [gridPage, setGridPage] = useState(0);
   const gridCameras = useMemo(() => cameras.filter((camera) => camera.enabled !== false), [cameras]);
+  const gridCustomIds = useMemo(() => allCamerasCustomIds(gridCustomCameras, gridCameras), [gridCameras, gridCustomCameras]);
   const activeCameraId = resolveTimelineHeroCameraId(cameras, cameraId);
   const dayStart = useMemo(() => zonedDateSecondToEpoch(date, 0, timeZone), [date, timeZone]);
   const nextDate = addDaysToDateKey(date, 1);
@@ -751,13 +829,34 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   latestAvailabilityRef.current = timeline[timeline.length - 1]?.end_epoch ?? null;
   // All cameras gets every camera's ranges; the rail shows where any has recording.
   // Only cameras with recording in the playhead's window get a tile.
-  const recordedGridCameras = useMemo(
-    () => (isAllCameras ? allCamerasWithRecording(gridCameras, timeline, playhead) : []),
+  const gridSelection = useMemo(
+    () => allCamerasGridSelection({
+      cameras: isAllCameras ? gridCameras : [],
+      ranges: timeline,
+      epoch: playhead,
+      mode: gridLayoutMode,
+      density: gridDensity,
+      page: gridPage,
+      customIds: gridCustomIds,
+      focusCameraId: gridFocusCamera,
+      focusScope: gridFocusScope,
+      layoutsAvailable: gridLayoutsAvailable,
+    }),
     // playhead matters only through its 15-minute window.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [gridCameras, isAllCameras, timeline, Number.isFinite(playhead) ? allCamerasWindowStart(playhead) : null],
+    [gridCameras, gridCustomIds, gridDensity, gridFocusCamera, gridFocusScope, gridLayoutMode, gridLayoutsAvailable, gridPage, isAllCameras, timeline, Number.isFinite(playhead) ? allCamerasWindowStart(playhead) : null],
   );
-  const unrecordedGridCameras = isAllCameras ? gridCameras.filter((camera) => !recordedGridCameras.includes(camera)) : [];
+  const recordedGridCameras = gridSelection.recorded;
+  // Keep the stored page on the page shown, so a shrinking set cannot bring
+  // an old page back later.
+  useEffect(() => {
+    if (isAllCameras && gridPage !== gridSelection.page) setGridPage(gridSelection.page);
+  }, [gridPage, gridSelection.page, isAllCameras]);
+  // A camera=all link on a phone opens the first camera (no grid on phones).
+  useEffect(() => {
+    if (phoneTimeline && cameraId === ALL_RECORDING_CAMERAS_ID && activeCameraId) setCameraId(activeCameraId);
+  }, [activeCameraId, cameraId, phoneTimeline]);
+  const unrecordedGridCameras = gridSelection.unrecorded;
   const investigationShown = investigationOpen && !(isAllCameras && timelineLayout !== "classic");
   const railRecordings = useMemo(() => (isAllCameras ? recordingCoverageUnion(timeline) : timeline), [isAllCameras, timeline]);
   const nativeScope = `${activeCameraId}:${source}:${dayStart}:${dayEnd}`;
@@ -2652,13 +2751,37 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const selectedRailEvent = timelineLayout === "catchup" ? storyFocus : selectedEvent;
   const selectedRailDuration = selectedRailEvent ? railEventDurationSeconds(selectedRailEvent) : 0;
   const cameraNames = Object.fromEntries(cameras.map((camera) => [camera.id, camera.name || camera.id]));
+  function changeGridLayoutMode(nextMode) {
+    const current = gridSelection.layoutMode;
+    if (nextMode === "focus" && current !== "focus") setGridFocusScope(current === "custom" ? "custom" : "all");
+    setGridLayoutMode(nextMode);
+    setGridPage(0);
+  }
+
+  function changeGridCustomCameras(value) {
+    setGridCustomCameras(value);
+    setGridPage(0);
+  }
+
+  // Live's makePrimaryCamera: the camera becomes Focus's primary.
+  function focusGridCamera(nextCameraId) {
+    if (!nextCameraId) return;
+    setGridFocusCamera(String(nextCameraId));
+    if (gridLayoutsAvailable) changeGridLayoutMode("focus");
+  }
+
+  function changeGridDensity(nextDensity) {
+    setGridDensity(nextDensity);
+    setGridPage(0);
+  }
+
   function selectRailEvent(event) {
     if (!event) return;
     checkpointTimelineView();
     cancelClipPreview();
     setSelectedEventId(event.id);
-    // All cameras keeps the grid and enlarges the event's camera instead.
-    if (isAllCameras) setEnlargedCameraId(event.camera_id || null);
+    // All cameras keeps the grid and focuses the event's camera instead.
+    if (isAllCameras) focusGridCamera(event.camera_id);
     else if (event.camera_id && event.camera_id !== activeCameraId) selectPlaybackCamera(event.camera_id);
     playAt(event.incident_epoch, true);
   }
@@ -2720,7 +2843,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           playhead={railPlayhead}
           onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
           onSelectCamera={(nextCameraId) => {
-            if (isAllCameras) setEnlargedCameraId(nextCameraId);
+            if (isAllCameras) focusGridCamera(nextCameraId);
             else if (nextCameraId !== activeCameraId) selectPlaybackCamera(nextCameraId);
           }}
           timeZone={timeZone}
@@ -2751,7 +2874,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   );
   const railAside = timelineLayout === "rail" ? (
     <EventRail
-      cameraId={isAllCameras ? (enlargedCameraId || activeCameraId) : activeCameraId}
+      cameraId={isAllCameras ? (gridSelection.layoutMode === "focus" ? gridSelection.focusCameraId : activeCameraId) : activeCameraId}
       cameraNames={isAllCameras ? cameraNames : null}
       source={source}
       dayStart={dayStart}
@@ -2796,8 +2919,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
         <MobileCameraSelect
           className="timeline-mobile-camera-select"
           cameras={cameras}
-          allOption={{ value: ALL_RECORDING_CAMERAS_ID, label: "All cameras" }}
-          value={isAllCameras ? ALL_RECORDING_CAMERAS_ID : activeCameraId}
+          value={activeCameraId}
           onChange={(nextCameraId) => { selectPlaybackCamera(nextCameraId); }}
           ariaLabel="Timeline camera"
         />
@@ -2808,6 +2930,16 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             </button>
           ))}
         </div>
+        {isAllCameras ? (
+          <div className="timeline-grid-layout">
+            {/* Density only applies to Automatic (Focus and Custom show their whole set). */}
+            {gridSelection.layoutMode === "auto" ? <CameraDensityControl density={gridSelection.density} page={gridSelection.page} pageCount={gridSelection.pageCount} onDensityChange={changeGridDensity} onPageChange={setGridPage} /> : null}
+            <CameraLayoutModeControl mode={gridSelection.layoutMode} customAvailable={gridLayoutsAvailable} onModeChange={changeGridLayoutMode} ariaLabel="All cameras layout" customTitle="Choose which cameras to show">
+              {gridSelection.layoutMode === "custom" ? <button type="button" className="secondary live-layout-reset" onClick={() => changeGridCustomCameras("")} title="Show every camera"><RotateCcw size={14} /> Reset</button> : null}
+            </CameraLayoutModeControl>
+            {gridSelection.layoutMode === "custom" ? <TimelineCameraChecklist cameras={gridCameras} selectedIds={gridCustomIds} onChange={(ids) => changeGridCustomCameras(JSON.stringify(ids))} /> : null}
+          </div>
+        ) : null}
         <span className="recordings-commandbar-live"><i />{date === today ? "Live archive" : "Archive"}</span>
         <div className="recordings-commandbar-day-controls">{timelineDayControls()}</div>
       </nav>
@@ -2815,13 +2947,15 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
         <div className={`recordings-v2-player${isAllCameras ? " all-cameras-player" : " selected-camera-stage"}`}>
           {isAllCameras ? <div className="recording-hero-media all-cameras-media">
             {Number.isFinite(playhead) ? <AllCamerasGrid
-              cameras={recordedGridCameras}
+              cameras={gridSelection.shown}
               source={source}
               epoch={playhead}
               playing={gridPlaying}
               rate={playbackRate}
-              enlargedCameraId={enlargedCameraId}
-              onEnlargedChange={setEnlargedCameraId}
+              layoutMode={gridSelection.layoutMode}
+              focusCameraId={gridSelection.focusCameraId}
+              canFocus={gridLayoutsAvailable}
+              onFocusCamera={focusGridCamera}
             /> : null}
           </div> : null}
           {!isAllCameras ? <div className="recording-hero-media" ref={heroMediaRef}>
@@ -3008,23 +3142,17 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           ) : null}
           {isAllCameras && Number.isFinite(playhead) ? <div className="recording-grid-controls recording-hero-controls all-cameras-controls">
             <button type="button" onClick={() => skipPlayback(-10, gridPlaying)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
-            <button type="button" className="primary" onClick={toggleGridPlayback} aria-label={gridPlaying ? "Pause" : "Play"}>{gridPlaying ? <Pause size={17} /> : <Play size={17} fill="currentColor" />}<span className="all-cameras-play-label">{gridPlaying ? "Pause" : "Play"}</span></button>
+            <button type="button" className="primary" onClick={toggleGridPlayback}>{gridPlaying ? <Pause size={17} /> : <Play size={17} fill="currentColor" />}{gridPlaying ? "Pause" : "Play"}</button>
             <button type="button" onClick={() => skipPlayback(10, gridPlaying)} aria-label="Forward 10 seconds"><SkipForward size={16} /></button>
             <time>{formatDateTime(playhead, timeZone)}</time>
             <span
               className="all-cameras-summary"
               role="status"
-              aria-label={`${recordedGridCameras.length} of ${gridCameras.length} cameras${unrecordedGridCameras.length ? `; no recording in this 15-minute window: ${unrecordedGridCameras.map((camera) => camera.name || camera.id).join(", ")}` : ""}`}
               title={unrecordedGridCameras.length ? `No recording in this 15-minute window: ${unrecordedGridCameras.map((camera) => camera.name || camera.id).join(", ")}` : undefined}
             >
-              {recordedGridCameras.length} of {gridCameras.length} cameras
+              {recordedGridCameras.length} of {gridSelection.chosen.length} cameras
               {unrecordedGridCameras.length ? (
-                <em>
-                  <span className="all-cameras-summary-separator"> · </span>
-                  <span className="all-cameras-summary-prefix">No recording: </span>
-                  <VideoOff className="all-cameras-summary-icon" size={11} aria-hidden="true" />
-                  {unrecordedGridCameras.map((camera) => camera.name || camera.id).join(", ")}
-                </em>
+                <em> · No recording: {unrecordedGridCameras.map((camera) => camera.name || camera.id).join(", ")}</em>
               ) : null}
             </span>
             <div className="incident-recording-source" role="group" aria-label="Playback stream">

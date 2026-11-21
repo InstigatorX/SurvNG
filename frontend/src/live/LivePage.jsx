@@ -1,10 +1,10 @@
 import { WeatherTile } from "./WeatherTile.jsx";
+import { CameraDensityControl, CameraLayoutModeControl } from "../shared/CameraLayoutControls.jsx";
 import { liveItemsWithWeather } from "../weather.mjs";
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Camera,
-  ChevronLeft,
   ChevronRight,
   Grid2X2,
   GripVertical,
@@ -26,7 +26,7 @@ import { liveStreamIdleLabel } from "../liveStreamPresence.mjs";
 import { noteLiveStreamActivity, useLiveStreamPresence } from "../useLiveStreamPresence.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "../liveCustomLayout.mjs";
-import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus, uniformLiveGridLayout } from "../liveWorkspace.mjs";
+import { focusedLiveCameraId, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus, uniformLiveGridLayout } from "../liveWorkspace.mjs";
 import { cameraCaptureConnectivity, cameraTileLiveState } from "../cameraConnectivity.mjs";
 import { liveFramingStyle } from "../liveFraming.mjs";
 import { focusLiveMosaicLayout, focusedLiveCameraId as validFocusCameraId } from "../liveFocusLayout.mjs";
@@ -840,17 +840,11 @@ export function LiveCommandBar({ cameras = [], focusedCameraId = "", onFocusedCa
         onChange={onFocusedCameraChange}
         ariaLabel="Live camera"
       />
-      <div className="live-density-control" role="group" aria-label="Visible camera density">
-        {LIVE_DENSITY_OPTIONS.map((option) => <button type="button" key={option} className={density === option ? "active" : ""} aria-pressed={density === option} onClick={() => onDensityChange(option)}>{option === "fit" ? <Grid2X2 size={15} /> : option === "4" ? <><Grid2X2 size={13} /> 4</> : option}</button>)}
-        {densityPageCount > 1 ? <span className="live-density-pages"><button type="button" onClick={() => onDensityPageChange(densityPage - 1)} disabled={densityPage === 0} aria-label="Previous camera page"><ChevronLeft size={15} /></button><small>{densityPage + 1}/{densityPageCount}</small><button type="button" onClick={() => onDensityPageChange(densityPage + 1)} disabled={densityPage >= densityPageCount - 1} aria-label="Next camera page"><ChevronRight size={15} /></button></span> : null}
-      </div>
-      <div className="live-layout-control" role="group" aria-label="Live camera layout">
-        <button type="button" className={layoutMode === "auto" ? "active" : ""} aria-pressed={layoutMode === "auto"} onClick={() => onLayoutModeChange("auto")}><Grid2X2 size={15} /> Automatic</button>
-        <button type="button" className={layoutMode === "focus" ? "active" : ""} aria-pressed={layoutMode === "focus"} onClick={() => onLayoutModeChange("focus")} disabled={!customAvailable} title={customAvailable ? "Prioritize one camera in a desktop mosaic" : "Focus layout is available on desktop"}><Camera size={15} /> Focus</button>
-        <button type="button" className={layoutMode === "custom" ? "active" : ""} aria-pressed={layoutMode === "custom"} onClick={() => onLayoutModeChange("custom")} disabled={!customAvailable} title={customAvailable ? "Arrange and resize cameras" : "Custom layout is available on desktop"}><GripVertical size={15} /> Custom</button>
+      <CameraDensityControl density={density} page={densityPage} pageCount={densityPageCount} onDensityChange={onDensityChange} onPageChange={onDensityPageChange} />
+      <CameraLayoutModeControl mode={layoutMode} customAvailable={customAvailable} onModeChange={onLayoutModeChange} ariaLabel="Live camera layout">
         {layoutMode === "custom" && customAvailable ? <button type="button" className="secondary live-layout-reset" onClick={onResetLayout}><RotateCcw size={14} /> Reset</button> : null}
         <button type="button" className="live-fullscreen" onClick={onFullscreen} aria-label="View Live fullscreen" title="Fullscreen"><Maximize2 size={16} /></button>
-      </div>
+      </CameraLayoutModeControl>
     </header>
   );
 }

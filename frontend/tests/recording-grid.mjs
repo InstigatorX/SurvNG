@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import {
   ALL_CAMERAS_WINDOW_SECONDS,
-  allCamerasGridColumns,
+  allCamerasCustomIds,
+  allCamerasGridSelection,
   allCamerasWindowStart,
   allCamerasWithRecording,
   recordingGridBestEpoch,
@@ -22,7 +23,35 @@ assert.equal(allCamerasWindowStart(2700), 2700);
   assert.deepEqual(allCamerasWithRecording(cameras, ranges, 2750).map((camera) => camera.id), ["drive"]);
   assert.deepEqual(allCamerasWithRecording(cameras, [], 2000), []);
 }
-assert.deepEqual([0, 1, 2, 3, 4, 5, 9, 10, 16].map(allCamerasGridColumns), [1, 1, 2, 2, 2, 3, 3, 4, 4], "the grid stays roughly square");
+{
+  // Custom set: stored ids that still exist, in camera order; none means all.
+  const cameras = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  assert.deepEqual(allCamerasCustomIds('["c","a","gone"]', cameras), ["a", "c"]);
+  assert.deepEqual(allCamerasCustomIds('["gone"]', cameras), ["a", "b", "c"]);
+  assert.deepEqual(allCamerasCustomIds("", cameras), ["a", "b", "c"]);
+  assert.deepEqual(allCamerasCustomIds("not json", cameras), ["a", "b", "c"]);
+}
+{
+  const cameras = ["a", "b", "c", "d", "e", "f"].map((id) => ({ id }));
+  const ranges = cameras.filter((camera) => camera.id !== "f").map((camera) => ({ camera_id: camera.id, start_epoch: 0, end_epoch: 900 }));
+  const base = { cameras, ranges, epoch: 100, mode: "auto", density: "4", page: 1, customIds: ["b", "f"], focusCameraId: "c" };
+  const auto = allCamerasGridSelection(base);
+  assert.deepEqual([auto.layoutMode, auto.density, auto.page, auto.pageCount], ["auto", "4", 1, 2], "Automatic pages the recorded cameras by density");
+  assert.deepEqual(auto.shown.map((camera) => camera.id), ["e"]);
+  assert.deepEqual(auto.unrecorded.map((camera) => camera.id), ["f"]);
+  const custom = allCamerasGridSelection({ ...base, mode: "custom" });
+  assert.deepEqual([custom.density, custom.pageCount], ["fit", 1], "Custom shows its whole set, like Live");
+  assert.deepEqual(custom.shown.map((camera) => camera.id), ["b"]);
+  assert.deepEqual(custom.unrecorded.map((camera) => camera.id), ["f"], "a chosen camera without recording is named, not shown");
+  const focus = allCamerasGridSelection({ ...base, mode: "focus" });
+  assert.deepEqual([focus.layoutMode, focus.density, focus.focusCameraId, focus.shown.length], ["focus", "fit", "c", 5]);
+  assert.equal(allCamerasGridSelection({ ...base, mode: "focus", focusCameraId: "f" }).focusCameraId, "a", "a focus camera without recording falls to the first shown");
+  assert.deepEqual(allCamerasGridSelection({ ...base, mode: "focus", focusScope: "custom", focusCameraId: "b" }).shown.map((camera) => camera.id), ["b"], "Focus entered from Custom keeps the chosen set");
+  const narrow = allCamerasGridSelection({ ...base, mode: "custom", layoutsAvailable: false });
+  assert.deepEqual([narrow.layoutMode, narrow.density, narrow.pageCount], ["auto", "fit", 1], "below desktop width, Automatic at fit applies (Live hides density there)");
+  assert.equal(allCamerasGridSelection({ ...base, mode: "bogus" }).layoutMode, "auto");
+  assert.equal(allCamerasGridSelection({ ...base, page: 9 }).page, 1, "the page is clamped");
+}
 
 const ranges = [
   { camera_id: "ahead", start_epoch: 980, end_epoch: 1000 },
