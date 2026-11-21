@@ -52,6 +52,11 @@ function cameras() {
     recording: !(scenario === "recording-failure" && index === 2), sub_recording: true,
     record_sub_enabled: true, detection_enabled: false, last_motion_at: null,
     width: cameraWidth(index), height: 720,
+    stream_dimensions: { main: { width: cameraWidth(index) * 2, height: 1440 }, live: { width: cameraWidth(index), height: 720 } },
+    capture_stats: { main: { fps: 15 }, live: { fps: 15 } },
+    ...(scenario === "recording-failure" && index === 2
+      ? { connected: false, capture_connectivity: "offline", last_frame_age_seconds: 840, capture_reconnects: 6 }
+      : {}),
   }));
 }
 
@@ -64,9 +69,38 @@ function system() {
     storage: { available: true, total_bytes: total, free_bytes: total * freePercent / 100,
       used_bytes: total * (100 - freePercent) / 100, used_percent: 100 - freePercent,
       sampled_at: new Date().toISOString() },
-    detector: { enabled: false, loaded_backend: "preview" },
+    detector: { enabled: true, loaded_backend: "openvino", loaded_device: "GPU.0", runtime: { average_inference_ms: 18.2 } },
     cameras: { total: cameraCount, enabled: cameraCount, online: cameraCount, recording_expected: cameraCount,
       recording: scenario === "recording-failure" && cameraCount > 2 ? cameraCount - 1 : cameraCount },
+  };
+}
+
+// Synthetic Admin data: hourly activity and per-camera availability.
+function hourStarts() {
+  const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+  return Array.from({ length: 24 }, (_, index) => new Date(hour - (23 - index) * 3_600_000).toISOString());
+}
+
+function availability() {
+  return Object.fromEntries(ids.map((id, index) => [id, hourStarts().map((started_at, hour) => ({
+    started_at,
+    availability_percent: scenario === "recording-failure" && index === 2 && hour === 23 ? 20
+      : index === 1 && hour === 12 ? 82 : 100,
+    capture_interruptions: 0,
+  }))]));
+}
+
+function telemetry() {
+  const counts = [3, 2, 1, 1, 0, 0, 1, 4, 9, 8, 6, 7, 9, 6, 5, 8, 10, 12, 9, 7, 6, 5, 4, 6];
+  const status = system();
+  return {
+    system: { storage: status.storage },
+    detector: status.detector,
+    activity: {
+      last_24h: { object_incidents: counts.reduce((sum, value) => sum + value, 0) },
+      hourly: hourStarts().map((started_at, index) => ({ started_at, events: counts[index] * 3, object_incidents: counts[index] })),
+    },
+    interruption_summary: { hours: 24, controlled: 0, unexpected: 0, unknown: 0, total: 0 },
   };
 }
 
@@ -146,6 +180,10 @@ server = await createServer({
       if (path === "/api/cameras") return json(res, cameras());
       if (path === "/api/config") return json(res, { cameras: ids.map((id, index) => ({ id, name: names[index], record: true, record_sub: true, live_view: { main: { fit: "cover", focal_x: 70, focal_y: 40, zoom: 1.25 }, live: { fit: "cover", focal_x: 30, focal_y: 60, zoom: 1.5 } } })), retention: { minimum_free_percent: 15, emergency_free_percent: 5 }, detector: { tracking: { camera_transition_routes: ids.slice(1).map((id) => ({ from_camera: ids[0], to_camera: id, bidirectional: true })) } } });
       if (path === "/api/system/status") return json(res, system());
+      if (path === "/api/telemetry") return json(res, telemetry());
+      if (path === "/api/telemetry/availability") return json(res, { hours: 24, cameras: availability() });
+      if (path === "/api/system-review") return json(res, { cadence: "weekly", briefing: { status: "complete", result: { recommendations: [{}, {}, {}, {}] } } });
+      if (path === "/api/retention/status") return json(res, { state: "idle", error: "" });
       if (path === "/api/incidents/feed") return json(res, { items: [], facets: { camera_ids: [], labels: [], zones: [] }, has_more: false });
       if (path === "/api/faces/people") return json(res, []);
       if (path === "/api/incidents/search") {

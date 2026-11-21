@@ -5,7 +5,6 @@ import React, { useContext, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { createPortal } from "react-dom";
 import {
   Activity,
-  ArrowRight,
   ArrowUpDown,
   Camera,
   Check,
@@ -60,7 +59,7 @@ import { logPayloadSignature } from "../pollingPolicy.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { motionAuditRegions } from "../motionAudit.mjs";
 import { clampZoneView, insertZonePointWithIndex, zoomZoneView } from "../zoneGeometry.mjs";
-import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminHomeDestinations, adminWorkspaceSearch, cameraConfigDirtyState, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, resolveAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
+import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminWorkspaceSearch, cameraConfigDirtyState, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, resolveAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
 import { appUrl, mediaUrl, fetch } from "../shared/api.js";
 import { MEDIA_STORAGE_ROLES, CAMERA_ADMIN_SECTIONS, TELEMETRY_ADMIN_SECTIONS, HEALTH_TELEMETRY_SECTIONS, GENERAL_ADMIN_SECTIONS, US_TIME_ZONES, THEMES } from "../shared/constants.js";
 import { CameraScopePicker } from "../shared/CameraScopePicker.jsx";
@@ -71,6 +70,7 @@ import { mediaStorageConfigurationError, slugify, inferredBackendLabel, cameraWi
 import { defaultCamera, CameraStreamsEditor, CameraOnvifEditor, LiveViewFramingEditor, defaultCameraMotionQualification, cameraMotionQualificationInherited } from "./cameraEditors.jsx";
 import { AccessSettings } from "./AccessSettings.jsx";
 import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
+import { AdminOverview } from "./AdminOverview.jsx";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
 import { DetectionOccupancyCard } from "./DetectionOccupancyCard.jsx";
 import { SpeechSettings } from "./SpeechSettings.jsx";
@@ -799,7 +799,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const initialAdminParams = useMemo(() => new URLSearchParams(initialAdminSearch), [initialAdminSearch]);
   const initialAdminWorkspace = useMemo(() => resolveAdminWorkspace(
     initialAdminSearch,
-    readStoredValue(browserStorage(window), "survng.configTab", "general"),
+    readStoredValue(browserStorage(window), "survng.configTab", "home"),
   ), [initialAdminSearch]);
   const [config, setConfig] = useState(null);
   const [runtimeStatus, setRuntimeStatus] = useState([]);
@@ -994,16 +994,17 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     setAdminNavOpen(false);
   }
 
-  function selectAdminDestination(destination) {
+  function selectAdminDestination(destination, { camera = "" } = {}) {
     const nextWorkspace = destination.workspace;
     const nextSubsection = destination.subsection || "";
+    const targetCamera = cameras.some((item) => item.id === camera) ? camera : cameras[0]?.id || "";
     const alreadySelected = nextWorkspace === settingsTab && (
       nextWorkspace === "general"
         ? nextSubsection === "detection"
           ? false
         : (nextSubsection || "general") === generalSection
         : nextWorkspace === "cameras"
-          ? cameraSection === "settings" && selectedId === (cameras[0]?.id || "")
+          ? cameraSection === "settings" && selectedId === targetCamera
         : nextWorkspace === "telemetry"
           ? (nextSubsection === "diagnostics") === (normalizeTelemetrySection(telemetrySection) === "diagnostics")
             && (normalizeTelemetrySection(nextSubsection || "health") !== "health" || !telemetryCamera)
@@ -1015,27 +1016,28 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     );
     if (alreadySelected) {
       setAdminNavOpen(false);
-      return;
+      return true;
     }
     if (apiTokenSecretVisible && settingsTab === "general") {
-      if (!window.confirm("The new API token secret is shown only once. Leave this section and discard the displayed secret?")) return;
+      if (!window.confirm("The new API token secret is shown only once. Leave this section and discard the displayed secret?")) return false;
       setApiTokenSecretVisible(false);
     }
-    if (!confirmDiscardAdminChanges("Switch sections and discard unsaved changes?")) return;
+    if (!confirmDiscardAdminChanges("Switch sections and discard unsaved changes?")) return false;
     if (nextWorkspace === "general") {
       setGeneralSection(nextSubsection || "general");
       if (nextSubsection === "detection") setGeneralViewNonce((current) => current + 1);
     }
     if (nextWorkspace === "cameras") {
       setCameraSection("settings");
-      setSelectedId(cameras[0]?.id || "");
+      setSelectedId(targetCamera);
     }
     if (nextWorkspace === "telemetry") {
       const telemetryDestination = normalizeTelemetrySection(nextSubsection || "health");
       setTelemetrySection(telemetryDestination);
       if (telemetryDestination === "health") setTelemetryCamera("");
       if (telemetryDestination === "diagnostics") {
-        setDiagnosticScope("system");
+        setDiagnosticScope(camera ? "camera" : "system");
+        if (camera) setTelemetryCamera(targetCamera);
         setDiagnosticDuration("3600");
       }
     }
@@ -1052,7 +1054,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
         subsection: nextSubsection === "general" ? "" : nextSubsection,
       }
       : nextWorkspace === "cameras"
-        ? { camera: cameras[0]?.id || "" }
+        ? { camera: targetCamera }
       : nextWorkspace === "telemetry"
         ? nextSubsection === "diagnostics"
           ? { subsection: "diagnostics" }
@@ -1067,6 +1069,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     adminHistoryWriteRef.current = false;
     setSettingsTab(nextWorkspace);
     setAdminNavOpen(false);
+    return true;
   }
 
   function selectAdminSubsection(nextSubsection, setter, section = settingsTab, cameraOverride = "") {
@@ -1083,6 +1086,28 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     acceptedAdminLocationRef.current = location;
     adminHistoryWriteRef.current = false;
     setter(nextSubsection);
+  }
+
+  function adminDestinationById(id) {
+    return ADMIN_NAV_GROUPS.flatMap((group) => group.items).find((item) => item.id === id);
+  }
+
+  // Overview actions resolve to existing Admin destinations.
+  function runOverviewAction(action) {
+    const destinationId = {
+      "open-camera": "cameras",
+      "add-camera": "cameras",
+      diagnostics: "diagnostics",
+      storage: "storage",
+      detection: "detection",
+      review: "tuneup",
+      logs: "logs",
+      health: "health",
+    }[action?.id];
+    const destination = destinationId ? adminDestinationById(destinationId) : null;
+    if (!destination) return;
+    const shown = selectAdminDestination(destination, { camera: action.cameraId || "" });
+    if (shown && action.id === "add-camera") addCamera();
   }
 
   async function load() {
@@ -2047,12 +2072,13 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           <button type="button" className="admin-navigation-close" aria-label="Close Admin menu" onClick={() => setAdminNavOpen(false)}><X size={18} /></button>
         </div>
         <nav>
-          {ADMIN_NAV_GROUPS.map((group) => <section key={group.id} aria-labelledby={`admin-group-${group.id}`}>
-            <h2 id={`admin-group-${group.id}`}>{group.label}</h2>
+          {ADMIN_NAV_GROUPS.map((group) => <section key={group.id} aria-labelledby={group.label ? `admin-group-${group.id}` : undefined}>
+            {group.label ? <h2 id={`admin-group-${group.id}`}>{group.label}</h2> : null}
             {group.items.map((destination) => {
               const Icon = ADMIN_DESTINATION_ICONS[destination.id] || Cog;
               const active = activeAdminDestination.id === destination.id;
-              return <button id={`admin-destination-${destination.id}`} type="button" className={`${active ? "active" : ""}${destination.secondary ? " secondary" : ""}`} aria-current={active ? "page" : undefined} onClick={() => selectAdminDestination(destination)} key={destination.id} title={destination.description}><Icon size={16} /><span>{destination.label}</span></button>;
+              const count = destination.id === "cameras" && cameras.length ? cameras.length : null;
+              return <button id={`admin-destination-${destination.id}`} type="button" className={`${active ? "active" : ""}${destination.secondary ? " secondary" : ""}`} aria-current={active ? "page" : undefined} onClick={() => selectAdminDestination(destination)} key={destination.id} title={destination.description}><Icon size={16} aria-hidden="true" /><span>{destination.label}</span>{count ? <><em className="admin-nav-count" aria-hidden="true">{count}</em><span className="sr-only">, {count} cameras</span></> : null}</button>;
             })}
           </section>)}
         </nav>
@@ -2067,25 +2093,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       <div className={`admin-workspace-surface admin-workspace-${settingsTab}`}>
 
         {settingsTab === "home" ? (
-          <section id="admin-panel-home" className="bento-card config-editor settings-panel admin-config-home" aria-labelledby="admin-home-title">
-            <div className="admin-home-inner">
-              <header className="admin-home-hero">
-                <div><span className="admin-eyebrow">Configure</span><h1 id="admin-home-title">Make SurvNG work for your scenes</h1><p>Start with a camera, then tune intelligence, storage, and connections as your system grows.</p></div>
-                <ShieldCheck size={34} aria-hidden="true" />
-              </header>
-              <div className="admin-home-summary" aria-label="System setup summary">
-                <article><span className="admin-home-summary-icon"><Camera size={18} /></span><div><strong>{cameras.length}</strong><small>{cameras.length === 1 ? "Camera configured" : "Cameras configured"}</small></div><em className={cameras.length ? "good" : "attention"}>{cameras.length ? "Ready" : "Start here"}</em></article>
-                <article><span className="admin-home-summary-icon"><ShieldCheck size={18} /></span><div><strong>{runtimeStatus.filter((item) => item.running !== false).length}/{cameras.length}</strong><small>Camera workers running</small></div><em className={cameras.length && runtimeStatus.filter((item) => item.running !== false).length === cameras.length ? "good" : "attention"}>{cameras.length && runtimeStatus.filter((item) => item.running !== false).length === cameras.length ? "Healthy" : "Review"}</em></article>
-                <article><span className="admin-home-summary-icon"><Cpu size={18} /></span><div><strong>{detectorStatus?.running === false ? "Offline" : config.detector ? "Enabled" : "Not set"}</strong><small>Detection engine</small></div><em className={detectorStatus?.running === false ? "attention" : "good"}>{detectorStatus?.running === false ? "Check" : "Ready"}</em></article>
-                <article><span className="admin-home-summary-icon"><HardDrive size={18} /></span><div><strong>{retentionStatus?.state ? String(retentionStatus.state).replaceAll("_", " ") : "Calculating"}</strong><small>Storage plan</small></div><em className={retentionStatus?.state === "error" ? "attention" : "good"}>{retentionStatus?.state === "error" ? "Review" : "Tracked"}</em></article>
-              </div>
-              <div className="admin-home-section-head"><div><h2>Choose a task</h2><p>Configuration is organized by the outcome you want, with advanced controls inside each area.</p></div></div>
-              <div className="admin-home-actions">
-                {adminHomeDestinations().map((destination) => { const Icon = ADMIN_DESTINATION_ICONS[destination.id] || Cog; return <button type="button" key={destination.id} onClick={() => selectAdminDestination(destination)}><Icon size={20} /><span><strong>{destination.label}</strong><small>{destination.description}</small></span><ChevronRight size={16} /></button>; })}
-              </div>
-              <div className="admin-home-footer"><span><CircleDot size={14} />Changes are scoped to the area you edit.</span><button type="button" onClick={() => selectAdminDestination(ADMIN_NAV_GROUPS.find((group) => group.id === "observe")?.items[0])}>View system health <ArrowRight size={15} /></button></div>
-            </div>
-          </section>
+          <AdminOverview config={config} detectorStatus={detectorStatus} retentionStatus={retentionStatus} onAction={runOverviewAction} />
         ) : settingsTab === "general" ? (
           <>
             <section className="bento-card camera-tree config-tree settings-section-tree">

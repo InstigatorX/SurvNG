@@ -519,6 +519,61 @@ class TelemetryStore:
             rows = conn.execute(sql, parameters).fetchall()
         return [dict(row) for row in rows]
 
+    def camera_availability(
+        self, *, hours: int = 24, now: datetime | None = None
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Hourly availability per camera for the last ``hours`` hours.
+
+        Every camera with samples in the window gets exactly ``hours`` slots,
+        oldest first, ending with the current (partial) hour. A slot without
+        samples, or in which the camera was not expected to run, has
+        ``availability_percent`` None so callers can show "no data" rather
+        than an outage.
+        """
+        current = _utc(now or datetime.now(timezone.utc))
+        span = max(1, min(int(hours), 168))
+        last_hour = current.replace(minute=0, second=0, microsecond=0)
+        first_hour = last_hour - timedelta(hours=span - 1)
+        bucket = (
+            "strftime('%Y-%m-%dT%H:00:00+00:00',(unixepoch(sampled_at)/3600)*3600,'unixepoch')"
+        )
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"select camera_id,{bucket} as hour,"
+                "sum(case when expected>0 then expected else 0 end) as expected,"
+                "sum(case when expected>0 then available else 0 end) as available,"
+                "sum(capture_interruptions) as interruptions "
+                "from camera_metric_buckets where resolution_minutes=1 and sampled_at>=? "
+                "group by camera_id,hour",
+                (first_hour.isoformat(),),
+            ).fetchall()
+        by_camera: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            by_camera.setdefault(str(row["camera_id"]), {})[str(row["hour"])] = row
+        result: dict[str, list[dict[str, Any]]] = {}
+        for camera_id, hours_by_key in sorted(by_camera.items()):
+            slots: list[dict[str, Any]] = []
+            for offset in range(span):
+                started_at = (first_hour + timedelta(hours=offset)).isoformat()
+                row = hours_by_key.get(started_at)
+                expected = float(row["expected"] or 0.0) if row is not None else 0.0
+                available = float(row["available"] or 0.0) if row is not None else 0.0
+                slots.append(
+                    {
+                        "started_at": started_at,
+                        "availability_percent": (
+                            round(min(100.0, (available / expected) * 100.0), 2)
+                            if expected > 0
+                            else None
+                        ),
+                        "capture_interruptions": int(row["interruptions"] or 0)
+                        if row is not None
+                        else 0,
+                    }
+                )
+            result[camera_id] = slots
+        return result
+
     def sample_times(self, *, hours: int, now: datetime | None = None) -> list[str]:
         current = _utc(now or datetime.now(timezone.utc))
         start = current - timedelta(hours=max(1, min(int(hours), 24 * 365)))
