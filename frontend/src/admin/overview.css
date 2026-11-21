@@ -334,3 +334,88 @@
   grid-template-columns: minmax(0, 1fr);
   padding-bottom: 0;
 }
+
+/* Health summary sits inside the Health tab panel, which scrolls. */
+.admin-overview.health-summary {
+  height: auto;
+  overflow: visible;
+  padding: 8px 0 24px;
+}
+
+.health-range {
+  display: flex;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-solid);
+  padding: 3px;
+}
+
+.admin-overview .health-range button {
+  min-height: 30px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 12px;
+}
+
+.admin-overview .health-range button.active {
+  background: var(--active);
+  color: var(--ink);
+}
+
+.health-pipeline-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(110px, auto);
+  gap: 16px;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  padding: 12px 18px;
+}
+
+.health-pipeline-row strong {
+  font-size: 13px;
+}
+
+.health-pipeline-row p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: none;
+}
+
+.health-pipeline-spark {
+  height: 28px;
+}
+
+.health-pipeline-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  text-align: right;
+}
+
+.health-details {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.health-details > summary {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+@media (max-width: 760px) {
+  .health-pipeline-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .health-pipeline-spark {
+    display: none;
+  }
+}

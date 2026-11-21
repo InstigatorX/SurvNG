@@ -8,6 +8,7 @@ import {
   overviewCameraRows,
   pendingReviewSuggestions,
 } from "../adminOverview.mjs";
+import { Sparkline, UptimeStrip } from "./healthVisuals.jsx";
 import "./overview.css";
 
 const REFRESH_MS = 60_000;
@@ -20,34 +21,6 @@ async function optionalJson(path) {
   } catch {
     return null;
   }
-}
-
-/** Sparkline of hourly counts: area plus line, emphasized last point. */
-function Sparkline({ values = [], label }) {
-  if (values.length < 2) return <span className="admin-overview-spark-empty">No activity yet</span>;
-  const width = 120;
-  const height = 24;
-  const max = Math.max(1, ...values);
-  const step = width / (values.length - 1);
-  const points = values.map((value, index) => [index * step, height - 2 - (value / max) * (height - 6)]);
-  const line = points.map(([x, y], index) => `${index ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`).join(" ");
-  const [lastX, lastY] = points.at(-1);
-  return (
-    <svg className="admin-overview-spark" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={label}>
-      <path d={`${line} L${width} ${height} L0 ${height} Z`} className="area" />
-      <path d={line} className="line" />
-      <circle cx={lastX} cy={lastY} r="2.5" className="point" />
-    </svg>
-  );
-}
-
-function UptimeStrip({ slots, name }) {
-  if (!slots.length) return <span className="admin-overview-muted">No history yet</span>;
-  return (
-    <div className="admin-overview-uptime" role="img" aria-label={`${name} availability by hour, last 24 hours`}>
-      {slots.map((slot, index) => <span key={slot.startedAt || index} className={slot.tone} title={slot.label} />)}
-    </div>
-  );
 }
 
 export function AdminOverview({ config, detectorStatus = null, retentionStatus = null, onAction }) {

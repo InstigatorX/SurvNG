@@ -86,18 +86,50 @@ function availability() {
     started_at,
     availability_percent: scenario === "recording-failure" && index === 2 && hour === 23 ? 20
       : index === 1 && hour === 12 ? 82 : 100,
-    capture_interruptions: 0,
+    capture_interruptions: index === 1 && hour % 6 === 0 ? 1 : scenario === "recording-failure" && index === 2 && hour === 23 ? 6 : 0,
   }))]));
+}
+
+function history(points, minutes) {
+  const now = Date.now();
+  return Array.from({ length: points }, (_, index) => {
+    const wave = Math.sin(index / 5);
+    return {
+      sampled_at: new Date(now - (points - 1 - index) * minutes * 60_000).toISOString(),
+      cpu_load_percent: 30 + wave * 6 + (index === Math.floor(points / 2) ? 18 : 0),
+      memory_used_percent: 48 + wave,
+      inference_ms: 17 + wave * 2 + (index === Math.floor(points / 2) ? 40 : 0),
+      analysis_coverage_percent: 92 + wave * 4,
+      camera_availability_percent: 100,
+      attempts: Math.max(0, Math.round(3 + wave * 3)),
+      waited: 0,
+      skipped: 0,
+      rss_bytes: (2000 + index * (minutes / 60) * 4) * 1024 ** 2,
+      worker_rss_bytes: 600 * 1024 ** 2,
+    };
+  });
 }
 
 function telemetry() {
   const counts = [3, 2, 1, 1, 0, 0, 1, 4, 9, 8, 6, 7, 9, 6, 5, 8, 10, 12, 9, 7, 6, 5, 4, 6];
   const status = system();
+  const short = history(120, 1);
+  const long = history(7 * 24 * 4, 15);
   return {
-    system: { storage: status.storage },
-    detector: status.detector,
+    generated_at: new Date().toISOString(),
+    system: { storage: status.storage, service_memory: { application_bytes: 2.1 * 1024 ** 3 } },
+    detector: { ...status.detector, runtime: { average_inference_ms: 18.2, failed_inferences: 0 } },
+    cameras: cameras().map((camera, index) => ({
+      id: camera.id, name: camera.name, connected: camera.connected, capture_connectivity: camera.capture_connectivity,
+      capture_reconnects: camera.capture_reconnects || (index === 1 ? 2 : 0),
+      activity: { last_24h: { events: 20 + index * 7 } },
+    })),
+    runtime_history: { short, long },
+    tracking_capacity_history: { short, long },
+    process_memory_history: { short, long },
+    semantic_search: { enabled: true, state: "ready", queue_depth: 0 },
     activity: {
-      last_24h: { object_incidents: counts.reduce((sum, value) => sum + value, 0) },
+      last_24h: { events: counts.reduce((sum, value) => sum + value, 0) * 3, object_incidents: counts.reduce((sum, value) => sum + value, 0) },
       hourly: hourStarts().map((started_at, index) => ({ started_at, events: counts[index] * 3, object_incidents: counts[index] })),
     },
     interruption_summary: { hours: 24, controlled: 0, unexpected: 0, unknown: 0, total: 0 },

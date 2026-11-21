@@ -72,6 +72,7 @@ import { defaultCamera, CameraStreamsEditor, CameraOnvifEditor, LiveViewFramingE
 import { AccessSettings } from "./AccessSettings.jsx";
 import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
 import { AdminOverview } from "./AdminOverview.jsx";
+import { HealthSummary } from "./HealthSummary.jsx";
 import { ChangeReviewPanel } from "./ChangeReview.jsx";
 import { CameraStudioList } from "./CameraStudioList.jsx";
 import { describeConfigChanges, revertConfigChange, scopeConfigReview } from "../configChanges.mjs";
@@ -2257,7 +2258,13 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                     {telemetrySection === "occupancy" ? (
                       <DetectionOccupancyCard telemetry={telemetry} cameraId={telemetryCamera} config={config} onOpenSetting={openOccupancySetting} />
                     ) : (
-                      <TelemetryViewer data={telemetry} cameraId={telemetryCamera} timeZone={timeZone} />
+                      <>
+                        <HealthSummary data={telemetry} cameraId={telemetryCamera} onAction={runOverviewAction} />
+                        {telemetry ? <details className="health-details">
+                          <summary>Detailed telemetry</summary>
+                          <TelemetryViewer data={telemetry} cameraId={telemetryCamera} timeZone={timeZone} />
+                        </details> : <TelemetryViewer data={telemetry} cameraId={telemetryCamera} timeZone={timeZone} />}
+                      </>
                     )}
                   </div>
                 </div>
