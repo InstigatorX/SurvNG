@@ -1,23 +1,34 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { nativePlaylistStart, nativePlaylistStartStep } from "../src/recordingPlayback.mjs";
 
 const source = readFileSync(new URL("../src/shared/RecordingHlsVideo.jsx", import.meta.url), "utf8");
-const helper = source.slice(
-  source.indexOf("function seekableContains("),
-  source.indexOf("// Let Safari own the playlist"),
-);
-const effect = source.slice(source.indexOf("  useEffect(() => {"), source.indexOf("\n\n  return nativeHls"));
+const constants = source.slice(source.indexOf("const NATIVE_START_EVENTS"), source.indexOf("// Let Safari own the playlist"))
+  + source.slice(source.indexOf("const NATIVE_START_WATCHDOG_MS"), source.indexOf("export const RecordingHlsVideo"));
+const effectStart = source.indexOf("  useEffect(() => {\n    if (!nativeHls) return undefined;");
+const effect = source.slice(effectStart, source.indexOf("\n\n  if (!nativeHls) {"));
 const listeners = new Map();
 const loads = [];
 const ready = [];
 const errors = [];
 const requests = [];
+const starting = [];
+const timers = [];
+const corrections = [];
+const needsPlay = [];
 const video = {
-  src: null, readyState: 0, error: null, seeking: false, currentTime: 0,
+  src: null, readyState: 0, error: null, seeking: false, currentTime: 0, paused: true, muted: false,
+  rejectPlay: false,
+  play() {
+    if (this.rejectPlay) return Promise.reject(new Error("NotAllowedError"));
+    this.paused = false;
+    return Promise.resolve();
+  },
   seekable: { length: 0, start() { return 0; }, end() { return 0; } },
   addEventListener(name, handler) { listeners.set(name, handler); },
   removeEventListener(name, handler) { if (listeners.get(name) === handler) listeners.delete(name); },
+  dispatch(name) { listeners.get(name)?.({ type: name }); },
   getAttribute() { return this.src; },
   setAttribute(_name, value) { this.src = value; },
   removeAttribute() { this.src = null; },
@@ -27,16 +38,24 @@ const video = {
 let cleanup;
 const context = vm.createContext({
   nativeHls: true, videoRef: { current: video }, src: "a.m3u8", AbortController,
-  callbacks: { current: {} }, window: { setTimeout, clearTimeout },
+  callbacks: { current: {} }, console,
+  // Controllable timers: the startup watchdog is fired explicitly below.
+  window: { setTimeout: (fn, ms) => { timers.push({ fn, ms, cleared: false }); return timers.length; }, clearTimeout: (id) => { if (timers[id - 1]) timers[id - 1].cleared = true; } },
+  nativePlaylistStart, nativePlaylistStartStep,
+  seekVideoToTime(element, time) { corrections.push(time); element.currentTime = time; },
+  setStartingSrc: (value) => starting.push(value),
   useEffect(run) { cleanup = run(); },
   fetch(url, options) { return new Promise((resolve) => requests.push({ url, options, resolve })); },
 });
-vm.runInContext(helper, context);
-function render(src, startTime = null) {
+vm.runInContext(constants, context);
+function render(src, startTime = null, options = {}) {
   context.src = src;
   context.callbacks.current = {
     src,
     startTime,
+    muted: Boolean(options.muted),
+    autoPlay: options.autoPlay !== false,
+    onStartNeedsPlay: (element) => needsPlay.push(element.src),
     onReady: (_player, element) => ready.push([src, element, element.currentTime]),
     onError: (error) => errors.push(error),
   };
@@ -91,52 +110,133 @@ cleanup();
 assert.equal(listeners.size, 0);
 assert.equal(video.src, null);
 
-// Native Safari must wait for a seekable range before applying startTime, then
-// report ready at the requested media offset instead of t=0.
+// Native startup at an offset follows the playlist's EXT-X-START. It never
+// writes currentTime while Safari loads, stays muted until the position
+// settles, and reports ready only for the settled element.
 ready.length = 0;
-loads.length = 0;
 render("window.m3u8", 42.5);
 mount();
-video.seekable = { length: 0, start() { return 0; }, end() { return 0; } };
+assert.equal(video.muted, true, "the lead-in plays muted");
 metadata();
-assert.equal(ready.length, 0, "do not finish ready before the target is seekable");
-assert.equal(video.currentTime, 0);
-assert.equal(listeners.has("progress"), true);
-video.seekable = {
-  length: 1,
-  start() { return 0; },
-  end() { return 90; },
-};
-video.readyState = 2;
-listeners.get("progress")();
-assert.equal(video.currentTime, 42.5);
-assert.deepEqual(ready.at(-1), ["window.m3u8", video, 42.5]);
-assert.equal(listeners.has("progress"), false, "start watchers release after ready");
+assert.equal(ready.length, 0, "metadata alone cannot confirm the start");
+assert.equal(video.currentTime, 0, "startup does not write currentTime");
+assert.equal(video.paused, false, "autoplay starts so the native player presents frames");
+video.readyState = 4;
+video.currentTime = 42.5;
+video.dispatch("canplay");
+assert.deepEqual(ready.at(-1), ["window.m3u8", video, 42.5], "ready reports the settled position");
+assert.deepEqual(corrections, []);
+assert.equal(video.muted, false, "the caller's mute setting returns once settled");
+assert.deepEqual(starting.slice(-2), ["window.m3u8", null], "the video is hidden only while this load's start settles");
+assert.equal(listeners.has("timeupdate"), false, "start watchers release after ready");
 cleanup();
 
-// iPhone sets seeking synchronously when currentTime is assigned. Ready must
-// wait for seeked so Timeline does not issue a second currentTime write.
+// A start that plays from the wrong place is corrected exactly once.
 ready.length = 0;
-let assignedTime = 0;
-Object.defineProperty(video, "currentTime", {
-  configurable: true,
-  get() { return assignedTime; },
-  set(value) { assignedTime = value; if (value > 0) video.seeking = true; },
-});
-video.seeking = false;
 video.readyState = 0;
-render("inflight.m3u8", 12);
+video.paused = true;
+render("wrong.m3u8", 12, { muted: true });
 mount();
-video.seekable = { length: 1, start() { return 0; }, end() { return 30; } };
 metadata();
-assert.equal(ready.length, 0, "do not report ready while the start seek is still in flight");
-assert.equal(assignedTime, 12);
-assert.equal(video.seeking, true);
-assert.equal(listeners.has("seeked"), true);
+video.readyState = 4;
+video.currentTime = 0.2;
+video.dispatch("seeked");
+video.dispatch("timeupdate");
+video.currentTime = 0.4;
+video.dispatch("timeupdate");
+assert.deepEqual(corrections, [12], "one correction after playback advanced from the wrong position");
+assert.equal(ready.length, 0, "the correction settles before ready");
+video.dispatch("seeked");
+assert.deepEqual(ready.at(-1), ["wrong.m3u8", video, 12]);
+assert.equal(video.muted, true, "a muted caller stays muted");
+cleanup();
+
+// After a correction, a start Safari paused resumes (Timeline's rule).
+ready.length = 0;
+video.readyState = 0;
+video.paused = true;
+video.currentTime = 0;
+render("resume.m3u8", 8);
+mount();
+metadata();
+video.readyState = 4;
+video.currentTime = 0.2;
+video.dispatch("timeupdate");
+video.currentTime = 0.4;
+video.dispatch("timeupdate");
+assert.deepEqual(corrections.at(-1), 8);
+video.paused = true;
+video.dispatch("seeked");
+assert.deepEqual(ready.at(-1), ["resume.m3u8", video, 8]);
+assert.equal(video.paused, false, "a corrected, on-target start that Safari paused resumes");
+cleanup();
+
+// A start that never settles is not left hidden forever.
+const watchdog = () => timers.filter((timer) => timer.ms === 4000 && !timer.cleared).at(-1);
+ready.length = 0;
+video.readyState = 0;
+video.paused = true;
+video.currentTime = 0;
+render("stuck-playing.m3u8", 20);
+mount();
+metadata();
+video.readyState = 4;
+video.seeking = true;
+watchdog().fn();
+assert.deepEqual(ready.at(-1), ["stuck-playing.m3u8", video, 0], "a playing start stuck seeking is revealed where it is");
+assert.equal(starting.at(-1), null);
+cleanup();
 video.seeking = false;
-listeners.get("seeked")();
-assert.equal(ready.length, 1, "seeked at the start offset finishes ready");
-assert.equal(ready.at(-1)[2], 12);
+
+ready.length = 0;
+needsPlay.length = 0;
+video.readyState = 0;
+video.paused = true;
+render("stuck-paused.m3u8", 20, { autoPlay: false });
+mount();
+metadata();
+watchdog().fn();
+assert.deepEqual(needsPlay, ["stuck-paused.m3u8"], "a paused start that never settles asks for play");
+assert.equal(ready.length, 0);
+cleanup();
+
+// Autoplay refused (for example Low Power Mode): the caller is asked to play.
+needsPlay.length = 0;
+video.readyState = 0;
+video.paused = true;
+video.rejectPlay = true;
+render("refused.m3u8", 20);
+mount();
+metadata();
+await Promise.resolve();
+await Promise.resolve();
+assert.deepEqual(needsPlay, ["refused.m3u8"], "a rejected play() is reported, not swallowed");
+video.rejectPlay = false;
+cleanup();
+
+// A paused wrong position cannot be judged; the caller is asked to play.
+needsPlay.length = 0;
+ready.length = 0;
+video.readyState = 0;
+video.paused = true;
+video.currentTime = 0;
+render("paused.m3u8", 30, { autoPlay: false });
+mount();
+metadata();
+assert.equal(video.paused, true, "no autoplay was requested");
+video.readyState = 3;
+video.dispatch("canplay");
+assert.deepEqual(needsPlay, ["paused.m3u8"]);
+assert.equal(ready.length, 0);
+cleanup();
+
+// Without an offset, ready still follows metadata (Timeline owns its start).
+ready.length = 0;
+video.readyState = 0;
+render("plain.m3u8");
+mount();
+metadata();
+assert.deepEqual(ready.at(-1), ["plain.m3u8", video, 0]);
 cleanup();
 
 console.log("native HLS source lifecycle and stale callback tests passed");

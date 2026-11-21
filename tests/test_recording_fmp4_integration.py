@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from survng.app.recording_media import hls_map_transition, mp4_stream_fingerprint
+from survng.app.recording_media import hls_map_transition, mp4_playback_metadata, mp4_stream_fingerprint
 from survng.app import recording_media_runtime
 from survng.app.recording_media_runtime import RecordingMediaRuntime
 from survng.app.recording_mp4 import iter_mp4_boxes, mp4_track_timescales, offset_fmp4_timestamps
@@ -215,6 +215,11 @@ def test_fmp4_preserves_source_av_timestamps_and_compressed_packets(recording_fr
     remuxed = fragment_packets(root, ffprobe, init, media, f"av-{codec}-b{b_frames}-result.mp4")
     assert [stream["codec_name"] for stream in remuxed["streams"]] == [codec, "aac"]
     assert len(original["packets"]) == len(remuxed["packets"])
+    video_positions = [int(packet["pos"]) for packet in remuxed["packets"] if packet["stream_index"] == 0]
+    audio_positions = [int(packet["pos"]) for packet in remuxed["packets"] if packet["stream_index"] == 1]
+    # Check physical layout, independent of the order in which ffprobe emits packets.
+    assert min(audio_positions) < max(video_positions), "audio must arrive before the end of the video run"
+    assert min(video_positions) < max(audio_positions), "video must arrive before the end of the audio run"
     for stream_index in (0, 1):
         before = [packet for packet in original["packets"] if packet["stream_index"] == stream_index]
         after = [packet for packet in remuxed["packets"] if packet["stream_index"] == stream_index]
@@ -348,3 +353,51 @@ def test_shared_init_preserves_each_recordings_audio_start_delay(recording_fragm
                 for field in ("pts_time", "dts_time"):
                     assert float(shared_packet[field]) == pytest.approx(float(own_packet[field]), abs=.000002)
                     assert float(own_packet[field]) - float(source_packet[field]) == pytest.approx(index * 2, abs=.000002)
+
+
+def test_recorder_segments_tile_audio_and_video_across_shared_init(recording_fragments, tmp_path):
+    # The recorder splits one continuous camera stream with the segment muxer,
+    # so consecutive files carry consecutive audio. After the per-file remux and
+    # tfdt shift, each track must continue where the previous file ended:
+    # native HLS treats one init/no-discontinuity run as one timeline.
+    # Without B-frames (most IP cameras) this holds within one audio sample.
+    # With B-frames, audio before a keyframe's presentation time lands in the
+    # next file with a negative start kept only in that file's own init edit
+    # list, which a shared init does not carry; that case is not covered here.
+    # The first file after a recorder start can also carry a small positive
+    # track delay (here the AAC priming makes video start 21 ms after audio),
+    # so only boundaries between later files are checked.
+    _root, ffmpeg, ffprobe, runtime = recording_fragments
+    live = tmp_path / "live.ts"
+    subprocess.run([
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+        "testsrc2=size=160x90:rate=25:duration=8", "-f", "lavfi", "-i",
+        "sine=frequency=440:sample_rate=48000:duration=8", "-c:v", "libx264",
+        "-preset", "ultrafast", "-g", "50", "-bf", "0", "-c:a", "aac", "-f", "mpegts", str(live),
+    ], check=True, capture_output=True, timeout=30)
+    # Same segment muxer flags as recording_process/recorder.py.
+    subprocess.run([
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(live), "-map", "0:v:0", "-map", "0:a:0?",
+        "-c:v", "copy", "-c:a", "copy", "-f", "segment", "-segment_time", "2", "-reset_timestamps", "1",
+        "-segment_format", "mp4", str(tmp_path / "recorded-%02d.mp4"),
+    ], check=True, capture_output=True, timeout=30)
+    sources = sorted(tmp_path.glob("recorded-*.mp4"))
+    assert len(sources) == 4
+    durations = [mp4_playback_metadata(source)[1] for source in sources]
+    assert all(duration and duration > 0 for duration in durations)
+    offsets = [sum(durations[:index]) for index in range(len(sources))]
+    outputs = [runtime._recording_fmp4_files(source, duration, offset) for source, duration, offset in zip(sources, durations, offsets)]
+    first_init = outputs[0][0]
+    spans = {0: [], 1: []}
+    for index, (_init, media) in enumerate(outputs):
+        data = fragment_packets(tmp_path, ffprobe, first_init, media, f"tiling-{index}.mp4")
+        for stream in spans:
+            stream_packets = [packet for packet in data["packets"] if packet["stream_index"] == stream]
+            spans[stream].append((
+                min(float(packet["pts_time"]) for packet in stream_packets),
+                max(float(packet["pts_time"]) + float(packet.get("duration_time", 0)) for packet in stream_packets),
+            ))
+    for stream, stream_spans in spans.items():
+        steady = stream_spans[1:]
+        for (_start, end), (next_start, _next_end) in zip(steady, steady[1:]):
+            assert next_start == pytest.approx(end, abs=0.001), (stream, stream_spans)

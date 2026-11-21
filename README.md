@@ -446,7 +446,9 @@ CHECK_GROWTH=1 CAMERA=front-door SOURCE=main SOAK_SECONDS=30 SCRUBS=8 \
   npm --prefix frontend run test:recordings-soak
 ```
 
-Timeline uses HLS by default on desktop and mobile: browsers with native HLS support play the playlist directly, and other browsers use Shaka. Recording video and audio are remuxed without re-encoding. At 4×, native-HLS browsers use buffered original MP4 clips to avoid Safari’s I-frame-only HLS fast-forward mode; returning to 2× or below restores HLS. An HLS format or decode failure switches that camera/source/day to buffered original MP4 playback. Transcoding is used only if the original file also fails to decode; network failures retry the current transport.
+Timeline defaults to HLS on desktop, iPhone, and iPad. Safari and other iOS browsers play the playlist natively. Chromium uses Shaka. Use `?transport=hls` or `?transport=original` to remember a transport in that browser, and `?transport=auto` to clear the override. A forced transport or `?playbackdebug=1` shows the on-screen readout of transport, waits, stalls, seek times, and media errors. `?playbackdebug=0` hides it even with a transport override.
+
+Recording video and audio are remuxed without re-encoding. With automatic transport, native HLS browsers use buffered original MP4 clips at 4× to avoid Safari’s I-frame-only HLS fast-forward mode and prefer HLS at 2× or below. An HLS format or decode failure switches that camera/source/day to buffered original MP4 playback. Transcoding is used only if the original file also fails to decode. Network failures retry the current transport.
 
 Real Safari validation must run on a Mac because Linux Chromium does not provide Safari's HEVC pipeline. Open the same camera/day in Safari, play through several segment boundaries, scrub to widely separated times, and confirm playback resumes without a black frame. Use an H.265 camera such as Upper Garage to exercise `hvc1` playback.
 

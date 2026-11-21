@@ -10,7 +10,7 @@ from typing import Any
 from .recording_mp4 import iter_mp4_boxes
 
 # Bump when fragment bytes change so disk and browser caches expire together.
-RECORDING_FMP4_VERSION = 7
+RECORDING_FMP4_VERSION = 8
 
 
 def event_clip_window(

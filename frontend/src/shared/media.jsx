@@ -4,6 +4,9 @@ import { appUrl, fetch } from "./api.js";
 import { DEFAULT_TIME_ZONE, PREFER_NATIVE_HLS } from "./constants.js";
 import { dateKeyForTimeZone, addDaysToDateKey, zonedDateSecondToEpoch } from "./datetime.js";
 import { recordingDayUrl, recordingDayHlsUrl } from "./mediaUrls.js";
+// RecordingHlsVideo imports ShakaVideo from this module; each only uses the
+// other at render time, so the import cycle is safe.
+import { RecordingHlsVideo } from "./RecordingHlsVideo.jsx";
 
 export let shakaImport;
 export function loadShaka() {
@@ -11,8 +14,7 @@ export function loadShaka() {
   return shakaImport;
 }
 
-// Incident playback retains its mobile MP4 compatibility policy. Timeline
-// defaults to HLS, with buffered MP4 for fast play or codec compatibility.
+// Touch devices show native video controls as soon as a player appears.
 export function prefersNativeMobilePlayback() {
   return PREFER_NATIVE_HLS
     || (typeof window !== "undefined" && Boolean(window.matchMedia?.("(pointer: coarse)").matches));
@@ -149,10 +151,8 @@ export function RecordingFallback({ cameraId, source, timeZone, muted, controls,
         if (!Array.isArray(rows) || !rows.length) continue;
         const duration = rows.reduce((total, row) => total + Math.max(0, Number(row.duration_seconds) || 0), 0);
         if (!cancelled) {
-          setPlayback({
-            src: recordingDayHlsUrl(cameraId, start, end, candidate),
-            startTime: Math.max(0, duration - 3),
-          });
+          const startTime = Math.max(0, duration - 3);
+          setPlayback({ src: recordingDayHlsUrl(cameraId, start, end, candidate, startTime), startTime });
         }
         return;
       }
@@ -164,10 +164,11 @@ export function RecordingFallback({ cameraId, source, timeZone, muted, controls,
   }, [cameraId, source, timeZone, onError]);
 
   if (!playback) return null;
+  // Same recorded-playback path as Timeline and incidents (native HLS starts
+  // at EXT-X-START on Safari/iOS, Shaka elsewhere).
   return (
-    <ShakaVideo
+    <RecordingHlsVideo
       src={playback.src}
-      mimeType="application/vnd.apple.mpegurl"
       startTime={playback.startTime}
       bufferingGoal={6}
       autoPlay

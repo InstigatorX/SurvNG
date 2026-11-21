@@ -5,6 +5,7 @@ import {
   playbackMediaTimeForEpoch,
   recordingPlaybackTransport,
   recordingPlayableEpoch,
+  recordingTransportOverride,
   recordingSegmentAt,
   recordingSegmentLocalTime,
   recordingEpochAfterSegment,
@@ -116,7 +117,14 @@ export function IncidentRecordingPlayer({
   const readySourceRef = useRef("");
   const ignorePauseRef = useRef(0);
   const [nativeHls] = useState(supportsNativeRecordingHls);
-  const [transport, setTransport] = useState(() => recordingPlaybackTransport({ nativeHls: supportsNativeRecordingHls(), rate: 1 }));
+  const [transportOverride] = useState(recordingTransportOverride);
+  // Same transport rules as Timeline: HLS on every platform (native on Safari
+  // and iOS, Shaka elsewhere), ?transport= override, original files on failure.
+  const initialTransport = () => recordingPlaybackTransport({
+    nativeHls, rate: 1, override: transportOverride,
+  });
+  const [transport, setTransport] = useState(initialTransport);
+  const [startNeedsPlay, setStartNeedsPlay] = useState(false);
   const [loaded, setLoaded] = useState(null);
   const [targetEpoch, setTargetEpoch] = useState(startEpoch);
   const [playhead, setPlayhead] = useState(startEpoch);
@@ -140,7 +148,8 @@ export function IncidentRecordingPlayer({
     setPlayhead(startEpoch);
     setPlaying(autoPlay);
     setError("");
-    setTransport(recordingPlaybackTransport({ nativeHls, rate: 1 }));
+    setStartNeedsPlay(false);
+    setTransport(initialTransport());
   }, [autoPlay, cameraId, endEpoch, nativeHls, source, startEpoch]);
 
   useEffect(() => {
@@ -219,6 +228,9 @@ export function IncidentRecordingPlayer({
 
   function seekVideo(video, epoch) {
     if (!video || !rows.length || !Number.isFinite(epoch)) return;
+    // A native playlist start is positioned by EXT-X-START; a currentTime write
+    // before it settles can interrupt it. onReady applies any later target.
+    if (transport === "hls" && nativeHls && readySourceRef.current !== playbackUrl) return;
     const next = recordingPlayableEpoch(rows, epoch);
     if (!Number.isFinite(next)) return;
     // A cross-segment seek is applied when the new source delivers metadata,
@@ -293,7 +305,8 @@ export function IncidentRecordingPlayer({
     setTargetEpoch(playhead);
     setLoaded(null);
     setError("");
-    setTransport(recordingPlaybackTransport({ nativeHls, rate: 1 }));
+    setStartNeedsPlay(false);
+    setTransport(initialTransport());
     setSelectedSource(nextSource);
     setSourceRevision(value => value + 1);
   }
@@ -302,6 +315,14 @@ export function IncidentRecordingPlayer({
     if (loaded?.source === "live" && isRecordingCompatibilityError(mediaError)) {
       failedSourcesRef.current.add("live");
       selectSource("main", true);
+      return;
+    }
+    // Like Timeline: an HLS format failure retries the original files, and
+    // only a failing original file is transcoded.
+    if (transport === "hls" && isRecordingCompatibilityError(mediaError)) {
+      readySourceRef.current = "";
+      setTargetEpoch(playhead);
+      setTransport("original");
       return;
     }
     if (transport !== "transcode" && isRecordingCompatibilityError(mediaError)) {
@@ -355,7 +376,22 @@ export function IncidentRecordingPlayer({
           muted={muted}
           playsInline
           preload="auto"
-          onReady={(_player, video) => { readySourceRef.current = playbackUrl; ignorePauseRef.current = performance.now() + 1500; seekVideo(video, targetEpoch); }}
+          onReady={(_player, video) => {
+            readySourceRef.current = playbackUrl;
+            ignorePauseRef.current = performance.now() + 1500;
+            setStartNeedsPlay(false);
+            const startedAt = loaded?.seekEpoch;
+            // The shared player settled the playlist start (corrected at most
+            // once). Seek again only for a target chosen during startup.
+            if (!nativeHls || !Number.isFinite(startedAt) || Math.abs(targetEpoch - startedAt) > 0.35) seekVideo(video, targetEpoch);
+            appliedSeekRef.current = targetEpoch;
+          }}
+          onStartNeedsPlay={() => {
+            // Autoplay was refused or the paused start cannot be positioned:
+            // show the play control as paused and say what to do.
+            setStartNeedsPlay(true);
+            setPlaying(false);
+          }}
           onTimeUpdate={handleTimeUpdate}
           onEnded={handleEnded}
           onError={handleError}
@@ -403,6 +439,7 @@ export function IncidentRecordingPlayer({
       />
       {loading ? <div className="incident-video-status preparing">Loading recording…</div> : null}
       {error ? <div className="incident-video-status">{error}</div> : null}
+      {startNeedsPlay && !playing && !error ? <div className="incident-video-status needs-play">Press play to start</div> : null}
       <div className="incident-recording-controls">
         <button type="button" onClick={() => scrubTo(playhead - 10)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
         <button type="button" className="primary" onClick={togglePlayback} aria-label={playing ? "Pause recording" : "Play recording"}>
