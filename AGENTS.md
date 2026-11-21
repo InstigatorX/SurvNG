@@ -9,15 +9,50 @@ proportionate investigation, focused changes, and meaningful validation.
 ## Execution and model policy
 
 The primary agent owns the outcome, chooses the workflow, verifies delegated
-evidence, and integrates the result. Handle small, tightly coupled tasks directly.
-For substantial work, delegate bounded research, implementation, testing, and
-independent review where supported and useful. Use the smallest useful team.
-If delegation is unavailable or restricted, run the same stages locally and
-report the limits of review independence.
+evidence, and integrates the result.
 
-- Honor the user's model and reasoning choices. Inherit settings where possible
-  and report actual settings only when verifiable. Surface unavailable
-  settings before using a fallback. Avoid silent model or effort changes.
+### Adaptive Model Routing and Reasoning Effort
+
+Before execution, classify each task by complexity, risk, and the evidence
+needed to verify it. Apply the same judgment to bounded subtasks.
+
+| Tier | Typical work | Preferred model and reasoning effort | Delegation and review |
+| --- | --- | --- | --- |
+| 1 · Lightweight | File discovery, code searches, documentation, simple refactoring | Fast, economical model · `low` | Work directly unless independent parallel work provides clear value. |
+| 2 · Standard Engineering | Routine implementation, unit tests, dependency tracing, ordinary bug fixes | Capable coding model · `medium` | Delegate independent tasks when beneficial. |
+| 3 · Complex Engineering | Intermittent failures, concurrency, streaming, networking, state management, architectural changes | Strongest available reasoning model · `high` | Use independent investigation and verification agents when supported. |
+| 4 · Critical Architecture and Validation | Cross-subsystem regressions, major architectural decisions, security-sensitive changes, difficult unresolved failures | Strongest available reasoning model · `high` or Extra High (`xhigh`) where supported | Require independent review and objective verification. |
+
+Use the least expensive model and effort that meet the task's demands. Keep
+effort low for mechanical work and preserve verification rigor at every tier.
+Reassess the tier after two reasonable attempts fail, when root-cause hypotheses
+remain contradictory, when the issue spans architectural boundaries or affects
+concurrency, resource lifecycle, network protocols, or data integrity, or when
+tests pass but observed runtime behavior remains incorrect. Revisit assumptions
+and broaden the investigation where the evidence points before retrying.
+Escalate to a stronger model or higher effort when the evidence shows the current
+choice is insufficient.
+
+Honor the user's model and reasoning choices. Use the client's native model and
+effort selector where available, or session settings such as `model` and
+`model_reasoning_effort` in Codex configuration. For delegates, use supported
+spawn options or existing native custom agents, such as those configured in
+`.codex/agents/`. Prefer inheritance when it meets the assigned task and the
+user's choices. `AGENTS.md` guides routing decisions. Changing the active model
+or effort requires a supported runtime control. If a requested setting is
+unavailable or the current interface cannot change it, disclose the limitation
+before continuing with the available configuration. Claim a setting changed
+only when the runtime confirms it.
+
+### Delegation and integration
+
+Use the smallest useful team. Run tightly coupled work directly or sequentially
+when that is simpler. Delegate bounded research, implementation, testing, and
+review according to the tier and the session's permissions. If delegation is
+unavailable or restricted, run the same stages locally and report the limits
+of review independence. If Tier 4 independent review remains unavailable,
+report it as an outstanding requirement.
+
 - Give each delegate a question or deliverable, an exact baseline, scope and
   permissions, owned paths, expected checks, and a reporting format.
 - Keep research and review read-only. Run independent work concurrently only
@@ -202,9 +237,10 @@ For difficult debugging:
 4. Implement the narrowest durable fix and add regression protection.
 5. Remove temporary debug code and report remaining uncertainty.
 
-If fixes repeatedly fail, revisit assumptions and broaden the investigation
-where evidence points. Do not automatically create more agents or pass the
-problem through model tiers.
+For substantive engineering tasks, report the root cause or implementation
+rationale, changes made, tests run and their results, and remaining
+uncertainties. Include the routing and delegation approach when observable.
+Report the actual model and reasoning effort only when verifiable.
 
 Do not turn a small request into an architecture review.
 Do not turn an architecture problem into a sequence of speculative one-line fixes.
