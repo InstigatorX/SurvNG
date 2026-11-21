@@ -111,7 +111,8 @@ async function main(): Promise<void> {
       .setCharacteristic(Characteristic.FirmwareRevision, '0.1.0');
     const cameraAllowed = () => !closing && !!controller?.homeKitCameraActive;
     local = new LocalStreams(media, () => !closing && !!controller?.streamingAllowed(controller.multiTierStreamManagementService), profile.tiers);
-    remote = new RemoteStreams(media, () => !closing && !!controller?.streamingAllowed(controller.webrtcStreamManagementService), address!, profile.tiers);
+    remote = new RemoteStreams(media, () => !closing && !!controller?.streamingAllowed(controller.webrtcStreamManagementService),
+      address!, profile.tiers, id => controller!.endWebRTCSession(id));
     recording = new LabRecording(media, cameraAllowed, profile.tiers);
     controller = new SecureVideoController({
       sensor: { uuid: uuid.generate(`${saved.id}:sensor`), width: profile.width, height: profile.height },
@@ -149,7 +150,9 @@ async function main(): Promise<void> {
     recording!.watch(publishMotion);
     controller.on('operating-mode-changed', () => {
       if (!controller!.streamingAllowed(controller!.multiTierStreamManagementService)) void local!.close();
-      if (!controller!.streamingAllowed(controller!.webrtcStreamManagementService)) void remote!.close();
+      if (!controller!.streamingAllowed(controller!.webrtcStreamManagementService)) {
+        void remote!.close().catch(() => console.error('HomeKit WebRTC session cleanup failed.'));
+      }
       if (!cameraAllowed()) { setMotion(false); void media!.cancelSnapshots(); }
       recording!.setAudio(controller!.recordingAudioActive); recording!.reconcile();
     });
@@ -164,6 +167,8 @@ async function main(): Promise<void> {
         homeKitActive: cameraAllowed(), recording: recording!.status(), media: { ...media!.counters, lastError: media!.lastError },
         encoder: media!.encoderStatus,
         localMedia: { sent: local!.sent, feedback: { video: local!.feedback.video.stats, audio: local!.feedback.audio.stats } },
+        remoteMedia: { ...remote!.counters, videoFeedback: remote!.feedback.video.stats, audioFeedback: remote!.feedback.audio.stats },
+        motion: { permitted: motionPermitted(), detected: motionPermitted() && recording!.reportingMotion() },
         zonesBlockMotion: !!(controller!.motionZones.active && controller!.motionZones.zones),
       };
       if (method === 'pairing') return { setupCode: saved.pincode, setupUri: accessory!.setupURI() };

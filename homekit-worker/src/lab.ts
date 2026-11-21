@@ -65,7 +65,8 @@ async function main(): Promise<void> {
     let controller: SecureVideoController | undefined;
     const cameraAllowed = () => !closing && !!controller?.homeKitCameraActive;
     local = new LocalStreams(media, () => !closing && !!controller?.streamingAllowed(controller.multiTierStreamManagementService));
-    remote = new RemoteStreams(media, () => !closing && !!controller?.streamingAllowed(controller.webrtcStreamManagementService), address!);
+    remote = new RemoteStreams(media, () => !closing && !!controller?.streamingAllowed(controller.webrtcStreamManagementService),
+      address!, tiers, id => controller!.endWebRTCSession(id));
     recording = new LabRecording(media, cameraAllowed);
     const snapshots = { requested: 0, completed: 0, failed: 0 };
     const requests = { accessories: 0, reads: 0, writes: 0, resources: 0 };
@@ -110,7 +111,9 @@ async function main(): Promise<void> {
     recording!.watch(publishMotion);
     controller.on('operating-mode-changed', () => {
       if (!controller!.streamingAllowed(controller!.multiTierStreamManagementService)) void local!.close();
-      if (!controller!.streamingAllowed(controller!.webrtcStreamManagementService)) void remote!.close();
+      if (!controller!.streamingAllowed(controller!.webrtcStreamManagementService)) {
+        void remote!.close().catch(() => console.error('HomeKit WebRTC session cleanup failed.'));
+      }
       if (!cameraAllowed()) setMotion(false);
       recording!.setAudio(controller!.recordingAudioActive); recording!.reconcile();
     });

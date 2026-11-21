@@ -1,16 +1,20 @@
 """Regression coverage for remote encoder ownership and input boundaries."""
 import asyncio
 import socket
-import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from fastapi import HTTPException, Request, Response
+from pydantic import ValidationError
+from starlette.requests import ClientDisconnect
 
+from survng.app import homekit_nodes
 from survng.app.homekit import HomeKitService
-from survng.app.homekit_routes import HomeKitRouteDependencies, create_homekit_router
+from survng.app.homekit_routes import HomeKitRouteDependencies, NodeReport, create_homekit_router
 from survng.app.media_sessions import MediaSessionManager
+from survng.app.security import is_public_api_path, required_api_scope
 from tests.test_homekit import configuration, _profile
 
 
@@ -43,79 +47,291 @@ def request(secret, chunks, before=None, headers=()):
         (b"x-survng-tier", b"1"), *headers]}, receive)
 
 
-def test_paused_feed_reader_survives_a_full_send_buffer(tmp_path):
-    """A full kernel buffer is backpressure. Closing it drops the live view."""
-    from survng.app.homekit_nodes import _TierFeed
+@pytest.fixture
+def encoder_feed(remote):
+    service, node, _, _ = remote
+    directory = service.nodes.prepare_feeds("porch", [1])
+    feed = service.nodes.feeds[("porch", 1)]
+    clients = []
 
-    directory = tmp_path / "feeds"
-    directory.mkdir()
-    feed = _TierFeed(directory / "1.sock", lambda: None)
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    reader = None
-    try:
+    def connect_reader(send_buffer=4096):
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        clients.append(client)
+        with feed.lock:
+            previous = set(feed.clients)
         client.connect(str(directory / "1.sock"))
         deadline = time.monotonic() + 2
-        while not feed.wanted() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        peer = next(iter(feed.clients))
-        payload = b"v" * (1024 * 1024)
-        feed.write(payload)
-        assert peer in feed.clients
-        assert feed._outbound.get(peer), "a full send buffer must queue the tail, not close the viewer"
-        received = bytearray()
-
-        def consume() -> None:
-            client.settimeout(0.2)
-            while len(received) < len(payload):
-                try:
-                    part = client.recv(256 * 1024)
-                except TimeoutError:
-                    continue
-                if not part:
-                    return
-                received.extend(part)
-
-        reader = threading.Thread(target=consume)
-        reader.start()
-        flush_deadline = time.monotonic() + 3
-        while len(received) < len(payload) and time.monotonic() < flush_deadline:
+        while time.monotonic() < deadline:
             with feed.lock:
-                pending = feed._outbound.get(peer)
-                if pending:
-                    feed._flush(peer, pending)
-                    if not pending:
-                        feed._outbound.pop(peer, None)
+                added = feed.clients - previous
+            if added:
+                peer = added.pop()
+                peer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, send_buffer)
+                client.setblocking(False)
+                return client, peer
             time.sleep(0.01)
-        assert bytes(received) == payload
+        pytest.fail("feed did not accept the viewer")
 
-        # Stop reading and exceed the per-viewer bound. Only this viewer goes.
-        reader.join(timeout=1)
-        reader = None
-        dropped = False
-        for _ in range(8):
-            feed.write(b"x" * (512 * 1024))
-            if peer not in feed.clients:
-                dropped = True
-                break
-        assert dropped
-        assert feed._outbound == {}
-        assert not feed.wanted()
+    try:
+        yield service, node, feed, connect_reader
     finally:
+        for client in clients:
+            client.close()
+
+
+def _read_available(client):
+    received = bytearray()
+    while True:
+        try:
+            part = client.recv(256 * 1024)
+        except BlockingIOError:
+            return received
+        assert part, "feed disconnected a draining viewer"
+        received.extend(part)
+
+
+def test_paused_feed_reader_recovers_through_encoder_uploads(encoder_feed):
+    service, node, feed, connect_reader = encoder_feed
+    client, peer = connect_reader()
+    revision = service.node_assignments()[0]["revision"]
+    claim = service.claim_encoder_upload(node, "porch", "1", revision)
+    assert claim is not None
+    expected = bytearray(bytes(range(256)) * 2048)
+    try:
+        assert service.write_encoder_upload(node, "porch", "1", claim, bytes(expected))
+        assert peer in feed.clients
+        assert feed._outbound[peer], "paused viewer must retain its unsent bytes"
+        received = bytearray()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            received.extend(_read_available(client))
+            if len(received) == len(expected):
+                break
+            # Exercise production writes, rather than calling the private flush helper.
+            chunk = bytes([len(expected) % 251]) * 188
+            expected.extend(chunk)
+            assert service.write_encoder_upload(node, "porch", "1", claim, chunk)
+            time.sleep(0.001)
+        assert received == expected
+        assert peer in feed.clients
+        assert not feed._outbound
+    finally:
+        service.release_encoder_upload("porch", "1", claim)
+    assert not service.nodes.uploads
+    feed.close()
+    assert not feed.clients and not feed._outbound
+    assert not feed.thread.is_alive()
+
+
+def test_stalled_feed_viewer_does_not_disconnect_a_draining_viewer(encoder_feed):
+    service, node, feed, connect_reader = encoder_feed
+    _, stalled = connect_reader()
+    client, healthy = connect_reader(send_buffer=1024 * 1024)
+    revision = service.node_assignments()[0]["revision"]
+    claim = service.claim_encoder_upload(node, "porch", "1", revision)
+    assert claim is not None
+    expected, received = bytearray(), bytearray()
+    try:
+        for index in range(80):
+            chunk = bytes([index]) * (32 * 1024)
+            expected.extend(chunk)
+            assert service.write_encoder_upload(node, "porch", "1", claim, chunk)
+            received.extend(_read_available(client))
+            assert healthy in feed.clients
+            if index == 0:
+                assert stalled in feed.clients, "a short pause must not disconnect the viewer"
+            assert len(feed._outbound.get(stalled, b"")) <= homekit_nodes.FEED_CLIENT_BUFFER
+        assert stalled not in feed.clients
+        assert stalled not in feed._outbound
+        assert received == expected
+        assert feed.wanted()
+        # The surviving viewer continues on the same claim after the other is dropped.
+        assert service.write_encoder_upload(node, "porch", "1", claim, b"still-live")
+        assert _read_available(client) == b"still-live"
+    finally:
+        service.release_encoder_upload("porch", "1", claim)
+
+
+def test_disconnected_feed_viewer_releases_pending_bytes_and_upload(encoder_feed):
+    service, node, feed, connect_reader = encoder_feed
+    client, peer = connect_reader()
+    revision = service.node_assignments()[0]["revision"]
+    claim = service.claim_encoder_upload(node, "porch", "1", revision)
+    assert claim is not None
+    try:
+        assert service.write_encoder_upload(node, "porch", "1", claim, b"x" * (512 * 1024))
+        assert peer in feed.clients
+        assert feed._outbound[peer]
         client.close()
-        if reader is not None:
-            reader.join(timeout=1)
-        feed.close()
+        assert not service.write_encoder_upload(node, "porch", "1", claim, b"unused")
+        assert not feed.clients and not feed._outbound
+    finally:
+        service.release_encoder_upload("porch", "1", claim)
+    assert not service.nodes.uploads
 
 
-def test_assigned_encoder_cannot_be_removed(remote):
+@pytest.mark.parametrize("camera_enabled", [True, False])
+def test_assigned_encoder_cannot_be_removed(remote, camera_enabled):
     service, node, _, endpoints = remote
+    service.config.cameras[0].homekit.enabled = camera_enabled
     with pytest.raises(HTTPException) as error:
         endpoints["/api/homekit/nodes/{node_id}"](node["id"], Response())
     assert error.value.status_code == 409
     assert node["id"] in service.nodes.nodes
 
 
-@pytest.mark.parametrize("change", ["reassign", "revoke", "power_off"])
+def test_unassigned_encoder_can_be_removed(remote):
+    service, node, secret, endpoints = remote
+    service.config.cameras[0].homekit.encoder = "local"
+    remove = endpoints["/api/homekit/nodes/{node_id}"]
+    assert remove(node["id"], Response()) == {"removed": True}
+    assert service.nodes.authenticate(secret) is None
+    with pytest.raises(HTTPException) as error:
+        remove(node["id"], Response())
+    assert error.value.status_code == 404
+
+
+def test_encoder_installer_requires_a_published_release(remote, monkeypatch):
+    from survng.app import homekit_routes
+
+    service, _, _, endpoints = remote
+    monkeypatch.setattr(homekit_routes, "available_agent_version", lambda: None)
+    enroll = Mock()
+    monkeypatch.setattr(service.nodes, "begin_enrollment", enroll)
+    with pytest.raises(HTTPException) as error:
+        endpoints["/api/homekit/nodes"](request("admin", []), Response())
+    assert error.value.status_code == 409
+    enroll.assert_not_called()
+
+
+def test_encoder_version_reports_update_status_independently_of_liveness(remote, monkeypatch):
+    service, node, _, _ = remote
+    available = "a" * 64
+    release = Mock(return_value=available)
+    monkeypatch.setattr(homekit_nodes, "available_agent_version", release)
+
+    assert service.status()["nodes"][0] == {
+        "id": node["id"], "name": "review", "online": True, "hardware": "qsv",
+        "lastSeen": int(node["lastSeen"]), "cameras": ["porch"],
+        "runningVersion": None, "availableVersion": available, "updateState": "unknown",
+    }
+    for running, state in (("b" * 64, "outdated"), (available, "current")):
+        service.nodes.update_report(node["id"], {"runningVersion": running})
+        status = service.status()["nodes"][0]
+        assert status["online"]
+        assert status["runningVersion"] == running
+        assert status["updateState"] == state
+    node["lastSeen"] = 0
+    assert service.status()["nodes"][0]["online"] is False
+    assert service.status()["nodes"][0]["updateState"] == "current"
+    release.return_value = None
+    status = service.status()["nodes"][0]
+    assert status["availableVersion"] is None
+    assert status["updateState"] == "unavailable"
+
+
+def test_resync_requests_are_scoped_and_retryable(remote, monkeypatch):
+    service, node, secret, endpoints = remote
+    available = "a" * 64
+    release = Mock(return_value=available)
+    monkeypatch.setattr(homekit_nodes, "available_agent_version", release)
+    clock = Mock(return_value=100.0)
+    monkeypatch.setattr(homekit_nodes.time, "monotonic", clock)
+    real_sync = service.nodes.sync
+    monkeypatch.setattr(service.nodes, "sync", lambda node, report, assign, timeout: real_sync(node, report, assign, 0))
+    resync = endpoints["/api/homekit/nodes/{node_id}/resync"]
+    sync = endpoints["/api/homekit/nodes/sync"]
+    response = Response()
+    node_request = request(secret, [])
+    path = f"/api/homekit/nodes/{node['id']}/resync"
+    assert required_api_scope("POST", path) == "admin"
+    assert not is_public_api_path("POST", path)
+    with pytest.raises(HTTPException) as error:
+        resync("unknown", response)
+    assert error.value.status_code == 404
+
+    generation = service.nodes.generation
+    assert resync(node["id"], response) == {"requested": True}
+    assert response.headers["cache-control"] == "no-store"
+    assert service.nodes.generation > generation
+    first = sync(NodeReport(), node_request)["syncRequest"]
+    assert len(first) == 32
+    assert service.status()["nodes"][0]["updateState"] == "syncing"
+    enrollment = service.nodes.begin_enrollment("http://localhost")
+    token = enrollment["command"].split("/enroll/")[1].split("'")[0]
+    other = service.nodes.complete_enrollment(token, "other")
+    assert "syncRequest" not in sync(NodeReport(), request(other["secret"], []))
+    assert resync(node["id"], response) == {"requested": True}
+    assert sync(NodeReport(failedSyncRequest="0" * 32), node_request)["syncRequest"] == first
+    assert "syncRequest" not in sync(NodeReport(failedSyncRequest=first), node_request)
+    assert service.status()["nodes"][0]["updateState"] == "failed"
+
+    assert resync(node["id"], response) == {"requested": True}
+    second = sync(NodeReport(failedSyncRequest=first), node_request)["syncRequest"]
+    assert second != first
+    clock.return_value += 3600
+    assert "syncRequest" not in sync(NodeReport(), node_request)
+    assert service.status()["nodes"][0]["updateState"] == "failed"
+    assert resync(node["id"], response) == {"requested": True}
+    third = sync(NodeReport(), node_request)["syncRequest"]
+    assert third != second
+
+    available = "b" * 64
+    release.return_value = available
+    assert "syncRequest" not in sync(NodeReport(), node_request)
+    assert resync(node["id"], response) == {"requested": True}
+    assert sync(NodeReport(), node_request)["syncRequest"] != third
+
+    assert "syncRequest" not in sync(NodeReport(runningVersion=available), node_request)
+    assert service.status()["nodes"][0]["updateState"] == "current"
+    with pytest.raises(HTTPException) as error:
+        resync(node["id"], response)
+    assert error.value.status_code == 409
+    node["lastSeen"] = 0
+    with pytest.raises(HTTPException) as error:
+        resync(node["id"], response)
+    assert error.value.status_code == 409
+    service.nodes.update_report(node["id"], {})
+    release.return_value = None
+    with pytest.raises(HTTPException) as error:
+        resync(node["id"], response)
+    assert error.value.status_code == 409
+
+
+def test_agent_archive_request_can_pin_release(remote, monkeypatch):
+    _, _, secret, endpoints = remote
+    available = "a" * 64
+    monkeypatch.setattr(homekit_nodes, "agent_release", lambda: (available, b"archive"))
+    download = endpoints["/api/homekit/nodes/agent"]
+    node_request = request(secret, [])
+    assert download(node_request).body == b"archive"
+    assert download(node_request, release=available).body == b"archive"
+    with pytest.raises(HTTPException) as error:
+        download(node_request, release="b" * 64)
+    assert error.value.status_code == 409
+    with pytest.raises(HTTPException) as error:
+        download(request("invalid", []), release=available)
+    assert error.value.status_code == 401
+
+
+def test_unstamped_legacy_worker_is_not_offered(tmp_path):
+    (tmp_path / "package.json").write_text("{}")
+    (tmp_path / "dist/src").mkdir(parents=True)
+    (tmp_path / "dist/src/agent.js").write_text("export {}")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "dist/src/camera.js").write_text("export {}")
+    assert homekit_nodes.available_agent_version(tmp_path) is None
+    with pytest.raises(RuntimeError):
+        homekit_nodes.agent_release(tmp_path)
+
+
+@pytest.mark.parametrize("invalid", [{"runningVersion": "A" * 64}, {"failedSyncRequest": "g" * 32}, {"runningVersion": "1" * 65}])
+def test_encoder_report_rejects_invalid_version_metadata(invalid):
+    with pytest.raises(ValidationError):
+        NodeReport(**invalid)
+
+
+@pytest.mark.parametrize("change", ["reassign", "revoke", "power_off", "same_node_source"])
 def test_media_upload_revalidates_authority_between_chunks(remote, change):
     service, node, secret, endpoints = remote
     feed = SimpleNamespace(wanted=lambda: True, write=lambda data: written.append(data), close=lambda: None)
@@ -128,11 +344,80 @@ def test_media_upload_revalidates_authority_between_chunks(remote, change):
             service.config.cameras[0].homekit.encoder = "local"
         elif change == "revoke":
             service.nodes.remove(node["id"], [])
-        else:
+        elif change == "power_off":
             service.camera_active = lambda _: False
-    with pytest.raises(HTTPException):
-        asyncio.run(endpoints["/api/homekit/nodes/media"](request(secret, [b"first", b"stale"], before)))
+        else:
+            service.config.cameras[0].stream_url = "rtsp://replacement/main"
+
+    revision = service.node_assignments()[0]["revision"]
+    headers = [(b"x-survng-revision", revision.encode())]
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(endpoints["/api/homekit/nodes/media"](request(secret, [b"first", b"stale"], before, headers)))
+    assert error.value.status_code == 404
     assert written == [b"first"]
+
+
+def test_media_upload_requires_current_revision_at_reconnect(remote):
+    service, _, secret, endpoints = remote
+    written = []
+    service.nodes.feeds[("porch", 1)] = SimpleNamespace(wanted=lambda: True, write=written.append, close=lambda: None)
+    previous = service.node_assignments()[0]["revision"]
+    service.config.cameras[0].stream_url = "rtsp://replacement/main"
+    current = service.node_assignments()[0]["revision"]
+    assert current != previous
+
+    upload = endpoints["/api/homekit/nodes/media"]
+    for headers in ([], [(b"x-survng-revision", previous.encode())]):
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(upload(request(secret, [b"unread"], lambda _: pytest.fail("stale body read"), headers)))
+        assert error.value.status_code == 404
+    fresh = request(secret, [b"fresh"], headers=[(b"x-survng-revision", current.encode())])
+    assert asyncio.run(upload(fresh)).status_code == 204
+    assert written == [b"fresh"]
+
+
+def test_media_upload_allows_config_changes_while_waiting_for_body(remote):
+    service, _, secret, endpoints = remote
+    written = []
+    service.nodes.feeds[("porch", 1)] = SimpleNamespace(wanted=lambda: True, write=written.append, close=lambda: None)
+    revision = service.node_assignments()[0]["revision"]
+    original = request(secret, [b"first", b"stale"], headers=[(b"x-survng-revision", revision.encode())])
+
+    def change_assignment():
+        assert service.lock.acquire(timeout=1), "upload held the service lock while waiting for a chunk"
+        try:
+            service.config.cameras[0].homekit.encoder = "local"
+        finally:
+            service.lock.release()
+
+    async def receive():
+        if written:
+            await asyncio.to_thread(change_assignment)
+        return await original.receive()
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(endpoints["/api/homekit/nodes/media"](Request(original.scope, receive)))
+    assert error.value.status_code == 404
+    assert written == [b"first"]
+    assert not service.nodes.uploads
+
+
+def test_media_upload_releases_claim_on_client_disconnect(remote):
+    service, _, secret, endpoints = remote
+    written = []
+    service.nodes.feeds[("porch", 1)] = SimpleNamespace(wanted=lambda: True, write=written.append, close=lambda: None)
+    revision = service.node_assignments()[0]["revision"]
+    original = request(secret, [b"first", b"unused"], headers=[(b"x-survng-revision", revision.encode())])
+
+    async def receive():
+        if written:
+            return {"type": "http.disconnect"}
+        return await original.receive()
+
+    with pytest.raises(ClientDisconnect):
+        asyncio.run(endpoints["/api/homekit/nodes/media"](Request(original.scope, receive)))
+    assert written == [b"first"]
+    assert not service.nodes.uploads
 
 
 def test_snapshot_rejects_oversized_body_while_reading(remote):
@@ -158,8 +443,8 @@ def test_upload_claim_prevents_interleaved_or_stale_writers(remote):
     written = []
     service.nodes.feeds[("porch", 1)] = SimpleNamespace(wanted=lambda: True, write=written.append, close=lambda: None)
     assignments = service.node_assignments()
-    first = service.nodes.claim_feed(node, "porch", "1", assignments)
-    second = service.nodes.claim_feed(node, "porch", "1", assignments)
+    first = service.nodes.claim_feed(node, "porch", "1", assignments, assignments[0]["revision"])
+    second = service.nodes.claim_feed(node, "porch", "1", assignments, assignments[0]["revision"])
     assert first is not None and second is not None
     assert not service.nodes.write_upload(node, "porch", "1", first, b"old", assignments)
     service.nodes.release_upload("porch", "1", first)
@@ -168,18 +453,26 @@ def test_upload_claim_prevents_interleaved_or_stale_writers(remote):
 
 
 def test_late_snapshot_cannot_fulfil_a_new_request(remote, tmp_path):
-    service, node, _, _ = remote
+    service, _, secret, endpoints = remote
     destination = tmp_path / "snapshot.jpg"
     old = service.nodes.begin_snapshot("porch", destination)
     service.nodes.end_snapshot("porch", old)
     current = service.nodes.begin_snapshot("porch", destination)
     data = b"\xff\xd8jpeg"
-    assignments = service.node_assignments()
-    assert not service.nodes.accept_snapshot(node, "porch", data, assignments, old[2])
+    endpoint = endpoints["/api/homekit/nodes/snapshot"]
+
+    def send_snapshot(token, chunks):
+        return asyncio.run(endpoint(request(secret, chunks, headers=[(b"x-survng-request", token.encode())])))
+
+    with pytest.raises(HTTPException) as stale:
+        send_snapshot(old[2], [data])
+    assert stale.value.status_code == 404
     assert not destination.exists()
-    assert service.nodes.accept_snapshot(node, "porch", data, assignments, current[2])
+    assert send_snapshot(current[2], [data[:2], data[2:]]) == {"accepted": True}
     assert current[0].is_set() and destination.read_bytes() == data
-    assert not service.nodes.accept_snapshot(node, "porch", b"\xff\xd8replacement", assignments, current[2])
+    with pytest.raises(HTTPException) as duplicate:
+        send_snapshot(current[2], [b"\xff\xd8replacement"])
+    assert duplicate.value.status_code == 404
     assert destination.read_bytes() == data
 
 
@@ -207,7 +500,7 @@ def test_closed_registry_rejects_stale_sync_and_writers(remote):
     assignments = service.node_assignments()
     service.close()
     assert service.nodes.authenticate(secret) is None
-    assert not service.nodes.feed_allowed(node, "porch", "1", assignments)
+    assert not service.nodes.feed_allowed(node, "porch", "1", assignments, assignments[0]["revision"])
     with pytest.raises((KeyError, RuntimeError)):
         service.nodes.sync(node, {}, assignments, timeout=0)
     with pytest.raises(RuntimeError):

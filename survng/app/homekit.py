@@ -22,14 +22,18 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
-from .homekit_nodes import assignment_revision
+from . import homekit_build
+from .homekit_nodes import EncoderUploadClaim, NodeRegistry, assignment_revision
 
 from .media_sessions import (
     MediaResourceClass, MediaSessionKind, MediaSessionManager, MediaSessionRequest,
 )
 
 LOGGER = logging.getLogger(__name__)
-WORKER = Path(__file__).resolve().parents[2] / "homekit-worker/dist/src/camera.js"
+BUILD_RECHECK_SECONDS = 10.0
+# Local startup can run three 15-second qualification commands per backend
+# (QSV and software), then a 15-second source probe before opening control.sock.
+LOCAL_STARTUP_GRACE_SECONDS = 120
 
 
 def camera_port(camera) -> int:
@@ -223,9 +227,6 @@ class CameraWorker:
                     self._state(state="waiting", error="state_in_use")
                     if self.stopping.wait(1):
                         return
-            if not WORKER.is_file():
-                self._state(state="blocked", error="worker_not_built")
-                return
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
                     probe.bind((self.config.homekit.bind, 0))
@@ -257,6 +258,12 @@ class CameraWorker:
                     self._state(state="starting", error="encoder_waiting")
                     self.stopping.wait(2)
                     continue
+                release, build_problem = homekit_build.verified_release()
+                if release is None:
+                    self._state(state="blocked", error=build_problem)
+                    self.service.ensure_worker_build()
+                    self.stopping.wait(BUILD_RECHECK_SECONDS)
+                    continue
                 node_left = False
                 try:
                     # Only this lock owner may remove a dead worker's stale socket.
@@ -265,7 +272,7 @@ class CameraWorker:
                         if stat.S_ISSOCK(endpoint.lstat().st_mode):
                             endpoint.unlink()
                     env = {**os.environ, "DEBUG": "", "NODE_DEBUG": ""}
-                    self.process = subprocess.Popen([self.config.homekit.node_path, str(WORKER)],
+                    self.process = subprocess.Popen([self.config.homekit.node_path, str(release / "dist/src/camera.js")],
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                         start_new_session=True, env=env, umask=0o077, pass_fds=(owner.fileno(),))
                     settings = worker_settings(self.config, self.camera, remote)
@@ -275,7 +282,11 @@ class CameraWorker:
                     self._state(state="starting", error=None)
                     pending = b""
                     control_failures = 0
-                    poll_at = time.monotonic() + 1
+                    started_at = time.monotonic()
+                    # Forgive failed control polls during local qualification.
+                    # A successful exchange ends the grace period immediately.
+                    startup_grace_until = started_at + LOCAL_STARTUP_GRACE_SECONDS if remote is None else None
+                    poll_at = started_at + 1
                     while not self.stopping.is_set() and self.process.poll() is None and self.service.camera_active(self.camera.id):
                         self._poll_snapshot()
                         if any(lease.cancelled() for lease in self.leases.values()):
@@ -311,10 +322,14 @@ class CameraWorker:
                                 control(self.path, "motion", {"active": self.service.motion_active(self.camera.id)})
                                 failures = 0
                                 control_failures = 0
+                                startup_grace_until = None
                             except (OSError, ValueError, RuntimeError):
                                 self._state(state="starting", error="control_unavailable")
                                 control_failures += 1
-                                if control_failures >= 3:
+                                if startup_grace_until is not None:
+                                    if time.monotonic() >= startup_grace_until:
+                                        break
+                                elif control_failures >= 3:
                                     break
                     self.service.clear_motion(self.camera.id)
                     if self.process.poll() == 42:
@@ -352,8 +367,18 @@ class HomeKitService:
         self.started = False
         self.operations = threading.RLock()
         self.detection_active = detection_active or camera_active
-        from .homekit_nodes import NodeRegistry
         self.nodes = NodeRegistry(self.directory)
+        self.builder = homekit_build.AutoBuilder()
+
+    def ensure_worker_build(self, *, force: bool = False) -> bool:
+        with self.lock:
+            config = self.config
+            started = self.started
+        with self.nodes.lock:
+            enrolled = bool(self.nodes.nodes)
+        if not force and not (started and (config.homekit.enabled or enrolled)):
+            return False
+        return self.builder.ensure(config.homekit.node_path, force=force)
 
     def start(self) -> None:
         with self.operations, self.lock:
@@ -362,6 +387,7 @@ class HomeKitService:
             self.nodes.reopen()
             self.started = True
             self._start_workers()
+        self.ensure_worker_build()
 
     def _start_workers(self) -> None:
         if not self.config.homekit.enabled:
@@ -375,6 +401,7 @@ class HomeKitService:
     def reconfigure(self, config) -> None:
         with self.operations:
             self._reconfigure(config)
+        self.ensure_worker_build()
 
     def _reconfigure(self, config) -> None:
         self.nodes.reopen()
@@ -460,6 +487,31 @@ class HomeKitService:
         with self.lock:
             return self.motion.get(camera_id, 0) > time.monotonic()
 
+    def remove_encoder(self, node_id: str) -> None:
+        with self.operations, self.lock:
+            assigned = [camera.id for camera in self.config.cameras if camera.homekit.encoder == node_id]
+            self.nodes.remove(node_id, assigned)
+
+    def claim_encoder_upload(
+        self, node: dict, camera_id: str, tier: str, revision: str,
+    ) -> EncoderUploadClaim | None:
+        with self.lock:
+            return self.nodes.claim_feed(node, camera_id, tier, self.node_assignments(), revision)
+
+    def write_encoder_upload(
+        self, node: dict, camera_id: str, tier: str, claim: EncoderUploadClaim, data: bytes,
+    ) -> bool:
+        # Recheck the live assignment for every chunk received from the encoder.
+        with self.lock:
+            return self.nodes.write_upload(node, camera_id, tier, claim, data, self.node_assignments())
+
+    def release_encoder_upload(self, camera_id: str, tier: str, claim: EncoderUploadClaim) -> None:
+        self.nodes.release_upload(camera_id, tier, claim)
+
+    def accept_encoder_snapshot(self, node: dict, camera_id: str, data: bytes, request_id: str) -> bool:
+        with self.lock:
+            return self.nodes.accept_snapshot(node, camera_id, data, self.node_assignments(), request_id)
+
     def node_assignments(self) -> list[dict]:
         with self.lock:
             config = self.config
@@ -483,15 +535,19 @@ class HomeKitService:
 
     def status(self) -> dict:
         with self.lock:
-            return {"enabled": self.config.homekit.enabled, "experimental": True,
+            config = self.config
+            status = {"enabled": config.homekit.enabled, "experimental": True,
                 "nodeError": self.nodes.error,
-                "nodes": self.nodes.public_status(self.config.cameras),
                 "cameras": [
                 {"id": camera.id, "name": camera.name, "enabled": camera.homekit.enabled,
                  "encoder": camera.homekit.encoder,
                  **(self.workers[camera.id].status() if camera.id in self.workers else {"state": "disabled", "paired": None, "port": camera_port(camera)})}
-                for camera in self.config.cameras
+                for camera in config.cameras
             ]}
+        status["nodes"] = self.nodes.public_status(config.cameras)
+        status["workerBuild"] = homekit_build.verify()
+        status["workerBuildJob"] = self.builder.status()
+        return status
 
     def pairing(self, camera_id: str) -> dict:
         with self.lock:

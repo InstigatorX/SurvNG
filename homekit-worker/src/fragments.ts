@@ -8,6 +8,9 @@ const POST_ROLL_MS = 4000;
 // The hub discards a download that never receives end-of-stream. A person who
 // stays in frame must still finish a clip before that happens.
 const CLIP_LIMIT_MS = 60_000;
+// End-of-stream and its acknowledgement travel on different channels. Hold the
+// sensor until the hub accepts the clip, or until the library would cancel it.
+const COMMIT_MS = 12_000;
 export function boxes(data: Buffer): Array<{ type: string; data: Buffer }> {
   const result = [];
   for (let offset = 0; offset < data.length;) {
@@ -175,16 +178,34 @@ export class LabRecording implements CameraRecordingDelegate {
   private motion = false;
   private motionStopped = 0;
   private finished = false;
+  private commit?: { id: number; until: number };
+  private commitTimer?: NodeJS.Timeout;
   private producerKey = '';
   private watcher?: () => void;
-  readonly counters = { streams: 0, completed: 0, closed: 0, failed: 0, producerFailures: 0 };
+  readonly counters = { streams: 0, completed: 0, acknowledged: 0, closed: 0, failed: 0, producerFailures: 0 };
   constructor(private media: MediaSource, private allowed: () => boolean, private catalog: readonly Tier[] = tiers) {}
   setMotion(value: boolean): void {
     if (this.motion && !value) this.motionStopped = Date.now();
     this.motion = value;
   }
-  /** The sensor stays on through an open clip so the hub does not abandon the download. */
-  reportingMotion(): boolean { return this.allowed() && (this.motion || this.stream !== undefined); }
+  /** The sensor stays on through an open clip and until the hub accepts its ending. */
+  reportingMotion(): boolean {
+    return this.allowed() && (this.motion || this.stream !== undefined || this.committing());
+  }
+  private committing(): boolean { return this.commit !== undefined && Date.now() < this.commit.until; }
+  private armCommit(id: number): void {
+    this.commit = { id, until: Date.now() + COMMIT_MS };
+    clearTimeout(this.commitTimer);
+    this.commitTimer = setTimeout(() => this.clearCommit(id), COMMIT_MS);
+    this.commitTimer.unref();
+  }
+  private clearCommit(id?: number): void {
+    if (id !== undefined && this.commit?.id !== id) return;
+    if (this.commit === undefined) return;
+    clearTimeout(this.commitTimer);
+    this.commit = undefined;
+    this.changed();
+  }
   watch(watcher: () => void): void { this.watcher = watcher; }
   private changed(): void { try { this.watcher?.(); } catch { /* a sensor update must not fail the clip */ } }
   updateRecordingConfiguration(config?: CameraRecordingConfiguration): void { this.config = config; this.reconcile(); }
@@ -234,47 +255,53 @@ export class LabRecording implements CameraRecordingDelegate {
     let sequence = ring.cursor();
     const abort = new AbortController(); this.stream = { id, abort }; this.finished = false;
     const opened = Date.now();
+    // A hub that connects after the post-roll still needs a clip that can end, not one already over.
+    if (!this.motion && this.motionStopped > 0 && opened - this.motionStopped >= POST_ROLL_MS) this.motionStopped = opened;
     const effective = AbortSignal.any([abort.signal, ...(signal ? [signal] : []), AbortSignal.timeout(300_000)]);
     this.counters.streams++;
     this.changed();
-    let sent: Buffer | undefined;
     const ended = () => (!this.motion && this.motionStopped > 0 && Date.now() - this.motionStopped >= POST_ROLL_MS)
       || Date.now() - opened >= CLIP_LIMIT_MS;
     const finish = (data: Buffer) => {
-      this.finished = true; this.counters.completed++;
+      this.finished = true; this.counters.completed++; this.armCommit(id);
       return { data, isLast: true };
     };
     try {
       yield { data: this.init, isLast: false };
       while (true) {
-        let fragment: Fragment;
-        try { fragment = await ring.read(sequence++, effective); }
-        catch (error) {
-          if (sent && ring.closed && !abort.signal.aborted && !signal?.aborted) { yield finish(sent); return; }
-          throw error;
-        }
+        const fragment = await ring.read(sequence++, effective);
         effective.throwIfAborted();
         if (!this.allowed()) throw new Error('HomeKit privacy enabled');
         if (ended()) { yield finish(fragment.data); return; }
-        sent = fragment.data;
         yield { data: fragment.data, isLast: false };
       }
     } catch (error) { if (!abort.signal.aborted && !signal?.aborted) this.counters.failed++; throw error; }
     finally { if (this.stream?.id === id) this.stream = undefined; this.changed(); }
   }
   closeRecordingStream(id: number): void {
-    if (this.stream?.id !== id) return;
-    if (!this.finished) this.counters.closed++;
-    this.stream.abort.abort();
+    if (this.stream?.id === id) {
+      if (!this.finished) this.counters.closed++;
+      this.stream.abort.abort();
+    }
+    this.clearCommit(id);
   }
-  acknowledgeStream(id: number): void { this.closeRecordingStream(id); }
+  acknowledgeStream(id: number): void {
+    if (this.commit?.id === id && this.finished) this.counters.acknowledged++;
+    this.clearCommit(id);
+    this.closeRecordingStream(id);
+  }
   private async stopProducer(): Promise<void> {
     clearInterval(this.watchdog);
+    // A finished clip is waiting on the hub, not on this process. Ack, close, or
+    // the commit timer releases that hold.
     this.active = false; this.stream?.abort.abort(); this.ring.close(); this.init = undefined;
     this.producerKey = '';
     const child = this.child; this.child = undefined;
     if (child) await stopChild(child);
   }
-  async close(): Promise<void> { this.desired = false; await this.transition; await this.stopProducer(); }
+  async close(): Promise<void> {
+    this.desired = false; await this.transition; await this.stopProducer();
+    this.clearCommit();
+  }
   status(): object { return { active: this.active, ready: this.ring.coverage >= 4, bufferSeconds: this.ring.coverage, bufferBytes: this.ring.size, ...this.counters }; }
 }

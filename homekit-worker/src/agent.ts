@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { createWriteStream, existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -76,6 +77,7 @@ function startFeed(camera: Assignment, tier: Tier, encoding: VideoEncoding): voi
   const upload = new AbortController();
   feeds.track(key, child, request('/api/homekit/nodes/media', child.stdout!, {
     'content-type': 'application/octet-stream', 'x-survng-camera': camera.id, 'x-survng-tier': String(tier.identifier),
+    'x-survng-revision': camera.revision,
   }, true, mediaOrigin, upload.signal), () => upload.abort());
 }
 
@@ -105,32 +107,43 @@ async function takeSnapshot(camera: Assignment, requestId: string, signal: Abort
 
 type Releases = { agent?: string; ffmpeg?: string; runtime?: string };
 const releasesPath = join(home, '.releases.json');
+const releaseDigest = /^[0-9a-f]{64}$/;
+const syncToken = /^[0-9a-f]{32}$/;
 let updateRetryAt = 0;
 
 async function savedReleases(): Promise<Releases> {
-  try { return JSON.parse(await readFile(releasesPath, 'utf8')) as Releases; }
+  try {
+    const { agent, ffmpeg, runtime } = JSON.parse(await readFile(releasesPath, 'utf8')) as Releases;
+    return { agent, ffmpeg, runtime };
+  }
   catch { return {}; }
 }
 
-async function pullArchive(path: string): Promise<string> {
+async function pullArchive(path: string, expectedDigest?: string): Promise<string> {
   const response = await fetch(`${origin}${path}`, { headers: { authorization: `Bearer ${secret}` },
     signal: AbortSignal.any([shutdown.signal, AbortSignal.timeout(60000)]) });
   if (!response.ok || !response.body) throw new Error('update rejected');
   const file = join(await mkdtemp(join(tmpdir(), 'survng-update-')), 'archive.tgz');
   let size = 0;
+  const digest = expectedDigest ? createHash('sha256') : undefined;
   const limit = new Transform({ transform(chunk: Buffer, _encoding, done) {
     size += chunk.length;
-    done(size > 512 * 1024 * 1024 ? new Error('update exceeds capacity') : null, chunk);
+    if (size > 512 * 1024 * 1024) return done(new Error('update exceeds capacity'));
+    digest?.update(chunk);
+    done(null, chunk);
   } });
   try {
     await pipeline(Readable.fromWeb(response.body as never), limit, createWriteStream(file, { mode: 0o600 }));
+    if (digest && digest.digest('hex') !== expectedDigest) throw new Error('update digest mismatch');
     return file;
   } catch (error) { await rm(dirname(file), { recursive: true, force: true }); throw error; }
 }
 
 type StagedUpdate = { directory: string; entries: { name: string; source: string }[] };
-async function stageUpdate(kind: 'agent' | 'ffmpeg' | 'runtime'): Promise<StagedUpdate> {
-  const file = await pullArchive(`/api/homekit/nodes/${kind}`);
+async function stageUpdate(kind: keyof Releases, release: string): Promise<StagedUpdate> {
+  if (kind === 'agent' && (typeof release !== 'string' || !releaseDigest.test(release))) throw new Error('invalid agent release');
+  const path = `/api/homekit/nodes/${kind}`;
+  const file = kind === 'agent' ? await pullArchive(`${path}?release=${release}`, release) : await pullArchive(path);
   let directory: string | undefined;
   try {
     const allow = kind === 'agent'
@@ -159,15 +172,14 @@ async function stageUpdate(kind: 'agent' | 'ffmpeg' | 'runtime'): Promise<Staged
   } finally { await rm(dirname(file), { recursive: true, force: true }); }
 }
 
-async function applyUpdates(releases: Releases): Promise<void> {
-  if (Date.now() < updateRetryAt) return;
-  const local = await savedReleases();
+async function applyUpdates(releases: Releases, local: Releases, requested: boolean): Promise<boolean> {
+  if (!requested && Date.now() < updateRetryAt) return true;
   const changed = (['agent', 'ffmpeg', 'runtime'] as const).filter(kind => releases[kind] && releases[kind] !== local[kind]);
-  if (!changed.length) return;
+  if (!changed.length) return true;
   const staged: StagedUpdate[] = [];
   let stampDirectory: string | undefined;
   try {
-    for (const kind of changed) staged.push(await stageUpdate(kind));
+    for (const kind of changed) staged.push(await stageUpdate(kind, releases[kind]!));
     stampDirectory = await mkdtemp(join(home, '.update-stamp-'));
     const stamp = join(stampDirectory, '.releases.json');
     await writeFile(stamp, JSON.stringify({ ...local, ...releases }), { mode: 0o600 });
@@ -179,10 +191,12 @@ async function applyUpdates(releases: Releases): Promise<void> {
   } catch {
     updateRetryAt = Date.now() + 60_000;
     console.error('SurvNG HomeKit encoder update failed.');
+    return false;
   } finally {
     for (const item of staged) await rm(item.directory, { recursive: true, force: true });
     if (stampDirectory) await rm(stampDirectory, { recursive: true, force: true });
   }
+  return true;
 }
 
 async function prepare(camera: Assignment, signal: AbortSignal): Promise<void> {
@@ -211,6 +225,12 @@ async function prepare(camera: Assignment, signal: AbortSignal): Promise<void> {
 
 async function main(): Promise<void> {
   progress.enter('version', 10000);
+  // A heartbeat describes the running process, even if an installer has since
+  // written a new release stamp to disk.
+  const localReleases = await savedReleases();
+  const runningVersion = typeof localReleases.agent === 'string' && releaseDigest.test(localReleases.agent) ? localReleases.agent : null;
+  let handledSyncRequest: string | undefined;
+  let failedSyncRequest: string | undefined;
   let ffmpegVersion = '';
   const version = spawn(ffmpeg, ['-version'], { stdio: ['ignore', 'pipe', 'ignore'], signal: shutdown.signal,
     timeout: 5000, killSignal: 'SIGKILL' });
@@ -224,11 +244,12 @@ async function main(): Promise<void> {
   while (!shutdown.signal.aborted) {
     const backends = Object.fromEntries([...encodings].map(([id, value]) => [id, value === 'unavailable' ? 'unavailable' : value.backend]));
     let desired: { assignments?: Assignment[]; feeds?: { camera: string; tier: number }[]; snapshots?: string[];
-      snapshotRequests?: Record<string, string>; releases?: Releases; ingest?: string } = {};
+      snapshotRequests?: Record<string, string>; releases?: Releases; ingest?: string; syncRequest?: string } = {};
     try {
       progress.enter('sync', 20000);
       const response = await request('/api/homekit/nodes/sync', JSON.stringify({
         name: hostname().slice(0, 64), hardware: devicePresent(), ffmpeg: ffmpegVersion,
+        runningVersion, failedSyncRequest,
         profiles: Object.fromEntries(profiles), backends, fps: Object.fromEntries(rates), revisions: Object.fromEntries(revisions),
       }), { 'content-type': 'application/json' });
       if (!response.ok) throw new Error('sync rejected');
@@ -245,7 +266,14 @@ async function main(): Promise<void> {
     const ingest = typeof desired.ingest === 'string' ? desired.ingest.replace(/\/$/, '') : '';
     if (/^https?:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[A-Za-z0-9._~-]+)*$/.test(ingest)) mediaOrigin = ingest;
     progress.enter('updates', 300000);
-    await applyUpdates(desired.releases || {});
+    const requestId = desired.syncRequest;
+    const requested = typeof requestId === 'string' && syncToken.test(requestId) && requestId !== handledSyncRequest;
+    if (requested) {
+      handledSyncRequest = requestId;
+      failedSyncRequest = undefined;
+    }
+    const updated = await applyUpdates(desired.releases || {}, localReleases, requested);
+    if (requested && !updated) failedSyncRequest = requestId;
     if (shutdown.signal.aborted) break;
     const assignments = desired.assignments || [];
     progress.enter('assignment cleanup', 30000);

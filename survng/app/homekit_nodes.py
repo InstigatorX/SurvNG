@@ -22,7 +22,11 @@ import tarfile
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from urllib.parse import urlsplit
+
+from . import homekit_build
+from .homekit_build import WORKER_ROOT, agent_archive as agent_archive
 
 
 def _private_directory(path: Path) -> None:
@@ -34,11 +38,9 @@ def _private_directory(path: Path) -> None:
 ONLINE_SECONDS = 20
 SNAPSHOT_LIMIT = 4 * 1024 * 1024
 TOKEN_SECONDS = 30 * 60
-# Same per-viewer bound as the local encoder in camera-source.ts. A paused
-# reader may queue this much; only that viewer is then disconnected. The kernel
-# send buffer filling up is backpressure, not a closed socket.
+# Match the local encoder's per-viewer queue bound in camera-source.ts.
 FEED_CLIENT_BUFFER = 2 * 1024 * 1024
-WORKER_ROOT = Path(__file__).resolve().parents[2] / "homekit-worker"
+SYNC_REQUEST_SECONDS = 5 * 60
 
 
 def _hash(value: str) -> str:
@@ -47,6 +49,12 @@ def _hash(value: str) -> str:
 
 def _matches(value: str, digest: str) -> bool:
     return hmac.compare_digest(_hash(value), digest)
+
+
+def _version(value: object) -> str | None:
+    if isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value):
+        return value
+    return None
 
 
 def assignment_revision(config, camera) -> str:
@@ -171,6 +179,8 @@ install -d -m 0700 /etc/survng /opt/survng-homekit-node
 printf '%s\\nSURVNG_ORIGIN=%s\\nSURVNG_FFMPEG=%s\\n' "$cred" "$ORIGIN" /opt/survng-homekit-node/bin/ffmpeg > /etc/survng/homekit-node.env
 chmod 0600 /etc/survng/homekit-node.env
 curl -fsSL -H "Authorization: Bearer $secret" -o "$work/survng-homekit-agent.tgz" "$ORIGIN/api/homekit/nodes/agent"
+agent_checksum=$(sha256sum "$work/survng-homekit-agent.tgz")
+agent_checksum=${{agent_checksum%% *}}
 rm -rf /opt/survng-homekit-node/dist /opt/survng-homekit-node/node_modules
 tar -xzf "$work/survng-homekit-agent.tgz" -C /opt/survng-homekit-node
 rm -f "$work/survng-homekit-agent.tgz"
@@ -220,9 +230,16 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
-if sync_body=$(curl -fsSL -m 25 -H "Authorization: Bearer $secret" -H "content-type: application/json" -d '{{"name":"encoder"}}' "$ORIGIN/api/homekit/nodes/sync"); then
-  printf '%s' "$sync_body" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{{const r=JSON.parse(s).releases||{{}};require("fs").writeFileSync("/opt/survng-homekit-node/.releases.json",JSON.stringify({{agent:String(r.agent||""),ffmpeg:String(r.ffmpeg||""),runtime:String(r.runtime||"")}}),{{mode:0o600}})}})' || true
-fi
+sync_body=$(curl -fsSL -m 25 -H "Authorization: Bearer $secret" -H "content-type: application/json" -d '{{"name":"encoder"}}' "$ORIGIN/api/homekit/nodes/sync") || sync_body='{{}}'
+printf '%s' "$sync_body" | node -e '
+const fs = require("fs");
+let releases = {{}};
+try {{ releases = JSON.parse(fs.readFileSync(0, "utf8")).releases || {{}}; }}
+catch {{ console.error("Could not read the encoder tools release metadata."); }}
+fs.writeFileSync("/opt/survng-homekit-node/.releases.json", JSON.stringify({{
+  agent: process.argv[1], ffmpeg: String(releases.ffmpeg || ""), runtime: String(releases.runtime || ""),
+}}), {{ mode: 0o600 }});
+' "$agent_checksum"
 systemctl daemon-reload
 systemctl enable --now survng-homekit-node.service
 echo "SurvNG HomeKit encoder is installed and checking in."
@@ -287,8 +304,7 @@ class _TierFeed:
                 pending = self._outbound.setdefault(client, bytearray())
                 try:
                     self._flush(client, pending)
-                    # Drop only this viewer once it is actually stuck. A short
-                    # pause must not tear down the MPEG-TS stream.
+                    # A full kernel buffer is backpressure, not a disconnect.
                     if len(pending) + len(data) > FEED_CLIENT_BUFFER:
                         dead.append(client)
                         continue
@@ -345,6 +361,22 @@ class _TierFeed:
             raise RuntimeError("HomeKit feed shutdown incomplete")
 
 
+@dataclass(frozen=True, eq=False)
+class EncoderUploadClaim:
+    revision: str
+
+
+@dataclass
+class _SyncRequest:
+    nonce: str
+    version: str
+    expires_at: float
+    failed: bool = False
+
+    def pending(self, now: float) -> bool:
+        return not self.failed and now < self.expires_at
+
+
 class NodeRegistry:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
@@ -357,8 +389,9 @@ class NodeRegistry:
         self.tokens: list[dict] = []
         self.nodes: dict[str, dict] = {}
         self.feeds: dict[tuple[str, int], _TierFeed] = {}
-        self.uploads: dict[tuple[str, int], object] = {}
+        self.uploads: dict[tuple[str, int], EncoderUploadClaim] = {}
         self.snapshots: dict[str, tuple[threading.Event, Path, str]] = {}
+        self.sync_requests: dict[str, _SyncRequest] = {}
         self.reopen()
 
     def _bump(self) -> None:
@@ -394,6 +427,7 @@ class NodeRegistry:
             node["profiles"] = {key: profile for key, value in node.get("profiles", {}).items() if (profile := clean_profile(value))}
             node["backends"] = {key: value for key, value in node.get("backends", {}).items()
                 if isinstance(value, str) and value in {"qsv", "software", "unavailable"}}
+            node["runningVersion"] = _version(node.get("runningVersion"))
         for token in tokens:
             if (not isinstance(token, dict) or not isinstance(token.get("hash"), str)
                     or not isinstance(token.get("origin"), str) or not math.isfinite(float(token.get("expires") or 0))):
@@ -503,8 +537,44 @@ class NodeRegistry:
             node["fps"] = {key: value for key, value in fps.items() if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 120}
             node["revisions"] = {key: value for key, value in revisions.items()
                 if isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)}
+            node["runningVersion"] = _version(report.get("runningVersion"))
+            request = self.sync_requests.get(node_id)
+            if request is not None:
+                if node["runningVersion"] == request.version:
+                    del self.sync_requests[node_id]
+                elif report.get("failedSyncRequest") == request.nonce:
+                    request.failed = True
             node["lastSeen"] = time.time()
             self._save()
+
+    def request_sync(self, node_id: str) -> None:
+        with self.lock:
+            if node_id not in self.nodes:
+                raise KeyError(node_id)
+        available = available_agent_version()
+        with self.lock:
+            node = self.nodes[node_id]
+            if self.closed or time.time() - node["lastSeen"] > ONLINE_SECONDS:
+                raise RuntimeError("HomeKit encoder is offline")
+            if available is None:
+                raise RuntimeError("HomeKit encoder release is unavailable")
+            if node.get("runningVersion") == available:
+                raise RuntimeError("HomeKit encoder is already current")
+            now = time.monotonic()
+            queued = self.sync_requests.get(node_id)
+            if queued is not None and queued.version == available and queued.pending(now):
+                return
+            self.sync_requests[node_id] = _SyncRequest(secrets.token_hex(16), available, now + SYNC_REQUEST_SECONDS)
+            self._bump()
+
+    def pending_sync_request(self, node: dict, available: str | None) -> str | None:
+        with self.lock:
+            if self.closed or self.nodes.get(node["id"]) is not node:
+                return None
+            request = self.sync_requests.get(node["id"])
+            if request is not None and request.version == available and request.pending(time.monotonic()):
+                return request.nonce
+            return None
 
     def sync(self, node: dict, report: dict, assignments: list[dict] | Callable[[], list[dict]], timeout: float) -> dict:
         with self.updates:
@@ -590,28 +660,29 @@ class NodeRegistry:
         if feed:
             feed.write(data)
 
-    def feed_allowed(self, node: dict, camera_id: str, tier: str, assignments: list[dict]) -> bool:
-        if tier not in {"1", "2", "3"}:
+    def feed_allowed(self, node: dict, camera_id: str, tier: str, assignments: list[dict], revision: str) -> bool:
+        if not revision or tier not in {"1", "2", "3"}:
             return False
         with self.lock:
             return not self.closed and self.nodes.get(node["id"]) is node and any(
-                item["id"] == camera_id and item["encoder"] == node["id"] for item in assignments)
+                item["id"] == camera_id and item["encoder"] == node["id"] and item["revision"] == revision
+                for item in assignments)
 
-    def claim_feed(self, node: dict, camera_id: str, tier: str, assignments: list[dict]) -> object | None:
+    def claim_feed(self, node: dict, camera_id: str, tier: str, assignments: list[dict], revision: str) -> EncoderUploadClaim | None:
         with self.lock:
-            if not self.feed_allowed(node, camera_id, tier, assignments):
+            if not self.feed_allowed(node, camera_id, tier, assignments, revision):
                 return None
             key = (camera_id, int(tier))
             feed = self.feeds.get(key)
             if feed is None or not feed.wanted():
                 return None
-            claim = object()
+            claim = EncoderUploadClaim(revision)
             self.uploads[key] = claim
             return claim
 
-    def write_upload(self, node: dict, camera_id: str, tier: str, claim: object, data: bytes, assignments: list[dict]) -> bool:
+    def write_upload(self, node: dict, camera_id: str, tier: str, claim: EncoderUploadClaim, data: bytes, assignments: list[dict]) -> bool:
         with self.lock:
-            if not self.feed_allowed(node, camera_id, tier, assignments):
+            if not self.feed_allowed(node, camera_id, tier, assignments, claim.revision):
                 return False
             key = (camera_id, int(tier))
             feed = self.feeds.get(key)
@@ -620,7 +691,7 @@ class NodeRegistry:
             feed.write(data)
             return True
 
-    def release_upload(self, camera_id: str, tier: str, claim: object) -> None:
+    def release_upload(self, camera_id: str, tier: str, claim: EncoderUploadClaim) -> None:
         with self.lock:
             key = (camera_id, int(tier))
             if self.uploads.get(key) is claim:
@@ -682,19 +753,36 @@ class NodeRegistry:
             if node_id not in self.nodes:
                 raise KeyError(node_id)
             self.nodes.pop(node_id)
+            self.sync_requests.pop(node_id, None)
             self._save()
             self._bump()
 
     def public_status(self, cameras) -> list[dict]:
+        with self.lock:
+            if not self.nodes:
+                return []
+        available = available_agent_version()
         now = time.time()
+        monotonic_now = time.monotonic()
         with self.lock:
             rows = []
-            for node in self.nodes.values():
-                assigned = [camera.id for camera in cameras if camera.homekit.encoder == node["id"]]
-                rows.append({"id": node["id"], "name": node.get("name") or "Encoder",
+            for node_id, node in self.nodes.items():
+                assigned = [camera.id for camera in cameras if camera.homekit.encoder == node_id]
+                running = node.get("runningVersion")
+                request = self.sync_requests.get(node_id)
+                if available is None:
+                    update_state = "unavailable"
+                elif running == available:
+                    update_state = "current"
+                elif request is not None and request.version == available:
+                    update_state = "syncing" if request.pending(monotonic_now) else "failed"
+                else:
+                    update_state = "unknown" if running is None else "outdated"
+                rows.append({"id": node_id, "name": node.get("name") or "Encoder",
                     "online": now - float(node.get("lastSeen") or 0) <= ONLINE_SECONDS,
                     "hardware": node.get("hardware") if node.get("hardware") in {"qsv", "software"} else "unknown",
-                    "lastSeen": int(node.get("lastSeen") or 0), "cameras": assigned})
+                    "lastSeen": int(node.get("lastSeen") or 0), "cameras": assigned,
+                    "runningVersion": running, "availableVersion": available, "updateState": update_state})
             return rows
 
     def close(self) -> None:
@@ -704,6 +792,7 @@ class NodeRegistry:
             self.feeds.clear()
             self.uploads.clear()
             self.snapshots.clear()
+            self.sync_requests.clear()
             self._bump()
         for feed in feeds:
             feed.close()
@@ -727,7 +816,6 @@ class NodeRegistry:
 
 
 _release_lock = threading.Lock()
-_agent_cache: tuple[tuple, str, bytes] | None = None
 _ffmpeg_stamp_cache: tuple[tuple, str] | None = None
 
 
@@ -741,30 +829,20 @@ def _file_signature(paths: list[Path]) -> tuple:
     return tuple(rows)
 
 
-def _dist_signature(root: Path) -> tuple:
-    files = [root / "package.json", root / "package-lock.json"]
-    dist = root / "dist"
-    if dist.is_dir() and not dist.is_symlink():
-        files.extend(path for path in dist.rglob("*") if path.is_file() and not path.is_symlink())
-    modules = root / "node_modules"
-    if modules.is_dir() and not modules.is_symlink():
-        files.extend(path for path in modules.glob("*/package.json") if path.is_file() and not path.is_symlink())
-        files.extend(path for path in modules.glob("@*/*/package.json") if path.is_file() and not path.is_symlink())
-    return _file_signature(files)
-
-
 def agent_release(root: Path = WORKER_ROOT) -> tuple[str, bytes]:
-    """Content stamp and archive for the encoder program. Rebuilt only when those files change."""
-    global _agent_cache
-    signature = _dist_signature(root)
-    with _release_lock:
-        if _agent_cache and _agent_cache[0] == signature:
-            return _agent_cache[1], _agent_cache[2]
-    payload = agent_archive(root)
-    digest = hashlib.sha256(payload).hexdigest()
-    with _release_lock:
-        _agent_cache = (signature, digest, payload)
-    return digest, payload
+    """Read the checksum and archive from the same verified release."""
+    release, problem = homekit_build.verified_release(root)
+    if release is None:
+        raise RuntimeError(problem)
+    return homekit_build.read_release_archive(release)
+
+
+def available_agent_version(root: Path = WORKER_ROOT) -> str | None:
+    try:
+        release, _ = homekit_build.verified_release(root)
+        return homekit_build.release_archive_version(release) if release is not None else None
+    except (OSError, RuntimeError):
+        return None
 
 
 def ffmpeg_binaries(ffmpeg_path: str) -> tuple[Path, Path]:
@@ -875,10 +953,9 @@ def runtime_archive_iter(lib_dir: Path = RUNTIME_LIB_DIR):
 
 def node_releases(ffmpeg_path: str, root: Path = WORKER_ROOT, *, lib_dir: Path | None = None) -> dict:
     releases: dict[str, str] = {}
-    try:
-        releases["agent"] = agent_release(root)[0]
-    except (OSError, RuntimeError):
-        pass
+    agent = available_agent_version(root)
+    if agent is not None:
+        releases["agent"] = agent
     try:
         releases["ffmpeg"] = ffmpeg_release(ffmpeg_path)
     except (OSError, ValueError):
@@ -929,23 +1006,3 @@ def ffmpeg_archive_iter(ffmpeg_path: str):
     with os.fdopen(read_fd, "rb") as raw:
         while chunk := raw.read(1024 * 1024):
             yield chunk
-
-
-def agent_archive(root: Path = WORKER_ROOT) -> bytes:
-    required = [root / "package.json", root / "dist" / "src" / "agent.js", root / "node_modules"]
-    if any(not path.exists() for path in required):
-        raise FileNotFoundError("HomeKit encoder agent is not built")
-    buffer = io.BytesIO()
-
-    def accept(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
-        name = member.name
-        if any(part in {".cache", ".git"} for part in Path(name).parts):
-            return None
-        if member.issym() or member.islnk() or member.isdev():
-            return None
-        return member
-
-    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-        for relative in ("package.json", "dist", "node_modules"):
-            archive.add(root / relative, arcname=relative, filter=accept)
-    return buffer.getvalue()

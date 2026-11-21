@@ -3971,7 +3971,9 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                     ? `Update (${productUpdate.behind_count})`
                     : productUpdate?.needs_checkout
                       ? "Switch Branch"
-                      : "Update"}
+                      : productUpdate?.homekit_rebuild
+                        ? "Rebuild HomeKit worker"
+                        : "Update"}
               </button>
               <button type="button" className="danger" onClick={restartServer} disabled={["requesting", "waiting"].includes(serverRestart.state)}>
                 {serverRestart.state === "requesting" || serverRestart.state === "waiting" ? <RefreshCcw className="spin" size={15} /> : <Power size={15} />}

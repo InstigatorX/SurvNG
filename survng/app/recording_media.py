@@ -7,6 +7,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from .recording_mp4 import iter_mp4_boxes
+
 # Bump when fragment bytes change so disk and browser caches expire together.
 RECORDING_FMP4_VERSION = 7
 
@@ -56,24 +58,6 @@ def playback_segment_duration(
     if not trim_end:
         return duration
     return max(0.1, min(duration, float(window_end) - float(row_start)))
-
-
-def _boxes(data: bytes, start: int = 0, end: int | None = None):
-    limit = len(data) if end is None else min(end, len(data))
-    cursor = start
-    while cursor + 8 <= limit:
-        size = struct.unpack_from(">I", data, cursor)[0]
-        box_type = data[cursor + 4:cursor + 8]
-        header = 8
-        if size == 1 and cursor + 16 <= limit:
-            size = struct.unpack_from(">Q", data, cursor + 8)[0]
-            header = 16
-        elif size == 0:
-            size = limit - cursor
-        if size < header or cursor + size > limit:
-            break
-        yield box_type, cursor, cursor + header, cursor + size
-        cursor += size
 
 
 def _read_mp4_box(path: Path, wanted: bytes, max_size: int = 32 * 1024 * 1024) -> bytes:
@@ -183,7 +167,7 @@ def _normalized_sample_description(
     handler: bytes,
 ) -> bytes:
     descriptors: list[bytes] = []
-    for entry_type, _, entry_payload, entry_end in _boxes(data, payload + 8, box_end):
+    for entry_type, _, entry_payload, entry_end in iter_mp4_boxes(data, payload + 8, box_end):
         if handler == b"vide" and entry_payload + 78 <= entry_end:
             fixed = data[entry_payload + 24:entry_payload + 28]
             child_start = entry_payload + 78
@@ -195,7 +179,7 @@ def _normalized_sample_description(
             descriptors.append(entry_type + data[entry_payload:entry_end])
             continue
         children: list[bytes] = []
-        for child_type, child_start_offset, child_payload, child_end in _boxes(data, child_start, entry_end):
+        for child_type, child_start_offset, child_payload, child_end in iter_mp4_boxes(data, child_start, entry_end):
             if child_type == b"btrt":
                 continue
             if child_type == b"esds":
@@ -211,16 +195,16 @@ def _track_stream_descriptor(data: bytes, payload: int, box_end: int) -> bytes:
     handler = b""
     timescale = b""
     sample_description_box: tuple[int, int] | None = None
-    for box_type, _, child_payload, child_end in _boxes(data, payload, box_end):
+    for box_type, _, child_payload, child_end in iter_mp4_boxes(data, payload, box_end):
         if box_type == b"hdlr" and child_payload + 12 <= child_end:
             handler = data[child_payload + 8:child_payload + 12]
         elif box_type == b"mdhd":
             timescale = _media_timescale(data, child_payload, child_end)
         elif box_type == b"minf":
-            for minf_type, _, minf_payload, minf_end in _boxes(data, child_payload, child_end):
+            for minf_type, _, minf_payload, minf_end in iter_mp4_boxes(data, child_payload, child_end):
                 if minf_type != b"stbl":
                     continue
-                for stbl_type, stbl_start, _, stbl_end in _boxes(data, minf_payload, minf_end):
+                for stbl_type, stbl_start, _, stbl_end in iter_mp4_boxes(data, minf_payload, minf_end):
                     if stbl_type == b"stsd":
                         sample_description_box = (stbl_start + 8, stbl_end)
                         break
@@ -234,21 +218,21 @@ def _track_stream_descriptor(data: bytes, payload: int, box_end: int) -> bytes:
 def _track_video_dimensions(data: bytes, payload: int, box_end: int) -> tuple[int, int] | None:
     handler = b""
     sample_description_box: tuple[int, int] | None = None
-    for box_type, _, child_payload, child_end in _boxes(data, payload, box_end):
+    for box_type, _, child_payload, child_end in iter_mp4_boxes(data, payload, box_end):
         if box_type != b"mdia":
             continue
-        for mdia_type, _, mdia_payload, mdia_end in _boxes(
+        for mdia_type, _, mdia_payload, mdia_end in iter_mp4_boxes(
             data, child_payload, child_end
         ):
             if mdia_type == b"hdlr" and mdia_payload + 12 <= mdia_end:
                 handler = data[mdia_payload + 8:mdia_payload + 12]
             elif mdia_type == b"minf":
-                for minf_type, _, minf_payload, minf_end in _boxes(
+                for minf_type, _, minf_payload, minf_end in iter_mp4_boxes(
                     data, mdia_payload, mdia_end
                 ):
                     if minf_type != b"stbl":
                         continue
-                    for stbl_type, stbl_start, _, stbl_end in _boxes(
+                    for stbl_type, stbl_start, _, stbl_end in iter_mp4_boxes(
                         data, minf_payload, minf_end
                     ):
                         if stbl_type == b"stsd":
@@ -257,7 +241,7 @@ def _track_video_dimensions(data: bytes, payload: int, box_end: int) -> tuple[in
     if handler != b"vide" or sample_description_box is None:
         return None
     stsd_payload, stsd_end = sample_description_box
-    for _entry_type, _, entry_payload, entry_end in _boxes(
+    for _entry_type, _, entry_payload, entry_end in iter_mp4_boxes(
         data, stsd_payload + 8, stsd_end
     ):
         if entry_payload + 28 > entry_end:
@@ -272,7 +256,7 @@ def _track_video_duration(data: bytes, payload: int, box_end: int) -> float | No
     handler = b""
     scale = 0
     ticks = 0
-    for kind, _, start, end in _boxes(data, payload, box_end):
+    for kind, _, start, end in iter_mp4_boxes(data, payload, box_end):
         if kind == b"hdlr" and start + 12 <= end:
             handler = data[start + 8:start + 12]
         elif kind == b"mdhd" and start + 4 <= end:
@@ -282,10 +266,10 @@ def _track_video_duration(data: bytes, payload: int, box_end: int) -> float | No
                 continue
             scale = struct.unpack_from(">I", data, offset)[0]
         elif kind == b"minf":
-            for child, _, child_start, child_end in _boxes(data, start, end):
+            for child, _, child_start, child_end in iter_mp4_boxes(data, start, end):
                 if child != b"stbl":
                     continue
-                for table, _, table_start, table_end in _boxes(data, child_start, child_end):
+                for table, _, table_start, table_end in iter_mp4_boxes(data, child_start, child_end):
                     if table != b"stts" or table_start + 8 > table_end:
                         continue
                     count = struct.unpack_from(">I", data, table_start + 4)[0]
@@ -307,13 +291,13 @@ def _cached_playback_metadata(path_value: str, modified_ns: int, size: int) -> t
         return "", None
     descriptors: list[bytes] = []
     video_duration = None
-    for box_type, _, payload, box_end in _boxes(moov):
+    for box_type, _, payload, box_end in iter_mp4_boxes(moov):
         if box_type != b"moov":
             continue
-        for child_type, _, child_payload, child_end in _boxes(moov, payload, box_end):
+        for child_type, _, child_payload, child_end in iter_mp4_boxes(moov, payload, box_end):
             if child_type != b"trak":
                 continue
-            for trak_type, _, trak_payload, trak_end in _boxes(moov, child_payload, child_end):
+            for trak_type, _, trak_payload, trak_end in iter_mp4_boxes(moov, child_payload, child_end):
                 if trak_type != b"mdia":
                     continue
                 if video_duration is None:
@@ -353,10 +337,10 @@ def _cached_mp4_video_dimensions(
     moov = _read_mp4_box(Path(path_value), b"moov")
     if not moov:
         return None
-    for box_type, _, payload, box_end in _boxes(moov):
+    for box_type, _, payload, box_end in iter_mp4_boxes(moov):
         if box_type != b"moov":
             continue
-        for child_type, _, child_payload, child_end in _boxes(moov, payload, box_end):
+        for child_type, _, child_payload, child_end in iter_mp4_boxes(moov, payload, box_end):
             if child_type != b"trak":
                 continue
             dimensions = _track_video_dimensions(moov, child_payload, child_end)

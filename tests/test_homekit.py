@@ -8,7 +8,7 @@ import subprocess
 import tarfile
 import time
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -31,6 +31,73 @@ def configuration(tmp_path):
     ])
 
 
+@pytest.mark.parametrize(
+    ("remote", "ready_at", "expected_motion_calls", "terminated_at"),
+    [(False, 6, 1, 9), (False, None, 0, 120), (True, None, 0, 3)],
+    ids=["slow-start-then-unhealthy", "local-grace-expires", "remote-restarts-promptly"],
+)
+def test_worker_control_startup_and_health_deadlines(
+    tmp_path, monkeypatch, remote, ready_at, expected_motion_calls, terminated_at,
+):
+    from survng.app import homekit
+
+    config = configuration(tmp_path)
+    service = HomeKitService(config, MediaSessionManager(), "test-generation", lambda _: True)
+    worker = CameraWorker(service, config, config.cameras[0])
+    if remote:
+        monkeypatch.setattr(service.nodes, "decision", lambda *_: "remote")
+        monkeypatch.setattr(service.nodes, "remote_for", lambda *_: {
+            "feeds": str(tmp_path / "feed"), "profile": {}, "encoding": {},
+        })
+    elapsed = 0
+    stops = []
+
+    def poll_pipe(*_args):
+        nonlocal elapsed
+        elapsed += 1
+        return [], [], []
+
+    def control(_path, method, _params=None):
+        if method == "status":
+            if elapsed != ready_at:
+                raise ConnectionRefusedError
+            return {"homeKitActive": True, "paired": False}
+        assert method == "motion"
+        assert elapsed == ready_at
+
+    def terminate():
+        if worker.process is not None:
+            stops.append(elapsed)
+            worker.process = None
+
+    monkeypatch.setattr(homekit.homekit_build, "verified_release", lambda: (tmp_path, None))
+    monkeypatch.setattr(homekit, "time", SimpleNamespace(monotonic=lambda: elapsed))
+    monkeypatch.setattr(homekit, "select", SimpleNamespace(select=poll_pipe))
+    # Keep preflight isolated from the host LAN address and installed tools.
+    monkeypatch.setattr(homekit, "socket", SimpleNamespace(
+        AF_INET=socket.AF_INET, SOCK_DGRAM=socket.SOCK_DGRAM, socket=MagicMock(),
+    ))
+    monkeypatch.setattr(homekit, "subprocess", SimpleNamespace(
+        run=Mock(side_effect=[
+            SimpleNamespace(stdout=b"v24.0.0"),
+            SimpleNamespace(stdout=b"libopus aac mjpeg"),
+        ]),
+        Popen=Mock(return_value=SimpleNamespace(stdin=io.BytesIO(), stdout=object(), poll=lambda: None)),
+        PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL, SubprocessError=subprocess.SubprocessError,
+    ))
+    mocked_control = Mock(side_effect=control)
+    monkeypatch.setattr(homekit, "control", mocked_control)
+    monkeypatch.setattr(worker, "_terminate", terminate)
+    monkeypatch.setattr(worker.stopping, "wait", lambda _delay: worker.stopping.set())
+    try:
+        worker._run()
+    finally:
+        service.nodes.close()
+
+    assert [call.args[1] for call in mocked_control.call_args_list].count("motion") == expected_motion_calls
+    assert stops == [terminated_at]
+
+
 def test_homekit_defaults_validation_and_stable_ports(tmp_path):
     assert not AppConfig().homekit.enabled
     assert not CameraHomeKitConfig().enabled
@@ -46,6 +113,30 @@ def test_homekit_defaults_validation_and_stable_ports(tmp_path):
     config.cameras[1].homekit.port = camera_port(config.cameras[0])
     with pytest.raises(ValidationError, match="different ports"):
         AppConfig.model_validate(config.model_dump())
+
+
+def test_worker_status_is_read_only_and_admin_can_retry(tmp_path, monkeypatch):
+    from survng.app import homekit_build
+
+    config = configuration(tmp_path)
+    service = HomeKitService(config, MediaSessionManager(), "generation", lambda _: True)
+    ensure = Mock(return_value=True)
+    monkeypatch.setattr(service.builder, "ensure", ensure)
+    monkeypatch.setattr(homekit_build, "verify", lambda: homekit_build.STALE)
+    assert service.status()["workerBuild"] == homekit_build.STALE
+    ensure.assert_not_called()
+
+    router = create_homekit_router(HomeKitRouteDependencies(get_manager=lambda: SimpleNamespace(homekit=service)))
+    path = "/api/homekit/worker/rebuild"
+    assert required_api_scope("POST", path) == "admin"
+    assert not is_public_api_path("POST", path)
+    retry = next(route.endpoint for route in router.routes if route.path == path)
+    response = Response()
+    result = retry(response)
+    assert result["requested"] is True
+    assert result["job"] == service.builder.status()
+    ensure.assert_called_once_with(config.homekit.node_path, force=True)
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_motion_is_opt_in_recent_object_evidence_and_expires(tmp_path):
@@ -203,6 +294,8 @@ def test_encoder_enrollment_is_one_time_and_keeps_secrets_off_status(tmp_path):
         assert f"TOKEN='{token}'" in script
         assert "linux-${node_arch}" in script
         assert "SURVNG_FFMPEG=%s" in script and "/opt/survng-homekit-node/bin/ffmpeg" in script
+        assert 'agent_checksum=$(sha256sum "$work/survng-homekit-agent.tgz")' in script
+        assert 'agent: process.argv[1]' in script and '\' "$agent_checksum"' in script
         assert "/api/homekit/nodes/ffmpeg" in script
         assert "apt-get install -y --no-install-recommends ca-certificates curl ffmpeg" not in script
         assert "private-password" not in script and "rtsp://" not in script

@@ -12,6 +12,7 @@ from fastapi import HTTPException
 
 from survng.app import main
 from survng.app.incident_presenter import _event_row, _incident_row, _recording_grid_incident_payload
+from survng.app.recording_mp4 import offset_fmp4_timestamps
 from survng.app.recording_routes import (
     MediaExportBatchRequest,
     MediaExportMetadataRequest,
@@ -43,7 +44,7 @@ class RecordingApiTest(unittest.TestCase):
             init_path.write_bytes(init_data)
             media_path.write_bytes(media_data)
 
-            main._recording_media_runtime._offset_fmp4_timestamps(init_path, media_path, 2.0)
+            offset_fmp4_timestamps(init_path, media_path, 2.0)
             updated = media_path.read_bytes()
 
         tfdt_position = updated.index(b"tfdt") + 8

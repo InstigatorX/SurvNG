@@ -26,16 +26,16 @@ From this directory:
 
 ```sh
 python3 scripts/bootstrap.py
-npm test
-HKSV_MEDIA_TESTS=1 npm test
+npm --prefix .releases/current test
+HKSV_MEDIA_TESTS=1 npm --prefix .releases/current test
 ```
 
 If the host has another Node version, use an isolated Node 24 runtime:
 
 ```sh
 npm exec --yes --package=node@24 -- python3 scripts/bootstrap.py
-npm exec --yes --package=node@24 -- npm test
-HKSV_MEDIA_TESTS=1 npm exec --yes --package=node@24 -- npm test
+npm exec --yes --package=node@24 -- npm --prefix .releases/current test
+HKSV_MEDIA_TESTS=1 npm exec --yes --package=node@24 -- npm --prefix .releases/current test
 ```
 
 Bootstrap verifies the upstream archive SHA-256, installs upstream build tools
@@ -52,7 +52,7 @@ After building the pinned dependencies, open **Admin → HomeKit** under
 Integrations. Set the server's LAN IPv4 address and the service account's Node.js
 24 executable path. Enable the HomeKit service, select cameras, opt into software
 HEVC encoding, and save. The worker reports missing build/runtime/encoder
-requirements in the same panel; startup never downloads packages.
+requirements in the same panel.
 
 Choose the main or live camera source and enable camera audio only when that
 source has audio. Use **Pair with Apple Home** to reveal the setup code and QR.
@@ -76,6 +76,27 @@ JPEG admission. Resource exhaustion fails visibly rather than bypassing limits.
 HomeKit Off closes its pipelines and clears its ring without changing SurvNG's
 own recording or detection settings. Talkback remains unavailable.
 
+Remote encoder media uploads carry the current camera assignment revision.
+The native SurvNG updaters (Admin and `scripts/update-from-git.sh`) rebuild
+this worker when the installation has built it before. Each release contains
+the compiled program, locked packages, and encoder archive. The builder
+verifies the release against the checkout before replacing `.releases/current`
+in one operation. Launches and encoder updates require a matching release.
+A failed build leaves the previous release in place. Published releases stay
+on disk because a running worker may still be using an older directory.
+
+With HomeKit enabled or encoders enrolled, the server can start a build in the
+background if the release is missing or stale at startup. Admin shows progress
+and errors. **Admin → HomeKit → Retry build** or **Rebuild HomeKit worker** in
+the product updater can start a rebuild immediately. Set
+`SURVNG_HOMEKIT_AUTO_BUILD=0` to leave builds to the native updaters and the
+manual command `python -m survng.app.homekit_build`, run from the SurvNG
+checkout as the SurvNG service account on a native install.
+
+Older agents can still sync and receive the agent update. Media uploads
+require the current assignment revision, so remote media may pause briefly
+during the update.
+
 ## Run the synthetic camera
 
 Choose an absolute directory owned by the account running the lab, mode 0700.
@@ -83,7 +104,7 @@ Keep it for pairing persistence. Choose the host IPv4 address on the same LAN as
 the Apple TV and iPhone. Use a free HAP port (default 51826).
 
 ```sh
-node dist/src/lab.js \
+node .releases/current/dist/src/lab.js \
   --state-dir /absolute/private/homekit-lab \
   --bind YOUR_LAN_IPV4 \
   --allow-synthetic-encoding

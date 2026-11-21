@@ -8,49 +8,71 @@ proportionate investigation, focused changes, and meaningful validation.
 
 ## Execution and model policy
 
-### One agent by default
+The primary agent owns the outcome, chooses the workflow, verifies delegated
+evidence, and integrates the result.
 
-- The primary agent owns the task end to end: investigation, design,
-  implementation, testing, and final review.
-- Use the user's selected model for all of that work, including routine
-  searches, mechanical edits, Git inspection, and known test runs.
-- Do not spawn subagents or delegate work unless the user explicitly requests
-  delegation or parallel agent work for the current task.
-- Do not ask about delegation for routine work. Continue directly.
-- Task size, complexity, or the availability of cheaper models does not by
-  itself authorize delegation.
-- Do not use a fixed orchestrator/worker topology, model-role matrix, or
-  automatic model-escalation ladder.
-- Independent tool calls may run concurrently when useful and safe. This
-  does not require additional agents.
+### Adaptive Model Routing and Reasoning Effort
 
-### Respect the user's settings
+Before execution, classify each task by complexity, risk, and the evidence
+needed to verify it. Apply the same judgment to bounded subtasks.
 
-- Honor explicit model and reasoning-effort instructions. Do not silently
-  substitute another model, reduce the selected model to a coordinator, or
-  change settings to pursue speculative cost savings.
-- This file defines working behavior; it does not select a model, change
-  reasoning settings, install agents, or override platform permissions.
-- Use only capabilities actually available in the current environment.
-  Never claim a model or reasoning setting was used unless verifiable.
-- If a specifically requested model is unavailable, disclose that limitation
-  and continue useful preparation within the user's authorized scope.
+| Tier | Typical work | Preferred model and reasoning effort | Delegation and review |
+| --- | --- | --- | --- |
+| 1 · Lightweight | File discovery, code searches, documentation, simple refactoring | Fast, economical model · `low` | Work directly unless independent parallel work provides clear value. |
+| 2 · Standard Engineering | Routine implementation, unit tests, dependency tracing, ordinary bug fixes | Capable coding model · `medium` | Delegate independent tasks when beneficial. |
+| 3 · Complex Engineering | Intermittent failures, concurrency, streaming, networking, state management, architectural changes | Strongest available reasoning model · `high` | Use independent investigation and verification agents when supported. |
+| 4 · Critical Architecture and Validation | Cross-subsystem regressions, major architectural decisions, security-sensitive changes, difficult unresolved failures | Strongest available reasoning model · `high` or Extra High (`xhigh`) where supported | Require independent review and objective verification. |
 
-### When the user requests delegation
+Use the least expensive model and effort that meet the task's demands. Keep
+effort low for mechanical work and preserve verification rigor at every tier.
+Reassess the tier after two reasonable attempts fail, when root-cause hypotheses
+remain contradictory, when the issue spans architectural boundaries or affects
+concurrency, resource lifecycle, network protocols, or data integrity, or when
+tests pass but observed runtime behavior remains incorrect. Revisit assumptions
+and broaden the investigation where the evidence points before retrying.
+Escalate to a stronger model or higher effort when the evidence shows the current
+choice is insufficient.
 
-- Keep delegation limited to the requested scope and the smallest useful
-  number of agents. Parallel work should have independent, bounded outcomes.
-- Before spawning, briefly state each subtask and why delegation helps.
-  Honor any model, effort, or agent-count limits the user specified.
-- Give each agent only the context, evidence, ownership boundaries, and
-  completion criteria needed for its subtask.
-- Do not delegate the same investigation to multiple agents unless the user
-  requested independent assessments. Do not let agents recursively delegate
-  unless the user explicitly authorized that structure.
-- Do not run parallel write agents against the same files.
-- The primary agent remains responsible for integration and must inspect
-  consequential diffs and supporting evidence. A summary alone is insufficient.
-- Report the delegated scope and models actually used when verifiable.
+Honor the user's model and reasoning choices. Use the client's native model and
+effort selector where available, or session settings such as `model` and
+`model_reasoning_effort` in Codex configuration. For delegates, use supported
+spawn options or existing native custom agents, such as those configured in
+`.codex/agents/`. Prefer inheritance when it meets the assigned task and the
+user's choices. `AGENTS.md` guides routing decisions. Changing the active model
+or effort requires a supported runtime control. If a requested setting is
+unavailable or the current interface cannot change it, disclose the limitation
+before continuing with the available configuration. Claim a setting changed
+only when the runtime confirms it.
+
+### Delegation and integration
+
+Use the smallest useful team. Run tightly coupled work directly or sequentially
+when that is simpler. Delegate bounded research, implementation, testing, and
+review according to the tier and the session's permissions. If delegation is
+unavailable or restricted, run the same stages locally and report the limits
+of review independence. If Tier 4 independent review remains unavailable,
+report it as an outstanding requirement.
+
+- Give each delegate a question or deliverable, an exact baseline, scope and
+  permissions, owned paths, expected checks, and a reporting format.
+- Keep research and review read-only. Run independent work concurrently only
+  when inputs and outputs are independent. Keep one writer per path.
+- Prefer isolated worktrees for concurrent writes. If isolation is unavailable,
+  serialize writes in the current checkout and preserve existing user changes.
+- The primary agent reconciles findings, inspects changes and verifies the
+  integrated snapshot. Request independent review from someone who did not
+  implement the change. Repeat affected checks after substantive edits.
+- Subagents may delegate only when the user authorizes that structure.
+- Obtain explicit user approval before merging.
+
+### Workflow skills
+
+Use the repository skills under `.agents/skills/` as appropriate:
+
+- `survng-orchestration` for bounded delegation and integration.
+- `survng-research` for read-only investigations and design rationale.
+- `survng-architecture` for ownership, interfaces, lifecycle and design choices.
+- `survng-verification` for baseline evidence, regression checks and independent review.
 
 ## Context efficiency
 
@@ -149,7 +171,8 @@ For recording bugs:
 
 ## Testing
 
-Use the narrowest meaningful validation first:
+Define the observable pass condition before editing. Establish a baseline
+when practical, then use the narrowest meaningful validation first:
 
 1. Run directly affected tests.
 2. Run relevant lint/type checks if the changed area uses them.
@@ -158,6 +181,11 @@ Use the narrowest meaningful validation first:
 For a behavior-changing bug fix without suitable coverage, add a focused
 regression test when practical. Avoid tests that merely duplicate the
 implementation or add little protection for a cosmetic change.
+
+Use `scripts/verify-architecture.sh static` for the Codex guidance, CI test
+assignment, and dependency lock. Use its `lifecycle`, `recording`, or `media`
+suite when investigating those boundaries. Run the smallest individual test
+through `scripts/run-tests.sh` when it gives sufficient coverage.
 
 Once appropriate checks pass, do not repeat or expand them without new changes,
 failures, or unresolved concerns.
@@ -197,7 +225,7 @@ For a normal task:
 
 1. Identify the requested outcome.
 2. Inspect enough code to locate the real execution path.
-3. Make the smallest coherent change using the selected model directly.
+3. Make the smallest coherent change, delegating bounded work when appropriate.
 4. Validate proportionately.
 5. Report the result, supporting evidence, and remaining limitations concisely.
 
@@ -209,9 +237,10 @@ For difficult debugging:
 4. Implement the narrowest durable fix and add regression protection.
 5. Remove temporary debug code and report remaining uncertainty.
 
-If fixes repeatedly fail, revisit assumptions and broaden the investigation
-where evidence points. Do not automatically create more agents or pass the
-problem through model tiers.
+For substantive engineering tasks, report the root cause or implementation
+rationale, changes made, tests run and their results, and remaining
+uncertainties. Include the routing and delegation approach when observable.
+Report the actual model and reasoning effort only when verifiable.
 
 Do not turn a small request into an architecture review.
 Do not turn an architecture problem into a sequence of speculative one-line fixes.
