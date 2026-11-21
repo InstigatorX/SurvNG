@@ -127,6 +127,16 @@
   background: var(--panel-solid);
 }
 
+.rail-day-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+/* The player already carries the Main/Sub switch. */
+.rail-day-toolbar .recordings-v2-player-source { display: none; }
+
 .rail-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1034,9 +1044,28 @@
     width: 44px;
   }
 
+  .edge-rail-day {
+    position: absolute;
+    left: 0;
+    right: 0;
+    display: grid;
+    place-items: center;
+    height: 44px;
+    min-height: 44px;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel-soft);
+    color: var(--text);
+  }
+
+  .edge-rail-day.next { top: 0; }
+  .edge-rail-day.previous { bottom: 0; }
+  .edge-rail-day:disabled { opacity: 0.35; }
+
   .edge-rail-track {
     position: absolute;
-    inset: 0;
+    inset: 48px 0;
     overflow: hidden;
     border: 1px solid var(--line);
     border-radius: 12px;

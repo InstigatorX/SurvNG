@@ -2765,6 +2765,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   );
   const railControls = (
     <div className="rail-controls">
+      {/* Desktop day navigation; phones keep theirs in the command bar and on the edge rail. */}
+      <div className="recordings-v2-timeline-toolbar rail-day-toolbar">
+        <div className="recordings-toolbar-day-controls">{timelineDayControls()}</div>
+      </div>
       <div className="rail-actions">
         <div className="rail-selected">
           {selectedRailEvent ? <i className={railEventKind(selectedRailEvent)} aria-hidden="true" /> : null}
@@ -2841,6 +2845,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
       timeZone={timeZone}
       extraControls={railActionButtons}
+      onPreviousDay={() => changeDate(addDaysToDateKey(date, -1))}
+      onNextDay={date < today ? () => changeDate(addDaysToDateKey(date, 1)) : null}
     />
   ) : timelineLayout === "catchup" ? (
     <aside className="catchup-now" aria-label={storyCurrent ? "Now playing" : "Up next"}>

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { CarFront, ChevronsDown, Footprints, Radar, ScanSearch, UserRound } from "lucide-react";
+import { CarFront, ChevronDown, ChevronUp, ChevronsDown, Footprints, Radar, ScanSearch, UserRound } from "lucide-react";
 import { eventThumbnailUrl, recordingPreviewUrl } from "../shared/mediaUrls.js";
 import { formatDuration } from "../shared/format.js";
 import { useViewportQuery } from "../shared/hooks.js";
@@ -40,6 +40,7 @@ function useElementHeight(ref) {
 }
 
 const SCRUB_HOLD_MS = 3000;
+const TOUCH_STALE_MS = 4000;
 
 /**
  * Scroll-to-scrub along a vertical time axis, newest at the top. The playhead
@@ -58,7 +59,12 @@ export function useVerticalScrub({ topEpoch, bottomEpoch, spanSeconds, playhead,
   // Only scrolling while the user is interacting (touch, wheel, drag, keys or
   // the edge rail) scrubs; layout changes and playback-driven scrolling never seek.
   const intentUntilRef = useRef(0);
+  // A touch counts while its finger is down. touchend can be lost when the card
+  // under the finger unmounts mid-gesture, so a touch with no activity for
+  // TOUCH_STALE_MS is treated as ended rather than freezing the rail.
   const touchingRef = useRef(false);
+  const touchActivityRef = useRef(0);
+  const touchActive = useCallback(() => touchingRef.current && performance.now() - touchActivityRef.current < TOUCH_STALE_MS, []);
   const markIntent = useCallback((ms = 1200) => { intentUntilRef.current = Math.max(intentUntilRef.current, performance.now() + ms); }, []);
   const commitTimerRef = useRef(null);
   const holdTimerRef = useRef(null);
@@ -66,6 +72,8 @@ export function useVerticalScrub({ topEpoch, bottomEpoch, spanSeconds, playhead,
   // scrollTop this hook set itself; the scroll event it causes is not a scrub.
   const programmaticTopRef = useRef(null);
   const [holdReleased, setHoldReleased] = useState(0);
+  // The committed scrub time shown while playback catches up to it.
+  const [heldEpoch, setHeldEpoch] = useState(null);
   const onSeekRef = useRef(onSeek);
   onSeekRef.current = onSeek;
   const y = useCallback((epoch) => lineY + (topEpoch - epoch) * pps, [lineY, pps, topEpoch]);
@@ -73,18 +81,19 @@ export function useVerticalScrub({ topEpoch, bottomEpoch, spanSeconds, playhead,
 
   useLayoutEffect(() => {
     const element = scrollerRef.current;
-    if (!element || !pps || scrubEpoch !== null || touchingRef.current || !Number.isFinite(playhead)) return;
+    if (!element || !pps || scrubEpoch !== null || touchActive() || !Number.isFinite(playhead)) return;
     const pending = pendingRef.current;
     // Hold the committed scrub position until playback reports the new time;
     // a seek that snapped elsewhere is released by the hold timer.
     if (pending && Math.abs(playhead - pending.epoch) > 2 && Date.now() - pending.at < SCRUB_HOLD_MS) return;
     pendingRef.current = null;
+    setHeldEpoch(null);
     const target = Math.max(0, (topEpoch - clamp(playhead, bottomEpoch, topEpoch)) * pps);
     if (Math.abs(element.scrollTop - target) < 0.5) return;
     element.scrollTop = target;
     programmaticTopRef.current = element.scrollTop;
     setScrollTop(element.scrollTop);
-  }, [bottomEpoch, holdReleased, playhead, pps, scrubEpoch, topEpoch]);
+  }, [bottomEpoch, holdReleased, playhead, pps, scrubEpoch, topEpoch, touchActive]);
 
   useEffect(() => () => { window.clearTimeout(commitTimerRef.current); window.clearTimeout(holdTimerRef.current); }, []);
 
@@ -93,19 +102,21 @@ export function useVerticalScrub({ topEpoch, bottomEpoch, spanSeconds, playhead,
     setScrollTop(top);
     const programmatic = programmaticTopRef.current !== null && Math.abs(top - programmaticTopRef.current) < 1;
     programmaticTopRef.current = null;
-    if (programmatic || (!touchingRef.current && performance.now() > intentUntilRef.current)) return;
+    if (touchingRef.current && !programmatic) touchActivityRef.current = performance.now();
+    if (programmatic || (!touchActive() && performance.now() > intentUntilRef.current)) return;
     markIntent(400); // momentum keeps scrubbing until it settles
     const epoch = epochAtScroll(top);
     setScrubEpoch(epoch);
     window.clearTimeout(commitTimerRef.current);
     commitTimerRef.current = window.setTimeout(() => {
       pendingRef.current = { epoch, at: Date.now() };
+      setHeldEpoch(epoch);
       setScrubEpoch(null);
       onSeekRef.current?.(epoch);
       window.clearTimeout(holdTimerRef.current);
       holdTimerRef.current = window.setTimeout(() => setHoldReleased((count) => count + 1), SCRUB_HOLD_MS + 50);
     }, 180);
-  }, [epochAtScroll, markIntent]);
+  }, [epochAtScroll, markIntent, touchActive]);
 
   // An explicit jump (edge rail, keys) is a user scrub, so it is not marked programmatic.
   const scrollToEpoch = useCallback((epoch) => {
@@ -132,7 +143,8 @@ export function useVerticalScrub({ topEpoch, bottomEpoch, spanSeconds, playhead,
   // tracked by the touch events instead, so only the mouse drag ends here.
   const onPointerUp = useCallback(() => { dragRef.current = null; }, []);
   const onWheel = useCallback(() => markIntent(), [markIntent]);
-  const onTouchStart = useCallback(() => { touchingRef.current = true; }, []);
+  const onTouchStart = useCallback(() => { touchingRef.current = true; touchActivityRef.current = performance.now(); }, []);
+  const onTouchMove = useCallback(() => { touchActivityRef.current = performance.now(); }, []);
   const onTouchEnd = useCallback(() => {
     touchingRef.current = false;
     markIntent(600); // a released touch may still fling; momentum scroll events extend this
@@ -144,10 +156,12 @@ export function useVerticalScrub({ topEpoch, bottomEpoch, spanSeconds, playhead,
     return { start: Math.max(bottomEpoch, toEpoch(scrollTop + height * 2)), end: Math.min(topEpoch, toEpoch(scrollTop - height)) };
   }, [bottomEpoch, height, lineY, pps, scrollTop, topEpoch]);
 
-  const lineEpoch = scrubEpoch ?? (pps ? epochAtScroll(scrollTop) : playhead);
+  // The line reads the video's own time; scrollTop is whole (or half) pixels,
+  // which at an hour per screen is several seconds, so it is only the fallback.
+  const lineEpoch = scrubEpoch ?? heldEpoch ?? (Number.isFinite(playhead) ? clamp(playhead, bottomEpoch, topEpoch) : (pps ? epochAtScroll(scrollTop) : null));
   return {
     scrollerRef, height, pps, lineY, contentHeight, y, visible, scrubEpoch, lineEpoch, scrollToEpoch, scrollTop,
-    scrollerProps: { ref: scrollerRef, onScroll, onPointerDown, onPointerMove, onPointerUp, onPointerCancel: onPointerUp, onWheel, onTouchStart, onTouchEnd, onTouchCancel: onTouchEnd },
+    scrollerProps: { ref: scrollerRef, onScroll, onPointerDown, onPointerMove, onPointerUp, onPointerCancel: onPointerUp, onWheel, onTouchStart, onTouchMove, onTouchEnd, onTouchCancel: onTouchEnd },
   };
 }
 
@@ -171,6 +185,7 @@ function scrubKeyHandler(lineEpoch, spanSeconds, bottomEpoch, topEpoch, scrollTo
 export function EventRail({
   cameraId, source, dayStart, dayEnd, topEpoch, playhead, recordings, events, densityEvents,
   spanMinutes, onSpanChange, filter, onFilterChange, selectedEventId, onEventSelect, onSeek, timeZone, extraControls = null,
+  onPreviousDay = null, onNextDay = null,
 }) {
   const spanSeconds = spanMinutes * 60;
   const scrub = useVerticalScrub({ topEpoch, bottomEpoch: dayStart, spanSeconds, playhead, onSeek });
@@ -299,6 +314,8 @@ export function EventRail({
           playhead={lineEpoch}
           onSeek={scrub.scrollToEpoch}
           timeZone={timeZone}
+          onPreviousDay={onPreviousDay}
+          onNextDay={onNextDay}
         />
         <p className="event-rail-hint">Scroll or drag to scrub · newest at top</p>
       </div>
@@ -307,7 +324,7 @@ export function EventRail({
 }
 
 /** Option B: the 24 h activity strip with a scrubbing loupe. */
-export function EdgeRail({ cameraId, source, dayStart, dayEnd, topEpoch, events, recordings, windowStart, windowEnd, playhead, onSeek, timeZone }) {
+export function EdgeRail({ cameraId, source, dayStart, dayEnd, topEpoch, events, recordings, windowStart, windowEnd, playhead, onSeek, timeZone, onPreviousDay = null, onNextDay = null }) {
   const railRef = useRef(null);
   const [loupe, setLoupe] = useState(null);
   const [previewEpoch, setPreviewEpoch] = useState(null);
@@ -337,7 +354,8 @@ export function EdgeRail({ cameraId, source, dayStart, dayEnd, topEpoch, events,
       ? clamp(gesture.anchorEpoch - (event.clientY - gesture.anchorY) * 2, dayStart, Math.min(dayEnd, topEpoch))
       : epochAt(event.clientY);
     gesture.epoch = epoch;
-    setLoupe({ epoch, y: clamp(event.clientY - rect.top, 0, rect.height), fine: gesture.fine });
+    // The loupe is placed in the edge rail, whose track starts below the next-day button.
+    setLoupe({ epoch, y: railRef.current.offsetTop + clamp(event.clientY - rect.top, 0, rect.height), fine: gesture.fine });
   };
   const onPointerDown = (event) => {
     event.preventDefault();
@@ -361,6 +379,8 @@ export function EdgeRail({ cameraId, source, dayStart, dayEnd, topEpoch, events,
   const hours = [0, 6, 12, 18].map((hour) => dayStart + hour * 3600);
   return (
     <div className="edge-rail">
+      {/* Newest at the top, so the next day sits above the track and the previous one below. */}
+      <button type="button" className="edge-rail-day next" onClick={onNextDay || undefined} disabled={!onNextDay} aria-label="Next day"><ChevronUp size={16} aria-hidden="true" /></button>
       <div
         ref={railRef}
         className="edge-rail-track"
@@ -388,6 +408,7 @@ export function EdgeRail({ cameraId, source, dayStart, dayEnd, topEpoch, events,
         {hours.map((epoch) => <span key={epoch} className="edge-rail-hour" style={{ top: `${fraction(epoch) * 100}%` }}>{label.format(new Date(epoch * 1000)).replace(":00", "").replace(" ", "").toLowerCase().replace("m", "")}</span>)}
         <span className="edge-rail-window" style={{ top: `${fraction(windowEnd) * 100}%`, height: `${Math.max(1.5, ((windowEnd - windowStart) / span) * 100)}%` }} />
       </div>
+      <button type="button" className="edge-rail-day previous" onClick={onPreviousDay || undefined} disabled={!onPreviousDay} aria-label="Previous day"><ChevronDown size={16} aria-hidden="true" /></button>
       {loupe ? (
         <div className="edge-rail-loupe" style={{ top: loupe.y }} role="status">
           {cameraId && Number.isFinite(previewEpoch) ? <img src={recordingPreviewUrl(cameraId, previewEpoch, source, { width: 320 })} alt="" /> : <span className="edge-rail-loupe-blank" />}

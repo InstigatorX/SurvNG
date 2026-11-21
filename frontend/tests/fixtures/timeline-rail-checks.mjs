@@ -57,6 +57,7 @@ export async function checks({ open, shot, query, at, assert }) {
   assert.equal(await desktop.locator(".recordings-v2-track").count(), 0, "the rail replaces the horizontal track");
   const startAt = await playheadSeconds(desktop);
   assert.ok(Math.abs(startAt - 14.53 * 3600) < 30, `playback starts near 2:31 PM (${startAt})`);
+  assert.equal(await railSeconds(desktop), startAt, "the rail line shows the video's own time, not a pixel-rounded one");
   await scroller.hover();
   await desktop.mouse.wheel(0, 360);
   await waitPlayhead(desktop, (value) => value < startAt - 300, "scrolling down the rail seeks earlier");
@@ -65,7 +66,11 @@ export async function checks({ open, shot, query, at, assert }) {
   await desktop.waitForTimeout(1200);
   const settled = await railSeconds(desktop);
   assert.ok(settled >= afterWheel - 1 && settled - afterWheel < 5, `a committed scrub is not undone by stale playback time (${afterWheel} → ${settled})`);
-  assert.ok(Math.abs(settled - await playheadSeconds(desktop)) < 5, "the rail line matches playback after a scrub");
+  await desktop.waitForFunction(() => {
+    const rail = document.querySelector(".event-rail .event-rail-playhead span")?.textContent?.trim();
+    const hero = /(\d+:\d\d:\d\d)/.exec(document.querySelector(".recording-hero-controls time")?.textContent || "")?.[1];
+    return rail && rail === hero;
+  }, null, { timeout: 5000 }).catch(() => { throw new Error("the rail line matches playback after a scrub"); });
   await desktop.locator(".event-rail-card", { hasText: "Car" }).first().click();
   await waitParam(desktop, "event", "value !== null", "selecting a card selects its incident");
   await waitPlayhead(desktop, (value) => Math.abs(value - 14.13 * 3600) < 20, "a card seeks to its event");
@@ -123,6 +128,19 @@ export async function checks({ open, shot, query, at, assert }) {
   assert.deepEqual(lanes.errors, [], "lanes and catch-up interactions must not raise errors");
   await lanes.close();
 
+  // Desktop day navigation lives in the rail controls.
+  const days = await open({ width: 1440, height: 900 }, query);
+  await settle(days);
+  for (const name of ["Previous day", "Next day"]) assert.ok(await days.getByRole("button", { name, exact: true }).first().isVisible(), `${name} is visible on desktop`);
+  assert.ok(await days.getByRole("button", { name: "Today" }).isVisible(), "Today is visible on desktop");
+  assert.ok(await days.locator(".rail-day-toolbar .recordings-playback-rate select").isVisible(), "playback speed is visible on desktop");
+  await days.locator(".rail-day-toolbar").getByRole("button", { name: "Previous day" }).click();
+  await waitParam(days, "date", "value === '2026-09-08'", "Previous day changes the recording day");
+  await days.locator(".rail-day-toolbar").getByRole("button", { name: "Next day" }).click();
+  await waitParam(days, "date", "value === '2026-09-09'", "Next day changes the recording day");
+  assert.deepEqual(days.errors, [], "day navigation must not raise errors");
+  await days.close();
+
   // Classic layout remains available.
   const classic = await open({ width: 1440, height: 900 }, `${query}&view=classic`);
   await settle(classic);
@@ -136,6 +154,7 @@ export async function checks({ open, shot, query, at, assert }) {
   const track = mobile.locator(".edge-rail-track");
   const box = await track.boundingBox();
   assert.ok(box && box.height > 200, "the edge rail is tall enough to scrub");
+  assert.equal(await railSeconds(mobile), await playheadSeconds(mobile), "the phone rail line shows the video's own time");
   const before = await playheadSeconds(mobile);
   await mobile.mouse.move(box.x + box.width / 2, box.y + box.height * 0.3);
   await mobile.mouse.down();
@@ -145,6 +164,10 @@ export async function checks({ open, shot, query, at, assert }) {
   await mobile.mouse.up();
   assert.equal(await mobile.locator(".edge-rail-loupe").count(), 0, "the loupe closes on release");
   await waitPlayhead(mobile, (value) => Math.abs(value - before) > 600, "releasing the edge rail seeks");
+  await mobile.locator(".edge-rail").getByRole("button", { name: "Previous day" }).click();
+  await waitParam(mobile, "date", "value === '2026-09-08'", "the edge rail steps to the previous day");
+  await mobile.locator(".edge-rail").getByRole("button", { name: "Next day" }).click();
+  await waitParam(mobile, "date", "value === '2026-09-09'", "the edge rail steps to the next day");
   assert.deepEqual(mobile.errors, [], "mobile interactions must not raise errors");
   await mobile.close();
 }
