@@ -2,199 +2,19 @@
    the same component language without changing media ownership here. */
 .app-shell {
   display: grid;
-  grid-template-columns: var(--workspace-rail-width) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   min-height: 100dvh;
   height: auto;
   overflow: visible;
 }
 
-.workspace-sidebar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  display: flex;
-  grid-column: 1;
-  grid-row: 1 / 3;
-  flex-direction: column;
-  height: 100dvh;
-  border-right: 1px solid var(--line);
-  background: color-mix(in srgb, var(--topbar) 96%, var(--panel-solid));
-}
-
-.workspace-brand {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-height: var(--workspace-topbar-height);
-  border-bottom: 1px solid var(--line);
-  color: var(--ink);
-  padding: 10px 13px;
-  text-decoration: none;
-}
-
-.workspace-brand .brand-mark {
-  width: 36px;
-  height: 36px;
-  flex-basis: 36px;
-}
-
-.workspace-brand strong {
-  font-size: 20px;
-  letter-spacing: -0.025em;
-}
-
-.workspace-navigation {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 4px;
-  padding: 12px 9px;
-}
-
-.workspace-navigation a {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 44px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  color: var(--muted);
-  padding: 0 11px;
-  text-decoration: none;
-}
-
-.workspace-navigation a:hover {
-  border-color: var(--line);
-  background: var(--control);
-  color: var(--ink);
-}
-
-.workspace-navigation a.active {
-  border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
-  background: color-mix(in srgb, var(--accent) 12%, var(--control));
-  color: var(--active-ink);
-  box-shadow: inset 3px 0 0 var(--accent);
-}
-
-.workspace-navigation a:focus-visible,
 .mobile-workspace-nav a:focus-visible,
 .mobile-workspace-nav button:focus-visible,
 .mobile-more-panel a:focus-visible,
 .mobile-more-panel button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-}
-
-.workspace-navigation a:last-child {
-  margin-top: auto;
-}
-
-.workspace-help-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 44px;
-  margin: 0 8px;
-  padding: 10px 12px;
-  color: var(--muted);
-  text-decoration: none;
-  border-radius: var(--workspace-control-radius, 4px);
-}
-
-.workspace-help-link:hover {
-  color: var(--ink);
-  background: color-mix(in srgb, var(--ink) 6%, transparent);
-}
-
-.workspace-help-link:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.workspace-rail-toggle {
-  min-height: 48px;
-  justify-content: flex-start;
-  margin: 8px;
-  border-color: var(--line);
-  background: transparent;
-  color: var(--muted);
-  padding-inline: 12px;
-}
-
-.workspace-rail-toggle:hover {
-  color: var(--ink);
-}
-
-.workspace-account {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin: 0 8px 10px;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--workspace-control-radius);
-  color: var(--ink);
-}
-
-.workspace-account span {
-  display: grid;
-  min-width: 0;
-}
-
-.workspace-account strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.78rem;
-}
-
-.workspace-account small {
-  color: var(--muted);
-  font-size: 0.68rem;
-  text-transform: capitalize;
-}
-
-.workspace-account button {
-  flex: 0 0 auto;
-  width: 32px;
-  height: 32px;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-}
-
-.workspace-rail-collapsed .workspace-account span {
-  display: none;
-}
-
-.workspace-rail-collapsed .workspace-account {
-  justify-content: center;
-  padding: 6px;
-}
-
-.app-shell.workspace-rail-collapsed {
-  --workspace-rail-width: 68px;
-}
-
-.workspace-rail-collapsed .workspace-brand {
-  justify-content: center;
-  padding-inline: 8px;
-}
-
-.workspace-rail-collapsed .workspace-brand strong,
-.workspace-rail-collapsed .workspace-navigation a span,
-.workspace-rail-collapsed .workspace-help-link span,
-.workspace-rail-collapsed .workspace-rail-toggle span {
-  display: none;
-}
-
-.workspace-rail-collapsed .workspace-navigation a,
-.workspace-rail-collapsed .workspace-help-link,
-.workspace-rail-collapsed .workspace-rail-toggle {
-  justify-content: center;
-  padding-inline: 0;
 }
 
 .workspace-search-entry {
@@ -244,7 +64,7 @@
 }
 
 .app-shell>.topbar {
-  grid-column: 2;
+  grid-column: 1;
   grid-row: 1;
   min-height: var(--workspace-topbar-height);
   padding: 7px 14px;
@@ -287,7 +107,7 @@
 }
 
 .workspace-content {
-  grid-column: 2;
+  grid-column: 1;
   grid-row: 2;
   min-width: 0;
   min-height: 0;
@@ -317,34 +137,6 @@
 }
 
 @media (max-width: 960px) and (min-width: 761px) {
-  .app-shell {
-    grid-template-columns: 68px minmax(0, 1fr);
-  }
-
-  .workspace-brand {
-    justify-content: center;
-    padding-inline: 8px;
-  }
-
-  .workspace-brand strong,
-  .workspace-navigation a span {
-    display: none;
-  }
-
-  .workspace-navigation a {
-    justify-content: center;
-    padding: 0;
-  }
-
-  .workspace-rail-toggle {
-    justify-content: center;
-    padding-inline: 0;
-  }
-
-  .workspace-rail-toggle span {
-    display: none;
-  }
-
   .workspace-search-entry {
     width: min(280px, 35vw);
   }
@@ -359,10 +151,6 @@
     display: block;
     min-height: 100dvh;
     padding-bottom: calc(62px + var(--safe-area-bottom));
-  }
-
-  .workspace-sidebar {
-    display: none;
   }
 
   .app-shell>.topbar {
@@ -779,79 +567,236 @@ a:focus-visible {
 }
 
 .app-shell {
-  grid-template-columns: var(--workspace-rail-width) minmax(0, 1fr);
   grid-template-rows: 58px minmax(0, 1fr);
   background: var(--canvas);
 }
 
-.workspace-sidebar {
-  background: var(--topbar);
+/* Desktop top bar: brand, workspace links, search, system health, account.
+   Wide screens show every workspace; laptop widths keep the most used ones
+   inline and move the rest under More (see DESKTOP_COMPACT_WORKSPACES). */
+.topbar-brand .brand-mark {
+  width: 28px;
+  height: 28px;
+  flex-basis: 28px;
 }
 
-.workspace-brand {
-  min-height: 58px;
-  padding: 8px 17px;
-}
-
-.workspace-brand .brand-mark {
-  width: 30px;
-  height: 30px;
-  flex-basis: 30px;
-}
-
-.workspace-brand strong {
-  font-size: 21px;
+.topbar-brand strong {
+  font-size: 17px;
   font-weight: 690;
-  letter-spacing: -.025em;
+  letter-spacing: -.02em;
 }
 
-.workspace-navigation {
-  gap: 0;
-  padding: 12px 0;
+.topbar-navigation {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 2px;
 }
 
-.workspace-navigation a {
-  min-height: 58px;
-  gap: 14px;
-  border: 0;
-  border-left: 4px solid transparent;
-  border-radius: 0;
-  padding: 0 23px;
-  color: color-mix(in srgb, var(--ink) 78%, var(--muted));
-  font-size: 14px;
-  font-weight: 520;
+.topbar-navigation > a,
+.topbar-menu-button {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: color-mix(in srgb, var(--ink) 80%, var(--muted));
+  font: inherit;
+  font-size: 13px;
+  font-weight: 540;
+  padding: 0 10px;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
-.workspace-navigation a:hover {
-  border-color: transparent;
-  background: color-mix(in srgb, var(--control) 62%, transparent);
-}
-
-.workspace-navigation a.active {
-  border-color: var(--accent);
-  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 24%, transparent), color-mix(in srgb, var(--accent) 9%, transparent));
+.topbar-navigation > a:hover,
+.topbar-menu-button:hover,
+.topbar-menu-button[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--control) 80%, transparent);
   color: var(--ink);
-  box-shadow: none;
 }
 
-@media (max-width: 960px) and (min-width: 761px) {
-  .app-shell {
-    grid-template-columns: 68px minmax(0, 1fr);
+.topbar-navigation > a.active {
+  background: var(--active);
+  color: var(--active-ink);
+}
+
+.topbar-navigation > a:focus-visible,
+.topbar-menu-button:focus-visible,
+.topbar-menu-panel > a:focus-visible,
+.topbar-menu-panel > button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.topbar-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.topbar-more {
+  display: none;
+}
+
+.topbar-account .topbar-menu-button {
+  justify-content: center;
+  min-width: 36px;
+  border-color: var(--line);
+  background: var(--control);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 0 8px;
+}
+
+.topbar-menu-panel {
+  position: absolute;
+  z-index: 100;
+  top: calc(100% + 6px);
+  left: 0;
+  display: grid;
+  min-width: 200px;
+  gap: 2px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel-solid);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 28%);
+  padding: 6px;
+}
+
+.topbar-account .topbar-menu-panel {
+  right: 0;
+  left: auto;
+}
+
+.topbar-menu-panel > a,
+.topbar-menu-panel > button {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  padding: 0 10px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.topbar-menu-panel > a:hover,
+.topbar-menu-panel > button:hover {
+  background: var(--control-muted);
+}
+
+.topbar-account-identity {
+  display: grid;
+  gap: 1px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+  padding: 6px 10px 10px;
+}
+
+.topbar-account-identity strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-account-identity small {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: capitalize;
+}
+
+@media (min-width: 761px) {
+  .app-shell>.topbar {
+    justify-content: flex-start;
+    gap: 14px;
   }
 
-  .workspace-brand {
-    justify-content: center;
-    padding-inline: 8px;
+  .topbar-brand {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 8px;
   }
 
-  .workspace-brand strong,
-  .workspace-navigation a span {
+  .workspace-search-entry {
+    flex: 0 1 auto;
+    width: clamp(150px, 15vw, 260px);
+    min-width: 0;
+    margin-left: auto;
+  }
+
+  .workspace-system-bar {
+    flex: 0 0 auto;
+  }
+}
+
+@media (min-width: 761px) and (max-width: 1359px) {
+  .topbar-navigation > a.topbar-overflow-link {
     display: none;
   }
 
-  .workspace-navigation a {
-    justify-content: center;
-    padding-inline: 0;
+  .topbar-more {
+    display: block;
+  }
+
+  .workspace-search-entry {
+    width: clamp(130px, 13vw, 190px);
+  }
+}
+
+@media (min-width: 761px) and (max-width: 1100px) {
+  .topbar-brand strong {
+    display: none;
+  }
+}
+
+@media (min-width: 761px) and (max-width: 960px) {
+  /* header.topbar outranks the unconditional top bar padding declared later in this file. */
+  .app-shell>header.topbar {
+    gap: 8px;
+    padding-inline: 12px;
+  }
+
+  .topbar-navigation > a,
+  .topbar-menu-button {
+    padding: 0 7px;
+  }
+
+  .workspace-search-entry {
+    width: auto;
+    min-width: 38px;
+    flex: 1 1 60px;
+  }
+
+  .workspace-search-entry {
+    gap: 4px;
+    padding: 0 10px;
+  }
+
+  .workspace-search-entry svg {
+    flex: 0 0 auto;
+  }
+
+  .workspace-search-entry kbd {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .topbar-navigation,
+  .topbar-account {
+    display: none;
   }
 }
 

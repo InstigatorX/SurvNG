@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   CircleHelp,
@@ -9,8 +9,8 @@ import {
   Gauge,
   Search,
   LogOut,
-  PanelLeftClose,
-  PanelLeftOpen,
+  ChevronDown,
+  UserRound,
   Siren,
   Sun,
   Users,
@@ -18,9 +18,9 @@ import {
   Video,
   X,
 } from "lucide-react";
-import { DESKTOP_PRIMARY_WORKSPACES, MOBILE_PRIMARY_WORKSPACES, workspaceDefinition, workspaceHref } from "../workspaceNavigation.mjs";
+import { compactDesktopNavigation, DESKTOP_PRIMARY_WORKSPACES, MOBILE_PRIMARY_WORKSPACES, workspaceDefinition, workspaceHref } from "../workspaceNavigation.mjs";
 import { appUrl, recordingsHref } from "../shared/api.js";
-import { useStoredState, useModalFocus } from "../shared/hooks.js";
+import { useModalFocus } from "../shared/hooks.js";
 import { RecordingHealthBar } from "./RecordingHealthBar.jsx";
 
 export const WORKSPACE_ICONS = Object.freeze({
@@ -53,6 +53,63 @@ export function MobileMoreSheet({ links, page, session = null, onClose }) {
     </div>
   ), document.body);
 }
+export function accountInitialsFor(name = "") {
+  const words = String(name || "").trim().split(/[\s._-]+/).filter(Boolean);
+  if (!words.length) return "";
+  const first = Array.from(words[0]);
+  const letters = words.length > 1 ? first[0] + Array.from(words[1])[0] : first.slice(0, 2).join("");
+  return letters.toUpperCase();
+}
+
+/** Small disclosure menu for the top bar (More workspaces, account). Closes on outside click, Escape and selection. */
+function TopbarMenu({ className, label, buttonLabel = undefined, menuLabel, children }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const buttonRef = useRef(null);
+  const menuId = useId();
+  useEffect(() => {
+    if (!open) return undefined;
+    function closeForOutside(event) {
+      if (!rootRef.current?.contains(event.target)) setOpen(false);
+    }
+    function closeForEscape(event) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setOpen(false);
+      buttonRef.current?.focus();
+    }
+    document.addEventListener("pointerdown", closeForOutside);
+    document.addEventListener("keydown", closeForEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeForOutside);
+      document.removeEventListener("keydown", closeForEscape);
+    };
+  }, [open]);
+  useEffect(() => {
+    if (open) rootRef.current?.querySelector("[role=menuitem]")?.focus();
+  }, [open]);
+  function moveFocus(event) {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const items = [...(rootRef.current?.querySelectorAll("[role=menuitem]") || [])];
+    if (!items.length) return;
+    event.preventDefault();
+    const current = items.indexOf(document.activeElement);
+    const next = event.key === "Home" ? 0
+      : event.key === "End" ? items.length - 1
+        : (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+    items[next].focus();
+  }
+  return (
+    <div ref={rootRef} className={`topbar-menu ${className}`} onBlur={(event) => { if (open && event.relatedTarget && !rootRef.current?.contains(event.relatedTarget)) setOpen(false); }}>
+      <button ref={buttonRef} type="button" className="topbar-menu-button" aria-haspopup="menu" aria-expanded={open} aria-controls={menuId} aria-label={buttonLabel} onClick={() => setOpen((value) => !value)}>
+        {label ? <span>{label}</span> : <UserRound size={17} aria-hidden="true" />}
+        {className.includes("topbar-more") ? <ChevronDown size={14} aria-hidden="true" /> : null}
+      </button>
+      {open ? <div id={menuId} className="topbar-menu-panel" role="menu" aria-label={menuLabel} onKeyDown={moveFocus} onClick={(event) => { if (event.target.closest("[role=menuitem]")) setOpen(false); }}>{children}</div> : null}
+    </div>
+  );
+}
+
 export function Shell({ page, theme, recordingContext, session = null, onSignOut = null, children }) {
   const shellRef = useRef(null);
   const topbarRef = useRef(null);
@@ -61,8 +118,6 @@ export function Shell({ page, theme, recordingContext, session = null, onSignOut
   const headerSearchRef = useRef(null);
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const [headerSearchQuery, setHeaderSearchQuery] = useState("");
-  const [railCollapsedValue, setRailCollapsedValue] = useStoredState("survng.workspaceRailCollapsed.v1", "false");
-  const railCollapsed = railCollapsedValue === "true";
   const workspaceLink = (id) => {
     const definition = workspaceDefinition(id);
     return [
@@ -76,6 +131,10 @@ export function Shell({ page, theme, recordingContext, session = null, onSignOut
   const mobileLinks = MOBILE_PRIMARY_WORKSPACES.filter((id) => id !== "more").map(workspaceLink);
   const mobilePrimaryIds = new Set(MOBILE_PRIMARY_WORKSPACES.filter((id) => id !== "more"));
   const moreLinks = workspaceLinks.filter(([id]) => !mobilePrimaryIds.has(id));
+  const compactNavigation = compactDesktopNavigation(workspaceLinks.map(([id]) => id), page);
+  const compactInlineIds = new Set(compactNavigation.inline);
+  const accountName = session?.user?.display_name || session?.user?.username || "";
+  const accountInitials = accountInitialsFor(accountName);
 
   useEffect(() => {
     const label = workspaceDefinition(page)?.label || "SurvNG";
@@ -123,29 +182,10 @@ export function Shell({ page, theme, recordingContext, session = null, onSignOut
     };
   }, []);
   return (
-    <div ref={shellRef} className={`app-shell page-${page}${railCollapsed ? " workspace-rail-collapsed" : ""}`}>
+    <div ref={shellRef} className={`app-shell page-${page}`}>
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <aside className="workspace-sidebar" aria-label="SurvNG navigation">
-        <a className="workspace-brand" href={appUrl("/")} aria-label="SurvNG Live">
-          <span className="brand-mark"><img src={appUrl("/static/favicon.svg")} alt="" aria-hidden="true" /></span>
-          <strong>SurvNG</strong>
-        </a>
-        <nav className="workspace-navigation" aria-label="Primary">
-          {workspaceLinks.map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} aria-label={label} title={label} href={href} key={id}><Icon size={19} /><span>{label}</span></a>)}
-        </nav>
-        <a className="workspace-help-link" href={appUrl("/help")} aria-label="Help" title="Help"><CircleHelp size={19} /><span>Help</span></a>
-        <button type="button" className="workspace-rail-toggle" onClick={() => setRailCollapsedValue(railCollapsed ? "false" : "true")} aria-label={railCollapsed ? "Expand navigation" : "Collapse navigation"} title={railCollapsed ? "Expand navigation" : "Collapse navigation"}>
-          {railCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}<span>{railCollapsed ? "Expand" : "Collapse"}</span>
-        </button>
-        {session?.user ? (
-          <div className="workspace-account">
-            <span><strong>{session.user.display_name || session.user.username}</strong><small>{session.user.role}</small></span>
-            {onSignOut ? <button type="button" onClick={onSignOut} aria-label="Sign out" title="Sign out"><LogOut size={16} /></button> : null}
-          </div>
-        ) : null}
-      </aside>
       <header ref={topbarRef} className="topbar">
-        <a className="brand-block mobile-brand-block" href={appUrl("/")} aria-label="SurvNG Live">
+        <a className="brand-block mobile-brand-block topbar-brand" href={appUrl("/")} aria-label="SurvNG Live">
           <div className="brand-mark">
             <img src={appUrl("/static/favicon.svg")} alt="" aria-hidden="true" />
           </div>
@@ -153,12 +193,28 @@ export function Shell({ page, theme, recordingContext, session = null, onSignOut
             <strong>SurvNG</strong>
           </div>
         </a>
+        <nav className="topbar-navigation" aria-label="Primary">
+          {workspaceLinks.map(([id, label, href]) => <a className={`${page === id ? "active" : ""}${compactInlineIds.has(id) ? "" : " topbar-overflow-link"}`.trim() || undefined} aria-current={page === id ? "page" : undefined} href={href} key={id}>{label}</a>)}
+          {compactNavigation.overflow.length ? (
+            <TopbarMenu className="topbar-more" label="More" menuLabel="More workspaces">
+              {compactNavigation.overflow.map((id) => {
+                const [, label, href] = workspaceLink(id);
+                return <a role="menuitem" href={href} key={id}>{label}</a>;
+              })}
+            </TopbarMenu>
+          ) : null}
+        </nav>
         <form className="workspace-search-entry" onSubmit={submitHeaderSearch} role="search">
           <Search size={16} aria-hidden="true" />
           <input ref={headerSearchRef} value={headerSearchQuery} onChange={(event) => setHeaderSearchQuery(event.target.value)} placeholder="Search incidents..." aria-label="Search incidents semantically" />
           <kbd>/</kbd>
         </form>
         <div className="workspace-system-bar" aria-label="System status"><RecordingHealthBar /></div>
+        <TopbarMenu className="topbar-account" label={accountInitials} buttonLabel={session?.user ? `Account: ${accountName}` : "Account and help"} menuLabel="Account">
+          {session?.user ? <div className="topbar-account-identity" role="none"><strong>{accountName}</strong><small>{session.user.role}</small></div> : null}
+          <a role="menuitem" href={appUrl("/help")}><CircleHelp size={16} aria-hidden="true" /><span>Help</span></a>
+          {session?.user && onSignOut ? <button type="button" role="menuitem" onClick={onSignOut}><LogOut size={16} aria-hidden="true" /><span>Sign out</span></button> : null}
+        </TopbarMenu>
       </header>
       <div id="main-content" className="workspace-content" tabIndex={-1}>
         <h1 ref={workspaceHeadingRef} className="sr-only" tabIndex={-1}>SurvNG — {workspaceDefinition(page)?.label || "Workspace"}</h1>

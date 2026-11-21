@@ -176,14 +176,12 @@ async function assertShellStacking(page, viewportName) {
     });
     assert.deepEqual(fingerprint, { position: "fixed", zIndex: "60", overflowX: "visible", overflowY: "visible" });
   } else {
-    const sidebar = page.locator(".workspace-sidebar");
-    assert.equal(await sidebar.isVisible(), true);
-    const fingerprint = await sidebar.evaluate((node) => {
+    assert.equal(await page.locator(".topbar-navigation").isVisible(), true);
+    const fingerprint = await page.locator(".app-shell > .topbar").evaluate((node) => {
       const style = getComputedStyle(node);
-      return { position: style.position, zIndex: style.zIndex, overflowX: style.overflowX, overflowY: style.overflowY };
+      return { position: style.position, top: style.top };
     });
-    assert.equal(fingerprint.position, "sticky");
-    assert.equal(fingerprint.zIndex, "20");
+    assert.deepEqual(fingerprint, { position: "sticky", top: "0px" });
   }
 }
 

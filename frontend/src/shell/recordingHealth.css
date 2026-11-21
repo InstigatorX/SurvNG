@@ -6,7 +6,7 @@
   min-width: 0;
   color: var(--muted);
 }
-.app-shell > .topbar:has(.recording-health-popover, .recording-health-tooltip) {
+.app-shell > .topbar:has(.recording-health-popover, .recording-health-tooltip, .topbar-menu-panel) {
   z-index: 20;
 }
 .recording-health-item, .recording-health-expand {
@@ -174,9 +174,6 @@
   }
 }
 
-@media (min-width: 761px) and (max-width: 1050px) {
-  .recording-health-item:nth-of-type(3) { display: none; }
-}
 
 .recording-health-item:focus-visible {
   outline: 2px solid var(--accent);
@@ -209,4 +206,63 @@
 .recording-health-resources > span { display: flex; justify-content: space-between; gap: 10px; }
 @media (max-width: 760px) {
   .recording-health-tooltip { position: fixed; top: var(--topbar-height, 56px); right: 8px; }
+}
+
+/* Desktop top bar: one compact status pill (recording · storage), the
+   attention summary only on very wide screens, and an icon-only details toggle. */
+@media (min-width: 761px) {
+  .recording-health {
+    gap: 0;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--control);
+  }
+  .recording-health-item, .recording-health-expand {
+    min-height: 34px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    padding: 0 9px;
+  }
+  .recording-health-item + .recording-health-item {
+    border-left: 1px solid var(--line);
+  }
+  .recording-health-expand {
+    border-left: 1px solid var(--line);
+    font-size: 0;
+    padding: 0 7px;
+  }
+  .recording-health-expand svg { width: 15px; height: 15px; }
+}
+
+/* Only quiet, healthy states are dropped to save space; warnings stay visible. */
+@media (min-width: 761px) and (max-width: 1599px) {
+  .recording-health-item.healthy:nth-of-type(3) { display: none; }
+}
+
+@media (min-width: 761px) and (max-width: 1023px) {
+  .recording-health-item:nth-of-type(2):not(.warning, .critical) { display: none; }
+}
+
+/* Narrow desktop: warning pills keep their colored icon; the label stays available to screen readers and the tooltip. */
+@media (min-width: 761px) and (max-width: 1100px) {
+  .recording-health-item:nth-of-type(3) strong {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}
+
+@media (min-width: 761px) and (max-width: 960px) {
+  .recording-health-item:nth-of-type(2) strong {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
 }
