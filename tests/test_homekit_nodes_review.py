@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 from fastapi import HTTPException, Request, Response
 from pydantic import ValidationError
+from starlette.requests import ClientDisconnect
 
 from survng.app import homekit_nodes
 from survng.app.homekit import HomeKitService
@@ -44,12 +45,25 @@ def request(secret, chunks, before=None, headers=()):
         (b"x-survng-tier", b"1"), *headers]}, receive)
 
 
-def test_assigned_encoder_cannot_be_removed(remote):
+@pytest.mark.parametrize("camera_enabled", [True, False])
+def test_assigned_encoder_cannot_be_removed(remote, camera_enabled):
     service, node, _, endpoints = remote
+    service.config.cameras[0].homekit.enabled = camera_enabled
     with pytest.raises(HTTPException) as error:
         endpoints["/api/homekit/nodes/{node_id}"](node["id"], Response())
     assert error.value.status_code == 409
     assert node["id"] in service.nodes.nodes
+
+
+def test_unassigned_encoder_can_be_removed(remote):
+    service, node, secret, endpoints = remote
+    service.config.cameras[0].homekit.encoder = "local"
+    remove = endpoints["/api/homekit/nodes/{node_id}"]
+    assert remove(node["id"], Response()) == {"removed": True}
+    assert service.nodes.authenticate(secret) is None
+    with pytest.raises(HTTPException) as error:
+        remove(node["id"], Response())
+    assert error.value.status_code == 404
 
 
 def test_encoder_installer_requires_a_published_release(remote, monkeypatch):
@@ -237,6 +251,50 @@ def test_media_upload_requires_current_revision_at_reconnect(remote):
     assert written == [b"fresh"]
 
 
+def test_media_upload_allows_config_changes_while_waiting_for_body(remote):
+    service, _, secret, endpoints = remote
+    written = []
+    service.nodes.feeds[("porch", 1)] = SimpleNamespace(wanted=lambda: True, write=written.append, close=lambda: None)
+    revision = service.node_assignments()[0]["revision"]
+    original = request(secret, [b"first", b"stale"], headers=[(b"x-survng-revision", revision.encode())])
+
+    def change_assignment():
+        assert service.lock.acquire(timeout=1), "upload held the service lock while waiting for a chunk"
+        try:
+            service.config.cameras[0].homekit.encoder = "local"
+        finally:
+            service.lock.release()
+
+    async def receive():
+        if written:
+            await asyncio.to_thread(change_assignment)
+        return await original.receive()
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(endpoints["/api/homekit/nodes/media"](Request(original.scope, receive)))
+    assert error.value.status_code == 404
+    assert written == [b"first"]
+    assert not service.nodes.uploads
+
+
+def test_media_upload_releases_claim_on_client_disconnect(remote):
+    service, _, secret, endpoints = remote
+    written = []
+    service.nodes.feeds[("porch", 1)] = SimpleNamespace(wanted=lambda: True, write=written.append, close=lambda: None)
+    revision = service.node_assignments()[0]["revision"]
+    original = request(secret, [b"first", b"unused"], headers=[(b"x-survng-revision", revision.encode())])
+
+    async def receive():
+        if written:
+            return {"type": "http.disconnect"}
+        return await original.receive()
+
+    with pytest.raises(ClientDisconnect):
+        asyncio.run(endpoints["/api/homekit/nodes/media"](Request(original.scope, receive)))
+    assert written == [b"first"]
+    assert not service.nodes.uploads
+
+
 def test_snapshot_rejects_oversized_body_while_reading(remote):
     _, _, secret, endpoints = remote
     reads = []
@@ -270,18 +328,26 @@ def test_upload_claim_prevents_interleaved_or_stale_writers(remote):
 
 
 def test_late_snapshot_cannot_fulfil_a_new_request(remote, tmp_path):
-    service, node, _, _ = remote
+    service, _, secret, endpoints = remote
     destination = tmp_path / "snapshot.jpg"
     old = service.nodes.begin_snapshot("porch", destination)
     service.nodes.end_snapshot("porch", old)
     current = service.nodes.begin_snapshot("porch", destination)
     data = b"\xff\xd8jpeg"
-    assignments = service.node_assignments()
-    assert not service.nodes.accept_snapshot(node, "porch", data, assignments, old[2])
+    endpoint = endpoints["/api/homekit/nodes/snapshot"]
+
+    def send_snapshot(token, chunks):
+        return asyncio.run(endpoint(request(secret, chunks, headers=[(b"x-survng-request", token.encode())])))
+
+    with pytest.raises(HTTPException) as stale:
+        send_snapshot(old[2], [data])
+    assert stale.value.status_code == 404
     assert not destination.exists()
-    assert service.nodes.accept_snapshot(node, "porch", data, assignments, current[2])
+    assert send_snapshot(current[2], [data[:2], data[2:]]) == {"accepted": True}
     assert current[0].is_set() and destination.read_bytes() == data
-    assert not service.nodes.accept_snapshot(node, "porch", b"\xff\xd8replacement", assignments, current[2])
+    with pytest.raises(HTTPException) as duplicate:
+        send_snapshot(current[2], [b"\xff\xd8replacement"])
+    assert duplicate.value.status_code == 404
     assert destination.read_bytes() == data
 
 

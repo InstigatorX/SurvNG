@@ -122,9 +122,7 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         response.headers["Cache-Control"] = "no-store"
         service = deps.get_manager().homekit
         try:
-            with service.operations, service.lock:
-                assigned = [camera.id for camera in service.config.cameras if camera.homekit.encoder == node_id]
-                service.nodes.remove(node_id, assigned)
+            service.remove_encoder(node_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="HomeKit encoder was not found") from None
         except RuntimeError:
@@ -184,19 +182,17 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         camera_id = request.headers.get("x-survng-camera", "")
         tier = request.headers.get("x-survng-tier", "")
         revision = request.headers.get("x-survng-revision", "")
-        with service.lock:
-            claim = service.nodes.claim_feed(node, camera_id, tier, service.node_assignments(), revision)
+        claim = service.claim_encoder_upload(node, camera_id, tier, revision)
         if claim is None:
             raise HTTPException(status_code=404, detail="encoder feed was not requested")
         try:
             async for chunk in request.stream():
                 if chunk:
-                    with service.lock:
-                        accepted = service.nodes.write_upload(node, camera_id, tier, claim, chunk, service.node_assignments())
+                    accepted = service.write_encoder_upload(node, camera_id, tier, claim, chunk)
                     if not accepted:
                         raise HTTPException(status_code=404, detail="encoder feed was not requested")
         finally:
-            service.nodes.release_upload(camera_id, tier, claim)
+            service.release_encoder_upload(camera_id, tier, claim)
         return Response(status_code=204)
 
     @router.post("/api/homekit/nodes/snapshot")
@@ -209,8 +205,9 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
             if len(data) + len(chunk) > SNAPSHOT_LIMIT:
                 raise HTTPException(status_code=413, detail="snapshot is too large")
             data.extend(chunk)
-        with service.lock:
-            accepted = service.nodes.accept_snapshot(node, camera_id, bytes(data), service.node_assignments(), request.headers.get("x-survng-request", ""))
+        accepted = service.accept_encoder_snapshot(
+            node, camera_id, bytes(data), request.headers.get("x-survng-request", ""),
+        )
         if not accepted:
             raise HTTPException(status_code=404, detail="snapshot was not requested")
         return {"accepted": True}

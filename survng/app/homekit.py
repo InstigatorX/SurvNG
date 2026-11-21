@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from . import homekit_build
-from .homekit_nodes import assignment_revision
+from .homekit_nodes import EncoderUploadClaim, NodeRegistry, assignment_revision
 
 from .media_sessions import (
     MediaResourceClass, MediaSessionKind, MediaSessionManager, MediaSessionRequest,
@@ -367,7 +367,6 @@ class HomeKitService:
         self.started = False
         self.operations = threading.RLock()
         self.detection_active = detection_active or camera_active
-        from .homekit_nodes import NodeRegistry
         self.nodes = NodeRegistry(self.directory)
         self.builder = homekit_build.AutoBuilder()
 
@@ -487,6 +486,31 @@ class HomeKitService:
             return False
         with self.lock:
             return self.motion.get(camera_id, 0) > time.monotonic()
+
+    def remove_encoder(self, node_id: str) -> None:
+        with self.operations, self.lock:
+            assigned = [camera.id for camera in self.config.cameras if camera.homekit.encoder == node_id]
+            self.nodes.remove(node_id, assigned)
+
+    def claim_encoder_upload(
+        self, node: dict, camera_id: str, tier: str, revision: str,
+    ) -> EncoderUploadClaim | None:
+        with self.lock:
+            return self.nodes.claim_feed(node, camera_id, tier, self.node_assignments(), revision)
+
+    def write_encoder_upload(
+        self, node: dict, camera_id: str, tier: str, claim: EncoderUploadClaim, data: bytes,
+    ) -> bool:
+        # Recheck the live assignment for every chunk received from the encoder.
+        with self.lock:
+            return self.nodes.write_upload(node, camera_id, tier, claim, data, self.node_assignments())
+
+    def release_encoder_upload(self, camera_id: str, tier: str, claim: EncoderUploadClaim) -> None:
+        self.nodes.release_upload(camera_id, tier, claim)
+
+    def accept_encoder_snapshot(self, node: dict, camera_id: str, data: bytes, request_id: str) -> bool:
+        with self.lock:
+            return self.nodes.accept_snapshot(node, camera_id, data, self.node_assignments(), request_id)
 
     def node_assignments(self) -> list[dict]:
         with self.lock:
