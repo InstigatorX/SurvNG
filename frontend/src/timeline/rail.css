@@ -837,9 +837,26 @@
 /* Phone */
 @media (max-width: 760px) {
   /* A compact third column beside the day and stream controls. */
-  /* Outranks shell/mobile.css, which loads later with two-column rules. */
+  /* Camera, day and view on one row. These outrank shell/mobile.css, which
+     loads later, hides the camera select and gives Main/Sub the second
+     column; Main/Sub stays on the player's own controls. */
   .recordings-v2-page .recordings-tabs.recordings-commandbar {
-    grid-template-columns: auto auto auto !important;
+    grid-template-columns: minmax(0, 1fr) auto auto !important;
+  }
+
+  .recordings-v2-page .recordings-commandbar .timeline-mobile-camera-select {
+    display: grid !important;
+    grid-column: 1;
+    grid-row: 1;
+    min-width: 0;
+  }
+
+  .recordings-v2-page .recordings-commandbar-day-controls .recordings-v2-date {
+    grid-column: 2 !important;
+  }
+
+  .recordings-v2-page .recordings-commandbar-day-controls .recordings-v2-player-source {
+    display: none !important;
   }
 
   .recordings-tabs.recordings-commandbar .timeline-view-switch {
@@ -851,10 +868,11 @@
   }
 
   .timeline-view-switch button {
-    min-width: 40px;
+    width: 34px;
+    min-width: 34px;
     min-height: 32px;
     justify-content: center;
-    padding: 0 8px;
+    padding: 0;
   }
 
   .timeline-view-label {

@@ -164,6 +164,15 @@ export async function checks({ open, shot, query, at, assert }) {
   await mobile.mouse.up();
   assert.equal(await mobile.locator(".edge-rail-loupe").count(), 0, "the loupe closes on release");
   await waitPlayhead(mobile, (value) => Math.abs(value - before) > 600, "releasing the edge rail seeks");
+  // Phones pick the camera from the command bar.
+  const cameraSelect = mobile.getByLabel("Timeline camera", { exact: true });
+  assert.ok(await cameraSelect.isVisible(), "the phone command bar has a camera selector");
+  const bar = await mobile.locator(".recordings-commandbar").boundingBox();
+  const selectBox = await cameraSelect.boundingBox();
+  assert.ok(selectBox.y >= bar.y && selectBox.y + selectBox.height <= bar.y + bar.height && selectBox.width >= 100, "the camera selector fits the command bar");
+  assert.equal(await cameraSelect.locator("option").count(), 3, "every camera is selectable on a phone");
+  await cameraSelect.selectOption("front-door");
+  await waitParam(mobile, "camera", "value === 'front-door'", "the phone camera selector switches camera");
   await mobile.locator(".edge-rail").getByRole("button", { name: "Previous day" }).click();
   await waitParam(mobile, "date", "value === '2026-09-08'", "the edge rail steps to the previous day");
   await mobile.locator(".edge-rail").getByRole("button", { name: "Next day" }).click();
