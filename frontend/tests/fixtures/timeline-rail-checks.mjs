@@ -168,6 +168,20 @@ export async function checks({ open, shot, query, at, assert }) {
   assert.deepEqual(forced.errors, [], "forced transport pages must not raise errors");
   await forced.close();
 
+  // A selected event in the URL (a shared link, reload or back/forward) must not
+  // open the incident panel over the phone rail and squeeze it to its controls.
+  const linked = await open({ width: 390, height: 844 }, `${query}&event=8`, true);
+  await settle(linked);
+  for (const pass of ["opened", "reloaded"]) {
+    if (pass === "reloaded") { await linked.reload(); await settle(linked); }
+    assert.match(await linked.locator(".recordings-v2-page").getAttribute("class"), /has-investigation/, `the event link selects its incident (${pass})`);
+    const railHeight = await linked.locator(".event-rail-scroller").evaluate((element) => element.getBoundingClientRect().height);
+    assert.ok(railHeight > 200, `the phone rail keeps its height with an event in the URL (${pass}: ${railHeight}px)`);
+    assert.equal(await linked.locator(".recordings-v2-incidents").isVisible(), false, `the phone rail view does not open the incident panel (${pass})`);
+  }
+  assert.deepEqual(linked.errors, [], "event links on the phone rail must not raise errors");
+  await linked.close();
+
   // Classic layout remains available.
   const classic = await open({ width: 1440, height: 900 }, `${query}&view=classic`);
   await settle(classic);
