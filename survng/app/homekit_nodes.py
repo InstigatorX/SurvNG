@@ -323,7 +323,7 @@ class _TierFeed:
 
 
 @dataclass(frozen=True, eq=False)
-class _UploadClaim:
+class EncoderUploadClaim:
     revision: str
 
 
@@ -350,7 +350,7 @@ class NodeRegistry:
         self.tokens: list[dict] = []
         self.nodes: dict[str, dict] = {}
         self.feeds: dict[tuple[str, int], _TierFeed] = {}
-        self.uploads: dict[tuple[str, int], _UploadClaim] = {}
+        self.uploads: dict[tuple[str, int], EncoderUploadClaim] = {}
         self.snapshots: dict[str, tuple[threading.Event, Path, str]] = {}
         self.sync_requests: dict[str, _SyncRequest] = {}
         self.reopen()
@@ -629,7 +629,7 @@ class NodeRegistry:
                 item["id"] == camera_id and item["encoder"] == node["id"] and item["revision"] == revision
                 for item in assignments)
 
-    def claim_feed(self, node: dict, camera_id: str, tier: str, assignments: list[dict], revision: str) -> _UploadClaim | None:
+    def claim_feed(self, node: dict, camera_id: str, tier: str, assignments: list[dict], revision: str) -> EncoderUploadClaim | None:
         with self.lock:
             if not self.feed_allowed(node, camera_id, tier, assignments, revision):
                 return None
@@ -637,11 +637,11 @@ class NodeRegistry:
             feed = self.feeds.get(key)
             if feed is None or not feed.wanted():
                 return None
-            claim = _UploadClaim(revision)
+            claim = EncoderUploadClaim(revision)
             self.uploads[key] = claim
             return claim
 
-    def write_upload(self, node: dict, camera_id: str, tier: str, claim: _UploadClaim, data: bytes, assignments: list[dict]) -> bool:
+    def write_upload(self, node: dict, camera_id: str, tier: str, claim: EncoderUploadClaim, data: bytes, assignments: list[dict]) -> bool:
         with self.lock:
             if not self.feed_allowed(node, camera_id, tier, assignments, claim.revision):
                 return False
@@ -652,7 +652,7 @@ class NodeRegistry:
             feed.write(data)
             return True
 
-    def release_upload(self, camera_id: str, tier: str, claim: _UploadClaim) -> None:
+    def release_upload(self, camera_id: str, tier: str, claim: EncoderUploadClaim) -> None:
         with self.lock:
             key = (camera_id, int(tier))
             if self.uploads.get(key) is claim:
