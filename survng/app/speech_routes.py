@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -49,6 +49,7 @@ def create_speech_router(deps: SpeechRouteDependencies) -> APIRouter:
         status: list[str] | None = Query(default=None, max_length=len(STATUSES)),
         before_id: int | None = Query(default=None, ge=1),
         limit: int = Query(default=100, ge=1, le=MAX_LIST_LIMIT),
+        view: Literal["segments", "transcript", "conversation"] = "segments",
     ) -> dict[str, Any]:
         if status and any(item not in STATUSES for item in status):
             raise HTTPException(status_code=400, detail="unknown speech segment status")
@@ -64,6 +65,7 @@ def create_speech_router(deps: SpeechRouteDependencies) -> APIRouter:
             statuses=status or None,
             before_id=before_id,
             limit=limit,
+            view=view,
         )
         deps.get_manager().speech_incident_ids(segments)
         return {

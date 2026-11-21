@@ -332,6 +332,29 @@ def test_retention_deletes_unattached_and_expires_attached_without_recordings(tm
     assert speech.get(recorded)["content_expired"] is True
 
 
+def test_conversation_retention_requires_full_incident_and_recording_coverage(tmp_path) -> None:
+    speech = SpeechStore(tmp_path)
+    for index, start in enumerate((100.0, 200.0, 300.0)):
+        segment_id = speech.insert_segment(
+            camera_id="gate", started_at=start, ended_at=start + 30, peak_probability=0,
+            status="queued", conversation_id=f"conversation-{index}", chunk_index=0, final=True,
+        )
+        speech.set_transcript(
+            segment_id, status="done", text=f"detail {index}", language="en", score=None, model="", device="",
+        )
+
+    result = apply_speech_retention(
+        speech,
+        cutoff=1000.0,
+        episode_windows=lambda *_: [(100.0, 101.0), (200.0, 230.0), (300.0, 330.0)],
+        recording_ranges=lambda *_: [(129.0, 130.0), (200.0, 220.0), (300.0, 312.0), (312.0, 330.0)],
+    )
+
+    assert (result.deleted, result.expired, result.kept) == (0, 2, 1)
+    rows = speech.list_segments(view="transcript")
+    assert [row["text"] for row in rows] == ["detail 2", "", ""]
+
+
 def test_retention_keeps_attached_transcripts_when_recordings_cannot_be_read(tmp_path) -> None:
     speech = SpeechStore(tmp_path)
     attached = _speech(speech, "gate", 101.0, 104.0, text="keep me")

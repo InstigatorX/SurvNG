@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { AudioLines, CircleAlert, Mic, RefreshCcw } from "lucide-react";
 import { fetch } from "../shared/api.js";
 import {
+  CAMERA_SPEECH_DEFAULTS,
   WHISPER_MODELS,
   cameraSpeechSettings,
   resolvedWhisperModel,
@@ -149,6 +150,13 @@ export function SpeechSettings({ config, updateConfig }) {
                 <label>End after silence (ms)<input type="number" min="100" max="5000" step="50" value={settings.hangover_ms} onChange={(event) => setCameraSpeech(index, "hangover_ms", Number(event.target.value))} /></label>
                 <label>Include before speech (ms)<input type="number" min="0" max="3000" step="50" value={settings.pre_roll_ms} onChange={(event) => setCameraSpeech(index, "pre_roll_ms", Number(event.target.value))} /></label>
                 <label>Longest segment (s)<input type="number" min="5" max="120" step="1" value={settings.max_segment_seconds} onChange={(event) => setCameraSpeech(index, "max_segment_seconds", Number(event.target.value))} /></label>
+                {settings.transcribe ? <>
+                  <label>Transcribe as<select value={settings.conversation_idle_ms === 0 ? "utterance" : "conversation"} onChange={(event) => setCameraSpeech(index, "conversation_idle_ms", event.target.value === "conversation" ? CAMERA_SPEECH_DEFAULTS.conversation_idle_ms : 0)}>
+                    <option value="conversation">Conversations</option>
+                    <option value="utterance">Individual speech segments</option>
+                  </select></label>
+                  {settings.conversation_idle_ms !== 0 ? <label>End conversation after silence (ms)<input type="number" min="5000" max="60000" step="1" value={settings.conversation_idle_ms} onChange={(event) => setCameraSpeech(index, "conversation_idle_ms", event.target.value === "" ? "" : event.target.valueAsNumber)} /><small>Shorter pauses stay with the surrounding speech during transcription.</small></label> : null}
+                </> : null}
                 {settings.incidents === "trigger" ? <>
                   <label>Speech before an incident check (ms)<input type="number" min="300" max="10000" step="100" value={settings.trigger_min_speech_ms} onChange={(event) => setCameraSpeech(index, "trigger_min_speech_ms", Number(event.target.value))} /><small>Voiced time in one utterance before speech asks for a check.</small></label>
                   <label>Time between checks (s)<input type="number" min="0" max="3600" step="5" value={settings.trigger_cooldown_seconds} onChange={(event) => setCameraSpeech(index, "trigger_cooldown_seconds", Number(event.target.value))} /></label>

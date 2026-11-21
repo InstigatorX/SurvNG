@@ -22,6 +22,7 @@ export const CAMERA_SPEECH_DEFAULTS = Object.freeze({
   hangover_ms: 800,
   pre_roll_ms: 500,
   max_segment_seconds: 30,
+  conversation_idle_ms: 10000,
   incidents: "attach",
   trigger_min_speech_ms: 1500,
   trigger_cooldown_seconds: 60,
@@ -95,6 +96,24 @@ export function speechSegmentStatusLabel(status) {
   return SEGMENT_STATUS_LABELS[String(status || "")] || String(status || "");
 }
 
+export function speechResultStatus(result) {
+  if (result.conversation_open) return { tone: "transcribing", label: "Conversation in progress" };
+  if (result.status === "done" && result.transcript_gaps?.length) {
+    return { tone: "partial", label: "Partial transcript" };
+  }
+  return { tone: result.status, label: speechSegmentStatusLabel(result.status) };
+}
+
+export function speechTranscriptGapLabel(reason) {
+  switch (reason) {
+    case "failed": return "Transcription failed";
+    case "skipped": return "Audio was not transcribed";
+    case "expired": return "Transcript expired with the recording";
+    case "interrupted": return "Conversation capture was interrupted";
+    default: return "Part of the transcript is missing";
+  }
+}
+
 /** Why a segment has no transcript, in operator terms. */
 export function speechSegmentReasonLabel(reason) {
   const text = String(reason || "").trim();
@@ -136,13 +155,14 @@ export function incidentSpeechLabel(speech) {
 }
 
 /** Query string for GET /api/speech/segments. */
-export function speechSegmentsQuery({ query = "", cameraId = "", limit = 100, beforeId = null } = {}) {
+export function speechSegmentsQuery({ query = "", cameraId = "", limit = 100, beforeId = null, view = "" } = {}) {
   const params = new URLSearchParams();
   const text = String(query || "").trim();
   if (text) params.set("q", text.slice(0, 200));
   if (cameraId) params.set("camera_id", String(cameraId));
   params.set("limit", String(Math.max(1, Math.min(500, Number(limit) || 100))));
   if (Number.isInteger(beforeId) && beforeId > 0) params.set("before_id", String(beforeId));
+  if (view) params.set("view", view);
   return params.toString();
 }
 

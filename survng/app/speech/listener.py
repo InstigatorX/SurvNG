@@ -24,6 +24,7 @@ from ..config import CameraConfig
 from ..ffmpeg_input import ffmpeg_input_args
 from ..ffmpeg_process import named_ffmpeg_executable
 from ..security import redact_secret_text
+from .conversation import ConversationCapture, ConversationChunk
 from .levels import LevelTracker, SpeechLevel
 from .segmenter import FRAME_SAMPLES, SAMPLE_RATE, SegmenterEvent, SpeechEnded, SpeechSegmenter, SpeechStarted
 
@@ -41,7 +42,7 @@ FAILURE_LOG_INTERVAL_SECONDS = 300.0
 @dataclass(frozen=True, slots=True)
 class ListenerEvent:
     camera_id: str
-    event: SegmenterEvent
+    event: SegmenterEvent | ConversationChunk
     started_at: float
     ended_at: float | None
     level: SpeechLevel | None = None
@@ -95,6 +96,7 @@ class SpeechListener:
         vad_model: Any,
         keep_audio: bool,
         on_event: Callable[[ListenerEvent], None],
+        conversation_idle_ms: int = 0,
         audio_available: Callable[[CameraConfig], bool | None] | None = None,
         clock: Callable[[], float] = time.time,
         popen: Callable[..., subprocess.Popen] = subprocess.Popen,
@@ -105,6 +107,7 @@ class SpeechListener:
         self.vad_model = vad_model
         self.keep_audio = keep_audio
         self.on_event = on_event
+        self.conversation_idle_ms = conversation_idle_ms
         self.audio_available = audio_available
         self.clock = clock
         self.popen = popen
@@ -247,13 +250,24 @@ class SpeechListener:
             keep_audio=self.keep_audio,
             confirm_ms=speech.trigger_min_speech_ms if speech.incidents == "trigger" else None,
         )
+        capture = ConversationCapture(
+            idle_ms=self.conversation_idle_ms,
+            pre_roll_ms=speech.pre_roll_ms,
+            min_speech_ms=speech.min_speech_ms,
+            release=segmenter.release,
+        ) if self.conversation_idle_ms else None
         anchor: float | None = None
+        conversation_anchor: float | None = None
+        tail: np.ndarray | None = None
         levels = LevelTracker(speech.vad_threshold)
         stdout = process.stdout
         try:
             while not self._stop.is_set() and stdout is not None:
                 data = stdout.read(FRAME_BYTES)
                 if not data or len(data) < FRAME_BYTES:
+                    if capture is not None and data and len(data) >= 2:
+                        samples = data[: len(data) // 2 * 2]
+                        tail = np.frombuffer(samples, dtype="<i2").astype(np.float32) / 32768.0
                     break
                 now = self.clock()
                 position = segmenter.frames_processed * FRAME_SAMPLES
@@ -268,14 +282,31 @@ class SpeechListener:
                 frame = np.frombuffer(data, dtype="<i2").astype(np.float32) / 32768.0
                 probability = detector.probability(frame)
                 levels.observe(frame, probability)
-                for event in segmenter.push(frame, probability):
+                events = segmenter.push(frame, probability)
+                for event in events:
                     self._emit(event, anchor, levels)
+                if capture is not None:
+                    if conversation_anchor is None or not capture.active:
+                        conversation_anchor = anchor
+                    # A max-length utterance split emits SpeechEnded before
+                    # SpeechStarted. It never starts a new conversation.
+                    speech_start = events[0].start_sample if events and isinstance(events[0], SpeechStarted) else None
+                    for chunk in capture.push(
+                        frame, position, probability,
+                        speech_start=speech_start, speaking=segmenter.speaking, candidate=segmenter.candidate,
+                    ):
+                        self._emit(chunk, conversation_anchor)
         finally:
             ended = segmenter.flush()
             if ended is not None and anchor is not None:
                 self._emit(ended, anchor, levels)
+            if capture is not None and conversation_anchor is not None:
+                for chunk in capture.flush(tail):
+                    self._emit(chunk, conversation_anchor)
 
-    def _emit(self, event: SegmenterEvent, anchor: float, levels: LevelTracker | None = None) -> None:
+    def _emit(
+        self, event: SegmenterEvent | ConversationChunk, anchor: float, levels: LevelTracker | None = None
+    ) -> None:
         started_at = anchor + event.start_sample / SAMPLE_RATE
         ended_at = None
         level = None
@@ -289,6 +320,8 @@ class SpeechListener:
                     self._state = "listening"
         elif isinstance(event, SpeechStarted):
             self._set_state("speaking")
+        elif isinstance(event, ConversationChunk):
+            ended_at = anchor + event.end_sample / SAMPLE_RATE
         try:
             self.on_event(ListenerEvent(self.camera.id, event, started_at, ended_at, level))
         except Exception:

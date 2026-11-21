@@ -19,7 +19,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .attach import ATTACH_PAD_SECONDS, attached_to_any
+from .attach import ATTACH_PAD_SECONDS, attached_to_any, padded
 from .store import SpeechStore
 
 LOGGER = logging.getLogger("uvicorn.error")
@@ -39,6 +39,16 @@ def _covered(start: float, end: float, ranges: Ranges) -> bool:
     return any(end >= low and start <= high for low, high in ranges)
 
 
+def _fully_covered(start: float, end: float, ranges: Ranges) -> bool:
+    for low, high in sorted(ranges):
+        if low > start:
+            return False
+        start = max(start, high)
+        if start >= end:
+            return True
+    return False
+
+
 def apply_speech_retention(
     store: SpeechStore,
     *,
@@ -54,19 +64,25 @@ def apply_speech_retention(
         if not candidates:
             return result
         after_id = candidates[-1][0]
-        by_camera: dict[str, list[tuple[int, float, float]]] = defaultdict(list)
-        for segment_id, camera_id, start, end in candidates:
-            by_camera[camera_id].append((segment_id, start, end))
+        by_camera: dict[str, list[tuple[int, float, float, bool]]] = defaultdict(list)
+        for segment_id, camera_id, start, end, conversation_chunk in candidates:
+            by_camera[camera_id].append((segment_id, start, end, conversation_chunk))
         delete: list[int] = []
         expire: list[int] = []
         for camera_id, rows in by_camera.items():
-            low = min(start for _, start, _ in rows) - ATTACH_PAD_SECONDS
-            high = max(end for _, _, end in rows) + ATTACH_PAD_SECONDS
+            low = min(row[1] for row in rows) - ATTACH_PAD_SECONDS
+            high = max(row[2] for row in rows) + ATTACH_PAD_SECONDS
             windows = episode_windows(camera_id, low, high) if episode_windows else []
+            padded_windows = [padded(start, end) for start, end in windows]
             ranges: Ranges | None = None
-            for segment_id, start, end in rows:
+            for segment_id, start, end, conversation_chunk in rows:
                 if not attached_to_any(start, end, windows):
                     delete.append(segment_id)
+                    continue
+                # A chunk can include speech outside the incident. Its text
+                # cannot be sliced reliably by the overlap of the time ranges.
+                if conversation_chunk and not _fully_covered(start, end, padded_windows):
+                    expire.append(segment_id)
                     continue
                 if ranges is None:
                     try:
@@ -76,7 +92,8 @@ def apply_speech_retention(
                         # transcript an incident still points at.
                         LOGGER.warning("Speech retention could not read recordings for %s", camera_id, exc_info=True)
                         ranges = [(float("-inf"), float("inf"))]
-                if _covered(start, end, ranges):
+                covered = _fully_covered if conversation_chunk else _covered
+                if covered(start, end, ranges):
                     result.kept += 1
                 else:
                     expire.append(segment_id)

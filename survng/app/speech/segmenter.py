@@ -110,6 +110,11 @@ class SpeechSegmenter:
         return self._state == "speaking"
 
     @property
+    def candidate(self) -> bool:
+        """Speech onset is awaiting the minimum-duration check."""
+        return self._state == "candidate"
+
+    @property
     def frames_processed(self) -> int:
         return self._frame_index
 

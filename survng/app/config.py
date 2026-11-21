@@ -642,6 +642,7 @@ class CameraSpeechConfig(BaseModel):
     hangover_ms: int = Field(default=800, ge=100, le=5000)
     pre_roll_ms: int = Field(default=500, ge=0, le=3000)
     max_segment_seconds: float = Field(default=30.0, ge=5.0, le=120.0)
+    conversation_idle_ms: int = Field(default=10000, ge=0, le=60000)
     # "attach": speech is shown on incidents that video creates.
     # "trigger": confirmed speech also asks for an incident check.
     incidents: Literal["attach", "trigger"] = "attach"
@@ -652,6 +653,13 @@ class CameraSpeechConfig(BaseModel):
     # "motion" behaves like motion-only incidents (the global "exclude
     # motion" setting decides), "always" or "never" override it.
     notify: Literal["motion", "always", "never"] = "motion"
+
+    @field_validator("conversation_idle_ms")
+    @classmethod
+    def validate_conversation_idle_ms(cls, value: int) -> int:
+        if 0 < value < 5000:
+            raise ValueError("conversation_idle_ms must be 0 or at least 5000")
+        return value
 
 
 class CameraHomeKitConfig(BaseModel):

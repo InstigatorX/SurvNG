@@ -5,12 +5,14 @@ import {
   resolvedWhisperModel,
   speechFailureLabel,
   speechListenerLabel,
+  speechResultStatus,
   speechSearchMode,
   speechSegmentReasonLabel,
   speechSegmentRecordingContext,
   speechSegmentStatusLabel,
   speechSegmentsQuery,
   speechSettings,
+  speechTranscriptGapLabel,
   withSetting,
 } from "../src/speechSettings.mjs";
 
@@ -19,6 +21,9 @@ assert.equal(speechSettings({}).enabled, false);
 assert.equal(speechSettings({ speech: { enabled: true } }).transcription_device, "CPU");
 assert.deepEqual(cameraSpeechSettings({ id: "gate" }), { ...CAMERA_SPEECH_DEFAULTS });
 assert.equal(cameraSpeechSettings({ speech: { enabled: true, source: "live" } }).source, "live");
+assert.equal(cameraSpeechSettings({ speech: { enabled: true, transcribe: true } }).conversation_idle_ms, 10000);
+assert.equal(cameraSpeechSettings({ speech: { conversation_idle_ms: 0 } }).conversation_idle_ms, 0);
+assert.equal(cameraSpeechSettings({ speech: { conversation_idle_ms: 24500 } }).conversation_idle_ms, 24500);
 assert.deepEqual(withSetting({ a: 1 }, "b", 2), { a: 1, b: 2 });
 
 // Automatic Whisper model follows the device; explicit choices win.
@@ -42,6 +47,8 @@ assert.equal(
 );
 assert.equal(speechSegmentsQuery({ query: "x".repeat(300) }).length, "q=".length + 200 + "&limit=100".length);
 assert.equal(speechSegmentsQuery({ beforeId: -1 }), "limit=100");
+assert.equal(speechSegmentsQuery({ view: "conversation", beforeId: 42 }), "limit=100&before_id=42&view=conversation");
+assert.equal(speechSegmentsQuery({ view: "transcript", cameraId: "gate" }), "camera_id=gate&limit=100&view=transcript");
 
 // Timeline links start at the segment's start time.
 assert.deepEqual(
@@ -55,6 +62,14 @@ assert.equal(speechSegmentReasonLabel("too_short"), "too short to transcribe");
 assert.equal(speechSegmentReasonLabel("GPU: model not installed; CPU: model not installed"), "Whisper model not installed");
 assert.equal(speechSegmentReasonLabel("SomeInternalError"), "");
 assert.equal(speechSegmentReasonLabel(""), "");
+
+assert.deepEqual(speechResultStatus({ status: "done", text: "Complete." }), { tone: "done", label: "Transcribed" });
+assert.deepEqual(speechResultStatus({ status: "done", conversation_open: true }), { tone: "transcribing", label: "Conversation in progress" });
+assert.deepEqual(speechResultStatus({ status: "done", text: "Some words.", transcript_gaps: [{ reason: "missing" }] }), { tone: "partial", label: "Partial transcript" });
+assert.deepEqual(speechResultStatus({ status: "transcribing", text: "Some words.", transcript_gaps: [{ reason: "missing" }] }), { tone: "transcribing", label: "Transcribing" });
+assert.deepEqual(speechResultStatus({ status: "failed", transcript_gaps: [{ reason: "failed" }] }), { tone: "failed", label: "Transcription failed" });
+assert.equal(speechTranscriptGapLabel("interrupted"), "Conversation capture was interrupted");
+assert.equal(speechTranscriptGapLabel("rtsp://user:pw@host failed"), "Part of the transcript is missing");
 
 assert.equal(speechSearchMode("speech"), "speech");
 assert.equal(speechSearchMode("anything"), "visual");
