@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { clipPreviewReachedEnd } from "../src/recordingClipSelection.mjs";
-import { isChromiumBrowser, supportsNativeRecordingHls, recordingTransportOverride, RECORDING_TRANSPORT_STORAGE_KEY, recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, recordingSegmentLocalTime, playbackRowsCoverEpoch, videoReachedSeekTarget, recordingSeekToleranceSeconds } from "../src/recordingPlayback.mjs";
+import { isChromiumBrowser, supportsNativeRecordingHls, recordingTransportOverride, RECORDING_TRANSPORT_STORAGE_KEY, recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, recordingSegmentLocalTime, playbackRowsCoverEpoch, videoReachedSeekTarget, recordingSeekToleranceSeconds, nativePlaylistStart, nativePlaylistStartStep } from "../src/recordingPlayback.mjs";
 
 for (const error of [{ code: 3 }, { code: 4 }, { code: 4032, category: 4 }, { code: 3014, data: [3] }, { code: 3015, data: [{ name: "NotSupportedError" }] }, { code: 3016, data: [3] }, { code: 3016, data: [4] }, new Error("This browser does not support Shaka Player")]) {
   assert.equal(isRecordingCompatibilityError(error), true, JSON.stringify(error));
@@ -169,8 +169,8 @@ assert.equal(isChromiumBrowser({ userAgent: "", userAgentData: { brands: [{ bran
   assert.equal(recordingTransportOverride(blocked), "original", "the URL still applies without storage");
   assert.equal(recordingTransportOverride(null), null);
   assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 4, override: "hls" }), "hls");
-  assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, preferMobileOriginal: false, override: "original" }), "original");
-  assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, preferMobileOriginal: false, override: "hls", preferOriginal: true }), "original", "a failure still falls back");
+  assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, override: "original" }), "original");
+  assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, override: "hls", preferOriginal: true }), "original", "a failure still falls back");
   assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, override: "hls", incompatible: true }), "transcode");
 }
 
@@ -178,12 +178,11 @@ assert.equal(isChromiumBrowser({ userAgent: "", userAgentData: { brands: [{ bran
 // format/decode failure opts into original files first. Network errors never encode.
 for (const nativeHls of [true, false]) {
   for (const rate of [.5, 1, 2, 4]) {
-    assert.equal(recordingPlaybackTransport({ nativeHls, rate, preferMobileOriginal: false }), nativeHls && rate > 2 ? "original" : "hls");
-    assert.equal(recordingPlaybackTransport({ nativeHls, rate, preferOriginal: true, preferMobileOriginal: false }), "original");
-    assert.equal(recordingPlaybackTransport({ nativeHls, rate, incompatible: true, preferOriginal: true, preferMobileOriginal: true }), "transcode");
+    assert.equal(recordingPlaybackTransport({ nativeHls, rate }), nativeHls && rate > 2 ? "original" : "hls");
+    assert.equal(recordingPlaybackTransport({ nativeHls, rate, preferOriginal: true }), "original");
+    assert.equal(recordingPlaybackTransport({ nativeHls, rate, incompatible: true, preferOriginal: true }), "transcode");
   }
 }
-assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, preferMobileOriginal: true }), "original", "the mobile incident player can still prefer original files");
 
 // Changing speed changes transport at the retained wall-clock position without
 // changing play/pause intent. This also covers an in-flight seek and cold index.
@@ -235,7 +234,7 @@ for (const outcome of ["zero", "landed", "corrected", "user-paused", "unmute-pau
   const plays = [];
   const visible = [];
   const context = vm.createContext({
-    nativeHls: true, videoRef: { current: video }, useSegmentPlayback: false, manifestUrl, nativePlaylistStartRef: {},
+    nativeHls: true, videoRef: { current: video }, useSegmentPlayback: false, manifestUrl, nativePlaylistStartRef: {}, nativePlaylistStart, nativePlaylistStartStep,
     transport: "hls", requestedTransport: "hls", originalFallbackRef: {}, transcodeFallbackRef: {},
     nativeScope: "gate", playbackRetryRef: { current: { attempts: 0 } },
     playbackRate: 1, normalizedTimelinePlaybackRate: (rate) => rate,
@@ -488,7 +487,7 @@ for (const outcome of ["zero", "landed", "corrected", "user-paused", "unmute-pau
   };
   const context = vm.createContext({
     Number, Math, videoRef: { current: video }, useSegmentPlayback: false, transport: "hls", requestedTransport: "hls",
-    nativePlaylistStartRef: {}, manifestUrl: "day.m3u8",
+    nativePlaylistStartRef: {}, nativePlaylistStart, nativePlaylistStartStep, manifestUrl: "day.m3u8",
     originalFallbackRef: {}, transcodeFallbackRef: {}, nativeScope: "gate", nativeHls: true, playbackRate: 1,
     normalizedTimelinePlaybackRate: (rate) => rate, playbackRetryRef: { current: { attempts: 0 } },
     pendingSeekEpochRef: { current: 1005 }, pendingSeekModeRef: { current: "window" }, desiredEpochRef: { current: 1005 },

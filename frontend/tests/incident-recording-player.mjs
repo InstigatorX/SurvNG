@@ -27,10 +27,14 @@ try {
   });
   await server.listen();
   browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH });
-  // Exercise the original-MP4 transport selected on iOS, using actual decoded
-  // media and natural ended events rather than synthetic episode completion.
+  // Exercise the original-MP4 transport (the HLS failure fallback), selected
+  // here with the shared ?transport= override, using actual decoded media and
+  // natural ended events rather than synthetic episode completion.
   const page = await browser.newPage({ userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1" });
-  const errors = [], requests = [];
+  await page.addInitScript(() => {
+    if (!sessionStorage.getItem("defaultTransport")) localStorage.setItem("survng.recordingTransport", "original");
+  });
+  const errors = [], requests = [], playlists = [], sequence = [];
   await page.setViewportSize({ width: 390, height: 844 });
   let rows = [900, 902, 904], failOriginal = false, failTranscode = false, missingSub = false;
   page.on("pageerror", error => errors.push(error.message));
@@ -42,6 +46,8 @@ try {
         recordings: (missingSub && url.searchParams.get("source") === "live" ? [] : rows).filter(epoch => epoch >= start && epoch < start + 900)
           .map(epoch => ({ start_epoch: epoch, end_epoch: epoch + 2, duration_seconds: 2 })) } });
     }
+    if (url.pathname.endsWith("/day.m3u8")) { playlists.push(Object.fromEntries(url.searchParams)); sequence.push("playlist"); }
+    if (url.pathname.endsWith("/segment.mp4")) sequence.push("segment");
     if (!url.pathname.endsWith("/segment.mp4")) return route.fulfill({ status: 404 });
     requests.push({ source: url.searchParams.get("source"), epoch: Number(url.searchParams.get("epoch")), transcode: url.searchParams.get("mobile") === "true" });
     if (url.searchParams.get("mobile") === "true" ? failTranscode : failOriginal)
@@ -172,6 +178,23 @@ try {
   });
   await page.getByText("No recording window found", { exact: true }).waitFor();
   assert.equal(requests.some(row => row.transcode), false, "network failures must not trigger expensive transcoding");
+
+  // Without an override, incidents use the same HLS transport as Timeline on
+  // an iPhone too. This fixture answers playlists with 404, so the request
+  // order also shows the Timeline fallback: playlist first, per-file MP4 only
+  // after HLS failed.
+  await page.evaluate(() => { sessionStorage.setItem("defaultTransport", "1"); localStorage.removeItem("survng.recordingTransport"); });
+  playlists.length = 0;
+  sequence.length = 0;
+  await open();
+  await page.waitForTimeout(1500);
+  assert.ok(playlists.length > 0, "an iPhone incident requests the HLS playlist by default");
+  assert.equal(sequence[0], "playlist", "HLS is tried before per-file MP4");
+  // Chromium reports the unplayable playlist as a media format error here, so
+  // the Timeline chain runs: Sub playlist, Main playlist, then original files.
+  assert.ok(sequence.includes("segment"), "a failed playlist falls back to original files");
+  assert.ok(sequence.indexOf("segment") > sequence.lastIndexOf("playlist"), "per-file MP4 only after the playlists failed");
+  assert.equal(requests[0]?.transcode, false, "original files are tried before transcoding");
   assert.deepEqual(errors, []);
   console.log("Incident native autoplay, segment advance, seeking, gaps, window rollover and compatibility fallback passed");
 } finally {

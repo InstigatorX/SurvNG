@@ -1,29 +1,50 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { supportsNativeRecordingHls } from "../recordingPlayback.mjs";
+import { nativePlaylistStart, nativePlaylistStartStep, seekVideoToTime, supportsNativeRecordingHls } from "../recordingPlayback.mjs";
 import { fetch } from "./api.js";
 import { ShakaVideo } from "./media.jsx";
 
-function seekableContains(video, mediaTime) {
-  if (!video || !Number.isFinite(mediaTime) || !video.seekable) return false;
-  for (let index = 0; index < video.seekable.length; index += 1) {
-    if (video.seekable.start(index) <= mediaTime && mediaTime <= video.seekable.end(index)) {
-      return true;
-    }
-  }
-  return false;
-}
+const NATIVE_START_EVENTS = ["loadeddata", "canplay", "playing", "seeking", "seeked", "timeupdate"];
 
 // Let Safari own the playlist and buffer across recording boundaries. Other
 // browsers use Shaka's MSE path; neither path requests a video transcode.
+//
+// Native startup at an offset follows the playlist's EXT-X-START: writing
+// currentTime while Safari loads can interrupt the seek it is already doing.
+// The element stays covered and muted until the position settles (one
+// correction at most, via nativePlaylistStartStep, shared with Timeline), and
+// onReady reports the settled element. onStartNeedsPlay fires when a paused
+// start cannot be judged until playback begins (including a rejected play()).
+// While the start settles the video itself is hidden (not covered), so any
+// poster or background behind it stays visible.
+const NATIVE_START_WATCHDOG_MS = 4000;
 export const RecordingHlsVideo = forwardRef(function RecordingHlsVideo({
   src, startTime, bufferingGoal, mimeType = "application/vnd.apple.mpegurl",
-  onReady, onError, ...videoProps
+  onReady, onError, onStartNeedsPlay, muted = false, ...videoProps
 }, forwardedRef) {
   const videoRef = useRef(null);
-  const callbacks = useRef({ src, startTime, onReady, onError });
-  callbacks.current = { src, startTime, onReady, onError };
+  const callbacks = useRef({});
+  callbacks.current = {
+    src, startTime, onReady, onError, onStartNeedsPlay, muted, autoPlay: Boolean(videoProps.autoPlay),
+  };
   const [nativeHls] = useState(supportsNativeRecordingHls);
+  // The source whose playlist start is still settling (set per load below).
+  const [startingSrc, setStartingSrc] = useState(null);
+  const covering = nativeHls && Boolean(src) && startingSrc === src;
+  const playRequested = Boolean(videoProps.autoPlay);
   useImperativeHandle(forwardedRef, () => videoRef.current);
+
+  useEffect(() => {
+    if (nativeHls && videoRef.current) videoRef.current.muted = Boolean(muted) || covering;
+  }, [nativeHls, muted, covering]);
+
+  // Play requested while the start is still settling (for example the user
+  // pressed play on a paused, unpositioned start): frames only arrive while
+  // playing, so start the muted lead-in instead of waiting for onReady.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!covering || !playRequested || !video?.paused) return;
+    video.play?.().catch(() => callbacks.current.onStartNeedsPlay?.(video));
+  }, [covering, playRequested]);
 
   useEffect(() => {
     if (!nativeHls) return undefined;
@@ -32,80 +53,70 @@ export const RecordingHlsVideo = forwardRef(function RecordingHlsVideo({
     let checking = false;
     let disposed = false;
     let probeTimer;
-    let startTimer;
     let readyReported = false;
+    let watchdog;
     const isCurrent = () => Boolean(src) && !disposed && callbacks.current.src === src
       && videoRef.current === video && video.getAttribute("src") === src;
-    let startSeekIssued = false;
+    const target = Number(callbacks.current.startTime);
+    const start = src && Number.isFinite(target) && target > 0.05 ? nativePlaylistStart(target) : null;
+    setStartingSrc(start ? src : null);
     const stopStartWatch = () => {
-      video.removeEventListener("progress", applyStartTime);
-      video.removeEventListener("canplay", applyStartTime);
-      video.removeEventListener("seeked", applyStartTime);
-      window.clearTimeout(startTimer);
-      startTimer = undefined;
+      for (const name of NATIVE_START_EVENTS) video.removeEventListener(name, checkStart);
+      window.clearTimeout(watchdog);
     };
-    const reportReady = () => {
+    const needsPlay = () => callbacks.current.onStartNeedsPlay?.(video);
+    const reportReady = (atTarget = true) => {
       if (!isCurrent() || readyReported || video.readyState < 1) return;
       readyReported = true;
       stopStartWatch();
+      if (start) {
+        const wasPlaying = !video.paused;
+        video.muted = Boolean(callbacks.current.muted);
+        setStartingSrc(null);
+        // Same rule as Timeline: Safari can pause muted autoplay when it
+        // becomes audible, or after the correction seek.
+        if (callbacks.current.autoPlay && video.paused && (wasPlaying || (atTarget && start.corrected))) {
+          video.play?.().catch(needsPlay);
+        }
+      }
       callbacks.current.onReady?.(null, video);
     };
-    function applyStartTime() {
-      if (!isCurrent() || video.readyState < 1) return false;
-      const target = Number(callbacks.current.startTime);
-      if (!Number.isFinite(target) || target <= 0.05) {
-        reportReady();
-        return true;
+    function checkStart(event) {
+      if (!start || !isCurrent() || readyReported) return;
+      let step = nativePlaylistStartStep(start, video, event.type);
+      if (step.action === "needs-play") {
+        needsPlay();
+        return;
       }
-      // Seeked position, not merely an assigned currentTime. iPhone keeps
-      // seeking true until the seeked event, and a second write here stalls.
-      if (Math.abs(video.currentTime - target) <= 0.05 && !video.seeking) {
-        reportReady();
-        return true;
+      if (step.action === "correct") {
+        try {
+          seekVideoToTime(video, start.mediaTime, { allowFastSeek: false });
+          return;
+        } catch (error) {
+          console.warn("Native HLS startup correction failed", error);
+          step = { action: "settle", atTarget: false };
+        }
       }
-      if (video.seeking || startSeekIssued) return false;
-      // Wait until Safari publishes a seekable range that covers the target.
-      // EXT-X-START usually lands here first; currentTime is only a backup.
-      if (!seekableContains(video, target) && video.readyState < 2) return false;
-      try {
-        video.currentTime = target;
-      } catch {
-        return false;
-      }
-      startSeekIssued = true;
-      if (Math.abs(video.currentTime - target) <= 0.05 && !video.seeking) {
-        reportReady();
-        return true;
-      }
-      return false;
+      if (step.action === "settle") reportReady(step.atTarget);
     }
     const ready = () => {
-      if (applyStartTime()) return;
-      video.addEventListener("progress", applyStartTime);
-      video.addEventListener("canplay", applyStartTime);
-      video.addEventListener("seeked", applyStartTime);
-      window.clearTimeout(startTimer);
-      startTimer = window.setTimeout(() => {
-        if (!isCurrent() || readyReported) return;
-        if (video.seeking && startSeekIssued) {
-          startTimer = window.setTimeout(() => {
-            if (isCurrent() && !readyReported) reportReady();
-          }, 1000);
-          return;
-        }
-        if (!startSeekIssued) {
-          try {
-            const target = Number(callbacks.current.startTime);
-            if (Number.isFinite(target) && target > 0.05 && !video.seeking) {
-              video.currentTime = target;
-              startSeekIssued = true;
-            }
-          } catch {
-            // Fall through to onReady; Timeline keeps its own pending seek.
-          }
-        }
+      if (!isCurrent()) return;
+      if (!start) {
         reportReady();
-      }, 1500);
+        return;
+      }
+      // Frames are presented only while playing; play muted while hidden. A
+      // rejected play (autoplay blocked) means the user has to start it.
+      if (callbacks.current.autoPlay && video.paused) video.play?.().catch(needsPlay);
+      checkStart({ type: "loadedmetadata" });
+      // A start that never settles (Safari stuck seeking or never buffering)
+      // must not stay hidden and muted forever: ask for play if paused,
+      // otherwise reveal it where it is.
+      watchdog = window.setTimeout(() => {
+        if (!isCurrent() || readyReported) return;
+        if (video.paused) needsPlay();
+        else reportReady(false);
+      }, NATIVE_START_WATCHDOG_MS);
     };
     const failed = async () => {
       if (checking || !isCurrent() || !video.error) return;
@@ -133,6 +144,10 @@ export const RecordingHlsVideo = forwardRef(function RecordingHlsVideo({
       }
       checking = false;
     };
+    if (start) {
+      video.muted = true;
+      for (const name of NATIVE_START_EVENTS) video.addEventListener(name, checkStart);
+    }
     video.addEventListener("loadedmetadata", ready);
     video.addEventListener("error", failed);
     // Own source changes here so cleanup releases the previous playlist before
@@ -155,8 +170,10 @@ export const RecordingHlsVideo = forwardRef(function RecordingHlsVideo({
     };
   }, [nativeHls, src]);
 
-  return nativeHls
-    ? <video {...videoProps} ref={videoRef} />
-    : <ShakaVideo {...videoProps} ref={videoRef} src={src} mimeType={mimeType}
+  if (!nativeHls) {
+    return <ShakaVideo {...videoProps} ref={videoRef} src={src} mimeType={mimeType} muted={muted}
       startTime={startTime} bufferingGoal={bufferingGoal} onReady={onReady} onError={onError} />;
+  }
+  const className = [videoProps.className, covering ? "recording-startup-pending" : ""].filter(Boolean).join(" ");
+  return <video {...videoProps} className={className || undefined} ref={videoRef} />;
 });

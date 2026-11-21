@@ -61,17 +61,61 @@ export function recordingPlaybackTransport({
   rate,
   incompatible = false,
   preferOriginal = false,
-  preferMobileOriginal = PREFER_NATIVE_HLS,
   override = null,
 } = {}) {
   if (incompatible) return "transcode";
   // A playback failure still falls back to original files, even when forced.
   if (preferOriginal) return "original";
   if (override === "hls" || override === "original") return override;
-  // Incident playback still uses original files on iOS. Native HLS also
-  // falls back to original files above 2× because of its I-frame limitation.
-  if (preferMobileOriginal || (nativeHls && rate > 2)) return "original";
+  // Every recording player (Timeline, incidents) defaults to HLS on every
+  // platform. Native HLS uses original files above 2× because of Safari's
+  // I-frame-only fast playback.
+  if (nativeHls && rate > 2) return "original";
   return "hls";
+}
+
+/**
+ * Native HLS startup: the playlist's EXT-X-START owns the first position,
+ * because a currentTime write while Safari loads can interrupt the seek it is
+ * already doing. Each media event advances this check; the caller acts on the
+ * result (keep waiting, ask for play, issue the one correction, or settle).
+ * `start` is the mutable state from nativePlaylistStart().
+ */
+export const NATIVE_PLAYLIST_START_TOLERANCE_SECONDS = 0.08;
+
+export function nativePlaylistStart(mediaTime) {
+  return { mediaTime: Number(mediaTime), firstWrongTime: null, corrected: false };
+}
+
+export function nativePlaylistStartStep(start, video, eventType) {
+  if (!video || video.readyState < 2 || video.seeking || eventType === "seeking") {
+    start.firstWrongTime = null;
+    return { action: "wait" };
+  }
+  const atTarget = videoReachedSeekTarget(video, start.mediaTime, NATIVE_PLAYLIST_START_TOLERANCE_SECONDS);
+  if (!atTarget) {
+    const time = video.currentTime;
+    if (video.paused || !Number.isFinite(time)) {
+      start.firstWrongTime = null;
+      // A paused element never advances, so it cannot prove a wrong start.
+      return { action: video.paused && video.readyState >= 3 ? "needs-play" : "wait" };
+    }
+    if (eventType === "seeked") start.firstWrongTime = null;
+    if (eventType !== "timeupdate") return { action: "wait" };
+    if (start.firstWrongTime === null || time < start.firstWrongTime) {
+      start.firstWrongTime = time;
+      return { action: "wait" };
+    }
+    // Give the initial seek time to settle. Correct only after playable media
+    // has actually advanced from the wrong position, and only once.
+    if (time - start.firstWrongTime < 0.1) return { action: "wait" };
+    if (!start.corrected) {
+      start.corrected = true;
+      start.firstWrongTime = null;
+      return { action: "correct" };
+    }
+  }
+  return { action: "settle", atTarget };
 }
 
 export function prefersJpegScrubPreview(options = {}) {

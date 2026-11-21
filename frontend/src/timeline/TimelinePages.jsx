@@ -40,7 +40,7 @@ import { browserStorage } from "../storage.mjs";
 import { canSetClipBoundaryAtPlayhead, clipPreviewReachedEnd, clipRangeIsValid, setClipBoundaryAtPlayhead } from "../recordingClipSelection.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
-import { recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
+import { nativePlaylistStart, nativePlaylistStartStep, recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { SpeechSearchWorkspace } from "../search/SpeechSearchResults.jsx";
@@ -146,6 +146,9 @@ export function RecordingGridTile({ camera, source, epoch, playing, primary, syn
   const previousEpochRef = useRef(null);
   const [playback, setPlayback] = useState(null);
   const [error, setError] = useState("");
+  // The playlist whose start has settled; until then the shared player owns
+  // the position (EXT-X-START on native HLS) and the grid clock must not seek.
+  const [readyManifest, setReadyManifest] = useState("");
   const bucket = Math.floor(Math.max(0, Number(epoch) || 0) / (15 * 60)) * 15 * 60;
   const previewEpoch = Math.floor(Math.max(0, Number(epoch) || 0) / 2) * 2;
   const retryScope = `${camera?.id || ""}:${source}:${bucket}`;
@@ -210,10 +213,22 @@ export function RecordingGridTile({ camera, source, epoch, playing, primary, syn
     return () => window.clearTimeout(timer);
   }, [epoch, error, hasCoverage, playback, retryCount, retryScope]);
 
+  const initialMediaTime = playbackMediaTimeForEpoch(timeline, playback?.targetEpoch, 1.25);
+  const manifestUrl = (primary || synchronized) && playback
+    ? recordingDayHlsUrl(camera.id, playback.start, playback.end, playback.source, initialMediaTime)
+    : "";
+
   useEffect(() => {
     const video = videoRef.current;
     const previousEpoch = previousEpochRef.current;
     previousEpochRef.current = epoch;
+    if (video && manifestUrl && readyManifest !== manifestUrl) {
+      // The shared player positions the start; apply play/pause (it starts the
+      // hidden lead-in itself) but never seek before the start settles.
+      if (playing) video.play().catch(() => { });
+      else video.pause();
+      return;
+    }
     if (!video || !Number.isFinite(mediaTime)) {
       video?.pause();
       return;
@@ -230,12 +245,8 @@ export function RecordingGridTile({ camera, source, epoch, playing, primary, syn
     })) video.currentTime = mediaTime;
     if (playing) video.play().catch(() => { });
     else video.pause();
-  }, [briefGap, mediaTime, playing]);
+  }, [briefGap, manifestUrl, mediaTime, playing, readyManifest]);
 
-  const manifestUrl = (primary || synchronized) && playback
-    ? recordingDayHlsUrl(camera.id, playback.start, playback.end, playback.source)
-    : "";
-  const initialMediaTime = playbackMediaTimeForEpoch(timeline, playback?.targetEpoch, 1.25);
   const displayedSource = playback?.source || source;
   const aspect = recordingCameraAspect(camera, displayedSource);
   return (
@@ -243,18 +254,20 @@ export function RecordingGridTile({ camera, source, epoch, playing, primary, syn
       className={`recording-grid-tile${primary ? " primary" : " companion"}${primary && hasCoverage ? "" : primary ? " gap" : ""}`}
       style={{ "--recording-aspect": aspect }}
     >
-      {manifestUrl ? <ShakaVideo
+      {manifestUrl ? <RecordingHlsVideo
         ref={videoRef}
         src={manifestUrl}
-        mimeType="application/vnd.apple.mpegurl"
         startTime={Number.isFinite(initialMediaTime) ? initialMediaTime : 0}
         bufferingGoal={20}
+        autoPlay={playing}
         muted
         playsInline
         preload="auto"
         onReady={(_player, video) => {
           setError("");
-          if (Number.isFinite(mediaTime)) video.currentTime = mediaTime;
+          setReadyManifest(manifestUrl);
+          // Follow the grid clock if it moved on while the start settled.
+          if (Number.isFinite(mediaTime) && Math.abs(video.currentTime - mediaTime) > 0.25) video.currentTime = mediaTime;
           if (playing && Number.isFinite(mediaTime)) video.play().catch(() => { });
         }}
         onError={() => setError("Playback unavailable")}
@@ -950,7 +963,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const loadedPlaybackWindow = playbackDetail?.scope === nativeScope ? playbackDetail : null;
   const requestedTransport = recordingPlaybackTransport({
     nativeHls, rate: playbackRate, incompatible: transcodeScope === nativeScope, preferOriginal: originalScope === nativeScope,
-    preferMobileOriginal: false, override: transportOverride,
+    override: transportOverride,
   });
   const transport = playbackTransport?.scope === nativeScope ? playbackTransport.mode : requestedTransport;
   const useTranscodedPlayback = transport === "transcode";
@@ -2140,7 +2153,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       pendingSeekEpochRef.current = target;
       pendingSeekModeRef.current = "playlist-start";
       nativePlaylistStartRef.current = {
-        video, src: video.getAttribute("src"), mediaTime, firstWrongTime: null, corrected: false,
+        video, src: video.getAttribute("src"), ...nativePlaylistStart(mediaTime),
       };
       desiredEpochRef.current = target;
       setPlayhead(target);
@@ -2180,38 +2193,22 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     const start = nativePlaylistStartRef.current;
     if (!start || video !== start.video || video !== videoRef.current
       || video.getAttribute("src") !== start.src || start.src !== manifestUrl) return;
-    if (video.readyState < 2 || video.seeking || event.type === "seeking") {
-      start.firstWrongTime = null;
+    let step = nativePlaylistStartStep(start, video, event.type);
+    if (step.action === "needs-play") {
+      setPlaybackNotice("Play to finish positioning the recording.");
       return;
     }
-    const atTarget = videoReachedSeekTarget(video, start.mediaTime, 0.08);
-    if (!atTarget) {
-      const time = video.currentTime;
-      if (video.paused || !Number.isFinite(time)) {
-        start.firstWrongTime = null;
-        if (video.paused && video.readyState >= 3) setPlaybackNotice("Play to finish positioning the recording.");
+    if (step.action === "correct") {
+      try {
+        seekVideoToTime(video, start.mediaTime, { allowFastSeek: false });
         return;
-      }
-      if (event.type === "seeked") start.firstWrongTime = null;
-      if (event.type !== "timeupdate") return;
-      if (start.firstWrongTime === null || time < start.firstWrongTime) {
-        start.firstWrongTime = time;
-        return;
-      }
-      // Give the initial seek time to settle. Correct only after playable
-      // media has actually advanced from the wrong position.
-      if (time - start.firstWrongTime < 0.1) return;
-      if (!start.corrected) {
-        start.corrected = true;
-        start.firstWrongTime = null;
-        try {
-          seekVideoToTime(video, start.mediaTime, { allowFastSeek: false });
-          return;
-        } catch (error) {
-          console.warn("Native HLS startup correction failed", error);
-        }
+      } catch (error) {
+        console.warn("Native HLS startup correction failed", error);
+        step = { action: "settle", atTarget: false };
       }
     }
+    if (step.action !== "settle") return;
+    const { atTarget } = step;
     const epoch = mediaTimeToEpoch(video.currentTime);
     if (Number.isFinite(epoch)) {
       desiredEpochRef.current = epoch;
