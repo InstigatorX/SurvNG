@@ -168,7 +168,8 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
   readonly counters = { solicitations: 0, offers: 0, answers: 0, reoffers: 0, started: 0,
     failures: 0, videoPackets: 0, audioPackets: 0, lastState: 'idle' };
   readonly feedback = { video: new ReceiverFeedback(90000), audio: new ReceiverFeedback(48000) };
-  constructor(private media: MediaSource, private allowed: () => boolean, private address: string, private catalog: readonly Tier[] = tiers) {}
+  constructor(private media: MediaSource, private allowed: () => boolean, private address: string,
+    private catalog: readonly Tier[] = tiers, private endControllerSession?: (id: string) => Promise<void>) {}
   async handleSolicitOffer(request: WebRTCSolicitOfferRequest): Promise<WebRTCOffer> {
     const id = request.sessionIdentifier;
     this.counters.solicitations++;
@@ -189,7 +190,12 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
     const audio = pc.addTransceiver(atrack, { direction: 'sendonly' });
     video.sender.onRtcp.subscribe(packet => this.feedback.video.observe(packet, video.sender.ssrc));
     audio.sender.onRtcp.subscribe(packet => this.feedback.audio.observe(packet, audio.sender.ssrc));
-    const fail = () => { const current = this.sessions.get(id); if (current && !current.closed) this.counters.failures++; void this.handleEndSession(id); };
+    const fail = () => {
+      const current = this.sessions.get(id);
+      if (!current || current.closed) return;
+      this.counters.failures++;
+      void this.endSession(id).catch(() => console.error('HomeKit WebRTC session cleanup failed.'));
+    };
     const session: RemoteSession = { pc, frame: new SecureVideoSFrame(true), closed: false, answered: false,
       timeout: setTimeout(fail, 60_000) };
     this.sessions.set(id, session);
@@ -251,7 +257,7 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
       await session.pc.setLocalDescription(await session.pc.createAnswer());
       this.counters.reoffers++;
       return { sdpAnswer: session.pc.localDescription!.sdp };
-    } catch (error) { await this.handleEndSession(request.sessionIdentifier); throw error; }
+    } catch (error) { await this.endSession(request.sessionIdentifier); throw error; }
   }
   async handleUpdateSession(request: WebRTCUpdateSessionRequest): Promise<void> {
     const session = this.sessions.get(request.sessionIdentifier);
@@ -268,9 +274,18 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
     session.closed = true; clearTimeout(session.timeout);
     session.stopping = (async () => {
       try { await session.feed?.stop(); }
-      finally { await session.pc.close(); this.sessions.delete(id); }
+      finally {
+        try { await session.pc.close(); }
+        finally { this.sessions.delete(id); }
+      }
     })();
     return session.stopping;
   }
-  async close(): Promise<void> { await Promise.all([...this.sessions.keys()].map(id => this.handleEndSession(id))); }
+  private async endSession(id: string): Promise<void> {
+    // Start delegate teardown before notifying HAP. Its end hook calls back
+    // into handleEndSession, which joins the same teardown without recursing.
+    const teardown = this.handleEndSession(id);
+    await Promise.all([teardown, this.endControllerSession?.(id)]);
+  }
+  async close(): Promise<void> { await Promise.all([...this.sessions.keys()].map(id => this.endSession(id))); }
 }
