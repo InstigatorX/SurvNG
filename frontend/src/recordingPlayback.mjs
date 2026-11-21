@@ -82,7 +82,8 @@ export function recordingPlaybackTransport({
  * Targets that close to a segment's end start at the next segment instead,
  * which begins on a keyframe. The last segment of a playlist is left alone.
  */
-export const NATIVE_HLS_SEGMENT_END_GUARD_SECONDS = 0.5;
+// Half a second was not reliable on iPhone; one second is.
+export const NATIVE_HLS_SEGMENT_END_GUARD_SECONDS = 1;
 
 export function nativeHlsSafeMediaTime(rows, mediaTime, guardSeconds = NATIVE_HLS_SEGMENT_END_GUARD_SECONDS) {
   if (!Number.isFinite(mediaTime) || !Array.isArray(rows)) return mediaTime;

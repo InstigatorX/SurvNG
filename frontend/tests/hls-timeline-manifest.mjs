@@ -76,7 +76,7 @@ context.desiredEpochRef.current = null;
 context.playbackTimeline = context.recordingPlaybackTimeline([{ start_epoch: 1000, end_epoch: 1900 }]);
 assert.equal(start(render()), 0, "without a retained position, start at the loaded window's first recording");
 
-// Native HLS (Safari) does not start in a segment's last half second: a start
+// Native HLS (Safari) does not start in a segment's last second: a start
 // 0.17 s before a recording's end begins at the next recording instead.
 context.activeCameraId = "back-left";
 context.playbackTimeline = context.recordingPlaybackTimeline([

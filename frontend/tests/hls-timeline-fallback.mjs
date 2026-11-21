@@ -153,7 +153,7 @@ assert.equal(isChromiumBrowser({ userAgent: "", userAgentData: { brands: [{ bran
   }
 }
 
-// Native HLS: a start or seek in a segment's last half second begins at the
+// Native HLS: a start or seek in a segment's last second begins at the
 // next segment (iPhone Safari refetched such a segment and never played).
 {
   const rows = [
@@ -161,13 +161,14 @@ assert.equal(isChromiumBrowser({ userAgent: "", userAgentData: { brands: [{ bran
     { media_start: 9.965, media_end: 19.93 },
     { media_start: 19.93, media_end: 29.895 },
   ];
-  assert.equal(NATIVE_HLS_SEGMENT_END_GUARD_SECONDS, 0.5);
+  assert.equal(NATIVE_HLS_SEGMENT_END_GUARD_SECONDS, 1);
   assert.equal(nativeHlsSafeMediaTime(rows, 5), 5, "mid-segment targets are unchanged");
-  assert.equal(nativeHlsSafeMediaTime(rows, 9.4), 9.4, "more than half a second before the end is unchanged");
+  assert.equal(nativeHlsSafeMediaTime(rows, 8.9), 8.9, "more than a second before the end is unchanged");
+  assert.equal(nativeHlsSafeMediaTime(rows, 9.4), 9.965, "half a second before the end now moves too");
   assert.equal(nativeHlsSafeMediaTime(rows, 9.796), 9.965, "the failing start (0.17 s before the end) moves to the next segment");
   assert.equal(nativeHlsSafeMediaTime(rows, 9.955), 9.965);
-  assert.equal(nativeHlsSafeMediaTime(rows, 19.5), 19.93, "applies to every segment boundary");
-  assert.equal(nativeHlsSafeMediaTime(rows, 29.6), 29.6, "the playlist's last segment has nowhere to move");
+  assert.equal(nativeHlsSafeMediaTime(rows, 19.0), 19.93, "applies to every segment boundary");
+  assert.equal(nativeHlsSafeMediaTime(rows, 29.2), 29.2, "the playlist's last segment has nowhere to move");
   assert.equal(nativeHlsSafeMediaTime(rows, 40), 40);
   assert.equal(nativeHlsSafeMediaTime([], 3), 3);
   assert.equal(Number.isNaN(nativeHlsSafeMediaTime(rows, NaN)), true);
