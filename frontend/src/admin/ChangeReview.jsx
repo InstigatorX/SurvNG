@@ -70,6 +70,7 @@ export function ChangeReviewPanel({ review, impact, saving = false, onUndo, onSa
       <footer>
         <button type="button" className="primary" onClick={onSave} disabled={!total || saving}>{saving ? <><RefreshCcw className="spin" size={15} aria-hidden="true" />Saving…</> : `Save ${total} change${total === 1 ? "" : "s"}`}</button>
         <button type="button" onClick={onDiscard} disabled={!total || saving}>Discard all</button>
+        <p>Saved changes appear under Recently changed on the Overview.</p>
       </footer>
     </aside>
   );

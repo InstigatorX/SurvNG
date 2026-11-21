@@ -104,3 +104,30 @@ assert.equal(formatAgeShort(30), "30 s");
 assert.equal(formatAgeShort(7200), "2 h");
 
 console.log("admin overview tests passed");
+
+// Recently changed.
+import("../src/adminOverview.mjs").then(({ formatRelativeTime, recentChangeRows }) => {
+  const NOW = new Date("2026-11-21T12:00:00Z").getTime();
+  assert.equal(formatRelativeTime("2026-11-21T11:59:30Z", NOW), "just now");
+  assert.equal(formatRelativeTime("2026-11-21T11:55:00Z", NOW), "5 min ago");
+  assert.equal(formatRelativeTime("2026-11-21T10:00:00Z", NOW), "2 h ago");
+  assert.equal(formatRelativeTime("2026-11-20T09:00:00Z", NOW), "yesterday");
+  assert.equal(formatRelativeTime("2026-11-17T09:00:00Z", NOW), "4 days ago");
+  assert.equal(formatRelativeTime("nonsense", NOW), "");
+  const rows = recentChangeRows([
+    { id: "a", at: "2026-11-21T10:00:00Z", actor: "alex", changes: [{ label: "Retention › Minimum free percent", kind: "value", before: "90", after: "92" }] },
+    { id: "b", at: "2026-11-20T09:00:00Z", actor: "", changes: [
+      { label: "Driveway › Zones › Street", kind: "added", before: "not set", after: "added" },
+      { label: "Driveway › Record sub", kind: "value", before: "Off", after: "On" },
+    ], more: 2 },
+    { id: "c", at: "2026-11-20T09:00:00Z", changes: [] },
+    { id: "d", at: "2026-11-19T09:00:00Z", actor: "API token HA", changes: [{ label: "Porch › Camera", kind: "removed", before: "present", after: "removed" }] },
+  ], NOW);
+  assert.deepEqual(rows.map((row) => [row.label, row.values, row.more, row.meta]), [
+    ["Retention › Minimum free percent", "90 → 92", "", "alex · 2 h ago"],
+    ["Driveway › Zones › Street", "added", "+3 more", "yesterday"],
+    ["Porch › Camera", "removed", "", "API token HA · 2 days ago"],
+  ]);
+  assert.equal(recentChangeRows(new Array(9).fill({ id: "x", at: "2026-11-21T10:00:00Z", changes: [{ label: "A", kind: "value", before: "1", after: "2" }] }), NOW).length, 5);
+  console.log("recently changed tests passed");
+});

@@ -86,6 +86,7 @@ jobs:
           scripts/run-tests.sh \
             tests/test_bind_policy.py \
             tests/test_api_security.py \
+            tests/test_config_changes.py \
             tests/test_proxy.py \
             tests/test_ffmpeg_input.py \
             tests/test_worker_topology.py \

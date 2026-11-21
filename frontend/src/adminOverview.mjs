@@ -196,3 +196,38 @@ export function overviewCameraRows({ health, cameras = [], availability = {} } =
     };
   });
 }
+
+/** "just now", "5 min ago", "2 h ago", "yesterday", "4 days ago", or a date. */
+export function formatRelativeTime(value, now = Date.now()) {
+  const at = new Date(value).getTime();
+  if (!Number.isFinite(at)) return "";
+  const seconds = Math.max(0, (now - at) / 1000);
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)} h ago`;
+  const days = Math.floor(seconds / 86_400);
+  if (days === 1) return "yesterday";
+  if (days < 7) return `${days} days ago`;
+  return new Date(at).toLocaleDateString();
+}
+
+/** One row per saved change set for the Overview's "Recently changed" panel. */
+export function recentChangeRows(entries = [], now = Date.now(), limit = 5) {
+  return (Array.isArray(entries) ? entries : [])
+    .filter((entry) => Array.isArray(entry?.changes) && entry.changes.length)
+    .slice(0, limit)
+    .map((entry) => {
+      const [first] = entry.changes;
+      const extra = entry.changes.length - 1 + Number(entry.more || 0);
+      const values = first.kind === "added" && first.before === "not set"
+        ? first.after === "added" ? "added" : first.after
+        : first.kind === "removed" ? "removed" : `${first.before} → ${first.after}`;
+      return {
+        id: entry.id,
+        label: first.label || "Settings",
+        values,
+        more: extra > 0 ? `+${extra} more` : "",
+        meta: [entry.actor, formatRelativeTime(entry.at, now)].filter(Boolean).join(" · "),
+      };
+    });
+}

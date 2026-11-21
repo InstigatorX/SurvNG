@@ -7,6 +7,7 @@ import {
   overviewAttention,
   overviewCameraRows,
   pendingReviewSuggestions,
+  recentChangeRows,
 } from "../adminOverview.mjs";
 import { Sparkline, UptimeStrip } from "./healthVisuals.jsx";
 import "./overview.css";
@@ -29,15 +30,19 @@ export function AdminOverview({ config, detectorStatus = null, retentionStatus =
   const [availability, setAvailability] = useState(null);
   const [review, setReview] = useState(null);
   const [retention, setRetention] = useState(null);
+  // undefined while loading; null when the history could not be read.
+  const [changes, setChanges] = useState(undefined);
   const [now, setNow] = useState(() => Date.now());
 
   const refresh = useCallback(async () => {
-    const [telemetryPayload, availabilityPayload, reviewPayload, retentionPayload] = await Promise.all([
+    const [telemetryPayload, availabilityPayload, reviewPayload, retentionPayload, changesPayload] = await Promise.all([
       optionalJson("/api/telemetry?hours=24"),
       optionalJson("/api/telemetry/availability?hours=24"),
       optionalJson("/api/system-review"),
       optionalJson("/api/retention/status"),
+      optionalJson("/api/config/changes?limit=5"),
     ]);
+    setChanges(changesPayload);
     setRetention(retentionPayload);
     setTelemetry(telemetryPayload);
     setAvailability(availabilityPayload);
@@ -68,6 +73,7 @@ export function AdminOverview({ config, detectorStatus = null, retentionStatus =
     [health, cameras, availability],
   );
 
+  const recentRows = useMemo(() => recentChangeRows(changes?.changes, now), [changes, now]);
   const expected = health.expectedCount;
   const active = health.activeCount;
   const offlineRows = health.rows.filter((row) => row.state === "attention" || row.state === "unavailable");
@@ -127,23 +133,43 @@ export function AdminOverview({ config, detectorStatus = null, retentionStatus =
         </article>
       </section>
 
-      <section className="admin-overview-panel" aria-labelledby="admin-overview-attention">
-        <div className="admin-overview-panel-head">
-          <h2 id="admin-overview-attention">Needs attention</h2>
-          <span>Sorted by impact on recording</span>
-        </div>
-        {attention.length ? attention.map((item) => (
-          <div className={`admin-overview-attention ${item.severity}`} key={item.id}>
-            <div>
-              <strong>{item.title}</strong>
-              {item.detail ? <p>{item.detail}</p> : null}
-            </div>
-            <div className="admin-overview-actions">
-              {item.actions.map((action) => <button type="button" key={action.id} className={action.primary ? "primary" : undefined} onClick={() => onAction?.(action)}>{action.label}</button>)}
-            </div>
+      <div className="admin-overview-split">
+        <section className="admin-overview-panel" aria-labelledby="admin-overview-attention">
+          <div className="admin-overview-panel-head">
+            <h2 id="admin-overview-attention">Needs attention</h2>
+            <span>Sorted by impact on recording</span>
           </div>
-        )) : <p className="admin-overview-empty">Nothing needs attention. Cameras are recording, storage is above the cleanup threshold and detection is running.</p>}
-      </section>
+          {attention.length ? attention.map((item) => (
+            <div className={`admin-overview-attention ${item.severity}`} key={item.id}>
+              <div>
+                <strong>{item.title}</strong>
+                {item.detail ? <p>{item.detail}</p> : null}
+              </div>
+              <div className="admin-overview-actions">
+                {item.actions.map((action) => <button type="button" key={action.id} className={action.primary ? "primary" : undefined} onClick={() => onAction?.(action)}>{action.label}</button>)}
+              </div>
+            </div>
+          )) : <p className="admin-overview-empty">Nothing needs attention. Cameras are recording, storage is above the cleanup threshold and detection is running.</p>}
+        </section>
+        <section className="admin-overview-panel" aria-labelledby="admin-overview-recent">
+          <div className="admin-overview-panel-head">
+            <h2 id="admin-overview-recent">Recently changed</h2>
+          </div>
+          {changes === undefined
+            ? <p className="admin-overview-empty">Loading recent changes…</p>
+            : changes === null
+            ? <p className="admin-overview-empty">Change history is unavailable.</p>
+            : recentRows.length ? <ul className="admin-overview-changes">
+              {recentRows.map((row) => (
+                <li key={row.id}>
+                  <span className="admin-overview-change-label">{row.label}</span>
+                  <span className="mono muted">{row.values}{row.more ? <em> {row.more}</em> : null}</span>
+                  <span className="admin-overview-change-meta">{row.meta}</span>
+                </li>
+              ))}
+            </ul> : <p className="admin-overview-empty">No changes saved yet. Settings you save from Admin appear here.</p>}
+        </section>
+      </div>
 
       <section className="admin-overview-panel" aria-labelledby="admin-overview-cameras">
         <div className="admin-overview-panel-head">

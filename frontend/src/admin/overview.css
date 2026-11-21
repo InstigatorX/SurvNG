@@ -419,3 +419,53 @@
     display: none;
   }
 }
+
+/* Needs attention beside Recently changed. */
+.admin-overview-split {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+
+.admin-overview-changes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-overview-changes li {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-top: 1px solid var(--line);
+  padding: 11px 18px;
+  font-size: 13px;
+}
+
+.admin-overview-change-label {
+  overflow-wrap: anywhere;
+}
+
+.admin-overview-changes .mono {
+  overflow-wrap: anywhere;
+}
+
+.admin-overview-changes .muted,
+.admin-overview-change-meta {
+  color: var(--muted);
+}
+
+.admin-overview-changes em {
+  font-style: normal;
+}
+
+.admin-overview-change-meta {
+  font-size: 12px;
+}
+
+@media (max-width: 1100px) {
+  .admin-overview-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

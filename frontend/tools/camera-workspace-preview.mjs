@@ -215,6 +215,12 @@ server = await createServer({
       if (path === "/api/telemetry") return json(res, telemetry());
       if (path === "/api/telemetry/availability") return json(res, { hours: 24, cameras: availability() });
       if (path === "/api/system-review") return json(res, { cadence: "weekly", briefing: { status: "complete", result: { recommendations: [{}, {}, {}, {}] } } });
+      if (path === "/api/config/changes") return json(res, { changes: [
+        { id: "c1", at: new Date(Date.now() - 2 * 3_600_000).toISOString(), actor: "admin", changes: [{ label: "Retention › Minimum free percent", kind: "value", before: "15", after: "18" }] },
+        { id: "c2", at: new Date(Date.now() - 26 * 3_600_000).toISOString(), actor: "admin", changes: [{ label: "Driveway › Zones › Street", kind: "added", before: "not set", after: "added" }] },
+        { id: "c3", at: new Date(Date.now() - 27 * 3_600_000).toISOString(), actor: "admin", changes: [{ label: "Detector › Confidence threshold", kind: "value", before: "0.45", after: "0.5" }] },
+        { id: "c4", at: new Date(Date.now() - 4 * 86_400_000).toISOString(), actor: "API token Home Assistant", changes: [{ label: "MQTT › Host", kind: "value", before: "broker.local", after: "broker.lan" }] },
+      ] });
       if (path === "/api/retention/status") return json(res, { state: "idle", error: "" });
       if (path === "/api/incidents/feed") return json(res, { items: [], facets: { camera_ids: [], labels: [], zones: [] }, has_more: false });
       if (path === "/api/faces/people") return json(res, []);
