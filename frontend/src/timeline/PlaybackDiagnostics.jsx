@@ -34,7 +34,7 @@ const seconds = (ms) => (ms === null ? "—" : `${(ms / 1000).toFixed(2)} s`);
  * an iPhone). It only observes: media events from every video inside
  * `containerRef` are counted, and the visible video is sampled twice a second.
  */
-export function PlaybackDiagnostics({ containerRef, transport, override }) {
+export function PlaybackDiagnostics({ containerRef, transport, override, playlistStart }) {
   const statsRef = useRef(emptyStats());
   const waitStartRef = useRef(new Map());
   const seekStartRef = useRef(new Map());
@@ -95,6 +95,7 @@ export function PlaybackDiagnostics({ containerRef, transport, override }) {
   return (
     <aside className="playback-diagnostics" aria-label="Playback diagnostics">
       <strong>{override && override !== transport ? `forced ${override}, fell back to ${transport}` : `${transport}${override ? " (forced)" : ""}`} · {srcKind(video?.currentSrc || video?.getAttribute("src"))}</strong>
+      {playlistStart ? <span>Startup via EXT-X-START</span> : null}
       <span>{video ? `${video.paused ? "paused" : "playing"} · t ${video.currentTime.toFixed(2)} · ready ${video.readyState} · ahead ${bufferedAhead(video).toFixed(1)} s` : "no video"}</span>
       <span>waits {stats.waits} · stalls {stats.stalls} · waited {seconds(stats.waitMs)} (max {seconds(stats.longestWaitMs)})</span>
       <span>seeks {stats.seeks} · last {seconds(stats.lastSeekMs)} · max {seconds(stats.longestSeekMs)} · loads {stats.loads}</span>

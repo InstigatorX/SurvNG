@@ -550,6 +550,14 @@
   visibility: hidden;
 }
 
+.recording-hero-startup-cover {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  background: inherit;
+  pointer-events: none;
+}
+
 .recording-frame-search-overlay {
   position: absolute;
   z-index: 6;

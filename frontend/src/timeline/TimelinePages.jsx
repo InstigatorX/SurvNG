@@ -832,6 +832,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const latestAvailabilityRef = useRef(null);
   const pendingSeekEpochRef = useRef(null);
   const pendingSeekModeRef = useRef(null);
+  const nativePlaylistStartRef = useRef(null);
+  const [visibleNativePlaylist, setVisibleNativePlaylist] = useState(null);
   const seekWatchdogRef = useRef(null);
   const ignorePauseUntilRef = useRef(0);
   const playbackRetryRef = useRef({ attempts: 0, timer: null });
@@ -1002,6 +1004,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     return () => controller.abort();
   }, [nativeScope, nativeSegmentUrl, heroPlaying, nativeNextEpoch, Boolean(nativeNextSegment)]);
   const hasPlaybackMedia = Boolean(manifestUrl || nativeSegmentUrl);
+  const coveringNativeStartup = nativeHls && Boolean(manifestUrl) && visibleNativePlaylist !== manifestUrl;
+  const playbackMuted = heroMuted || coveringNativeStartup;
+  useEffect(() => {
+    if (!manifestUrl) setVisibleNativePlaylist(null);
+  }, [manifestUrl]);
   // Keep AI analysis strictly local to an actively playing Timeline video. The
   // overlay's key resets its temporary tracks when the recording scope changes.
   const aiOverlayActive = aiOverlayEnabled
@@ -1014,8 +1021,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const aiOverlayKey = `${activeCameraId}:${source}:${playbackDetail?.revision || 0}:${nativeSegmentUrl || manifestUrl}`;
 
   useEffect(() => {
-    if (videoRef.current) videoRef.current.muted = heroMuted;
-  }, [heroMuted, manifestUrl, nativeSegmentUrl]);
+    if (videoRef.current) videoRef.current.muted = playbackMuted;
+  }, [playbackMuted, manifestUrl, nativeSegmentUrl]);
 
   const semanticReady = Boolean(
     semanticStatus?.enabled && semanticStatus?.state === "ready"
@@ -1646,6 +1653,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       && target < loadedPlaybackWindow.end;
     const coveredByCurrentManifest = playbackRowsCoverEpoch(playbackTimeline, target);
     const video = videoRef.current;
+    const previousSeekMode = pendingSeekModeRef.current;
     // Mark the seek before any pause so an ended event cannot start the next clip.
     // Do not pause a playing element for an in-window seek: pause()+play()+currentTime
     // is the iPhone sequence that drops the seek or leaves the video paused.
@@ -1698,7 +1706,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       return;
     }
     const mediaTime = epochToPlaybackMediaTime(target);
-    if (inCurrentWindow && coveredByCurrentManifest && video && Number.isFinite(mediaTime)) {
+    const canSeekWithinManifest = !nativeHls || (video?.readyState >= 2
+      && previousSeekMode !== "playlist-start" && previousSeekMode !== "window" && previousSeekMode !== "window-ready");
+    if (inCurrentWindow && coveredByCurrentManifest && canSeekWithinManifest && video && Number.isFinite(mediaTime)) {
       pendingSeekEpochRef.current = target;
       pendingSeekModeRef.current = "local";
       playbackRequestRef.current += 1;
@@ -2121,6 +2131,23 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (!loadedPlaybackWindow || !Number.isFinite(target)
       || target < loadedPlaybackWindow.start || target >= loadedPlaybackWindow.end) return;
     const mediaTime = epochToPlaybackMediaTime(target);
+    if (nativeHls && Number.isFinite(mediaTime)) {
+      if (pendingSeekModeRef.current === "local") return;
+      // EXT-X-START owns native startup. A currentTime write during metadata
+      // loading can interrupt the seek that the native player is already doing.
+      pendingSeekEpochRef.current = target;
+      pendingSeekModeRef.current = "playlist-start";
+      nativePlaylistStartRef.current = {
+        video, src: video.getAttribute("src"), mediaTime, firstWrongTime: null, corrected: false,
+      };
+      desiredEpochRef.current = target;
+      setPlayhead(target);
+      setPlaybackError("");
+      setPlaybackErrorStage("");
+      checkNativePlaylistStart({ currentTarget: video });
+      if (autoplayRef.current && video.paused) requestRecordingPlay(video);
+      return;
+    }
     const atMediaTime = Number.isFinite(mediaTime) && Math.abs(video.currentTime - mediaTime) <= 0.05;
     const seekRequired = Number.isFinite(mediaTime) && (!atMediaTime || Boolean(video.seeking));
     if (seekRequired) {
@@ -2145,10 +2172,72 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (autoplayRef.current && !seekRequired) requestRecordingPlay(video);
   }
 
+  function checkNativePlaylistStart(event) {
+    if (pendingSeekModeRef.current !== "playlist-start") return;
+    const video = event.currentTarget;
+    const start = nativePlaylistStartRef.current;
+    if (!start || video !== start.video || video !== videoRef.current
+      || video.getAttribute("src") !== start.src || start.src !== manifestUrl) return;
+    if (video.readyState < 2 || video.seeking || event.type === "seeking") {
+      start.firstWrongTime = null;
+      return;
+    }
+    const atTarget = videoReachedSeekTarget(video, start.mediaTime, 0.08);
+    if (!atTarget) {
+      const time = video.currentTime;
+      if (video.paused || !Number.isFinite(time)) {
+        start.firstWrongTime = null;
+        if (video.paused && video.readyState >= 3) setPlaybackNotice("Play to finish positioning the recording.");
+        return;
+      }
+      if (event.type === "seeked") start.firstWrongTime = null;
+      if (event.type !== "timeupdate") return;
+      if (start.firstWrongTime === null || time < start.firstWrongTime) {
+        start.firstWrongTime = time;
+        return;
+      }
+      // Give the initial seek time to settle. Correct only after playable
+      // media has actually advanced from the wrong position.
+      if (time - start.firstWrongTime < 0.1) return;
+      if (!start.corrected) {
+        start.corrected = true;
+        start.firstWrongTime = null;
+        try {
+          seekVideoToTime(video, start.mediaTime, { allowFastSeek: false });
+          return;
+        } catch (error) {
+          console.warn("Native HLS startup correction failed", error);
+        }
+      }
+    }
+    const epoch = mediaTimeToEpoch(video.currentTime);
+    if (Number.isFinite(epoch)) {
+      desiredEpochRef.current = epoch;
+      setPlayhead(epoch);
+    }
+    nativePlaylistStartRef.current = null;
+    pendingSeekEpochRef.current = null;
+    pendingSeekModeRef.current = null;
+    setHeroSeeking(false);
+    setVisibleNativePlaylist(start.src);
+    setPlaybackNotice(atTarget ? "" : "Playback started at a different recording time.");
+    const wasPlaying = !video.paused;
+    video.muted = heroMuted;
+    // Safari can pause when muted autoplay becomes audible. Use the normal
+    // play request so a blocked resume offers the existing play button.
+    if (autoplayRef.current && video.paused && (wasPlaying || (atTarget && start.corrected))) {
+      requestRecordingPlay(video);
+    }
+  }
+
   function handleRecordingTimeUpdate(event) {
     if (event.currentTarget !== videoRef.current || useSegmentPlayback || transport !== requestedTransport || originalFallbackRef.current === nativeScope || transcodeFallbackRef.current === nativeScope) return;
     if (Number.isFinite(pendingSeekEpochRef.current)) {
       const pendingMode = pendingSeekModeRef.current;
+      if (pendingMode === "playlist-start") {
+        checkNativePlaylistStart(event);
+        return;
+      }
       if (pendingMode === "local" || pendingMode === "window-ready") {
         const targetEpoch = pendingSeekEpochRef.current;
         const targetMediaTime = epochToPlaybackMediaTime(targetEpoch);
@@ -2197,6 +2286,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     const video = event.currentTarget;
     if (video !== videoRef.current) return;
     const pendingMode = pendingSeekModeRef.current;
+    if (pendingMode === "playlist-start") {
+      checkNativePlaylistStart(event);
+      return;
+    }
     if (pendingMode === "local" || pendingMode === "window-ready") {
       const target = epochToPlaybackMediaTime(pendingSeekEpochRef.current);
       if (Number.isFinite(target) && !videoReachedSeekTarget(video, target, recordingSeekToleranceSeconds()) && !video.seeking) {
@@ -2406,7 +2499,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     cancelClipPreview();
     const video = videoRef.current;
     let currentEpoch = Number.isFinite(playhead) ? playhead : desiredEpochRef.current;
-    if (!isAllCameras && video && Number.isFinite(video.currentTime)) {
+    if (!isAllCameras && pendingSeekModeRef.current !== "playlist-start" && video && Number.isFinite(video.currentTime)) {
       const mediaEpoch = useSegmentPlayback
         ? (nativeSegment ? nativeSegment.start_epoch + Math.max(0, video.currentTime) : null)
         : mediaTimeToEpoch(video.currentTime);
@@ -2899,7 +2992,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             onSelect={(selectedCameraId) => { selectPlaybackCamera(selectedCameraId); }}
           /> : null}
           {!isAllCameras ? <div className="recording-hero-media" ref={heroMediaRef}>
-          {showPlaybackDiagnostics ? <PlaybackDiagnostics containerRef={heroMediaRef} transport={transport} override={transportOverride} /> : null}
+          {showPlaybackDiagnostics ? <PlaybackDiagnostics containerRef={heroMediaRef} transport={transport} override={transportOverride} playlistStart={nativeHls && !useSegmentPlayback && manifestStartTime > 0} /> : null}
           {nativeSegmentUrl ? (
             <NativeRecordingVideo
               key={nativeScope}
@@ -2936,15 +3029,19 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               ref={videoRef}
               src={manifestUrl}
               mimeType="application/vnd.apple.mpegurl"
-              startTime={manifestStartTime}
+              startTime={nativeHls ? null : manifestStartTime}
               bufferingGoal={8}
               controls={false}
-              muted={heroMuted}
+              muted={playbackMuted}
               playsInline
               preload="auto"
               onReady={handleRecordingReady}
               onError={handleRecordingError}
+              onLoadedData={checkNativePlaylistStart}
+              onCanPlay={checkNativePlaylistStart}
+              onPlaying={checkNativePlaylistStart}
               onTimeUpdate={handleRecordingTimeUpdate}
+              onSeeking={checkNativePlaylistStart}
               onSeeked={handleRecordingSeeked}
               onEnded={handleRecordingEnded}
               onPlay={() => {
@@ -2954,6 +3051,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
                 if (!Number.isFinite(pendingSeekEpochRef.current)) setPlaybackNotice("");
               }}
               onPause={(event) => {
+                if (event.currentTarget !== videoRef.current || !event.currentTarget.paused) return;
                 if (performance.now() < ignorePauseUntilRef.current) return;
                 if (!event.currentTarget.error && !event.currentTarget.ended
                   && !Number.isFinite(pendingSeekEpochRef.current)) {
@@ -2964,6 +3062,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               }}
             />
           ) : null}
+          {coveringNativeStartup ? <div className="recording-hero-startup-cover" aria-hidden="true" /> : null}
           <DebugDetectionOverlay
             key={aiOverlayKey}
             videoRef={videoRef}

@@ -595,7 +595,15 @@ class RecordingMediaRuntime:
             command = [selected_config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-i', str(path), '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-avoid_negative_ts', 'disabled']
             if codec in {'hevc', 'h265'}:
                 command.extend(['-tag:v', 'hvc1'])
-            command.extend(['-f', 'hls', '-hls_time', '300', '-hls_list_size', '0', '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4', '-hls_segment_filename', str(temp_dir / 'media_%d.m4s'), str(temp_dir / 'index.m3u8')])
+            # Let native HLS preroll audio and video together after a seek.
+            # The MOV muxer's default writes the entire video run before audio.
+            command.extend([
+                '-f', 'hls', '-hls_time', '300', '-hls_list_size', '0',
+                '-hls_segment_type', 'fmp4', '-hls_segment_options', 'frag_interleave=1',
+                '-hls_fmp4_init_filename', 'init.mp4',
+                '-hls_segment_filename', str(temp_dir / 'media_%d.m4s'),
+                str(temp_dir / 'index.m3u8'),
+            ])
             try:
                 media_sessions = getattr(selected_manager, 'media_sessions', None)
                 if media_sessions is None:

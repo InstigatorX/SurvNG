@@ -215,6 +215,11 @@ def test_fmp4_preserves_source_av_timestamps_and_compressed_packets(recording_fr
     remuxed = fragment_packets(root, ffprobe, init, media, f"av-{codec}-b{b_frames}-result.mp4")
     assert [stream["codec_name"] for stream in remuxed["streams"]] == [codec, "aac"]
     assert len(original["packets"]) == len(remuxed["packets"])
+    video_positions = [int(packet["pos"]) for packet in remuxed["packets"] if packet["stream_index"] == 0]
+    audio_positions = [int(packet["pos"]) for packet in remuxed["packets"] if packet["stream_index"] == 1]
+    # Check physical layout, independent of the order in which ffprobe emits packets.
+    assert min(audio_positions) < max(video_positions), "audio must arrive before the end of the video run"
+    assert min(video_positions) < max(audio_positions), "video must arrive before the end of the audio run"
     for stream_index in (0, 1):
         before = [packet for packet in original["packets"] if packet["stream_index"] == stream_index]
         after = [packet for packet in remuxed["packets"] if packet["stream_index"] == stream_index]
