@@ -194,7 +194,9 @@ export function parseTimelineView(search, today = "") {
     .slice(0, 24);
   const queryMode = params.get("query_mode");
   return {
-    cameraId: params.get("camera") || "all",
+    // No camera means the first camera; only an explicit camera=all selects
+    // the All cameras grid.
+    cameraId: params.get("camera") || "",
     date,
     source: ["main", "live"].includes(params.get("source")) ? params.get("source") : null,
     at: Number.isFinite(at) && at > 0 ? at : null,

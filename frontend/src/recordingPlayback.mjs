@@ -231,12 +231,30 @@ export function gridPlaybackNeedsSeek({ currentTime, targetTime, playing, epochD
   const drift = Math.abs(currentTime - targetTime);
   if (!playing) return drift > 0.08;
   const continuousClock = Number.isFinite(epochDelta) && epochDelta >= 0 && epochDelta <= 2.5;
-  return continuousClock ? false : drift > 0.2;
+  // A running clock tolerates normal lag (more at higher rates, which step
+  // further per tick) but still pulls back a tile that stalled or fell behind.
+  return continuousClock ? drift > Math.max(2, epochDelta * 2) : drift > 0.2;
 }
 
 /** Mobile Safari often pauses while seeking; resume only for intentional autoplay seeks. */
 export function shouldResumePlaybackAfterSeek({ pendingSeekMode, autoplay }) {
   return Boolean(autoplay) && (pendingSeekMode === "local" || pendingSeekMode === "window-ready");
+}
+
+// Where any of several overlapping range lists has recording (All cameras):
+// the sorted union, so a rail drawing it sees no duplicates or false gaps.
+export function recordingCoverageUnion(ranges) {
+  const ordered = (ranges || [])
+    .map((range) => ({ start_epoch: Number(range?.start_epoch), end_epoch: Number(range?.end_epoch) }))
+    .filter((range) => Number.isFinite(range.start_epoch) && range.end_epoch > range.start_epoch)
+    .sort((left, right) => left.start_epoch - right.start_epoch);
+  const union = [];
+  for (const range of ordered) {
+    const previous = union[union.length - 1];
+    if (previous && range.start_epoch <= previous.end_epoch) previous.end_epoch = Math.max(previous.end_epoch, range.end_epoch);
+    else union.push(range);
+  }
+  return union;
 }
 
 export function mergeRecordingAvailability(current, updates) {
@@ -309,6 +327,26 @@ export function isRecordingCompatibilityError(error) {
     || (code === 3015 && error?.data?.[0]?.name === "NotSupportedError") // addSourceBuffer
     || /does not support Shaka Player/.test(error?.message || "")
     || (!Number.isFinite(code) && isUnsupportedPlaybackError(error));
+}
+
+// The HLS window playlist's clock: rows in time order, each with its media
+// offset (the concatenated duration of the rows before it).
+export function recordingPlaybackTimeline(rows) {
+  let mediaOffset = 0;
+  return (rows || [])
+    .map((item) => ({
+      ...item,
+      start_epoch: Number(item.start_epoch),
+      end_epoch: Number(item.end_epoch),
+    }))
+    .filter((item) => Number.isFinite(item.start_epoch) && Number.isFinite(item.end_epoch))
+    .sort((left, right) => left.start_epoch - right.start_epoch)
+    .map((item) => {
+      const duration = Math.max(0.01, Number(item.duration_seconds) || item.end_epoch - item.start_epoch);
+      const result = { ...item, media_start: mediaOffset, media_end: mediaOffset + duration };
+      mediaOffset += duration;
+      return result;
+    });
 }
 
 export function recordingSegmentAt(rows, epoch) {

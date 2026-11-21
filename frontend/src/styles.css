@@ -10886,80 +10886,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   visibility: visible;
 }
 
-.recordings-v2-player.all-camera-grid {
-  display: block;
-  padding: 4px;
-}
-
-.recording-camera-grid {
-  position: relative;
-  display: block;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-}
-
-.recording-camera-grid.stage-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(260px, 2fr);
-  grid-template-rows: minmax(0, 1fr);
-  gap: var(--timeline-media-gap);
-}
-
-.recording-camera-grid.stage-layout .recording-grid-tile {
-  position: relative;
-  inset: auto;
-  width: auto;
-  height: auto;
-  aspect-ratio: auto;
-  border-radius: 2px;
-}
-
-.recording-camera-grid.stage-layout .recording-grid-tile.primary {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
-}
-
-.recording-grid-companions {
-  display: grid;
-  min-width: 0;
-  min-height: 0;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: repeat(3, minmax(0, 1fr));
-  gap: var(--timeline-media-gap);
-}
-
-.recording-grid-preview {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  background: #030708;
-}
-
-.recording-grid-tile.primary .recording-grid-camera {
-  top: 8px;
-  left: 8px;
-  min-height: 32px;
-  font-size: 12px;
-}
-
-.recording-grid-tile.companion .recording-grid-camera {
-  inset: 0 0 auto;
-  max-width: none;
-  min-height: 26px;
-  border: 0;
-  border-radius: 0;
-  background: rgba(2, 6, 8, .82);
-}
-
-.recording-grid-tile.companion .recording-grid-focus-hit {
-  cursor: pointer;
-}
-
-.recording-grid-tile.primary .recording-grid-focus-hit {
-  pointer-events: none;
-}
-
 /* Hero viewport geometry is owned by timeline.css (.recording-hero-media). */
 
 .recordings-v2-player.selected-camera-stage:has(.recording-selected-companions[data-camera-count="1"]) {
@@ -11071,80 +10997,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   color: #fff;
   font-size: 9px;
   text-align: center;
-}
-
-.recording-grid-tile {
-  position: absolute;
-  aspect-ratio: var(--recording-aspect, 16 / 9);
-  width: 220px;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  border: 1px solid rgba(148, 163, 184, .28);
-  border-radius: 5px;
-  background: #071011;
-}
-
-.recordings-v2-player .recording-grid-tile video {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.recording-grid-tile.gap video {
-  visibility: hidden;
-}
-
-.recording-grid-focus-hit {
-  position: absolute;
-  z-index: 2;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  cursor: zoom-in;
-}
-
-.recording-grid-camera {
-  position: absolute;
-  z-index: 4;
-  top: 6px;
-  left: 6px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 28px;
-  border-color: rgba(255, 255, 255, .18);
-  background: rgba(3, 10, 11, .78);
-  color: #fff;
-  padding: 4px 7px;
-  backdrop-filter: blur(6px);
-}
-
-.recording-grid-camera em {
-  border-left: 1px solid rgba(255, 255, 255, .2);
-  color: #9de9dc;
-  font-size: 9px;
-  font-style: normal;
-  padding-left: 5px;
-}
-
-.recording-grid-status {
-  position: absolute;
-  z-index: 3;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  color: #9caaa9;
-  font-size: 11px;
-  font-weight: 750;
-  pointer-events: none;
 }
 
 .recording-grid-controls {
@@ -11887,21 +11739,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
   .recordings-v2-player video {
     max-height: none;
-  }
-
-  .recordings-v2-player.all-camera-grid {
-    height: min(68dvh, 680px);
-    padding: 40px 4px 48px;
-  }
-
-  .recording-grid-camera {
-    max-width: calc(100% - 12px);
-  }
-
-  .recording-grid-camera span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .recording-grid-controls time {

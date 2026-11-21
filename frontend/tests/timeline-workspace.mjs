@@ -132,6 +132,9 @@ assert.deepEqual(parseTimelineView("?camera=all&date=2026-08-15&at=123.5&window=
 assert.deepEqual(parseTimelineView("?camera=gate&event=84&trail=12,84,91&query_mode=visual", "2026-08-16").trailEventIds, [12, 84, 91]);
 assert.equal(parseTimelineView("?camera=gate&event=84&trail=12,84,91&query_mode=visual", "2026-08-16").trailQueryMode, "visual");
 assert.equal(resolveTimelineHeroCameraId(routeCameras, parseTimelineView("?camera=all", "2026-08-16").cameraId), "gate");
+// Only an explicit camera=all opens the All cameras grid; no camera means the first camera.
+assert.equal(parseTimelineView("?date=2026-08-15", "2026-08-16").cameraId, "");
+assert.equal(resolveTimelineHeroCameraId(routeCameras, parseTimelineView("", "2026-08-16").cameraId), "gate");
 const appSource = readFileSync(new URL("../src/timeline/TimelinePages.jsx", import.meta.url), "utf8");
 const stylesSource = [
   readFileSync(new URL("../src/styles.css", import.meta.url), "utf8"),

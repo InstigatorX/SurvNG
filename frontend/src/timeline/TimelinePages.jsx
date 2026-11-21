@@ -34,14 +34,18 @@ import {
   Rows3,
   Columns3,
   FastForward,
+  RotateCcw,
 } from "lucide-react";
 import { liveFramingStyle } from "../liveFraming.mjs";
 import { browserStorage } from "../storage.mjs";
 import { canSetClipBoundaryAtPlayhead, clipPreviewReachedEnd, clipRangeIsValid, setClipBoundaryAtPlayhead } from "../recordingClipSelection.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
-import { nativePlaylistStart, nativePlaylistStartStep, recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
-import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
+import { nativePlaylistStart, nativePlaylistStartStep, recordingCoverageUnion, recordingPlaybackTimeline, recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
+import { ALL_CAMERAS_LIVE_DELAY_SECONDS, allCamerasCustomIds, allCamerasGridSelection, allCamerasWindowStart, recordingGridBestEpoch } from "../recordingGrid.mjs";
+import { CameraDensityControl, CameraLayoutModeControl } from "../shared/CameraLayoutControls.jsx";
+import { useStoredState, useViewportQuery } from "../shared/hooks.js";
+import { AllCamerasGrid } from "./AllCamerasGrid.jsx";
 import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { SpeechSearchWorkspace } from "../search/SpeechSearchResults.jsx";
 import { speechSearchMode } from "../speechSettings.mjs";
@@ -123,217 +127,6 @@ function containedImageBounds(surface, image) {
   };
 }
 
-export function recordingPlaybackTimeline(rows) {
-  let mediaOffset = 0;
-  return (rows || [])
-    .map((item) => ({
-      ...item,
-      start_epoch: Number(item.start_epoch),
-      end_epoch: Number(item.end_epoch),
-    }))
-    .filter((item) => Number.isFinite(item.start_epoch) && Number.isFinite(item.end_epoch))
-    .sort((left, right) => left.start_epoch - right.start_epoch)
-    .map((item) => {
-      const duration = Math.max(0.01, Number(item.duration_seconds) || item.end_epoch - item.start_epoch);
-      const result = { ...item, media_start: mediaOffset, media_end: mediaOffset + duration };
-      mediaOffset += duration;
-      return result;
-    });
-}
-
-export function RecordingGridTile({ camera, source, epoch, playing, primary, synchronized = false, onFocus, onSelect }) {
-  const videoRef = useRef(null);
-  const previousEpochRef = useRef(null);
-  const [playback, setPlayback] = useState(null);
-  const [error, setError] = useState("");
-  // The playlist whose start has settled; until then the shared player owns
-  // the position (EXT-X-START on native HLS) and the grid clock must not seek.
-  const [readyManifest, setReadyManifest] = useState("");
-  const bucket = Math.floor(Math.max(0, Number(epoch) || 0) / (15 * 60)) * 15 * 60;
-  const previewEpoch = Math.floor(Math.max(0, Number(epoch) || 0) / 2) * 2;
-  const retryScope = `${camera?.id || ""}:${source}:${bucket}`;
-  const [retryState, setRetryState] = useState({ scope: retryScope, count: 0 });
-  const retryCount = retryState.scope === retryScope ? retryState.count : 0;
-  const timeline = useMemo(
-    () => recordingPlaybackTimeline(playback?.rows || []),
-    [playback?.rows],
-  );
-  const exactMediaTime = playbackMediaTimeForEpoch(timeline, epoch);
-  const mediaTime = Number.isFinite(exactMediaTime)
-    ? exactMediaTime
-    : playbackMediaTimeForEpoch(timeline, epoch, 1.25);
-  const briefGap = !Number.isFinite(exactMediaTime) && Number.isFinite(mediaTime);
-  const hasCoverage = Number.isFinite(mediaTime);
-
-  useEffect(() => {
-    if ((!primary && !synchronized) || !camera?.id || !bucket) return undefined;
-    const controller = new AbortController();
-    let cancelled = false;
-    setPlayback(null);
-    setError("");
-    const candidates = source === "main" ? ["main", "live"] : ["live", "main"];
-    async function load() {
-      for (const candidate of candidates) {
-        const response = await fetch(
-          recordingWindowUrl(camera.id, bucket, bucket + 15 * 60, candidate),
-          { signal: controller.signal },
-        );
-        if (!response.ok) continue;
-        const payload = await response.json();
-        if (!(payload.recordings || []).length) continue;
-        if (!cancelled) {
-          setPlayback({
-            source: candidate,
-            start: Number(payload.start_epoch),
-            end: Number(payload.end_epoch),
-            rows: payload.recordings,
-            targetEpoch: epoch,
-          });
-        }
-        return;
-      }
-      if (!cancelled) setError("No recording at this time");
-    }
-    load().catch((loadError) => {
-      if (!cancelled && loadError.name !== "AbortError") setError("Recording unavailable");
-    });
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [bucket, camera?.id, primary, retryCount, source, synchronized]);
-
-  useEffect(() => {
-    const nearLive = Math.abs(Date.now() / 1000 - epoch) <= 5 * 60;
-    if (retryCount >= 4 || !nearLive || (!error && (!playback || hasCoverage))) return undefined;
-    const timer = window.setTimeout(() => setRetryState((current) => ({
-      scope: retryScope,
-      count: current.scope === retryScope ? current.count + 1 : 1,
-    })), 3000);
-    return () => window.clearTimeout(timer);
-  }, [epoch, error, hasCoverage, playback, retryCount, retryScope]);
-
-  const initialMediaTime = playbackMediaTimeForEpoch(timeline, playback?.targetEpoch, 1.25);
-  const manifestUrl = (primary || synchronized) && playback
-    ? recordingDayHlsUrl(camera.id, playback.start, playback.end, playback.source, initialMediaTime)
-    : "";
-
-  useEffect(() => {
-    const video = videoRef.current;
-    const previousEpoch = previousEpochRef.current;
-    previousEpochRef.current = epoch;
-    if (video && manifestUrl && readyManifest !== manifestUrl) {
-      // The shared player positions the start; apply play/pause (it starts the
-      // hidden lead-in itself) but never seek before the start settles.
-      if (playing) video.play().catch(() => { });
-      else video.pause();
-      return;
-    }
-    if (!video || !Number.isFinite(mediaTime)) {
-      video?.pause();
-      return;
-    }
-    if (briefGap) {
-      video.pause();
-      return;
-    }
-    if (gridPlaybackNeedsSeek({
-      currentTime: video.currentTime,
-      targetTime: mediaTime,
-      playing,
-      epochDelta: Number.isFinite(previousEpoch) ? epoch - previousEpoch : null,
-    })) video.currentTime = mediaTime;
-    if (playing) video.play().catch(() => { });
-    else video.pause();
-  }, [briefGap, manifestUrl, mediaTime, playing, readyManifest]);
-
-  const displayedSource = playback?.source || source;
-  const aspect = recordingCameraAspect(camera, displayedSource);
-  return (
-    <article
-      className={`recording-grid-tile${primary ? " primary" : " companion"}${primary && hasCoverage ? "" : primary ? " gap" : ""}`}
-      style={{ "--recording-aspect": aspect }}
-    >
-      {manifestUrl ? <RecordingHlsVideo
-        ref={videoRef}
-        src={manifestUrl}
-        startTime={Number.isFinite(initialMediaTime) ? initialMediaTime : 0}
-        bufferingGoal={20}
-        autoPlay={playing}
-        muted
-        playsInline
-        preload="auto"
-        onReady={(_player, video) => {
-          setError("");
-          setReadyManifest(manifestUrl);
-          // Follow the grid clock if it moved on while the start settled.
-          if (Number.isFinite(mediaTime) && Math.abs(video.currentTime - mediaTime) > 0.25) video.currentTime = mediaTime;
-          if (playing && Number.isFinite(mediaTime)) video.play().catch(() => { });
-        }}
-        onError={() => setError("Playback unavailable")}
-      /> : <img className="recording-grid-preview" src={recordingPreviewUrl(camera.id, previewEpoch, source)} alt="" />}
-      <button
-        type="button"
-        className="recording-grid-focus-hit media-surface-action"
-        onClick={() => onFocus(camera.id)}
-        aria-label={primary ? `${camera.name} is the primary recording` : `Show ${camera.name} as primary recording`}
-        title={primary ? "Primary camera" : "Show as primary"}
-        disabled={primary}
-      />
-      <button type="button" className="recording-grid-camera" onClick={() => onSelect(camera.id)} title={`Open ${camera.name} recording`}>
-        <Camera size={14} /><span>{camera.name}</span>
-        {playback?.source && playback.source !== source ? <em>{playback.source === "live" ? "Sub" : "Main"}</em> : null}
-      </button>
-      {(primary || synchronized) && !playback && !error ? <div className="recording-grid-status"><RefreshCcw className="spin" size={17} />Loading</div> : null}
-      {(primary || synchronized) && (!hasCoverage || error) && playback ? <div className="recording-grid-status"><Film size={17} />{error || "No recording at this time"}</div> : null}
-      {(primary || synchronized) && error && !playback ? <div className="recording-grid-status"><Film size={17} />{error}</div> : null}
-    </article>
-  );
-}
-
-export function RecordingCameraGrid({ cameras, source, epoch, playing, onSelect }) {
-  const [cameraPage, setCameraPage] = useState(0);
-  const page = useMemo(() => timelineStagePage(cameras, cameraPage), [cameraPage, cameras]);
-  const [primaryCameraId, setPrimaryCameraId] = useState(page.cameras[0]?.id || "");
-  const gridRef = useRef(null);
-  const displayedCameras = useMemo(
-    () => timelineStageCameras(page.cameras, primaryCameraId),
-    [page.cameras, primaryCameraId],
-  );
-
-  useEffect(() => {
-    if (!displayedCameras.some((camera) => camera.id === primaryCameraId)) {
-      setPrimaryCameraId(displayedCameras[0]?.id || "");
-    }
-  }, [displayedCameras, primaryCameraId]);
-
-  const primaryCamera = displayedCameras.find((camera) => camera.id === primaryCameraId) || displayedCameras[0];
-  const orderedCameras = primaryCamera
-    ? [primaryCamera, ...displayedCameras.filter((camera) => camera.id !== primaryCamera.id)]
-    : [];
-  return <div ref={gridRef} className="recording-camera-grid stage-layout">
-    {primaryCamera ? <RecordingGridTile key={primaryCamera.id} camera={primaryCamera} source={source} epoch={epoch} playing={playing} primary onFocus={setPrimaryCameraId} onSelect={onSelect} /> : null}
-    <div className="recording-grid-companions">
-      {orderedCameras.slice(1).map((camera) => <RecordingGridTile
-        key={camera.id}
-        camera={camera}
-        source={source}
-        epoch={epoch}
-        playing={playing}
-        primary={false}
-        synchronized
-        onFocus={setPrimaryCameraId}
-        onSelect={onSelect}
-      />)}
-    </div>
-    {page.pages > 1 ? <div className="recording-stage-pagination">
-      <button type="button" onClick={() => setCameraPage((current) => Math.max(0, current - 1))} disabled={page.page === 0} aria-label="Previous camera page"><ChevronLeft size={15} /></button>
-      <span>{page.page + 1} / {page.pages}</span>
-      <button type="button" onClick={() => setCameraPage((current) => Math.min(page.pages - 1, current + 1))} disabled={page.page >= page.pages - 1} aria-label="Next camera page"><ChevronRight size={15} /></button>
-    </div> : null}
-  </div>;
-}
-
 export function RecordingCompanionStrip({ cameras, routes, activeCameraId, source, epoch, onSelect }) {
   const previewEpoch = Math.floor(Math.max(0, Number(epoch) || 0) / 15) * 15;
   const companions = expectedTimelineCameras(cameras, routes, activeCameraId, 6);
@@ -350,17 +143,13 @@ export function RecordingCompanionStrip({ cameras, routes, activeCameraId, sourc
   </div>;
 }
 
-export function TimelineCameraPicker({ cameras, value, onChange, allOption = null, ariaLabel = "Select timeline camera" }) {
+// A camera picker menu: focuses its search when opened, and closes on Escape
+// or a press outside it.
+function useCameraPickerMenu() {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const rootRef = useRef(null);
   const searchRef = useRef(null);
-  const allSelected = Boolean(allOption) && value === allOption.value;
-  const selectedCamera = cameras.find((camera) => camera.id === value);
-  const selected = allSelected
-    ? { id: allOption.value, name: allOption.label, recording: cameras.some((camera) => camera.recording || camera.sub_recording) }
-    : selectedCamera || cameras[0] || (allOption ? { id: allOption.value, name: allOption.label, recording: false } : null);
-  const matches = filteredTimelineCameras(cameras, query);
   useEffect(() => {
     if (!open) return undefined;
     searchRef.current?.focus();
@@ -377,6 +166,17 @@ export function TimelineCameraPicker({ cameras, value, onChange, allOption = nul
       document.removeEventListener("keydown", onKey);
     };
   }, [open]);
+  return { open, setOpen, query, setQuery, rootRef, searchRef };
+}
+
+export function TimelineCameraPicker({ cameras, value, onChange, allOption = null, ariaLabel = "Select timeline camera" }) {
+  const { open, setOpen, query, setQuery, rootRef, searchRef } = useCameraPickerMenu();
+  const allSelected = Boolean(allOption) && value === allOption.value;
+  const selectedCamera = cameras.find((camera) => camera.id === value);
+  const selected = allSelected
+    ? { id: allOption.value, name: allOption.label, recording: cameras.some((camera) => camera.recording || camera.sub_recording) }
+    : selectedCamera || cameras[0] || (allOption ? { id: allOption.value, name: allOption.label, recording: false } : null);
+  const matches = filteredTimelineCameras(cameras, query);
   if (!selected) return null;
   return (
     <div ref={rootRef} className={`timeline-camera-picker${open ? " open" : ""}`}>
@@ -426,6 +226,64 @@ export function TimelineCameraPicker({ cameras, value, onChange, allOption = nul
                 <i className={(camera.recording || camera.sub_recording) ? "online" : ""} />
               </button>
             ))}
+            {!matches.length ? <p>No matching cameras</p> : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Choose a set of cameras (All cameras' Custom layout); one always stays. */
+export function TimelineCameraChecklist({ cameras, selectedIds, onChange }) {
+  const { open, setOpen, query, setQuery, rootRef, searchRef } = useCameraPickerMenu();
+  const matches = filteredTimelineCameras(cameras, query);
+  const toggle = (cameraId) => {
+    const selected = selectedIds.includes(cameraId);
+    if (selected && selectedIds.length === 1) return;
+    const next = new Set(selected ? selectedIds.filter((id) => id !== cameraId) : [...selectedIds, cameraId]);
+    onChange(cameras.filter((camera) => next.has(camera.id)).map((camera) => camera.id));
+  };
+  return (
+    <div ref={rootRef} className={`timeline-camera-picker timeline-camera-checklist${open ? " open" : ""}`}>
+      <button
+        type="button"
+        className="timeline-camera-picker-toggle"
+        aria-expanded={open}
+        aria-haspopup="true"
+        onClick={() => { setQuery(""); setOpen((current) => !current); }}
+      >
+        <Camera size={15} />
+        <strong>Choose cameras</strong>
+        <small>{selectedIds.length}/{cameras.length}</small>
+      </button>
+      {open ? (
+        <div className="timeline-camera-picker-menu" role="group" aria-label="Cameras to show">
+          <label className="timeline-camera-picker-search">
+            <Search size={14} aria-hidden="true" />
+            <span className="sr-only">Search cameras</span>
+            <input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search cameras" />
+          </label>
+          <div className="timeline-camera-picker-list">
+            {matches.map((camera) => {
+              const checked = selectedIds.includes(camera.id);
+              return (
+                <button
+                  key={camera.id}
+                  type="button"
+                  role="checkbox"
+                  aria-checked={checked}
+                  className={checked ? "active" : ""}
+                  disabled={checked && selectedIds.length === 1}
+                  title={checked && selectedIds.length === 1 ? "At least one camera stays selected" : undefined}
+                  onClick={() => toggle(camera.id)}
+                >
+                  {checked ? <Check size={15} /> : <Camera size={15} />}
+                  <span>{camera.name}</span>
+                  <i className={(camera.recording || camera.sub_recording) ? "online" : ""} />
+                </button>
+              );
+            })}
             {!matches.length ? <p>No matching cameras</p> : null}
           </div>
         </div>
@@ -936,7 +794,21 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     frameSearchRequestRef.current = null;
   }, []);
 
-  const isAllCameras = false;
+  // All cameras is a desktop and tablet view; a phone opens the first camera.
+  const phoneTimeline = useViewportQuery("(max-width: 760px)");
+  const isAllCameras = cameraId === ALL_RECORDING_CAMERAS_ID && !phoneTimeline;
+  // Its layout follows Live: Automatic (density and pages), Focus, and Custom
+  // (here, a chosen set of cameras); Focus and Custom need desktop width.
+  const gridLayoutsAvailable = useViewportQuery("(min-width: 1051px)");
+  const [gridLayoutMode, setGridLayoutMode] = useStoredState("survng.timelineGridLayoutMode.v1", "auto");
+  const [gridDensity, setGridDensity] = useStoredState("survng.timelineGridDensity.v1", "fit");
+  const [gridFocusCamera, setGridFocusCamera] = useStoredState("survng.timelineGridFocusCamera.v1", "");
+  const [gridCustomCameras, setGridCustomCameras] = useStoredState("survng.timelineGridCameras.v1", "");
+  // Focus entered from Custom keeps the chosen cameras around the primary.
+  const [gridFocusScope, setGridFocusScope] = useStoredState("survng.timelineGridFocusScope.v1", "all");
+  const [gridPage, setGridPage] = useState(0);
+  const gridCameras = useMemo(() => cameras.filter((camera) => camera.enabled !== false), [cameras]);
+  const gridCustomIds = useMemo(() => allCamerasCustomIds(gridCustomCameras, gridCameras), [gridCameras, gridCustomCameras]);
   const activeCameraId = resolveTimelineHeroCameraId(cameras, cameraId);
   const dayStart = useMemo(() => zonedDateSecondToEpoch(date, 0, timeZone), [date, timeZone]);
   const nextDate = addDaysToDateKey(date, 1);
@@ -955,6 +827,38 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     return recordingPlaybackTimeline(recordings);
   }, [recordings]);
   latestAvailabilityRef.current = timeline[timeline.length - 1]?.end_epoch ?? null;
+  // All cameras gets every camera's ranges; the rail shows where any has recording.
+  // Only cameras with recording in the playhead's window get a tile.
+  const gridSelection = useMemo(
+    () => allCamerasGridSelection({
+      cameras: isAllCameras ? gridCameras : [],
+      ranges: timeline,
+      epoch: playhead,
+      mode: gridLayoutMode,
+      density: gridDensity,
+      page: gridPage,
+      customIds: gridCustomIds,
+      focusCameraId: gridFocusCamera,
+      focusScope: gridFocusScope,
+      layoutsAvailable: gridLayoutsAvailable,
+    }),
+    // playhead matters only through its 15-minute window.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [gridCameras, gridCustomIds, gridDensity, gridFocusCamera, gridFocusScope, gridLayoutMode, gridLayoutsAvailable, gridPage, isAllCameras, timeline, Number.isFinite(playhead) ? allCamerasWindowStart(playhead) : null],
+  );
+  const recordedGridCameras = gridSelection.recorded;
+  // Keep the stored page on the page shown, so a shrinking set cannot bring
+  // an old page back later.
+  useEffect(() => {
+    if (isAllCameras && gridPage !== gridSelection.page) setGridPage(gridSelection.page);
+  }, [gridPage, gridSelection.page, isAllCameras]);
+  // A camera=all link on a phone opens the first camera (no grid on phones).
+  useEffect(() => {
+    if (phoneTimeline && cameraId === ALL_RECORDING_CAMERAS_ID && activeCameraId) setCameraId(activeCameraId);
+  }, [activeCameraId, cameraId, phoneTimeline]);
+  const unrecordedGridCameras = gridSelection.unrecorded;
+  const investigationShown = investigationOpen && !(isAllCameras && timelineLayout !== "classic");
+  const railRecordings = useMemo(() => (isAllCameras ? recordingCoverageUnion(timeline) : timeline), [isAllCameras, timeline]);
   const nativeScope = `${activeCameraId}:${source}:${dayStart}:${dayEnd}`;
   const playbackTimeline = useMemo(() => {
     if (playbackDetail?.scope !== nativeScope) return [];
@@ -1267,10 +1171,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   // or starts inside a quiet stretch, continues at the next event; a seek the
   // user made into a quiet stretch (or a clip preview) plays as asked.
   const storyTickRef = useRef(null);
+  const pagePlaying = isAllCameras ? gridPlaying : heroPlaying;
   useEffect(() => {
     const previous = storyTickRef.current;
-    storyTickRef.current = { epoch: playhead, inEvent: Boolean(storyCurrent), playing: heroPlaying };
-    if (timelineLayout !== "catchup" || !Number.isFinite(playhead) || !heroPlaying) return;
+    storyTickRef.current = { epoch: playhead, inEvent: Boolean(storyCurrent), playing: pagePlaying };
+    if (timelineLayout !== "catchup" || !Number.isFinite(playhead) || !pagePlaying) return;
     if (storyCurrent) {
       if (String(storyCurrent.id) !== String(selectedEventId)) setSelectedEventId(storyCurrent.id);
       return;
@@ -1288,7 +1193,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     playAt(target, true);
     // playAt and snapToRecording are recreated every render; the playhead drives this effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoAdvance, clipPreviewing, heroPlaying, playhead, storyCurrent?.id, storyItems, timelineLayout]);
+  }, [autoAdvance, clipPreviewing, pagePlaying, playhead, storyCurrent?.id, storyItems, timelineLayout]);
 
   useVisiblePolling(async (signal) => {
     const response = await fetch("/api/semantic-search/status", { signal });
@@ -1347,7 +1252,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setFrameSearchEpoch(null);
     setFrameSearchCrop(null);
     setFrameSearchError("");
-  }, [activeCameraId, date, source]);
+  }, [activeCameraId, date, isAllCameras, source]);
 
   useEffect(() => {
     if (!activeCameraId) return undefined;
@@ -1747,6 +1652,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     autoplayRef.current = true;
     ignorePauseUntilRef.current = performance.now() + 2000;
     if (videoRef.current) requestRecordingPlay(videoRef.current, false);
+    // The grid plays every camera at once; it starts on the lighter Sub stream.
+    if (camera === ALL_RECORDING_CAMERAS_ID && camera !== cameraId) setSource("live");
     setCameraId(camera);
   }
 
@@ -1784,6 +1691,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           next = following ? Math.max(requested, following.start_epoch) : null;
         }
         if (!Number.isFinite(next) || next >= dayEnd) {
+          autoplayRef.current = false;
           setGridPlaying(false);
           return base;
         }
@@ -1797,7 +1705,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   useEffect(() => {
     if (!isAllCameras || !gridPlaying) return undefined;
     const pauseWhenHidden = () => {
-      if (document.hidden) setGridPlaying(false);
+      if (!document.hidden) return;
+      autoplayRef.current = false;
+      setGridPlaying(false);
     };
     document.addEventListener("visibilitychange", pauseWhenHidden);
     return () => document.removeEventListener("visibilitychange", pauseWhenHidden);
@@ -2012,7 +1922,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       ? retainedEpoch
       : date === today ? Date.now() / 1000 : timeline[0].start_epoch;
     if (isAllCameras && !Number.isFinite(retainedEpoch) && date === today) {
-      initialEpoch = recordingGridBestEpoch(timeline, initialEpoch) ?? initialEpoch;
+      // Start behind the newest indexed recording: at that edge every tile
+      // would reload as each new recording file lands.
+      const newest = timeline.reduce((latest, item) => Math.max(latest, item.end_epoch), -Infinity);
+      const behindLive = Math.max(dayStart, Math.min(initialEpoch, newest) - ALL_CAMERAS_LIVE_DELAY_SECONDS);
+      initialEpoch = recordingGridBestEpoch(timeline, behindLive) ?? behindLive;
     }
     playAt(initialEpoch, autoplayRef.current);
   }, [date, dayEnd, dayStart, isAllCameras, playhead, timeline, today]);
@@ -2027,7 +1941,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
 
   useEffect(() => {
     if (!activeCameraId) return;
-    const params = new URLSearchParams({ camera: activeCameraId, date, source });
+    const params = new URLSearchParams({ camera: isAllCameras ? ALL_RECORDING_CAMERAS_ID : activeCameraId, date, source });
     const playbackDebug = initialQuery.get("playbackdebug");
     if (playbackDebug === "0" || playbackDebug === "1") params.set("playbackdebug", playbackDebug);
     const retainedEpoch = desiredEpochRef.current;
@@ -2045,7 +1959,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (timelineLayout !== "rail") params.set("view", timelineLayout);
     if (railMinutes !== 60) params.set("rail", String(railMinutes));
     window.history.replaceState(null, "", appUrl(`/timeline?${params.toString()}`));
-  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, incidentRangeHours, initialQuery, playbackRate, railMinutes, selectedEventId, source, timelineLanes.motion, timelineLanes.object, timelineLayout, trailEventIds]);
+  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, isAllCameras, incidentRangeHours, initialQuery, playbackRate, railMinutes, selectedEventId, source, timelineLanes.motion, timelineLanes.object, timelineLayout, trailEventIds]);
 
   useEffect(() => {
     const restoreView = () => {
@@ -2317,6 +2231,12 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       return;
     }
     completePendingNativeSeek(video);
+  }
+
+  function toggleGridPlayback() {
+    // Index reloads (Main/Sub, date) resume from autoplayRef, so it tracks the choice.
+    autoplayRef.current = !gridPlaying;
+    setGridPlaying(!gridPlaying);
   }
 
   function toggleHeroPlayback() {
@@ -2831,12 +2751,38 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const selectedRailEvent = timelineLayout === "catchup" ? storyFocus : selectedEvent;
   const selectedRailDuration = selectedRailEvent ? railEventDurationSeconds(selectedRailEvent) : 0;
   const cameraNames = Object.fromEntries(cameras.map((camera) => [camera.id, camera.name || camera.id]));
+  function changeGridLayoutMode(nextMode) {
+    const current = gridSelection.layoutMode;
+    if (nextMode === "focus" && current !== "focus") setGridFocusScope(current === "custom" ? "custom" : "all");
+    setGridLayoutMode(nextMode);
+    setGridPage(0);
+  }
+
+  function changeGridCustomCameras(value) {
+    setGridCustomCameras(value);
+    setGridPage(0);
+  }
+
+  // Live's makePrimaryCamera: the camera becomes Focus's primary.
+  function focusGridCamera(nextCameraId) {
+    if (!nextCameraId) return;
+    setGridFocusCamera(String(nextCameraId));
+    if (gridLayoutsAvailable) changeGridLayoutMode("focus");
+  }
+
+  function changeGridDensity(nextDensity) {
+    setGridDensity(nextDensity);
+    setGridPage(0);
+  }
+
   function selectRailEvent(event) {
     if (!event) return;
     checkpointTimelineView();
     cancelClipPreview();
     setSelectedEventId(event.id);
-    if (event.camera_id && event.camera_id !== activeCameraId) selectPlaybackCamera(event.camera_id);
+    // All cameras keeps the grid and focuses the event's camera instead.
+    if (isAllCameras) focusGridCamera(event.camera_id);
+    else if (event.camera_id && event.camera_id !== activeCameraId) selectPlaybackCamera(event.camera_id);
     playAt(event.incident_epoch, true);
   }
   function changeTimelineLayout(nextLayout) {
@@ -2846,7 +2792,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }
   const railActionButtons = (
     <>
-      <button
+      {!isAllCameras ? <button
         type="button"
         aria-pressed={investigationOpen}
         aria-expanded={investigationOpen}
@@ -2854,9 +2800,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
         onClick={() => setInvestigationOpen((current) => !current)}
       >
         {investigationOpen ? <ChevronDown size={15} /> : <ChevronUp size={15} />}Nearby
-      </button>
-      <button type="button" className={exportRange ? "active" : ""} onClick={toggleExport} disabled={!timeline.length || exportActive}>
-        <Download size={15} />{exportActive ? "Export running" : exportRange ? "Close export" : "Export"}
+      </button> : null}
+      <button type="button" className={exportRange ? "active" : ""} onClick={toggleExport} disabled={isAllCameras || !timeline.length || exportActive}
+        title={isAllCameras ? "Select one camera to export" : undefined}>
+        <Download size={15} />{isAllCameras ? "Select camera" : exportActive ? "Export running" : exportRange ? "Close export" : "Export"}
       </button>
     </>
   );
@@ -2870,7 +2817,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
         <div className="rail-selected">
           {selectedRailEvent ? <i className={railEventKind(selectedRailEvent)} aria-hidden="true" /> : null}
           <div>
-            <strong>{selectedRailEvent ? railEventTitle(selectedRailEvent) : (cameraNames[activeCameraId] || "Recording")}</strong>
+            <strong>{selectedRailEvent ? railEventTitle(selectedRailEvent) : isAllCameras ? "All cameras" : (cameraNames[activeCameraId] || "Recording")}</strong>
             <small>
               {selectedRailEvent
                 ? `${formatDateTime(selectedRailEvent.incident_epoch, timeZone)}${selectedRailDuration ? ` · ${formatDuration(selectedRailDuration)}` : ""}${selectedRailEvent.camera_id && selectedRailEvent.camera_id !== activeCameraId ? ` · ${cameraNames[selectedRailEvent.camera_id] || selectedRailEvent.camera_id}` : ""}`
@@ -2895,7 +2842,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           dayStart={dayStart}
           playhead={railPlayhead}
           onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
-          onSelectCamera={(nextCameraId) => { if (nextCameraId !== activeCameraId) selectPlaybackCamera(nextCameraId); }}
+          onSelectCamera={(nextCameraId) => {
+            if (isAllCameras) focusGridCamera(nextCameraId);
+            else if (nextCameraId !== activeCameraId) selectPlaybackCamera(nextCameraId);
+          }}
           timeZone={timeZone}
           spanMinutes={railMinutes}
           onSpanChange={(minutes) => { checkpointTimelineView(); setRailMinutes(minutes); }}
@@ -2924,13 +2874,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   );
   const railAside = timelineLayout === "rail" ? (
     <EventRail
-      cameraId={activeCameraId}
+      cameraId={isAllCameras ? (gridSelection.layoutMode === "focus" ? gridSelection.focusCameraId : activeCameraId) : activeCameraId}
+      cameraNames={isAllCameras ? cameraNames : null}
       source={source}
       dayStart={dayStart}
       dayEnd={dayEnd}
       topEpoch={railTopEpoch}
       playhead={railPlayhead}
-      recordings={timeline}
+      recordings={railRecordings}
       events={filteredEvents}
       densityEvents={timelineEvents}
       spanMinutes={railMinutes}
@@ -2957,11 +2908,12 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   ) : null;
 
   return (
-    <main className={`recordings-v2-page timeline-layout-${timelineLayout}${investigationOpen ? " has-investigation" : " investigation-hidden"}`}>
+    <main className={`recordings-v2-page timeline-layout-${timelineLayout}${investigationShown ? " has-investigation" : " investigation-hidden"}`}>
       <nav className="recordings-tabs recordings-commandbar" aria-label="Timeline controls">
         <TimelineCameraPicker
           cameras={cameras}
-          value={activeCameraId}
+          value={isAllCameras ? ALL_RECORDING_CAMERAS_ID : activeCameraId}
+          allOption={{ value: ALL_RECORDING_CAMERAS_ID, label: "All cameras" }}
           onChange={(nextCameraId) => { selectPlaybackCamera(nextCameraId); }}
         />
         <MobileCameraSelect
@@ -2978,18 +2930,34 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             </button>
           ))}
         </div>
+        {isAllCameras ? (
+          <div className="timeline-grid-layout">
+            {/* Density only applies to Automatic (Focus and Custom show their whole set). */}
+            {gridSelection.layoutMode === "auto" ? <CameraDensityControl density={gridSelection.density} page={gridSelection.page} pageCount={gridSelection.pageCount} onDensityChange={changeGridDensity} onPageChange={setGridPage} /> : null}
+            <CameraLayoutModeControl mode={gridSelection.layoutMode} customAvailable={gridLayoutsAvailable} onModeChange={changeGridLayoutMode} ariaLabel="All cameras layout" customTitle="Choose which cameras to show">
+              {gridSelection.layoutMode === "custom" ? <button type="button" className="secondary live-layout-reset" onClick={() => changeGridCustomCameras("")} title="Show every camera"><RotateCcw size={14} /> Reset</button> : null}
+            </CameraLayoutModeControl>
+            {gridSelection.layoutMode === "custom" ? <TimelineCameraChecklist cameras={gridCameras} selectedIds={gridCustomIds} onChange={(ids) => changeGridCustomCameras(JSON.stringify(ids))} /> : null}
+          </div>
+        ) : null}
         <span className="recordings-commandbar-live"><i />{date === today ? "Live archive" : "Archive"}</span>
         <div className="recordings-commandbar-day-controls">{timelineDayControls()}</div>
       </nav>
       <section className="recordings-v2-workspace">
-        <div className={`recordings-v2-player${isAllCameras ? " all-camera-grid" : " selected-camera-stage"}`}>
-          {isAllCameras && Number.isFinite(playhead) ? <RecordingCameraGrid
-            cameras={cameras}
-            source={source}
-            epoch={playhead}
-            playing={gridPlaying}
-            onSelect={(selectedCameraId) => { selectPlaybackCamera(selectedCameraId); }}
-          /> : null}
+        <div className={`recordings-v2-player${isAllCameras ? " all-cameras-player" : " selected-camera-stage"}`}>
+          {isAllCameras ? <div className="recording-hero-media all-cameras-media">
+            {Number.isFinite(playhead) ? <AllCamerasGrid
+              cameras={gridSelection.shown}
+              source={source}
+              epoch={playhead}
+              playing={gridPlaying}
+              rate={playbackRate}
+              layoutMode={gridSelection.layoutMode}
+              focusCameraId={gridSelection.focusCameraId}
+              canFocus={gridLayoutsAvailable}
+              onFocusCamera={focusGridCamera}
+            /> : null}
+          </div> : null}
           {!isAllCameras ? <div className="recording-hero-media" ref={heroMediaRef}>
           {showPlaybackDiagnostics ? <PlaybackDiagnostics containerRef={heroMediaRef} transport={transport} override={transportOverride} playlistStart={nativeHls && !useSegmentPlayback && manifestStartTime > 0} /> : null}
           {nativeSegmentUrl ? (
@@ -3172,11 +3140,28 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               </div>
             </div>
           ) : null}
-          {isAllCameras && Number.isFinite(playhead) ? <div className="recording-grid-controls">
+          {isAllCameras && Number.isFinite(playhead) ? <div className="recording-grid-controls recording-hero-controls all-cameras-controls">
             <button type="button" onClick={() => skipPlayback(-10, gridPlaying)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
-            <button type="button" className="primary" onClick={() => setGridPlaying((current) => !current)}>{gridPlaying ? <Pause size={17} /> : <Play size={17} fill="currentColor" />}{gridPlaying ? "Pause" : "Play"}</button>
+            <button type="button" className="primary" onClick={toggleGridPlayback}>{gridPlaying ? <Pause size={17} /> : <Play size={17} fill="currentColor" />}{gridPlaying ? "Pause" : "Play"}</button>
             <button type="button" onClick={() => skipPlayback(10, gridPlaying)} aria-label="Forward 10 seconds"><SkipForward size={16} /></button>
             <time>{formatDateTime(playhead, timeZone)}</time>
+            <span
+              className="all-cameras-summary"
+              role="status"
+              title={unrecordedGridCameras.length ? `No recording in this 15-minute window: ${unrecordedGridCameras.map((camera) => camera.name || camera.id).join(", ")}` : undefined}
+            >
+              {recordedGridCameras.length} of {gridSelection.chosen.length} cameras
+              {unrecordedGridCameras.length ? (
+                <em> · No recording: {unrecordedGridCameras.map((camera) => camera.name || camera.id).join(", ")}</em>
+              ) : null}
+            </span>
+            <div className="incident-recording-source" role="group" aria-label="Playback stream">
+              {["main", "live"].map(value => <button key={value} type="button" aria-pressed={source === value}
+                disabled={availableSources.length > 0 && !availableSources.includes(value)}
+                onClick={() => { checkpointTimelineView(); setSource(value); }}>
+                {value === "main" ? "Main" : "Sub"}
+              </button>)}
+            </div>
           </div> : null}
         </div>
 
@@ -3257,7 +3242,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
         {railAside}
       </section>
 
-      <div id="timeline-investigation" className="recordings-v2-incidents" hidden={!investigationOpen}>
+      <div id="timeline-investigation" className="recordings-v2-incidents" hidden={!investigationShown}>
         <div className={`recordings-v2-investigation${showForensicPanel ? " forensic-active" : " nearby-only"}`}>
           {showForensicPanel && forensicContext ? (
             <aside className="recordings-v2-forensic-context" aria-label="Forensic context">

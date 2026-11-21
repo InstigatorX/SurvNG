@@ -223,7 +223,7 @@ export async function checks({ open, shot, query, at, assert }) {
   const bar = await mobile.locator(".recordings-commandbar").boundingBox();
   const selectBox = await cameraSelect.boundingBox();
   assert.ok(selectBox.y >= bar.y && selectBox.y + selectBox.height <= bar.y + bar.height && selectBox.width >= 100, "the camera selector fits the command bar");
-  assert.equal(await cameraSelect.locator("option").count(), 3, "every camera is selectable on a phone");
+  assert.deepEqual(await cameraSelect.locator("option").allTextContents(), ["Gate", "Front Door", "Upper Garage"], "every camera is selectable on a phone, and All cameras is not offered");
   await cameraSelect.selectOption("front-door");
   await waitParam(mobile, "camera", "value === 'front-door'", "the phone camera selector switches camera");
   await mobile.locator(".edge-rail").getByRole("button", { name: "Previous day" }).click();
@@ -232,4 +232,143 @@ export async function checks({ open, shot, query, at, assert }) {
   await waitParam(mobile, "date", "value === '2026-09-09'", "the edge rail steps to the next day");
   assert.deepEqual(mobile.errors, [], "mobile interactions must not raise errors");
   await mobile.close();
+
+  // All cameras (desktop and tablet): a grid of the cameras in the player's
+  // spot, driven by the same playhead, laid out like Live. Tapping a tile
+  // focuses it (Live's Focus) without reloading any tile's video.
+  {
+    const grid = await open({ width: 1440, height: 900 }, query.replace("camera=gate", "camera=all"));
+    await settle(grid);
+    await grid.waitForFunction(() => [...document.querySelectorAll(".all-cameras-tile video")].filter((video) => video.readyState >= 2).length === 3, null, { timeout: 8000 })
+      .catch(() => { throw new Error("every All cameras tile loads its recording"); });
+    assert.deepEqual(await grid.locator(".all-cameras-tile").evaluateAll((tiles) => tiles.map((tile) => tile.dataset.cameraId)), ["gate", "front-door", "upper-garage"]);
+    assert.equal(await grid.locator(".recording-hero-media > video").count(), 0, "the single-camera player is replaced, not stacked");
+    const media = await grid.locator(".all-cameras-media").boundingBox();
+    const tiles = await grid.locator(".all-cameras-tile").evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().toJSON()));
+    assert.ok(tiles.every((tile) => tile.y >= media.y - 1 && tile.y + tile.height <= media.y + media.height + 1 && tile.x >= media.x - 1 && tile.x + tile.width <= media.x + media.width + 1 && tile.height > 60), "tiles fill the player area");
+    const controls = await grid.locator(".all-cameras-controls").boundingBox();
+    assert.ok(tiles.every((tile) => tile.y + tile.height <= controls.y + 1), "the grid controls do not cover the tiles");
+    assert.ok((await grid.locator(".event-rail-card small").first().textContent()).includes(" · "), "rail cards name their camera");
+    // Live's controls, in Live's order, on the right of the command bar.
+    const bar = grid.locator(".recordings-commandbar");
+    assert.deepEqual((await bar.locator(".live-layout-control > button").allTextContents()).map((text) => text.trim()), ["Automatic", "Focus", "Custom"]);
+    assert.ok(await bar.getByRole("button", { name: "Automatic", exact: true }).getAttribute("aria-pressed") === "true");
+    assert.deepEqual((await bar.locator(".live-density-control > button").allTextContents()).map((text) => text.trim()), ["", "4", "6", "9", "16", "25"]);
+    const barBox = await bar.boundingBox();
+    const layoutBox = await bar.locator(".timeline-grid-layout").boundingBox();
+    assert.ok(layoutBox.y >= barBox.y && layoutBox.y + layoutBox.height <= barBox.y + barBox.height && layoutBox.x + layoutBox.width <= barBox.x + barBox.width + 1, "the layout controls fit in the command bar");
+    await grid.evaluate(() => { document.querySelectorAll(".all-cameras-tile video").forEach((video, index) => { video.dataset.mount = String(index); }); });
+    const front = grid.locator('.all-cameras-tile[data-camera-id="front-door"]');
+    await front.locator(".all-cameras-tile-hit").click();
+    await grid.waitForSelector('.all-cameras-tile.primary[data-camera-id="front-door"]');
+    assert.ok(await bar.getByRole("button", { name: "Focus", exact: true }).getAttribute("aria-pressed") === "true", "tapping a tile switches to Focus");
+    assert.deepEqual(await grid.locator(".all-cameras-tile video").evaluateAll((videos) => videos.map((video) => video.dataset.mount)), ["0", "1", "2"], "focusing keeps every tile's video element");
+    const primary = await front.boundingBox();
+    const other = await grid.locator('.all-cameras-tile[data-camera-id="gate"]').boundingBox();
+    assert.ok(primary.width > other.width * 1.5 && primary.height > other.height * 1.5, "the focused camera is the large tile of the mosaic");
+    assert.equal(await front.locator(".all-cameras-tile-hit").evaluate((button) => getComputedStyle(button).backgroundColor), "rgba(0, 0, 0, 0)", "the pressed, hovered tile stays see-through");
+    await shot(grid, "all-cameras-desktop");
+    await bar.getByRole("button", { name: "Automatic", exact: true }).click();
+    assert.equal(await grid.locator(".all-cameras-tile.primary").count(), 0, "Automatic returns to the uniform grid");
+    const exportButton = grid.getByRole("button", { name: "Select camera" });
+    assert.ok(await exportButton.isDisabled(), "export needs one camera");
+    const before = await grid.locator(".all-cameras-tile video").evaluateAll((videos) => videos.map((video) => video.currentTime));
+    await grid.getByRole("button", { name: "Back 10 seconds" }).click();
+    await grid.waitForFunction((previous) => [...document.querySelectorAll(".all-cameras-tile video")].every((video, index) => Math.abs(video.currentTime - (previous[index] - 10)) < 1.5), before, { timeout: 5000 })
+      .catch(() => { throw new Error("skipping moves every tile with the playhead"); });
+    assert.equal(param(grid, "camera"), "all", "the URL keeps All cameras");
+    assert.equal(await grid.locator("img.all-cameras-still").count(), 0, "tiles showing video stop requesting stills");
+    // Play/Pause is a choice that survives the index reload a Main/Sub flip makes.
+    const transport = grid.locator(".all-cameras-controls");
+    const flip = async (name, value) => {
+      await transport.getByRole("button", { name, exact: true }).click();
+      await waitParam(grid, "source", `value === '${value}'`, `the grid switches to ${name}`);
+      await grid.waitForFunction(() => document.querySelectorAll(".all-cameras-tile video").length === 3, null, { timeout: 8000 });
+      await grid.waitForTimeout(1500);
+    };
+    await transport.getByRole("button", { name: "Play", exact: true }).click();
+    await flip("Sub", "live");
+    assert.ok(await transport.getByRole("button", { name: "Pause", exact: true }).isVisible(), "a playing grid keeps playing after Main/Sub");
+    await transport.getByRole("button", { name: "Pause", exact: true }).click();
+    await flip("Main", "main");
+    assert.ok(await transport.getByRole("button", { name: "Play", exact: true }).isVisible(), "a paused grid stays paused after Main/Sub");
+    // Custom: the chosen cameras, kept across visits; Reset shows every camera.
+    await bar.getByRole("button", { name: "Custom", exact: true }).click();
+    assert.equal(await bar.locator(".live-density-control").count(), 0, "density only applies to Automatic");
+    await bar.getByRole("button", { name: /Choose cameras/ }).click();
+    await bar.getByRole("checkbox", { name: /Front Door/ }).click();
+    await grid.keyboard.press("Escape");
+    await grid.waitForFunction(() => document.querySelectorAll(".all-cameras-tile").length === 2, null, { timeout: 5000 })
+      .catch(() => { throw new Error("Custom shows only the chosen cameras"); });
+    assert.match(await grid.locator(".all-cameras-summary").textContent(), /^2 of 2 cameras$/);
+    await shot(grid, "all-cameras-custom");
+    await grid.reload();
+    await settle(grid);
+    await grid.waitForSelector(".all-cameras-tile");
+    assert.deepEqual(await grid.locator(".all-cameras-tile").evaluateAll((tiles) => tiles.map((tile) => tile.dataset.cameraId)), ["gate", "upper-garage"], "the Custom set and mode are remembered");
+    await grid.locator('.all-cameras-tile[data-camera-id="upper-garage"] .all-cameras-tile-hit').click();
+    await grid.waitForSelector('.all-cameras-tile.primary[data-camera-id="upper-garage"]');
+    assert.deepEqual(await grid.locator(".all-cameras-tile").evaluateAll((tiles) => tiles.map((tile) => tile.dataset.cameraId)), ["gate", "upper-garage"], "Focus entered from Custom keeps the chosen cameras");
+    await bar.getByRole("button", { name: "Custom", exact: true }).click();
+    await bar.getByRole("button", { name: /Choose cameras/ }).click();
+    await bar.getByRole("checkbox", { name: /Gate/ }).click();
+    assert.ok(await bar.getByRole("checkbox", { name: /Upper Garage/ }).isDisabled(), "the last chosen camera cannot be cleared");
+    await grid.keyboard.press("Escape");
+    await bar.getByRole("button", { name: "Reset", exact: true }).click();
+    await grid.waitForFunction(() => document.querySelectorAll(".all-cameras-tile").length === 3, null, { timeout: 5000 })
+      .catch(() => { throw new Error("Reset shows every camera"); });
+    assert.deepEqual(grid.errors, [], "All cameras must not raise errors");
+    await grid.close();
+  }
+
+  // Phones never show All cameras: a camera=all link opens the first camera.
+  {
+    const phone = await open({ width: 390, height: 844 }, query.replace("camera=gate", "camera=all"), true);
+    await settle(phone);
+    await waitParam(phone, "camera", "value === 'gate'", "a phone opens the first camera instead of All cameras");
+    assert.equal(await phone.locator(".all-cameras-grid").count(), 0);
+    assert.equal(await phone.locator(".timeline-grid-layout").count(), 0, "phones get no grid layout controls");
+    assert.deepEqual(phone.errors, [], "a camera=all link on a phone must not raise errors");
+    await phone.close();
+  }
+
+  // Cameras with no recording in the playhead's window get no tile; the
+  // control bar says which, centred between the time and Main/Sub.
+  {
+    const grid = await open({ width: 1440, height: 900 }, query.replace("camera=gate", "camera=all"));
+    await grid.route("**/api/recordings/grid/day*", async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json();
+      payload.availability = payload.availability.filter((range) => range.camera_id !== "upper-garage");
+      await route.fulfill({ response, json: payload });
+    });
+    await grid.reload();
+    await settle(grid);
+    await grid.waitForFunction(() => document.querySelectorAll(".all-cameras-tile").length === 2, null, { timeout: 8000 })
+      .catch(() => { throw new Error("a camera without recording gets no tile"); });
+    assert.deepEqual(await grid.locator(".all-cameras-tile").evaluateAll((tiles) => tiles.map((tile) => tile.dataset.cameraId)), ["gate", "front-door"]);
+    const summary = grid.locator(".all-cameras-summary");
+    assert.match(await summary.textContent(), /^2 of 3 cameras · No recording: Upper Garage$/);
+    const bar = await grid.locator(".all-cameras-controls").boundingBox();
+    const box = await summary.boundingBox();
+    const source = await grid.locator(".all-cameras-controls .incident-recording-source").boundingBox();
+    assert.ok(box.width > 40 && box.x + box.width <= source.x + 1 && box.y >= bar.y && box.y + box.height <= bar.y + bar.height, "the status sits in the bar before Main/Sub");
+    await shot(grid, "all-cameras-hidden-desktop");
+    assert.deepEqual(grid.errors, [], "hiding cameras must not raise errors");
+    await grid.close();
+  }
+
+  // Today, the grid starts behind live so tiles have footage ahead of them.
+  {
+    const liveEdge = at(15.4);
+    const grid = await open({ width: 1440, height: 900 }, `camera=all&date=${new Date(liveEdge * 1000).toISOString().slice(0, 10)}`);
+    await grid.clock.setFixedTime(new Date((liveEdge + 20) * 1000));
+    await grid.reload();
+    await settle(grid);
+    await grid.waitForSelector(".all-cameras-tile video");
+    const start = await playheadSeconds(grid);
+    const edge = liveEdge - at(0);
+    assert.ok(start <= edge - 45 && start >= edge - 400, `today starts about a minute behind the newest recording (${edge - start}s behind)`);
+    await grid.close();
+  }
 }

@@ -1284,3 +1284,11 @@
   .catchup-thumb { height: 64px; }
   .catchup-quiet button { flex-direction: row; width: auto; min-height: 32px; padding: 0 12px; border-radius: 16px; }
 }
+
+/* Card detail line (camera · time · duration) stays on one line. */
+.event-rail-card-text small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
