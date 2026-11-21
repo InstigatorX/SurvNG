@@ -263,6 +263,11 @@ class RecordingRouteLifecycleTests(TestCase):
             body.index("#EXT-X-START:"),
             body.index("#EXTINF:"),
         )
+        # Recording files start on keyframes (segment muxer, stream copy), so
+        # the playlist declares independent segments in its header.
+        header = body.split("#EXT-X-MAP:", 1)[0].splitlines()
+        self.assertIn("#EXT-X-INDEPENDENT-SEGMENTS", header)
+        self.assertEqual(header[-1], "#EXT-X-START:TIME-OFFSET=7.250,PRECISE=YES")
         clipped = handlers["recording_day_hls_playlist"](
             "gate",
             100,

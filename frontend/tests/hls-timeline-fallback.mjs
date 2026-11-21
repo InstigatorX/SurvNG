@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { clipPreviewReachedEnd } from "../src/recordingClipSelection.mjs";
-import { isChromiumBrowser, supportsNativeRecordingHls, recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, recordingSegmentLocalTime, playbackRowsCoverEpoch, videoReachedSeekTarget, recordingSeekToleranceSeconds } from "../src/recordingPlayback.mjs";
+import { isChromiumBrowser, supportsNativeRecordingHls, recordingTransportOverride, RECORDING_TRANSPORT_STORAGE_KEY, recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, recordingSegmentLocalTime, playbackRowsCoverEpoch, videoReachedSeekTarget, recordingSeekToleranceSeconds } from "../src/recordingPlayback.mjs";
 
 for (const error of [{ code: 3 }, { code: 4 }, { code: 4032, category: 4 }, { code: 3014, data: [3] }, { code: 3015, data: [{ name: "NotSupportedError" }] }, { code: 3016, data: [3] }, { code: 3016, data: [4] }, new Error("This browser does not support Shaka Player")]) {
   assert.equal(isRecordingCompatibilityError(error), true, JSON.stringify(error));
@@ -150,6 +150,29 @@ assert.equal(isChromiumBrowser({ userAgent: "", userAgentData: { brands: [{ bran
   } finally {
     if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;
   }
+}
+
+// A forced transport (?transport=hls|original) wins over the iPhone/4× policy,
+// is remembered per browser, and `auto` clears it. A playback failure still
+// falls back to original files, and codec failure still transcodes.
+{
+  const storage = new Map();
+  const win = (search) => ({ location: { search }, localStorage: { getItem: (k) => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v), removeItem: (k) => storage.delete(k) } });
+  assert.equal(recordingTransportOverride(win("")), null);
+  assert.equal(recordingTransportOverride(win("?camera=gate&transport=hls")), "hls");
+  assert.equal(storage.get(RECORDING_TRANSPORT_STORAGE_KEY), "hls");
+  assert.equal(recordingTransportOverride(win("?camera=gate")), "hls", "the choice persists without the URL parameter");
+  assert.equal(recordingTransportOverride(win("?transport=bogus")), "hls", "unknown values do not change it");
+  assert.equal(recordingTransportOverride(win("?transport=auto")), null);
+  assert.equal(storage.has(RECORDING_TRANSPORT_STORAGE_KEY), false, "auto clears the stored choice");
+  const blocked = { location: { search: "?transport=original" }, get localStorage() { throw new Error("blocked"); } };
+  assert.equal(recordingTransportOverride(blocked), "original", "the URL still applies without storage");
+  assert.equal(recordingTransportOverride(null), null);
+  assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, mobileNative: true, override: "hls" }), "hls", "iPhone can be forced onto native HLS");
+  assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 4, mobileNative: false, override: "hls" }), "hls");
+  assert.equal(recordingPlaybackTransport({ nativeHls: false, rate: 1, mobileNative: false, override: "original" }), "original");
+  assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, mobileNative: true, override: "hls", preferOriginal: true }), "original", "a failure still falls back");
+  assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, override: "hls", incompatible: true }), "transcode");
 }
 
 // HLS is the default; fast native playback copies original MP4, and only a

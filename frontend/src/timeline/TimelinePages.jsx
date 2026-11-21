@@ -40,7 +40,7 @@ import { browserStorage } from "../storage.mjs";
 import { canSetClipBoundaryAtPlayhead, clipPreviewReachedEnd, clipRangeIsValid, setClipBoundaryAtPlayhead } from "../recordingClipSelection.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
-import { recordingPlaybackTransport, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
+import { recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { SpeechSearchWorkspace } from "../search/SpeechSearchResults.jsx";
@@ -72,6 +72,7 @@ import { ShakaVideo } from "../shared/media.jsx";
 import { CameraLanes, CatchUpStory, EventRail } from "./TimelineRail.jsx";
 import { condenseStory, nextStoryEvent, railEventDurationSeconds, railEventKind, railEventTitle, storyEventAt } from "../timelineRail.mjs";
 import { RecordingHlsVideo } from "../shared/RecordingHlsVideo.jsx";
+import { PlaybackDiagnostics, playbackDiagnosticsEnabled } from "./PlaybackDiagnostics.jsx";
 import { NativeRecordingVideo } from "../shared/NativeRecordingVideo.jsx";
 import { DebugDetectionOverlay } from "../shared/evidence.jsx";
 import { MobileCameraSelect } from "../shared/MobileCameraSelect.jsx";
@@ -821,6 +822,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const failedSubScopeRef = useRef(null);
   const [transcodeScope, setTranscodeScope] = useState(null);
   const [nativeHls] = useState(supportsNativeRecordingHls);
+  const [transportOverride] = useState(recordingTransportOverride);
+  const [showPlaybackDiagnostics] = useState(() => playbackDiagnosticsEnabled(transportOverride));
+  const heroMediaRef = useRef(null);
   const [playbackTransport, setPlaybackTransport] = useState(null);
   const playbackTransportRef = useRef(null);
   const playbackRequestRef = useRef(0);
@@ -944,6 +948,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const loadedPlaybackWindow = playbackDetail?.scope === nativeScope ? playbackDetail : null;
   const requestedTransport = recordingPlaybackTransport({
     nativeHls, rate: playbackRate, incompatible: transcodeScope === nativeScope, preferOriginal: originalScope === nativeScope,
+    override: transportOverride,
   });
   const transport = playbackTransport?.scope === nativeScope ? playbackTransport.mode : requestedTransport;
   const useTranscodedPlayback = transport === "transcode";
@@ -2893,7 +2898,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             playing={gridPlaying}
             onSelect={(selectedCameraId) => { selectPlaybackCamera(selectedCameraId); }}
           /> : null}
-          {!isAllCameras ? <div className="recording-hero-media">
+          {!isAllCameras ? <div className="recording-hero-media" ref={heroMediaRef}>
+          {showPlaybackDiagnostics ? <PlaybackDiagnostics containerRef={heroMediaRef} transport={transport} override={transportOverride} /> : null}
           {nativeSegmentUrl ? (
             <NativeRecordingVideo
               key={nativeScope}
