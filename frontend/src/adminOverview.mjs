@@ -154,7 +154,8 @@ export function uptimePercent(slots = []) {
   return known.reduce((sum, value) => sum + value, 0) / known.length;
 }
 
-function streamSummary(runtime) {
+/** "2560×1440 · 15 fps" from a camera runtime status, or "—". */
+export function cameraStreamSummary(runtime) {
   const dimensions = runtime?.stream_dimensions?.main || runtime?.stream_dimensions?.live;
   const fps = Number(runtime?.capture_stats?.main?.fps || runtime?.capture_stats?.live?.fps || 0);
   const size = finite(dimensions?.width) && finite(dimensions?.height) && dimensions.width > 0
@@ -163,7 +164,8 @@ function streamSummary(runtime) {
   return [size, rate].filter(Boolean).join(" · ") || "—";
 }
 
-function cameraStatus(row) {
+/** Status label and tone for one recordingHealth row. */
+export function cameraStatusSummary(row) {
   if (row.state === "healthy") return { label: "Recording", tone: "good" };
   if (row.state === "paused") return { label: "Not recording by choice", tone: "muted" };
   if (row.state === "disabled") return { label: "Disabled", tone: "muted" };
@@ -185,8 +187,8 @@ export function overviewCameraRows({ health, cameras = [], availability = {} } =
     return {
       id,
       name: row.name,
-      status: cameraStatus(row),
-      stream: streamSummary(row.runtime),
+      status: cameraStatusSummary(row),
+      stream: cameraStreamSummary(row.runtime),
       detection: row.runtime?.detection_enabled === false || config.detection_enabled === false ? "Off" : "On",
       homekit: config.homekit?.enabled ? "On" : "Off",
       uptime: uptimeSlots(slots),

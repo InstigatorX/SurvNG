@@ -30,6 +30,7 @@ import {
   LayoutDashboard,
   Monitor,
   Moon,
+  PanelLeftClose,
   PanelLeftOpen,
   Plus,
   Power,
@@ -71,6 +72,11 @@ import { defaultCamera, CameraStreamsEditor, CameraOnvifEditor, LiveViewFramingE
 import { AccessSettings } from "./AccessSettings.jsx";
 import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
 import { AdminOverview } from "./AdminOverview.jsx";
+import { ChangeReviewPanel } from "./ChangeReview.jsx";
+import { CameraStudioList } from "./CameraStudioList.jsx";
+import { describeConfigChanges, revertConfigChange, scopeConfigReview } from "../configChanges.mjs";
+import { recordingHealth } from "../recordingHealth.mjs";
+import { cameraStatusSummary, cameraStreamSummary } from "../adminOverview.mjs";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
 import { DetectionOccupancyCard } from "./DetectionOccupancyCard.jsx";
 import { SpeechSettings } from "./SpeechSettings.jsx";
@@ -862,6 +868,9 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const [maintenance, setMaintenance] = useState(null);
   const [maintenanceError, setMaintenanceError] = useState("");
   const [adminNavOpen, setAdminNavOpen] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  // In Camera Studio the Admin rail collapses to icons unless the operator expands it.
+  const [adminRailExpanded, setAdminRailExpanded] = useStoredState("survng.adminRailExpanded.v1", "false");
   const [calibrationCommandBar, setCalibrationCommandBar] = useState(null);
   const [generalViewNonce, setGeneralViewNonce] = useState(0);
   const [detectionSection, setDetectionSection] = useState("object");
@@ -873,7 +882,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const apiTokenSecretVisibleRef = useRef(apiTokenSecretVisible);
   const acceptedAdminLocationRef = useRef(`${window.location.pathname}${window.location.search}${window.location.hash}`);
   const baselineConfigRef = useRef(null);
-  const [, setBaselineRevision] = useState(0);
+  const [baselineRevision, setBaselineRevision] = useState(0);
   const auditPageSize = 24;
 
   function adminLocationOptions(section = settingsTab) {
@@ -1468,6 +1477,31 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
             ? "Camera order changes the interface only and does not restart camera workers."
             : "Camera changes use scoped saves and avoid unnecessary worker restarts."
     : "Settings apply selectively; the confirmation will identify any subsystem or camera worker that reloaded.";
+  const pendingReview = useMemo(
+    () => (config && baselineConfig ? describeConfigChanges(baselineConfig, config) : null),
+    // baselineRevision tracks in-place updates of the baseline ref.
+    [config, baselineConfig, baselineRevision],
+  );
+  const currentReview = scopeConfigReview(pendingReview, settingsTab);
+  const unsavedByCamera = Object.fromEntries((pendingReview?.cameras || []).map((group) => [group.cameraId, group.changes.length]));
+  const cameraHealthRows = useMemo(() => recordingHealth({
+    // An empty list means status has not arrived; report "unknown", not "unavailable".
+    cameras: runtimeStatus.length ? runtimeStatus : null,
+    appConfig: baselineConfig,
+    camerasUpdatedAt: Date.now(),
+    now: Date.now(),
+  }).rows, [runtimeStatus, baselineConfig, baselineRevision]);
+  const cameraStatusById = Object.fromEntries(cameraHealthRows.map((row) => [row.id, cameraStatusSummary(row)]));
+  const reviewCameraNames = (currentReview?.cameras || []).map((group) => group.name);
+  const unsavedSummary = currentReview?.count
+    ? `${currentReview.count} unsaved change${currentReview.count === 1 ? "" : "s"}`
+    : "Unsaved changes";
+  const unsavedWhere = reviewCameraNames.length === 1
+    ? `on ${reviewCameraNames[0]}`
+    : reviewCameraNames.length === 2
+      ? `on ${reviewCameraNames[0]} and ${reviewCameraNames[1]}`
+      : reviewCameraNames.length > 2 ? `on ${reviewCameraNames.length} cameras` : "";
+  const adminRailCollapsed = settingsTab === "cameras" && adminRailExpanded !== "true";
   adminDirtyRef.current = adminDirty;
   apiTokenSecretVisibleRef.current = apiTokenSecretVisible;
   const selectedRuntimeStatus = runtimeStatus.find((camera) => camera.id === selectedCamera?.id);
@@ -1493,6 +1527,22 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   }, [adminDirty, apiTokenSecretVisible]);
 
 
+
+  useEffect(() => {
+    if (reviewOpen && !currentAdminDirty) setReviewOpen(false);
+  }, [reviewOpen, currentAdminDirty]);
+
+  useEffect(() => {
+    setReviewOpen(false);
+  }, [settingsTab]);
+
+  function undoConfigChange(change) {
+    const baselineSnapshot = baselineConfigRef.current;
+    if (!baselineSnapshot) return;
+    const next = revertConfigChange(config, baselineSnapshot, change);
+    setConfig(next);
+    if (!next.cameras?.some((camera) => camera.id === selectedId)) setSelectedId(next.cameras?.[0]?.id || "");
+  }
 
   function discardAdminChanges() {
     if (!baselineConfigRef.current) return;
@@ -1915,14 +1965,21 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     if (settingsTab === "cameras") {
       return {
         scope: (
-          <CameraScopePicker
-            className="section-title-picker"
-            cameras={cameras}
-            runtimeStatus={runtimeStatus}
-            value={selectedCamera?.id || ""}
-            onChange={selectConfigCamera}
-            ariaLabel="Configure camera"
-          />
+          <>
+            {selectedCamera ? <div className="camera-studio-heading">
+              <h2>{selectedCamera.name || selectedCamera.id}</h2>
+              {cameraStatusById[selectedCamera.id] ? <span className={`camera-studio-chip ${cameraStatusById[selectedCamera.id].tone}`}><i aria-hidden="true" />{cameraStatusById[selectedCamera.id].label}</span> : <span className="camera-studio-chip muted">Not saved yet</span>}
+              <span className="camera-studio-stream">{cameraStreamSummary(selectedRuntimeStatus)}</span>
+            </div> : null}
+            <CameraScopePicker
+              className="section-title-picker camera-studio-picker"
+              cameras={cameras}
+              runtimeStatus={runtimeStatus}
+              value={selectedCamera?.id || ""}
+              onChange={selectConfigCamera}
+              ariaLabel="Configure camera"
+            />
+          </>
         ),
         actions: (
           <div className="camera-command-bar">
@@ -2036,6 +2093,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   }, [
     auditCamera,
     auditCategoryTitle,
+    baselineRevision,
     auditLoading,
     auditPage,
     calibrationCommandBar,
@@ -2064,7 +2122,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   }
 
   return (
-    <main className="bento-grid config-grid settings-grid">
+    <main className={`bento-grid config-grid settings-grid${adminRailCollapsed ? " admin-rail-collapsed" : ""}${reviewOpen ? " admin-review-open" : ""}`}>
       <button type="button" className={`admin-navigation-backdrop${adminNavOpen ? " open" : ""}`} aria-label="Close Admin menu" onClick={() => setAdminNavOpen(false)} />
       <aside id="admin-navigation" className={`admin-navigation${adminNavOpen ? " open" : ""}`} aria-label="Admin navigation">
         <div className="admin-navigation-head">
@@ -2082,6 +2140,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
             })}
           </section>)}
         </nav>
+        {settingsTab === "cameras" ? <button type="button" className="admin-rail-toggle" onClick={() => setAdminRailExpanded(adminRailCollapsed ? "true" : "false")} aria-label={adminRailCollapsed ? "Expand Admin menu" : "Collapse Admin menu"} title={adminRailCollapsed ? "Expand Admin menu" : "Collapse Admin menu"}>{adminRailCollapsed ? <PanelLeftOpen size={17} aria-hidden="true" /> : <PanelLeftClose size={17} aria-hidden="true" />}</button> : null}
       </aside>
       <header className="admin-mobile-toolbar">
         <button type="button" aria-controls="admin-navigation" aria-expanded={adminNavOpen} onClick={() => setAdminNavOpen(true)}><PanelLeftOpen size={18} />Menu</button>
@@ -2224,6 +2283,15 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           </section>
         ) : (
           <>
+            <CameraStudioList
+              cameras={cameras}
+              selectedId={selectedCamera?.id || ""}
+              statusById={cameraStatusById}
+              unsavedById={unsavedByCamera}
+              onSelect={selectConfigCamera}
+              onAdd={() => addCamera()}
+              disabled={cameraOrderEditing}
+            />
             <section id="admin-panel-cameras" className="bento-card config-editor settings-panel settings-panel-wide admin-workspace-cameras subsection-workspace">
 
               {cameraOrderEditing ? <section className="sub-panel camera-order-panel" aria-label="Camera order">
@@ -2454,15 +2522,27 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
             </section>
           </>
         )}
+        {reviewOpen && currentReview ? (
+          <ChangeReviewPanel
+            review={currentReview}
+            impact={adminSaveImpact}
+            saving={currentAdminSaving}
+            onUndo={undoConfigChange}
+            onSave={() => void saveCurrentAdminChanges()}
+            onDiscard={discardAdminChanges}
+            onClose={() => setReviewOpen(false)}
+          />
+        ) : null}
       </div>
       {adminSaveAvailable ? <div className={`admin-save-bar${currentAdminDirty ? " dirty" : ""}`} role="region" aria-label="Save Admin changes">
         <div className="admin-save-state" role="status" aria-live="polite">
           {saveNotice?.state === "error" ? <CircleAlert size={17} /> : currentAdminSaving ? <RefreshCcw className="spin" size={17} /> : <CircleDot size={17} />}
-          <span><strong>{adminSaveStatusTitle}</strong><small>{saveNotice?.state === "error" ? saveNotice.text : currentAdminDirty ? adminSaveImpact : saveNotice?.text || adminSaveImpact}</small></span>
+          <span><strong>{currentAdminDirty && !currentAdminSaving ? unsavedSummary : adminSaveStatusTitle}</strong><small>{saveNotice?.state === "error" ? saveNotice.text : currentAdminDirty ? (unsavedWhere || adminSaveImpact) : saveNotice?.text || adminSaveImpact}</small></span>
         </div>
         <div className="admin-save-actions">
           <button type="button" onClick={discardAdminChanges} disabled={!currentAdminDirty || currentAdminSaving}>Discard</button>
-          <button type="button" className="primary" onClick={() => void saveCurrentAdminChanges()} disabled={!currentAdminDirty || currentAdminSaving}>{currentAdminSaving ? <RefreshCcw className="spin" size={16} /> : <Save size={16} />}{currentAdminSaving ? "Saving…" : "Save changes"}</button>
+          <button type="button" className={reviewOpen ? "pressed" : undefined} aria-pressed={reviewOpen} onClick={() => setReviewOpen((open) => !open)} disabled={!currentAdminDirty}>Review changes</button>
+          {reviewOpen ? null : <button type="button" className="primary" onClick={() => void saveCurrentAdminChanges()} disabled={!currentAdminDirty || currentAdminSaving}>{currentAdminSaving ? <RefreshCcw className="spin" size={16} /> : <Save size={16} />}{currentAdminSaving ? "Saving…" : "Save changes"}</button>}
         </div>
       </div> : null}
       {selectedAudit ? (
