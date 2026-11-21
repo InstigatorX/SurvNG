@@ -138,6 +138,24 @@ test('a late recording open still records a post-roll', async t => {
   } finally { await stream.return(undefined); await recording.close(); }
 });
 
+test('producer loss fails an open recording without resending its last fragment', async () => {
+  const recording = ready();
+  recording.setMotion(true);
+  const stream = recording.handleRecordingStreamRequest(1);
+  try {
+    await stream.next();
+    assert.deepEqual((await stream.next()).value, { data: Buffer.from('first'), isLast: false });
+    recording.setMotion(false);
+    const waiting = stream.next();
+    recording.ring.close();
+    await assert.rejects(waiting, /fragment source closed/);
+    assert.equal(recording.counters.failed, 1);
+    assert.equal(recording.counters.completed, 0);
+    assert.equal(recording.counters.acknowledged, 0);
+    assert.equal(recording.reportingMotion(), false);
+  } finally { await stream.return(undefined); await recording.close(); }
+});
+
 test('privacy changed while a recording read waits prevents the next fragment', async () => {
   let allowed = true;
   const recording = ready(() => allowed);

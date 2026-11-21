@@ -260,7 +260,6 @@ export class LabRecording implements CameraRecordingDelegate {
     const effective = AbortSignal.any([abort.signal, ...(signal ? [signal] : []), AbortSignal.timeout(300_000)]);
     this.counters.streams++;
     this.changed();
-    let sent: Buffer | undefined;
     const ended = () => (!this.motion && this.motionStopped > 0 && Date.now() - this.motionStopped >= POST_ROLL_MS)
       || Date.now() - opened >= CLIP_LIMIT_MS;
     const finish = (data: Buffer) => {
@@ -270,16 +269,10 @@ export class LabRecording implements CameraRecordingDelegate {
     try {
       yield { data: this.init, isLast: false };
       while (true) {
-        let fragment: Fragment;
-        try { fragment = await ring.read(sequence++, effective); }
-        catch (error) {
-          if (sent && ring.closed && !abort.signal.aborted && !signal?.aborted) { yield finish(sent); return; }
-          throw error;
-        }
+        const fragment = await ring.read(sequence++, effective);
         effective.throwIfAborted();
         if (!this.allowed()) throw new Error('HomeKit privacy enabled');
         if (ended()) { yield finish(fragment.data); return; }
-        sent = fragment.data;
         yield { data: fragment.data, isLast: false };
       }
     } catch (error) { if (!abort.signal.aborted && !signal?.aborted) this.counters.failed++; throw error; }
