@@ -106,10 +106,10 @@ export function PlaybackDiagnostics({ containerRef, transport, override, playlis
 }
 
 export function playbackDiagnosticsEnabled(override, win = typeof window === "undefined" ? null : window) {
-  if (override) return true;
   try {
-    return new URLSearchParams(win?.location?.search || "").get("playbackdebug") === "1";
+    const setting = new URLSearchParams(win?.location?.search || "").get("playbackdebug");
+    return setting !== "0" && (setting === "1" || Boolean(override));
   } catch {
-    return false;
+    return Boolean(override);
   }
 }

@@ -152,7 +152,7 @@ assert.equal(isChromiumBrowser({ userAgent: "", userAgentData: { brands: [{ bran
   }
 }
 
-// A forced transport (?transport=hls|original) wins over the iPhone/4× policy,
+// A forced transport (?transport=hls|original) wins over the automatic policy,
 // is remembered per browser, and `auto` clears it. A playback failure still
 // falls back to original files, and codec failure still transcodes.
 {
@@ -168,10 +168,9 @@ assert.equal(isChromiumBrowser({ userAgent: "", userAgentData: { brands: [{ bran
   const blocked = { location: { search: "?transport=original" }, get localStorage() { throw new Error("blocked"); } };
   assert.equal(recordingTransportOverride(blocked), "original", "the URL still applies without storage");
   assert.equal(recordingTransportOverride(null), null);
-  assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, mobileNative: true, override: "hls" }), "hls", "iPhone can be forced onto native HLS");
-  assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 4, mobileNative: false, override: "hls" }), "hls");
-  assert.equal(recordingPlaybackTransport({ nativeHls: false, rate: 1, mobileNative: false, override: "original" }), "original");
-  assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, mobileNative: true, override: "hls", preferOriginal: true }), "original", "a failure still falls back");
+  assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 4, override: "hls" }), "hls");
+  assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, preferMobileOriginal: false, override: "original" }), "original");
+  assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, preferMobileOriginal: false, override: "hls", preferOriginal: true }), "original", "a failure still falls back");
   assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, override: "hls", incompatible: true }), "transcode");
 }
 
@@ -179,12 +178,12 @@ assert.equal(isChromiumBrowser({ userAgent: "", userAgentData: { brands: [{ bran
 // format/decode failure opts into original files first. Network errors never encode.
 for (const nativeHls of [true, false]) {
   for (const rate of [.5, 1, 2, 4]) {
-    assert.equal(recordingPlaybackTransport({ nativeHls, rate, mobileNative: false }), nativeHls && rate > 2 ? "original" : "hls");
-    assert.equal(recordingPlaybackTransport({ nativeHls, rate, preferOriginal: true, mobileNative: false }), "original");
-    assert.equal(recordingPlaybackTransport({ nativeHls, rate, incompatible: true, preferOriginal: true, mobileNative: true }), "transcode");
-    assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, mobileNative: true }), "original");
+    assert.equal(recordingPlaybackTransport({ nativeHls, rate, preferMobileOriginal: false }), nativeHls && rate > 2 ? "original" : "hls");
+    assert.equal(recordingPlaybackTransport({ nativeHls, rate, preferOriginal: true, preferMobileOriginal: false }), "original");
+    assert.equal(recordingPlaybackTransport({ nativeHls, rate, incompatible: true, preferOriginal: true, preferMobileOriginal: true }), "transcode");
   }
 }
+assert.equal(recordingPlaybackTransport({ nativeHls: true, rate: 1, preferMobileOriginal: true }), "original", "the mobile incident player can still prefer original files");
 
 // Changing speed changes transport at the retained wall-clock position without
 // changing play/pause intent. This also covers an in-flight seek and cold index.

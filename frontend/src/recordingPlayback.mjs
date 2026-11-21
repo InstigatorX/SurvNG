@@ -61,17 +61,16 @@ export function recordingPlaybackTransport({
   rate,
   incompatible = false,
   preferOriginal = false,
-  mobileNative = PREFER_NATIVE_HLS,
+  preferMobileOriginal = PREFER_NATIVE_HLS,
   override = null,
 } = {}) {
   if (incompatible) return "transcode";
   // A playback failure still falls back to original files, even when forced.
   if (preferOriginal) return "original";
   if (override === "hls" || override === "original") return override;
-  // iPhone cannot seek these archive HLS playlists: precise playlist starts and
-  // currentTime writes stall or never resume. Original MP4 files answer byte-range
-  // seeks directly. Desktop HLS above 2× has the same I-frame limitation.
-  if (mobileNative || (nativeHls && rate > 2)) return "original";
+  // Incident playback still uses original files on iOS. Native HLS also
+  // falls back to original files above 2× because of its I-frame limitation.
+  if (preferMobileOriginal || (nativeHls && rate > 2)) return "original";
   return "hls";
 }
 

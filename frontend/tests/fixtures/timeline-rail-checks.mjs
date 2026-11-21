@@ -141,15 +141,15 @@ export async function checks({ open, shot, query, at, assert }) {
   assert.deepEqual(days.errors, [], "day navigation must not raise errors");
   await days.close();
 
-  // iPhone playback transport: per-file MP4 by default; ?transport=hls forces
-  // the HLS playlist (remembered per browser) and shows the diagnostics readout.
+  // iPhone defaults to HLS. Explicit diagnostics settings take precedence over
+  // the readout that accompanies a forced transport, including saved overrides.
   const iphone = { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1" };
   const phone = { width: 390, height: 844 };
   const readout = (page) => page.locator(".playback-diagnostics strong").textContent();
   const defaultIphone = await open(phone, `${query}&playbackdebug=1`, true, iphone);
   await defaultIphone.waitForSelector(".playback-diagnostics");
-  await defaultIphone.waitForFunction(() => /per-file MP4/.test(document.querySelector(".playback-diagnostics strong")?.textContent || ""));
-  assert.match(await readout(defaultIphone), /^original · per-file MP4/, "an iPhone plays original files by default");
+  await defaultIphone.waitForFunction(() => document.querySelector(".recording-hero-media video")?.readyState >= 2);
+  assert.match(await readout(defaultIphone), /^hls ·/, "an iPhone uses HLS by default");
   await defaultIphone.close();
   const forced = await open(phone, `${query}&transport=hls`, true, iphone);
   await forced.waitForSelector(".playback-diagnostics");
@@ -159,7 +159,19 @@ export async function checks({ open, shot, query, at, assert }) {
   assert.match(await readout(forced), /^hls \(forced\)/, "forced HLS stays on HLS without falling back");
   assert.equal(await forced.locator(".playback-diagnostics-error").count(), 0, "forced HLS plays the fixture without media errors");
   assert.equal(await forced.evaluate(() => [...document.querySelectorAll(".recording-hero-media video")].some((video) => /segment\.mp4/.test(video.getAttribute("src") || ""))), false, "forced HLS does not load per-file MP4");
-  await forced.goto(forced.url().replace("&transport=hls", ""));
+  const unforcedUrl = forced.url();
+  const forcedUrl = new URL(unforcedUrl);
+  forcedUrl.searchParams.set("transport", "hls");
+  for (const url of [forcedUrl, unforcedUrl]) {
+    await forced.goto(`${url}&playbackdebug=0`);
+    await forced.waitForFunction(() => document.querySelector(".recording-hero-media video")?.readyState >= 2);
+    assert.equal(await forced.locator(".playback-diagnostics").count(), 0, "playbackdebug=0 hides diagnostics with an explicit or saved override");
+    assert.equal(param(forced, "playbackdebug"), "0", "Timeline preserves the explicit debug setting in the URL");
+  }
+  await forced.reload();
+  await forced.waitForFunction(() => document.querySelector(".recording-hero-media video")?.readyState >= 2);
+  assert.equal(await forced.locator(".playback-diagnostics").count(), 0, "diagnostics stay off on reload");
+  await forced.goto(unforcedUrl);
   await forced.waitForFunction(() => /^hls \(forced\)/.test(document.querySelector(".playback-diagnostics strong")?.textContent || ""));
   await forced.goto(`${forced.url()}&transport=auto`);
   await forced.waitForSelector(".recording-hero-media video");

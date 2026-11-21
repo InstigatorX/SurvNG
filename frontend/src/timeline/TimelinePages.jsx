@@ -950,7 +950,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const loadedPlaybackWindow = playbackDetail?.scope === nativeScope ? playbackDetail : null;
   const requestedTransport = recordingPlaybackTransport({
     nativeHls, rate: playbackRate, incompatible: transcodeScope === nativeScope, preferOriginal: originalScope === nativeScope,
-    override: transportOverride,
+    preferMobileOriginal: false, override: transportOverride,
   });
   const transport = playbackTransport?.scope === nativeScope ? playbackTransport.mode : requestedTransport;
   const useTranscodedPlayback = transport === "transcode";
@@ -2015,6 +2015,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   useEffect(() => {
     if (!activeCameraId) return;
     const params = new URLSearchParams({ camera: activeCameraId, date, source });
+    const playbackDebug = initialQuery.get("playbackdebug");
+    if (playbackDebug === "0" || playbackDebug === "1") params.set("playbackdebug", playbackDebug);
     const retainedEpoch = desiredEpochRef.current;
     if (Number.isFinite(retainedEpoch) && retainedEpoch >= dayStart && retainedEpoch < dayEnd) {
       params.set("at", String(Math.round(retainedEpoch * 1000) / 1000));
@@ -2030,7 +2032,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (timelineLayout !== "rail") params.set("view", timelineLayout);
     if (railMinutes !== 60) params.set("rail", String(railMinutes));
     window.history.replaceState(null, "", appUrl(`/timeline?${params.toString()}`));
-  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, incidentRangeHours, playbackRate, railMinutes, selectedEventId, source, timelineLanes.motion, timelineLanes.object, timelineLayout, trailEventIds]);
+  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, incidentRangeHours, initialQuery, playbackRate, railMinutes, selectedEventId, source, timelineLanes.motion, timelineLanes.object, timelineLayout, trailEventIds]);
 
   useEffect(() => {
     const restoreView = () => {
