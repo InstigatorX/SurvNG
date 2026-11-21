@@ -2,10 +2,27 @@ import React, { useEffect, useRef, useState } from "react";
 import { CircleAlert, Mic, Play, Search } from "lucide-react";
 import { appUrl, fetch, recordingsHref } from "../shared/api.js";
 import { canonicalIncidentHref } from "../incidentScene.mjs";
-import { formatDateTime } from "../shared/format.js";
-import { speechLevelLabel, speechSegmentPlaceholder, speechSegmentRecordingContext, speechSegmentStatusLabel, speechSegmentsQuery } from "../speechSettings.mjs";
+import { formatDateTime, formatTimeOnly } from "../shared/format.js";
+import {
+  speechLevelLabel,
+  speechResultStatus,
+  speechSegmentPlaceholder,
+  speechSegmentRecordingContext,
+  speechSegmentsQuery,
+  speechTranscriptGapLabel,
+} from "../speechSettings.mjs";
 
 const PAGE_SIZE = 50;
+
+function TranscriptGaps({ gaps, timeZone }) {
+  if (!gaps?.length) return null;
+  return <ul className="speech-transcript-gaps" aria-label="Transcript gaps">
+    {gaps.map((gap, index) => <li key={index}>
+      {gap.started_at ? <><time dateTime={gap.started_at}>{formatTimeOnly(gap.started_at, timeZone)}</time>{gap.ended_at && gap.ended_at !== gap.started_at ? <>–<time dateTime={gap.ended_at}>{formatTimeOnly(gap.ended_at, timeZone)}</time></> : null} · </> : null}
+      {speechTranscriptGapLabel(gap.reason)}
+    </li>)}
+  </ul>;
+}
 
 export function SpeechSearchWorkspace({ cameras, cameraId, timeZone, initialQuery = "", disabledReason = "" }) {
   const [query, setQuery] = useState(initialQuery);
@@ -28,6 +45,7 @@ export function SpeechSearchWorkspace({ cameras, cameraId, timeZone, initialQuer
         cameraId,
         limit: PAGE_SIZE,
         beforeId: append ? nextBeforeId : null,
+        view: "conversation",
       });
       const response = await fetch(`/api/speech/segments?${params}`, { signal: controller.signal });
       const payload = await response.json().catch(() => ({}));
@@ -84,9 +102,11 @@ export function SpeechSearchWorkspace({ cameras, cameraId, timeZone, initialQuer
         const when = formatDateTime(segment.started_at, timeZone);
         const text = segment.text?.trim();
         const placeholder = speechSegmentPlaceholder(segment);
-        return <article key={segment.id} className={`speech-result ${segment.status}`} aria-label={`Speech at ${name}, ${when}`}>
-          <div className="speech-result-meta"><Mic size={15} /><strong>{name}</strong><small>{when} · {Number(segment.duration_seconds || 0).toFixed(1)}s{speechLevelLabel(segment) ? ` · ${speechLevelLabel(segment)}` : ""}</small><span className={`speech-result-status ${segment.status}`}>{speechSegmentStatusLabel(segment.status)}</span></div>
+        const status = speechResultStatus(segment);
+        return <article key={segment.conversation_id || segment.id} className={`speech-result ${segment.status}`} aria-label={`${segment.conversation_id ? "Conversation" : "Speech"} at ${name}, ${when}`}>
+          <div className="speech-result-meta"><Mic size={15} /><strong>{name}</strong><small>{when} · {Number(segment.duration_seconds || 0).toFixed(1)}s{speechLevelLabel(segment) ? ` · ${speechLevelLabel(segment)}` : ""}</small><span className={`speech-result-status ${status.tone}`}>{status.label}</span></div>
           <p className={text ? "speech-result-text" : "speech-result-text empty"}>{text ? `“${text}”` : placeholder}</p>
+          <TranscriptGaps gaps={segment.transcript_gaps} timeZone={timeZone} />
           {context || segment.incident_id ? <nav aria-label={`Actions for speech at ${name}`}>
             {segment.incident_id ? <a href={appUrl(canonicalIncidentHref({ incident_id: segment.incident_id }))}>Open incident</a> : null}
             {context ? <a href={recordingsHref(context)}><Play size={14} />Play recording</a> : null}

@@ -4,6 +4,7 @@ import io
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from survng.app.config import AppConfig, SpeechConfig
 from survng.app.local_observability import _speech_snapshot
 from survng.app.security import required_api_scope
+from survng.app.speech.conversation import ConversationChunk
 from survng.app.speech.lifecycle import SpeechLifecycle
 from survng.app.speech.listener import (
     ListenerEvent,
@@ -32,6 +34,7 @@ from survng.app.speech.transcriber import (
     TranscriptionService,
     classify_transcript,
 )
+from survng.app.speech_routes import SpeechRouteDependencies, create_speech_router
 
 FRAME_MS = FRAME_SAMPLES * 1000 / SAMPLE_RATE  # 32 ms
 
@@ -69,6 +72,7 @@ def test_speech_is_off_by_default_and_old_configs_load() -> None:
     assert config.speech.enabled is False
     assert config.cameras[0].speech.enabled is False
     assert config.cameras[0].speech.transcribe is False
+    assert config.cameras[0].speech.conversation_idle_ms == 10000
     assert config.speech.mqtt_publish_transcripts is False
 
 
@@ -513,7 +517,7 @@ def test_detection_only_cameras_record_segments_and_publish_state(tmp_path: Path
 
 @pytest.mark.parametrize("publish_transcripts", [False, True])
 def test_transcription_results_update_rows_and_mqtt_is_opt_in(tmp_path: Path, publish_transcripts: bool) -> None:
-    config = _config(transcribe=True)
+    config = _config(transcribe=True, conversation_idle_ms=0)
     config.speech.mqtt_publish_transcripts = publish_transcripts
     published: list = []
     lifecycle = _lifecycle(tmp_path, config, {"gate": True}, published)
@@ -542,6 +546,51 @@ def test_transcription_results_update_rows_and_mqtt_is_opt_in(tmp_path: Path, pu
             assert transcript_topics == [{"camera_id": "gate", "segment_id": segment_id, "text": "Hello there", "language": "en"}]
         else:
             assert transcript_topics == []
+    finally:
+        lifecycle.stop()
+
+
+def test_conversation_jobs_and_search_leave_utterance_events_intact(tmp_path: Path) -> None:
+    published: list = []
+    config = _config(transcribe=True)
+    lifecycle = _lifecycle(tmp_path, config, {"gate": True}, published)
+    lifecycle.start()
+    try:
+        assert _FakeListener.instances[0].kwargs["conversation_idle_ms"] == 10000
+        assert _FakeListener.instances[0].kwargs["keep_audio"] is False
+        emit = _FakeListener.instances[0].kwargs["on_event"]
+        emit(ListenerEvent("gate", SpeechStarted(0), 100.0, None))
+        emit(ListenerEvent("gate", _ended(2.0, audio=False), 100.0, 102.0))
+        assert [payload["state"] for _, payload in published] == ["ON", "OFF"]
+
+        for index in range(3):
+            start = index * SAMPLE_RATE
+            end = start + 2 * SAMPLE_RATE
+            chunk = ConversationChunk(
+                conversation_id="test-conversation", chunk_index=index,
+                start_sample=start, end_sample=end, audio=np.zeros(end - start, np.float32),
+                final=index == 2, interrupted=False,
+            )
+            emit(ListenerEvent("gate", chunk, 100.0 + index, 102.0 + index))
+        transcriber = lifecycle.transcriber
+        first, middle, last = transcriber.jobs
+        transcriber.on_result(TranscriptionResult(last.segment_id, "gate", "done", text="The meeting ended"))
+        transcriber.on_dropped(middle, "queue_full")
+        transcriber.on_result(TranscriptionResult(first.segment_id, "gate", "done", text="The meeting began"))
+
+        manager = SimpleNamespace(speech=lifecycle, speech_incident_ids=lambda segments: None)
+        router = create_speech_router(SpeechRouteDependencies(get_manager=lambda: manager))
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/speech/segments")
+        filters = dict(camera_id=None, start=None, end=None, status=None, before_id=None, limit=50)
+        default_rows = endpoint(q="", **filters)["segments"]
+        assert [row["status"] for row in default_rows] == ["detected"]
+        assert default_rows[0]["id"] == published[-1][1]["segment_id"]
+        [row] = endpoint(view="conversation", q="began", **filters)["segments"]
+        assert row["text"].index("began") < row["text"].index("ended")
+        assert row["chunk_count"] == 3
+        assert [gap["reason"] for gap in row["transcript_gaps"]] == ["skipped"]
+        pieces = endpoint(view="transcript", q="", **filters)["segments"]
+        assert [piece["chunk_index"] for piece in pieces] == [2, 1, 0]
     finally:
         lifecycle.stop()
 

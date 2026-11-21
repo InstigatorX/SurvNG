@@ -27,7 +27,7 @@ export function IncidentSpeechPanel({ incident, timeZone }) {
     (async () => {
       try {
         const pages = await Promise.all(windows.map(async (window) => {
-          const query = speechSegmentsQuery({ cameraId: window.camera_id, limit: 200 });
+          const query = speechSegmentsQuery({ cameraId: window.camera_id, limit: 200, view: "transcript" });
           const params = new URLSearchParams(query);
           params.set("start", window.start_at);
           params.set("end", window.end_at);
@@ -61,6 +61,6 @@ export function IncidentSpeechPanel({ incident, timeZone }) {
         </li>;
       })}
     </ol> : null}
-    {segments && !segments.length && !error ? <p className="incident-speech-note">The transcript has been removed by retention.</p> : null}
+    {segments && !segments.length && !error ? <p className="incident-speech-note">No transcript is available yet for this incident.</p> : null}
   </section>;
 }

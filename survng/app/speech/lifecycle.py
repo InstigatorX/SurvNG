@@ -16,6 +16,7 @@ from typing import Any
 
 from ..config import AppConfig, CameraConfig
 from .attach import incident_speech
+from .conversation import ConversationChunk
 from .retention import apply_speech_retention
 from .triggers import TriggerDispatcher, TriggerThrottle
 from .listener import ListenerEvent, SpeechListener
@@ -96,9 +97,7 @@ class SpeechLifecycle:
             return
         try:
             self.store = SpeechStore(self.database_dir)
-            abandoned = self.store.abandon_pending("restart")
-            if abandoned:
-                LOGGER.info("Speech: %d pending transcriptions were abandoned at restart", abandoned)
+            self._recover_interrupted_work()
         except Exception as error:
             self._state, self._reason = "unavailable", f"speech database: {type(error).__name__}"
             LOGGER.exception("Speech database could not be opened")
@@ -172,12 +171,19 @@ class SpeechLifecycle:
             return
         try:
             self.store = SpeechStore(self.database_dir)
+            self._recover_interrupted_work()
         except Exception:
             LOGGER.exception("Speech database could not be opened for retention")
             return
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="speech-retention", daemon=True)
         self._thread.start()
+
+    def _recover_interrupted_work(self) -> None:
+        abandoned = self.store.abandon_pending("restart")
+        self.store.close_unfinished_conversations()
+        if abandoned:
+            LOGGER.info("Speech: %d pending transcriptions were abandoned at restart", abandoned)
 
     def _run(self) -> None:
         while not self._stop.wait(RECONCILE_INTERVAL_SECONDS):
@@ -207,11 +213,14 @@ class SpeechLifecycle:
             starting = [camera_id for camera_id in desired if camera_id not in self._listeners]
             for camera_id in starting:
                 camera = self.cameras[camera_id]
+                transcribe = camera.speech.transcribe and self.transcriber is not None
+                conversation_idle_ms = camera.speech.conversation_idle_ms if transcribe else 0
                 listener = self.listener_factory(
                     camera,
                     ffmpeg_path=self.config.ffmpeg_path,
                     vad_model=self._vad,
-                    keep_audio=bool(camera.speech.transcribe and self.transcriber is not None),
+                    keep_audio=transcribe and not conversation_idle_ms,
+                    conversation_idle_ms=conversation_idle_ms,
                     on_event=self._listener_event,
                     audio_available=self.audio_available,
                 )
@@ -252,14 +261,24 @@ class SpeechLifecycle:
         if isinstance(item.event, SpeechStarted):
             self._publish_state(item.camera_id, True, started_at=item.started_at)
             return
+        if isinstance(item.event, ConversationChunk):
+            self._conversation_chunk(item, item.event)
+            return
         if not isinstance(item.event, SpeechEnded) or self.store is None:
             return
         event = item.event
         camera = self.cameras.get(item.camera_id)
+        conversation = bool(
+            camera is not None
+            and camera.speech.transcribe
+            and self.transcriber is not None
+            and camera.speech.conversation_idle_ms
+        )
         transcribe = bool(
             camera is not None
             and camera.speech.transcribe
             and self.transcriber is not None
+            and not conversation
             and event.audio is not None
         )
         status, reason = "detected", ""
@@ -276,11 +295,28 @@ class SpeechLifecycle:
             reason=reason,
             voiced_dbfs=item.level.voiced_dbfs if item.level is not None else None,
             noise_dbfs=item.level.noise_dbfs if item.level is not None else None,
+            transcript_in_conversation=conversation,
         )
         if not event.split:
             self._publish_state(item.camera_id, False, segment_id=segment_id)
         if transcribe:
             self.transcriber.submit(TranscriptionJob(segment_id, item.camera_id, event.audio))
+
+    def _conversation_chunk(self, item: ListenerEvent, chunk: ConversationChunk) -> None:
+        if self.store is None or self.transcriber is None or item.ended_at is None:
+            return
+        segment_id = self.store.insert_segment(
+            camera_id=item.camera_id,
+            started_at=item.started_at,
+            ended_at=item.ended_at,
+            peak_probability=0.0,
+            status="queued",
+            conversation_id=chunk.conversation_id,
+            chunk_index=chunk.chunk_index,
+            final=chunk.final,
+            interrupted=chunk.interrupted,
+        )
+        self.transcriber.submit(TranscriptionJob(segment_id, item.camera_id, chunk.audio))
 
     def _transcription_dropped(self, job: TranscriptionJob, reason: str) -> None:
         if self.store is not None:
@@ -292,7 +328,7 @@ class SpeechLifecycle:
         if result.status == "transcribing":
             self.store.set_status(result.segment_id, "transcribing")
             return
-        self.store.set_transcript(
+        stored = self.store.set_transcript(
             result.segment_id,
             status=result.status,
             text=result.text,
@@ -303,7 +339,8 @@ class SpeechLifecycle:
             reason=result.reason,
         )
         if (
-            self.speech.mqtt_publish_transcripts
+            stored
+            and self.speech.mqtt_publish_transcripts
             and self.publish is not None
             and result.status == "done"
         ):

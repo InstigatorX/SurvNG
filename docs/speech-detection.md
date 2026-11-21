@@ -18,6 +18,7 @@ go2rtc / camera stream
             └─ segmenter (hysteresis, pre-roll, hangover, max length)
                  ├─ speech_segments row  (speech.sqlite3)
                  ├─ MQTT  survng/camera/<id>/speech  ON / OFF
+            └─ conversation audio (optional, preserves pauses and quiet replies)
                  └─ transcription queue (bounded per camera)
                       └─ survng-speech worker process (Whisper, OpenVINO GenAI)
 ```
@@ -33,6 +34,14 @@ go2rtc / camera stream
 - **Segments.** Speech must last `min_speech_ms` to count. `pre_roll_ms` of
   audio before onset is included. A segment ends after `hangover_ms` of
   silence, and long speech is split at `max_segment_seconds`.
+- **Conversations.** Transcribing cameras default to keeping audio from
+  confirmed speech (including pre-roll) until 10 seconds without speech.
+  Audio between phrases stays in the transcript input even when it falls
+  below the detection threshold. Whisper receives overlapping chunks of at
+  most 30 seconds. Search joins them in time order and removes matching
+  phrases at adjoining boundaries. Failed or skipped chunks and stream
+  interruptions are visible. Changing the conversation timeout does not
+  change the timing of the speech sensor or incident checks.
 - **Transcription.** Whisper runs in its own spawned process, never in the
   detector pool or the API process, so slow transcription cannot delay
   incident inference. Queues are bounded per camera (`max_queue_per_camera`).
@@ -183,6 +192,7 @@ the live listener state, and optional tuning. The same settings in
         "hangover_ms": 800,
         "pre_roll_ms": 500,
         "max_segment_seconds": 30,
+        "conversation_idle_ms": 10000,
         "incidents": "attach",
         "trigger_min_speech_ms": 1500,
         "trigger_cooldown_seconds": 60,
@@ -194,6 +204,10 @@ the live listener state, and optional tuning. The same settings in
 }
 ```
 
+Set `conversation_idle_ms` between 5000 and 60000 to tune which pauses
+belong in the same conversation. Set it to 0 to transcribe each utterance
+individually.
+
 A camera listens only while it is powered on **and** its Detection switch is
 on (from the Live view, the API, MQTT or Home Assistant). Turning either off
 stops its listener immediately, and turning both back on restarts it.
@@ -203,17 +217,22 @@ standard manager reload, which restarts camera workers.
 
 ## Outputs
 
-- **Search page.** **Search → Speech** lists recent speech and searches
-  transcripts. It reuses the page's camera filter, and **Play recording**
-  opens the timeline at the moment speech started. The Visual/Speech switch
-  appears once speech is enabled. Transcripts are admin-only.
+- **Search page.** **Search → Speech** lists conversations and searches
+  transcripts. Existing utterance transcripts remain searchable. **Play
+  recording** opens the camera timeline at the start of the conversation
+  or utterance. Playback depends on the camera recording being available.
+  The Visual/Speech switch appears once speech is enabled. Transcripts are
+  admin-only.
 - **API**
   - `GET /api/speech/status` (read scope): service, per-camera and transcriber
     state.
   - `GET /api/speech/segments` (admin scope, because transcripts are
     conversation content): filters are `camera_id` (repeatable), `start` and
     `end` (ISO 8601 with a timezone), `q` (full-text search over transcripts),
-    `status`, `before_id` and `limit`.
+    `status`, `before_id` and `limit`. The default `view=segments` returns
+    utterance timing and older utterance transcripts. Use `view=transcript`
+    for individual transcript chunks or `view=conversation` for combined
+    text and any gaps. Pass cursors back to the same view.
   - `GET /api/speech/segments/{id}` (admin scope).
 - **Segment statuses**
   - `detected`: no transcription requested.
@@ -227,7 +246,9 @@ standard manager reload, which restarts camera workers.
   - Each speech camera gets a `Speech` binary sensor
     (`device_class: sound`) on `survng/camera/<id>/speech`.
   - Transcript text is published to `survng/camera/<id>/speech/transcript` only
-    when `speech.mqtt_publish_transcripts` is `true`.
+    when `speech.mqtt_publish_transcripts` is `true`. Conversation mode
+    publishes completed chunks on that topic with their own segment IDs.
+    The speech sensor's OFF event continues to reference the utterance.
 - **`survngctl status`** has a `speech` section with listener state, failure
   category, restart and segment counts, and transcriber device, model, queue
   and drop counters. Transcript text never appears in this snapshot, in logs,
@@ -241,6 +262,9 @@ standard manager reload, which restarts camera workers.
     deleted, but the incident still shows that speech happened
     ("Transcript expired with the recording"). On a camera that doesn't
     record, transcripts last `retention_days`.
+  - For conversation chunks, extending retention requires the full chunk
+    to be covered by incident windows and recordings. The incident panel
+    shows excerpts at chunk granularity.
 - **Speech on incidents.** Speech that overlaps an incident's time on the
   same camera (with a 5 s margin) appears on that incident: a microphone
   badge in the list, a purple Speech trigger dot when speech started the
