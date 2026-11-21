@@ -122,12 +122,12 @@ assert.deepEqual(timelineEvidenceWindow(filteredEvidence, 10, 12).map((event) =>
 assert.deepEqual(parseTimelineView("?camera=gate&date=2026-08-15&source=main&at=123.5&event=44101&filter=vehicles&inspector=ai&window=4&objects=0&thumbs=0&speed=2", "2026-08-16"), {
   cameraId: "gate", date: "2026-08-15", source: "main", at: 123.5, eventFilter: "vehicles", eventId: 44101,
   trailEventIds: [], trailQueryMode: null,
-  inspector: "ai", windowHours: 4, lanes: { object: false, motion: true }, thumbnails: false, speed: 2,
+  inspector: "ai", windowHours: 4, lanes: { object: false, motion: true }, thumbnails: false, speed: 2, view: "rail", railMinutes: 60,
 });
 assert.deepEqual(parseTimelineView("?camera=all&date=2026-08-15&at=123.5&window=1", "2026-08-16"), {
   cameraId: "all", date: "2026-08-15", source: null, at: 123.5, eventFilter: "all", eventId: null,
   trailEventIds: [], trailQueryMode: null,
-  inspector: "details", windowHours: 1, lanes: { object: true, motion: true }, thumbnails: true, speed: 1,
+  inspector: "details", windowHours: 1, lanes: { object: true, motion: true }, thumbnails: true, speed: 1, view: "rail", railMinutes: 60,
 });
 assert.deepEqual(parseTimelineView("?camera=gate&event=84&trail=12,84,91&query_mode=visual", "2026-08-16").trailEventIds, [12, 84, 91]);
 assert.equal(parseTimelineView("?camera=gate&event=84&trail=12,84,91&query_mode=visual", "2026-08-16").trailQueryMode, "visual");

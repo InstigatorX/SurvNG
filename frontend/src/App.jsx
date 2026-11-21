@@ -5,6 +5,7 @@ import { CircleAlert } from "lucide-react";
 import "./styles.css";
 import "./shell/shell.css";
 import "./timeline/timeline.css";
+import "./timeline/rail.css";
 import "./live/live.css";
 import "./timeline/investigation.css";
 import "./incidents/incidents.css";

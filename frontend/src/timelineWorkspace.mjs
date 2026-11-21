@@ -1,3 +1,4 @@
+import { normalizedRailMinutes, normalizedTimelineView } from "./timelineRail.mjs";
 export const TIMELINE_PLAYBACK_RATES = Object.freeze([0.5, 1, 2, 4]);
 
 export function normalizedTimelinePlaybackRate(value) {
@@ -206,5 +207,7 @@ export function parseTimelineView(search, today = "") {
     lanes: { object: params.get("objects") !== "0", motion: params.get("motion") !== "0" },
     thumbnails: params.get("thumbs") !== "0",
     speed: normalizedTimelinePlaybackRate(params.get("speed")),
+    view: normalizedTimelineView(params.get("view")),
+    railMinutes: normalizedRailMinutes(params.get("rail")),
   };
 }

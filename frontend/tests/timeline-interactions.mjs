@@ -86,7 +86,7 @@ try {
     });
   } }] });
   await server.listen();
-  const url = `${server.resolvedUrls.local[0]}timeline?camera=gate&date=${date}&at=${dayStart + 12 * 3600 + 5}&source=main`;
+  const url = `${server.resolvedUrls.local[0]}timeline?camera=gate&date=${date}&at=${dayStart + 12 * 3600 + 5}&source=main&view=classic`;
   console.log(`Full RecordingsPage fixture: ${url}\nDiagnostics: ${server.resolvedUrls.local[0]}timeline-interactions-requests.json`);
   if (process.env.TIMELINE_INTERACTIONS_SERVE === "1") {
     await new Promise(done => { process.once("SIGINT", done); process.once("SIGTERM", done); });
