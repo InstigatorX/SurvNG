@@ -7,10 +7,12 @@ import subprocess
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from survng.app.recording_media import hls_map_transition, mp4_stream_fingerprint
 from survng.app import recording_media_runtime
 from survng.app.recording_media_runtime import RecordingMediaRuntime
+from survng.app.recording_mp4 import iter_mp4_boxes, mp4_track_timescales, offset_fmp4_timestamps
 from survng.app.recording_routes import create_recording_router
 from survng.app.recorder import Recorder
 
@@ -58,18 +60,18 @@ def fragment_packets(root, ffprobe, init, media, name):
     return packets(ffprobe, combined)
 
 
-def decode_times(runtime, media):
+def decode_times(media):
     data = media.read_bytes()
     values = {}
-    for box_type, _, payload, end in runtime._mp4_boxes(data):
+    for box_type, _, payload, end in iter_mp4_boxes(data):
         if box_type != b"moof":
             continue
-        for child_type, _, child_payload, child_end in runtime._mp4_boxes(data, payload, end):
+        for child_type, _, child_payload, child_end in iter_mp4_boxes(data, payload, end):
             if child_type != b"traf":
                 continue
             track_id = None
             timestamp = None
-            for kind, _, start, stop in runtime._mp4_boxes(data, child_payload, child_end):
+            for kind, _, start, stop in iter_mp4_boxes(data, child_payload, child_end):
                 if kind == b"tfhd":
                     track_id = struct.unpack_from(">I", data, start + 4)[0]
                 elif kind == b"tfdt":
@@ -79,10 +81,10 @@ def decode_times(runtime, media):
     return values
 
 
-def segment_indexes(runtime, media):
+def segment_indexes(media):
     data = media.read_bytes()
     indexes = {}
-    for kind, _, payload, end in runtime._mp4_boxes(data):
+    for kind, _, payload, end in iter_mp4_boxes(data):
         if kind != b"sidx":
             continue
         track, scale = struct.unpack_from(">II", data, payload + 4)
@@ -97,14 +99,14 @@ def test_fragment_offset_is_applied_once_to_every_track(recording_fragments, seg
     source = root / f"segment-{segment_index:02d}.mp4"
     initial_init, initial_media = runtime._recording_fmp4_files(source, 2, 0)
     shifted_init, shifted_media = runtime._recording_fmp4_files(source, 2, offset)
-    timescales = runtime._mp4_track_timescales(initial_init.read_bytes())
+    timescales = mp4_track_timescales(initial_init.read_bytes())
     assert len(timescales) == 2 and len(set(timescales.values())) == 2
-    initial_times, shifted_times = decode_times(runtime, initial_media), decode_times(runtime, shifted_media)
+    initial_times, shifted_times = decode_times(initial_media), decode_times(shifted_media)
     assert initial_times.keys() == shifted_times.keys() == timescales.keys()
     for track, scale in timescales.items():
         assert shifted_times[track] == [value + round(offset * scale) for value in initial_times[track]]
-    initial_indexes = segment_indexes(runtime, initial_media)
-    shifted_indexes = segment_indexes(runtime, shifted_media)
+    initial_indexes = segment_indexes(initial_media)
+    shifted_indexes = segment_indexes(shifted_media)
     assert initial_indexes.keys() == shifted_indexes.keys() == timescales.keys()
     for track, (scale, timestamp) in initial_indexes.items():
         assert shifted_indexes[track] == (scale, timestamp + round(offset * scale))
@@ -129,6 +131,27 @@ def test_remux_version_invalidates_disk_cache(recording_fragments, monkeypatch):
     assert all(path.is_file() for path in (*before, *after))
 
 
+def test_failed_timestamp_repair_keeps_fragment_out_of_cache(recording_fragments, tmp_path, monkeypatch):
+    root, _ffmpeg, _ffprobe, runtime = recording_fragments
+    source = root / "segment-00.mp4"
+    manager = SimpleNamespace(storage_dir=tmp_path)
+
+    def fail_after_repair(init_path, media_path, seconds):
+        offset_fmp4_timestamps(init_path, media_path, seconds)
+        raise RuntimeError("timestamp repair failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(recording_media_runtime, "offset_fmp4_timestamps", fail_after_repair)
+        with pytest.raises(HTTPException, match="recording fragment timestamp repair failed") as error:
+            runtime._recording_fmp4_files(source, 2, 7.25, active_manager=manager)
+    assert error.value.status_code == 500
+
+    cache_root = tmp_path / "playback-cache" / "fmp4"
+    assert list(cache_root.glob("*/*")) == []
+    init, media = runtime._recording_fmp4_files(source, 2, 7.25, active_manager=manager)
+    assert init.is_file() and media.is_file()
+
+
 @pytest.mark.parametrize("version", [0, 1])
 @pytest.mark.parametrize("overflow", [False, True])
 def test_sidx_uses_its_own_timescale_and_preserves_byte_references(
@@ -137,7 +160,7 @@ def test_sidx_uses_its_own_timescale_and_preserves_byte_references(
     root, _ffmpeg, _ffprobe, runtime = recording_fragments
     init, media = runtime._recording_fmp4_files(root / "segment-01.mp4", 2, 0)
     scale = 1000
-    assert scale not in runtime._mp4_track_timescales(init.read_bytes()).values()
+    assert scale not in mp4_track_timescales(init.read_bytes()).values()
     value_format = ">QQ" if version else ">II"
     earliest = (1 << (64 if version else 32)) - 1 if overflow else 123
     # Include a byte offset and a reference entry: neither changes when shifting
@@ -147,18 +170,18 @@ def test_sidx_uses_its_own_timescale_and_preserves_byte_references(
                + struct.pack(">HHIII", 0, 1, 1234, 2000, 0x90000000))
     index = struct.pack(">I4s", len(payload) + 8, b"sidx") + payload
     data = media.read_bytes()
-    remaining = b"".join(data[start:end] for kind, start, _, end in runtime._mp4_boxes(data) if kind != b"sidx")
+    remaining = b"".join(data[start:end] for kind, start, _, end in iter_mp4_boxes(data) if kind != b"sidx")
     target = tmp_path / "indexed.m4s"
     target.write_bytes(index + remaining)
     if overflow:
         with pytest.raises(RuntimeError, match=f"exceeds version {version} sidx"):
-            runtime._offset_fmp4_timestamps(init, target, 7.25)
+            offset_fmp4_timestamps(init, target, 7.25)
         assert target.read_bytes() == index + remaining
         return
-    runtime._offset_fmp4_timestamps(init, target, 7.25)
+    offset_fmp4_timestamps(init, target, 7.25)
     updated = target.read_bytes()
     timestamp_end = 20 + (8 if version else 4)
-    assert segment_indexes(runtime, target) == {1: (scale, 7373)}
+    assert segment_indexes(target) == {1: (scale, 7373)}
     assert len(updated) == len(index + remaining)
     assert updated[:20] == index[:20]
     assert updated[timestamp_end:len(index)] == index[timestamp_end:]
