@@ -38,6 +38,8 @@ def _private_directory(path: Path) -> None:
 ONLINE_SECONDS = 20
 SNAPSHOT_LIMIT = 4 * 1024 * 1024
 TOKEN_SECONDS = 30 * 60
+# Match the local encoder's per-viewer queue bound in camera-source.ts.
+FEED_CLIENT_BUFFER = 2 * 1024 * 1024
 SYNC_REQUEST_SECONDS = 5 * 60
 
 
@@ -248,6 +250,7 @@ class _TierFeed:
     def __init__(self, path: Path, bump) -> None:
         self.path, self.bump = path, bump
         self.clients: set[socket.socket] = set()
+        self._outbound: dict[socket.socket, bytearray] = {}
         self.closed = False
         self.lock = threading.Lock()
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -289,21 +292,58 @@ class _TierFeed:
                 except OSError:
                     dead.append(client)
             for client in dead:
-                self.clients.discard(client)
-                client.close()
+                self._drop_client(client)
             return bool(self.clients)
 
     def write(self, data: bytes) -> None:
+        if not data:
+            return
         with self.lock:
             dead = []
             for client in self.clients:
+                pending = self._outbound.setdefault(client, bytearray())
                 try:
-                    client.sendall(data)
+                    self._flush(client, pending)
+                    # A full kernel buffer is backpressure, not a disconnect.
+                    if len(pending) + len(data) > FEED_CLIENT_BUFFER:
+                        dead.append(client)
+                        continue
+                    pending.extend(data)
+                    self._flush(client, pending)
                 except OSError:
                     dead.append(client)
+                    continue
+                if not pending:
+                    self._outbound.pop(client, None)
             for client in dead:
-                self.clients.discard(client)
-                client.close()
+                self._drop_client(client)
+
+    def _flush(self, client: socket.socket, pending: bytearray) -> None:
+        view = memoryview(pending)
+        sent = 0
+        try:
+            while sent < len(view):
+                try:
+                    count = client.send(view[sent:])
+                except InterruptedError:
+                    continue
+                if count == 0:
+                    raise ConnectionError("HomeKit feed closed")
+                sent += count
+        except BlockingIOError:
+            pass
+        finally:
+            view.release()
+            if sent:
+                del pending[:sent]
+
+    def _drop_client(self, client: socket.socket) -> None:
+        self.clients.discard(client)
+        self._outbound.pop(client, None)
+        try:
+            client.close()
+        except OSError:
+            pass
 
     def close(self) -> None:
         with self.lock:
@@ -313,9 +353,8 @@ class _TierFeed:
         except OSError:
             pass
         with self.lock:
-            for client in self.clients:
-                client.close()
-            self.clients.clear()
+            for client in list(self.clients):
+                self._drop_client(client)
         self.path.unlink(missing_ok=True)
         self.thread.join(timeout=1)
         if self.thread.is_alive():

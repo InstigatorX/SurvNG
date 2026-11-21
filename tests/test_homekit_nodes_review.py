@@ -1,5 +1,7 @@
 """Regression coverage for remote encoder ownership and input boundaries."""
 import asyncio
+import socket
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -43,6 +45,129 @@ def request(secret, chunks, before=None, headers=()):
     return Request({"type": "http", "headers": [
         (b"authorization", f"Bearer {secret}".encode()), (b"x-survng-camera", b"porch"),
         (b"x-survng-tier", b"1"), *headers]}, receive)
+
+
+@pytest.fixture
+def encoder_feed(remote):
+    service, node, _, _ = remote
+    directory = service.nodes.prepare_feeds("porch", [1])
+    feed = service.nodes.feeds[("porch", 1)]
+    clients = []
+
+    def connect_reader(send_buffer=4096):
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        clients.append(client)
+        with feed.lock:
+            previous = set(feed.clients)
+        client.connect(str(directory / "1.sock"))
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with feed.lock:
+                added = feed.clients - previous
+            if added:
+                peer = added.pop()
+                peer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, send_buffer)
+                client.setblocking(False)
+                return client, peer
+            time.sleep(0.01)
+        pytest.fail("feed did not accept the viewer")
+
+    try:
+        yield service, node, feed, connect_reader
+    finally:
+        for client in clients:
+            client.close()
+
+
+def _read_available(client):
+    received = bytearray()
+    while True:
+        try:
+            part = client.recv(256 * 1024)
+        except BlockingIOError:
+            return received
+        assert part, "feed disconnected a draining viewer"
+        received.extend(part)
+
+
+def test_paused_feed_reader_recovers_through_encoder_uploads(encoder_feed):
+    service, node, feed, connect_reader = encoder_feed
+    client, peer = connect_reader()
+    revision = service.node_assignments()[0]["revision"]
+    claim = service.claim_encoder_upload(node, "porch", "1", revision)
+    assert claim is not None
+    expected = bytearray(bytes(range(256)) * 2048)
+    try:
+        assert service.write_encoder_upload(node, "porch", "1", claim, bytes(expected))
+        assert peer in feed.clients
+        assert feed._outbound[peer], "paused viewer must retain its unsent bytes"
+        received = bytearray()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            received.extend(_read_available(client))
+            if len(received) == len(expected):
+                break
+            # Exercise production writes, rather than calling the private flush helper.
+            chunk = bytes([len(expected) % 251]) * 188
+            expected.extend(chunk)
+            assert service.write_encoder_upload(node, "porch", "1", claim, chunk)
+            time.sleep(0.001)
+        assert received == expected
+        assert peer in feed.clients
+        assert not feed._outbound
+    finally:
+        service.release_encoder_upload("porch", "1", claim)
+    assert not service.nodes.uploads
+    feed.close()
+    assert not feed.clients and not feed._outbound
+    assert not feed.thread.is_alive()
+
+
+def test_stalled_feed_viewer_does_not_disconnect_a_draining_viewer(encoder_feed):
+    service, node, feed, connect_reader = encoder_feed
+    _, stalled = connect_reader()
+    client, healthy = connect_reader(send_buffer=1024 * 1024)
+    revision = service.node_assignments()[0]["revision"]
+    claim = service.claim_encoder_upload(node, "porch", "1", revision)
+    assert claim is not None
+    expected, received = bytearray(), bytearray()
+    try:
+        for index in range(80):
+            chunk = bytes([index]) * (32 * 1024)
+            expected.extend(chunk)
+            assert service.write_encoder_upload(node, "porch", "1", claim, chunk)
+            received.extend(_read_available(client))
+            assert healthy in feed.clients
+            if index == 0:
+                assert stalled in feed.clients, "a short pause must not disconnect the viewer"
+            assert len(feed._outbound.get(stalled, b"")) <= homekit_nodes.FEED_CLIENT_BUFFER
+        assert stalled not in feed.clients
+        assert stalled not in feed._outbound
+        assert received == expected
+        assert feed.wanted()
+        # The surviving viewer continues on the same claim after the other is dropped.
+        assert service.write_encoder_upload(node, "porch", "1", claim, b"still-live")
+        assert _read_available(client) == b"still-live"
+    finally:
+        service.release_encoder_upload("porch", "1", claim)
+
+
+def test_disconnected_feed_viewer_releases_pending_bytes_and_upload(encoder_feed):
+    service, node, feed, connect_reader = encoder_feed
+    client, peer = connect_reader()
+    revision = service.node_assignments()[0]["revision"]
+    claim = service.claim_encoder_upload(node, "porch", "1", revision)
+    assert claim is not None
+    try:
+        assert service.write_encoder_upload(node, "porch", "1", claim, b"x" * (512 * 1024))
+        assert peer in feed.clients
+        assert feed._outbound[peer]
+        client.close()
+        assert not service.write_encoder_upload(node, "porch", "1", claim, b"unused")
+        assert not feed.clients and not feed._outbound
+    finally:
+        service.release_encoder_upload("porch", "1", claim)
+    assert not service.nodes.uploads
 
 
 @pytest.mark.parametrize("camera_enabled", [True, False])
