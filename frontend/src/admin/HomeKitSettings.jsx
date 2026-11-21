@@ -8,6 +8,8 @@ const ERROR_LABELS = {
   software_encoding_not_allowed: "This server needs an application restart to enable hardware-only HomeKit startup.",
   encoding_unavailable: "No permitted HEVC encoder passed its startup test. Check QSV device access or allow software fallback.",
   worker_not_built: "Build the HomeKit worker before enabling cameras.",
+  worker_build_stale: "The HomeKit worker was built from a different checkout.",
+  worker_dependencies_stale: "The HomeKit worker packages do not match its lockfile.",
   node_24_required: "HomeKit requires Node.js 24. Set its executable path below.",
   encoder_unavailable: "FFmpeg needs HEVC encoding plus libopus, AAC, and MJPEG support.",
   encoder_offline: "The assigned encoder is offline. HomeKit stays on this server and is not using a local encoder.",
@@ -21,11 +23,103 @@ const ERROR_LABELS = {
   camera_off: "Turn this camera on in SurvNG to resume HomeKit.",
 };
 
+const UPDATE_LABELS = {
+  current: "Up to date",
+  outdated: "Update available",
+  unknown: "Running version not reported",
+  unavailable: "No release available",
+  syncing: "Syncing encoder…",
+  failed: "Encoder update failed",
+};
+
+function EncoderVersion({ label, version, fallback }) {
+  if (!version) return <span>{label} {fallback}</span>;
+  return <details>
+    <summary>{label} <code title={version}>{version.slice(0, 12)}</code></summary>
+    <code className="homekit-node-digest">{version}</code>
+  </details>;
+}
+
+function WorkerBuild({ problem, job, onRetry, busy, requestError }) {
+  const reason = ERROR_LABELS[problem] || "The HomeKit worker build is unavailable.";
+  if (job?.state === "building") {
+    return <p role="status" className="settings-help">{reason} Rebuilding it now.</p>;
+  }
+  if (job && job.available === false) {
+    return <p role="alert" className="settings-help homekit-error">{reason} Automatic rebuilds are off for this server. Run <code>python -m survng.app.homekit_build</code> in the SurvNG checkout.</p>;
+  }
+  const failed = job?.state === "failed";
+  return <div className="settings-help">
+    <p role={failed ? "alert" : "status"} className={failed ? "homekit-error" : undefined}>{reason}{failed ? " The rebuild failed." : ""}</p>
+    {failed && job.error ? <pre className="homekit-build-error">{job.error}</pre> : null}
+    {requestError ? <p role="alert" className="homekit-error">{requestError}</p> : null}
+    <button type="button" disabled={busy} onClick={onRetry}>{busy ? "Starting…" : failed ? "Retry build" : "Rebuild worker"}</button>
+  </div>;
+}
+
+function HomeKitEncoder({ node }) {
+  const [request, setRequest] = useState(null);
+  const requestController = useRef(null);
+  const state = node.updateState || "unknown";
+  const canSync = node.availableVersion && ["outdated", "unknown", "failed"].includes(state);
+  const awaitingStatus = request?.phase === "accepted" && node === request.node;
+  const syncing = request?.phase === "sending" || awaitingStatus || state === "syncing";
+  const statusLabel = request?.phase === "sending" ? "Requesting sync…" : awaitingStatus ? "Sync requested" : UPDATE_LABELS[state] || UPDATE_LABELS.unknown;
+
+  useEffect(() => () => requestController.current?.abort(), []);
+  useEffect(() => {
+    if (request?.phase !== "accepted") return undefined;
+    if (!awaitingStatus) {
+      setRequest(null);
+      return undefined;
+    }
+    const timeout = setTimeout(() => setRequest({ phase: "unconfirmed" }), 12000);
+    return () => clearTimeout(timeout);
+  }, [request, awaitingStatus]);
+
+  async function syncEncoder() {
+    if (requestController.current || !canSync || !node.online || syncing) return;
+    const controller = new AbortController();
+    requestController.current = controller;
+    setRequest({ phase: "sending" });
+    try {
+      const response = await fetch(`/api/homekit/nodes/${encodeURIComponent(node.id)}/resync`, {
+        method: "POST", cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]),
+      });
+      if (!response.ok || (await response.json()).requested !== true) throw new Error("Sync request rejected");
+      setRequest({ phase: "accepted", node });
+    } catch {
+      if (!controller.signal.aborted) setRequest({ phase: "error" });
+    } finally {
+      if (requestController.current === controller) requestController.current = null;
+    }
+  }
+
+  return <article className="sub-panel homekit-node" aria-label={node.name || "Encoder"}>
+    <div className="homekit-camera-head">
+      <h4>{node.name || "Encoder"}</h4>
+      <span className="homekit-badge">{node.online ? "Online" : "Offline"}</span>
+    </div>
+    <p className="settings-help">{node.hardware === "qsv" ? "Intel QSV HEVC" : node.hardware === "software" ? "Software HEVC" : "Encoder type not reported yet"}{node.cameras?.length ? ` · ${node.cameras.length} ${node.cameras.length === 1 ? "camera" : "cameras"}` : ""}</p>
+    <div className="settings-help homekit-node-versions">
+      <EncoderVersion label="Running version" version={node.runningVersion} fallback="Not reported" />
+      <EncoderVersion label="Available version" version={node.availableVersion} fallback="Unavailable" />
+    </div>
+    <div className="homekit-node-action">
+      <p className="settings-help" role="status">{statusLabel}</p>
+      {canSync || state === "syncing" ? <button type="button" disabled={!node.online || syncing} onClick={syncEncoder}>Sync now</button> : null}
+    </div>
+    {request?.phase === "error" && canSync && !syncing ? <p className="settings-help homekit-error" role="alert">Could not request an encoder sync. Try again.</p> : null}
+    {request?.phase === "unconfirmed" && canSync && !syncing ? <p className="settings-help homekit-error" role="alert">The encoder has not confirmed the sync. Check its status or try again.</p> : null}
+  </article>;
+}
+
 export function HomeKitSettings({ config, updateConfig, cameraId = "" }) {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState("");
   const [pairing, setPairing] = useState(null);
   const [busy, setBusy] = useState("");
+  const [buildError, setBuildError] = useState("");
   const [installer, setInstaller] = useState("");
   const pairingRequest = useRef(null);
   const hidePairing = () => {
@@ -71,6 +165,19 @@ export function HomeKitSettings({ config, updateConfig, cameraId = "" }) {
     document.addEventListener("visibilitychange", hide);
     return () => document.removeEventListener("visibilitychange", hide);
   }, []);
+
+  async function rebuildWorker() {
+    setBusy("rebuild"); setBuildError("");
+    try {
+      const response = await fetch("/api/homekit/worker/rebuild", {
+        method: "POST", cache: "no-store", signal: AbortSignal.timeout(15000),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Could not start the HomeKit worker build.");
+      setStatus((current) => current && { ...current, workerBuildJob: payload.job || current.workerBuildJob });
+    } catch (failure) { setBuildError(failure.message || "Could not start the HomeKit worker build."); }
+    finally { setBusy(""); }
+  }
 
   async function addEncoder() {
     setBusy("encoder"); setError(""); setInstaller("");
@@ -156,10 +263,11 @@ export function HomeKitSettings({ config, updateConfig, cameraId = "" }) {
       </div>
     </fieldset>
     <section className="homekit-nodes" aria-label="HomeKit encoders">
+      {status?.workerBuild && (status.enabled || status.nodes?.length || status.workerBuildJob?.available) ? <WorkerBuild problem={status.workerBuild} job={status.workerBuildJob} onRetry={rebuildWorker} busy={busy === "rebuild"} requestError={buildError} /> : null}
       {status?.nodeError ? <p role="alert" className="settings-help homekit-error">HomeKit encoder state is unavailable. Check its private directory permissions and saved state.</p> : null}
-      <div className="telemetry-section-head"><div><h3>Encoders</h3><p>Run the installer once as root in a new container. It checks in here. Apple Home still reaches this server.</p></div><button type="button" disabled={!!busy} onClick={addEncoder}>{busy === "encoder" ? "Working…" : "Add encoder"}</button></div>
+      <div className="telemetry-section-head"><div><h3>Encoders</h3><p>Run the installer once as root in a new container. It checks in here. Apple Home still reaches this server.</p></div><button type="button" disabled={!!busy || !!status?.workerBuild} onClick={addEncoder}>{busy === "encoder" ? "Working…" : "Add encoder"}</button></div>
       {installer ? <div className="homekit-installer" role="region" aria-label="Encoder installer"><p className="settings-help">This command is shown once and enrolls one encoder.</p><code>{installer}</code><button type="button" onClick={() => setInstaller("")}>Hide installer</button></div> : null}
-      {status?.nodes?.length ? status.nodes.map((node) => <article className="sub-panel homekit-node" key={node.id}><div className="homekit-camera-head"><h4>{node.name || "Encoder"}</h4><span className="homekit-badge">{node.online ? "Online" : "Offline"}</span></div><p className="settings-help">{node.hardware === "qsv" ? "Intel QSV HEVC" : node.hardware === "software" ? "Software HEVC" : "Encoder type not reported yet"}{node.cameras?.length ? ` · ${node.cameras.length} ${node.cameras.length === 1 ? "camera" : "cameras"}` : ""}</p></article>) : <p className="settings-help">No encoder nodes have checked in. Cameras continue to encode on this server.</p>}
+      {status?.nodes?.length ? status.nodes.map((node) => <HomeKitEncoder key={node.id} node={node} />) : <p className="settings-help">No encoder nodes have checked in. Cameras continue to encode on this server.</p>}
     </section>
     <p className="settings-help">Configure HomeKit for each camera in <a href={appUrl("/admin?section=cameras")}>Camera settings</a>, alongside live view framing.</p>
     {error ? <p role="alert" className="settings-help homekit-error">{error} Status retries automatically.</p> : null}

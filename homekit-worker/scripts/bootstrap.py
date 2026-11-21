@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Build the audited HAP revision before installing the locked worker packages."""
+"""Publish the locked worker release, or pack its audited HAP dependency."""
 from __future__ import annotations
 
+import argparse
 import hashlib
 import io
 import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import urllib.request
 
@@ -20,7 +22,7 @@ def run(*args: str, cwd: Path = ROOT) -> None:
     subprocess.run(args, cwd=cwd, check=True)
 
 
-def main() -> None:
+def prepare_hap() -> None:
     major = subprocess.check_output(["node", "-p", "process.versions.node.split('.')[0]"], text=True).strip()
     if major != "24":
         raise SystemExit("Node.js 24 is required; use npm exec --package=node@24 -- python3 scripts/bootstrap.py")
@@ -42,8 +44,17 @@ def main() -> None:
         ["npm", "pack", "--ignore-scripts", "--json", "--pack-destination", str(cache)], cwd=source, text=True,
     ))[0]["filename"]
     (cache / packed).replace(cache / "hap-nodejs.tgz")
-    run("npm", "ci" if (ROOT / "package-lock.json").exists() else "install", "--ignore-scripts", "--no-audit", "--no-fund")
-    run("npm", "run", "build")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--hap-only", action="store_true", help="pack the pinned HAP dependency for the builder")
+    if parser.parse_args().hap_only:
+        prepare_hap()
+        return
+    node = shutil.which("node")
+    run(sys.executable, "-m", "survng.app.homekit_build", "--root", str(ROOT),
+        *(["--node", node] if node else []), cwd=ROOT.parent)
 
 
 if __name__ == "__main__":

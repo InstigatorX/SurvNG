@@ -61,14 +61,39 @@ try {
   const pageErrors = [];
   page.on("pageerror", error => pageErrors.push(error.message));
   let mode = "ready", resets = 0, statusRequests = 0, delayPairing = false;
+  const olderVersion = "1".repeat(64);
+  const availableVersion = "2".repeat(64);
+  let gateState = "outdated", rejectSync = false, syncRequests = 0;
+  let workerBuild = null, workerBuildJob = { state: "idle" }, rebuilds = 0, rejectRebuild = false;
   let initialStatus;
   const waitForInitial = new Promise(resolve => { initialStatus = resolve; });
   await page.route("**/api/homekit/status", async route => {
     statusRequests++;
     if (statusRequests === 1) await waitForInitial;
     await route.fulfill({ status: mode === "error" ? 503 : 200, contentType: "application/json",
-      body: JSON.stringify({ enabled: true, nodes: [{ id: "abc123abc123abcd", name: "Gate box", online: true, hardware: "qsv", cameras: [] }],
+      body: JSON.stringify({ enabled: true, workerBuild, workerBuildJob, nodes: [
+        { id: "abc123abc123abcd", name: "Gate box", online: true, hardware: "qsv", cameras: [],
+          runningVersion: gateState === "current" ? availableVersion : olderVersion, availableVersion, updateState: gateState },
+        { id: "offline", name: "Offline box", online: false, runningVersion: olderVersion, availableVersion, updateState: "outdated" },
+        { id: "legacy", name: "Legacy box", online: true, runningVersion: null, availableVersion, updateState: "unknown" },
+        { id: "unavailable", name: "No release box", online: true, runningVersion: olderVersion, availableVersion: null, updateState: "unavailable" },
+      ],
         cameras: [{ id: "porch", state: "running", paired: false, port: 52001, encoder: "local" }] }) });
+  });
+  await page.route("**/api/homekit/nodes/abc123abc123abcd/resync", route => {
+    syncRequests++;
+    assert.equal(route.request().method(), "POST");
+    assert.equal(route.request().postData(), null);
+    if (rejectSync) return route.fulfill({ status: 503, body: "Unavailable" });
+    return route.fulfill({ contentType: "application/json", body: '{"requested":true}' });
+  });
+  await page.route("**/api/homekit/worker/rebuild", route => {
+    rebuilds++;
+    assert.equal(route.request().method(), "POST");
+    if (rejectRebuild) return route.fulfill({ status: 503, contentType: "application/json",
+      body: JSON.stringify({ detail: "Rebuild could not start" }) });
+    workerBuildJob = { state: "building", error: null };
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ requested: true, job: workerBuildJob }) });
   });
   await page.route("**/api/homekit/nodes", route => route.fulfill({ contentType: "application/json",
     body: JSON.stringify({ command: "curl -fsSL 'https://survng.example/api/homekit/enroll/token' | sh" }) }));
@@ -105,7 +130,68 @@ try {
   await page.getByRole("button", { name: "Show HomeKit service" }).click();
   assert.equal(await page.getByRole("checkbox", { name: "Enable HomeKit for this camera" }).count(), 0);
   await page.getByRole("heading", { name: "Gate box" }).waitFor();
-  await page.getByText("Online", { exact: true }).waitFor();
+  const gate = page.getByRole("article", { name: "Gate box" });
+  const gateSync = gate.getByRole("button", { name: "Sync now" });
+  await gate.getByText("Online", { exact: true }).waitFor();
+  await gate.getByRole("status").filter({ hasText: "Update available" }).waitFor();
+  assert.equal(await gate.locator(`[title="${olderVersion}"]`).textContent(), olderVersion.slice(0, 12));
+  assert.equal(await gate.locator(`[title="${availableVersion}"]`).textContent(), availableVersion.slice(0, 12));
+  const offline = page.getByRole("article", { name: "Offline box" });
+  await offline.getByText("Offline", { exact: true }).waitFor();
+  assert.equal(await offline.getByRole("button", { name: "Sync now" }).isDisabled(), true);
+  const legacy = page.getByRole("article", { name: "Legacy box" });
+  await legacy.getByRole("status").filter({ hasText: "Running version not reported" }).waitFor();
+  assert.equal(await legacy.getByRole("button", { name: "Sync now" }).isEnabled(), true);
+  const unavailable = page.getByRole("article", { name: "No release box" });
+  await unavailable.getByRole("status").filter({ hasText: "No release available" }).waitFor();
+  assert.equal(await unavailable.getByRole("button", { name: "Sync now" }).count(), 0);
+
+  rejectSync = true;
+  await gateSync.click();
+  await gate.getByRole("alert").filter({ hasText: "Could not request an encoder sync" }).waitFor();
+  rejectSync = false;
+  await gateSync.click();
+  await gate.getByRole("status").filter({ hasText: "Sync requested" }).waitFor();
+  assert.equal(await gateSync.isDisabled(), true);
+  assert.equal(await page.getByRole("button", { name: "Add encoder" }).isEnabled(), true);
+  gateState = "syncing";
+  await gate.getByRole("status").filter({ hasText: "Syncing encoder" }).waitFor();
+  gateState = "current";
+  await gate.getByRole("status").filter({ hasText: "Up to date" }).waitFor();
+  assert.equal(await gateSync.count(), 0);
+  assert.equal(await gate.locator(`[title="${availableVersion}"]`).count(), 2);
+  assert.equal(syncRequests, 2);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await gate.locator("summary").filter({ hasText: "Running version" }).press("Enter");
+  await gate.locator(".homekit-node-digest:visible").filter({ hasText: availableVersion }).waitFor();
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), "encoder cards fit on mobile");
+  await page.setViewportSize({ width: 1440, height: 1200 });
+  gateState = "failed";
+  await gate.getByRole("status").filter({ hasText: "Encoder update failed" }).waitFor();
+  await gateSync.click();
+  await gate.getByRole("status").filter({ hasText: "Sync requested" }).waitFor();
+  await gate.getByRole("status").filter({ hasText: "Encoder update failed" }).waitFor();
+  assert.equal(await gateSync.isEnabled(), true);
+  assert.equal(syncRequests, 3);
+  workerBuild = "worker_build_stale";
+  await page.getByRole("button", { name: "Rebuild worker" }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Add encoder" }).isDisabled(), true);
+  workerBuildJob = { state: "building", error: null };
+  await page.getByRole("status").filter({ hasText: "Rebuilding it now" }).waitFor();
+  workerBuildJob = { state: "failed", error: "Node.js 24 was not found" };
+  await page.getByRole("alert").filter({ hasText: "The rebuild failed" }).waitFor();
+  await page.getByText("Node.js 24 was not found").waitFor();
+  rejectRebuild = true;
+  await page.getByRole("button", { name: "Retry build" }).click();
+  await page.getByRole("alert").filter({ hasText: "Rebuild could not start" }).waitFor();
+  rejectRebuild = false;
+  await page.getByRole("button", { name: "Retry build" }).click();
+  await page.getByRole("status").filter({ hasText: "Rebuilding it now" }).waitFor();
+  assert.equal(rebuilds, 2);
+  workerBuildJob = { state: "idle", available: false };
+  await page.getByRole("alert").filter({ hasText: "Automatic rebuilds are off" }).getByText("python -m survng.app.homekit_build").waitFor();
+  workerBuild = null; workerBuildJob = { state: "idle", available: true };
+  await page.getByRole("alert").filter({ hasText: "Automatic rebuilds are off" }).waitFor({ state: "detached" });
   await page.getByRole("button", { name: "Add encoder" }).click();
   await page.getByText("curl -fsSL 'https://survng.example/api/homekit/enroll/token' | sh").waitFor();
   await page.getByRole("button", { name: "Hide installer" }).click();
@@ -159,7 +245,7 @@ try {
   await page.goto(`${url}?empty=1`);
   await page.getByText("Add a camera in Camera setup, then enable it here.").waitFor();
   assert.deepEqual(pageErrors, []);
-  console.log("HomeKit camera layout, framing controls, service separation, pairing, reset, reconnect, and mobile checks passed");
+  console.log("HomeKit encoder updates, camera layout, framing controls, service separation, pairing, reset, reconnect, and mobile checks passed");
 } finally {
   await browser?.close();
   await server?.close();
