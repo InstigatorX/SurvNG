@@ -446,6 +446,10 @@ On Linux, the children also set their kernel-visible process names to
 `survng-object` and `survng-face`, making GPU ownership identifiable in
 `intel_gpu_top`, `top`, `htop`, and `ps`.
 
+`RecordedMotionObjectDetector` owns frame sampling, decode admission, and retries.
+It passes collected samples to `motion_pipeline.recorded_evidence` for temporal
+association, confirmation, and representative frame selection.
+
 The representative frame is the sample that best shows the active subject:
 one that contains it, in an incident zone, fully inside the frame, and with
 the most resolved detail. Detail combines subject size with the sharpness of
