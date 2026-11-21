@@ -34,6 +34,7 @@ import {
   Rows3,
   Columns3,
   FastForward,
+  VideoOff,
 } from "lucide-react";
 import { liveFramingStyle } from "../liveFraming.mjs";
 import { browserStorage } from "../storage.mjs";
@@ -41,7 +42,7 @@ import { canSetClipBoundaryAtPlayhead, clipPreviewReachedEnd, clipRangeIsValid, 
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
 import { nativePlaylistStart, nativePlaylistStartStep, recordingCoverageUnion, recordingPlaybackTimeline, recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
-import { recordingGridBestEpoch } from "../recordingGrid.mjs";
+import { ALL_CAMERAS_LIVE_DELAY_SECONDS, allCamerasWindowStart, allCamerasWithRecording, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { AllCamerasGrid } from "./AllCamerasGrid.jsx";
 import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { SpeechSearchWorkspace } from "../search/SpeechSearchResults.jsx";
@@ -749,6 +750,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }, [recordings]);
   latestAvailabilityRef.current = timeline[timeline.length - 1]?.end_epoch ?? null;
   // All cameras gets every camera's ranges; the rail shows where any has recording.
+  // Only cameras with recording in the playhead's window get a tile.
+  const recordedGridCameras = useMemo(
+    () => (isAllCameras ? allCamerasWithRecording(gridCameras, timeline, playhead) : []),
+    // playhead matters only through its 15-minute window.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [gridCameras, isAllCameras, timeline, Number.isFinite(playhead) ? allCamerasWindowStart(playhead) : null],
+  );
+  const unrecordedGridCameras = isAllCameras ? gridCameras.filter((camera) => !recordedGridCameras.includes(camera)) : [];
   const investigationShown = investigationOpen && !(isAllCameras && timelineLayout !== "classic");
   const railRecordings = useMemo(() => (isAllCameras ? recordingCoverageUnion(timeline) : timeline), [isAllCameras, timeline]);
   const nativeScope = `${activeCameraId}:${source}:${dayStart}:${dayEnd}`;
@@ -1814,7 +1823,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       ? retainedEpoch
       : date === today ? Date.now() / 1000 : timeline[0].start_epoch;
     if (isAllCameras && !Number.isFinite(retainedEpoch) && date === today) {
-      initialEpoch = recordingGridBestEpoch(timeline, initialEpoch) ?? initialEpoch;
+      // Start behind the newest indexed recording: at that edge every tile
+      // would reload as each new recording file lands.
+      const newest = timeline.reduce((latest, item) => Math.max(latest, item.end_epoch), -Infinity);
+      const behindLive = Math.max(dayStart, Math.min(initialEpoch, newest) - ALL_CAMERAS_LIVE_DELAY_SECONDS);
+      initialEpoch = recordingGridBestEpoch(timeline, behindLive) ?? behindLive;
     }
     playAt(initialEpoch, autoplayRef.current);
   }, [date, dayEnd, dayStart, isAllCameras, playhead, timeline, today]);
@@ -2802,7 +2815,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
         <div className={`recordings-v2-player${isAllCameras ? " all-cameras-player" : " selected-camera-stage"}`}>
           {isAllCameras ? <div className="recording-hero-media all-cameras-media">
             {Number.isFinite(playhead) ? <AllCamerasGrid
-              cameras={gridCameras}
+              cameras={recordedGridCameras}
               source={source}
               epoch={playhead}
               playing={gridPlaying}
@@ -2995,9 +3008,25 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           ) : null}
           {isAllCameras && Number.isFinite(playhead) ? <div className="recording-grid-controls recording-hero-controls all-cameras-controls">
             <button type="button" onClick={() => skipPlayback(-10, gridPlaying)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
-            <button type="button" className="primary" onClick={toggleGridPlayback}>{gridPlaying ? <Pause size={17} /> : <Play size={17} fill="currentColor" />}{gridPlaying ? "Pause" : "Play"}</button>
+            <button type="button" className="primary" onClick={toggleGridPlayback} aria-label={gridPlaying ? "Pause" : "Play"}>{gridPlaying ? <Pause size={17} /> : <Play size={17} fill="currentColor" />}<span className="all-cameras-play-label">{gridPlaying ? "Pause" : "Play"}</span></button>
             <button type="button" onClick={() => skipPlayback(10, gridPlaying)} aria-label="Forward 10 seconds"><SkipForward size={16} /></button>
             <time>{formatDateTime(playhead, timeZone)}</time>
+            <span
+              className="all-cameras-summary"
+              role="status"
+              aria-label={`${recordedGridCameras.length} of ${gridCameras.length} cameras${unrecordedGridCameras.length ? `; no recording in this 15-minute window: ${unrecordedGridCameras.map((camera) => camera.name || camera.id).join(", ")}` : ""}`}
+              title={unrecordedGridCameras.length ? `No recording in this 15-minute window: ${unrecordedGridCameras.map((camera) => camera.name || camera.id).join(", ")}` : undefined}
+            >
+              {recordedGridCameras.length} of {gridCameras.length} cameras
+              {unrecordedGridCameras.length ? (
+                <em>
+                  <span className="all-cameras-summary-separator"> · </span>
+                  <span className="all-cameras-summary-prefix">No recording: </span>
+                  <VideoOff className="all-cameras-summary-icon" size={11} aria-hidden="true" />
+                  {unrecordedGridCameras.map((camera) => camera.name || camera.id).join(", ")}
+                </em>
+              ) : null}
+            </span>
             <div className="incident-recording-source" role="group" aria-label="Playback stream">
               {["main", "live"].map(value => <button key={value} type="button" aria-pressed={source === value}
                 disabled={availableSources.length > 0 && !availableSources.includes(value)}

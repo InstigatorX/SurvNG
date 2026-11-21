@@ -1,21 +1,26 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Camera, Maximize2, Minimize2 } from "lucide-react";
 import { gridPlaybackNeedsSeek, playbackMediaTimeForEpoch, recordingPlaybackTimeline } from "../recordingPlayback.mjs";
-import { allCamerasGridColumns } from "../recordingGrid.mjs";
+import { ALL_CAMERAS_WINDOW_SECONDS, allCamerasGridColumns, allCamerasWindowStart } from "../recordingGrid.mjs";
 import { fetch } from "../shared/api.js";
 import { recordingDayHlsUrl, recordingPreviewUrl, recordingWindowUrl } from "../shared/mediaUrls.js";
 import { RecordingHlsVideo } from "../shared/RecordingHlsVideo.jsx";
 
-// Each tile plays one 15-minute window playlist, the same unit Timeline uses.
-const WINDOW_SECONDS = 15 * 60;
-// A window this recent may still be growing; a tile at its end re-reads it.
+// Each tile plays one 15-minute window playlist (ALL_CAMERAS_WINDOW_SECONDS).
+// A window this recent may still be growing; a tile nearing the end of what
+// it loaded re-reads it early, so new footage is ready before it runs out.
 const LIVE_WINDOW_GRACE_SECONDS = 120;
-const LIVE_REFRESH_MS = 5000;
+const LIVE_PREFETCH_SECONDS = 12;
+const LIVE_REFRESH_MS = 3000;
 // A camera with nothing in a live window (offline) is re-read less often.
 const EMPTY_REFRESH_MS = 30000;
 // Pulling a lagging tile back to the clock rebuffers it; a slow tile gets at
 // most one correction per interval so it cannot stutter on repeated seeks.
 const DRIFT_CORRECTION_INTERVAL_MS = 3000;
+// A held frame is a bridge across a reload, never a stale picture: it goes
+// when the playhead moves away from it or the reload takes too long.
+const HOLD_MAX_DRIFT_SECONDS = 3;
+const HOLD_MAX_MS = 4000;
 
 /**
  * One camera in the All cameras grid. The page playhead is the only clock:
@@ -28,12 +33,16 @@ function CameraGridTile({ camera, source, epoch, playing, rate, enlarged, onTogg
   const previousEpochRef = useRef(null);
   const lastCorrectionRef = useRef(-Infinity);
   const loadKeyRef = useRef("");
+  const playbackRef = useRef(null);
+  const holdRef = useRef(null);
+  const holdEpochRef = useRef(null);
+  const [holding, setHolding] = useState(false);
   const [playback, setPlayback] = useState(null);
   const [error, setError] = useState("");
   const [readyManifest, setReadyManifest] = useState("");
   const [revision, setRevision] = useState(0);
-  const windowStart = Math.floor(Math.max(0, Number(epoch) || 0) / WINDOW_SECONDS) * WINDOW_SECONDS;
-  const windowEnd = windowStart + WINDOW_SECONDS;
+  const windowStart = allCamerasWindowStart(epoch);
+  const windowEnd = windowStart + ALL_CAMERAS_WINDOW_SECONDS;
   const timeline = useMemo(() => recordingPlaybackTimeline(playback?.rows || []), [playback?.rows]);
   const exactMediaTime = playbackMediaTimeForEpoch(timeline, epoch);
   // A short gap between files keeps the previous frame rather than blanking.
@@ -55,7 +64,43 @@ function CameraGridTile({ camera, source, epoch, playing, rate, enlarged, onTogg
   const showingVideo = Boolean(manifestUrl) && readyManifest === manifestUrl && hasCoverage;
   const previewEpoch = Math.floor(Math.max(0, Number(epoch) || 0) / 2) * 2;
   const lastEnd = timeline.length ? timeline[timeline.length - 1].end_epoch : null;
-  const atLoadedTail = Boolean(playback) && (lastEnd === null || (epoch >= lastEnd - 1 && lastEnd < windowEnd - 1));
+  const nearLoadedTail = Boolean(playback) && (lastEnd === null || (epoch >= lastEnd - LIVE_PREFETCH_SECONDS && lastEnd < windowEnd - 1));
+  playbackRef.current = playback;
+
+  // Reloading the player (a new window, or a live window that grew) keeps the
+  // last frame on screen until the new start settles, instead of blanking.
+  function holdFrame() {
+    const video = videoRef.current;
+    const canvas = holdRef.current;
+    if (!video || !canvas || video.readyState < 2 || !video.videoWidth) return;
+    try {
+      const scale = Math.min(1, 640 / video.videoWidth);
+      canvas.width = Math.round(video.videoWidth * scale);
+      canvas.height = Math.round(video.videoHeight * scale);
+      const context = canvas.getContext("2d");
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      // Some browsers draw HLS video as black; then the still is the better cover.
+      const { data } = context.getImageData(0, Math.floor(canvas.height / 2), canvas.width, 1);
+      let lit = false;
+      for (let index = 0; index < data.length && !lit; index += 4) lit = data[index] + data[index + 1] + data[index + 2] > 24;
+      holdEpochRef.current = epoch;
+      setHolding(lit);
+    } catch (holdError) {
+      // A frame that cannot be captured only loses the hold; the still covers.
+      console.debug("All cameras: frame hold unavailable", holdError);
+      setHolding(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!holding) return undefined;
+    if (showingVideo || error || (playback && !hasCoverage) || Math.abs(epoch - holdEpochRef.current) > HOLD_MAX_DRIFT_SECONDS) {
+      setHolding(false);
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setHolding(false), HOLD_MAX_MS);
+    return () => window.clearTimeout(timer);
+  }, [epoch, error, hasCoverage, holding, playback, showingVideo]);
 
   useEffect(() => {
     if (!camera?.id || !windowStart) return undefined;
@@ -65,6 +110,9 @@ function CameraGridTile({ camera, source, epoch, playing, rate, enlarged, onTogg
     const refresh = loadKeyRef.current === loadKey;
     loadKeyRef.current = loadKey;
     if (!refresh) {
+      // Only playback running into the next window keeps its frame; after a
+      // jump the old frame would be the wrong picture, so the still covers.
+      if (Math.abs(epoch - (previousEpochRef.current ?? -Infinity)) <= HOLD_MAX_DRIFT_SECONDS) holdFrame();
       setPlayback(null);
       setError("");
       setReadyManifest("");
@@ -90,11 +138,13 @@ function CameraGridTile({ camera, source, epoch, playing, rate, enlarged, onTogg
         if (cancelled) return;
         setError("");
         // A refresh only replaces what is playing when the window grew.
-        setPlayback((current) => {
-          if (!refresh || !current?.rows?.length || current.source !== candidate) return next(candidate, payload);
+        const current = playbackRef.current;
+        if (refresh && current?.rows?.length && current.source === candidate) {
           const grown = Math.max(...payload.recordings.map((row) => Number(row.end_epoch)));
-          return grown > Number(current.rows[current.rows.length - 1]?.end_epoch) + 0.5 ? next(candidate, payload) : current;
-        });
+          if (!(grown > Number(current.rows[current.rows.length - 1]?.end_epoch) + 0.5)) return;
+          holdFrame();
+        }
+        setPlayback(next(candidate, payload));
         return;
       }
       if (cancelled) return;
@@ -112,13 +162,13 @@ function CameraGridTile({ camera, source, epoch, playing, rate, enlarged, onTogg
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [camera?.id, revision, source, windowStart]);
 
-  // Near live, the window grows after it was read: re-read it while the
-  // playhead waits at the end of what this tile has.
+  // Near live, the window grows after it was read: re-read it as the
+  // playhead nears the end of what this tile has (rarely, with nothing yet).
   useEffect(() => {
-    if (!atLoadedTail || windowEnd < Date.now() / 1000 - LIVE_WINDOW_GRACE_SECONDS) return undefined;
+    if (!nearLoadedTail || windowEnd < Date.now() / 1000 - LIVE_WINDOW_GRACE_SECONDS) return undefined;
     const timer = window.setTimeout(() => setRevision((value) => value + 1), lastEnd === null ? EMPTY_REFRESH_MS : LIVE_REFRESH_MS);
     return () => window.clearTimeout(timer);
-  }, [atLoadedTail, lastEnd, revision, windowEnd]);
+  }, [lastEnd, nearLoadedTail, revision, windowEnd]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -158,7 +208,7 @@ function CameraGridTile({ camera, source, epoch, playing, rate, enlarged, onTogg
   return (
     <article className={`all-cameras-tile${enlarged ? " enlarged" : ""}${hasCoverage ? "" : " gap"}`} data-camera-id={camera.id}>
       {/* The still covers loading and gaps; while video shows, it stops requesting frames. */}
-      {showingVideo ? null : <img className="all-cameras-still" src={recordingPreviewUrl(camera.id, previewEpoch, source)} alt="" />}
+      {showingVideo || holding ? null : <img className="all-cameras-still" src={recordingPreviewUrl(camera.id, previewEpoch, source)} alt="" />}
       {manifestUrl ? (
         <RecordingHlsVideo
           ref={videoRef}
@@ -179,6 +229,8 @@ function CameraGridTile({ camera, source, epoch, playing, rate, enlarged, onTogg
           onError={() => setError("Playback unavailable")}
         />
       ) : null}
+      {/* After the video: while a tile reloads, its held frame covers the player. */}
+      <canvas ref={holdRef} className="all-cameras-still all-cameras-hold" hidden={!holding || showingVideo} aria-hidden="true" />
       {status ? <span className="all-cameras-status">{status}</span> : null}
       <button
         type="button"
@@ -218,7 +270,7 @@ export function AllCamerasGrid({ cameras, source, epoch, playing, rate, enlarged
       onToggle={toggle}
     />
   );
-  if (!cameras.length) return <div className="all-cameras-grid empty"><span className="all-cameras-status">No cameras</span></div>;
+  if (!cameras.length) return <div className="all-cameras-grid empty"><span className="all-cameras-status">No camera has recording in this 15-minute window</span></div>;
   // Every tile stays in one container in camera order, so enlarging only
   // changes CSS placement and never reloads a tile's video.
   const strip = enlarged && others.length > 0;

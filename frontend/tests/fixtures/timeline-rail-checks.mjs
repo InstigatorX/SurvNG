@@ -268,7 +268,7 @@ export async function checks({ open, shot, query, at, assert }) {
       await grid.waitForFunction((previous) => [...document.querySelectorAll(".all-cameras-tile video")].every((video, index) => Math.abs(video.currentTime - (previous[index] - 10)) < 1.5), before, { timeout: 5000 })
         .catch(() => { throw new Error("skipping moves every tile with the playhead"); });
       assert.equal(param(grid, "camera"), "all", "the URL keeps All cameras");
-      assert.equal(await grid.locator(".all-cameras-still").count(), 0, "tiles showing video stop requesting stills");
+      assert.equal(await grid.locator("img.all-cameras-still").count(), 0, "tiles showing video stop requesting stills");
       // Play/Pause is a choice that survives the index reload a Main/Sub flip makes.
       const controls = grid.locator(".all-cameras-controls");
       const flip = async (name, value) => {
@@ -285,6 +285,46 @@ export async function checks({ open, shot, query, at, assert }) {
       assert.ok(await controls.getByRole("button", { name: "Play", exact: true }).isVisible(), "a paused grid stays paused after Main/Sub");
     }
     assert.deepEqual(grid.errors, [], "All cameras must not raise errors");
+    await grid.close();
+  }
+
+  // Cameras with no recording in the playhead's window get no tile; the
+  // control bar says which, centred between the time and Main/Sub.
+  for (const [viewport, isMobile] of [[{ width: 1440, height: 900 }, false], [{ width: 390, height: 844 }, true]]) {
+    const grid = await open(viewport, query.replace("camera=gate", "camera=all"), isMobile);
+    await grid.route("**/api/recordings/grid/day*", async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json();
+      payload.availability = payload.availability.filter((range) => range.camera_id !== "upper-garage");
+      await route.fulfill({ response, json: payload });
+    });
+    await grid.reload();
+    await settle(grid);
+    await grid.waitForFunction(() => document.querySelectorAll(".all-cameras-tile").length === 2, null, { timeout: 8000 })
+      .catch(() => { throw new Error("a camera without recording gets no tile"); });
+    assert.deepEqual(await grid.locator(".all-cameras-tile").evaluateAll((tiles) => tiles.map((tile) => tile.dataset.cameraId)), ["gate", "front-door"]);
+    const summary = grid.locator(".all-cameras-summary");
+    assert.match(await summary.textContent(), /^2 of 3 cameras · No recording: Upper Garage$/);
+    const bar = await grid.locator(".all-cameras-controls").boundingBox();
+    const box = await summary.boundingBox();
+    const source = await grid.locator(".all-cameras-controls .incident-recording-source").boundingBox();
+    assert.ok(box.width > 40 && box.x + box.width <= source.x + 1 && box.y >= bar.y && box.y + box.height <= bar.y + bar.height, "the status sits in the bar before Main/Sub");
+    await shot(grid, `all-cameras-hidden-${isMobile ? "mobile" : "desktop"}`);
+    assert.deepEqual(grid.errors, [], "hiding cameras must not raise errors");
+    await grid.close();
+  }
+
+  // Today, the grid starts behind live so tiles have footage ahead of them.
+  {
+    const liveEdge = at(15.4);
+    const grid = await open({ width: 1440, height: 900 }, `camera=all&date=${new Date(liveEdge * 1000).toISOString().slice(0, 10)}`);
+    await grid.clock.setFixedTime(new Date((liveEdge + 20) * 1000));
+    await grid.reload();
+    await settle(grid);
+    await grid.waitForSelector(".all-cameras-tile video");
+    const start = await playheadSeconds(grid);
+    const edge = liveEdge - at(0);
+    assert.ok(start <= edge - 45 && start >= edge - 400, `today starts about a minute behind the newest recording (${edge - start}s behind)`);
     await grid.close();
   }
 }

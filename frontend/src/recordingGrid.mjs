@@ -1,3 +1,26 @@
+// All cameras tiles each play one window playlist of this length.
+export const ALL_CAMERAS_WINDOW_SECONDS = 15 * 60;
+// Today, All cameras starts this far behind the newest recording so tiles have footage ahead
+// of them instead of reloading as each new recording file is indexed.
+export const ALL_CAMERAS_LIVE_DELAY_SECONDS = 60;
+
+export function allCamerasWindowStart(epoch) {
+  const value = Math.max(0, Number(epoch) || 0);
+  return Math.floor(value / ALL_CAMERAS_WINDOW_SECONDS) * ALL_CAMERAS_WINDOW_SECONDS;
+}
+
+// Cameras with any recording (either stream) in the window around an epoch.
+// Decided per window, not per instant, so tiles do not come and go mid-window.
+export function allCamerasWithRecording(cameras, ranges, epoch) {
+  const start = allCamerasWindowStart(epoch);
+  const end = start + ALL_CAMERAS_WINDOW_SECONDS;
+  const recorded = new Set();
+  for (const range of ranges || []) {
+    if (Number(range?.start_epoch) < end && Number(range?.end_epoch) > start) recorded.add(String(range.camera_id || ""));
+  }
+  return (cameras || []).filter((camera) => recorded.has(camera.id));
+}
+
 // All cameras grid: the smallest square-ish grid that holds every camera.
 export function allCamerasGridColumns(count) {
   return Math.max(1, Math.ceil(Math.sqrt(Math.max(1, Number(count) || 0))));

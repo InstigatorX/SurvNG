@@ -1749,6 +1749,7 @@
 }
 
 .all-cameras-tile video { z-index: 1; }
+.all-cameras-tile .all-cameras-hold { z-index: 1; }
 .all-cameras-tile.gap video { visibility: hidden; }
 .all-cameras-tile.gap .all-cameras-still { opacity: 0.45; }
 
@@ -1819,3 +1820,32 @@
 }
 
 .all-cameras-tile.enlarged { outline: 2px solid var(--accent, #3ddbc0); outline-offset: -2px; }
+
+/* All cameras status, centered between the time and the stream switch. */
+.recording-hero-controls.all-cameras-controls .all-cameras-summary {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted, #9aa4ad);
+  font-size: 12px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: auto;
+}
+
+.all-cameras-summary em { font-style: normal; }
+
+@media (max-width: 760px) {
+  /* Phones: the count, then the cameras without recording on a second line. */
+  .recording-hero-controls.all-cameras-controls .all-cameras-summary { font-size: 11px; line-height: 1.3; }
+  .all-cameras-summary em { display: block; overflow: hidden; text-overflow: ellipsis; }
+}
+.all-cameras-summary-icon { display: none; vertical-align: -1px; margin-right: 3px; }
+
+@media (max-width: 760px) {
+  .all-cameras-summary-separator,
+  .all-cameras-summary-prefix,
+  .all-cameras-play-label { display: none; }
+  .all-cameras-summary-icon { display: inline; }
+}
