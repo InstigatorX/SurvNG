@@ -1,7 +1,25 @@
 import { PREFER_NATIVE_HLS } from "./shared/constants.js";
 
-export function supportsNativeRecordingHls() {
+/**
+ * Chromium-based browsers (desktop Chrome/Edge, Android Chrome and WebView)
+ * now answer canPlayType for HLS too. iOS browsers are WebKit underneath and
+ * identify as CriOS/EdgiOS/FxiOS, not Chrome/, so they stay on native HLS.
+ */
+export function isChromiumBrowser(nav = typeof navigator === "undefined" ? null : navigator) {
+  if (!nav) return false;
+  if (nav.userAgentData?.brands?.some(({ brand }) => /Chromium/i.test(brand))) return true;
+  return /\b(?:Chrome|Chromium)\/\d/.test(nav.userAgent || "");
+}
+
+/**
+ * Native HLS is Safari's player. Chromium's built-in HLS player fails seeking
+ * backwards across the EXT-X-DISCONTINUITY between recording files
+ * (DEMUXER_ERROR_COULD_NOT_PARSE), which pushed Chrome onto the per-file
+ * fallback; Chromium keeps using Shaka's MSE path instead.
+ */
+export function supportsNativeRecordingHls(nav = typeof navigator === "undefined" ? null : navigator) {
   return typeof document !== "undefined"
+    && !isChromiumBrowser(nav)
     && Boolean(document.createElement("video").canPlayType("application/vnd.apple.mpegurl"));
 }
 

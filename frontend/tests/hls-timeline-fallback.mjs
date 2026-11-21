@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { clipPreviewReachedEnd } from "../src/recordingClipSelection.mjs";
-import { recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, recordingSegmentLocalTime, playbackRowsCoverEpoch, videoReachedSeekTarget, recordingSeekToleranceSeconds } from "../src/recordingPlayback.mjs";
+import { isChromiumBrowser, supportsNativeRecordingHls, recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, recordingSegmentLocalTime, playbackRowsCoverEpoch, videoReachedSeekTarget, recordingSeekToleranceSeconds } from "../src/recordingPlayback.mjs";
 
 for (const error of [{ code: 3 }, { code: 4 }, { code: 4032, category: 4 }, { code: 3014, data: [3] }, { code: 3015, data: [{ name: "NotSupportedError" }] }, { code: 3016, data: [3] }, { code: 3016, data: [4] }, new Error("This browser does not support Shaka Player")]) {
   assert.equal(isRecordingCompatibilityError(error), true, JSON.stringify(error));
@@ -120,6 +120,35 @@ for (const result of [200, 404, 503, "offline"]) {
     await context.handleNativeRecordingError({ currentTarget: video });
     assert.equal(calls.length, stale ? 0 : 1);
     if (!stale) assert.equal(isRecordingCompatibilityError(calls[0]), result === 200);
+  }
+}
+
+// Native HLS is Safari's. Chromium also answers canPlayType for HLS, but its
+// built-in player cannot seek back across recording discontinuities, so it
+// stays on Shaka. iOS browsers are WebKit whatever their brand.
+const userAgents = {
+  desktopChrome: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+  androidChrome: "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36",
+  edge: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0",
+  macSafari: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
+  iphoneSafari: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
+  iphoneChrome: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/141.0.0.0 Mobile/15E148 Safari/604.1",
+};
+for (const name of ["desktopChrome", "androidChrome", "edge"]) assert.equal(isChromiumBrowser({ userAgent: userAgents[name] }), true, name);
+for (const name of ["macSafari", "iphoneSafari", "iphoneChrome"]) assert.equal(isChromiumBrowser({ userAgent: userAgents[name] }), false, name);
+assert.equal(isChromiumBrowser({ userAgent: "", userAgentData: { brands: [{ brand: "Chromium", version: "141" }] } }), true, "client hints identify Chromium without a UA string");
+{
+  const previousDocument = globalThis.document;
+  globalThis.document = { createElement: () => ({ canPlayType: (type) => (type === "application/vnd.apple.mpegurl" ? "maybe" : "") }) };
+  try {
+    assert.equal(supportsNativeRecordingHls({ userAgent: userAgents.desktopChrome }), false, "Chromium answering canPlayType still uses Shaka");
+    assert.equal(supportsNativeRecordingHls({ userAgent: userAgents.androidChrome }), false);
+    assert.equal(supportsNativeRecordingHls({ userAgent: userAgents.macSafari }), true, "Safari keeps native HLS");
+    assert.equal(supportsNativeRecordingHls({ userAgent: userAgents.iphoneChrome }), true, "iOS Chrome is WebKit and keeps native HLS");
+    globalThis.document = { createElement: () => ({ canPlayType: () => "" }) };
+    assert.equal(supportsNativeRecordingHls({ userAgent: "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0" }), false, "no native HLS without canPlayType");
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;
   }
 }
 
