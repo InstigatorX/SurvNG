@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { clipPreviewReachedEnd } from "../src/recordingClipSelection.mjs";
-import { isChromiumBrowser, supportsNativeRecordingHls, recordingTransportOverride, RECORDING_TRANSPORT_STORAGE_KEY, recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, recordingSegmentLocalTime, playbackRowsCoverEpoch, videoReachedSeekTarget, recordingSeekToleranceSeconds } from "../src/recordingPlayback.mjs";
+import { nativeHlsSafeMediaTime, NATIVE_HLS_SEGMENT_END_GUARD_SECONDS, isChromiumBrowser, supportsNativeRecordingHls, recordingTransportOverride, RECORDING_TRANSPORT_STORAGE_KEY, recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, recordingSegmentLocalTime, playbackRowsCoverEpoch, videoReachedSeekTarget, recordingSeekToleranceSeconds } from "../src/recordingPlayback.mjs";
 
 for (const error of [{ code: 3 }, { code: 4 }, { code: 4032, category: 4 }, { code: 3014, data: [3] }, { code: 3015, data: [{ name: "NotSupportedError" }] }, { code: 3016, data: [3] }, { code: 3016, data: [4] }, new Error("This browser does not support Shaka Player")]) {
   assert.equal(isRecordingCompatibilityError(error), true, JSON.stringify(error));
@@ -23,7 +23,7 @@ const handler = source.slice(source.indexOf("  function handleRecordingError("),
 function fixture({ playing = true, pending = null, rows = true, transcoded = false, original = false } = {}) {
   const calls = [];
   const context = vm.createContext({
-    seekRecoveryRef: { current: null },
+    seekRecoveryRef: { current: null }, nativeHlsSafeMediaTime,
     Number, Math, performance, console: { warn() {} }, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt,
     useTranscodedPlayback: transcoded, useSegmentPlayback: transcoded || original, nativeScope: "gate:main:100:900", activeCameraId: "gate", source: "main",
     originalFallbackRef: { current: original ? "gate:main:100:900" : null },
@@ -105,7 +105,7 @@ for (const result of [200, 404, 503, "offline"]) {
     const calls = [];
     let src = "original.mp4";
     const video = { error: { code: 4 }, getAttribute: () => src };
-    const context = vm.createContext({
+    const context = vm.createContext({ nativeHlsSafeMediaTime,
       AbortController, videoRef: { current: video }, nativeScope: "gate", transport: "original",
       playbackTransportRef: { current: { scope: "gate", mode: "original" } },
       isRecordingCompatibilityError, handleRecordingError: (error) => calls.push(error),
@@ -153,6 +153,26 @@ assert.equal(isChromiumBrowser({ userAgent: "", userAgentData: { brands: [{ bran
   }
 }
 
+// Native HLS: a start or seek in a segment's last half second begins at the
+// next segment (iPhone Safari refetched such a segment and never played).
+{
+  const rows = [
+    { media_start: 0, media_end: 9.965 },
+    { media_start: 9.965, media_end: 19.93 },
+    { media_start: 19.93, media_end: 29.895 },
+  ];
+  assert.equal(NATIVE_HLS_SEGMENT_END_GUARD_SECONDS, 0.5);
+  assert.equal(nativeHlsSafeMediaTime(rows, 5), 5, "mid-segment targets are unchanged");
+  assert.equal(nativeHlsSafeMediaTime(rows, 9.4), 9.4, "more than half a second before the end is unchanged");
+  assert.equal(nativeHlsSafeMediaTime(rows, 9.796), 9.965, "the failing start (0.17 s before the end) moves to the next segment");
+  assert.equal(nativeHlsSafeMediaTime(rows, 9.955), 9.965);
+  assert.equal(nativeHlsSafeMediaTime(rows, 19.5), 19.93, "applies to every segment boundary");
+  assert.equal(nativeHlsSafeMediaTime(rows, 29.6), 29.6, "the playlist's last segment has nowhere to move");
+  assert.equal(nativeHlsSafeMediaTime(rows, 40), 40);
+  assert.equal(nativeHlsSafeMediaTime([], 3), 3);
+  assert.equal(Number.isNaN(nativeHlsSafeMediaTime(rows, NaN)), true);
+}
+
 // A forced transport (?transport=hls|original) wins over the iPhone/4× policy,
 // is remembered per browser, and `auto` clears it. A playback failure still
 // falls back to original files, and codec failure still transcodes.
@@ -196,7 +216,7 @@ for (const [transport, requestedTransport] of [["hls", "original"], ["original",
       for (const rows of [[], [{ start_epoch: 100, end_epoch: 110 }]]) {
         const calls = [];
         const context = vm.createContext({
-    seekRecoveryRef: { current: null },
+    seekRecoveryRef: { current: null }, nativeHlsSafeMediaTime,
           Number, transport, requestedTransport, nativeScope: "gate", playbackTransport: { scope: "gate", mode: transport },
           autoplayRef: { current: playing }, desiredEpochRef: { current: 105 }, pendingSeekEpochRef: { current: pending },
           pendingSeekModeRef: {}, playbackTimeline: rows, recordingSegmentAt, clearSeekWatchdog() {},
@@ -222,7 +242,7 @@ for (const [transport, requestedTransport] of [["hls", "original"], ["original",
 const readyHandler = source.slice(source.indexOf("  function handleRecordingReady("), source.indexOf("  function handleRecordingTimeUpdate("));
 {
   const video = { playbackRate: 1 };
-  const context = vm.createContext({
+  const context = vm.createContext({ nativeHlsSafeMediaTime,
     Number, videoRef: { current: video }, useSegmentPlayback: false, transport: "hls", requestedTransport: "hls",
     originalFallbackRef: {}, transcodeFallbackRef: {}, nativeScope: "gate", playbackRate: 2, normalizedTimelinePlaybackRate: (rate) => rate,
     playbackRetryRef: { current: { attempts: 0 } }, pendingSeekEpochRef: { current: 2005 },
@@ -243,7 +263,7 @@ const readyHandler = source.slice(source.indexOf("  function handleRecordingRead
   const video = { playbackRate: 1, currentTime: 0, paused: true, fastSeek() { throw new Error("Native HLS must use an exact seek"); } };
   const playheads = [];
   const plays = [];
-  const context = vm.createContext({
+  const context = vm.createContext({ nativeHlsSafeMediaTime,
     Number, Math, performance, videoReachedSeekTarget, recordingSeekToleranceSeconds, nativeHls: true, videoRef: { current: video }, useSegmentPlayback: false,
     clipPreviewReachedEnd, clipPreviewEndRef: { current: null },
     transport: "hls", requestedTransport: "hls", originalFallbackRef: {}, transcodeFallbackRef: {}, nativeScope: "gate",
@@ -308,7 +328,7 @@ function seekWatchdogHarness(video) {
   };
   const plays = [];
   const reloads = [];
-  const context = vm.createContext({
+  const context = vm.createContext({ nativeHlsSafeMediaTime,
     Number, Math, CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init.detail; } },
     performance: { now: () => clock.now }, STALLED_SEEK_RELOAD_MS: 15_000,
     window: { setTimeout: (callback, delay = 0) => { timers.push({ callback, delay }); return timers.length; }, clearTimeout: () => { timers.length = 0; } },
@@ -390,7 +410,7 @@ const stubVideo = (state) => Object.defineProperties({
 {
   const video = { currentTime: 0, paused: false, pause() {}, fastSeek() { throw new Error("Repeated native HLS scrub used fastSeek"); } };
   const context = vm.createContext({
-    seekRecoveryRef: { current: null },
+    seekRecoveryRef: { current: null }, nativeHlsSafeMediaTime,
     Number, nativeHls: true, useSegmentPlayback: false, isAllCameras: false, activeCameraId: "gate",
     timelineView: { startEpoch: 1000, endEpoch: 1900 }, loadedPlaybackWindow: { start: 1000, end: 1900 },
     playbackTimeline: [{ start_epoch: 1000, end_epoch: 1010 }], playbackRowsCoverEpoch,
@@ -427,7 +447,7 @@ const stubVideo = (state) => Object.defineProperties({
     fastSeek() { throw new Error("Native HLS scrub used fastSeek"); },
   };
   const context = vm.createContext({
-    seekRecoveryRef: { current: null },
+    seekRecoveryRef: { current: null }, nativeHlsSafeMediaTime,
     Number, nativeHls: true, useSegmentPlayback: false, isAllCameras: false, activeCameraId: "gate",
     timelineView: { startEpoch: 1000, endEpoch: 1900 }, loadedPlaybackWindow: { start: 1000, end: 1900 },
     playbackTimeline: [{ start_epoch: 1000, end_epoch: 1010 }], playbackRowsCoverEpoch,
@@ -465,7 +485,7 @@ const stubVideo = (state) => Object.defineProperties({
   };
   const segment = { start_epoch: 100, end_epoch: 110 };
   const context = vm.createContext({
-    seekRecoveryRef: { current: null },
+    seekRecoveryRef: { current: null }, nativeHlsSafeMediaTime,
     Number, useSegmentPlayback: true, isAllCameras: false, activeCameraId: "gate",
     timelineView: { startEpoch: 0, endEpoch: 1000 },
     loadedPlaybackWindow: { start: 0, end: 900 },
@@ -494,7 +514,7 @@ const stubVideo = (state) => Object.defineProperties({
     fastSeek() { throw new Error("in-flight native seek must not be replaced"); },
   };
   const context = vm.createContext({
-    seekRecoveryRef: { current: null },
+    seekRecoveryRef: { current: null }, nativeHlsSafeMediaTime,
     Number, Math, videoRef: { current: video }, useSegmentPlayback: false, transport: "hls", requestedTransport: "hls",
     originalFallbackRef: {}, transcodeFallbackRef: {}, nativeScope: "gate", nativeHls: true, playbackRate: 1,
     normalizedTimelinePlaybackRate: (rate) => rate, playbackRetryRef: { current: { attempts: 0 } },
@@ -521,7 +541,7 @@ const stubVideo = (state) => Object.defineProperties({
     set currentTime(value) { writes.push(value); currentTime = value; },
   };
   const context = vm.createContext({
-    seekRecoveryRef: { current: null },
+    seekRecoveryRef: { current: null }, nativeHlsSafeMediaTime,
     Number, Math, performance, videoRef: { current: video }, nativeHls: true,
     pendingSeekEpochRef: { current: 1008 }, pendingSeekModeRef: { current: "local" }, desiredEpochRef: { current: 1008 },
     autoplayRef: { current: true }, ignorePauseUntilRef: { current: 0 },
@@ -550,7 +570,7 @@ const stubVideo = (state) => Object.defineProperties({
 // previous camera's codec fallback or transport, including initial ?speed=4.
 for (const requestedTransport of ["hls", "original"]) {
   const calls = [];
-  const context = vm.createContext({
+  const context = vm.createContext({ nativeHlsSafeMediaTime,
     transport: requestedTransport, requestedTransport, nativeScope: "new-camera",
     playbackTransport: { scope: "old-camera", mode: "transcode" },
     setPlaybackTransport: (value) => calls.push(value),
@@ -564,7 +584,7 @@ for (const requestedTransport of ["hls", "original"]) {
 // Original fast-play URLs cannot accidentally invoke the mobile encoder.
 const urls = readFileSync(new URL("../src/shared/mediaUrls.js", import.meta.url), "utf8");
 const segmentUrlFunction = urls.slice(urls.indexOf("export function recordingSegmentUrl("), urls.indexOf("export function recordingGridDayUrl(")) .replaceAll("export ", "");
-const urlContext = vm.createContext({ URLSearchParams, appUrl: (value) => `/survng${value}` });
+const urlContext = vm.createContext({ nativeHlsSafeMediaTime, URLSearchParams, appUrl: (value) => `/survng${value}` });
 vm.runInContext(segmentUrlFunction, urlContext);
 for (const transcode of [false, true]) {
   const url = new URL(urlContext.recordingSegmentUrl("gate", 107.25, "main", transcode), "http://nvr.test");
@@ -581,7 +601,7 @@ for (const secondTick of [false, true]) {
     const timers = [];
     let src = "day.m3u8?reload=0";
     const video = { currentTime: 0, getAttribute: () => src };
-    const context = vm.createContext({
+    const context = vm.createContext({ nativeHlsSafeMediaTime,
       seekRecoveryRef: { current: null }, performance: { now: () => 0 }, STALLED_SEEK_RELOAD_MS: 15_000,
       Number, videoRef: { current: video }, seekWatchdogRef: {}, clearSeekWatchdog() {},
       recordingSeekToleranceSeconds: () => .35, seekWatchdogDelayMs: () => 3000,

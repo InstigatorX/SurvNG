@@ -75,6 +75,24 @@ export function recordingPlaybackTransport({
   return "hls";
 }
 
+/**
+ * Safari's native HLS player can fail to start when asked to begin in the last
+ * fraction of a second of a segment: it refetches that segment endlessly and
+ * never plays (seen on iPhone starting 0.17 s before a recording's end).
+ * Targets that close to a segment's end start at the next segment instead,
+ * which begins on a keyframe. The last segment of a playlist is left alone.
+ */
+export const NATIVE_HLS_SEGMENT_END_GUARD_SECONDS = 0.5;
+
+export function nativeHlsSafeMediaTime(rows, mediaTime, guardSeconds = NATIVE_HLS_SEGMENT_END_GUARD_SECONDS) {
+  if (!Number.isFinite(mediaTime) || !Array.isArray(rows)) return mediaTime;
+  const index = rows.findIndex((row) => Number(row.media_start) <= mediaTime && mediaTime < Number(row.media_end));
+  if (index < 0 || index >= rows.length - 1) return mediaTime;
+  if (Number(rows[index].media_end) - mediaTime > guardSeconds) return mediaTime;
+  const nextStart = Number(rows[index + 1].media_start);
+  return Number.isFinite(nextStart) ? nextStart : mediaTime;
+}
+
 export function prefersJpegScrubPreview(options = {}) {
   const preferNativeHls = typeof options.preferNativeHls === "boolean"
     ? options.preferNativeHls
