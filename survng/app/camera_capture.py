@@ -1050,6 +1050,10 @@ class CameraCaptureService:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._stop.set()
+        # Mains capture reconnects. A battery wake opens once and exits when
+        # the stream ends, without the retry loop opening the camera again.
+        self._one_shot = False
+        self._autostart = True
         self._threads: dict[str, threading.Thread] = {}
         self._source_stops: dict[str, threading.Event] = {}
         self._all_threads: dict[
@@ -1122,6 +1126,57 @@ class CameraCaptureService:
         return normalized
 
     def start(self) -> bool:
+        """Open the live source and keep reconnecting until stop."""
+        with self._lock:
+            self._one_shot = False
+            self._autostart = True
+        if not self._arm_generation():
+            return False
+        return self.ensure_source("live").running
+
+    def arm(self) -> bool:
+        """Clear the stop gate without opening a stream.
+
+        Battery cameras stay armed while asleep. A later wake calls
+        ``open_wake_source`` for one bounded session.
+        """
+        with self._lock:
+            self._one_shot = True
+            self._autostart = False
+        return self._arm_generation()
+
+    def open_wake_source(self, source: str = "live") -> bool:
+        """Open one source for the current armed generation, without reconnect."""
+        source = self._normalize_source(source)
+        with self._lock:
+            if self._stop.is_set():
+                return False
+            self._one_shot = True
+            self._autostart = False
+        self.release_wake_sources()
+        with self._lock:
+            if self._stop.is_set():
+                return False
+        return self.ensure_source(source).running
+
+    def release_wake_sources(self) -> None:
+        """Stop open sources and keep the capture generation armed."""
+        with self._lock:
+            stops = tuple(self._source_stops.values())
+            threads = tuple(self._all_threads)
+        for stop_event in stops:
+            stop_event.set()
+        for thread in threads:
+            if thread is threading.current_thread():
+                continue
+            thread.join(timeout=2.0)
+
+    def source_running(self, source: str) -> bool:
+        source = self._normalize_source(source)
+        with self._lock:
+            return self._thread_running_locked(source)
+
+    def _arm_generation(self) -> bool:
         with self._lock:
             starting_generation = self._stop.is_set()
             if starting_generation:
@@ -1152,7 +1207,7 @@ class CameraCaptureService:
             except BaseException:
                 self._stop.set()
                 raise
-        return self.ensure_source("live").running
+        return True
 
     def ensure_source(self, source: str) -> SourceStartResult:
         source = self._normalize_source(source)
@@ -1197,18 +1252,25 @@ class CameraCaptureService:
         source = self._normalize_source(source)
         if self._stop.is_set():
             return None
+        # Asleep battery cameras must not open a stream because a viewer,
+        # snapshot, or calibration pass asked for a frame.
+        if not self._autostart:
+            return self.latest(source)
         with self._lock:
             self._last_access[source] = self._monotonic_clock()
         if not self.ensure_source(source).running:
             return None
         return self.latest(source)
 
-    def latest(self, source: str) -> CapturedFrame | None:
+    def latest(self, source: str, *, allow_stale: bool = False) -> CapturedFrame | None:
         source = self._normalize_source(source)
         now = self._monotonic_clock()
         with self._lock:
             frame = self._frames.get(source)
-            if frame is None or now - frame.captured_at_monotonic > self.stale_seconds:
+            if frame is None or (
+                not allow_stale
+                and now - frame.captured_at_monotonic > self.stale_seconds
+            ):
                 return None
         # Published frames are immutable, so retaining the frame reference is
         # safe while the potentially large writable copy happens without
@@ -1532,12 +1594,21 @@ class CameraCaptureService:
                                     break
                                 if not session_received_frame:
                                     consecutive_open_failures += 1
-                                failure_reason = self._capture_failure_reason(
-                                    "stream read failed",
-                                    handle,
+                                # A wake that already delivered frames ends
+                                # because the camera went back to sleep. That
+                                # is not a capture interruption.
+                                expected_sleep = (
+                                    self._one_shot and session_received_frame
                                 )
-                                self._increment(source, "read_failures")
-                                self._set_error(source, failure_reason)
+                                if not expected_sleep:
+                                    failure_reason = self._capture_failure_reason(
+                                        "stream read failed",
+                                        handle,
+                                    )
+                                    self._increment(source, "read_failures")
+                                    self._set_error(source, failure_reason)
+                                else:
+                                    self._set_error(source, "")
                                 break
                             if self._cancelled(stop_event):
                                 break
@@ -1568,8 +1639,10 @@ class CameraCaptureService:
                                 source,
                                 redact_secret_text(exc)[:160],
                             )
-                if self._cancelled(stop_event) or self._should_exit_for_idle(
-                    source, stop_event
+                if (
+                    self._one_shot
+                    or self._cancelled(stop_event)
+                    or self._should_exit_for_idle(source, stop_event)
                 ):
                     break
                 LOGGER.info(

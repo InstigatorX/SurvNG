@@ -218,6 +218,20 @@ def test_cached_derivatives_are_used_only_for_matching_preprocessor() -> None:
     assert context.processed_frame is None
 
 
+def test_battery_camera_uses_the_wake_as_its_only_motion_notice() -> None:
+    camera = CameraConfig(
+        id="porch",
+        name="Porch",
+        stream_url="rtsp://example.invalid/main",
+        power="battery",
+    )
+    service = _service(camera=camera)
+
+    assert service.settings()[0] == "camera"
+    assert service.adaptive_analysis_required() is False
+    assert service.continuous_primary_required() is False
+
+
 def test_cached_derivatives_reach_matching_configured_preprocessor() -> None:
     service = _service()
     service.qualification_pipeline.stage_configuration = [

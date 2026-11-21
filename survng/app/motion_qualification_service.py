@@ -107,6 +107,10 @@ class MotionQualificationService:
             if override.sensitivity == "inherit"
             else override.sensitivity
         )
+        # A battery wake is the motion notice. Continuous EMA has no picture
+        # while the camera is asleep and must not demand one.
+        if self.camera.battery_powered():
+            mode = "camera"
         return mode, sensitivity, int(override.frame_width or self.config.frame_width)
 
     def stationary_object_tolerance(self) -> str:
@@ -171,6 +175,8 @@ class MotionQualificationService:
         )
 
     def adaptive_analysis_required(self) -> bool:
+        if self.camera.battery_powered():
+            return False
         if self.trigger_mode() in {"adaptive", "camera_rescue"}:
             return True
         options = self.fusion_options()
@@ -180,6 +186,8 @@ class MotionQualificationService:
         )
 
     def continuous_primary_required(self) -> bool:
+        if self.camera.battery_powered():
+            return False
         return bool(
             self.adaptive_analysis_required()
             and (

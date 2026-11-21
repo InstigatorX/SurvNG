@@ -265,6 +265,41 @@ class RecorderTest(unittest.TestCase):
                 {(camera.id, "main"), (camera.id, "live")},
             )
 
+    def test_sleeping_battery_camera_is_recorded_only_during_a_wake(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            camera = CameraConfig(
+                id="porch",
+                name="Porch",
+                stream_url="rtsp://camera/main",
+                power="battery",
+            )
+            self.assertEqual(recorder._wanted_keys({camera.id: camera}), {})
+
+            recorder.set_session_released(camera.id, True)
+            self.assertEqual(
+                set(recorder._wanted_keys({camera.id: camera})),
+                {(camera.id, "main")},
+            )
+            key = (camera.id, "main")
+            dead = Mock(pid=42)
+            dead.poll.return_value = 1
+            recorder.processes[key] = (dead, Mock(), Mock())
+            with patch.object(recorder, "stop"), patch.object(
+                recorder, "start"
+            ) as start, patch.object(recorder, "cleanup_duplicate_recorders"):
+                recorder.reconcile({camera.id: camera})
+            start.assert_called()
+
+            recorder.processes.clear()
+            recorder.set_session_released(camera.id, False)
+            with patch.object(recorder, "stop"), patch.object(
+                recorder, "start"
+            ) as start, patch.object(recorder, "cleanup_duplicate_recorders"):
+                recorder.reconcile({camera.id: camera})
+            start.assert_not_called()
+            self.assertEqual(recorder._wanted_keys({camera.id: camera}), {})
+
     def test_start_failure_is_nonfatal_and_backed_off(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)

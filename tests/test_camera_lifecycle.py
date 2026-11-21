@@ -15,10 +15,11 @@ from survng.app.camera_lifecycle import (
 )
 
 
-def _service() -> tuple[CameraLifecycleService, SimpleNamespace]:
+def _service(*, defer_capture: bool = False) -> tuple[CameraLifecycleService, SimpleNamespace]:
     state = CameraRuntimeState()
     capture = Mock()
     capture.start.return_value = True
+    capture.arm.return_value = True
     capture.threads.return_value = {}
     capture.wait_stopped.return_value = {}
     onvif = Mock()
@@ -40,6 +41,7 @@ def _service() -> tuple[CameraLifecycleService, SimpleNamespace]:
         tracking=tracking,
         motion_runtime=motion_runtime,
         tracking_frames=tracking_frames,
+        defer_capture=defer_capture,
     )
     return service, SimpleNamespace(
         state=state,
@@ -77,6 +79,18 @@ def test_detection_work_leases_are_concurrent_and_drain_after_failure() -> None:
                 assert not rejected
             raise ValueError("frame failed")
     assert state.wait_detection_idle(0)
+
+
+def test_battery_start_arms_capture_without_onvif_or_a_stream() -> None:
+    service, owned = _service(defer_capture=True)
+
+    service.start()
+
+    owned.capture.arm.assert_called_once_with()
+    owned.capture.start.assert_not_called()
+    owned.onvif.start.assert_not_called()
+    owned.motion_runtime.start.assert_called_once()
+    assert owned.state.phase is CameraLifecyclePhase.RUNNING
 
 
 def test_start_orders_state_cleanup_before_producers() -> None:

@@ -131,6 +131,28 @@ def _wait_until(predicate, timeout: float = 1.0) -> None:
     assert predicate()
 
 
+def test_one_shot_wake_does_not_reconnect_or_open_from_a_frame_request() -> None:
+    frame = np.ones((8, 8, 3), dtype=np.uint8)
+    backend = FakeBackend([[frame]])
+    service = _service(backend)
+
+    assert service.arm()
+    assert service.request_frame("live") is None
+    assert backend.open_calls == 0
+
+    assert service.open_wake_source("live")
+    _wait_until(lambda: service.status()["capture_stats"]["live"]["frames_received"] >= 1)
+    _wait_until(lambda: not service.source_running("live"))
+
+    assert backend.open_calls == 1
+    assert service.status()["capture_stats"]["live"]["read_failures"] == 0
+    assert service.latest("live", allow_stale=True) is not None
+    assert service.request_frame("live") is not None
+    assert backend.open_calls == 1
+    service.request_stop()
+    assert service.wait_stopped(1) == {}
+
+
 def test_live_source_starts_persistently_and_stops_in_two_phases() -> None:
     backend = FakeBackend([[np.ones((10, 20, 3), dtype=np.uint8)]])
     service = _service(backend)
