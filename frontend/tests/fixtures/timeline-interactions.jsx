@@ -5,6 +5,7 @@ import { Shell } from "../../src/shell/Shell.jsx";
 import "../../src/styles.css";
 import "../../src/shell/shell.css";
 import "../../src/timeline/timeline.css";
+import "../../src/timeline/rail.css";
 import "../../src/live/live.css";
 import "../../src/timeline/investigation.css";
 import "../../src/incidents/incidents.css";

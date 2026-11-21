@@ -31,6 +31,9 @@ import {
   VolumeX,
   X,
   Mic,
+  Rows3,
+  Columns3,
+  FastForward,
 } from "lucide-react";
 import { liveFramingStyle } from "../liveFraming.mjs";
 import { browserStorage } from "../storage.mjs";
@@ -66,6 +69,8 @@ import { preferredStreamSource } from "../shared/cameras.js";
 import { IdentityChip } from "../shared/identity.jsx";
 import { eventThumbnailUrl, recordingDayUrl, recordingWindowUrl, recordingUpdatesUrl, recordingDayHlsUrl, recordingGridDayUrl, recordingGridUpdatesUrl, recordingPreviewUrl, recordingSegmentUrl } from "../shared/mediaUrls.js";
 import { ShakaVideo } from "../shared/media.jsx";
+import { CameraLanes, CatchUpStory, EventRail } from "./TimelineRail.jsx";
+import { condenseStory, nextStoryEvent, railEventDurationSeconds, railEventKind, railEventTitle, storyEventAt } from "../timelineRail.mjs";
 import { RecordingHlsVideo } from "../shared/RecordingHlsVideo.jsx";
 import { NativeRecordingVideo } from "../shared/NativeRecordingVideo.jsx";
 import { DebugDetectionOverlay } from "../shared/evidence.jsx";
@@ -890,6 +895,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [aiOverlayEnabled, setAiOverlayEnabled] = useState(false);
   const [followPlayhead, setFollowPlayhead] = useState(true);
   const [playbackRate, setPlaybackRate] = useState(initialView.speed);
+  const [timelineLayout, setTimelineLayout] = useState(initialView.view);
+  const [railMinutes, setRailMinutes] = useState(initialView.railMinutes);
+  const [quietMinutes, setQuietMinutes] = useState(5);
+  const [autoAdvance, setAutoAdvance] = useState(true);
+  const [laneData, setLaneData] = useState({ scope: "", recordings: [], events: [] });
   const [timelineViewportAnchor, setTimelineViewportAnchor] = useState(initialView.at);
   const [semanticStatus, setSemanticStatus] = useState(null);
   const [frameSearchEpoch, setFrameSearchEpoch] = useState(null);
@@ -1204,6 +1214,56 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     ) return viewportEvents;
     return [...viewportEvents, selectedEvent].sort((left, right) => left.incident_epoch - right.incident_epoch);
   }, [selectedEvent, timelineView.endEpoch, timelineView.startEpoch, viewportEvents]);
+
+  // Event Rail, camera lanes and catch-up share these. The rail top is "now"
+  // on today (rounded to five minutes so it does not shift every render).
+  const railNow = date === today ? Math.ceil(Math.max(Date.now() / 1000, latestAvailabilityRef.current || dayStart) / 300) * 300 : dayEnd;
+  const railTopEpoch = Math.min(dayEnd, railNow);
+  const railPlayhead = Number.isFinite(playhead) ? playhead : (latestAvailabilityRef.current ?? dayStart);
+  const previousRailEvent = useMemo(() => [...filteredEvents].reverse().find((event) => event.incident_epoch < railPlayhead - 2) ?? null, [filteredEvents, railPlayhead]);
+  const nextRailEvent = useMemo(() => filteredEvents.find((event) => event.incident_epoch > railPlayhead + 2) ?? null, [filteredEvents, railPlayhead]);
+  const storyItems = useMemo(() => condenseStory(filteredEvents, { quietSeconds: quietMinutes * 60, startEpoch: dayStart, endEpoch: railTopEpoch }), [dayStart, filteredEvents, quietMinutes, railTopEpoch]);
+  const storyCurrent = timelineLayout === "catchup" && Number.isFinite(playhead) ? storyEventAt(storyItems, playhead, 3, selectedEventId) : null;
+  const storyFocus = storyCurrent || selectedEvent || nextStoryEvent(storyItems, railPlayhead);
+  const laneScope = `${dayStart}:${dayEnd}:${source}`;
+  const laneEvents = useMemo(() => (laneData.scope === laneScope ? laneData.events : [])
+    .filter((event) => timelineEventMatchesFilter(event, eventFilter))
+    .map((event) => ({ ...event, incident_epoch: recordingIncidentEpoch(event) }))
+    .filter((event) => Number.isFinite(event.incident_epoch)), [eventFilter, laneData, laneScope]);
+
+  useVisiblePolling(async (signal) => {
+    const response = await fetch(recordingGridDayUrl(dayStart, dayEnd, source, true), { signal });
+    if (!response.ok) throw new Error(`Camera lanes failed (${response.status})`);
+    const payload = await response.json();
+    setLaneData({ scope: `${dayStart}:${dayEnd}:${source}`, recordings: payload.availability || [], events: payload.incidents || payload.events || [] });
+  }, 30_000, timelineLayout === "cameras", { restartKey: laneScope });
+
+  // Catch-up skips quiet stretches. Playback that runs off the end of an event,
+  // or starts inside a quiet stretch, continues at the next event; a seek the
+  // user made into a quiet stretch (or a clip preview) plays as asked.
+  const storyTickRef = useRef(null);
+  useEffect(() => {
+    const previous = storyTickRef.current;
+    storyTickRef.current = { epoch: playhead, inEvent: Boolean(storyCurrent), playing: heroPlaying };
+    if (timelineLayout !== "catchup" || !Number.isFinite(playhead) || !heroPlaying) return;
+    if (storyCurrent) {
+      if (String(storyCurrent.id) !== String(selectedEventId)) setSelectedEventId(storyCurrent.id);
+      return;
+    }
+    if (!autoAdvance || clipPreviewing) return;
+    const ranOffEvent = previous?.inEvent && previous.playing && playhead > previous.epoch && playhead - previous.epoch < 3;
+    const startedInQuiet = previous && !previous.playing;
+    if (!ranOffEvent && !startedInQuiet) return;
+    const next = nextStoryEvent(storyItems, playhead);
+    if (!next) return;
+    const target = Math.max(dayStart, next.incident_epoch - 1);
+    // An event without recording would snap back here; leave playback alone.
+    if ((snapToRecording(target) ?? playhead) <= playhead + 1) return;
+    setSelectedEventId(next.id);
+    playAt(target, true);
+    // playAt and snapToRecording are recreated every render; the playhead drives this effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoAdvance, clipPreviewing, heroPlaying, playhead, storyCurrent?.id, storyItems, timelineLayout]);
 
   useVisiblePolling(async (signal) => {
     const response = await fetch("/api/semantic-search/status", { signal });
@@ -1952,8 +2012,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (!timelineLanes.object) params.set("objects", "0");
     if (!timelineLanes.motion) params.set("motion", "0");
     if (playbackRate !== 1) params.set("speed", String(playbackRate));
+    if (timelineLayout !== "rail") params.set("view", timelineLayout);
+    if (railMinutes !== 60) params.set("rail", String(railMinutes));
     window.history.replaceState(null, "", appUrl(`/timeline?${params.toString()}`));
-  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, incidentRangeHours, playbackRate, selectedEventId, source, timelineLanes.motion, timelineLanes.object, trailEventIds]);
+  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, incidentRangeHours, playbackRate, railMinutes, selectedEventId, source, timelineLanes.motion, timelineLanes.object, timelineLayout, trailEventIds]);
 
   useEffect(() => {
     const restoreView = () => {
@@ -1979,6 +2041,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       setIncidentRangeHours(view.windowHours);
       setTimelineLanes(view.lanes);
       setPlaybackRate(view.speed);
+      setTimelineLayout(view.view);
+      setRailMinutes(view.railMinutes);
     };
     window.addEventListener("popstate", restoreView);
     return () => window.removeEventListener("popstate", restoreView);
@@ -2616,8 +2680,181 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     );
   }
 
+  const exportPanel = exportRange ? (
+            <section className="recordings-v2-export-panel" aria-label="Export recording">
+              <div className="recordings-v2-export-kind" role="group" aria-label="Export type">
+                <button type="button" className={exportKind === "recording" ? "active" : ""} onClick={() => setExportKind("recording")} disabled={Boolean(exportJob)}>Video clip</button>
+                <button type="button" className={exportKind === "timelapse" ? "active" : ""} onClick={() => setExportKind("timelapse")} disabled={Boolean(exportJob)}>Timelapse</button>
+              </div>
+              <div className="recordings-v2-export-range-label">
+                <span><b>Start</b>{formatDateTime(exportRange.start, timeZone)}</span>
+                <span><b>End</b>{formatDateTime(exportRange.end, timeZone)}</span>
+                <span><b>Length</b>{formatDuration(exportRange.end - exportRange.start)}</span>
+              </div>
+              <div className="recordings-v2-clip-composer" aria-label="Clip selection controls">
+                <div className="recordings-v2-clip-composer-heading">
+                  <span><Camera size={14} />{cameras.find((camera) => camera.id === activeCameraId)?.name || activeCameraId}</span>
+                  <small>Choose within {formatTimeOnly(timelineView.startEpoch, timeZone)}–{formatTimeOnly(timelineView.endEpoch, timeZone)}. Minimum 1 sec.</small>
+                </div>
+                <div className="recordings-v2-clip-boundaries">
+                  <button type="button" onClick={() => jumpToClipBoundary(exportRange.start)} disabled={Boolean(exportJob)} title="Jump to selected start"><SkipBack size={14} />Start</button>
+                  <button type="button" onClick={() => setClipBoundary("start")} disabled={Boolean(exportJob) || !canSetClipBoundaryAtPlayhead({ range: exportRange, kind: "start", playhead, startEpoch: timelineView.startEpoch, endEpoch: timelineView.endEpoch })}>Set start here</button>
+                  <button type="button" onClick={() => setClipBoundary("end")} disabled={Boolean(exportJob) || !canSetClipBoundaryAtPlayhead({ range: exportRange, kind: "end", playhead, startEpoch: timelineView.startEpoch, endEpoch: timelineView.endEpoch })}>Set end here</button>
+                  <button type="button" onClick={() => jumpToClipBoundary(exportRange.end)} disabled={Boolean(exportJob)} title="Jump to selected end">End<SkipForward size={14} /></button>
+                  {clipPreviewing ? <button type="button" className="active" onClick={() => cancelClipPreview({ pause: true, notice: "Clip preview stopped" })}><Pause size={14} />Stop preview</button> : <button type="button" onClick={previewClip} disabled={Boolean(exportJob) || !clipRangeIsValid(exportRange, timelineView.startEpoch, timelineView.endEpoch)}><Play size={14} fill="currentColor" />Preview clip</button>}
+                </div>
+              </div>
+              <div className="recordings-v2-export-options">
+                <label className="export-name-field"><span>Name</span><input value={exportLabel} onChange={(event) => setExportLabel(event.target.value)} placeholder="Optional export name" maxLength="120" disabled={Boolean(exportJob)} /></label>
+                {exportKind === "timelapse" ? <>
+                  <label><span>Capture every</span><select value={exportOptions.interval} onChange={(event) => setExportOptions((current) => ({ ...current, interval: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="5">5 sec</option><option value="10">10 sec</option><option value="30">30 sec</option><option value="60">1 min</option><option value="300">5 min</option></select></label>
+                  <label><span>Playback</span><select value={exportOptions.fps} onChange={(event) => setExportOptions((current) => ({ ...current, fps: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="24">24 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label>
+                </> : null}
+                <label><span>Resolution</span><select value={exportKind === "timelapse" ? exportOptions.timelapseHeight : exportOptions.clipHeight} onChange={(event) => setExportOptions((current) => ({ ...current, [exportKind === "timelapse" ? "timelapseHeight" : "clipHeight"]: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="0">Original</option><option value="2160">2160p</option><option value="1440">1440p</option><option value="1080">1080p</option><option value="720">720p</option><option value="480">480p</option></select></label>
+              </div>
+              {exportKind === "recording" ? <p>Creates one broadly compatible H.264 MP4. Width follows the camera aspect ratio; gaps are skipped and source-format changes are joined automatically.</p> : <p>Resolution is the output height; width follows the camera aspect ratio.</p>}
+              {exportJob ? (
+                <div className={`recordings-v2-export-status ${exportJob.status}`}>
+                  <span><b>{exportJob.phase || exportJob.status}</b><small>{Math.round(Number(exportJob.progress) || 0)}%</small></span>
+                  <i><b style={{ width: `${Math.max(0, Math.min(100, Number(exportJob.progress) || 0))}%` }} /></i>
+                  {exportJob.error ? <em>{exportJob.error}</em> : null}
+                </div>
+              ) : null}
+              {exportError ? <div className="recordings-v2-export-error"><CircleAlert size={15} />{exportError}</div> : null}
+              <div className="recordings-v2-export-actions">
+                {exportJob?.status === "completed" && exportJob.download_url ? <a className="nav-button" href={mediaUrl(exportJob.download_url)}><Download size={15} />Download</a> : null}
+                {exportJob?.status === "completed" ? <a className="nav-button" href={appUrl(`/exports?camera=${encodeURIComponent(activeCameraId)}`)}><Film size={15} />Open export</a> : null}
+                {exportJob && ["queued", "running", "cancelling"].includes(exportJob.status) ? <button type="button" onClick={cancelExport} disabled={exportJob.status === "cancelling"}><X size={15} />{exportJob.status === "cancelling" ? "Cancelling" : "Cancel"}</button> : null}
+                {!exportJob ? <button type="button" className="primary" onClick={startExport} disabled={exportSubmitting}><Download size={15} />{exportSubmitting ? "Starting..." : `Start ${exportKind === "timelapse" ? "timelapse" : "export"}`}</button> : null}
+                {exportJob && ["completed", "failed", "cancelled"].includes(exportJob.status) ? <button type="button" onClick={() => { setExportJob(null); setExportError(""); setExportLabel(""); }}>New export</button> : null}
+              </div>
+            </section>
+          ) : null;
+
+  const selectedRailEvent = timelineLayout === "catchup" ? storyFocus : selectedEvent;
+  const selectedRailDuration = selectedRailEvent ? railEventDurationSeconds(selectedRailEvent) : 0;
+  const cameraNames = Object.fromEntries(cameras.map((camera) => [camera.id, camera.name || camera.id]));
+  function selectRailEvent(event) {
+    if (!event) return;
+    checkpointTimelineView();
+    cancelClipPreview();
+    setSelectedEventId(event.id);
+    if (event.camera_id && event.camera_id !== activeCameraId) selectPlaybackCamera(event.camera_id);
+    playAt(event.incident_epoch, true);
+  }
+  function changeTimelineLayout(nextLayout) {
+    if (nextLayout === timelineLayout) return;
+    checkpointTimelineView();
+    setTimelineLayout(nextLayout);
+  }
+  const railActionButtons = (
+    <>
+      <button
+        type="button"
+        aria-pressed={investigationOpen}
+        aria-expanded={investigationOpen}
+        aria-controls="timeline-investigation"
+        onClick={() => setInvestigationOpen((current) => !current)}
+      >
+        {investigationOpen ? <ChevronDown size={15} /> : <ChevronUp size={15} />}Nearby
+      </button>
+      <button type="button" className={exportRange ? "active" : ""} onClick={toggleExport} disabled={!timeline.length || exportActive}>
+        <Download size={15} />{exportActive ? "Export running" : exportRange ? "Close export" : "Export"}
+      </button>
+    </>
+  );
+  const railControls = (
+    <div className="rail-controls">
+      <div className="rail-actions">
+        <div className="rail-selected">
+          {selectedRailEvent ? <i className={railEventKind(selectedRailEvent)} aria-hidden="true" /> : null}
+          <div>
+            <strong>{selectedRailEvent ? railEventTitle(selectedRailEvent) : (cameraNames[activeCameraId] || "Recording")}</strong>
+            <small>
+              {selectedRailEvent
+                ? `${formatDateTime(selectedRailEvent.incident_epoch, timeZone)}${selectedRailDuration ? ` · ${formatDuration(selectedRailDuration)}` : ""}${selectedRailEvent.camera_id && selectedRailEvent.camera_id !== activeCameraId ? ` · ${cameraNames[selectedRailEvent.camera_id] || selectedRailEvent.camera_id}` : ""}`
+                : (Number.isFinite(playhead) ? formatDateTime(playhead, timeZone) : "No recording selected")}
+            </small>
+          </div>
+        </div>
+        <button type="button" onClick={() => selectRailEvent(previousRailEvent)} disabled={!previousRailEvent} aria-label="Previous event"><SkipBack size={15} /><span className="rail-action-label">Previous</span></button>
+        <button type="button" onClick={() => selectRailEvent(nextRailEvent)} disabled={!nextRailEvent} aria-label="Next event"><span className="rail-action-label">Next</span><SkipForward size={15} /></button>
+        {railActionButtons}
+      </div>
+      {exportPanel}
+      {timelineLayout === "cameras" ? (
+        <CameraLanes
+          cameras={cameras}
+          recordings={laneData.scope === laneScope ? laneData.recordings : []}
+          events={laneEvents}
+          source={source}
+          startEpoch={timelineView.startEpoch}
+          endEpoch={timelineView.endEpoch}
+          topEpoch={railTopEpoch}
+          dayStart={dayStart}
+          playhead={railPlayhead}
+          onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
+          onSelectCamera={(nextCameraId) => { if (nextCameraId !== activeCameraId) selectPlaybackCamera(nextCameraId); }}
+          timeZone={timeZone}
+          spanMinutes={railMinutes}
+          onSpanChange={(minutes) => { checkpointTimelineView(); setRailMinutes(minutes); }}
+          windowHours={incidentRangeHours}
+          onWindowHoursChange={(hours) => { checkpointTimelineView(); setIncidentRangeHours(hours); }}
+        />
+      ) : null}
+      {timelineLayout === "catchup" ? (
+        <CatchUpStory
+          events={filteredEvents}
+          dayStart={dayStart}
+          endEpoch={railTopEpoch}
+          playhead={railPlayhead}
+          selectedEventId={storyFocus?.id}
+          onPlayEvent={selectRailEvent}
+          onShowRealTime={(epoch) => { changeTimelineLayout("rail"); playAt(epoch, true); }}
+          cameraNames={cameraNames}
+          timeZone={timeZone}
+          quietMinutes={quietMinutes}
+          onQuietMinutesChange={setQuietMinutes}
+          autoAdvance={autoAdvance}
+          onAutoAdvanceChange={setAutoAdvance}
+        />
+      ) : null}
+    </div>
+  );
+  const railAside = timelineLayout === "rail" ? (
+    <EventRail
+      cameraId={activeCameraId}
+      source={source}
+      dayStart={dayStart}
+      dayEnd={dayEnd}
+      topEpoch={railTopEpoch}
+      playhead={railPlayhead}
+      recordings={timeline}
+      events={filteredEvents}
+      densityEvents={timelineEvents}
+      spanMinutes={railMinutes}
+      onSpanChange={(minutes) => { checkpointTimelineView(); setRailMinutes(minutes); }}
+      filter={eventFilter}
+      onFilterChange={(value) => { checkpointTimelineView(); setEventFilter(value); }}
+      selectedEventId={selectedEvent?.id}
+      onEventSelect={selectRailEvent}
+      onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
+      timeZone={timeZone}
+      extraControls={railActionButtons}
+    />
+  ) : timelineLayout === "catchup" ? (
+    <aside className="catchup-now" aria-label={storyCurrent ? "Now playing" : "Up next"}>
+      <h2>{storyCurrent ? "Now playing" : storyFocus ? "Up next" : "Catch up"}</h2>
+      {storyFocus ? <>
+        <strong>{railEventTitle(storyFocus)}</strong>
+        <p>{formatDateTime(storyFocus.incident_epoch, timeZone)}{railEventDurationSeconds(storyFocus) ? ` · ${formatDuration(railEventDurationSeconds(storyFocus))}` : ""} · {cameraNames[storyFocus.camera_id || activeCameraId] || ""}</p>
+        {storyFocus.snapshot_url || storyFocus.snapshot_path ? <div className="catchup-now-thumbs"><img src={eventThumbnailUrl(storyFocus, 480, 78, { objectFocus: true, aspectWidth: 16, aspectHeight: 10 })} alt="" loading="lazy" decoding="async" /></div> : null}
+      </> : <p>No events today for this filter.</p>}
+    </aside>
+  ) : null;
+
   return (
-    <main className={`recordings-v2-page${investigationOpen ? " has-investigation" : " investigation-hidden"}`}>
+    <main className={`recordings-v2-page timeline-layout-${timelineLayout}${investigationOpen ? " has-investigation" : " investigation-hidden"}`}>
       <nav className="recordings-tabs recordings-commandbar" aria-label="Timeline controls">
         <TimelineCameraPicker
           cameras={cameras}
@@ -2631,6 +2868,13 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           onChange={(nextCameraId) => { selectPlaybackCamera(nextCameraId); }}
           ariaLabel="Timeline camera"
         />
+        <div className="timeline-view-switch" role="group" aria-label="Timeline view">
+          {[["rail", "Timeline", Rows3], ["cameras", "Cameras", Columns3], ["catchup", "Catch up", FastForward]].map(([value, label, Icon]) => (
+            <button key={value} type="button" aria-pressed={timelineLayout === value} aria-label={label} title={label} onClick={() => changeTimelineLayout(value)}>
+              <Icon size={15} aria-hidden="true" /><span className="timeline-view-label">{label}</span>
+            </button>
+          ))}
+        </div>
         <span className="recordings-commandbar-live"><i />{date === today ? "Live archive" : "Archive"}</span>
         <div className="recordings-commandbar-day-controls">{timelineDayControls()}</div>
       </nav>
@@ -2826,7 +3070,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           </div> : null}
         </div>
 
-        <div className="recordings-v2-controls">
+        {timelineLayout === "classic" ? <div className="recordings-v2-controls">
           <div className="recordings-mobile-time-navigation">
             <button type="button" aria-label="Earlier time range" disabled={timelineView.startEpoch <= dayStart} onClick={() => panTimelineViewport(-(timelineView.endEpoch - timelineView.startEpoch) / 2)}><ChevronLeft size={18} /></button>
             <select aria-label="Visible time span" value={incidentRangeHours} onChange={(event) => { checkpointTimelineView(); setIncidentRangeHours(Number(event.target.value)); }}>
@@ -2898,58 +3142,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             exportRange={isAllCameras ? null : exportRange}
             onExportRangeChange={isAllCameras || exportJob ? null : (nextRange) => { cancelClipPreview(); setExportRange(nextRange); }}
           />
-          {exportRange ? (
-            <section className="recordings-v2-export-panel" aria-label="Export recording">
-              <div className="recordings-v2-export-kind" role="group" aria-label="Export type">
-                <button type="button" className={exportKind === "recording" ? "active" : ""} onClick={() => setExportKind("recording")} disabled={Boolean(exportJob)}>Video clip</button>
-                <button type="button" className={exportKind === "timelapse" ? "active" : ""} onClick={() => setExportKind("timelapse")} disabled={Boolean(exportJob)}>Timelapse</button>
-              </div>
-              <div className="recordings-v2-export-range-label">
-                <span><b>Start</b>{formatDateTime(exportRange.start, timeZone)}</span>
-                <span><b>End</b>{formatDateTime(exportRange.end, timeZone)}</span>
-                <span><b>Length</b>{formatDuration(exportRange.end - exportRange.start)}</span>
-              </div>
-              <div className="recordings-v2-clip-composer" aria-label="Clip selection controls">
-                <div className="recordings-v2-clip-composer-heading">
-                  <span><Camera size={14} />{cameras.find((camera) => camera.id === activeCameraId)?.name || activeCameraId}</span>
-                  <small>Choose within {formatTimeOnly(timelineView.startEpoch, timeZone)}–{formatTimeOnly(timelineView.endEpoch, timeZone)}. Minimum 1 sec.</small>
-                </div>
-                <div className="recordings-v2-clip-boundaries">
-                  <button type="button" onClick={() => jumpToClipBoundary(exportRange.start)} disabled={Boolean(exportJob)} title="Jump to selected start"><SkipBack size={14} />Start</button>
-                  <button type="button" onClick={() => setClipBoundary("start")} disabled={Boolean(exportJob) || !canSetClipBoundaryAtPlayhead({ range: exportRange, kind: "start", playhead, startEpoch: timelineView.startEpoch, endEpoch: timelineView.endEpoch })}>Set start here</button>
-                  <button type="button" onClick={() => setClipBoundary("end")} disabled={Boolean(exportJob) || !canSetClipBoundaryAtPlayhead({ range: exportRange, kind: "end", playhead, startEpoch: timelineView.startEpoch, endEpoch: timelineView.endEpoch })}>Set end here</button>
-                  <button type="button" onClick={() => jumpToClipBoundary(exportRange.end)} disabled={Boolean(exportJob)} title="Jump to selected end">End<SkipForward size={14} /></button>
-                  {clipPreviewing ? <button type="button" className="active" onClick={() => cancelClipPreview({ pause: true, notice: "Clip preview stopped" })}><Pause size={14} />Stop preview</button> : <button type="button" onClick={previewClip} disabled={Boolean(exportJob) || !clipRangeIsValid(exportRange, timelineView.startEpoch, timelineView.endEpoch)}><Play size={14} fill="currentColor" />Preview clip</button>}
-                </div>
-              </div>
-              <div className="recordings-v2-export-options">
-                <label className="export-name-field"><span>Name</span><input value={exportLabel} onChange={(event) => setExportLabel(event.target.value)} placeholder="Optional export name" maxLength="120" disabled={Boolean(exportJob)} /></label>
-                {exportKind === "timelapse" ? <>
-                  <label><span>Capture every</span><select value={exportOptions.interval} onChange={(event) => setExportOptions((current) => ({ ...current, interval: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="5">5 sec</option><option value="10">10 sec</option><option value="30">30 sec</option><option value="60">1 min</option><option value="300">5 min</option></select></label>
-                  <label><span>Playback</span><select value={exportOptions.fps} onChange={(event) => setExportOptions((current) => ({ ...current, fps: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="24">24 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label>
-                </> : null}
-                <label><span>Resolution</span><select value={exportKind === "timelapse" ? exportOptions.timelapseHeight : exportOptions.clipHeight} onChange={(event) => setExportOptions((current) => ({ ...current, [exportKind === "timelapse" ? "timelapseHeight" : "clipHeight"]: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="0">Original</option><option value="2160">2160p</option><option value="1440">1440p</option><option value="1080">1080p</option><option value="720">720p</option><option value="480">480p</option></select></label>
-              </div>
-              {exportKind === "recording" ? <p>Creates one broadly compatible H.264 MP4. Width follows the camera aspect ratio; gaps are skipped and source-format changes are joined automatically.</p> : <p>Resolution is the output height; width follows the camera aspect ratio.</p>}
-              {exportJob ? (
-                <div className={`recordings-v2-export-status ${exportJob.status}`}>
-                  <span><b>{exportJob.phase || exportJob.status}</b><small>{Math.round(Number(exportJob.progress) || 0)}%</small></span>
-                  <i><b style={{ width: `${Math.max(0, Math.min(100, Number(exportJob.progress) || 0))}%` }} /></i>
-                  {exportJob.error ? <em>{exportJob.error}</em> : null}
-                </div>
-              ) : null}
-              {exportError ? <div className="recordings-v2-export-error"><CircleAlert size={15} />{exportError}</div> : null}
-              <div className="recordings-v2-export-actions">
-                {exportJob?.status === "completed" && exportJob.download_url ? <a className="nav-button" href={mediaUrl(exportJob.download_url)}><Download size={15} />Download</a> : null}
-                {exportJob?.status === "completed" ? <a className="nav-button" href={appUrl(`/exports?camera=${encodeURIComponent(activeCameraId)}`)}><Film size={15} />Open export</a> : null}
-                {exportJob && ["queued", "running", "cancelling"].includes(exportJob.status) ? <button type="button" onClick={cancelExport} disabled={exportJob.status === "cancelling"}><X size={15} />{exportJob.status === "cancelling" ? "Cancelling" : "Cancel"}</button> : null}
-                {!exportJob ? <button type="button" className="primary" onClick={startExport} disabled={exportSubmitting}><Download size={15} />{exportSubmitting ? "Starting..." : `Start ${exportKind === "timelapse" ? "timelapse" : "export"}`}</button> : null}
-                {exportJob && ["completed", "failed", "cancelled"].includes(exportJob.status) ? <button type="button" onClick={() => { setExportJob(null); setExportError(""); setExportLabel(""); }}>New export</button> : null}
-              </div>
-            </section>
-          ) : null}
-        </div>
-
+          {exportPanel}
+        </div> : railControls}
+        {railAside}
       </section>
 
       <div id="timeline-investigation" className="recordings-v2-incidents" hidden={!investigationOpen}>
