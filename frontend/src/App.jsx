@@ -2,6 +2,7 @@ import React, { lazy, Suspense, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { CircleAlert } from "lucide-react";
 
+import "./typeScale.css";
 import "./styles.css";
 import "./shell/shell.css";
 import "./timeline/timeline.css";
@@ -29,6 +30,7 @@ import { RuntimeStateProvider } from "./shared/runtimeState.jsx";
 import { canonicalWorkspaceUrl, resolveWorkspace } from "./workspaceNavigation.mjs";
 import { registerSurvngServiceWorker } from "./registerServiceWorker.mjs";
 import { applyBrowserAppearance } from "./browserAppearance.mjs";
+import { applyTextSize, TEXT_SIZE_STORAGE_KEY } from "./textSize.mjs";
 
 function lazyExport(importer, exportName) {
   return lazy(() => importer().then((module) => ({ default: module[exportName] })));
@@ -52,6 +54,7 @@ function WorkspaceFallback() {
 function App() {
   const [timeZone, setTimeZone] = useStoredState("survng.timeZone", DEFAULT_TIME_ZONE);
   const [theme, setTheme] = useStoredState("survng.theme", "dark");
+  const [textSize, setTextSize] = useStoredState(TEXT_SIZE_STORAGE_KEY, "default");
   const [recordingContext, setRecordingContext] = useState(null);
   const [assistantAsk, setAssistantAsk] = useState(null);
   const [session, setSession] = useState(null);
@@ -106,6 +109,9 @@ function App() {
       media.removeListener?.(sync);
     };
   }, [theme]);
+  useEffect(() => {
+    applyTextSize(textSize);
+  }, [textSize]);
   if (!session) {
     return <main className="workspace-not-found" aria-busy="true"><p>Loading SurvNG…</p></main>;
   }
@@ -118,10 +124,10 @@ function App() {
   }
   const workspacePage = viewer && page === "admin" ? "live" : page;
   return (
-    <RuntimeStateProvider><Shell page={workspacePage} theme={theme} recordingContext={recordingContext} session={session} onSignOut={() => void signOut()}>
+    <RuntimeStateProvider><Shell page={workspacePage} theme={theme} textSize={textSize} recordingContext={recordingContext} session={session} onSignOut={() => void signOut()}>
       <Suspense fallback={<WorkspaceFallback />}>
         {workspacePage === "admin"
-          ? <ConfigPage timeZone={timeZone} setTimeZone={setTimeZone} theme={theme} setTheme={setTheme} onAssistantContextChange={setAssistantContext} />
+          ? <ConfigPage timeZone={timeZone} setTimeZone={setTimeZone} theme={theme} setTheme={setTheme} textSize={textSize} setTextSize={setTextSize} onAssistantContextChange={setAssistantContext} />
           : workspacePage === "exports"
             ? <ExportCenterPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
             : workspacePage === "timeline"

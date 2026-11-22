@@ -11,34 +11,34 @@
 .weather-heading, .weather-footer { position: absolute; left: 0; right: 0; z-index: 2; padding: 7px 10px; background: #101a27e8; }
 .weather-heading { top: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .weather-heading strong, .weather-actions, .weather-radar-controls { display: flex; align-items: center; gap: 6px; }
-.weather-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.weather-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-md); }
 .weather-content button, .weather-content select { color: #f4f7fa; background: #26384c; border: 1px solid #597087; border-radius: 5px; padding: 4px 6px; min-height: 28px; cursor: pointer; }
 .weather-content button:disabled { opacity: .45; cursor: default; }
 .weather-content button:focus-visible, .weather-content input:focus-visible { outline: 2px solid #7dd3fc; outline-offset: 2px; }
-.weather-conditions { position: absolute; top: 48px; left: 10px; display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border-radius: 8px; background: #101a27dc; font-size: 11px; pointer-events: none; }
-.weather-temperature { font-size: 26px; line-height: 1.1; font-weight: 650; }
+.weather-conditions { position: absolute; top: 48px; left: 10px; display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border-radius: 8px; background: #101a27dc; font-size: var(--text-xs); pointer-events: none; }
+.weather-temperature { font-size: 1.625rem; line-height: 1.1; font-weight: 650; }
 .weather-footer { bottom: 0; }
-.weather-radar-controls { font-size: 11px; }
+.weather-radar-controls { font-size: var(--text-xs); }
 .weather-radar-controls input { flex: 1; min-width: 30px; width: 60px; }
 .weather-radar-controls span { white-space: nowrap; }
-.weather-attribution { display: flex; flex-wrap: wrap; gap: 3px 9px; font-size: 9px; margin-top: 4px; }
+.weather-attribution { display: flex; flex-wrap: wrap; gap: 3px 9px; font-size: var(--text-2xs); margin-top: 4px; }
 .weather-attribution a { color: #b9e5fc; }
-.weather-map-message { position: absolute; top: 20px; left: -95px; width: 190px; padding: 4px; background: #101a27e8; text-align: center; font-size: 12px; }
-.weather-map-warning { position: absolute; right: 8px; top: 48px; max-width: 160px; padding: 4px; background: #101a27e8; font-size: 11px; }
+.weather-map-message { position: absolute; top: 20px; left: -95px; width: 190px; padding: 4px; background: #101a27e8; text-align: center; font-size: var(--text-sm); }
+.weather-map-warning { position: absolute; right: 8px; top: 48px; max-width: 160px; padding: 4px; background: #101a27e8; font-size: var(--text-xs); }
 .weather-dialog { width: min(1200px, 96vw); max-width: 96vw; height: min(850px, 94dvh); max-height: 94dvh; margin: auto; padding: 0; border: 1px solid #597087; border-radius: 12px; background: #101a27; color: #f4f7fa; }
 .weather-dialog::backdrop { background: #000b; }
 .weather-dialog .weather-content { height: calc(100% - 110px); min-height: 220px; }
 .weather-hourly { height: 110px; display: flex; align-items: center; gap: 18px; overflow-x: auto; padding: 12px; }
-.weather-hourly > div { display: flex; flex-direction: column; gap: 7px; flex-shrink: 0; font-size: 12px; }
+.weather-hourly > div { display: flex; flex-direction: column; gap: 7px; flex-shrink: 0; font-size: var(--text-sm); }
 .weather-expanded-placeholder { width: 100%; height: 100%; }
 .weather-settings { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--border, #52616f); border-radius: 8px; }
 .weather-settings input[type="checkbox"] { width: auto; }
 @container (max-width: 400px) {
   .weather-details { display: none; }
   .weather-conditions { top: 40px; padding: 5px 7px; }
-  .weather-temperature { font-size: 21px; }
+  .weather-temperature { font-size: 1.3125rem; }
   .weather-heading { padding: 5px; }
-  .weather-heading strong { font-size: 11px; }
+  .weather-heading strong { font-size: var(--text-xs); }
   .weather-radar-controls { flex-wrap: wrap; }
   .weather-radar-controls span { white-space: normal; }
   .weather-attribution { gap: 2px 5px; }

@@ -53,6 +53,8 @@ export function MobileMoreSheet({ links, page, session = null, onClose }) {
     </div>
   ), document.body);
 }
+const TOPBAR_FIT_LEVELS = 4;
+
 export function accountInitialsFor(name = "") {
   const words = String(name || "").trim().split(/[\s._-]+/).filter(Boolean);
   if (!words.length) return "";
@@ -110,7 +112,7 @@ function TopbarMenu({ className, label, buttonLabel = undefined, menuLabel, chil
   );
 }
 
-export function Shell({ page, theme, recordingContext, session = null, onSignOut = null, children }) {
+export function Shell({ page, theme, textSize = "default", recordingContext, session = null, onSignOut = null, children }) {
   const shellRef = useRef(null);
   const topbarRef = useRef(null);
   const workspaceHeadingRef = useRef(null);
@@ -160,6 +162,34 @@ export function Shell({ page, theme, recordingContext, session = null, onSignOut
     window.location.assign(appUrl(query ? `/search?q=${encodeURIComponent(query)}` : "/search"));
   }
 
+  // The top bar's breakpoints assume the default text size. When its contents
+  // still do not fit (larger text, long names), step through more compact
+  // levels until they do: 1 hides the brand name, 2 moves workspaces under
+  // More, 3 shrinks search to its icon and status pills to icons, 4 lets the
+  // remaining workspace links scroll sideways inside the bar.
+  useLayoutEffect(() => {
+    const topbar = topbarRef.current;
+    if (!topbar) return undefined;
+    const fit = () => {
+      let level = 0;
+      for (; level <= TOPBAR_FIT_LEVELS; level += 1) {
+        topbar.dataset.fit = String(level);
+        if (topbar.scrollWidth <= topbar.clientWidth + 1) break;
+      }
+      topbar.dataset.fit = String(Math.min(level, TOPBAR_FIT_LEVELS));
+    };
+    fit();
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;
+    observer?.observe(topbar);
+    const status = topbar.querySelector(".workspace-system-bar");
+    if (status) observer?.observe(status);
+    window.addEventListener("resize", fit);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", fit);
+    };
+  }, [textSize, page, session?.user?.role]);
+
   useLayoutEffect(() => {
     const shell = shellRef.current;
     const topbar = topbarRef.current;
@@ -195,15 +225,15 @@ export function Shell({ page, theme, recordingContext, session = null, onSignOut
         </a>
         <nav className="topbar-navigation" aria-label="Primary">
           {workspaceLinks.map(([id, label, href]) => <a className={`${page === id ? "active" : ""}${compactInlineIds.has(id) ? "" : " topbar-overflow-link"}`.trim() || undefined} aria-current={page === id ? "page" : undefined} href={href} key={id}>{label}</a>)}
-          {compactNavigation.overflow.length ? (
-            <TopbarMenu className="topbar-more" label="More" menuLabel="More workspaces">
-              {compactNavigation.overflow.map((id) => {
-                const [, label, href] = workspaceLink(id);
-                return <a role="menuitem" href={href} key={id}>{label}</a>;
-              })}
-            </TopbarMenu>
-          ) : null}
         </nav>
+        {compactNavigation.overflow.length ? (
+          <TopbarMenu className="topbar-more" label="More" menuLabel="More workspaces">
+            {compactNavigation.overflow.map((id) => {
+              const [, label, href] = workspaceLink(id);
+              return <a role="menuitem" href={href} key={id}>{label}</a>;
+            })}
+          </TopbarMenu>
+        ) : null}
         <form className="workspace-search-entry" onSubmit={submitHeaderSearch} role="search">
           <Search size={16} aria-hidden="true" />
           <input ref={headerSearchRef} value={headerSearchQuery} onChange={(event) => setHeaderSearchQuery(event.target.value)} placeholder="Search incidents..." aria-label="Search incidents semantically" />

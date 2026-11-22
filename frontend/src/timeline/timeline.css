@@ -61,7 +61,7 @@
 
 .export-center-toolbar .timeline-camera-picker-toggle {
   min-height: 30px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 560;
 }
 
@@ -82,7 +82,7 @@
   border-radius: 4px;
   background: var(--control);
   color: var(--ink);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 620;
   padding: 0 10px;
 }
@@ -157,7 +157,7 @@
   border-radius: 0;
   background: transparent;
   color: var(--ink);
-  font-size: 13px;
+  font-size: var(--text-md);
   padding: 0 12px;
   text-align: left;
 }
@@ -170,7 +170,7 @@
 .timeline-camera-picker-list p {
   margin: 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   padding: 14px;
 }
 
@@ -189,7 +189,7 @@
   border-radius: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 600;
   padding: 0 8px;
 }
@@ -213,7 +213,7 @@
   border-radius: 4px;
   background: color-mix(in srgb, var(--accent) 18%, var(--panel-solid));
   color: var(--ink);
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 620;
   padding: 0 10px;
   white-space: nowrap;
@@ -228,7 +228,7 @@
   border-radius: 4px;
   background: transparent;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 620;
   padding: 0 10px;
   white-space: nowrap;
@@ -244,7 +244,7 @@
   align-items: center;
   gap: 5px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-xs);
   white-space: nowrap;
 }
 
@@ -283,7 +283,7 @@
   border-left: 1px solid var(--line);
   border-radius: 0;
   background: transparent;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 540;
   line-height: 1;
   padding: 0 7px;
@@ -335,7 +335,7 @@
 
 .recordings-v2-date-calendar header strong {
   color: var(--ink);
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 620;
   text-align: center;
 }
@@ -362,7 +362,7 @@
 
 .recordings-v2-date-weekdays span {
   color: var(--muted);
-  font-size: 9px;
+  font-size: var(--text-2xs);
   font-weight: 620;
   line-height: 18px;
   text-align: center;
@@ -377,7 +377,7 @@
   border-radius: 4px;
   background: transparent;
   color: var(--ink);
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 540;
   padding: 0;
 }
@@ -420,7 +420,7 @@
   border-radius: 0;
   background: transparent;
   color: var(--ink);
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 540;
   line-height: 1;
   padding: 0 8px;
@@ -450,7 +450,7 @@
   min-height: 32px;
   height: 32px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 540;
   padding: 0 6px;
 }
@@ -589,7 +589,7 @@
 .recording-frame-search-surface>span {
   position: absolute;
   color: rgba(255, 255, 255, .8);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .recording-frame-search-selection {
@@ -638,7 +638,7 @@
 .recording-frame-search-panel small,
 .recording-frame-search-panel footer span {
   color: rgba(255, 255, 255, .68);
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .recording-frame-search-panel canvas {
@@ -654,13 +654,13 @@
 .recording-frame-search-panel p {
   margin: 0;
   color: #ffb9b9;
-  font-size: 11px;
+  font-size: var(--text-xs);
 }
 
 .recording-frame-search-status {
   align-self: center;
   color: rgba(255, 255, 255, .7);
-  font-size: 9px;
+  font-size: var(--text-2xs);
   pointer-events: auto;
 }
 
@@ -714,7 +714,7 @@
   border-color: transparent;
   background: transparent;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .recordings-timeline-display-controls button::before {
@@ -739,7 +739,7 @@
 
 .recordings-v2-timeline-toolbar>span {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-xs);
   white-space: nowrap;
 }
 
@@ -757,7 +757,7 @@
   align-items: center;
   gap: 5px;
   margin-right: 8px;
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 580;
 }
 
@@ -774,7 +774,7 @@
   border-left: 1px solid var(--line);
   border-radius: 0;
   background: transparent;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 540;
 }
 
@@ -878,13 +878,13 @@
 
 .recordings-timeline-evidence time {
   color: var(--muted);
-  font-size: 8px;
+  font-size: var(--text-2xs);
   line-height: 18px;
 }
 
 .recordings-v2-ticks small {
   color: color-mix(in srgb, var(--muted) 86%, var(--ink));
-  font-size: 8px;
+  font-size: var(--text-2xs);
   font-weight: 520;
 }
 
@@ -956,7 +956,7 @@
   gap: 8px;
   padding: 0 10px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 650;
   letter-spacing: .04em;
   text-transform: uppercase;
@@ -978,7 +978,7 @@
   border-radius: 999px;
   background: color-mix(in srgb, var(--panel-solid) 88%, var(--canvas));
   color: var(--ink);
-  font-size: 9px;
+  font-size: var(--text-2xs);
   font-weight: 700;
   letter-spacing: 0;
   line-height: 1;
@@ -1028,7 +1028,7 @@
   justify-content: flex-start;
   background: linear-gradient(transparent, rgba(2, 8, 9, .92));
   color: #fff;
-  font-size: 9px;
+  font-size: var(--text-2xs);
   font-weight: 700;
   line-height: 1.25;
   padding: 16px 6px 5px;
@@ -1057,7 +1057,7 @@
   border: 0;
   background: transparent;
   color: var(--accent);
-  font-size: 10px;
+  font-size: var(--text-xs);
   padding: 2px 5px;
 }
 
@@ -1080,7 +1080,7 @@
   justify-content: space-between;
   padding: 0 12px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: .03em;
   text-transform: uppercase;
 }
@@ -1147,7 +1147,7 @@
 .recordings-v2-event-caption time,
 .recordings-v2-event-caption b {
   color: #fff;
-  font-size: 9px;
+  font-size: var(--text-2xs);
   font-weight: 700;
   line-height: 1.25;
 }
@@ -1187,7 +1187,7 @@
   border-radius: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .recordings-event-inspector-tabs button.active {
@@ -1211,7 +1211,7 @@
   display: grid;
   grid-template-columns: 74px minmax(0, 1fr);
   gap: 6px;
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .recordings-event-inspector dt {
@@ -1237,12 +1237,12 @@
   gap: 7px;
   padding: 14px 4px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .recordings-inspector-message strong {
   color: var(--ink);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .recordings-v2-clip-composer {
@@ -1269,14 +1269,14 @@
   align-items: center;
   gap: 5px;
   color: var(--ink);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
   white-space: nowrap;
 }
 
 .recordings-v2-clip-composer-heading small {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-align: right;
 }
 
@@ -1296,7 +1296,7 @@
   border-radius: 4px;
   background: var(--panel-solid);
   color: var(--ink);
-  font-size: 11px;
+  font-size: var(--text-xs);
   padding: 0 8px;
 }
 
@@ -1684,7 +1684,7 @@
   background: rgba(0, 0, 0, 0.72);
   color: #e8f0f2;
   padding: 6px 8px;
-  font: 500 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font: 500 var(--text-xs)/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
   pointer-events: auto;
 }
 
@@ -1748,7 +1748,7 @@
   background: rgba(0, 0, 0, 0.62);
   color: rgba(255, 255, 255, 0.86);
   padding: 3px 9px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 700;
   white-space: nowrap;
   pointer-events: none;
@@ -1782,7 +1782,7 @@
   border-radius: 4px;
   background: rgba(0, 0, 0, 0.58);
   padding: 2px 6px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1793,7 +1793,7 @@
   background: rgba(255, 196, 0, 0.85);
   color: #111;
   padding: 0 4px;
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-style: normal;
 }
 
@@ -1813,7 +1813,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--muted, #9aa4ad);
-  font-size: 12px;
+  font-size: var(--text-sm);
   text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1844,7 +1844,7 @@
 
 .timeline-camera-checklist .timeline-camera-picker-toggle small {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
 }
 
 .timeline-camera-checklist { flex: 0 0 auto; }
