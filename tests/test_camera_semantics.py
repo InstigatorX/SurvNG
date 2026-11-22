@@ -118,6 +118,8 @@ def test_notice_admission_accepts_only_affirmative_semantic_claims() -> None:
         ("RuleEngine/PersonDetect", '<tt:SimpleItem Name="State" Value="false"/>', "state_not_affirmative"),
         ("RuleEngine/PersonDetect", '<tt:SimpleItem Name="State" Value="pending"/>', "state_not_affirmative"),
         ("RuleEngine/PersonDetect", "<tt:Message><broken", "unparsed_payload"),
+        # Truncated mid-document: whole SimpleItem tags must not be harvested.
+        ("RuleEngine/PersonDetect", '<tt:Message><tt:Data><tt:SimpleItem Name="State" Value="true"/>', "unparsed_payload"),
         ("RuleEngine/PersonDetect", "<tt:Message><tt:Data/></tt:Message>", "unparsed_payload"),
         ("RuleEngine/PersonCount", active, "no_semantic_claim"),
     ]:

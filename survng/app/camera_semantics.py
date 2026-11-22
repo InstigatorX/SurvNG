@@ -20,8 +20,8 @@ _STATE_FIELDS = {"state", "ismotion", "motion", "isinside"}
 _INACTIVE = {"false", "0", "off", "inactive"}
 _ACTIVE = {"true", "1", "on", "active"}
 _BROAD_CLASSES = {"people", "human"}
-_SIMPLE_ITEM_TAG = re.compile(r"<(?:[A-Za-z_][\w.-]*:)?SimpleItem\b([^<>]*?)/?>")
-_XML_ATTRIBUTE = re.compile(r"\b(Name|Value)\s*=\s*\"([^\"]*)\"", re.IGNORECASE)
+_ELEMENT_PREFIX = re.compile(r"(</?)[A-Za-z_][\w.-]*:")
+_PREFIXED_ATTRIBUTE = re.compile(r"\s[A-Za-z_][\w.-]*:[\w.-]+\s*=\s*(?:\"[^\"]*\"|'[^']*')")
 
 CAMERA_NOTICE_ADMISSION_VERSION = 1
 # Categories whose affirmative camera claim may stand in for SurvNG's own
@@ -48,16 +48,13 @@ def _explicit_items(message: str) -> list[tuple[str, str]]:
             root = ElementTree.fromstring(text)
         except ElementTree.ParseError:
             # Fragments with an undeclared prefix (``<tt:SimpleItem .../>``)
-            # are what the ONVIF parser accepts; read only whole SimpleItem tags.
-            pairs: list[tuple[str, str]] = []
-            for attributes in _SIMPLE_ITEM_TAG.findall(text[:20000])[:32]:
-                values = {
-                    name.lower(): value
-                    for name, value in _XML_ATTRIBUTE.findall(attributes)
-                }
-                if "name" in values and "value" in values:
-                    pairs.append((values["name"], values["value"]))
-            return pairs
+            # are what the ONVIF parser accepts. Drop the prefixes and parse
+            # again strictly, so truncated or broken XML still yields nothing.
+            unprefixed = _ELEMENT_PREFIX.sub(r"\1", _PREFIXED_ATTRIBUTE.sub("", text))
+            try:
+                root = ElementTree.fromstring(unprefixed)
+            except ElementTree.ParseError:
+                return []
         return [
             (str(element.attrib.get("Name") or ""), str(element.attrib.get("Value") or ""))
             for element in root.iter()
