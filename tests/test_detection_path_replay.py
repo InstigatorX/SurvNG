@@ -94,7 +94,7 @@ def _replay_scenario() -> dict[str, Any]:
     handler = MotionDecisionHandler(
         camera_id="gate",
         events=events,
-        detection_provider=lambda _at: (frame, objects, "recording.mp4"),
+        detection_provider=lambda _at, _qualification=None: (frame, objects, "recording.mp4"),
         snapshot_writer=lambda _frame, _at: "snapshot.webp",
         object_serializer=lambda value: json.dumps(value, separators=(",", ":")),
         event_callback=lambda kind, payload: published.append((kind, payload)),

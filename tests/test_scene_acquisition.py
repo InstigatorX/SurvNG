@@ -69,7 +69,7 @@ def handler(events, objects, frame=None):
         frame_captured_at_epoch=1000, frame_source="recorded_main", frame_timestamp_exact=True,
     )
     return MotionDecisionHandler(
-        camera_id="gate", events=events, detection_provider=lambda _: result,
+        camera_id="gate", events=events, detection_provider=lambda _, _qualification=None: result,
         snapshot_writer=lambda *_: "cover.webp", object_serializer=json.dumps,
     )
 
@@ -81,7 +81,7 @@ def test_paused_recorded_pass_decides_and_persists_nothing():
         timings_ms={}, resume_stage=2, resume_at=1234.5,
     )
     processor = MotionDecisionHandler(
-        camera_id="gate", events=events, detection_provider=lambda _: paused,
+        camera_id="gate", events=events, detection_provider=lambda _, _qualification=None: paused,
         snapshot_writer=lambda *_: "cover.webp", object_serializer=json.dumps,
     )
     outcome = processor.refine("motion", "", datetime.fromtimestamp(1000, timezone.utc),
@@ -249,7 +249,7 @@ def test_empty_live_discovery_is_successful_analysis(tmp_path):
     events = EventStore(tmp_path)
     published = []
     processor = MotionDecisionHandler(
-        camera_id='gate', events=events, detection_provider=lambda _: result,
+        camera_id='gate', events=events, detection_provider=lambda _, _qualification=None: result,
         snapshot_writer=lambda *_: 'cover.webp', object_serializer=json.dumps,
         event_callback=lambda kind, payload: published.append((kind, payload)),
     )
@@ -312,7 +312,7 @@ def test_live_discovery_inference_failure_is_retained_as_incomplete(tmp_path):
     events = EventStore(tmp_path)
     published = []
     processor = MotionDecisionHandler(
-        camera_id='gate', events=events, detection_provider=lambda _: result,
+        camera_id='gate', events=events, detection_provider=lambda _, _qualification=None: result,
         snapshot_writer=lambda *_: 'cover.webp', object_serializer=json.dumps,
         event_callback=lambda kind, payload: published.append((kind, payload)),
     )

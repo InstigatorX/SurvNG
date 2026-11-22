@@ -64,7 +64,7 @@ def _replay() -> dict[str, Any]:
         handler = MotionDecisionHandler(
             camera_id="front-door",
             events=_Events(),
-            detection_provider=lambda _at: result,
+            detection_provider=lambda _at, _qualification=None: result,
             snapshot_writer=write_snapshot,
             object_serializer=lambda value: json.dumps(value, separators=(",", ":")),
             face_candidate_sink=store.ingest_candidates,

@@ -2323,7 +2323,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 events.add_event.return_value = {"id": 1}
                 publish = Mock()
                 handler = MotionDecisionHandler(
-                    "gate", events, lambda _at: result,
+                    "gate", events, lambda _at, _qualification=None: result,
                     lambda _frame, _at: "snapshot.jpg", json.dumps,
                     event_callback=publish,
                 )

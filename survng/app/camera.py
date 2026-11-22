@@ -449,7 +449,9 @@ class CameraWorker:
                 event_at, qualification=qualification
             ),
             initial_detection_provider=(
-                lambda event_at: self._recorded_motion_frame(event_at, initial=True)
+                lambda event_at, _qualification: self._recorded_motion_frame(
+                    event_at, initial=True,
+                )
             ),
             initial_evidence_detection_provider=(
                 lambda event_at, evidence: self._recorded_motion_frame(

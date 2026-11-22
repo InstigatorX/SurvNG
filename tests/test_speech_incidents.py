@@ -794,7 +794,7 @@ def test_unavailable_initial_frame_waits_until_ignored_zone_video(tmp_path) -> N
     )
     results = [unavailable, recorded]
 
-    def provider(_at):
+    def provider(_at, _qualification=None):
         return results.pop(0)
 
     qualification = {"trigger_source": "speech", "establishment_zone_policy": restricting()}
@@ -841,7 +841,7 @@ def test_failed_refinement_opens_unverified_speech_without_replacing_the_snapsho
     )
     results = [provisional, failed]
 
-    def provider(_at):
+    def provider(_at, _qualification=None):
         return results.pop(0)
 
     qualification = {"trigger_source": "speech", "establishment_zone_policy": restricting()}
@@ -885,7 +885,7 @@ def _speech_runtime(store, provider, *, vehicle=False, evidence_ready_at=None):
         frame_source="live_fast_path",
     )
     handler = MotionDecisionHandler(
-        camera_id="gate", events=store, initial_detection_provider=lambda _at: initial,
+        camera_id="gate", events=store, initial_detection_provider=lambda _at, _qualification=None: initial,
         detection_provider=provider, snapshot_writer=lambda *_: "provisional.webp",
         object_serializer=json.dumps, establishment_zone_policy=restricting,
     )
@@ -904,7 +904,7 @@ def test_failed_cover_does_not_finish_a_queued_speech_refinement(tmp_path) -> No
 
     store = EventStore(tmp_path)
     service, at = _speech_runtime(
-        store, lambda _: RecordedDetectionResult(
+        store, lambda *_: RecordedDetectionResult(
             frame=None, objects=[{"status": "no_recorded_frame"}],
             recording_path="", timings_ms={}, refinement_pending=False,
         ), vehicle=True, evidence_ready_at=lambda *_: time.time() + 120,
@@ -927,7 +927,7 @@ def test_failed_cover_does_not_finish_a_queued_speech_refinement(tmp_path) -> No
 
 def test_retrying_speech_stays_pending_and_terminal_failure_finishes_it(tmp_path) -> None:
     store = EventStore(tmp_path)
-    service, at = _speech_runtime(store, lambda _: None)
+    service, at = _speech_runtime(store, lambda *_: None)
     initial = service.process("survng/speech", "", at, {"trigger_source": "speech"})
     job = store.claim_detection_job("gate", lease_owner="review")
     assert store.retry_detection_job(job["id"], "inference failed", maximum_attempts=2,
@@ -951,7 +951,7 @@ def test_terminal_worker_error_finishes_speech(tmp_path, monkeypatch, error_type
 
     store = EventStore(tmp_path)
 
-    def broken(_at):
+    def broken(_at, _qualification=None):
         raise error_type("inference failed")
 
     service, at = _speech_runtime(store, broken)
@@ -988,7 +988,7 @@ def test_expired_speech_is_recovered_after_restart_and_kept_until_settled(tmp_pa
     import threading
 
     store = EventStore(tmp_path)
-    service, at = _speech_runtime(store, lambda _: None)
+    service, at = _speech_runtime(store, lambda *_: None)
     initial = service.process("survng/speech", "", at, {"trigger_source": "speech"})
     assert store.expire_stale_detection_jobs("gate", maximum_age_seconds=0,
                                              event_maximum_age_seconds=0) == 1
@@ -997,7 +997,7 @@ def test_expired_speech_is_recovered_after_restart_and_kept_until_settled(tmp_pa
     assert store.prune_detection_jobs(force=True) == 0
 
     recovered = EventStore(tmp_path)
-    runtime, _ = _speech_runtime(recovered, lambda _: pytest.fail("expired job ran inference"))
+    runtime, _ = _speech_runtime(recovered, lambda *_: pytest.fail("expired job ran inference"))
     settled = threading.Event()
     finish = recovered.finish_failed_speech_looks
 
@@ -1024,7 +1024,7 @@ def test_expired_speech_is_recovered_after_restart_and_kept_until_settled(tmp_pa
 
 def test_speech_finalization_replays_a_commit_without_duplicating_the_incident(tmp_path, monkeypatch) -> None:
     store = EventStore(tmp_path)
-    service, at = _speech_runtime(store, lambda _: None)
+    service, at = _speech_runtime(store, lambda *_: None)
     initial = service.process("survng/speech", "", at, {"trigger_source": "speech"})
     store.expire_stale_detection_jobs("gate", maximum_age_seconds=0, event_maximum_age_seconds=0)
 
@@ -1044,7 +1044,7 @@ def test_speech_finalization_replays_a_commit_without_duplicating_the_incident(t
 
 def test_failed_speech_waits_for_a_separate_confirmation_then_replays(tmp_path) -> None:
     store = EventStore(tmp_path)
-    service, at = _speech_runtime(store, lambda _: None)
+    service, at = _speech_runtime(store, lambda *_: None)
     now = time.time()
     seed = store.acquire_scene_sample(
         sample_id="speech-confirmation-seed", camera_id="gate", captured_epoch=at.timestamp(),
@@ -1072,7 +1072,7 @@ def test_failed_speech_waits_for_a_separate_confirmation_then_replays(tmp_path) 
 
 def test_speech_recovery_does_not_touch_camera_notices_or_live_jobs(tmp_path) -> None:
     store = EventStore(tmp_path)
-    service, at = _speech_runtime(store, lambda _: None)
+    service, at = _speech_runtime(store, lambda *_: None)
     speech = service.process("survng/speech", "", at, {"trigger_source": "speech"})
     store.expire_stale_detection_jobs("gate", maximum_age_seconds=0, event_maximum_age_seconds=0)
     store.enqueue_detection_job(

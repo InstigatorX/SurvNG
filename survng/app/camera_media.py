@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import inspect
 import random
 import time
 from datetime import datetime, timezone
@@ -165,16 +164,7 @@ class CameraMediaService:
         event_at: datetime,
         qualification: dict[str, Any] | None = None,
     ) -> tuple[Any | None, list[dict[str, Any]], str]:
-        detector = self.motion_detector.detect
-        try:
-            accepts_qualification = len(inspect.signature(detector).parameters) >= 2
-        except (TypeError, ValueError):
-            accepts_qualification = True
-        return (
-            detector(event_at, qualification)
-            if accepts_qualification
-            else detector(event_at)
-        )
+        return self.motion_detector.detect(event_at, qualification)
 
     def detect_initial_recorded_motion(
         self,
