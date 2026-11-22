@@ -444,7 +444,6 @@ class RecordedMotionObjectDetector:
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
         decode_budget: RecordedDecodeBudget | None = None,
-        motion_evidence: Any | None = None,
         activity_attributor: ObjectActivityAttributor | None = None,
     ) -> None:
         self.camera = camera
@@ -458,9 +457,6 @@ class RecordedMotionObjectDetector:
         self.decode_budget = decode_budget
         self._scene_frames: deque[TimestampedLiveFrame] = deque(maxlen=4)
         self._scene_frames_lock = threading.Lock()
-        # Compatibility-only: refinement depth no longer publishes rolling
-        # motion evidence, so callers may keep passing this legacy argument.
-        _ = motion_evidence
 
     def stop_requested(self) -> bool:
         return self._camera_stop_requested() or evidence_cancelled()
@@ -2627,7 +2623,6 @@ class RecordedMotionObjectDetectorFactory:
         timestamped_live_frame_provider: TimestampedLiveFrameProvider | None = None,
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
-        motion_evidence: Any | None = None,
         activity_attributor: ObjectActivityAttributor | None = None,
     ) -> RecordedMotionObjectDetector:
         return RecordedMotionObjectDetector(
@@ -2639,6 +2634,5 @@ class RecordedMotionObjectDetectorFactory:
             timestamped_evidence_frame_provider=timestamped_evidence_frame_provider,
             stop_requested=stop_requested,
             decode_budget=self.decode_budget,
-            motion_evidence=motion_evidence,
             activity_attributor=activity_attributor,
         )

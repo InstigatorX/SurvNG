@@ -78,38 +78,6 @@ def adaptive_motion_stage_configs() -> list[MotionStageConfig]:
     ]
 
 
-def default_motion_stage_configs() -> list[MotionStageConfig]:
-    return [
-        MotionStageConfig(stage_id="preprocess", implementation="gray_blur"),
-        MotionStageConfig(stage_id="difference", implementation="frame_difference"),
-        MotionStageConfig(
-            stage_id="threshold",
-            implementation="fixed_threshold",
-            options={"value": 18},
-        ),
-        MotionStageConfig(
-            stage_id="morphology",
-            implementation="open_close",
-            options={"kernel_size": 3, "close_iterations": 2},
-        ),
-        MotionStageConfig(stage_id="blob_extract", implementation="contour_blobs"),
-        MotionStageConfig(
-            stage_id="blob_filter",
-            implementation="minimum_area",
-            options={"minimum_area_ratio": 0.0003},
-        ),
-        MotionStageConfig(
-            stage_id="tracking",
-            implementation="dominant_centroid",
-            options={
-                "minimum_active_area_ratio": 0.0008,
-                "minimum_changed_ratio": 0.003,
-            },
-        ),
-        MotionStageConfig(stage_id="scoring", implementation="default_motion_score"),
-    ]
-
-
 def default_motion_observation_stage_configs() -> list[MotionStageConfig]:
     return [MotionStageConfig(
         stage_id="onvif_source",

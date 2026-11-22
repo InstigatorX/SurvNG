@@ -6,12 +6,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-import cv2
 import numpy as np
 
 from survng.app.motion import (
     preprocess_motion_frames,
-    qualify_motion,
 )
 from survng.app.motion_pipeline import (
     MotionContext,
@@ -22,8 +20,8 @@ from survng.app.motion_pipeline import (
     MotionStageOption,
     MotionStageRegistration,
     MotionStageRegistry,
+    adaptive_motion_stage_configs,
     build_builtin_motion_registry,
-    default_motion_stage_configs,
     motion_pipeline_catalog,
 )
 
@@ -958,12 +956,13 @@ class MotionPipelineTest(unittest.TestCase):
         }
 
         self.assertEqual(catalog["schema_version"], 1)
-        self.assertEqual(stages["dominant_centroid"]["name"], "Centroid motion tracking")
-        self.assertEqual(stages["dominant_centroid"]["graph"], "qualification")
-        self.assertIn(
-            "minimum_active_area_ratio",
-            {option["key"] for option in stages["dominant_centroid"]["options"]},
-        )
+        tracker = stages["persistent_centroid_tracker"]
+        self.assertEqual(tracker["name"], "Persistent multi-region tracking")
+        self.assertEqual(tracker["graph"], "qualification")
+        self.assertIn("maximum_distance", {option["key"] for option in tracker["options"]})
+        # The retired fixed-threshold stages are no longer offered.
+        self.assertNotIn("dominant_centroid", stages)
+        self.assertNotIn("frame_difference", stages)
         self.assertTrue(all(preset["available"] for preset in catalog["presets"]))
         self.assertEqual([preset["id"] for preset in catalog["presets"]], ["adaptive"])
         self.assertTrue(stages["adaptive_ema_background"]["continuous_analysis"])
@@ -1068,8 +1067,8 @@ class MotionPipelineTest(unittest.TestCase):
 
     def test_pipeline_rejects_context_from_another_camera_or_runtime(self) -> None:
         factory = MotionPipelineFactory(build_builtin_motion_registry())
-        gate = factory.create("gate", default_motion_stage_configs())
-        foyer = factory.create("foyer", default_motion_stage_configs())
+        gate = factory.create("gate", adaptive_motion_stage_configs())
+        foyer = factory.create("foyer", adaptive_motion_stage_configs())
         context = MotionContext(
             camera_id="gate",
             captured_at=10.0,
@@ -1158,66 +1157,12 @@ class MotionPipelineTest(unittest.TestCase):
                 [MotionStageConfig("consumer", "needs_mask")],
             )
 
-    def test_modular_image_stages_match_legacy_qualifier_and_expose_artifacts(self) -> None:
-        frames = []
-        for index in range(9):
-            frame = np.zeros((180, 320), dtype=np.uint8)
-            cv2.rectangle(frame, (70 + index * 8, 60), (105 + index * 8, 125), 255, -1)
-            frames.append(frame)
-        expected = qualify_motion(frames, "balanced")
-        pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
-            "gate",
-            default_motion_stage_configs(),
-        )
-        context = MotionContext(
-            camera_id="gate",
-            captured_at=10.0,
-            original_frame=frames[-1],
-            frame_history=tuple(frames),
-            configuration={"sensitivity": "balanced"},
-            runtime=pipeline.runtime,
-        )
-
-        result = pipeline.process(context)
-
-        self.assertEqual(result.scoring.accepted, expected.accepted)
-        self.assertEqual(result.scoring.score, expected.score)
-        self.assertEqual(result.scoring.threshold, expected.threshold)
-        self.assertEqual(result.scoring.reason, expected.reason)
-        self.assertEqual(result.scoring.features, expected.features)
-        self.assertEqual(len(result.processed_frame_history), len(frames))
-        self.assertEqual(len(result.difference_history), len(frames) - 1)
-        self.assertEqual(len(result.threshold_mask_history), len(frames) - 1)
-        self.assertEqual(len(result.motion_mask_history), len(frames) - 1)
-        self.assertEqual(len(result.raw_blob_history), len(frames) - 1)
-        self.assertEqual(len(result.filtered_blob_history), len(frames) - 1)
-        self.assertTrue(result.blobs)
-        self.assertIsNotNone(result.dominant_track)
-        self.assertTrue(result.tracked_objects)
-        self.assertEqual(result.dominant_track.score, expected.score)
-        self.assertIs(result.processed_frame, result.processed_frame_history[-1])
-        self.assertIs(result.difference_image, result.difference_history[-1])
-        self.assertIs(result.binary_motion_mask, result.motion_mask_history[-1])
-        self.assertEqual(
-            list(result.timings),
-            [
-                "preprocess",
-                "difference",
-                "threshold",
-                "morphology",
-                "blob_extract",
-                "blob_filter",
-                "tracking",
-                "scoring",
-            ],
-        )
-
     def test_modular_pipeline_reuses_preprocessed_frame_derivatives(self) -> None:
         frames = [np.zeros((90, 160), dtype=np.uint8) for _index in range(3)]
         prepared = preprocess_motion_frames(frames)
         pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
             "gate",
-            default_motion_stage_configs(),
+            adaptive_motion_stage_configs(),
         )
         context = MotionContext(
             camera_id="gate",
@@ -1236,30 +1181,6 @@ class MotionPipelineTest(unittest.TestCase):
         for actual, expected in zip(result.processed_frame_history, prepared):
             self.assertIs(actual, expected)
         self.assertIs(result.processed_frame, prepared[-1])
-        self.assertIsNone(result.decision)
-
-    def test_modular_pipeline_waits_for_a_scoreable_window(self) -> None:
-        frames = [np.zeros((90, 160), dtype=np.uint8) for _index in range(3)]
-        pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
-            "gate",
-            default_motion_stage_configs(),
-        )
-        try:
-            result = pipeline.process(MotionContext(
-                camera_id="gate",
-                captured_at=10.0,
-                original_frame=frames[-1],
-                frame_history=tuple(frames),
-                configuration={"sensitivity": "balanced"},
-                runtime=pipeline.runtime,
-            ))
-        finally:
-            pipeline.close()
-
-        self.assertFalse(result.scoring.accepted)
-        self.assertEqual(result.scoring.score, 0.0)
-        self.assertEqual(result.scoring.reason, "insufficient_frames")
-
 
 if __name__ == "__main__":
     unittest.main()

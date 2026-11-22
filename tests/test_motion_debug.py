@@ -10,7 +10,6 @@ from survng.app.motion_pipeline import (
     MotionDebugSnapshotStore,
     MotionPipelineFactory,
     build_builtin_motion_registry,
-    default_motion_stage_configs,
     adaptive_motion_stage_configs,
 )
 
@@ -19,7 +18,7 @@ class MotionDebugSnapshotTest(unittest.TestCase):
     def test_capture_encodes_bounded_layers_and_metadata(self) -> None:
         pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
             "gate",
-            default_motion_stage_configs(),
+            adaptive_motion_stage_configs(),
         )
         frames = []
         for offset in range(6):
@@ -95,13 +94,12 @@ class MotionDebugSnapshotTest(unittest.TestCase):
         layers = {layer["id"] for layer in status["layers"]}
         self.assertIn("background", layers)
         self.assertIn("ema_exclusion", layers)
-        self.assertEqual(status["event_state"], "idle")
         pipeline.close()
 
     def test_write_protected_gray_and_float_masks_encode(self) -> None:
         pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
             "gate",
-            default_motion_stage_configs(),
+            adaptive_motion_stage_configs(),
         )
         frames = []
         for offset in range(4):
@@ -140,7 +138,7 @@ class MotionDebugSnapshotTest(unittest.TestCase):
     def test_failed_layer_does_not_abort_snapshot(self) -> None:
         pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
             "gate",
-            default_motion_stage_configs(),
+            adaptive_motion_stage_configs(),
         )
         frame = np.full((90, 160), 32, dtype=np.uint8)
         context = MotionContext(
@@ -166,7 +164,7 @@ class MotionDebugSnapshotTest(unittest.TestCase):
     def test_status_exposes_last_error_when_no_layers_encode(self) -> None:
         pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
             "gate",
-            default_motion_stage_configs(),
+            adaptive_motion_stage_configs(),
         )
         store = MotionDebugSnapshotStore()
         store.set_enabled(True)

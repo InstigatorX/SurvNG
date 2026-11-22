@@ -201,8 +201,8 @@ class MotionAnalysisService:
         self.media = media
         self.state = state
         self.frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
-        # Four frames are the minimum required by the classic modular scorer.
-        # EMA still consumes only previously unseen timestamps from this window.
+        # A short color window: continuous analysis passes only frames newer
+        # than its anchor, and replays this window after a runtime reset.
         self.color_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=4)
         self.evidence_frames: deque[MotionEvidenceFrame] = deque(
             # Enough history to cover the EMA decision/dispatch delay without

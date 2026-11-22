@@ -23,13 +23,31 @@ class ResolvedMotionPipelineGraphs:
     origins: dict[str, str]
 
 
+# The fixed-threshold frame-difference graph was removed; EMA is the only
+# qualification graph. Name the retired stages so a hand-edited configuration
+# gets an actionable error instead of "unknown implementation".
+RETIRED_QUALIFICATION_IMPLEMENTATIONS = frozenset({
+    "frame_difference",
+    "fixed_threshold",
+    "contour_blobs",
+    "minimum_area",
+    "dominant_centroid",
+    "default_motion_score",
+})
+# Evidence fusion is the EMA validation switch: ``audit`` keeps the EMA
+# decision, ``bypass`` disables EMA validation in camera mode. No independent
+# evidence source feeds it.
+SUPPORTED_FUSION_POLICIES = frozenset({"audit", "bypass"})
+
+
 def _stage_configs(selections: list[MotionStageSelection]) -> tuple[MotionStageConfig, ...]:
     for selection in selections:
-        if (
-            selection.implementation == "buffered_evidence_fusion"
-            and "depth_object" in _normalized_sources(selection.options.get("sources", ()))
-        ):
-            raise ValueError("rolling depth-object motion fusion is unsupported")
+        if selection.implementation in RETIRED_QUALIFICATION_IMPLEMENTATIONS:
+            raise ValueError(
+                f"motion stage {selection.stage_id!r} uses the retired "
+                f"fixed-threshold implementation {selection.implementation!r}; "
+                "use Enhanced Motion Analysis (EMA)"
+            )
     return tuple(
         MotionStageConfig(
             stage_id=selection.stage_id,
@@ -71,12 +89,7 @@ def _normalized_sources(value: object) -> tuple[str, ...]:
     ))
 
 
-def _validate_trigger_source_separation(
-    mode: str,
-    fusion: tuple[MotionStageConfig, ...],
-) -> None:
-    if mode not in {"camera", "camera_rescue", "adaptive"}:
-        return
+def _validate_fusion(fusion: tuple[MotionStageConfig, ...]) -> None:
     for stage in fusion:
         if stage.implementation != "buffered_evidence_fusion":
             continue
@@ -85,6 +98,19 @@ def _validate_trigger_source_separation(
             raise ValueError(
                 "ONVIF cannot be a validation source in camera/adaptive mode; "
                 "it is the camera trigger in camera modes and diagnostic-only in adaptive mode"
+            )
+        if sources:
+            raise ValueError(
+                f"motion fusion sources {list(sources)} are unsupported; "
+                "depth is recorded-refinement attribution, not rolling motion evidence"
+            )
+        policy = str(stage.options.get("policy", "audit")).strip().lower()
+        if policy not in SUPPORTED_FUSION_POLICIES:
+            # With no sources, the former any/all/weighted policies found no
+            # evidence and fail-open accepted every motion.
+            raise ValueError(
+                f"motion fusion policy {policy!r} is unsupported; use 'audit' "
+                "(EMA validation on) or 'bypass' (EMA validation off)"
             )
 
 
@@ -99,7 +125,6 @@ def resolve_motion_pipeline_graphs(
     global_config: MotionQualificationConfig,
     camera_config: CameraMotionQualificationConfig,
 ) -> ResolvedMotionPipelineGraphs:
-    mode = global_config.mode if camera_config.mode == "inherit" else camera_config.mode
     qualification, qualification_origin = _resolve_graph(
         "qualification",
         global_config.pipeline.qualification,
@@ -112,7 +137,7 @@ def resolve_motion_pipeline_graphs(
         camera_config.pipeline.fusion,
         default_motion_fusion_stage_configs(),
     )
-    _validate_trigger_source_separation(mode, fusion)
+    _validate_fusion(fusion)
     observation, observation_origin = _resolve_graph(
         "observation",
         global_config.pipeline.observation,

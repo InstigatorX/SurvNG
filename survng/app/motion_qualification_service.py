@@ -217,28 +217,6 @@ class MotionQualificationService:
             or captured_at - last_processed_at >= interval * 0.85
         )
 
-    def external_confirmation_required(self) -> bool:
-        options = self.fusion_options()
-        raw_sources = options.get("sources", [])
-        source_values = (raw_sources,) if isinstance(raw_sources, str) else raw_sources
-        sources = (
-            tuple(
-                normalized
-                for source in source_values
-                if (normalized := str(source).strip().lower())
-            )
-            if isinstance(source_values, (list, tuple))
-            else ()
-        )
-        policy = str(options.get("policy", "audit")).strip().lower()
-        return bool(
-            sources
-            and (
-                policy in {"all", "weighted"}
-                or not bool(options.get("include_primary", True))
-            )
-        )
-
     def frame_analysis_required(self) -> bool:
         return bool(
             self.adaptive_analysis_required()
@@ -500,8 +478,6 @@ class MotionQualificationService:
             else received_at
         )
         if not self.adaptive_analysis_required():
-            if self.external_confirmation_required():
-                self.stop_event.wait(self.config.post_trigger_seconds)
             result = MotionQualificationResult(
                 False, 0.0, 1.0, "adaptive_validation_disabled", 0, {}
             )
@@ -527,7 +503,7 @@ class MotionQualificationService:
                     evaluated_windows.add(key)
                     if best_result is None or result.score > best_result.score:
                         best_result = result
-                    if result.accepted and not self.external_confirmation_required():
+                    if result.accepted:
                         return self.with_source_evidence(
                             result,
                             anchor - self.config.window_seconds,
@@ -578,7 +554,7 @@ class MotionQualificationService:
                     )
                 if best_result is None or result.score > best_result.score:
                     best_result = result
-                if result.accepted and not self.external_confirmation_required():
+                if result.accepted:
                     return self.with_source_evidence(
                         result,
                         anchor - self.config.window_seconds,

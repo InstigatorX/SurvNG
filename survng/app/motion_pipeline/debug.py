@@ -139,7 +139,6 @@ class MotionDebugSnapshot:
     frame_count: int
     blob_count: int
     track_points: int
-    event_state: str
     timings: dict[str, float]
     images: dict[str, bytes]
 
@@ -191,7 +190,6 @@ class MotionDebugSnapshot:
             frame_count=context.scoring.frame_count,
             blob_count=len(context.blobs),
             track_points=len(context.dominant_track.path) if context.dominant_track else 0,
-            event_state=context.event_state.phase.value,
             timings={
                 stage_id: round(timing.duration_ms, 3)
                 for stage_id, timing in context.timings.items()
@@ -209,7 +207,6 @@ class MotionDebugSnapshot:
             "frame_count": self.frame_count,
             "blob_count": self.blob_count,
             "track_points": self.track_points,
-            "event_state": self.event_state,
             "timings": dict(self.timings),
             "layers": [
                 {"id": layer, "label": DEBUG_LAYER_LABELS[layer]}

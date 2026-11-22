@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import math
 from typing import Any, Mapping
 
 from ..camera_semantics import active_camera_semantic_kind
 from ..motion_topics import semantic_motion_kind
 
 from .context import MotionContext
-from .evidence import MotionEvidenceRepository, MotionEvidenceSample
+from .evidence import MotionEvidenceRepository
 from .registry import (
     MotionStageDependencies,
     MotionStageOption,
@@ -17,41 +16,6 @@ from .registry import (
 
 
 EVIDENCE_REPOSITORY_SERVICE = "motion_evidence_repository"
-
-
-def _finite_float(value: object, *, label: str) -> float:
-    number = float(value)
-    if not math.isfinite(number):
-        raise ValueError(f"{label} must be finite")
-    return number
-
-
-def _safe_unit_score(value: object, default: float = 0.0) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return default
-    if not math.isfinite(number):
-        return default
-    return max(0.0, min(1.0, number))
-
-
-def _evidence_sample_score(source: str, values: Mapping[str, Any]) -> float:
-    score = values.get("score")
-    if score is None and source == "depth_object":
-        score = values.get("foreground_score")
-    return _safe_unit_score(score)
-
-
-def _normalize_evidence_values(source: str, values: Mapping[str, Any]) -> dict[str, Any]:
-    normalized = dict(values)
-    if source == "depth_object":
-        if "score" not in normalized and normalized.get("foreground_score") is not None:
-            normalized["score"] = normalized["foreground_score"]
-        normalized.setdefault("warmed", 1.0)
-    return normalized
-
-
 
 
 class OnvifEventEvidenceStage:
@@ -129,99 +93,25 @@ class OnvifEventEvidenceStage:
 
 
 class BufferedMotionFusionStage:
-    """Aggregates independent sources and optionally applies an explicit policy."""
+    """Apply the EMA validation switch to the primary qualification result.
 
-    def __init__(
-        self,
-        stage_id: str,
-        repository: MotionEvidenceRepository,
-        sources: tuple[str, ...] = (),
-        *,
-        policy: str = "audit",
-        source_thresholds: Mapping[str, float] | None = None,
-        source_weights: Mapping[str, float] | None = None,
-        weighted_threshold: float | None = None,
-        minimum_sources: int = 1,
-        require_warmed: bool = True,
-        include_primary: bool = True,
-        fail_open: bool = True,
-    ) -> None:
+    ``audit`` keeps the EMA decision. ``bypass`` disables EMA validation so a
+    camera notice runs object detection. No independent evidence source feeds
+    this stage; configuration validation rejects sources and other policies.
+    """
+
+    def __init__(self, stage_id: str, *, policy: str = "audit") -> None:
         self._stage_id = stage_id
-        self.repository = repository
-        self.sources = sources
         normalized_policy = policy.strip().lower()
-        if normalized_policy not in {"audit", "bypass", "any", "all", "weighted"}:
+        if normalized_policy not in {"audit", "bypass"}:
             raise ValueError(f"unsupported motion fusion policy: {policy}")
         self.policy = normalized_policy
-        self.source_thresholds = {
-            str(source): max(0.0, min(1.0, _finite_float(
-                threshold, label=f"source threshold for {source}"
-            )))
-            for source, threshold in (source_thresholds or {}).items()
-        }
-        self.source_weights = {
-            str(source): max(0.0, _finite_float(
-                weight, label=f"source weight for {source}"
-            ))
-            for source, weight in (source_weights or {}).items()
-        }
-        self.weighted_threshold = (
-            None
-            if weighted_threshold is None
-            else max(0.0, min(1.0, _finite_float(
-                weighted_threshold, label="weighted threshold"
-            )))
-        )
-        self.minimum_sources = max(0, int(minimum_sources))
-        self.require_warmed = bool(require_warmed)
-        self.include_primary = bool(include_primary)
-        self.fail_open = bool(fail_open)
 
     @property
     def stage_id(self) -> str:
         return self._stage_id
 
     def process(self, context: MotionContext) -> MotionContext:
-        started_at = float(context.configuration.get("evidence_started_at", context.captured_at))
-        ended_at = float(context.configuration.get("evidence_ended_at", context.captured_at))
-        for source in self.sources:
-            samples = self.repository.window(source, started_at, ended_at)
-            aggregate = self._aggregate_generic_source(source, samples)
-            context.source_evidence[source] = aggregate
-            context.scoring.features.update(aggregate)
-        self._apply_policy(context)
-        return context
-
-    @staticmethod
-    def _aggregate_generic_source(
-        source: str,
-        samples: tuple[MotionEvidenceSample, ...],
-    ) -> dict[str, Any]:
-        if not samples:
-            return {
-                f"{source}_warmed": 0.0,
-                f"{source}_sample_count": 0,
-            }
-        best = max(
-            samples,
-            key=lambda sample: _evidence_sample_score(source, sample.values),
-        )
-        values = _normalize_evidence_values(source, best.values)
-        aggregate = {
-            f"{source}_warmed": _safe_unit_score(values.get("warmed", 1.0)),
-            f"{source}_score": _safe_unit_score(values.get("score", 0.0)),
-            f"{source}_sample_count": len(samples),
-        }
-        aggregate.update(
-            {
-                f"{source}_{key}": value
-                for key, value in values.items()
-                if key not in {"warmed", "score"}
-            }
-        )
-        return aggregate
-
-    def _apply_policy(self, context: MotionContext) -> None:
         if (
             bool(context.configuration.get("require_primary_trigger"))
             and not context.scoring.accepted
@@ -232,9 +122,7 @@ class BufferedMotionFusionStage:
                 "fusion_primary_required": True,
             })
             context.scoring.reason = "primary_trigger_rejected"
-            return
-        if self.policy == "audit":
-            return
+            return context
         if self.policy == "bypass":
             context.scoring.accepted = True
             context.scoring.score = 1.0
@@ -244,74 +132,7 @@ class BufferedMotionFusionStage:
                 "fusion_applied": True,
                 "fusion_primary_included": False,
             })
-            return
-        source_scores: dict[str, float] = {}
-        source_votes: dict[str, bool] = {}
-        for source in self.sources:
-            aggregate = context.source_evidence.get(source, {})
-            if not isinstance(aggregate, Mapping):
-                continue
-            score_value = aggregate.get(f"{source}_score", aggregate.get("score"))
-            if score_value is None:
-                continue
-            warmed = aggregate.get(f"{source}_warmed", aggregate.get("warmed", 1.0))
-            if self.require_warmed and _safe_unit_score(warmed) < 1.0:
-                continue
-            score = _safe_unit_score(score_value)
-            source_scores[source] = score
-            source_votes[source] = score >= self.source_thresholds.get(source, 0.5)
-
-        features = context.scoring.features
-        features["fusion_policy"] = self.policy
-        features["fusion_sources_considered"] = sorted(source_scores)
-        features["fusion_primary_accepted"] = context.scoring.accepted
-        features["fusion_primary_included"] = self.include_primary
-        if len(source_scores) < self.minimum_sources:
-            features["fusion_applied"] = False
-            features["fusion_reason"] = "insufficient_sources"
-            if self.fail_open:
-                context.scoring.accepted = True
-                context.scoring.score = 1.0
-                context.scoring.reason = "validation_unavailable_fail_open"
-            else:
-                context.scoring.accepted = False
-                context.scoring.reason = "validation_unavailable_fail_closed"
-            return
-
-        primary_score = context.scoring.score
-        considered_scores = list(source_scores.values())
-        considered_votes = list(source_votes.values())
-        if self.include_primary:
-            considered_scores.insert(0, primary_score)
-            considered_votes.insert(0, context.scoring.accepted)
-        if self.policy == "any":
-            fused_score = max(considered_scores, default=primary_score)
-            accepted = any(considered_votes)
-        elif self.policy == "all":
-            fused_score = min(considered_scores, default=primary_score)
-            accepted = bool(considered_votes) and all(considered_votes)
-        else:
-            primary_weight = self.source_weights.get("primary", 1.0) if self.include_primary else 0.0
-            weighted_total = primary_score * primary_weight
-            total_weight = primary_weight
-            for source, score in source_scores.items():
-                weight = self.source_weights.get(source, 1.0)
-                weighted_total += score * weight
-                total_weight += weight
-            fused_score = weighted_total / total_weight if total_weight > 0 else primary_score
-            threshold = (
-                self.weighted_threshold
-                if self.weighted_threshold is not None
-                else context.scoring.threshold
-            )
-            accepted = fused_score >= threshold
-
-        context.scoring.accepted = accepted
-        context.scoring.score = round(fused_score, 4)
-        context.scoring.reason = f"fusion_{self.policy}_{'accepted' if accepted else 'rejected'}"
-        features["fusion_applied"] = True
-        features["fusion_score"] = context.scoring.score
-        features["fusion_source_votes"] = dict(source_votes)
+        return context
 
 
 def _repository(dependencies: MotionStageDependencies) -> MotionEvidenceRepository:
@@ -355,46 +176,18 @@ def _build_buffered_fusion(
     options: Mapping[str, Any],
     dependencies: MotionStageDependencies,
 ) -> BufferedMotionFusionStage:
+    # Saved configurations written by the UI still carry the former
+    # source_thresholds/source_weights/weighted_threshold/minimum_sources/
+    # require_warmed/include_primary/fail_open keys. They are accepted and
+    # ignored; ``include_primary`` is read by the qualification service.
+    del dependencies
     raw_sources = options.get("sources", ())
-    if isinstance(raw_sources, str):
-        source_values = (raw_sources,)
-    elif isinstance(raw_sources, (list, tuple)):
-        source_values = raw_sources
-    else:
+    sources = (raw_sources,) if isinstance(raw_sources, str) else raw_sources
+    if not isinstance(sources, (list, tuple)):
         raise ValueError("motion fusion sources must be a list of source names")
-    sources = tuple(dict.fromkeys(
-        normalized
-        for source in source_values
-        if (normalized := str(source).strip().lower())
-    ))
-    raw_thresholds = options.get("source_thresholds", {})
-    raw_weights = options.get("source_weights", {})
-    if not isinstance(raw_thresholds, Mapping):
-        raise ValueError("motion fusion source_thresholds must be an object")
-    if not isinstance(raw_weights, Mapping):
-        raise ValueError("motion fusion source_weights must be an object")
-    weighted_threshold = options.get("weighted_threshold")
-    return BufferedMotionFusionStage(
-        stage_id,
-        _repository(dependencies),
-        sources,
-        policy=str(options.get("policy", "audit")),
-        source_thresholds={
-            str(source): float(threshold)
-            for source, threshold in raw_thresholds.items()
-        },
-        source_weights={
-            str(source): float(weight)
-            for source, weight in raw_weights.items()
-        },
-        weighted_threshold=(
-            None if weighted_threshold is None else float(weighted_threshold)
-        ),
-        minimum_sources=int(options.get("minimum_sources", 1)),
-        require_warmed=bool(options.get("require_warmed", True)),
-        include_primary=bool(options.get("include_primary", True)),
-        fail_open=bool(options.get("fail_open", True)),
-    )
+    if any(str(source).strip() for source in sources):
+        raise ValueError("motion fusion has no supported evidence sources")
+    return BufferedMotionFusionStage(stage_id, policy=str(options.get("policy", "audit")))
 
 
 def register_evidence_stages(registry: MotionStageRegistry) -> None:
@@ -426,15 +219,10 @@ def register_evidence_stages(registry: MotionStageRegistry) -> None:
             graph="fusion",
             category="fusion",
             display_name="Buffered evidence fusion",
-            description="Combines the normal motion score with recent independent evidence.",
+            description="Turns EMA validation on (audit) or off (bypass) for camera notices.",
             options=(
-                MotionStageOption(
-                    "sources",
-                    "Extra sources",
-                    "string_list",
-                    ["depth_object"],
-                ),
-                MotionStageOption("policy", "Decision style", "string", "audit", choices=("audit", "bypass", "any", "all", "weighted")),
+                MotionStageOption("sources", "Extra sources", "string_list", [], advanced=True),
+                MotionStageOption("policy", "Decision style", "string", "audit", choices=("audit", "bypass")),
                 MotionStageOption("source_thresholds", "Source confidence levels", "object", {}, advanced=True),
                 MotionStageOption("source_weights", "Source importance", "object", {}, advanced=True),
                 MotionStageOption("weighted_threshold", "Combined confidence", "number", 0.5, minimum=0, maximum=1, advanced=True),

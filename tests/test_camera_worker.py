@@ -49,7 +49,6 @@ from survng.app.motion_pipeline import (
     MotionStageDependencies,
     RecordedMotionObjectDetectorFactory,
     build_builtin_motion_registry,
-    default_motion_stage_configs,
     resolve_motion_pipeline_graphs,
 )
 
@@ -1628,49 +1627,6 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertTrue(worker.motion_analysis.visual_backup_readiness(stable, 110.0))
             self.assertTrue(worker.motion_analysis.visual_backup_readiness(active, 110.75))
 
-    def test_visual_trigger_modes_run_custom_non_adaptive_qualifiers_continuously(self) -> None:
-        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        custom_pipeline = {
-            "qualification": [
-                {
-                    "stage_id": stage.stage_id,
-                    "implementation": stage.implementation,
-                    "options": dict(stage.options),
-                }
-                for stage in default_motion_stage_configs()
-            ],
-        }
-        with tempfile.TemporaryDirectory() as tmpdir:
-            rescue = make_worker(
-                camera,
-                Path(tmpdir),
-                motion_config=MotionQualificationConfig.model_validate({
-                    "mode": "camera_rescue",
-                    "pipeline": custom_pipeline,
-                }),
-            )
-            visual = make_worker(
-                camera,
-                Path(tmpdir),
-                motion_config=MotionQualificationConfig.model_validate({
-                    "mode": "adaptive",
-                    "pipeline": custom_pipeline,
-                }),
-            )
-            camera_only = make_worker(
-                camera,
-                Path(tmpdir),
-                motion_config=MotionQualificationConfig.model_validate({
-                    "mode": "camera",
-                    "pipeline": custom_pipeline,
-                }),
-            )
-
-        self.assertFalse(rescue.motion_pipeline.continuous_analysis)
-        self.assertTrue(rescue.motion_qualification.continuous_primary_required())
-        self.assertTrue(visual.motion_qualification.continuous_primary_required())
-        self.assertFalse(camera_only.motion_qualification.continuous_primary_required())
-
     def test_visual_backup_never_promotes_weak_or_known_noise_motion(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         config = MotionQualificationConfig(
@@ -2132,142 +2088,6 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertTrue(result.features["validation_fail_open"])
             self.assertEqual(diagnostics["windows_evaluated"], 1)
             self.assertEqual(worker.motion_state._stats["validation_fail_opens"], 1)
-
-    def test_external_confirmation_uses_strongest_full_event_window(self) -> None:
-        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        config = MotionQualificationConfig.model_validate({
-            "mode": "camera",
-            "post_trigger_seconds": 0.5,
-            "window_seconds": 0.8,
-            "pipeline": {
-                "fusion": [
-                    {
-                        "stage_id": "evidence_fusion",
-                        "implementation": "buffered_evidence_fusion",
-                        "options": {
-                            "policy": "all",
-                            "sources": ["aux"],
-                            "include_primary": True,
-                        },
-                    }],
-            },
-        })
-        accepted = MotionQualificationResult(True, 0.8, 0.48, "qualified", 4, {})
-        received_at = time.time() - 1.0
-        with tempfile.TemporaryDirectory() as tmpdir:
-            worker = make_worker(camera, Path(tmpdir), motion_config=config)
-            worker._stop.clear()
-            for index in range(7):
-                worker.motion_analysis.frames.append((
-                    received_at - 0.8 + index * 0.2,
-                    np.zeros((90, 160), dtype=np.uint8),
-                ))
-            with (
-                patch.object(
-                    worker.motion_qualification,
-                    "run_pipeline",
-                    return_value=accepted,
-                ) as analyze,
-                patch.object(
-                    worker.motion_qualification,
-                    "with_source_evidence",
-                    return_value=accepted,
-                ) as fuse,
-            ):
-                result, _diagnostics = worker.motion_qualification.qualify_burst(
-                    datetime.fromtimestamp(received_at, timezone.utc),
-                    received_at,
-                    "balanced",
-                    worker.motion_analysis,
-                )
-
-            self.assertTrue(result.accepted)
-            self.assertGreaterEqual(analyze.call_count, 2)
-            fuse.assert_called_once()
-
-    def test_external_only_validation_waits_for_post_trigger_evidence(self) -> None:
-        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        config = MotionQualificationConfig.model_validate({
-            "mode": "camera",
-            "post_trigger_seconds": 0.5,
-            "pipeline": {
-                "fusion": [
-                    {
-                        "stage_id": "evidence_fusion",
-                        "implementation": "buffered_evidence_fusion",
-                        "options": {
-                            "policy": "all",
-                            "sources": ["aux"],
-                            "include_primary": False,
-                        },
-                    }],
-            },
-        })
-        accepted = MotionQualificationResult(True, 0.8, 0.5, "fusion_all_accepted", 0, {})
-        received_at = time.time()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            worker = make_worker(camera, Path(tmpdir), motion_config=config)
-            with (
-                patch.object(worker._stop, "wait", return_value=False) as wait_for_evidence,
-                patch.object(
-                    worker.motion_qualification,
-                    "with_source_evidence",
-                    return_value=accepted,
-                ) as fuse,
-            ):
-                result, diagnostics = worker.motion_qualification.qualify_burst(
-                    datetime.fromtimestamp(received_at, timezone.utc),
-                    received_at,
-                    "balanced",
-                    worker.motion_analysis,
-                )
-
-            self.assertTrue(result.accepted)
-            wait_for_evidence.assert_called_once_with(0.5)
-            fuse.assert_called_once()
-            self.assertEqual(diagnostics["windows_evaluated"], 0)
-
-    def test_scalar_external_source_still_requires_confirmation_window(self) -> None:
-        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        config = MotionQualificationConfig.model_validate({
-            "mode": "camera",
-            "pipeline": {
-                "fusion": [
-                    {
-                        "stage_id": "evidence_fusion",
-                        "implementation": "buffered_evidence_fusion",
-                        "options": {
-                            "policy": "all",
-                            "sources": "aux",
-                            "include_primary": False,
-                        },
-                    }],
-            },
-        })
-        with tempfile.TemporaryDirectory() as tmpdir:
-            worker = make_worker(camera, Path(tmpdir), motion_config=config)
-            self.assertTrue(worker.motion_qualification.external_confirmation_required())
-
-    def test_blank_external_source_does_not_add_confirmation_delay(self) -> None:
-        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        config = MotionQualificationConfig.model_validate({
-            "mode": "camera",
-            "pipeline": {
-                "fusion": [
-                    {
-                        "stage_id": "evidence_fusion",
-                        "implementation": "buffered_evidence_fusion",
-                        "options": {
-                            "policy": "all",
-                            "sources": " ",
-                            "include_primary": False,
-                        },
-                    }],
-            },
-        })
-        with tempfile.TemporaryDirectory() as tmpdir:
-            worker = make_worker(camera, Path(tmpdir), motion_config=config)
-            self.assertFalse(worker.motion_qualification.external_confirmation_required())
 
     def test_shutdown_during_validation_does_not_start_object_detection(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
