@@ -153,3 +153,40 @@ def test_reported_state_is_kept_apart_from_motion_state():
     assert counter.reported_state is None
     payload = inspector.events_after(0)["events"][0]
     assert payload["reported_state"] is False
+
+
+def test_known_non_object_events_get_display_labels_only():
+    inspector = OnvifInspector()
+    expected = {
+        "ruleengine/myruledetector/visitor": "doorbell",
+        "ruleengine/myruledetector/package": "package",
+        "ruleengine/countaggregation/counter": "object_count",
+        "videosource/globalscenechange/analyticsservice": "tamper",
+        "device/trigger/relay": "io",
+        "device/trigger/digitalinput": "io",
+        "device/hardwarefailure/storagefailure": "device",
+        "monitoring/operatingtime/lastclocksynchronization": "device",
+        "monitoring/processorusage": "device",
+        "vendor/unknown/thing": None,
+    }
+    for topic, label in expected.items():
+        event = inspector.record(camera_id="cam", topic="tns1:" + topic, normalized_topic=topic,
+                                 active=None, simple_items=(("state", "false"),))
+        assert event.event_type == label, topic
+        # A label is never an object class or a motion verdict.
+        assert event.classification is None
+        assert event.recognized is False
+    # Object classes and motion keep their classification and get no label.
+    person = inspector.record(camera_id="cam", topic="tns1:RuleEngine/MyRuleDetector/PeopleDetect",
+                              normalized_topic="ruleengine/myruledetector/peopledetect", active=False)
+    assert (person.classification, person.event_type) == ("person", None)
+    assert inspector.state_snapshot()["cameras"]["cam"]["classes"] == {"person": {
+        "active": False, "changed_at": person.received_at}}
+    assert inspector.events_after(0)["events"][0]["event_type"] == "doorbell"
+
+
+def test_doorbell_press_is_not_a_person_claim():
+    from survng.app.motion_decisions import classify_motion_trigger
+
+    pressed = '<tt:SimpleItem Name="State" Value="true"/>'
+    assert classify_motion_trigger("tns1:RuleEngine/MyRuleDetector/Visitor", pressed) == "generic_camera"
