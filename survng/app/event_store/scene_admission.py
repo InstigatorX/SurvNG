@@ -250,6 +250,8 @@ class EventStoreSceneAdmissionMixin:
                     notice["activity_policy"] = qualification["notice_activity_policy"]
                 if isinstance(qualification.get("camera_semantics"), dict):
                     notice["camera_semantics"] = qualification["camera_semantics"]
+                if isinstance(qualification.get("camera_notice_admission"), dict):
+                    notice["camera_admission"] = qualification["camera_notice_admission"]
 
             memory = None
             if callable(getattr(type(self), "scene_context_snapshot", None)):

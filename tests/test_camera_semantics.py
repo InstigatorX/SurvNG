@@ -89,3 +89,41 @@ def test_camera_semantics_survive_durable_trigger_round_trip() -> None:
 
     assert restored.camera_semantics == semantics
     assert restored.delivery_job_id == "job-7"
+
+
+def test_notice_admission_accepts_only_affirmative_semantic_claims() -> None:
+    from survng.app.camera_semantics import camera_notice_admission, semantic_label_compatible
+
+    labels = ["person", "car", "truck", "dog", "cat", "horse"]
+    active = '<tt:SimpleItem Name="State" Value="true"/>'
+    person = camera_notice_admission("tns1:RuleEngine/MyRuleDetector/PeopleDetect", active, labels)
+    assert person["kind"] == "semantic"
+    assert person["compatible_labels"] == ["person"]
+    # A specific known alias admits its configured family; an unknown class stays exact.
+    car = camera_notice_admission("Vendor/Alarm", "{'Name': 'ObjectType', 'Value': 'car'}", labels)
+    assert car["compatible_labels"] == ["car", "truck"]
+    mower = camera_notice_admission(
+        "RuleEngine/VehicleDetect", "{'Name': 'ObjectType', 'Value': 'robot_lawnmower'}",
+        [*labels, "robot_lawnmower"],
+    )
+    assert mower["compatible_labels"] == ["robot_lawnmower"]
+    assert camera_notice_admission("RuleEngine/DogCatDetect", "", labels)["compatible_labels"] == ["dog", "cat"]
+    assert semantic_label_compatible("Truck", car["compatible_labels"])
+    assert not semantic_label_compatible("person", car["compatible_labels"])
+
+    for topic, message, reason in [
+        ("tns1:RuleEngine/CellMotionDetector/Motion", '<tt:SimpleItem Name="IsMotion" Value="true"/>', "no_semantic_claim"),
+        ("RuleEngine/PersonDetect", '<tt:SimpleItem Name="State" Value="false"/>', "state_not_affirmative"),
+        ("RuleEngine/PersonDetect", '<tt:SimpleItem Name="State" Value="pending"/>', "state_not_affirmative"),
+        ("RuleEngine/PersonDetect", "<tt:Message><broken", "unparsed_payload"),
+        ("RuleEngine/PersonDetect", "vendor text", "unparsed_payload"),
+        ("RuleEngine/PersonCount", active, "no_semantic_claim"),
+    ]:
+        admission = camera_notice_admission(topic, message, labels)
+        assert admission == {"version": 1, "kind": "generic", "reason": reason}
+
+
+def test_undeclared_prefix_fragment_reads_its_state() -> None:
+    assert camera_semantic_reports(
+        "RuleEngine/PersonDetect", '<tt:SimpleItem Name="State" Value="false"/>', ["person"]
+    ) == []

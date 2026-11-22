@@ -189,7 +189,7 @@ def test_camera_primary_batch_preserves_route_provenance_for_admission() -> None
     )
     primary = MotionTrigger(
         topic="rule/person",
-        message="camera primary",
+        message="",
         event_at=now,
         received_at=now.timestamp(),
     )
@@ -334,13 +334,27 @@ def test_uncertain_camera_rejection_receives_bounded_object_verification() -> No
     state.increment_stat.assert_any_call("camera_uncertainty_checks", 1)
 
 
-def test_camera_rescue_camera_notice_bypasses_ema_qualification() -> None:
-    events = MotionEventCoordinator(queue_size=4, retry_limit=2)
-    now = datetime.now(timezone.utc)
+CELL_MOTION_TOPIC = "tns1:RuleEngine/tns2:CellMotionDetector/Motion"
+ACTIVE = '<tt:SimpleItem Name="State" Value="true"/>'
+INACTIVE = '<tt:SimpleItem Name="State" Value="false"/>'
+CELL_MOTION_ACTIVE = '<tt:SimpleItem Name="IsMotion" Value="true"/>'
+
+
+def _rescue_orchestrator(
+    events: MotionEventCoordinator,
+    *,
+    qualify: MotionQualificationResult | None = None,
+    labels: list[str] | None = None,
+) -> tuple[MotionDecisionOrchestrator, Mock, Mock, Mock]:
     qualification = Mock()
     qualification.settings.return_value = ("camera_rescue", "balanced", 640)
     qualification.rescue_settings.return_value = (False, 0.0)
     qualification.suppression_verification_rate.return_value = 0.0
+    qualification.with_pipeline_telemetry.side_effect = lambda result: result
+    qualification.qualify_burst.return_value = (
+        qualify or MotionQualificationResult(True, 0.7, 0.5, "accepted", 3, {}),
+        {},
+    )
     incidents = Mock()
     incidents.process.return_value = Mock(as_dict=Mock(return_value={
         "event_id": 42,
@@ -358,45 +372,115 @@ def test_camera_rescue_camera_notice_bypasses_ema_qualification() -> None:
         media=Mock(),
         analysis=Mock(),
         state=state,
+        model_labels=lambda: labels or ["person", "car", "truck", "dog", "cat"],
     )
+    return orchestrator, qualification, incidents, state
 
+
+def _run_one(topic: str, message: str, **kwargs: object) -> tuple[Mock, Mock, Mock]:
+    now = datetime.now(timezone.utc)
+    orchestrator, qualification, incidents, state = _rescue_orchestrator(
+        MotionEventCoordinator(queue_size=4, retry_limit=2), **kwargs  # type: ignore[arg-type]
+    )
     orchestrator._process_batch(MotionTriggerBatch((MotionTrigger(
-        topic="onvif/motion",
-        message="motion",
+        topic=topic,
+        message=message,
         event_at=now,
         received_at=now.timestamp(),
     ),)), threading.Event())
+    return qualification, incidents, state
+
+
+@pytest.mark.parametrize(("topic", "message", "category", "compatible"), [
+    ("tns1:RuleEngine/MyRuleDetector/PeopleDetect", ACTIVE, "person", ["person"]),
+    ("tns1:RuleEngine/MyRuleDetector/VehicleDetect", ACTIVE, "vehicle", ["car", "truck"]),
+    ("tns1:RuleEngine/MyRuleDetector/DogCatDetect", ACTIVE, "animal", ["dog", "cat"]),
+    ("RuleEngine/MyRuleDetector/Alarm", "{'Name': 'ObjectType', 'Value': 'car'}", "vehicle", ["car", "truck"]),
+])
+def test_camera_rescue_semantic_notice_bypasses_ema_qualification(
+    topic: str, message: str, category: str, compatible: list[str],
+) -> None:
+    qualification, incidents, state = _run_one(topic, message)
 
     qualification.qualify_burst.assert_not_called()
     published = state.publish_event.call_args.args[1]
     assert published["reason"] == "camera_primary_fast_path"
     assert published["effective_accepted"] is True
+    # The fast path still runs SurvNG's object check, with the persisted policy.
+    persisted = incidents.process.call_args.args[3]
+    assert persisted["camera_notice_admission"] == {
+        "version": 1,
+        "trigger_class": "semantic_camera",
+        "categories": [category],
+        "compatible_labels": compatible,
+    }
 
 
-def test_camera_rescue_camera_notice_skips_burst_coalescing_delay() -> None:
+@pytest.mark.parametrize(("topic", "message"), [
+    (CELL_MOTION_TOPIC, CELL_MOTION_ACTIVE),
+    ("onvif/motion", "motion"),
+    ("tns1:VideoSource/MotionAlarm", ACTIVE),
+    # Cleared, ambiguous, malformed and unknown vendor payloads.
+    ("tns1:RuleEngine/MyRuleDetector/PeopleDetect", INACTIVE),
+    ("tns1:RuleEngine/MyRuleDetector/PeopleDetect", '<tt:SimpleItem Name="State" Value="unknown"/>'),
+    ("tns1:RuleEngine/MyRuleDetector/PeopleDetect", "<tt:Message><broken"),
+    ("Vendor/Analytics/PersonCount", ACTIVE),
+])
+def test_camera_rescue_generic_or_unconfirmed_notice_is_qualified_normally(
+    topic: str, message: str,
+) -> None:
+    qualification, incidents, state = _run_one(topic, message)
+
+    qualification.qualify_burst.assert_called_once()
+    published = state.publish_event.call_args.args[1]
+    assert published["reason"] != "camera_primary_fast_path"
+    assert published["reason"] == "accepted"
+    persisted = incidents.process.call_args.args[3]
+    assert persisted["camera_notice_admission"] == {
+        "version": 1,
+        "trigger_class": "generic_camera",
+        "motion_validated": True,
+    }
+
+
+def test_camera_rescue_generic_notice_rejected_by_ema_needs_an_eligible_object() -> None:
+    rejected = MotionQualificationResult(False, 0.1, 0.5, "low_score", 2, {})
+    _qualification, incidents, state = _run_one(
+        CELL_MOTION_TOPIC, CELL_MOTION_ACTIVE, qualify=rejected
+    )
+
+    published = state.publish_event.call_args.args[1]
+    assert published["reason"] == "low_score"
+    assert incidents.process.call_args.kwargs["require_eligible_object"] is True
+    assert incidents.process.call_args.args[3]["camera_notice_admission"]["motion_validated"] is False
+
+
+@pytest.mark.parametrize(("topic", "trigger_class"), [
+    ("manual", "manual"),
+    ("survng/speech", "speech"),
+])
+def test_camera_rescue_manual_and_speech_keep_the_primary_fast_path(
+    topic: str, trigger_class: str,
+) -> None:
+    qualification, incidents, state = _run_one(topic, "")
+
+    qualification.qualify_burst.assert_not_called()
+    assert state.publish_event.call_args.args[1]["reason"] == "camera_primary_fast_path"
+    assert incidents.process.call_args.args[3]["camera_notice_admission"]["trigger_class"] == trigger_class
+
+
+def _first_quiet_seconds(topic: str, message: str) -> float:
     events = MotionEventCoordinator(queue_size=4, retry_limit=2)
     now = datetime.now(timezone.utc)
     assert events.enqueue(MotionTrigger(
-        topic="onvif/motion",
-        message="motion",
+        topic=topic,
+        message=message,
         event_at=now,
         received_at=now.timestamp(),
     ))
     original_coalesce = events.coalesce
     events.coalesce = Mock(side_effect=original_coalesce)
-    qualification = Mock()
-    qualification.settings.return_value = ("camera_rescue", "balanced", 640)
-    orchestrator = MotionDecisionOrchestrator(
-        camera_id="gate",
-        events=events,
-        audit_recorder=Mock(),
-        config=MotionQualificationConfig(burst_quiet_seconds=0.5),
-        qualification=qualification,
-        incidents=Mock(),
-        media=Mock(),
-        analysis=Mock(),
-        state=Mock(),
-    )
+    orchestrator, _qualification, _incidents, _state = _rescue_orchestrator(events)
     stop = threading.Event()
     events.coalesce.side_effect = lambda *args, **kwargs: (
         stop.set() or None
@@ -404,7 +488,24 @@ def test_camera_rescue_camera_notice_skips_burst_coalescing_delay() -> None:
 
     orchestrator.run_until_error(stop)
 
-    assert events.coalesce.call_args.kwargs["quiet_seconds"] == 0.0
+    return events.coalesce.call_args.kwargs["quiet_seconds"]
+
+
+def test_camera_rescue_semantic_notice_skips_burst_coalescing_delay() -> None:
+    assert _first_quiet_seconds("RuleEngine/PersonDetect", ACTIVE) == 0.0
+    assert _first_quiet_seconds("manual", "") == 0.0
+
+
+@pytest.mark.parametrize(("topic", "message"), [
+    (CELL_MOTION_TOPIC, CELL_MOTION_ACTIVE),
+    ("onvif/motion", "motion"),
+    ("RuleEngine/PersonDetect", INACTIVE),
+    ("adaptive/motion", "ema"),
+])
+def test_camera_rescue_generic_notice_keeps_burst_coalescing_delay(
+    topic: str, message: str,
+) -> None:
+    assert _first_quiet_seconds(topic, message) == 0.5
 
 
 def test_claimed_trigger_is_released_when_shutdown_arrives_after_claim() -> None:
@@ -498,7 +599,7 @@ def test_durable_delivery_uses_one_persisted_retry_budget() -> None:
             durable_store=store,
         )
         reserved = events.episode_controller.observe_camera(
-            CameraNotice("gate", 100.0, 100.0, "onvif/motion"),
+            CameraNotice("gate", 100.0, 100.0, "RuleEngine/PersonDetect"),
             generation=0,
         )
         assert reserved.intent is not None
@@ -509,8 +610,8 @@ def test_durable_delivery_uses_one_persisted_retry_budget() -> None:
         )
         now = datetime.now(timezone.utc)
         assert events.enqueue(MotionTrigger(
-            topic="onvif/motion",
-            message="motion",
+            topic="RuleEngine/PersonDetect",
+            message="",
             event_at=now,
             received_at=now.timestamp(),
             detection_intent_id=reserved.intent.intent_id,
