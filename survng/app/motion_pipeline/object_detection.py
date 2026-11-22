@@ -445,8 +445,10 @@ class RecordedMotionObjectDetector:
         stop_requested: StopRequested = lambda: False,
         decode_budget: RecordedDecodeBudget | None = None,
         motion_evidence: Any | None = None,
+        activity_attributor: ObjectActivityAttributor | None = None,
     ) -> None:
         self.camera = camera
+        self.activity_attributor = activity_attributor
         self.detector = detector
         self.recorder = recorder
         self.live_frame_provider = live_frame_provider
@@ -1642,8 +1644,8 @@ class RecordedMotionObjectDetector:
                     detected.get("temporal_sample_offset_seconds", selected.offset)
                 )
                 detected["frame_source"] = "recorded_main"
-        attributor = getattr(self, "activity_attributor", None)
-        if isinstance(attributor, ObjectActivityAttributor) and observations:
+        attributor = self.activity_attributor
+        if attributor is not None and observations:
             attributor.stamp_recorded(
                 observations,
                 event_key=datetime.fromtimestamp(event_epoch, timezone.utc).isoformat(),
@@ -2626,6 +2628,7 @@ class RecordedMotionObjectDetectorFactory:
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
         motion_evidence: Any | None = None,
+        activity_attributor: ObjectActivityAttributor | None = None,
     ) -> RecordedMotionObjectDetector:
         return RecordedMotionObjectDetector(
             camera=camera,
@@ -2637,4 +2640,5 @@ class RecordedMotionObjectDetectorFactory:
             stop_requested=stop_requested,
             decode_budget=self.decode_budget,
             motion_evidence=motion_evidence,
+            activity_attributor=activity_attributor,
         )

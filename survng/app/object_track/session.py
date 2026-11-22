@@ -18,7 +18,11 @@ from ..detector import detection_failure
 from ..domain_events import TrackingCompleted
 from ..motion_pipeline.scene_evidence import scene_observation
 from ..scene_activity_evidence import scene_sample_records
-from ..object_activity import annotate_box_history_motion, apply_stationary_alert
+from ..object_activity import (
+    ObjectActivityAttributor,
+    annotate_box_history_motion,
+    apply_stationary_alert,
+)
 from ..scene_zone_admission import (
     effective_activity_attribution,
     effective_stationary_presence,
@@ -198,9 +202,11 @@ class ObjectTrackingSession:
         window_provider: Callable[[int, datetime], tuple[float, float]] | None = None,
         evidence_capacity: TrackingEvidenceCapacity | None = None,
         evidence_writer: TrackingEvidenceWriter | None = None,
+        activity_attributor: ObjectActivityAttributor | None = None,
     ) -> None:
         self.camera = camera
         self.config = config
+        self.activity_attributor = activity_attributor
         self.detector = detector
         self.frame_provider = frame_provider
         self.update_event = update_event
@@ -1303,7 +1309,7 @@ class ObjectTrackingSession:
                     for item in tracker.summaries(sample_epoch)
                     if item.get("track_id") is not None
                 }
-                attributor = getattr(self, "activity_attributor", None)
+                attributor = self.activity_attributor
                 if (self._scene_analysis_job or {}).get("admission") == "demand":
                     # Historical review must not teach the live stationary-
                     # subject memory from old footage. Scene evidence still
@@ -2497,6 +2503,7 @@ class ObjectTrackingSessionFactory:
         catchup_frame_provider: CatchupFrameProvider | None = None,
         cover_frame_provider: TrackingCoverFrameProvider | None = None,
         snapshot_writer: TrackingSnapshotWriter | None = None,
+        activity_attributor: ObjectActivityAttributor | None = None,
     ) -> ObjectTrackingSession:
         return ObjectTrackingSession(
             camera=camera,
@@ -2517,4 +2524,5 @@ class ObjectTrackingSessionFactory:
             window_provider=self.window_provider,
             evidence_capacity=self.evidence_capacity,
             evidence_writer=self.evidence_writer,
+            activity_attributor=activity_attributor,
         )

@@ -33,6 +33,7 @@ def test_recorded_ledger_retains_objects_absent_from_cover_and_outside_alert_zon
         _RecordedDetectionSample(1, frame, [person(70)], "after.mp4", exact_timestamp=True),
     ]
     detector = RecordedMotionObjectDetector.__new__(RecordedMotionObjectDetector)
+    detector.activity_attributor = None
     detector.camera = SimpleNamespace(id="gate")
     result = detector._recorded_result(
         samples[1], [person(70, snapshot_visible=False,

@@ -377,6 +377,15 @@ class CameraWorker:
             CaptureOpenLimiter()
         )
         self.motion_debug = MotionDebugSnapshotStore()
+        # One attributor per camera, shared by the decision handler, recorded
+        # refinement and tracking sessions. Built before its consumers so each
+        # receives it at construction.
+        self.activity_attributor = self._build_activity_attributor(
+            detector_config=getattr(
+                motion_object_detector_factory.detector, "config", None,
+            ),
+            decision_factory=motion_decision_handler_factory,
+        )
         self.motion_object_detector = motion_object_detector_factory.create(
             camera=camera,
             live_frame_provider=lambda: self._get_latest_frame(),
@@ -386,6 +395,7 @@ class CameraWorker:
                 self._stop.is_set()
                 and self.runtime_state.phase is not CameraLifecyclePhase.STOPPED
             ),
+            activity_attributor=self.activity_attributor,
         )
         self.media = CameraMediaService(
             camera=camera,
@@ -409,6 +419,7 @@ class CameraWorker:
             ),
             lifecycle_lock=self._lifecycle_lock,
             recorded_available=self.recorded_analysis_available,
+            activity_attributor=self.activity_attributor,
             cover_frame_provider=lambda captured_at, width, reference: (
                 self.tracking_frames.recorded_frame_at(
                     captured_at,
@@ -464,9 +475,7 @@ class CameraWorker:
             event_callback=(
                 self.motion_state.publish_event if event_callback is not None else None
             ),
-            activity_attributor=self._activity_attributor(
-                motion_decision_handler_factory
-            ),
+            activity_attributor=self.activity_attributor,
             spatial_alignment=self._effective_spatial_alignment,
             route_admission_callback=route_target_admitted,
         )
@@ -983,10 +992,12 @@ class CameraWorker:
     def status(self) -> dict[str, Any]:
         return self.status_reporter.snapshot()
 
-    def _activity_attributor(self, decision_factory):
-        detector_config = getattr(
-            getattr(self.motion_object_detector, "detector", None), "config", None,
-        )
+    def _build_activity_attributor(
+        self,
+        *,
+        detector_config: Any,
+        decision_factory: MotionDecisionHandlerFactory,
+    ) -> ObjectActivityAttributor:
         mode = (
             getattr(detector_config, "object_activity_attribution", "enforce")
             if self.camera.object_activity_attribution == "inherit"
@@ -1007,16 +1018,6 @@ class CameraWorker:
             memory=memory,
             camera_id=self.camera.id,
         )
-        self.scene_context_memory = attributor.memory
-        self.tracking_lifecycle.scene_context_memory = attributor.memory
-        self.tracking_lifecycle.activity_attributor = attributor
-        current = self.tracking_lifecycle.current()
-        current.scene_context_memory = attributor.memory
-        current.activity_attributor = attributor
-        detector = getattr(self, "motion_object_detector", None)
-        if detector is not None:
-            detector.scene_context_memory = attributor.memory
-            detector.activity_attributor = attributor
         return attributor
 
     def reconfigure_object_activity_attribution(self, mode: AttributionMode) -> None:

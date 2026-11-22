@@ -126,6 +126,7 @@ def test_camera_reported_notice_is_not_a_video_witness():
 
 def test_confirmation_bypasses_live_and_honors_bounded_requested_window():
     detector=RecordedMotionObjectDetector.__new__(RecordedMotionObjectDetector)
+    detector.activity_attributor = None
     detector.camera=SimpleNamespace(id="gate")
     detector.detector=SimpleNamespace(config=SimpleNamespace())
     detector._live_discovery_result=Mock(side_effect=AssertionError("live confirmation forbidden"))
@@ -146,6 +147,7 @@ def test_confirmation_bypasses_live_and_honors_bounded_requested_window():
 
 def test_native_recorded_review_image_keeps_its_own_time_and_source():
     detector=RecordedMotionObjectDetector.__new__(RecordedMotionObjectDetector)
+    detector.activity_attributor = None
     detector.camera=SimpleNamespace(id="gate")
     images=[frame(20),frame(35)]
     samples=[_RecordedDetectionSample(t,image,[detection(x)],"main.mp4",requested_offset=t,exact_timestamp=True)
