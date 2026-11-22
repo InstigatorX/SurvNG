@@ -235,21 +235,70 @@ def _event_loop_lag_snapshot(raw: object) -> dict[str, Any] | None:
     }
 
 
-def _write_lock_snapshot(write_lock: object) -> dict[str, Any]:
-    histograms = getattr(write_lock, "histograms", None)
-    if not callable(histograms):
-        return {"available": False}
-    raw = histograms()
+MAX_SLOW_SITES = 32
+_SLOW_SITE_RE = re.compile(r"[A-Za-z0-9_./:<> -]{1,160}")
+_SLOW_SITE_FIELDS = (
+    "count", "total_ms", "max_ms", "last_ms", "last_at_epoch_seconds",
+    "max_write_lock_ms", "last_write_lock_ms",
+)
+
+
+def _slow_sites_snapshot(raw: object) -> dict[str, Any] | None:
+    """Project a SlowSiteTable snapshot: code locations and timings only."""
+    if not isinstance(raw, dict):
+        return None
+    sites = raw.get("sites")
+    rows = []
+    for item in (sites if isinstance(sites, list) else [])[:MAX_SLOW_SITES]:
+        if not isinstance(item, dict):
+            continue
+        site = item.get("site")
+        if not isinstance(site, str) or not _SLOW_SITE_RE.fullmatch(site):
+            continue
+        rows.append({"site": site, **{
+            name: value
+            for name, value in _numeric_fields(item, _SLOW_SITE_FIELDS).items()
+            if value is not None
+        }})
+    return {
+        **_numeric_fields(raw, ("threshold_ms", "dropped")),
+        "sites": rows,
+    }
+
+
+def _lock_histograms_snapshot(raw: object) -> dict[str, Any]:
+    """Project a TimedLock.histograms() payload."""
     raw = raw if isinstance(raw, dict) else {}
     return {
         "available": True,
         **_numeric_fields(raw, ("acquisitions", "contended", "metric_failures")),
         "wait_ms": _histogram_snapshot(raw.get("wait")),
         "hold_ms": _histogram_snapshot(raw.get("hold")),
+        "slow_holds": _slow_sites_snapshot(raw.get("slow_holds")),
     }
 
 
-def _database_snapshot(raw: object, write_lock: object) -> dict[str, Any]:
+def _write_lock_snapshot(write_lock: object) -> dict[str, Any]:
+    histograms = getattr(write_lock, "histograms", None)
+    if not callable(histograms):
+        return {"available": False}
+    return _lock_histograms_snapshot(histograms())
+
+
+def _event_store_locks_snapshot(event_store: object) -> dict[str, Any]:
+    histograms = getattr(event_store, "lock_histograms", None)
+    if not callable(histograms):
+        return {}
+    raw = histograms()
+    raw = raw if isinstance(raw, dict) else {}
+    return {name: _lock_histograms_snapshot(raw.get(name)) for name in ("events", "jobs")}
+
+
+def _database_snapshot(
+    raw: object,
+    write_lock: object,
+    event_store: object = None,
+) -> dict[str, Any]:
     raw = raw if isinstance(raw, dict) else {}
     domains = raw.get("domains")
     domains = domains if isinstance(domains, dict) else {}
@@ -266,6 +315,8 @@ def _database_snapshot(raw: object, write_lock: object) -> dict[str, Any]:
             if _motion_identifier(name) is not None
         },
         "main_write_lock": _write_lock_snapshot(write_lock),
+        "slow_transactions": _slow_sites_snapshot(raw.get("slow_transactions")),
+        "event_store_locks": _event_store_locks_snapshot(event_store),
     }
 
 
@@ -902,7 +953,9 @@ def build_runtime_status(
 
     try:
         databases = _database_snapshot(
-            database_metrics_snapshot(), getattr(manager, "database_write_lock", None)
+            database_metrics_snapshot(),
+            getattr(manager, "database_write_lock", None),
+            getattr(manager, "events", None),
         )
     except Exception as error:
         LOGGER.warning(

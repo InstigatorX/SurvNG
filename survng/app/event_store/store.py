@@ -17,7 +17,7 @@ from ..main_database import connect_main_database
 from ..media_storage import MediaStorageRegistry, path_presence
 from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 from ..object_motion import tracking_motion_promotions
-from ..perf_samples import TimedLock
+from ..perf_samples import SlowSiteTable, TimedLock
 from .calibration import EventStoreCalibrationMixin
 from .jobs import EventStoreJobsMixin
 from .evidence import EventStoreEvidenceMixin, EventSnapshotChangedError
@@ -73,12 +73,20 @@ class EventStore(
         self.db_path = (database_dir or storage_dir) / "survng.sqlite3"
         self.jobs_db_path = self.db_path.parent / "detection-jobs.sqlite3"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = TimedLock(threading.Lock())
+        # Long holds are attributed to the acquiring call site (diagnostic):
+        # every camera's event writes queue behind this lock.
+        self._lock = TimedLock(
+            threading.Lock(),
+            slow_holds=SlowSiteTable("event store lock hold", 1000.0),
+        )
         self._database_write_lock = database_write_lock or threading.RLock()
         # SQLite permits a single writer.  Camera event/refinement workers share
         # the jobs ledger, so serialize their short local transactions instead
         # of making them contend through SQLite's busy timeout.
-        self._jobs_lock = TimedLock(threading.RLock())
+        self._jobs_lock = TimedLock(
+            threading.RLock(),
+            slow_holds=SlowSiteTable("detection jobs lock hold", 1000.0),
+        )
         self._jobs_maintenance_lock = threading.Lock()
         self._next_detection_job_prune_monotonic = 0.0
         self._snapshot_size_scan_idle_until = 0.0
@@ -99,6 +107,10 @@ class EventStore(
     def lock_wait_status(self) -> dict[str, dict[str, int | float | None]]:
         """Contended waits on the in-process serialization locks."""
         return {"events": self._lock.snapshot(), "jobs": self._jobs_lock.snapshot()}
+
+    def lock_histograms(self) -> dict[str, dict[str, object]]:
+        """Wait/hold histograms and slow-hold call sites for both store locks."""
+        return {"events": self._lock.histograms(), "jobs": self._jobs_lock.histograms()}
 
     def _connect(self) -> sqlite3.Connection:
         conn = connect_main_database(
