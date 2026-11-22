@@ -1345,167 +1345,16 @@ class MotionAnalysisService:
             )
         observed_monotonic = time.monotonic()
         if trigger_mode == "adaptive":
-            if not self.state.detection_enabled() or not result.accepted:
+            adaptive_decision = self._adaptive_signal_decision(
+                result, captured_at, observed_monotonic,
+            )
+            if adaptive_decision is None:
                 return
-            qualified = EmaQualified(
-                camera_id=self.camera_id,
-                captured_at=captured_at,
-                observed_monotonic=observed_monotonic,
-                result=result,
-                required_score=result.threshold,
-                qualifying_samples=1,
-                window_samples=1,
-                candidate_started_at=captured_at,
-            )
-            decision = EmaSignalDecision(
-                action=EmaSignalAction.QUALIFIED,
-                result=result,
-                required_score=result.threshold,
-                scene_ready=True,
-                qualifying_samples=1,
-                window_samples=1,
-                qualified=qualified,
-            )
+            decision = adaptive_decision
         else:
-            with self._visual_lock:
-                policy = self.qualification.visual_backup_policy()
-                decision = self.ema_v2.evaluate(
-                    result,
-                    captured_at,
-                    observed_monotonic,
-                    policy,
-                    detection_enabled=self.state.detection_enabled(),
-                )
-                try:
-                    watch = (
-                        self._route_watch_provider(self.camera_id, captured_at)
-                        if self._route_watch_provider is not None
-                        else None
-                    )
-                except Exception:
-                    watch = None
-                    LOGGER.exception(
-                        "route detection watch lookup failed for %s",
-                        self.camera_id,
-                    )
-                try:
-                    effectiveness = (
-                        self._onvif_effectiveness_provider()
-                        if self._onvif_effectiveness_provider is not None
-                        else {}
-                    )
-                except Exception:
-                    effectiveness = {}
-                    LOGGER.exception(
-                        "ONVIF effectiveness lookup failed for %s",
-                        self.camera_id,
-                    )
-                onvif_degraded = bool(effectiveness.get("signal_degraded"))
-                onvif_unavailable = bool(
-                    effectiveness.get("signal_effectiveness_status")
-                    == "transport_unavailable"
-                )
-                verification_reason = (
-                    "route_watch"
-                    if watch is not None
-                    else "onvif_degraded"
-                    if onvif_degraded
-                    else "onvif_unavailable"
-                    if onvif_unavailable
-                    else "persistent_ema"
-                )
-                watch_payload = (
-                    watch.as_dict()
-                    if watch is not None and hasattr(watch, "as_dict")
-                    else {}
-                )
-                verification_result = MotionQualificationResult(
-                    accepted=result.accepted,
-                    score=result.score,
-                    threshold=result.threshold,
-                    reason=result.reason,
-                    frame_count=result.frame_count,
-                    features={
-                        **result.features,
-                        "security_verification": True,
-                        "security_verification_bypass_limits": watch is not None,
-                        "security_verification_reason": verification_reason,
-                        "route_detection_watch": watch_payload,
-                        "onvif_signal_effectiveness_status": effectiveness.get(
-                            "signal_effectiveness_status"
-                        ),
-                    },
-                    telemetry=dict(result.telemetry),
-                )
-                # The ordinary edge remains the efficient primary path.  A
-                # second conditioner guarantees that accepted, persistent
-                # motion is eventually verified even below the operator's
-                # rescue score.  Route evidence or proven ONVIF degradation
-                # accelerates that verification; otherwise it requires more
-                # persistence to keep nuisance cost bounded.
-                verification_policy = replace(
-                    policy,
-                    minimum_score=min(
-                        float(policy.minimum_score),
-                        float(result.threshold),
-                    ),
-                    score_margin=0.0,
-                    minimum_consecutive=(
-                        1
-                        if watch is not None
-                        else policy.minimum_consecutive
-                        if onvif_degraded or onvif_unavailable
-                        else policy.minimum_consecutive + 2
-                    ),
-                    grace_seconds=(
-                        0.0
-                        if watch is not None
-                        else policy.grace_seconds
-                        if onvif_degraded or onvif_unavailable
-                        else policy.grace_seconds + 1.0
-                    ),
-                )
-                verification = self.ema_verification.evaluate(
-                    verification_result,
-                    captured_at,
-                    observed_monotonic,
-                    verification_policy,
-                    detection_enabled=self.state.detection_enabled(),
-                )
-                route_verification = bool(
-                    watch is not None
-                    and verification_result.accepted
-                    and verification_result.reason
-                    not in VISUAL_BACKUP_EXCLUDED_REASONS
-                    and self.state.detection_enabled()
-                )
-                if route_verification:
-                    qualified = EmaQualified(
-                        camera_id=self.camera_id,
-                        captured_at=captured_at,
-                        observed_monotonic=observed_monotonic,
-                        result=verification_result,
-                        required_score=float(result.threshold),
-                        qualifying_samples=1,
-                        window_samples=1,
-                        candidate_started_at=captured_at,
-                    )
-                    decision = EmaSignalDecision(
-                        action=EmaSignalAction.QUALIFIED,
-                        result=verification_result,
-                        required_score=float(result.threshold),
-                        scene_ready=True,
-                        qualifying_samples=1,
-                        window_samples=1,
-                        qualified=qualified,
-                    )
-                    self.ema_v2.clear_candidate()
-                    self.ema_verification.clear_candidate()
-                elif decision.action is EmaSignalAction.QUALIFIED:
-                    self.ema_verification.clear_candidate()
-                elif verification.action is EmaSignalAction.QUALIFIED:
-                    self.ema_v2.clear_candidate()
-                    decision = verification
+            decision = self._rescue_signal_decision(
+                result, captured_at, observed_monotonic,
+            )
         result = decision.result
         if decision.action in {EmaSignalAction.DISABLED, EmaSignalAction.REJECTED}:
             if decision.count_nonpromotion:
@@ -1743,6 +1592,192 @@ class MotionAnalysisService:
                         self._enqueue_replacement_camera_notice(replacement)
                 except ValueError:
                     pass
+
+    def _adaptive_signal_decision(
+        self,
+        result: MotionQualificationResult,
+        captured_at: float,
+        observed_monotonic: float,
+    ) -> EmaSignalDecision | None:
+        """In EMA-triggered mode every accepted sample is a qualified edge."""
+        if not self.state.detection_enabled() or not result.accepted:
+            return None
+        qualified = EmaQualified(
+            camera_id=self.camera_id,
+            captured_at=captured_at,
+            observed_monotonic=observed_monotonic,
+            result=result,
+            required_score=result.threshold,
+            qualifying_samples=1,
+            window_samples=1,
+            candidate_started_at=captured_at,
+        )
+        decision = EmaSignalDecision(
+            action=EmaSignalAction.QUALIFIED,
+            result=result,
+            required_score=result.threshold,
+            scene_ready=True,
+            qualifying_samples=1,
+            window_samples=1,
+            qualified=qualified,
+        )
+        return decision
+
+    def _rescue_signal_decision(
+        self,
+        result: MotionQualificationResult,
+        captured_at: float,
+        observed_monotonic: float,
+    ) -> EmaSignalDecision:
+        """Condition EMA backup motion through the rescue and verification lanes."""
+        with self._visual_lock:
+            policy = self.qualification.visual_backup_policy()
+            decision = self.ema_v2.evaluate(
+                result,
+                captured_at,
+                observed_monotonic,
+                policy,
+                detection_enabled=self.state.detection_enabled(),
+            )
+            watch, effectiveness = self._security_verification_inputs(captured_at)
+            onvif_degraded = bool(effectiveness.get("signal_degraded"))
+            onvif_unavailable = bool(
+                effectiveness.get("signal_effectiveness_status")
+                == "transport_unavailable"
+            )
+            verification_reason = (
+                "route_watch"
+                if watch is not None
+                else "onvif_degraded"
+                if onvif_degraded
+                else "onvif_unavailable"
+                if onvif_unavailable
+                else "persistent_ema"
+            )
+            watch_payload = (
+                watch.as_dict()
+                if watch is not None and hasattr(watch, "as_dict")
+                else {}
+            )
+            verification_result = MotionQualificationResult(
+                accepted=result.accepted,
+                score=result.score,
+                threshold=result.threshold,
+                reason=result.reason,
+                frame_count=result.frame_count,
+                features={
+                    **result.features,
+                    "security_verification": True,
+                    "security_verification_bypass_limits": watch is not None,
+                    "security_verification_reason": verification_reason,
+                    "route_detection_watch": watch_payload,
+                    "onvif_signal_effectiveness_status": effectiveness.get(
+                        "signal_effectiveness_status"
+                    ),
+                },
+                telemetry=dict(result.telemetry),
+            )
+            # The ordinary edge remains the efficient primary path.  A
+            # second conditioner guarantees that accepted, persistent
+            # motion is eventually verified even below the operator's
+            # rescue score.  Route evidence or proven ONVIF degradation
+            # accelerates that verification; otherwise it requires more
+            # persistence to keep nuisance cost bounded.
+            verification_policy = replace(
+                policy,
+                minimum_score=min(
+                    float(policy.minimum_score),
+                    float(result.threshold),
+                ),
+                score_margin=0.0,
+                minimum_consecutive=(
+                    1
+                    if watch is not None
+                    else policy.minimum_consecutive
+                    if onvif_degraded or onvif_unavailable
+                    else policy.minimum_consecutive + 2
+                ),
+                grace_seconds=(
+                    0.0
+                    if watch is not None
+                    else policy.grace_seconds
+                    if onvif_degraded or onvif_unavailable
+                    else policy.grace_seconds + 1.0
+                ),
+            )
+            verification = self.ema_verification.evaluate(
+                verification_result,
+                captured_at,
+                observed_monotonic,
+                verification_policy,
+                detection_enabled=self.state.detection_enabled(),
+            )
+            route_verification = bool(
+                watch is not None
+                and verification_result.accepted
+                and verification_result.reason
+                not in VISUAL_BACKUP_EXCLUDED_REASONS
+                and self.state.detection_enabled()
+            )
+            if route_verification:
+                qualified = EmaQualified(
+                    camera_id=self.camera_id,
+                    captured_at=captured_at,
+                    observed_monotonic=observed_monotonic,
+                    result=verification_result,
+                    required_score=float(result.threshold),
+                    qualifying_samples=1,
+                    window_samples=1,
+                    candidate_started_at=captured_at,
+                )
+                decision = EmaSignalDecision(
+                    action=EmaSignalAction.QUALIFIED,
+                    result=verification_result,
+                    required_score=float(result.threshold),
+                    scene_ready=True,
+                    qualifying_samples=1,
+                    window_samples=1,
+                    qualified=qualified,
+                )
+                self.ema_v2.clear_candidate()
+                self.ema_verification.clear_candidate()
+            elif decision.action is EmaSignalAction.QUALIFIED:
+                self.ema_verification.clear_candidate()
+            elif verification.action is EmaSignalAction.QUALIFIED:
+                self.ema_v2.clear_candidate()
+                decision = verification
+        return decision
+
+    def _security_verification_inputs(
+        self,
+        captured_at: float,
+    ) -> tuple[Any | None, dict[str, Any]]:
+        """Return the active route watch and ONVIF effectiveness, failing soft."""
+        try:
+            watch = (
+                self._route_watch_provider(self.camera_id, captured_at)
+                if self._route_watch_provider is not None
+                else None
+            )
+        except Exception:
+            watch = None
+            LOGGER.exception(
+                "route detection watch lookup failed for %s",
+                self.camera_id,
+            )
+        try:
+            effectiveness = (
+                self._onvif_effectiveness_provider()
+                if self._onvif_effectiveness_provider is not None
+                else {}
+            )
+        except Exception:
+            effectiveness = {}
+            LOGGER.exception(
+                "ONVIF effectiveness lookup failed for %s",
+                self.camera_id,
+            )
+        return watch, effectiveness
 
     def consider_route_watch(self, watch: Any) -> bool:
         """Replay recent accepted EMA evidence when route confirmation is late."""
