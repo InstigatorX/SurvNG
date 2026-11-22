@@ -1,9 +1,16 @@
-"""Continuous EMA analysis processes each frame once without changing decisions.
+"""Continuous EMA analysis processes each frame once.
 
 ``MotionAnalysisService.analyze_continuous`` used to pass its whole frame ring
 to the stateful qualification graph on every cycle. It now passes the newest
 already-processed frame as an anchor plus newer frames. These tests replay the
-same frame sequence through both forms and require identical decisions.
+same frame sequence through the incremental path and through a full-window
+replay on the current code, and require the same accept/reason/score.
+
+That is not identity with the code before the change: the illumination stage
+now keeps each pair's mask from when its newer frame was analysed, where a
+full replay recomputed it against a background that had already advanced.
+Scores can differ in the fourth decimal on lighting scenes; the intended
+behaviour is pinned in test_illumination_pair_mask_is_frozen_at_first_analysis.
 """
 
 from __future__ import annotations
@@ -180,3 +187,47 @@ def test_incremental_analysis_passes_only_new_frames_after_warmup() -> None:
         assert calls[-1] == len(analysis.color_frames) > 2
     finally:
         qualification.qualification_pipeline.close()
+
+
+def test_illumination_pair_mask_is_frozen_at_first_analysis() -> None:
+    """A later call with a different mask for the same frame keeps the first."""
+    from types import SimpleNamespace
+
+    from survng.app.motion_pipeline.adaptive_stages import (
+        IlluminationChangeFilterStage,
+        _IlluminationRuntime,
+    )
+
+    rng = np.random.default_rng(3)
+    base = rng.integers(40, 160, size=(90, 160, 3), dtype=np.uint8)
+    brighter = np.clip(base.astype(np.int16) + 50, 0, 255).astype(np.uint8)
+    first_mask = np.zeros((90, 160), np.uint8)
+    first_mask[10:60, 10:90] = 255
+    later_mask = np.zeros((90, 160), np.uint8)
+    later_mask[60:88, 100:158] = 255
+    stage = IlluminationChangeFilterStage("illumination")
+    expected = stage._pair_evidence(base, brighter, first_mask)
+    recomputed = stage._pair_evidence(base, brighter, later_mask)
+    assert expected != recomputed  # the masks are distinguishable
+
+    def context(timestamps, frames, masks):
+        return SimpleNamespace(
+            frame_history=frames, motion_mask_history=masks, frame_timestamps=timestamps,
+            configuration={"history_started_at": 1.0},
+        )
+
+    state = _IlluminationRuntime()
+    gray = (None, None, None)
+    first = stage._windowed_pair_evidence(
+        state, context((1.0, 2.0), (base, brighter), [first_mask]), gray, evaluate=True,
+    )
+    # The background has since advanced: the context now offers another mask
+    # for the frame at 2.0. The pair (1.0, 2.0) keeps the one it was scored with.
+    later = stage._windowed_pair_evidence(
+        state,
+        context((1.0, 2.0, 3.0), (base, brighter, brighter), [later_mask, later_mask]),
+        gray,
+        evaluate=True,
+    )
+    assert first == [expected]
+    assert later[0] == expected

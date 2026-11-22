@@ -294,11 +294,13 @@ applies a 5x5 Gaussian blur once per frame. Retained per camera:
   `max(12, round(sample_fps * (window_seconds + post_trigger_seconds + 3)))`,
   36 with defaults;
 - a 4-frame color and blurred window for continuous analysis;
-- an evidence ring (6–16 frames) holding the analysis frame plus a reference to
-  the read-only full-resolution live capture it came from. Those references
-  share the capture buffers and are bounded per camera by
-  `EVIDENCE_SOURCE_FRAME_BUDGET_BYTES` (64 MiB); older entries keep only the
-  analysis frame.
+- an evidence ring (12–16 frames: the motion ring size, capped at 16) holding
+  the analysis frame plus a reference to the read-only full-resolution live
+  capture it came from. Those references share the capture buffers and are
+  bounded per camera by `EVIDENCE_SOURCE_FRAME_BUDGET_BYTES` (64 MiB); older
+  entries keep only the analysis frame. A live frame larger than the inference
+  worker accepts (`MAX_INFERENCE_FRAME_BYTES`, 64 MiB, about 6300 px wide at
+  16:9) is never kept, so the fast check uses its analysis-width copy.
 
 A backward wall-clock step clears the rings and resets the EMA runtime; an
 equal timestamp is treated as a duplicate sample.
@@ -314,7 +316,12 @@ keeps filling its rings.
 
 The EMA stages are stateful and process each frame exactly once. Each cycle
 passes the newest frame already processed (as the pair anchor) plus newer
-frames; after a runtime reset the retained window is replayed once.
+frames; after a runtime reset the retained window is replayed once. The
+illumination filter keeps each frame pair's motion mask from when the newer
+frame was analysed. Before incremental analysis it recomputed that mask on
+every cycle against a background that had already advanced, so lighting-scene
+scores can differ from older builds in the fourth decimal; accept/reject
+changes only for a score that close to its threshold.
 
 - **Background:** a selective EMA background learns quiet pixels at
   `learning_rate`, learns quickly on whole-scene changes
@@ -860,7 +867,9 @@ or `bypass` and no sources. Configurations saved by the UI may still contain
 `source_thresholds`, `source_weights`, `weighted_threshold`,
 `minimum_sources`, `require_warmed` or `fail_open`; they load and are
 ignored. The UI records "EMA validation off" as policy `bypass` with
-`include_primary: false`; either one disables EMA validation.
+`include_primary: false`. Only policy `bypass` turns EMA validation off:
+`include_primary: false` with policy `audit` rejects every generic notice
+(`adaptive_validation_disabled`), so a hand-edited config must set both.
 
 AI audit advisor:
 
