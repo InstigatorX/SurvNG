@@ -101,29 +101,14 @@ def clean_profile(raw: object) -> dict | None:
     return {"width": width, "height": height, "tiers": cleaned, "resolutions": clean_resolutions}
 
 
-def media_ingest_root(server, bind: str, base_path: str = "") -> str:
-    """LAN address for the encoder's video upload. The public proxy buffers that body."""
-    host, port = "", 80
-    if isinstance(server, (list, tuple)) and len(server) >= 2:
-        host, port = str(server[0] or ""), int(server[1])
-    if host in {"", "0.0.0.0", "::", "::0"}:
-        host = str(bind or "").strip()
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    if not host or not 1 <= port <= 65535:
-        raise ValueError("no direct ingest address")
-    prefix = str(base_path or "").strip().rstrip("/")
-    if prefix and not prefix.startswith("/"):
-        prefix = "/" + prefix
-    return install_origin(f"http://{host}:{port}{prefix}")
-
-
 def public_api_root(base_url: str, base_path: str = "") -> str:
     """Host the admin reached, plus the /survng prefix when the API lives under it."""
     root = install_origin(str(base_url).strip())
     prefix = str(base_path or "").strip().rstrip("/")
-    if prefix and not (root.endswith(prefix) or root.endswith(prefix + "/")):
-        root = f"{root}{prefix if prefix.startswith('/') else '/' + prefix}"
+    if prefix:
+        prefix = "/" + prefix.lstrip("/")
+        if not urlsplit(root).path.endswith(prefix):
+            root += prefix
     return install_origin(root)
 
 
@@ -150,12 +135,47 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 ORIGIN='{origin}'
 TOKEN='{token}'
+marker=/opt/survng-homekit-node/.installing-node-id
+fresh_install_help() {{
+  echo "Fresh encoder setup was interrupted." >&2
+  if grep -qx 'pending' "$marker"; then
+    echo "The encoder ID was not recorded. Verify enrollment records on the server before revoking any node." >&2
+    return
+  fi
+  echo "The enrollment ID is recorded in $marker." >&2
+  echo "If the service is running and checking in, keep the installation and remove only that marker." >&2
+  echo "For a failed new container, disable its service and revoke that ID with the admin DELETE /api/homekit/nodes/<id> endpoint. Recreate the empty container and use Add encoder again." >&2
+}}
+if [ -f "$marker" ]; then
+  fresh_install_help
+  exit 1
+fi
+for path in /opt/survng-homekit-node /etc/survng/homekit-node.env /etc/systemd/system/survng-homekit-node.service; do
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    echo "An encoder installation already exists. Use the encoder migration procedure." >&2
+    exit 1
+  fi
+done
 if [ "$(uname -m)" != '{platform.machine()}' ]; then
   echo "This encoder must match the server architecture ({platform.machine()})." >&2
   exit 1
 fi
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+reserved=
+enrollment_attempted=
+cleanup() {{
+  result=$?
+  rm -rf "$work"
+  if [ "$result" -ne 0 ] && [ -n "$reserved" ]; then
+    if [ -n "$enrollment_attempted" ]; then
+      fresh_install_help
+    else
+      rm -f "$marker"
+      rmdir /opt/survng-homekit-node
+    fi
+  fi
+}}
+trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -170,44 +190,76 @@ if ! command -v node >/dev/null 2>&1 || [ "$(node --version | cut -d. -f1)" != "
   tar -xJf "$work/survng-node.tar.xz" -C /usr/local --strip-components=1
   rm -f "$work/survng-node.tar.xz"
 fi
-cred=$(curl -fsSL -X POST "$ORIGIN/api/homekit/enroll/$TOKEN")
+mkdir -m 0700 /opt/survng-homekit-node
+reserved=1
+printf 'pending\\n' > "$marker"
+enrollment_attempted=1
+cred=$(curl -fsS --connect-timeout 10 --max-time 30 -X POST "$ORIGIN/api/homekit/enroll/$TOKEN")
 secret=$(printf '%s\\n' "$cred" | sed -n 's/^SURVNG_NODE_SECRET=//p')
 case "$secret" in
   *[!A-Za-z0-9_-]*|"") echo "Enrollment was rejected." >&2; exit 1 ;;
 esac
-install -d -m 0700 /etc/survng /opt/survng-homekit-node
+node_id=$(printf '%s\\n' "$cred" | sed -n 's/^SURVNG_NODE_ID=//p')
+case "$node_id" in
+  *[!0-9a-f]*|"") echo "Invalid enrollment ID." >&2; exit 1 ;;
+esac
+[ "${{#node_id}}" -eq 16 ] || {{ echo "Invalid enrollment ID." >&2; exit 1; }}
+printf '%s\\n' "$node_id" > "$marker"
+install -d -m 0700 /etc/survng
 printf '%s\\nSURVNG_ORIGIN=%s\\nSURVNG_FFMPEG=%s\\n' "$cred" "$ORIGIN" /opt/survng-homekit-node/bin/ffmpeg > /etc/survng/homekit-node.env
 chmod 0600 /etc/survng/homekit-node.env
-curl -fsSL -H "Authorization: Bearer $secret" -o "$work/survng-homekit-agent.tgz" "$ORIGIN/api/homekit/nodes/agent"
-agent_checksum=$(sha256sum "$work/survng-homekit-agent.tgz")
-agent_checksum=${{agent_checksum%% *}}
-rm -rf /opt/survng-homekit-node/dist /opt/survng-homekit-node/node_modules
+curl -fsS --connect-timeout 10 --max-time 600 -H "Authorization: Bearer $secret" "$ORIGIN/api/homekit/nodes/releases" -o "$work/releases.json"
+agent_release=$(node -e '
+const releases = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+for (const kind of ["agent", "ffmpeg", "runtime"]) {{
+  if (typeof releases[kind] !== "string" || !/^[0-9a-f]{{64}}$/.test(releases[kind])) throw Error("Incomplete encoder release metadata");
+}}
+console.log(releases.agent);
+' "$work/releases.json")
+curl -fsS --connect-timeout 10 --max-time 600 -H "Authorization: Bearer $secret" -o "$work/survng-homekit-agent.tgz" "$ORIGIN/api/homekit/nodes/agent?release=$agent_release"
+printf '%s  %s\\n' "$agent_release" "$work/survng-homekit-agent.tgz" | sha256sum --check --status
 tar -xzf "$work/survng-homekit-agent.tgz" -C /opt/survng-homekit-node
 rm -f "$work/survng-homekit-agent.tgz"
-curl -fsSL -H "Authorization: Bearer $secret" -o "$work/survng-homekit-ffmpeg.tgz" "$ORIGIN/api/homekit/nodes/ffmpeg"
-if tar -tzf "$work/survng-homekit-ffmpeg.tgz" | grep -vxE 'ffmpeg|ffprobe'; then
-  echo "Encoder tools were rejected." >&2
-  exit 1
-fi
-install -d -m 0755 /opt/survng-homekit-node/bin
-tar -xzf "$work/survng-homekit-ffmpeg.tgz" -C /opt/survng-homekit-node/bin
+extract_tools() {{
+  archive=$1
+  destination=$2
+  shift 2
+  printf '%s\\n' "$@" | LC_ALL=C sort > "$work/expected"
+  tar -tzf "$archive" > "$work/members"
+  LC_ALL=C sort -o "$work/members" "$work/members"
+  tar -tvzf "$archive" > "$work/types"
+  if ! cmp -s "$work/expected" "$work/members" || grep -qv '^-' "$work/types"; then
+    echo "Encoder tools archive was rejected." >&2
+    exit 1
+  fi
+  install -d -m 0755 "$destination"
+  tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$destination"
+  rm -f "$archive"
+}}
+curl -fsS --connect-timeout 10 --max-time 600 -H "Authorization: Bearer $secret" -o "$work/survng-homekit-ffmpeg.tgz" "$ORIGIN/api/homekit/nodes/ffmpeg"
+extract_tools "$work/survng-homekit-ffmpeg.tgz" /opt/survng-homekit-node/bin ffmpeg ffprobe
 chmod 0755 /opt/survng-homekit-node/bin/ffmpeg /opt/survng-homekit-node/bin/ffprobe
-rm -f "$work/survng-homekit-ffmpeg.tgz"
-/opt/survng-homekit-node/bin/ffmpeg -hide_banner -encoders > "$work/survng-ffmpeg-encoders"
-grep -q libx265 "$work/survng-ffmpeg-encoders"
-grep -q libopus "$work/survng-ffmpeg-encoders"
-grep -q ' aac ' "$work/survng-ffmpeg-encoders"
-grep -q mjpeg "$work/survng-ffmpeg-encoders"
-rm -f "$work/survng-ffmpeg-encoders"
-curl -fsSL -H "Authorization: Bearer $secret" -o "$work/survng-homekit-runtime.tgz" "$ORIGIN/api/homekit/nodes/runtime"
-if tar -tzf "$work/survng-homekit-runtime.tgz" | grep -vxE 'dri|dri/iHD_drv_video.so|lib[A-Za-z0-9._+-]+[.]so([.][A-Za-z0-9._+-]+)?'; then
-  echo "Encoder runtime was rejected." >&2
-  exit 1
-fi
-rm -rf /opt/survng-homekit-node/lib
-install -d -m 0755 /opt/survng-homekit-node/lib
-tar -xzf "$work/survng-homekit-runtime.tgz" -C /opt/survng-homekit-node/lib
-rm -f "$work/survng-homekit-runtime.tgz"
+curl -fsS --connect-timeout 10 --max-time 600 -H "Authorization: Bearer $secret" -o "$work/survng-homekit-runtime.tgz" "$ORIGIN/api/homekit/nodes/runtime"
+extract_tools "$work/survng-homekit-runtime.tgz" /opt/survng-homekit-node/lib {" ".join(RUNTIME_SONAMES)} dri/iHD_drv_video.so
+cd /opt/survng-homekit-node
+node --input-type=module - "$work/releases.json" <<'VERIFY'
+import {{ createHash }} from "node:crypto";
+import {{ createReadStream }} from "node:fs";
+import {{ readFile, writeFile }} from "node:fs/promises";
+const releases = JSON.parse(await readFile(process.argv[2], "utf8"));
+async function verify(kind, directory, names) {{
+  const hash = createHash("sha256");
+  for (const name of names) {{
+    if (kind === "runtime") hash.update(name);
+    for await (const chunk of createReadStream(directory + "/" + name)) hash.update(chunk);
+  }}
+  if (hash.digest("hex") !== releases[kind]) throw Error("Encoder " + kind + " checksum mismatch");
+}}
+await verify("ffmpeg", "bin", ["ffmpeg", "ffprobe"]);
+await verify("runtime", "lib", {json.dumps([*RUNTIME_SONAMES, "dri/iHD_drv_video.so"])});
+await writeFile(".releases.json", JSON.stringify(releases), {{ mode: 0o600, flag: "wx" }});
+VERIFY
+node /opt/survng-homekit-node/dist/src/agent-launcher.js --migrate /opt/survng-homekit-node /opt/survng-homekit-node
 node_bin=$(command -v node)
 cat > /etc/systemd/system/survng-homekit-node.service <<EOF
 [Unit]
@@ -230,18 +282,9 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
-sync_body=$(curl -fsSL -m 25 -H "Authorization: Bearer $secret" -H "content-type: application/json" -d '{{"name":"encoder"}}' "$ORIGIN/api/homekit/nodes/sync") || sync_body='{{}}'
-printf '%s' "$sync_body" | node -e '
-const fs = require("fs");
-let releases = {{}};
-try {{ releases = JSON.parse(fs.readFileSync(0, "utf8")).releases || {{}}; }}
-catch {{ console.error("Could not read the encoder tools release metadata."); }}
-fs.writeFileSync("/opt/survng-homekit-node/.releases.json", JSON.stringify({{
-  agent: process.argv[1], ffmpeg: String(releases.ffmpeg || ""), runtime: String(releases.runtime || ""),
-}}), {{ mode: 0o600 }});
-' "$agent_checksum"
 systemctl daemon-reload
 systemctl enable --now survng-homekit-node.service
+rm "$marker"
 echo "SurvNG HomeKit encoder is installed and checking in."
 """
 
@@ -253,14 +296,18 @@ class _TierFeed:
         self._outbound: dict[socket.socket, bytearray] = {}
         self.closed = False
         self.lock = threading.Lock()
+        self._bound = False
+        self.thread = threading.Thread(target=self._accept, name=f"homekit-feed-{path.parent.name}-{path.stem}", daemon=True)
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        if path.exists() or path.is_symlink():
-            path.unlink()
-        self.server.bind(str(path))
-        os.chmod(path, 0o600)
+
+    def start(self) -> None:
+        if self.path.exists() or self.path.is_symlink():
+            self.path.unlink()
+        self.server.bind(str(self.path))
+        self._bound = True
+        os.chmod(self.path, 0o600)
         self.server.listen(4)
         self.server.settimeout(0.5)
-        self.thread = threading.Thread(target=self._accept, name=f"homekit-feed-{path.parent.name}-{path.stem}", daemon=True)
         self.thread.start()
 
     def _accept(self) -> None:
@@ -355,10 +402,13 @@ class _TierFeed:
         with self.lock:
             for client in list(self.clients):
                 self._drop_client(client)
-        self.path.unlink(missing_ok=True)
-        self.thread.join(timeout=1)
+        if self.thread.ident is not None:
+            self.thread.join(timeout=1)
         if self.thread.is_alive():
             raise RuntimeError("HomeKit feed shutdown incomplete")
+        if self._bound:
+            self.path.unlink(missing_ok=True)
+            self._bound = False
 
 
 @dataclass(frozen=True, eq=False)
@@ -382,6 +432,7 @@ class NodeRegistry:
         self.directory = directory
         self.path = directory / "nodes.json"
         self.lock = threading.RLock()
+        self._close_lock = threading.Lock()
         self.updates = threading.Condition()
         self.generation = 0
         self.closed = True
@@ -392,7 +443,6 @@ class NodeRegistry:
         self.uploads: dict[tuple[str, int], EncoderUploadClaim] = {}
         self.snapshots: dict[str, tuple[threading.Event, Path, str]] = {}
         self.sync_requests: dict[str, _SyncRequest] = {}
-        self.reopen()
 
     def _bump(self) -> None:
         with self.updates:
@@ -436,9 +486,12 @@ class NodeRegistry:
         self.tokens = tokens
         self.nodes = {item["id"]: item for item in nodes}
 
-    def _save(self) -> None:
+    def _require_open(self) -> None:
         if self.closed:
             raise RuntimeError("HomeKit registry is closed")
+
+    def _save(self) -> None:
+        self._require_open()
         payload = {"version": 1, "tokens": self.tokens, "nodes": list(self.nodes.values())}
         temporary = self.path.with_suffix(".tmp")
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
@@ -454,6 +507,7 @@ class NodeRegistry:
         token = secrets.token_urlsafe(32)
         expires = time.time() + TOKEN_SECONDS
         with self.lock:
+            self._require_open()
             self.tokens = [item for item in self.tokens if item.get("expires", 0) > time.time()]
             self.tokens.append({"hash": _hash(token), "expires": expires, "origin": origin})
             self._save()
@@ -476,6 +530,7 @@ class NodeRegistry:
 
     def enrollment_script(self, token: str, origin: str | None = None) -> str:
         with self.lock:
+            self._require_open()
             now = time.time()
             match = next((item for item in self.tokens
                 if item.get("expires", 0) > now and isinstance(item.get("hash"), str) and isinstance(item.get("origin"), str)
@@ -490,6 +545,7 @@ class NodeRegistry:
     def complete_enrollment(self, token: str, name: str) -> dict:
         name = "".join(character for character in name if character.isprintable() and character not in "\r\n")[:64] or "encoder"
         with self.lock:
+            self._require_open()
             self._take_token(token)
             node_id = secrets.token_hex(8)
             secret = secrets.token_urlsafe(32)
@@ -513,8 +569,7 @@ class NodeRegistry:
 
     def update_report(self, node_id: str, report: dict) -> None:
         with self.lock:
-            if self.closed:
-                raise RuntimeError("HomeKit registry is closed")
+            self._require_open()
             node = self.nodes.get(node_id)
             if node is None:
                 raise KeyError(node_id)
@@ -538,6 +593,9 @@ class NodeRegistry:
             node["revisions"] = {key: value for key, value in revisions.items()
                 if isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)}
             node["runningVersion"] = _version(report.get("runningVersion"))
+            node["releaseProtocol"] = report.get("releaseProtocol")
+            if node["releaseProtocol"] != 1:
+                self.sync_requests.pop(node_id, None)
             request = self.sync_requests.get(node_id)
             if request is not None:
                 if node["runningVersion"] == request.version:
@@ -549,13 +607,17 @@ class NodeRegistry:
 
     def request_sync(self, node_id: str) -> None:
         with self.lock:
-            if node_id not in self.nodes:
-                raise KeyError(node_id)
+            self._require_open()
+            node = self.nodes[node_id]
         available = available_agent_version()
         with self.lock:
-            node = self.nodes[node_id]
-            if self.closed or time.time() - node["lastSeen"] > ONLINE_SECONDS:
+            self._require_open()
+            if self.nodes.get(node_id) is not node:
+                raise KeyError(node_id)
+            if time.time() - node["lastSeen"] > ONLINE_SECONDS:
                 raise RuntimeError("HomeKit encoder is offline")
+            if node.get("releaseProtocol") != 1:
+                raise RuntimeError("HomeKit encoder requires local migration before updates")
             if available is None:
                 raise RuntimeError("HomeKit encoder release is unavailable")
             if node.get("runningVersion") == available:
@@ -579,7 +641,10 @@ class NodeRegistry:
     def sync(self, node: dict, report: dict, assignments: list[dict] | Callable[[], list[dict]], timeout: float) -> dict:
         with self.updates:
             seen = self.generation
-        self.update_report(node["id"], report)
+        with self.lock:
+            if self.nodes.get(node["id"]) is not node:
+                raise KeyError(node["id"])
+            self.update_report(node["id"], report)
         deadline = time.monotonic() + max(0, timeout)
         with self.updates:
             while time.monotonic() < deadline and self.generation == seen:
@@ -587,7 +652,11 @@ class NodeRegistry:
                 if remaining <= 0:
                     break
                 self.updates.wait(remaining)
-        return self.assignment_payload(node["id"], assignments() if callable(assignments) else assignments)
+        current = assignments() if callable(assignments) else assignments
+        with self.lock:
+            if self.nodes.get(node["id"]) is not node:
+                raise KeyError(node["id"])
+            return self.assignment_payload(node["id"], current)
 
     def assignment_payload(self, node_id: str, assignments: list[dict]) -> dict:
         with self.lock:
@@ -645,20 +714,37 @@ class NodeRegistry:
     def prepare_feeds(self, camera_id: str, tiers: list[int]) -> Path:
         directory = self.directory / "feeds" / camera_id
         with self.lock:
-            if self.closed:
-                raise RuntimeError("HomeKit registry is closed")
+            self._require_open()
             _private_directory(self.directory / "feeds")
             _private_directory(directory)
             for tier in tiers:
-                if (camera_id, tier) not in self.feeds:
-                    self.feeds[(camera_id, tier)] = _TierFeed(directory / f"{tier}.sock", self._bump)
+                key = (camera_id, tier)
+                existing = self.feeds.get(key)
+                if existing is not None:
+                    if existing.closed:
+                        raise RuntimeError("HomeKit feed shutdown incomplete")
+                    continue
+                feed = _TierFeed(directory / f"{tier}.sock", self._bump)
+                self.feeds[key] = feed
+                try:
+                    feed.start()
+                except BaseException as start_error:
+                    try:
+                        feed.close()
+                    except Exception as close_error:
+                        raise RuntimeError("HomeKit feed startup cleanup incomplete") from BaseExceptionGroup(
+                            "HomeKit feed startup", [start_error, close_error],
+                        )
+                    del self.feeds[key]
+                    raise
         return directory
 
     def write_feed(self, camera_id: str, tier: int, data: bytes) -> None:
         with self.lock:
-            feed = self.feeds.get((camera_id, tier))
-        if feed:
-            feed.write(data)
+            if not self.closed:
+                feed = self.feeds.get((camera_id, tier))
+                if feed:
+                    feed.write(data)
 
     def feed_allowed(self, node: dict, camera_id: str, tier: str, assignments: list[dict], revision: str) -> bool:
         if not revision or tier not in {"1", "2", "3"}:
@@ -715,7 +801,8 @@ class NodeRegistry:
 
     def begin_snapshot(self, camera_id: str, destination: Path) -> tuple[threading.Event, Path, str]:
         with self.lock:
-            if self.closed or camera_id in self.snapshots:
+            self._require_open()
+            if camera_id in self.snapshots:
                 raise RuntimeError("snapshot already pending")
             waiter = (threading.Event(), destination, secrets.token_hex(16))
             self.snapshots[camera_id] = waiter
@@ -750,6 +837,7 @@ class NodeRegistry:
         if assigned:
             raise RuntimeError("encoder is assigned to a camera")
         with self.lock:
+            self._require_open()
             if node_id not in self.nodes:
                 raise KeyError(node_id)
             self.nodes.pop(node_id)
@@ -770,7 +858,9 @@ class NodeRegistry:
                 assigned = [camera.id for camera in cameras if camera.homekit.encoder == node_id]
                 running = node.get("runningVersion")
                 request = self.sync_requests.get(node_id)
-                if available is None:
+                if node.get("lastSeen") and node.get("releaseProtocol") != 1:
+                    update_state = "migration_required"
+                elif available is None:
                     update_state = "unavailable"
                 elif running == available:
                     update_state = "current"
@@ -786,21 +876,35 @@ class NodeRegistry:
             return rows
 
     def close(self) -> None:
-        with self.lock:
-            self.closed = True
-            feeds = list(self.feeds.values())
-            self.feeds.clear()
-            self.uploads.clear()
-            self.snapshots.clear()
-            self.sync_requests.clear()
-            self._bump()
-        for feed in feeds:
-            feed.close()
+        with self._close_lock:
+            with self.lock:
+                if self.closed and not self.feeds:
+                    return
+                self.closed = True
+                feeds = list(self.feeds.items())
+                self.uploads.clear()
+                self.snapshots.clear()
+                self.sync_requests.clear()
+                self._bump()
+            first_error = None
+            for key, feed in feeds:
+                try:
+                    feed.close()
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+                else:
+                    with self.lock:
+                        del self.feeds[key]
+            if first_error is not None:
+                raise RuntimeError("HomeKit feed shutdown incomplete") from first_error
 
     def reopen(self) -> None:
         with self.lock:
             if not self.closed:
                 return
+            if self.feeds:
+                raise RuntimeError("HomeKit feed shutdown incomplete")
             try:
                 _private_directory(self.directory)
                 self._load()

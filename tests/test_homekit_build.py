@@ -74,6 +74,8 @@ class FakeToolchain:
             source = (cwd / "src" / "agent.ts").read_text()
             (cwd / "dist" / "src" / "agent.js").write_text(source)
             (cwd / "dist" / "src" / "camera.js").write_text(source)
+            (cwd / "dist" / "src" / "agent-launcher.js").write_text(source)
+            (cwd / "dist" / "src" / "agent-generations.js").write_text(source)
         return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
 
 
@@ -108,7 +110,7 @@ def test_build_activates_a_verified_bundle_and_skips_when_current(tmp_path):
     assert digest == hashlib.sha256(payload).hexdigest()
     assert digest == homekit_build.release_archive_version(release)
     with tarfile.open(fileobj=io.BytesIO(payload)) as archive:
-        assert {"dist/src/agent.js", "dist/src/camera.js", "node_modules/werift/package.json"} <= set(archive.getnames())
+        assert {"dist/src/agent.js", "dist/src/agent-launcher.js", "dist/src/agent-generations.js", "dist/src/camera.js", "node_modules/werift/package.json"} <= set(archive.getnames())
         assert str(homekit_build.MANIFEST) not in archive.getnames()
     assert not list(root.glob(".build-*"))
     # Packages install from the lockfile in staging, never in the live tree.

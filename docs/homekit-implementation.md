@@ -79,9 +79,11 @@ negative tests for each; it does not reject an otherwise valid GPB picture label
 
 Playback also had a separate, reproduced pacing bug. FFmpeg's demuxer probe
 buffered video and then dumped roughly eight seconds of media into RTP in 2.93
-seconds. Shared-source consumers now use timestamp-based real-time reads, a
-one-millisecond initial burst and no accelerated catch-up. An exact zero burst
-would restore FFmpeg's default half-second burst, so it is deliberately avoided.
+seconds. Shared-source consumers use timestamp-based real-time reads and a
+one-millisecond initial burst. At startup the camera worker checks whether its
+configured FFmpeg supports explicit catch-up control and disables accelerated
+catch-up where supported. Older builds use their native real-time pacing.
+An exact zero burst would restore FFmpeg's default half-second burst.
 The same 120-frame diagnostic then spanned about 7.84 seconds for eight seconds
 of media, with no local sequence gaps. The automated real-input test checks
 pacing over a four-second window, allowing bounded codec-startup latency.
@@ -125,8 +127,10 @@ The Python manager owns one optional Node worker process group per enabled
 camera. Camera URLs travel over an inherited pipe, not the Node command line or
 persisted worker configuration. A versioned admission protocol reserves media
 capacity before each child starts, records its actual process PID, and releases
-its lease after child closure. Crashed workers and their FFmpeg descendants are
-terminated as a group before reservations are released. Disabled/off cameras stop
+its lease after child closure. A shared-source consumer also registers its source
+release before waiting for the supervisor to acknowledge the child. Crashed
+workers and their FFmpeg descendants are terminated as a group before reservations
+are released. Disabled/off cameras stop
 workers; restart, disable/enable and independent camera changes preserve identity.
 
 Each demanded video tier has one shared live HEVC/AAC MPEG-TS producer. Recording
@@ -141,6 +145,9 @@ Two same-tier recording prebuffers therefore consume two encoders; live viewers
 can join them without starting two more encoders. A different requested tier
 still requires available encoder capacity. No indexed recording is used as a
 pretend live source.
+
+When privacy or streaming permission is turned off, remote WebRTC stops
+forwarding new audio and video packets before waiting for FFmpeg teardown.
 
 The recording ring is bounded by time and bytes. Coverage and pre-roll now use
 MP4 sample durations, including AAC alignment, rather than an assumed two-second
@@ -165,11 +172,26 @@ camera ID; collisions require a custom port. Backup this state with the database
 Only an explicit reset removes HomeKit identity and HAP state for that camera.
 Disablement, camera removal, startup failure and service shutdown never reset it.
 
-All `/api/homekit` routes require admin scope. Status is allowlisted; pairing uses
+HomeKit administration routes require admin scope. Encoder enrollment and sync
+use their own enrollment or node credentials. Status is allowlisted; pairing uses
 an explicit POST and no-store response. QR generation uses existing OpenCV,
 without an external QR service or another dependency. The UI clears setup
 material on backgrounding, navigation, connection failure, successful pairing,
 or after two minutes. Reset requires camera-specific confirmation.
+
+Remote encoders upload through their enrolled server URL by default, including
+native HTTPS. A reverse proxy on that path must stream the request body to
+SurvNG without buffering it. When that is impractical, set `homekit.ingest_origin`
+to a separate, certificate-valid HTTPS origin without a path. Use a trusted
+proxy for the same SurvNG instance because it receives the encoder bearer token
+and media. SurvNG combines the origin
+with the effective web base path. The encoder drains existing uploads when that
+endpoint changes. Clear the override to resume using the enrolled URL.
+
+If the public base path changes, update `SURVNG_ORIGIN` in each installed
+encoder's systemd environment file and restart the encoder. Keep the existing
+node ID and secret, so re-enrollment is unnecessary. Restart or upgrade legacy
+agents that may still hold a previously advertised LAN endpoint in memory.
 
 Validation covers real H.264/AAC input over a local HTTP fixture, shared live and
 recording normalization to HEVC, Opus RTP, decoded fMP4 with/without audio,

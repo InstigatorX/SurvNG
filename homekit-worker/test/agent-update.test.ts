@@ -1,25 +1,22 @@
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { replaceUpdate, validateArchive } from '../src/agent-update.js';
+import { validateArchive, verifyToolRelease } from '../src/agent-update.js';
 
-test('a failed multi-component update restores all installed components', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'survng-update-test-'));
+test('the FFmpeg release covers both staged executables', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'survng-tools-test-'));
   try {
-    await writeFile(join(root, 'package.json'), 'old package');
-    await mkdir(join(root, 'dist'));
-    await writeFile(join(root, 'dist', 'version'), 'old program');
-    await writeFile(join(root, 'new-package'), 'new package');
-    await assert.rejects(replaceUpdate(root, [
-      { name: 'package.json', source: join(root, 'new-package') },
-      { name: 'dist', source: join(root, 'missing-stage') },
-    ]));
-    assert.equal(await readFile(join(root, 'package.json'), 'utf8'), 'old package');
-    assert.equal(await readFile(join(root, 'dist', 'version'), 'utf8'), 'old program');
+    await writeFile(join(root, 'ffmpeg'), 'encoder');
+    await writeFile(join(root, 'ffprobe'), 'probe');
+    const digest = createHash('sha256').update('encoderprobe').digest('hex');
+    await verifyToolRelease('ffmpeg', digest, root, new AbortController().signal);
+    await writeFile(join(root, 'ffprobe'), 'stale probe');
+    await assert.rejects(verifyToolRelease('ffmpeg', digest, root, new AbortController().signal), /release mismatch/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
