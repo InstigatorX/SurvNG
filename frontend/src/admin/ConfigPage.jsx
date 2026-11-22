@@ -72,6 +72,7 @@ import { defaultCamera, CameraStreamsEditor, CameraOnvifEditor, LiveViewFramingE
 import { AccessSettings } from "./AccessSettings.jsx";
 import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
 import { AdminOverview } from "./AdminOverview.jsx";
+import { normalizeTextSize, TEXT_SIZE_META, TEXT_SIZES } from "../textSize.mjs";
 import { HealthSummary } from "./HealthSummary.jsx";
 import { ChangeReviewPanel } from "./ChangeReview.jsx";
 import { CameraStudioList } from "./CameraStudioList.jsx";
@@ -801,7 +802,7 @@ export function CalibrationLab(props) {
   return <SystemReviewPanel {...props} />;
 }
 
-export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContextChange }) {
+export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = "default", setTextSize = null, onAssistantContextChange }) {
   const initialAdminSearch = useMemo(() => window.location.search, []);
   const initialAdminParams = useMemo(() => new URLSearchParams(initialAdminSearch), [initialAdminSearch]);
   const initialAdminWorkspace = useMemo(() => resolveAdminWorkspace(
@@ -2180,6 +2181,8 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 setTimeZone={setTimeZone}
                 theme={theme}
                 setTheme={setTheme}
+                textSize={textSize}
+                setTextSize={setTextSize}
                 accelerator={accelerator}
                 detectorModels={detectorModels}
                 recordingCache={recordingCache}
@@ -3669,7 +3672,7 @@ export function RetentionSummary({ status }) {
   );
 }
 
-export function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenSecretVisibleChange, onOpenApiTokens = null, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, runtimeStatus = [], advisorCameraId = "", onAdvisorCameraIdChange = null, section, detectionSection = "object", onDetectionSectionChange = null }) {
+export function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenSecretVisibleChange, onOpenApiTokens = null, timeZone, setTimeZone, theme, setTheme, textSize = "default", setTextSize = null, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, runtimeStatus = [], advisorCameraId = "", onAdvisorCameraIdChange = null, section, detectionSection = "object", onDetectionSectionChange = null }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
   const [serverRestart, setServerRestart] = useState({ state: "idle", text: "" });
   const [productUpdate, setProductUpdate] = useState(null);
@@ -4008,7 +4011,10 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
           <label>Theme<select value={theme} onChange={(event) => setTheme(event.target.value)}>
             {THEMES.map((value) => <option key={value} value={value}>{THEME_META[value].label}</option>)}
           </select></label>
-          <p className="admin-action-note">Timezone and theme apply immediately in this browser. Web Base Path is included in Save settings.</p>
+          {setTextSize ? <label>Text size<select value={normalizeTextSize(textSize)} onChange={(event) => setTextSize(event.target.value)}>
+            {TEXT_SIZES.map((value) => <option key={value} value={value}>{TEXT_SIZE_META[value].label}</option>)}
+          </select></label> : null}
+          <p className="admin-action-note">Timezone, theme and text size apply immediately in this browser. Web Base Path is included in Save settings.</p>
           <label>Web Base Path<input value={config.base_path ?? "/survng"} onChange={(event) => updateConfig(["base_path"], event.target.value)} placeholder="/survng" /></label>
           <div className="preference-action general-server-actions">
             <span>

@@ -640,6 +640,8 @@ a:focus-visible {
 
 .topbar-more {
   display: none;
+  /* Sits right after the workspace links, at the links' own spacing. */
+  margin-left: -12px;
 }
 
 .topbar-account .topbar-menu-button {
@@ -732,8 +734,20 @@ a:focus-visible {
   .workspace-search-entry {
     flex: 0 1 auto;
     width: clamp(150px, 15vw, 260px);
-    min-width: 0;
+    min-width: 38px;
     margin-left: auto;
+    container-type: inline-size;
+  }
+
+  .workspace-search-entry svg {
+    flex: 0 0 auto;
+  }
+
+  /* A squeezed search box keeps its icon; the shortcut hint goes first. */
+  @container (max-width: 110px) {
+    .workspace-search-entry kbd {
+      display: none;
+    }
   }
 
   .workspace-system-bar {
@@ -843,3 +857,52 @@ a:focus-visible {
 }
 
 
+/* Fit levels set by Shell when the top bar still overflows (larger text). */
+@media (min-width: 761px) {
+  .app-shell>.topbar[data-fit="1"] .topbar-brand strong,
+  .app-shell>.topbar[data-fit="2"] .topbar-brand strong,
+  .app-shell>.topbar[data-fit="3"] .topbar-brand strong,
+  .app-shell>.topbar[data-fit="4"] .topbar-brand strong {
+    display: none;
+  }
+
+  .app-shell>.topbar[data-fit="2"] .topbar-navigation > a.topbar-overflow-link,
+  .app-shell>.topbar[data-fit="3"] .topbar-navigation > a.topbar-overflow-link,
+  .app-shell>.topbar[data-fit="4"] .topbar-navigation > a.topbar-overflow-link {
+    display: none;
+  }
+
+  .app-shell>.topbar[data-fit="2"] .topbar-more,
+  .app-shell>.topbar[data-fit="3"] .topbar-more,
+  .app-shell>.topbar[data-fit="4"] .topbar-more {
+    display: block;
+  }
+
+  .app-shell>.topbar[data-fit="3"] .workspace-search-entry,
+  .app-shell>.topbar[data-fit="4"] .workspace-search-entry {
+    width: auto;
+    min-width: 38px;
+    flex: 1 1 38px;
+  }
+
+  .app-shell>.topbar[data-fit="3"] .workspace-search-entry kbd,
+  .app-shell>.topbar[data-fit="4"] .workspace-search-entry kbd {
+    display: none;
+  }
+
+  .app-shell>.topbar[data-fit="3"] .topbar-navigation > a,
+  .app-shell>.topbar[data-fit="3"] .topbar-menu-button,
+  .app-shell>.topbar[data-fit="4"] .topbar-navigation > a,
+  .app-shell>.topbar[data-fit="4"] .topbar-menu-button {
+    padding: 0 7px;
+  }
+
+  /* Last resort: workspace links scroll inside the bar. The More menu stays
+     outside the scroller so its panel is not clipped. */
+  .app-shell>.topbar[data-fit="4"] .topbar-navigation {
+    flex: 0 1 auto;
+    overflow-x: auto;
+    scrollbar-width: none;
+    mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  }
+}

@@ -849,13 +849,15 @@
 }
 
 .admin-save-state small {
+  display: -webkit-box;
   overflow: hidden;
   max-width: 720px;
   color: var(--muted);
   font-size: var(--text-xs);
   line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* Up to two lines so the hint is not cut off at larger text sizes. */
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .admin-save-actions {

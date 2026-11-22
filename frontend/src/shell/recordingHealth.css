@@ -267,3 +267,15 @@
   }
 }
 
+/* Tightest top bar fit level: status pills keep their icon; labels stay for screen readers. */
+@media (min-width: 761px) {
+  .topbar[data-fit="3"] .recording-health-item:not(:first-of-type) strong,
+  .topbar[data-fit="4"] .recording-health-item:not(:first-of-type) strong {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}

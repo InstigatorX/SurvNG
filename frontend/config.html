@@ -28,6 +28,15 @@
         if (themeColor) themeColor.setAttribute("content", colors[appearance]);
         if (statusBar) statusBar.setAttribute("content", appearance === "light" ? "default" : "black");
         if (colorScheme) colorScheme.setAttribute("content", appearance);
+        // Text size (keep in sync with src/textSize.mjs).
+        const textSizes = { large: "112.5%", larger: "125%" };
+        try {
+          const textSize = localStorage.getItem("survng.textSize");
+          if (textSizes[textSize]) {
+            root.style.fontSize = textSizes[textSize];
+            root.dataset.textSize = textSize;
+          }
+        } catch {}
       })();
     </script>
     <link rel="manifest" href="/manifest.webmanifest">
