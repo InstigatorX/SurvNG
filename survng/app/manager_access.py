@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -96,19 +97,40 @@ def guard_manager_generation(
 
     def decorate(operation: Callable[Params, ReturnT]) -> Callable[Params, ReturnT]:
         if iscoroutinefunction(operation):
+            if access is None and generation_lock is not None:
+                # Holding a threading lock across awaits on the event loop
+                # would stall every request during a reload.
+                raise TypeError(
+                    "an async manager guard needs a ManagerAccessCoordinator lease"
+                )
+
             @wraps(operation)
             async def async_guarded(*args: Params.args, **kwargs: Params.kwargs) -> Any:
-                if access is not None:
-                    if generation_lock is None:
-                        raise RuntimeError(
-                            "manager generation guard requires a generation lock"
-                        )
-                    with access.lease(generation_lock, get_manager):
-                        return await operation(*args, **kwargs)
-                if generation_lock is not None:
-                    with generation_lock:
-                        return await operation(*args, **kwargs)
-                return await operation(*args, **kwargs)
+                if access is None:
+                    return await operation(*args, **kwargs)
+                if generation_lock is None:
+                    raise RuntimeError(
+                        "manager generation guard requires a generation lock"
+                    )
+                # Selecting the manager and registering the lease takes the
+                # reload lock, so it runs in a worker thread; releasing the
+                # lease only signals the coordinator's condition.
+                lease = access.lease(generation_lock, get_manager)
+                entering = asyncio.ensure_future(asyncio.to_thread(lease.__enter__))
+                try:
+                    await asyncio.shield(entering)
+                except asyncio.CancelledError:
+                    # The thread still registers the lease; release it then,
+                    # or a reload would wait on a lease nobody holds.
+                    entering.add_done_callback(
+                        lambda done: None if done.cancelled() or done.exception()
+                        else lease.__exit__(None, None, None)
+                    )
+                    raise
+                try:
+                    return await operation(*args, **kwargs)
+                finally:
+                    lease.__exit__(None, None, None)
 
             return async_guarded
 

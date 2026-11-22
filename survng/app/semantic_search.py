@@ -23,7 +23,7 @@ import cv2
 
 from .config import SemanticSearchConfig
 from .incident_utils import event_snapshot_path
-from .main_database import connect_main_database
+from .main_database import connect_main_database, create_index_logged
 from .media_storage import MediaStorageRegistry
 from .openclip_tokenizer import OpenClipBpeTokenizer
 
@@ -333,6 +333,7 @@ class SemanticIndex:
     VECTOR_CACHE_MAX_AGE_SECONDS = 6 * 60 * 60.0
     VECTOR_CACHE_RETRY_SECONDS = 5 * 60.0
     VECTOR_LOAD_BATCH_ROWS = 2_000
+    COVERAGE_CACHE_SECONDS = 30.0
 
     @staticmethod
     def _event_matches(connection: sqlite3.Connection, event: dict[str, Any]) -> bool:
@@ -364,6 +365,10 @@ class SemanticIndex:
         self._vector_cache: _SemanticVectorCache | None = None
         self._vector_cache_disabled_until = 0.0
         self._vector_cache_error = ""
+        self._coverage_lock = threading.Lock()
+        self._coverage_cache: dict[
+            tuple[str, str] | None, tuple[float, int, dict[str, int]]
+        ] = {}
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -428,6 +433,16 @@ class SemanticIndex:
                 create index if not exists idx_semantic_event
                 on semantic_embeddings(event_id)
                 """
+            )
+            # coverage() runs on every status read (telemetry, runtime
+            # monitor, status API). Covering the generation's event_id keeps
+            # count(distinct event_id) on index pages instead of reading every
+            # embedding row (each carries a multi-KB vector blob).
+            create_index_logged(
+                connection,
+                "idx_semantic_generation_event",
+                "create index if not exists idx_semantic_generation_event "
+                "on semantic_embeddings(model_fingerprint, preprocessing_fingerprint, event_id)",
             )
             # Point lookups by observation must not scan a model generation.
             connection.execute(
@@ -1290,24 +1305,55 @@ class SemanticIndex:
             all_components[positions].astype(np.float32, copy=False),
         )
 
+    @staticmethod
+    def coverage_query(identity: SemanticModelIdentity | None) -> tuple[str, tuple[Any, ...]]:
+        """SQL and parameters for coverage().
+
+        Served by covering indexes: idx_semantic_generation_event for one
+        generation, idx_semantic_event for all rows.
+        """
+        select = (
+            "select count(*) as evidence_count, count(distinct event_id) as event_count "
+            "from semantic_embeddings"
+        )
+        if identity is None:
+            return select, ()
+        return (
+            select + " where model_fingerprint = ? and preprocessing_fingerprint = ?",
+            (identity.model_fingerprint, identity.preprocessing_fingerprint),
+        )
+
     def coverage(self, identity: SemanticModelIdentity | None = None) -> dict[str, int]:
-        clauses = ""
-        parameters: tuple[Any, ...] = ()
-        if identity is not None:
-            clauses = "where model_fingerprint = ? and preprocessing_fingerprint = ?"
-            parameters = (identity.model_fingerprint, identity.preprocessing_fingerprint)
+        """Evidence and event counts, cached briefly for status reads.
+
+        count(distinct event_id) walks every index entry of the generation,
+        and status reads it about once a minute. A cached result is reused
+        while it is younger than COVERAGE_CACHE_SECONDS and no row was added
+        since (max rowid, one index lookup). Deletes, including the cascade
+        from event retention, show up once the entry expires.
+        """
+        key = (
+            None if identity is None
+            else (identity.model_fingerprint, identity.preprocessing_fingerprint)
+        )
+        sql, parameters = self.coverage_query(identity)
         with self._connect() as connection:
-            row = connection.execute(
-                f"""
-                select count(*) as evidence_count, count(distinct event_id) as event_count
-                from semantic_embeddings {clauses}
-                """,
-                parameters,
-            ).fetchone()
-        return {
+            newest = connection.execute(
+                "select coalesce(max(rowid), 0) from semantic_embeddings"
+            ).fetchone()[0]
+            now = time.monotonic()
+            with self._coverage_lock:
+                cached = self._coverage_cache.get(key)
+            if cached is not None and cached[0] > now and cached[1] == newest:
+                return dict(cached[2])
+            row = connection.execute(sql, parameters).fetchone()
+        result = {
             "evidence_count": int(row["evidence_count"] if row else 0),
             "event_count": int(row["event_count"] if row else 0),
         }
+        with self._coverage_lock:
+            self._coverage_cache[key] = (now + self.COVERAGE_CACHE_SECONDS, newest, result)
+        return dict(result)
 
     def clone_image_generation(
         self,

@@ -9,7 +9,13 @@ from typing import Any
 
 from ..database_polling import polling_connection
 from ..durable_payload import durable_json_dumps
-from ..main_database import closing_connection_factory
+from ..main_database import (
+    closing_connection_factory,
+    create_index_logged,
+    mark_startup_recovered,
+    stamp_startup_recovery,
+    startup_recovery_pending,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -31,6 +37,51 @@ _UNFINISHED_SPEECH_LOOK_SQL = (
     "and coalesce(json_extract(payload_json, '$.speech_look_finished'),0)=0"
 )
 
+
+# Terminal jobs past the general retention window, oldest first.
+PRUNE_EXPIRED_JOBS_SQL = (
+    "select id from detection_jobs "
+    "where state in ('completed','failed') and updated_at < ? "
+    f"and not ({_UNFINISHED_SPEECH_LOOK_SQL}) "
+    "order by updated_at asc limit ?"
+)
+# Scene-discovery jobs keep a shorter history. The partial index carries the
+# discovery flag, so finding them never parses other jobs' payloads. The
+# WHERE must repeat the index's terms literally for SQLite to use it.
+_DISCOVERY_TERMINAL_WHERE = (
+    "state in ('completed','failed') "
+    "and json_extract(payload_json, '$.qualification.scene_discovery') = 1"
+)
+_DISCOVERY_TERMINAL_INDEX_SQL = (
+    "create index if not exists idx_detection_jobs_discovery_terminal "
+    f"on detection_jobs(updated_at) where {_DISCOVERY_TERMINAL_WHERE}"
+)
+# INDEXED BY: without statistics the planner prefers the (state, updated_at)
+# range, which is the full scan this avoids; SQLite errors instead of falling
+# back if the index ever stops matching.
+PRUNE_EXPIRED_DISCOVERY_JOBS_SQL = (
+    "select id from detection_jobs INDEXED BY idx_detection_jobs_discovery_terminal "
+    f"where {_DISCOVERY_TERMINAL_WHERE} "
+    f"and updated_at < ? and not ({_UNFINISHED_SPEECH_LOOK_SQL}) "
+    "order by updated_at asc limit ?"
+)
+
+# Rows per orphan-repair transaction (a rowid window, not a row count). A
+# 20,000-row window held the write lock for 1.3 s on a production database.
+ORPHAN_REPAIR_BATCH_ROWS = 5_000
+_ORPHAN_REPAIRS = (
+    ("face_observations", "face_observations_deleted",
+     "delete from face_observations where rowid between ? and ? "
+     "and not exists (select 1 from events where events.id = face_observations.event_id)"),
+    ("motion_audits", "motion_audits_event_nulled",
+     "update motion_audits set event_id = null where rowid between ? and ? "
+     "and event_id is not null "
+     "and not exists (select 1 from events where events.id = motion_audits.event_id)"),
+    ("motion_audits", "motion_audits_related_nulled",
+     "update motion_audits set related_event_id = null where rowid between ? and ? "
+     "and related_event_id is not null "
+     "and not exists (select 1 from events where events.id = motion_audits.related_event_id)"),
+)
 
 def _detection_job_occurrence(payload: dict[str, Any]) -> dict[str, Any]:
     qualification = payload.get("qualification")
@@ -185,6 +236,9 @@ class EventStoreJobsMixin:
             conn.execute(
                 "create index if not exists idx_detection_jobs_terminal "
                 "on detection_jobs(state, updated_at)"
+            )
+            create_index_logged(
+                conn, "idx_detection_jobs_discovery_terminal", _DISCOVERY_TERMINAL_INDEX_SQL,
             )
             detection_columns = {
                 str(row["name"])
@@ -472,6 +526,10 @@ class EventStoreJobsMixin:
             conn.execute(
                 "create index if not exists idx_calibration_change_sets_created on calibration_change_sets(created_at desc, id desc)"
             )
+            # Work left mid-flight is marked interrupted on every construction,
+            # including a settings reload: a reload is refused while any AI
+            # operation is registered, so a row still in a running state then
+            # has no live worker.
             conn.execute(
                 "update calibration_runs set status = 'interrupted', error = 'SurvNG restarted before calibration completed', updated_at = ? where status in ('queued', 'running', 'cancelling')",
                 (datetime.now(timezone.utc).isoformat(),),
@@ -499,86 +557,70 @@ class EventStoreJobsMixin:
                 """,
                 (datetime.now(timezone.utc).isoformat(),),
             )
-            try:
-                backfill_after_id = int(
-                    self._metadata_value(conn, "motion_audit_backfill_event_id") or 0
+            # The audit backfill and the orphan repair run once per process.
+            # A reload builds this store while the previous one still runs,
+            # and repeating them there held the write lock for seconds.
+            recover = startup_recovery_pending(conn, "event_store", self.db_path)
+            if recover:
+                try:
+                    backfill_after_id = int(
+                        self._metadata_value(conn, "motion_audit_backfill_event_id") or 0
+                    )
+                except ValueError:
+                    backfill_after_id = 0
+                latest_event_id = int(
+                    conn.execute("select coalesce(max(id), 0) from events").fetchone()[0]
                 )
-            except ValueError:
-                backfill_after_id = 0
-            latest_event_id = int(
-                conn.execute("select coalesce(max(id), 0) from events").fetchone()[0]
+                if latest_event_id > backfill_after_id:
+                    self._backfill_motion_audits(conn, after_event_id=backfill_after_id)
+                    self._set_metadata_value(
+                        conn,
+                        "motion_audit_backfill_event_id",
+                        str(latest_event_id),
+                    )
+        if not recover:
+            return
+        repaired = self._repair_orphan_event_references_in_batches()
+        if any(repaired.values()):
+            LOGGER.info(
+                "Repaired orphan event references: %s",
+                ", ".join(f"{key}={value}" for key, value in repaired.items() if value),
             )
-            if latest_event_id > backfill_after_id:
-                self._backfill_motion_audits(conn, after_event_id=backfill_after_id)
-                self._set_metadata_value(
-                    conn,
-                    "motion_audit_backfill_event_id",
-                    str(latest_event_id),
-                )
-            repaired = self._repair_orphan_event_references(conn)
-            if any(repaired.values()):
-                LOGGER.info(
-                    "Repaired orphan event references: %s",
-                    ", ".join(
-                        f"{key}={value}" for key, value in repaired.items() if value
-                    ),
-                )
+        with self._lock, self._connect() as conn:
+            stamp_startup_recovery(conn, "event_store")
+        mark_startup_recovered("event_store", self.db_path)
 
-    def _repair_orphan_event_references(
-        self, conn: sqlite3.Connection
-    ) -> dict[str, int]:
+    def _repair_orphan_event_references_in_batches(self) -> dict[str, int]:
         """Clear soft-linked child rows whose parent events no longer exist.
 
-        Deployed databases grew without hard FKs on face/audit/tracking tables.
-        New CREATE TABLE statements declare FKs for fresh installs; this repair
+        Deployed databases grew without hard FKs on face/audit tables. New
+        CREATE TABLE statements declare FKs for fresh installs; this repair
         covers legacy rows left by event deletes (for example route-admission
-        rollback). Motion-audit links are nulled so training negatives survive.
+        rollback). Motion-audit links are nulled so training negatives
+        survive. Each rowid window is its own short transaction, so the
+        whole-table scan never holds the write lock for long.
         """
-        counts = {
-            "face_observations_deleted": 0,
-            "motion_audits_event_nulled": 0,
-            "motion_audits_related_nulled": 0,
-        }
-        tables = {
-            str(row[0])
-            for row in conn.execute(
-                "select name from sqlite_master where type = 'table'"
-            )
-        }
-        if "face_observations" in tables:
-            cursor = conn.execute(
-                """
-                delete from face_observations
-                where not exists (
-                    select 1 from events where events.id = face_observations.event_id
-                )
-                """
-            )
-            counts["face_observations_deleted"] = max(0, int(cursor.rowcount))
-        if "motion_audits" in tables:
-            cursor = conn.execute(
-                """
-                update motion_audits
-                set event_id = null
-                where event_id is not null
-                  and not exists (
-                    select 1 from events where events.id = motion_audits.event_id
-                  )
-                """
-            )
-            counts["motion_audits_event_nulled"] = max(0, int(cursor.rowcount))
-            cursor = conn.execute(
-                """
-                update motion_audits
-                set related_event_id = null
-                where related_event_id is not null
-                  and not exists (
-                    select 1 from events
-                    where events.id = motion_audits.related_event_id
-                  )
-                """
-            )
-            counts["motion_audits_related_nulled"] = max(0, int(cursor.rowcount))
+        counts = {key: 0 for _table, key, _sql in _ORPHAN_REPAIRS}
+        with self._connect() as conn:
+            tables = {
+                str(row[0])
+                for row in conn.execute("select name from sqlite_master where type = 'table'")
+            }
+            bounds = {
+                table: conn.execute(f"select min(rowid), max(rowid) from {table}").fetchone()
+                for table in {table for table, _key, _sql in _ORPHAN_REPAIRS}
+                if table in tables
+            }
+        for table, key, sql in _ORPHAN_REPAIRS:
+            low, high = bounds.get(table, (None, None))
+            if low is None:
+                continue
+            start = int(low)
+            while start <= int(high):
+                stop = start + ORPHAN_REPAIR_BATCH_ROWS - 1
+                with self._lock, self._connect() as conn:
+                    counts[key] += max(0, int(conn.execute(sql, (start, stop)).rowcount))
+                start = stop + 1
         return counts
 
     def enqueue_detection_job(
@@ -1098,15 +1140,18 @@ class EventStoreJobsMixin:
                 now - timedelta(seconds=max(60.0, float(discovery_retention_seconds)))
             ).isoformat())
             with self._jobs_lock, self._connect_jobs() as conn:
+                # Two index-driven passes instead of one query over every
+                # terminal job newer than the discovery window: that form
+                # parsed up to a week of payloads to find a batch, every
+                # minute while a backlog remained.
                 rows = conn.execute(
-                    "select id from detection_jobs "
-                    "where state in ('completed','failed') and updated_at < ? "
-                    "and (updated_at < ? or json_extract(payload_json, "
-                    "'$.qualification.scene_discovery') = 1) "
-                    f"and not ({_UNFINISHED_SPEECH_LOOK_SQL}) "
-                    "order by updated_at asc limit ?",
-                    (discovery_cutoff, cutoff, batch),
+                    PRUNE_EXPIRED_JOBS_SQL, (cutoff, batch),
                 ).fetchall()
+                if len(rows) < batch:
+                    rows += conn.execute(
+                        PRUNE_EXPIRED_DISCOVERY_JOBS_SQL,
+                        (discovery_cutoff, batch - len(rows)),
+                    ).fetchall()
                 if rows:
                     conn.executemany(
                         "delete from detection_jobs "

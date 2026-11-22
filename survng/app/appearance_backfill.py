@@ -19,7 +19,12 @@ from .config import ObjectTrackingConfig
 from .evidence_work import attributed_inference
 from .incident_utils import event_snapshot_path
 from .inference import InferenceUnavailable
-from .main_database import connect_main_database
+from .main_database import (
+    connect_main_database,
+    mark_startup_recovered,
+    stamp_startup_recovery,
+    startup_recovery_pending,
+)
 from .media_storage import MediaStorageRegistry
 
 
@@ -31,6 +36,11 @@ class AppearanceEncoder(Protocol):
     def embed_for_label(self, label: str, crop: np.ndarray) -> np.ndarray: ...
     def model_identity_for_label(self, label: str) -> dict[str, Any] | None: ...
 
+
+# Event ids per orphan-check transaction at startup.
+ORPHAN_JOB_BATCH_EVENTS = 5_000
+# A running job untouched this long has no live worker.
+STALLED_JOB_SECONDS = 600.0
 
 class DeferredAppearanceBackfill:
     """Durably recover ReID evidence when full multi-frame tracking did not."""
@@ -102,23 +112,65 @@ class DeferredAppearanceBackfill:
                         "on conflict(event_id) do update set state='queued',attempts=0,reason='scene observation backfill'",
                         (now, now),
                     )
-            connection.execute(
-                """
-                delete from appearance_backfill_jobs
-                where not exists (
-                    select 1 from events where events.id = appearance_backfill_jobs.event_id
+            # Restart recovery runs once per process: a settings reload builds
+            # this service while the previous worker may still hold a job.
+            recover = startup_recovery_pending(
+                connection, "appearance_backfill", self.database_path,
+            )
+            if recover:
+                connection.execute(
+                    "update appearance_backfill_jobs set state = 'queued', "
+                    "reason = 'resumed after restart' where state = 'running'"
                 )
-                """
-            )
-            connection.execute(
-                "update appearance_backfill_jobs set state = 'queued', reason = 'resumed after restart' where state = 'running'"
-            )
+                bounds = connection.execute(
+                    "select min(event_id), max(event_id) from appearance_backfill_jobs"
+                ).fetchone()
+        if not recover:
+            return
+        # Orphans are legacy rows from before the cascading foreign key. The
+        # whole-table check runs in short event-id windows.
+        if bounds[0] is not None:
+            low = int(bounds[0])
+            while low <= int(bounds[1]):
+                high = low + ORPHAN_JOB_BATCH_EVENTS - 1
+                with self._connect() as connection:
+                    connection.execute(
+                        "delete from appearance_backfill_jobs where event_id between ? and ? "
+                        "and not exists (select 1 from events "
+                        "where events.id = appearance_backfill_jobs.event_id)",
+                        (low, high),
+                    )
+                low = high + 1
+        with self._connect() as connection:
+            stamp_startup_recovery(connection, "appearance_backfill")
+        mark_startup_recovered("appearance_backfill", self.database_path)
+
+    def _requeue_stalled_jobs(self) -> int:
+        """Re-queue jobs left running by a worker that died or was replaced.
+
+        Startup recovery re-queues every running job once per process; a
+        worker replaced by a settings reload, or one that died on an
+        exception, can still leave one behind. Only jobs untouched for
+        STALLED_JOB_SECONDS are taken, so a job the previous worker is still
+        finishing is left to it.
+        """
+        cutoff = datetime.fromtimestamp(
+            time.time() - STALLED_JOB_SECONDS, timezone.utc
+        ).isoformat()
+        with self._connect() as connection:
+            return int(connection.execute(
+                "update appearance_backfill_jobs set state = 'queued', "
+                "reason = 'resumed after a stalled worker' "
+                "where state = 'running' and updated_at < ?",
+                (cutoff,),
+            ).rowcount)
 
     def start(self) -> None:
         if not self.config.deferred_reid_enabled or not self.config.appearance_reid_enabled:
             return
         if self._thread is not None and self._thread.is_alive():
             return
+        self._requeue_stalled_jobs()
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run,

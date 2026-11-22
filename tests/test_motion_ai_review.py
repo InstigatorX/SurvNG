@@ -6,6 +6,7 @@ from pathlib import Path
 
 from survng.app.audit_ai import AuditAiAdvice
 from survng.app.events import EventStore
+from survng.app.main_database import forget_startup_recovery
 from survng.app.motion_ai_review import aggregate_motion_ai_review
 
 
@@ -118,6 +119,7 @@ class MotionAiReviewTest(unittest.TestCase):
             review = first.create_motion_ai_review("gate", 20)
             first.update_motion_ai_review(int(review["id"]), status="running", analyzed=2)
 
+            forget_startup_recovery()  # simulate a new process
             second = EventStore(Path(tmpdir))
             interrupted = second.get_motion_ai_review(int(review["id"]))
             ignored_late_update = first.update_motion_ai_review(

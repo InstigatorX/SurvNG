@@ -15,6 +15,7 @@ import numpy as np
 from survng.app.appearance_backfill import DeferredAppearanceBackfill
 from survng.app.appearance_index import AppearanceIndex
 from survng.app.config import ObjectTrackingConfig
+from survng.app.main_database import forget_startup_recovery
 
 
 class _Events:
@@ -187,6 +188,7 @@ class DeferredAppearanceBackfillTest(unittest.TestCase):
                     ) values (99, 'gate', 'queued', 0, 'now', 'now')
                     """
                 )
+            forget_startup_recovery()  # simulate a new process
             service._init_db()
             with sqlite3.connect(database) as connection:
                 remaining = connection.execute(

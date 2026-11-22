@@ -36,6 +36,10 @@ RETENTION_PRESSURE_IDLE_RETRY_SECONDS = 60
 _HEALTHY_RECORDING_LOCATION_STATES = frozenset({"online", "low_space", "full", "read_only"})
 
 
+def _is_progress_interrupt(error: BaseException) -> bool:
+    """The error SQLite raises when a progress handler aborts a statement."""
+    return isinstance(error, sqlite3.OperationalError) and "interrupted" in str(error)
+
 class RecordingRetentionService:
     """Index-driven continuous-recording retention with bounded NFS work."""
 
@@ -875,6 +879,16 @@ class RecordingRetentionService:
                     else RETENTION_CLEANUP_INTERVAL_SECONDS
                 )
             except Exception as error:
+                if self._stop.is_set() and _is_progress_interrupt(error):
+                    # stop() aborts an in-flight scan through the progress
+                    # handler; that is a cancellation (for example a settings
+                    # reload replacing this worker), not a failure.
+                    LOGGER.info("Recording retention cycle cancelled: worker stopping")
+                    with self._state_lock:
+                        self._cleanup_active = False
+                        self._cleanup_started_epoch = None
+                        self._status = {**self._status, "state": "stopped", "progress": None}
+                    return
                 LOGGER.exception("Recording retention cycle failed")
                 with self._state_lock:
                     self._cleanup_active = False

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from survng.app.events import EventStore
 from survng.app.faces import FaceStore
+from survng.app.main_database import forget_startup_recovery
 
 
 class OrphanEventReferenceRepairTest(unittest.TestCase):
@@ -82,6 +83,7 @@ class OrphanEventReferenceRepairTest(unittest.TestCase):
                 )
                 connection.execute("delete from events where id = ?", (event["id"],))
 
+            forget_startup_recovery()  # simulate a new process
             EventStore(storage, database_dir=database)
 
             with sqlite3.connect(events.db_path) as connection:

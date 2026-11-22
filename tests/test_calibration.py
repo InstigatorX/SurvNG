@@ -23,6 +23,7 @@ from survng.app.intelligence_routes import (
     CalibrationRollbackRequest,
     CalibrationRunRequest,
 )
+from survng.app.main_database import forget_startup_recovery
 
 
 def test_calibration_fingerprint_excludes_camera_credentials() -> None:
@@ -305,6 +306,7 @@ def test_restart_interrupts_cancelling_calibration_run() -> None:
         )
         store.update_calibration_run(int(run["id"]), status="cancelling")
 
+        forget_startup_recovery()  # simulate a new process
         restored = EventStore(root).get_calibration_run(int(run["id"]))
 
     assert restored is not None

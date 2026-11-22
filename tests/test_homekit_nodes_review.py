@@ -11,7 +11,6 @@ from unittest.mock import Mock
 import pytest
 from fastapi import HTTPException, Request, Response
 from pydantic import ValidationError
-from starlette.requests import ClientDisconnect
 
 from survng.app import homekit_nodes
 from survng.app.homekit import HomeKitService
@@ -571,8 +570,9 @@ def test_media_upload_releases_claim_on_client_disconnect(remote):
             return {"type": "http.disconnect"}
         return await original.receive()
 
-    with pytest.raises(ClientDisconnect):
-        asyncio.run(endpoints["/api/homekit/nodes/media"](Request(original.scope, receive)))
+    # A disconnect ends the upload quietly; it is how a node stops streaming.
+    response = asyncio.run(endpoints["/api/homekit/nodes/media"](Request(original.scope, receive)))
+    assert response.status_code == 204
     assert written == [b"first"]
     assert not service.nodes.uploads
 
@@ -587,6 +587,23 @@ def test_snapshot_rejects_oversized_body_while_reading(remote):
     assert error.value.status_code == 413
     assert reads == [0, 1]
 
+
+
+def test_snapshot_upload_interrupted_by_the_node_is_a_plain_400(remote):
+    _, _, secret, endpoints = remote
+    original = request(secret, [b"partial"])
+    calls = []
+
+    async def receive():
+        calls.append(1)
+        if len(calls) > 1:
+            return {"type": "http.disconnect"}
+        message = await original.receive()
+        return {**message, "more_body": True}
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(endpoints["/api/homekit/nodes/snapshot"](Request(original.scope, receive)))
+    assert error.value.status_code == 400
 
 def test_profile_without_qualified_backend_is_not_ready(remote):
     service, node, _, _ = remote

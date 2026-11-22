@@ -240,6 +240,9 @@ _SLOW_SITE_RE = re.compile(r"[A-Za-z0-9_./:<> -]{1,160}")
 _SLOW_SITE_FIELDS = (
     "count", "total_ms", "max_ms", "last_ms", "last_at_epoch_seconds",
     "max_write_lock_ms", "last_write_lock_ms",
+    "max_statements_ms", "last_statements_ms",
+    "max_slowest_statement_ms", "last_slowest_statement_ms",
+    "max_commit_ms", "last_commit_ms",
 )
 
 
@@ -260,6 +263,9 @@ def _slow_sites_snapshot(raw: object) -> dict[str, Any] | None:
             for name, value in _numeric_fields(item, _SLOW_SITE_FIELDS).items()
             if value is not None
         }})
+        slowest = item.get("last_slowest_site")
+        if isinstance(slowest, str) and _SLOW_SITE_RE.fullmatch(slowest):
+            rows[-1]["last_slowest_site"] = slowest
     return {
         **_numeric_fields(raw, ("threshold_ms", "dropped")),
         "sites": rows,

@@ -91,6 +91,9 @@ def live_camera_jpeg(manager: AppManager, camera_id: str, source: str = "live") 
 RECORDING_STREAM_INFO = RecordingStreamInfo()
 
 
+# Longest an MJPEG frame waits for a settings reload before skipping.
+MJPEG_RELOAD_WAIT_SECONDS = 0.5
+
 def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundle:
     router = APIRouter()
 
@@ -241,13 +244,19 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
         source: str = "live",
         fps: float = 4.0,
     ) -> StreamingResponse:
-        with deps.manager_lock:
-            active_manager = deps.get_manager()
-            worker = active_manager.workers.get(camera_id)
-            if worker is None:
-                raise HTTPException(status_code=404, detail="camera not found")
-            if not worker.status().get("running"):
-                raise HTTPException(status_code=503, detail="camera is powered off")
+        def select_worker():
+            with deps.manager_lock:
+                active_manager = deps.get_manager()
+                worker = active_manager.workers.get(camera_id)
+                if worker is None:
+                    raise HTTPException(status_code=404, detail="camera not found")
+                if not worker.status().get("running"):
+                    raise HTTPException(status_code=503, detail="camera is powered off")
+                return active_manager, worker
+
+        # A settings reload holds the manager lock for seconds; taking it on
+        # the event loop would stall every request until the reload ends.
+        active_manager, worker = await asyncio.to_thread(select_worker)
         try:
             session = active_manager.media_sessions.acquire(
                 MediaSessionRequest(
@@ -267,16 +276,29 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
             ) from exc
         frame_interval = 1.0 / max(0.5, min(4.0, fps))
 
+        def next_image() -> bytes | None | bool:
+            # During a reload, skip the frame instead of keeping an executor
+            # thread waiting for the whole cutover: other to_thread work
+            # shares that pool. False ends the stream (camera replaced).
+            if not deps.manager_lock.acquire(timeout=MJPEG_RELOAD_WAIT_SECONDS):
+                return None
+            try:
+                current = deps.get_manager().workers.get(camera_id) is worker
+            finally:
+                deps.manager_lock.release()
+            if not current:
+                return False
+            return worker.snapshot(source)
+
         async def frames():
             try:
                 while (
                     not session.cancelled()
                     and not await request.is_disconnected()
                 ):
-                    with deps.manager_lock:
-                        if deps.get_manager().workers.get(camera_id) is not worker:
-                            return
-                    image = await asyncio.to_thread(worker.snapshot, source)
+                    image = await asyncio.to_thread(next_image)
+                    if image is False:
+                        return
                     if image is not None:
                         frame = (
                             b"--frame\r\n"
@@ -305,7 +327,7 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
     async def relay_go2rtc_websocket(
         websocket: WebSocket, camera_id: str, transport: str
     ) -> None:
-        try:
+        def select_camera():
             with deps.manager_lock:
                 active_manager = deps.get_manager()
                 camera = active_manager.camera(camera_id)
@@ -314,6 +336,10 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
                     raise Go2RtcError("camera not found")
                 if not worker.status().get("running"):
                     raise Go2RtcError("camera is powered off")
+                return active_manager, camera
+
+        try:
+            active_manager, camera = await asyncio.to_thread(select_camera)
             upstream_url = await asyncio.to_thread(
                 active_manager.go2rtc.websocket_url,
                 camera,

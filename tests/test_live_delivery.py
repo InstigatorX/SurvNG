@@ -14,6 +14,17 @@ from survng.app.main import live_info, relay_go2rtc_websocket, stream, stream_so
 from starlette.websockets import WebSocketDisconnect
 
 
+
+def _to_thread_resolving(url: str) -> AsyncMock:
+    """Run the relay's locked camera lookup; answer the go2rtc URL resolution."""
+
+    async def to_thread(function, *args, **kwargs):
+        if getattr(function, "__name__", "") == "select_camera":
+            return function(*args, **kwargs)
+        return url
+
+    return AsyncMock(side_effect=to_thread)
+
 class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
     async def test_snapshot_releases_generation_lock_before_camera_io(self) -> None:
         class GenerationLock:
@@ -146,7 +157,7 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
             patch("survng.app.main.manager.go2rtc.websocket_url") as websocket_url,
             patch(
                 "survng.app.main.asyncio.to_thread",
-                new=AsyncMock(return_value="ws://go2rtc.invalid/api/ws"),
+                new=_to_thread_resolving("ws://go2rtc.invalid/api/ws"),
             ) as to_thread,
             patch("survng.app.camera_api_routes.websockets.connect", side_effect=OSError("offline")) as connect,
         ):
@@ -154,7 +165,9 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
 
         # Legacy compat parameters are deliberately ignored; relay ownership
         # stops at selecting the configured native go2rtc source.
-        to_thread.assert_awaited_once_with(websocket_url, camera, "main")
+        # Two worker-thread calls: the locked camera lookup, then the URL.
+        self.assertEqual(to_thread.await_count, 2)
+        to_thread.assert_awaited_with(websocket_url, camera, "main")
         websocket.accept.assert_not_awaited()
         self.assertEqual(connect.call_args.kwargs["max_size"], 8 * 1024 * 1024)
         self.assertEqual(connect.call_args.kwargs["max_queue"], 4)
@@ -213,7 +226,7 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
             patch("survng.app.main.manager.workers", {"gate": worker}),
             patch(
                 "survng.app.main.asyncio.to_thread",
-                new=AsyncMock(return_value="ws://go2rtc.invalid/api/ws"),
+                new=_to_thread_resolving("ws://go2rtc.invalid/api/ws"),
             ),
             patch("survng.app.camera_api_routes.websockets.connect", return_value=Connection()),
         ):
@@ -235,7 +248,7 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
             patch("survng.app.main.manager.workers", {"gate": worker}),
             patch(
                 "survng.app.main.asyncio.to_thread",
-                new=AsyncMock(return_value="ws://go2rtc.invalid/api/ws"),
+                new=_to_thread_resolving("ws://go2rtc.invalid/api/ws"),
             ),
             patch(
                 "survng.app.camera_api_routes.websockets.connect",
@@ -253,6 +266,57 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(HTTPException, "powered off"):
                 await stream("gate", Mock())
 
+
+    async def test_mjpeg_streams_frames_until_the_camera_worker_is_replaced(self) -> None:
+        worker = Mock()
+        worker.status.return_value = {"running": True}
+        worker.snapshot.return_value = b"jpeg-bytes"
+        workers = {"gate": worker}
+        request = Mock()
+        request.is_disconnected = AsyncMock(return_value=False)
+        with patch("survng.app.main.manager.workers", workers):
+            response = await stream("gate", request, fps=4.0)
+            frames = response.body_iterator
+            first = await frames.__anext__()
+            workers["gate"] = Mock()  # a reload replaced the camera worker
+            with self.assertRaises(StopAsyncIteration):
+                await frames.__anext__()
+
+        self.assertIn(b"jpeg-bytes", first)
+        worker.snapshot.assert_called_once_with("live")
+
+    async def test_mjpeg_skips_frames_while_a_reload_holds_the_manager_lock(self) -> None:
+        from survng.app import main
+
+        worker = Mock()
+        worker.status.return_value = {"running": True}
+        worker.snapshot.return_value = b"jpeg-bytes"
+        request = Mock()
+        request.is_disconnected = AsyncMock(side_effect=[False, False, True])
+        with (
+            patch("survng.app.main.manager.workers", {"gate": worker}),
+            patch("survng.app.camera_api_routes.MJPEG_RELOAD_WAIT_SECONDS", 0.05),
+        ):
+            response = await stream("gate", request)
+            holder_ready = threading.Event()
+            release = threading.Event()
+
+            def hold_lock() -> None:
+                with main.MANAGER_RELOAD_LOCK:
+                    holder_ready.set()
+                    release.wait(5)
+
+            holder = threading.Thread(target=hold_lock)
+            holder.start()
+            holder_ready.wait(5)
+            try:
+                chunks = [chunk async for chunk in response.body_iterator]
+            finally:
+                release.set()
+                holder.join(5)
+
+        self.assertEqual(chunks, [])
+        worker.snapshot.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

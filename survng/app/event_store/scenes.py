@@ -13,6 +13,7 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from ..incident_utils import portable_media_path
+from ..main_database import create_index_logged
 from ..scene_identity import observation_identity
 from ..motion_topics import SPEECH_TOPIC
 
@@ -56,6 +57,14 @@ def _incident_display_summary(objects):
     text = ", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else names[0]
     return text[:1].upper() + text[1:] + " observed"
 
+
+
+# Moving a duplicate subject onto the retained one. Both filter on an object
+# id; without idx_appearance_scene_object (appearance_index) and
+# scene_track_alias_object they scanned whole tables, and the embeddings scan
+# held the main write lock for 3-4 s per subject join in production.
+JOIN_SUBJECT_ALIASES_SQL = "update scene_track_aliases set object_id=? where object_id=?"
+JOIN_SUBJECT_EMBEDDINGS_SQL = "update appearance_embeddings set scene_object_id=? where scene_object_id=?"
 
 class SceneConflict(ValueError):
     """A correction was based on an obsolete incident revision."""
@@ -372,6 +381,10 @@ class EventStoreSceneMixin:
                 conn.execute("alter table scene_objects add column facet_label text not null default ''")
             conn.execute("create index if not exists scene_object_facet_label on scene_objects(facet_label)")
             conn.execute("create index if not exists scene_observation_source on scene_observations(source_observation_id)")
+            create_index_logged(
+                conn, "scene_track_alias_object",
+                "create index if not exists scene_track_alias_object on scene_track_aliases(object_id)",
+            )
             conn.execute(
                 "create index if not exists scene_observation_recording "
                 "on scene_observations(recording_path) where recording_path != ''"
@@ -499,10 +512,10 @@ class EventStoreSceneMixin:
             # one shared frame into an association of their entire histories.
             return False
         conn.execute("update scene_observations set object_id=? where object_id=?",(retained,duplicate))
-        conn.execute("update scene_track_aliases set object_id=? where object_id=?",(retained,duplicate))
+        conn.execute(JOIN_SUBJECT_ALIASES_SQL,(retained,duplicate))
         columns={r[1] for r in conn.execute("pragma table_info(appearance_embeddings)")}
         if "scene_object_id" in columns:
-            conn.execute("update appearance_embeddings set scene_object_id=? where scene_object_id=?",(retained,duplicate))
+            conn.execute(JOIN_SUBJECT_EMBEDDINGS_SQL,(retained,duplicate))
         return True
 
     @staticmethod

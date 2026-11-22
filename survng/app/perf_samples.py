@@ -130,7 +130,10 @@ class SlowSiteTable:
         self._sites: dict[str, dict[str, float]] = {}
         self._dropped = 0
 
-    def record(self, site: str, duration_ms: float, **extra_ms: float) -> None:
+    def record(
+        self, site: str, duration_ms: float, *, slowest_site: str = "", **extra_ms: float,
+    ) -> None:
+        """``slowest_site`` names the code inside the operation that took longest."""
         if duration_ms < self.threshold_ms:
             return
         now = time.time()
@@ -157,6 +160,12 @@ class SlowSiteTable:
             for key, value in extra_ms.items():
                 entry[f"last_{key}"] = float(value)
                 entry[f"max_{key}"] = max(entry.get(f"max_{key}", 0.0), float(value))
+            # Always replaced: a later record without a slow statement must
+            # not be shown beside an earlier record's location.
+            if slowest_site:
+                entry["last_slowest_site"] = slowest_site  # type: ignore[assignment]
+            else:
+                entry.pop("last_slowest_site", None)
             if now - entry["last_logged_at"] >= self._log_interval:
                 entry["last_logged_at"] = now
                 log_entry = dict(entry)
@@ -164,6 +173,8 @@ class SlowSiteTable:
             details = "".join(
                 f", {key}={value:.0f} ms" for key, value in sorted(extra_ms.items())
             )
+            if slowest_site:
+                details += f", slowest at {slowest_site}"
             warn = self._warn_when is None or self._warn_when(duration_ms, extra_ms)
             LOGGER.log(
                 logging.WARNING if warn else logging.DEBUG,
