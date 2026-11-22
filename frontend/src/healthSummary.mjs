@@ -142,3 +142,40 @@ export function memoryTrendBytesPerHour(history = [], key = "rss_bytes") {
   if (hours < 1) return null;
   return (points.at(-1).value - points[0].value) / hours;
 }
+
+/**
+ * How well object tracking kept up over tracking_capacity_history buckets.
+ * A request is late when it waited for a free tracker slot or was skipped.
+ * Skipped requests first wait up to the configured limit, so they are
+ * already among the waits when that limit is above zero; when it is zero
+ * nothing waits. The larger of the two counts is therefore a bucket's late
+ * requests in either case.
+ */
+export function trackingCapacitySummary(history = []) {
+  const points = Array.isArray(history) ? history : [];
+  let requests = 0;
+  let waited = 0;
+  let skipped = 0;
+  let late = 0;
+  let longestWaitSeconds = 0;
+  const lateSeries = points.map((point) => {
+    const attempts = Math.max(0, Number(point?.attempts) || 0);
+    const bucketWaited = Math.max(0, Number(point?.waited) || 0);
+    const bucketSkipped = Math.max(0, Number(point?.skipped) || 0);
+    const bucketLate = Math.min(attempts, Math.max(bucketWaited, bucketSkipped));
+    requests += attempts;
+    waited += bucketWaited;
+    skipped += bucketSkipped;
+    late += bucketLate;
+    longestWaitSeconds = Math.max(longestWaitSeconds, Number(point?.wait_seconds_max) || 0);
+    return bucketLate;
+  });
+  return {
+    requests,
+    waited,
+    skipped,
+    onTimePercent: requests ? ((requests - late) / requests) * 100 : null,
+    longestWaitSeconds,
+    lateSeries,
+  };
+}

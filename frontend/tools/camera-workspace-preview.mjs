@@ -102,8 +102,10 @@ function history(points, minutes) {
       analysis_coverage_percent: 92 + wave * 4,
       camera_availability_percent: 100,
       attempts: Math.max(0, Math.round(3 + wave * 3)),
-      waited: 0,
-      skipped: 0,
+      // A short burst where tracking had to wait, and once skipped.
+      waited: index % 40 >= 30 && index % 40 < 34 ? 2 : 0,
+      skipped: index % 40 === 32 ? 1 : 0,
+      wait_seconds_max: index % 40 >= 30 && index % 40 < 34 ? 3.4 : 0,
       rss_bytes: (2000 + index * (minutes / 60) * 4) * 1024 ** 2,
       worker_rss_bytes: 600 * 1024 ** 2,
     };
