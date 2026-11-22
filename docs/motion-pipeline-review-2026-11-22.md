@@ -141,7 +141,23 @@ Suggested order: T1 and T2, then T3, T5 and T6, with T4 last.
   no longer resets motion state. `tests/test_motion_incremental_qualification.py`
   replays moving-object, lighting-ramp and static scenes through the old and
   new paths and requires identical decisions.
-- **T2:** not started.
+- **T2 (done):**
+  - Evidence fusion is validated to policy `audit` or `bypass` with no
+    sources. The stage is reduced to that switch, which closes the fail-open
+    trap where `any`/`all`/`weighted` accepted every motion. Option keys the
+    UI saves (`source_thresholds`, `source_weights`, `weighted_threshold`,
+    and similar) still load and are ignored.
+  - The fixed-threshold graph and its `motion.py` scorer are retired.
+    Configurations naming those stages get an explicit error.
+  - Removed: the event-state/trigger-decision context types, the
+    always-idle debug `event_state` field, unused guided helpers,
+    `build_default_motion_pipeline`, the ignored `motion_evidence` argument,
+    and the impossible external-confirmation wait.
+  - The YOLO scalar oracle moved into `tests/test_detector.py`.
+  - Not done: the in-memory detection job store used only as a test
+    fallback (`motion_incidents._MemoryDetectionJobStore`), and the
+    `event_state_*` audit-reason filters, which only match older stored
+    rows.
 - **T3 (done):** each EMA evidence frame keeps a reference to the read-only
   live capture it was derived from (no copy), bounded per camera by
   `EVIDENCE_SOURCE_FRAME_BUDGET_BYTES` (64 MiB; the newest entry always keeps
