@@ -19,7 +19,7 @@ export const MOTION_MODE_OPTIONS = Object.freeze([
     value: "camera_rescue",
     label: "Camera + EMA backup (Recommended)",
     status: "Camera primary · EMA backup",
-    description: "Camera ONVIF notices remain primary and skip EMA filtering. Continuous EMA can still rescue a silent camera; an eligible object must overlap that motion or move across detector samples. Pays extra CPU for recall, not for fewer false positives.",
+    description: "Camera ONVIF notices remain primary. Person, vehicle, animal and face notices skip EMA filtering; generic motion notices are checked against EMA. Continuous EMA can still rescue a silent camera; an eligible object must overlap that motion or move across detector samples. Pays extra CPU for recall, not for fewer false positives.",
   }),
   Object.freeze({
     value: "adaptive",

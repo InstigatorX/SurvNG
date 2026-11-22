@@ -13,6 +13,7 @@ import numpy as np
 from .config import CameraConfig, DetectionZone, MotionQualificationConfig
 from .motion import MotionQualificationResult
 from .ema_v2 import EmaPolicy
+from .motion_topics import is_manual_topic
 from .motion_pipeline import (
     MotionContext,
     MotionDebugSnapshotStore,
@@ -216,28 +217,6 @@ class MotionQualificationService:
             or captured_at - last_processed_at >= interval * 0.85
         )
 
-    def external_confirmation_required(self) -> bool:
-        options = self.fusion_options()
-        raw_sources = options.get("sources", [])
-        source_values = (raw_sources,) if isinstance(raw_sources, str) else raw_sources
-        sources = (
-            tuple(
-                normalized
-                for source in source_values
-                if (normalized := str(source).strip().lower())
-            )
-            if isinstance(source_values, (list, tuple))
-            else ()
-        )
-        policy = str(options.get("policy", "audit")).strip().lower()
-        return bool(
-            sources
-            and (
-                policy in {"all", "weighted"}
-                or not bool(options.get("include_primary", True))
-            )
-        )
-
     def frame_analysis_required(self) -> bool:
         return bool(
             self.adaptive_analysis_required()
@@ -292,7 +271,7 @@ class MotionQualificationService:
                         configuration={
                             "observation_kind": "motion_event",
                             "event_source": (
-                                "manual" if topic.startswith("manual") else "onvif"
+                                "manual" if is_manual_topic(topic) else "onvif"
                             ),
                             "event_topic": topic,
                             "event_message": message,
@@ -499,8 +478,6 @@ class MotionQualificationService:
             else received_at
         )
         if not self.adaptive_analysis_required():
-            if self.external_confirmation_required():
-                self.stop_event.wait(self.config.post_trigger_seconds)
             result = MotionQualificationResult(
                 False, 0.0, 1.0, "adaptive_validation_disabled", 0, {}
             )
@@ -526,7 +503,7 @@ class MotionQualificationService:
                     evaluated_windows.add(key)
                     if best_result is None or result.score > best_result.score:
                         best_result = result
-                    if result.accepted and not self.external_confirmation_required():
+                    if result.accepted:
                         return self.with_source_evidence(
                             result,
                             anchor - self.config.window_seconds,
@@ -577,7 +554,7 @@ class MotionQualificationService:
                     )
                 if best_result is None or result.score > best_result.score:
                     best_result = result
-                if result.accepted and not self.external_confirmation_required():
+                if result.accepted:
                     return self.with_source_evidence(
                         result,
                         anchor - self.config.window_seconds,
@@ -636,7 +613,17 @@ class MotionQualificationService:
         processed_frame_implementation: str = "",
         clone_runtime: bool = True,
         luminance_frames: list[np.ndarray] | None = None,
+        history_started_at: float | None = None,
+        history_frame_count: int | None = None,
     ) -> MotionQualificationResult:
+        """Run the qualification graph over ``frames``.
+
+        Continuous analysis passes only the newest frames of its ring. It
+        supplies ``history_started_at`` so stages that look back over the
+        retained window keep their own per-frame evidence for it, and
+        ``history_frame_count`` so the reported frame count still describes
+        the retained window rather than the incremental slice.
+        """
         if (
             processed_frames is not None
             and processed_frame_implementation != self.preprocessor_implementation()
@@ -678,6 +665,11 @@ class MotionQualificationService:
                 "stationary_object_tolerance": self.stationary_object_tolerance(),
                 "illumination_filter_enabled": self.illumination_filter_enabled(),
                 "frame_width": frame_width,
+                **(
+                    {"history_started_at": float(history_started_at)}
+                    if history_started_at is not None
+                    else {}
+                ),
             },
             runtime=pipeline.runtime,
         )
@@ -717,10 +709,18 @@ class MotionQualificationService:
             score=scoring.score,
             threshold=scoring.threshold,
             reason=scoring.reason,
-            frame_count=scoring.frame_count,
+            frame_count=(
+                scoring.frame_count
+                if history_frame_count is None
+                else int(history_frame_count)
+            ),
             features=features,
             telemetry=telemetry,
         )
+
+    def pipeline_generation(self) -> int:
+        """Return the qualification runtime generation; resets advance it."""
+        return int(self.qualification_pipeline.runtime.generation)
 
     def set_debug_enabled(self, enabled: bool) -> None:
         self.debug_store.set_enabled(enabled)

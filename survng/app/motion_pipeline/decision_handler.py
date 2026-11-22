@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
 import math
-import inspect
 import time
 from typing import Any, Callable, Protocol
 
@@ -18,7 +17,9 @@ from .context import Frame
 from .scene_evidence import scene_batches, scene_observation
 
 
-MotionDetectionProvider = Callable[[datetime], Any]
+# Every detection provider receives the event time and the durable
+# qualification for the decision; providers may ignore the latter.
+MotionDetectionProvider = Callable[[datetime, dict[str, Any]], Any]
 MotionEvidenceDetectionProvider = Callable[[datetime, dict[str, Any]], Any]
 MotionSnapshotWriter = Callable[[Frame, datetime], str]
 MotionEventCallback = Callable[[str, dict[str, Any]], None]
@@ -329,27 +330,6 @@ class MotionDecisionHandler:
             return {"mode": "off", "evaluated": 0}
         return self.activity_attributor.status()
 
-    @staticmethod
-    def _invoke_detection_provider(
-        provider: Callable[..., Any],
-        event_at: datetime,
-        qualification: dict[str, Any],
-    ) -> Any:
-        """Pass durable qualification to modern providers, preserving legacy mocks."""
-        try:
-            parameters = inspect.signature(provider).parameters.values()
-            accepts_two = any(
-                parameter.kind == inspect.Parameter.VAR_POSITIONAL
-                for parameter in parameters
-            ) or len(parameters) >= 2
-        except (TypeError, ValueError):
-            accepts_two = True
-        return (
-            provider(event_at, qualification)
-            if accepts_two
-            else provider(event_at)
-        )
-
     def reconfigure_activity_attribution(self, mode: AttributionMode) -> None:
         if self.activity_attributor is not None:
             self.activity_attributor.reconfigure(mode)
@@ -456,7 +436,7 @@ class MotionDecisionHandler:
         provider_result = (
             evidence_provider(event_at, provider_qualification)
             if evidence_provider is not None
-            else self._invoke_detection_provider(provider, event_at, provider_qualification)
+            else provider(event_at, provider_qualification)
         )
         try:
             check_evidence_cancellation()
@@ -785,9 +765,7 @@ class MotionDecisionHandler:
                 try:
                     promotion_kwargs = dict(revision_kwargs)
                     diagnostics: dict[str, Any] = {}
-                    parameters = inspect.signature(self.refinement_cover_promoter).parameters
-                    if "diagnostics" in parameters:
-                        promotion_kwargs["diagnostics"] = diagnostics
+                    promotion_kwargs["diagnostics"] = diagnostics
                     if cover_only and qualification.get("cover_requirement_lease_owner"):
                         promotion_kwargs["requirement_lease_owner"] = qualification["cover_requirement_lease_owner"]
                     promoted = self.refinement_cover_promoter(

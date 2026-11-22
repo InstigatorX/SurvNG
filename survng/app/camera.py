@@ -29,7 +29,7 @@ from .camera_lifecycle import (
     CameraRuntimeState,
     CameraStopTicket,
 )
-from .config import CameraConfig, DetectionZone, MotionQualificationConfig
+from .config import CameraConfig, DetectionZone, DetectorConfig, MotionQualificationConfig
 from .image_storage import DurableImageWriter
 from .media_storage import MediaStorageRegistry
 from .media_sessions import MediaSessionManager
@@ -377,6 +377,13 @@ class CameraWorker:
             CaptureOpenLimiter()
         )
         self.motion_debug = MotionDebugSnapshotStore()
+        # One attributor per camera, shared by the decision handler, recorded
+        # refinement and tracking sessions. Built before its consumers so each
+        # receives it at construction.
+        self.activity_attributor = self._build_activity_attributor(
+            detector_config=motion_object_detector_factory.detector.config,
+            decision_factory=motion_decision_handler_factory,
+        )
         self.motion_object_detector = motion_object_detector_factory.create(
             camera=camera,
             live_frame_provider=lambda: self._get_latest_frame(),
@@ -386,12 +393,12 @@ class CameraWorker:
                 self._stop.is_set()
                 and self.runtime_state.phase is not CameraLifecyclePhase.STOPPED
             ),
+            activity_attributor=self.activity_attributor,
         )
         self.media = CameraMediaService(
             camera=camera,
             storage_dir=storage_dir,
             image_writer=image_writer,
-            motion_detector=self.motion_object_detector,
             frame_provider=lambda source: self._get_latest_frame(source),
             rejected_sample_rate=lambda: self.motion_config.rejected_sample_rate,
             stop_requested=self._stop.is_set,
@@ -409,6 +416,7 @@ class CameraWorker:
             ),
             lifecycle_lock=self._lifecycle_lock,
             recorded_available=self.recorded_analysis_available,
+            activity_attributor=self.activity_attributor,
             cover_frame_provider=lambda captured_at, width, reference: (
                 self.tracking_frames.recorded_frame_at(
                     captured_at,
@@ -430,41 +438,38 @@ class CameraWorker:
         detector_factory = motion_object_detector_factory
 
         def establishment_zones() -> dict[str, Any]:
-            config = getattr(getattr(detector_factory, "detector", None), "config", None)
+            # Read per call: the detector configuration is reloadable.
+            config = detector_factory.detector.config
             require = self.camera.require_incident_zone
             if require is None:
-                require = True if config is None else bool(getattr(config, "require_incident_zone", True))
+                require = config.require_incident_zone
             return establishment_zone_policy(
                 self.camera,
                 require_incident_zone=require,
-                confidence_threshold=None if config is None else getattr(config, "confidence_threshold", None),
-                class_confidence_thresholds=None if config is None else getattr(config, "event_class_confidence_thresholds", None),
+                confidence_threshold=config.confidence_threshold,
+                class_confidence_thresholds=config.event_class_confidence_thresholds,
                 detector_config=config,
             )
 
         self.motion_decision_handler = motion_decision_handler_factory.create(
             camera_id=camera.id,
             establishment_zone_policy=establishment_zones,
-            detection_provider=lambda event_at, qualification=None: self._recorded_motion_frame(
-                event_at, qualification=qualification
+            # Resolve the detector at call time so a replaced or patched
+            # detector is honoured.
+            detection_provider=lambda event_at, qualification=None: (
+                self.motion_object_detector.detect(event_at, qualification)
             ),
-            initial_detection_provider=(
-                lambda event_at: self._recorded_motion_frame(event_at, initial=True)
+            initial_detection_provider=lambda event_at, _qualification: (
+                self.motion_object_detector.detect_initial(event_at)
             ),
-            initial_evidence_detection_provider=(
-                lambda event_at, evidence: self._recorded_motion_frame(
-                    event_at,
-                    initial=True,
-                    evidence=evidence,
-                )
+            initial_evidence_detection_provider=lambda event_at, evidence: (
+                self.motion_object_detector.detect_initial(event_at, evidence)
             ),
             snapshot_writer=lambda frame, event_at: self._write_snapshot(frame, event_at),
             event_callback=(
                 self.motion_state.publish_event if event_callback is not None else None
             ),
-            activity_attributor=self._activity_attributor(
-                motion_decision_handler_factory
-            ),
+            activity_attributor=self.activity_attributor,
             spatial_alignment=self._effective_spatial_alignment,
             route_admission_callback=route_target_admitted,
         )
@@ -487,22 +492,9 @@ class CameraWorker:
             start_tracking=self.tracking_lifecycle.start_incident,
             prewarm_tracking=self.tracking_lifecycle.prewarm,
             image_reader=self.media.read_image,
-            refinement_store=(
-                motion_decision_handler_factory.events
-                if hasattr(
-                    motion_decision_handler_factory.events,
-                    "enqueue_detection_job",
-                )
-                else None
-            ),
+            refinement_store=motion_decision_handler_factory.events,
         )
-        ring_size = max(
-            12,
-            round(
-                self.motion_config.sample_fps
-                * (self.motion_config.window_seconds + self.motion_config.post_trigger_seconds + 3.0)
-            ),
-        )
+        ring_size = self.motion_config.motion_ring_size()
         self.motion_events = MotionEventCoordinator(
             queue_size=MOTION_QUEUE_SIZE,
             retry_limit=MOTION_EVENT_MAX_RETRIES,
@@ -987,12 +979,14 @@ class CameraWorker:
     def status(self) -> dict[str, Any]:
         return self.status_reporter.snapshot()
 
-    def _activity_attributor(self, decision_factory):
-        detector_config = getattr(
-            getattr(self.motion_object_detector, "detector", None), "config", None,
-        )
+    def _build_activity_attributor(
+        self,
+        *,
+        detector_config: DetectorConfig,
+        decision_factory: MotionDecisionHandlerFactory,
+    ) -> ObjectActivityAttributor:
         mode = (
-            getattr(detector_config, "object_activity_attribution", "enforce")
+            detector_config.object_activity_attribution
             if self.camera.object_activity_attribution == "inherit"
             else self.camera.object_activity_attribution
         )
@@ -1011,16 +1005,6 @@ class CameraWorker:
             memory=memory,
             camera_id=self.camera.id,
         )
-        self.scene_context_memory = attributor.memory
-        self.tracking_lifecycle.scene_context_memory = attributor.memory
-        self.tracking_lifecycle.activity_attributor = attributor
-        current = self.tracking_lifecycle.current()
-        current.scene_context_memory = attributor.memory
-        current.activity_attributor = attributor
-        detector = getattr(self, "motion_object_detector", None)
-        if detector is not None:
-            detector.scene_context_memory = attributor.memory
-            detector.activity_attributor = attributor
         return attributor
 
     def reconfigure_object_activity_attribution(self, mode: AttributionMode) -> None:
@@ -1177,15 +1161,11 @@ class CameraWorker:
                     source="live",
                 )
                 detector_config = self.motion_object_detector.detector.config
-                discovery_interval = float(getattr(
-                    detector_config, "scene_discovery_interval_seconds", 10.0,
-                ))
-                discovery_heartbeat = float(getattr(
-                    detector_config, "scene_discovery_heartbeat_seconds", 120.0,
-                ))
+                discovery_interval = detector_config.scene_discovery_interval_seconds
+                discovery_heartbeat = detector_config.scene_discovery_heartbeat_seconds
                 since_discovery = frame.captured_at_monotonic - self._last_scene_discovery_at
                 if (
-                    bool(getattr(detector_config, "scene_discovery_enabled", True))
+                    detector_config.scene_discovery_enabled
                     and (
                         since_discovery >= max(discovery_interval, discovery_heartbeat)
                         or (
@@ -1279,10 +1259,13 @@ class CameraWorker:
         )
         if selected is None:
             return None
-        height, width = selected.image.shape[:2]
+        # Detect on the full-resolution live capture EMA analysed, not the
+        # analysis-width copy, when that reference is still retained.
+        image = selected.detection_image
+        height, width = image.shape[:2]
         alignment = self._effective_spatial_alignment
         return TimestampedLiveFrame(
-            frame=selected.image,
+            frame=image,
             captured_at_epoch=selected.captured_at_epoch,
             captured_at_monotonic=selected.captured_at_monotonic,
             sequence=selected.sequence,
@@ -1332,18 +1315,6 @@ class CameraWorker:
             frame_width,
             after_epoch=after_epoch,
         )
-
-    def _recorded_motion_frame(
-        self,
-        event_at: datetime,
-        *,
-        initial: bool = False,
-        evidence: dict[str, Any] | None = None,
-        qualification: dict[str, Any] | None = None,
-    ) -> Any:
-        if initial:
-            return self.media.detect_initial_recorded_motion(event_at, evidence)
-        return self.media.detect_recorded_motion(event_at, qualification)
 
     def _write_snapshot(self, frame: Any, event_at: datetime | None = None) -> str:
         return self.media.write_snapshot(frame, event_at)

@@ -47,7 +47,7 @@ def processor(store, result, root):
         target.parent.mkdir(exist_ok=True)
         target.write_bytes(b'captured evidence')
         return str(target)
-    return MotionDecisionHandler(camera_id='gate',events=store,detection_provider=lambda _:result,
+    return MotionDecisionHandler(camera_id='gate',events=store,detection_provider=lambda _, _qualification=None:result,
         snapshot_writer=snapshot,object_serializer=json.dumps)
 
 

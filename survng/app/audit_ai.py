@@ -211,8 +211,6 @@ decision_outcome.object_detection_completed to distinguish those cases. A null o
 usually means detection did not run; when object_detection_ran is true and
 object_detection_completed is false, detection was attempted but did not complete. Neither case
 means the frame contained no real subject. Likewise, no detected object is not definitive visual ground truth.
-event_state_active and event_state_cooldown mean a repeated notification was suppressed while an
-event was already active or cooling down; they are duplicate-control outcomes, not motion failures.
 Check related_prior_event before claiming an incident was missed. Never claim object detection used
 the motion frame width: frame_width describes the adaptive motion-analysis copy, not detector input.
 Event object labels use spatially associated temporal consensus over available high-resolution
@@ -288,20 +286,6 @@ def motion_audit_interpretation(
             "label": "Motion confirmed · detected object outside motion area",
             "object_detection_miss": False,
             "explanation": "EMA confirmed credible motion, but the detected object was outside that motion area and did not move across detector samples.",
-        }
-    if normalized_reason == "event_state_active" and not detection_ran:
-        return {
-            "category": "duplicate_active_event",
-            "label": "Duplicate while event active",
-            "object_detection_miss": False,
-            "explanation": "A repeated motion notice was suppressed because the event state was already active.",
-        }
-    if normalized_reason == "event_state_cooldown" and not detection_ran:
-        return {
-            "category": "duplicate_event_cooldown",
-            "label": "Duplicate during cooldown",
-            "object_detection_miss": False,
-            "explanation": "A repeated motion notice was suppressed during the post-event cooldown period.",
         }
     if not detection_ran:
         return {

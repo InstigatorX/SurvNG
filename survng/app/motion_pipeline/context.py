@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from enum import StrEnum
 from typing import Any, Mapping, TypeAlias
 
 import numpy as np
@@ -23,34 +22,6 @@ class MotionScoring:
     reason: str = "unscored"
     frame_count: int = 0
     features: dict[str, Any] = field(default_factory=dict)
-
-
-class MotionEventPhase(StrEnum):
-    IDLE = "idle"
-    CANDIDATE = "candidate"
-    ACTIVE = "active"
-    REJECTED = "rejected"
-    COOLDOWN = "cooldown"
-
-
-@dataclass(slots=True)
-class MotionEventState:
-    phase: MotionEventPhase = MotionEventPhase.IDLE
-    event_key: str = ""
-    started_at: float | None = None
-    updated_at: float | None = None
-    consecutive_accepts: int = 0
-    consecutive_rejects: int = 0
-    cooldown_until: float | None = None
-    transition_reason: str = "uninitialized"
-
-
-@dataclass(frozen=True, slots=True)
-class TriggerDecision:
-    run_object_detection: bool
-    reason: str
-    score: float
-    evidence_sources: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,8 +68,6 @@ class MotionContext:
     blobs: list[MotionBlob] = field(default_factory=list)
     tracked_objects: list[MotionTrack] = field(default_factory=list)
     scoring: MotionScoring = field(default_factory=MotionScoring)
-    event_state: MotionEventState = field(default_factory=MotionEventState)
-    decision: TriggerDecision | None = None
     source_evidence: dict[str, Any] = field(default_factory=dict)
     timings: dict[str, StageTiming] = field(default_factory=dict)
     debug: MotionDebugData = field(default_factory=MotionDebugData)
@@ -110,7 +79,6 @@ class MotionContext:
             blobs=list(self.blobs),
             tracked_objects=list(self.tracked_objects),
             scoring=replace(self.scoring, features=deepcopy(self.scoring.features)),
-            event_state=replace(self.event_state),
             source_evidence=deepcopy(self.source_evidence),
             timings=dict(self.timings),
             debug=MotionDebugData(

@@ -56,6 +56,7 @@ def _hooks(
     qualification.continuous_primary_required.return_value = True
     qualification.continuous_primary_due.return_value = True
     qualification.run_pipeline = run_pipeline or Mock()
+    qualification.pipeline_generation.return_value = 1
     qualification.illumination_filter_enabled.return_value = False
     qualification.trigger_mode.return_value = trigger_mode
     qualification.with_source_evidence = with_source_evidence or Mock()
@@ -239,6 +240,76 @@ def test_scene_change_signal_ignores_quiet_and_illumination_results() -> None:
     assert service.scene_change_since(103.0) is False
     hooks.qualification.continuous_primary_required.return_value = False
     assert service.scene_change_since(103.0) is True
+
+
+def _submit_and_preprocess(
+    service: MotionAnalysisService,
+    frame: np.ndarray,
+    *,
+    clock: float,
+    epoch: float,
+    sequence: int,
+) -> None:
+    service.submit_frame(
+        frame,
+        clock,
+        threading.Event(),
+        epoch,
+        capture_sequence=sequence,
+        capture_generation=7,
+        lifecycle_generation=3,
+    )
+    submitted = service.queue.get_nowait()
+    assert isinstance(submitted, MotionFrameSubmission)
+    service._preprocess_frame(
+        submitted.image,
+        submitted.captured_at_epoch,
+        captured_at_monotonic=submitted.captured_at_monotonic,
+        capture_sequence=submitted.capture_sequence,
+        capture_generation=submitted.capture_generation,
+        lifecycle_generation=submitted.lifecycle_generation,
+    )
+
+
+def test_evidence_frame_keeps_full_resolution_live_capture() -> None:
+    service = _service(_hooks())
+    live = np.full((360, 640, 3), 33, dtype=np.uint8)
+    live.setflags(write=False)
+
+    _submit_and_preprocess(service, live, clock=10.0, epoch=100.0, sequence=5)
+
+    selected = service.evidence_frame_near(
+        100.0, sequence=5, capture_generation=7, lifecycle_generation=3,
+    )
+    assert selected is not None
+    # EMA scored the analysis-width copy; detection uses the capture itself.
+    assert selected.image.shape == (180, 320, 3)
+    assert selected.detection_image is live
+    assert selected.detection_image.shape == (360, 640, 3)
+
+
+def test_evidence_source_frames_respect_byte_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    live = np.zeros((360, 640, 3), dtype=np.uint8)
+    monkeypatch.setattr(
+        "survng.app.motion_analysis_service.EVIDENCE_SOURCE_FRAME_BUDGET_BYTES",
+        int(live.nbytes * 2),
+    )
+    service = _service(_hooks())
+    for index in range(5):
+        frame = np.full((360, 640, 3), index, dtype=np.uint8)
+        frame.setflags(write=False)
+        _submit_and_preprocess(
+            service, frame, clock=10.0 + index, epoch=100.0 + index, sequence=index + 1,
+        )
+
+    with service.frame_lock:
+        retained = [item.source_image is not None for item in service.evidence_frames]
+    assert retained == [False, False, False, True, True]
+    oldest = service.evidence_frame_near(
+        100.0, sequence=1, capture_generation=7, lifecycle_generation=3,
+    )
+    assert oldest is not None
+    assert oldest.detection_image is oldest.image
 
 
 def test_evidence_frame_selection_is_nearest_and_generation_bounded() -> None:

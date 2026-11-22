@@ -7,13 +7,18 @@ import threading
 import time
 import uuid
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
 from .config import MotionQualificationConfig
 from .database_polling import database_polling_session
 from .motion import MotionQualificationResult
-from .motion_topics import is_speech_topic, semantic_motion_kind
+from .motion_topics import (
+    MotionTriggerKind,
+    is_speech_topic,
+    motion_trigger_kind,
+)
 from .camera_semantics import (
     CAMERA_NOTICE_ADMISSION_VERSION,
     camera_notice_admission,
@@ -28,7 +33,6 @@ from .motion_events import (
 
 LOGGER = logging.getLogger(__name__)
 
-INCIDENT_ACTIVITY_REASONS = frozenset({"event_state_active", "event_state_cooldown"})
 # Durable refinement jobs replay a completion shortly after it lands, so recent
 # ids are all that must be remembered to stay idempotent across a restart.
 COMPLETED_REFINEMENT_MEMORY = 512
@@ -93,12 +97,17 @@ CAMERA_PRIMARY_TRIGGER_CLASSES = frozenset(
 
 
 def classify_motion_trigger(topic: str, message: str = "") -> str:
-    """The one predicate separating manual, speech, semantic, generic and adaptive."""
-    if str(topic or "").startswith("adaptive/"):
+    """The one predicate separating manual, speech, semantic, generic and adaptive.
+
+    SurvNG-owned topics are classified by ``motion_trigger_kind``; a camera
+    notice is semantic only when its raw topic and payload affirm a subject.
+    """
+    kind = motion_trigger_kind(topic)
+    if kind.is_ema:
         return TRIGGER_ADAPTIVE
-    if semantic_motion_kind(topic) == "manual":
+    if kind is MotionTriggerKind.MANUAL:
         return TRIGGER_MANUAL
-    if is_speech_topic(topic):
+    if kind is MotionTriggerKind.SPEECH:
         return TRIGGER_SPEECH
     if camera_notice_admission(topic, message)["kind"] == "semantic":
         return TRIGGER_SEMANTIC_CAMERA
@@ -176,6 +185,42 @@ def audit_features(result: MotionQualificationResult) -> dict[str, Any]:
     if result.telemetry:
         features["pipeline_telemetry"] = result.telemetry
     return features
+
+
+@dataclass(frozen=True, slots=True)
+class _BatchShape:
+    """What raised a coalesced trigger batch, derived once per decision."""
+
+    representative: MotionTrigger
+    route_trigger: MotionTrigger | None
+    received_at: float
+    semantic_reports: list[dict[str, object]]
+    priority: bool
+    speech_trigger: bool
+    speech_only: bool
+    adaptive_only: bool
+    visual_backup: bool
+    active_followup: bool
+    live_probe: bool
+    trigger_class: str
+    # Persisted with the qualification so establishment, refinement and
+    # restarts replay the same notice policy. Mutable: the decision adds
+    # ``motion_validated`` for generic camera notices once EMA has run.
+    camera_notice_policy: dict[str, Any]
+
+    @property
+    def camera_primary(self) -> bool:
+        return self.trigger_class in CAMERA_PRIMARY_TRIGGER_CLASSES
+
+    @property
+    def trigger_source(self) -> str:
+        if self.visual_backup:
+            return "visual_backup"
+        if self.active_followup:
+            return "active_followup"
+        if self.speech_only:
+            return "speech"
+        return "adaptive" if self.adaptive_only else "camera"
 
 
 class MotionDecisionOrchestrator:
@@ -342,6 +387,141 @@ class MotionDecisionOrchestrator:
             self._events.set_active(None)
             return
         self._mark_episode_intents_running(triggers)
+        batch = self._classify_batch(triggers)
+        representative = batch.representative
+        event_at = representative.event_at
+        received_at = batch.received_at
+        decision_id = next(
+            (item.decision_id for item in triggers if item.decision_id),
+            "",
+        ) or uuid.uuid4().hex
+        for item in triggers:
+            item.decision_id = decision_id
+
+        mode, sensitivity, frame_width = self._qualification.settings()
+        rescue_enabled, rescue_margin = self._qualification.rescue_settings()
+        result, diagnostics = self._qualification_result(
+            triggers=triggers,
+            event_at=event_at,
+            received_at=received_at,
+            mode=mode,
+            sensitivity=sensitivity,
+            priority=batch.priority,
+            adaptive_only=batch.adaptive_only,
+            speech=batch.speech_trigger,
+            camera_primary=batch.camera_primary,
+        )
+        if stop_event.is_set():
+            self._abort_episode_intents(triggers)
+            self._events.release_deliveries(triggers)
+            self._complete_adaptive_trigger(triggers, complete_delivery=False)
+            self._events.set_active(None)
+            return
+
+        borderline_candidate = is_borderline_candidate(
+            result,
+            rescue_enabled,
+            rescue_margin,
+        )
+        verification_rate = self._qualification.suppression_verification_rate()
+        if batch.trigger_class == TRIGGER_GENERIC_CAMERA:
+            # Measured motion regions may place a generic notice in a zone only
+            # when SurvNG's own qualification accepted that motion.
+            batch.camera_notice_policy["motion_validated"] = bool(result.accepted)
+        confident_nuisance = is_confident_nuisance(result)
+        suppression_verification_candidate = bool(
+            mode in ENFORCING_MODES
+            and not result.accepted
+            and not borderline_candidate
+            and (
+                (
+                    not batch.adaptive_only
+                    and not confident_nuisance
+                )
+                or should_verify_suppression(decision_id, verification_rate)
+            )
+        )
+        camera_uncertainty_verification = bool(
+            suppression_verification_candidate
+            and not batch.adaptive_only
+            and not confident_nuisance
+        )
+        qualification = self._qualification_payload(
+            batch=batch,
+            triggers=triggers,
+            event_at=event_at,
+            result=result,
+            diagnostics=diagnostics,
+            mode=mode,
+            sensitivity=sensitivity,
+            frame_width=frame_width,
+            rescue_enabled=rescue_enabled,
+            rescue_margin=rescue_margin,
+            borderline_candidate=borderline_candidate,
+            verification_rate=verification_rate,
+            suppression_verification_candidate=suppression_verification_candidate,
+            camera_uncertainty_verification=camera_uncertainty_verification,
+            confident_nuisance=confident_nuisance,
+        )
+        effective_accepted = bool(
+            result.accepted
+            or borderline_candidate
+            or suppression_verification_candidate
+        )
+        qualification["effective_accepted"] = effective_accepted
+        retry_attempt = qualification["retry_count"] > 0
+        for item in triggers:
+            item.retry_qualification_result = result
+            item.retry_diagnostics = dict(diagnostics)
+        self._state.record_decision(
+            result=result,
+            qualification=qualification,
+            retry_attempt=retry_attempt,
+            priority=batch.priority,
+            mode=mode,
+            borderline_candidate=borderline_candidate,
+            suppression_verification_candidate=suppression_verification_candidate,
+        )
+
+        if not retry_attempt:
+            self._state.publish_event(
+                "motion_qualification",
+                {
+                    "camera_id": self._camera_id,
+                    "timestamp": event_at.isoformat(),
+                    **qualification,
+                },
+            )
+        if not effective_accepted:
+            self._record_rejected_audit(
+                triggers,
+                decision_id=decision_id,
+                event_at=event_at,
+                mode=mode,
+                sensitivity=sensitivity,
+                result=result,
+            )
+            self._complete_adaptive_trigger(triggers)
+            self._events.set_active(None)
+            return
+
+        self._process_accepted(
+            triggers=triggers,
+            representative=representative,
+            event_at=event_at,
+            decision_id=decision_id,
+            mode=mode,
+            sensitivity=sensitivity,
+            result=result,
+            qualification=qualification,
+            visual_backup=batch.visual_backup,
+            active_followup=batch.active_followup,
+            borderline_candidate=borderline_candidate,
+            suppression_verification_candidate=suppression_verification_candidate,
+        )
+
+    def _classify_batch(self, triggers: MotionTriggerBatch) -> "_BatchShape":
+        """Derive what raised a coalesced batch and how it must be handled."""
         intents = [
             intent
             for item in triggers
@@ -372,17 +552,6 @@ class MotionDecisionOrchestrator:
             ),
             None,
         )
-        event_at = representative.event_at
-        received_at = min(item.received_at for item in triggers)
-        decision_id = next(
-            (item.decision_id for item in triggers if item.decision_id),
-            "",
-        ) or uuid.uuid4().hex
-        for item in triggers:
-            item.decision_id = decision_id
-
-        mode, sensitivity, frame_width = self._qualification.settings()
-        rescue_enabled, rescue_margin = self._qualification.rescue_settings()
         retained_notices = [
             intent.camera_notice
             for intent in intents
@@ -438,7 +607,7 @@ class MotionDecisionOrchestrator:
             {"camera", "manual"}
         )
         adaptive_only = bool(
-            all(item.topic.startswith("adaptive/") for item in triggers)
+            all(motion_trigger_kind(item.topic).is_ema for item in triggers)
             and not authoritative_sources.intersection({"camera", "manual"})
         )
         trigger_class = (
@@ -469,11 +638,13 @@ class MotionDecisionOrchestrator:
                 categories=categories, compatible_labels=compatible
             )
         visual_backup_queued = any(
-            item.topic == "adaptive/visual_backup" for item in triggers
+            motion_trigger_kind(item.topic) is MotionTriggerKind.EMA_VISUAL_BACKUP
+            for item in triggers
         )
         visual_backup = adaptive_only and visual_backup_queued
         active_followup_queued = any(
-            item.topic == "adaptive/active_followup" for item in triggers
+            motion_trigger_kind(item.topic) is MotionTriggerKind.EMA_ACTIVE_FOLLOWUP
+            for item in triggers
         )
         active_followup = adaptive_only and active_followup_queued
         live_probe = bool(
@@ -484,54 +655,45 @@ class MotionDecisionOrchestrator:
                 for item in triggers
             )
         )
-        result, diagnostics = self._qualification_result(
-            triggers=triggers,
-            event_at=event_at,
-            received_at=received_at,
-            mode=mode,
-            sensitivity=sensitivity,
+        return _BatchShape(
+            representative=representative,
+            route_trigger=route_trigger,
+            received_at=min(item.received_at for item in triggers),
+            semantic_reports=semantic_reports,
             priority=priority,
+            speech_trigger=speech_trigger,
+            speech_only=speech_only,
             adaptive_only=adaptive_only,
-            speech=speech_trigger,
-            camera_primary=trigger_class in CAMERA_PRIMARY_TRIGGER_CLASSES,
+            visual_backup=visual_backup,
+            active_followup=active_followup,
+            live_probe=live_probe,
+            trigger_class=trigger_class,
+            camera_notice_policy=camera_notice_policy,
         )
-        if stop_event.is_set():
-            self._abort_episode_intents(triggers)
-            self._events.release_deliveries(triggers)
-            self._complete_adaptive_trigger(triggers, complete_delivery=False)
-            self._events.set_active(None)
-            return
 
-        borderline_candidate = is_borderline_candidate(
-            result,
-            rescue_enabled,
-            rescue_margin,
-        )
-        verification_rate = self._qualification.suppression_verification_rate()
-        if trigger_class == TRIGGER_GENERIC_CAMERA:
-            # Measured motion regions may place a generic notice in a zone only
-            # when SurvNG's own qualification accepted that motion.
-            camera_notice_policy["motion_validated"] = bool(result.accepted)
-        confident_nuisance = is_confident_nuisance(result)
-        suppression_verification_candidate = bool(
-            mode in ENFORCING_MODES
-            and not result.accepted
-            and not borderline_candidate
-            and not result.reason.startswith("event_state_")
-            and (
-                (
-                    not adaptive_only
-                    and not confident_nuisance
-                )
-                or should_verify_suppression(decision_id, verification_rate)
-            )
-        )
-        camera_uncertainty_verification = bool(
-            suppression_verification_candidate
-            and not adaptive_only
-            and not confident_nuisance
-        )
-        qualification = {
+    def _qualification_payload(
+        self,
+        *,
+        batch: "_BatchShape",
+        triggers: MotionTriggerBatch,
+        event_at: datetime,
+        result: MotionQualificationResult,
+        diagnostics: dict[str, Any],
+        mode: str,
+        sensitivity: str,
+        frame_width: int,
+        rescue_enabled: bool,
+        rescue_margin: float,
+        borderline_candidate: bool,
+        verification_rate: float,
+        suppression_verification_candidate: bool,
+        camera_uncertainty_verification: bool,
+        confident_nuisance: bool,
+    ) -> dict[str, Any]:
+        """Build the durable qualification record for one decision batch."""
+        representative = batch.representative
+        received_at = batch.received_at
+        qualification: dict[str, Any] = {
             **result.as_dict(),
             **diagnostics,
             "mode": mode,
@@ -545,16 +707,8 @@ class MotionDecisionOrchestrator:
             "camera_uncertainty_verification": camera_uncertainty_verification,
             "confident_nuisance": confident_nuisance,
             "trigger_count": len(triggers),
-            "trigger_source": (
-                "visual_backup"
-                if visual_backup
-                else "active_followup"
-                if active_followup
-                else "speech"
-                if speech_only
-                else "adaptive" if adaptive_only else "camera"
-            ),
-            "live_probe": live_probe,
+            "trigger_source": batch.trigger_source,
+            "live_probe": batch.live_probe,
             "retry_count": max((item.retry_count for item in triggers), default=0),
             "trigger_received_at_epoch": received_at,
             "event_timing": (
@@ -588,17 +742,17 @@ class MotionDecisionOrchestrator:
                 and representative.prequalified.features.get("ema_v2")
             ),
         }
-        if semantic_reports:
-            qualification["camera_semantics"] = {"reports": semantic_reports}
+        if batch.semantic_reports:
+            qualification["camera_semantics"] = {"reports": batch.semantic_reports}
         # Persisted so establishment and every later refinement or restart
         # replay the same notice policy instead of re-deriving it.
-        qualification["camera_notice_admission"] = camera_notice_policy
-        if route_trigger is not None and route_trigger.prequalified is not None:
+        qualification["camera_notice_admission"] = batch.camera_notice_policy
+        if batch.route_trigger is not None and batch.route_trigger.prequalified is not None:
             # The representative controls the camera-primary presentation and
             # timing, but route provenance controls the durable occurrence
             # identity and target admission.  Do not lose it when sources
             # coalesce into the same decision batch.
-            route_features = route_trigger.prequalified.features
+            route_features = batch.route_trigger.prequalified.features
             qualification["features"] = {
                 **qualification["features"],
                 "route_detection_watch": dict(
@@ -606,66 +760,11 @@ class MotionDecisionOrchestrator:
                 ),
             }
             route_intent_id = (
-                route_trigger.delivery_job_id or route_trigger.detection_intent_id
+                batch.route_trigger.delivery_job_id or batch.route_trigger.detection_intent_id
             )
             if route_intent_id:
                 qualification["detection_intent_id"] = route_intent_id
-        effective_accepted = bool(
-            result.accepted
-            or borderline_candidate
-            or suppression_verification_candidate
-        )
-        qualification["effective_accepted"] = effective_accepted
-        retry_attempt = qualification["retry_count"] > 0
-        for item in triggers:
-            item.retry_qualification_result = result
-            item.retry_diagnostics = dict(diagnostics)
-        self._state.record_decision(
-            result=result,
-            qualification=qualification,
-            retry_attempt=retry_attempt,
-            priority=priority,
-            mode=mode,
-            borderline_candidate=borderline_candidate,
-            suppression_verification_candidate=suppression_verification_candidate,
-        )
-
-        if not retry_attempt:
-            self._state.publish_event(
-                "motion_qualification",
-                {
-                    "camera_id": self._camera_id,
-                    "timestamp": event_at.isoformat(),
-                    **qualification,
-                },
-            )
-        if not effective_accepted:
-            self._record_rejected_audit(
-                triggers,
-                decision_id=decision_id,
-                event_at=event_at,
-                mode=mode,
-                sensitivity=sensitivity,
-                result=result,
-            )
-            self._complete_adaptive_trigger(triggers)
-            self._events.set_active(None)
-            return
-
-        self._process_accepted(
-            triggers=triggers,
-            representative=representative,
-            event_at=event_at,
-            decision_id=decision_id,
-            mode=mode,
-            sensitivity=sensitivity,
-            result=result,
-            qualification=qualification,
-            visual_backup=visual_backup,
-            active_followup=active_followup,
-            borderline_candidate=borderline_candidate,
-            suppression_verification_candidate=suppression_verification_candidate,
-        )
+        return qualification
 
     def _qualification_result(
         self,
@@ -767,11 +866,7 @@ class MotionDecisionOrchestrator:
             None,
         )
         if snapshot_path is None:
-            snapshot_path = (
-                ""
-                if result.reason in INCIDENT_ACTIVITY_REASONS
-                else self._media.sample_rejected_motion(event_at, result)
-            )
+            snapshot_path = self._media.sample_rejected_motion(event_at, result)
             for item in triggers:
                 item.audit_snapshot_path = snapshot_path
         self._audit_recorder.record_audit(
@@ -786,7 +881,6 @@ class MotionDecisionOrchestrator:
             object_detected=None,
             trigger_count=len(triggers),
             features=audit_features(result),
-            related_event_id=self._related_incident_event_id(result),
         )
 
     def _process_accepted(
@@ -1231,11 +1325,3 @@ class MotionDecisionOrchestrator:
                 )
             except ValueError:
                 pass
-
-    def _related_incident_event_id(
-        self,
-        result: MotionQualificationResult,
-    ) -> int | None:
-        if result.reason not in INCIDENT_ACTIVITY_REASONS:
-            return None
-        return self._events.active_incident_event_id()

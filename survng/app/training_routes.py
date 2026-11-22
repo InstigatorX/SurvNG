@@ -519,9 +519,7 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
             audit = active_manager.events.get_motion_audit(audit_id)
             if audit is None:
                 raise HTTPException(status_code=404, detail="motion audit entry not found")
-            if audit.get("object_detected") or audit.get("reason") in {
-                "event_state_active", "event_state_cooldown",
-            }:
+            if audit.get("object_detected"):
                 raise HTTPException(status_code=422, detail="audit is not a negative candidate")
             epoch = _utc_datetime(audit["created_at"], "audit created_at").timestamp()
             rows = active_manager.recorder.recording_rows_between(

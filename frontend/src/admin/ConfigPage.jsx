@@ -2964,8 +2964,6 @@ export function motionAuditOutcome(item) {
   if (item.interpretation?.category === "visual_backup_scene_learning") return { label: "Visual backup · scene learning", className: "not-run" };
   if (item.interpretation?.category === "visual_backup_below_threshold") return { label: "Credible EMA motion · below backup threshold", className: "not-run" };
   if (item.interpretation?.category === "object_not_motion_correlated") return { label: "Motion confirmed · detected object outside motion area", className: "clear" };
-  if (item.interpretation?.category === "duplicate_active_event") return { label: "Duplicate · event active", className: "not-run" };
-  if (item.interpretation?.category === "duplicate_event_cooldown") return { label: "Duplicate · cooldown", className: "not-run" };
   if (item.interpretation?.category === "filtered_before_object_detection") return { label: "Filtered before detection", className: "not-run" };
   if (item.object_detected === true) return { label: visualBackup ? "Visual backup · object found" : activeFollowup ? "Active follow-up · object found" : "Object found", className: "object" };
   if (item.object_detected === false) return { label: visualBackup ? "Visual backup · no object" : activeFollowup ? "Active follow-up · no object" : "No object", className: "clear" };
@@ -4898,7 +4896,7 @@ export function MotionEffectiveness({ cameraId, mode }) {
   return (
     <div className="motion-effectiveness-summary">
       <strong>Last 7 days in this mode</strong>
-      <span>{summary.allowed_events || 0} allowed · {summary.visual_filtered || 0} visually filtered · {summary.state_deduplicated || 0} merged with ongoing activity</span>
+      <span>{summary.allowed_events || 0} allowed · {summary.visual_filtered || 0} visually filtered</span>
       <span>{summary.object_events || 0} allowed events found a configured object · {summary.no_object_events || 0} found none</span>
       <span>{Math.round(Number(summary.visual_rejection_rate || 0) * 100)}% visually filtered · {Math.round(Number(summary.object_yield_rate || 0) * 100)}% object yield · {summary.borderline_rescued || 0} borderline rescues</span>
       <span>{summary.suppression_verification_checks || 0} filtered events double-checked · {summary.suppression_verification_rescues || 0} restored after finding an object</span>

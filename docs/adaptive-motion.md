@@ -29,7 +29,7 @@ accepted lower-score persistent EMA                │
   → slower security-verification lane              ┘
 ```
 
-This default mode keeps ONVIF as the primary trigger but covers a camera that occasionally fails to send a notice. After a startup learning period lets the adaptive background stabilize, strong accepted motion uses the normal score and persistence safeguards. Accepted motion below that rescue score is not permanently discarded: a second, slower conditioner requests one security-verification pass when it persists longer. Known illumination, insect, persistent-scene, and stationary-foreground rejection reasons remain ineligible for either path.
+This default mode keeps ONVIF as the primary trigger but covers a camera that occasionally fails to send a notice. Only affirmative semantic notices (person, vehicle, animal, face), manual tests and speech skip validation; generic camera motion notices are validated against EMA, and an incident they start needs temporal object confirmation. After a startup learning period lets the adaptive background stabilize, strong accepted motion uses the normal score and persistence safeguards. Accepted motion below that rescue score is not permanently discarded: a second, slower conditioner requests one security-verification pass when it persists longer. Known illumination, insect, persistent-scene, and stationary-foreground rejection reasons remain ineligible for either path.
 
 A confirmed eligible object can open a short verification window on the next camera in a configured camera-transition route. During that bounded window, one accepted non-nuisance EMA sample is enough to request analysis because the upstream object supplies the temporal prior. After ONVIF transport has repeatedly failed to correlate with qualified EMA evidence, the slower lane instead uses the normal persistence duration. These signals authorize object analysis only; they never create an incident or bypass object confidence, temporal confirmation, zones, activity attribution, or EMA/object correlation.
 
@@ -92,7 +92,7 @@ Only enabled visual processors consume analysis time. Camera + EMA backup and EM
 
 The former `motion_qualification.temporal_filter_threshold` shortcut is retired. Existing configuration files containing it remain valid, but the value is ignored and its control no longer appears in Admin. Every cadence-due sample now reaches the scene-aware pipeline so quiet frames and small motion can update the adaptive background. Sampling rate, latest-frame mailboxes, and the shared concurrency limit still bound the work, though installations that previously skipped many quiet frames should expect higher EMA CPU use.
 
-The classic modular scorer now waits for four frames before it can produce a continuous trigger. Camera-event validation remains fail-open while a frame window is incomplete or has no temporal signal. In custom adaptive graphs, explicit `stationary_displacement_ratio` and `stationary_path_ratio` stage options override the named Light, Standard, or Strong stationary policy; omit those options to follow the named policy.
+Camera-event validation remains fail-open while no EMA result is available or the window has no temporal signal. The former fixed-threshold frame-difference scorer is retired; EMA is the only qualification graph. In custom EMA graphs, explicit `stationary_displacement_ratio` and `stationary_path_ratio` stage options override the named Light, Standard, or Strong stationary policy; omit those options to follow the named policy.
 
 ## Episode admission
 

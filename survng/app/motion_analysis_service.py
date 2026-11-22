@@ -37,8 +37,17 @@ from .motion_decisions import (
 )
 from .motion_events import MotionEventCoordinator, MotionTrigger
 from .motion_pipeline import MotionDebugSnapshotStore, MotionEvidenceRepository
+from .motion_topics import (
+    ADAPTIVE_ACTIVE_FOLLOWUP_TOPIC,
+    ADAPTIVE_MOTION_TOPIC,
+    ADAPTIVE_VISUAL_BACKUP_TOPIC,
+)
 
 LOGGER = logging.getLogger(__name__)
+# Per-camera cap on full-resolution live frames referenced by the evidence
+# ring. The references share capture buffers (no copy); the cap bounds how
+# long those buffers stay alive. Older entries keep only the analysis frame.
+EVIDENCE_SOURCE_FRAME_BUDGET_BYTES = 64 * 1024 * 1024
 CACHED_PREPROCESSOR_IMPLEMENTATION = "gray_blur"
 # Localized scene change worth a discovery sample, including sub-threshold and
 # stationary foreground. Illumination, insects, foliage and jitter are left to
@@ -64,6 +73,7 @@ class MotionAnalysisQualification(Protocol):
     def continuous_primary_required(self) -> bool: ...
     def continuous_primary_due(self, captured_at: float, previous: float) -> bool: ...
     def run_pipeline(self, *args: Any, **kwargs: Any) -> MotionQualificationResult: ...
+    def pipeline_generation(self) -> int: ...
     def illumination_filter_enabled(self) -> bool: ...
     def trigger_mode(self) -> str: ...
     def with_source_evidence(
@@ -112,7 +122,13 @@ class MotionFrameSubmission:
 
 @dataclass(frozen=True, slots=True)
 class MotionEvidenceFrame:
-    """Bounded, generation-qualified color evidence retained for fast detection."""
+    """Bounded, generation-qualified color evidence retained for fast detection.
+
+    ``image`` is the analysis-width frame EMA scored. ``source_image`` is the
+    read-only live capture it was derived from, retained for recent entries
+    only (see ``EVIDENCE_SOURCE_FRAME_BUDGET_BYTES``) so the fast object check
+    can run at full live resolution on the exact frame EMA saw.
+    """
 
     image: np.ndarray
     captured_at_epoch: float
@@ -120,6 +136,12 @@ class MotionEvidenceFrame:
     sequence: int
     capture_generation: int
     lifecycle_generation: int
+    source_image: np.ndarray | None = None
+
+    @property
+    def detection_image(self) -> np.ndarray:
+        """Return the highest-resolution retained image of this frame."""
+        return self.source_image if self.source_image is not None else self.image
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,8 +201,8 @@ class MotionAnalysisService:
         self.media = media
         self.state = state
         self.frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
-        # Four frames are the minimum required by the classic modular scorer.
-        # EMA still consumes only previously unseen timestamps from this window.
+        # A short color window: continuous analysis passes only frames newer
+        # than its anchor, and replays this window after a runtime reset.
         self.color_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=4)
         self.evidence_frames: deque[MotionEvidenceFrame] = deque(
             # Enough history to cover the EMA decision/dispatch delay without
@@ -209,6 +231,10 @@ class MotionAnalysisService:
         self._submission_sequence = 0
         self._last_frame_epoch = 0.0
         self.primary_last_processed_at = 0.0
+        # Newest frame timestamp, and the qualification runtime generation,
+        # already handed to the stateful pipeline (see analyze_continuous).
+        self._pipeline_anchor_at = 0.0
+        self._pipeline_anchor_generation = 0
         self._pending_analysis_at = 0.0
         self._analysis_request_deferred = False
         self.last_continuous_result: MotionQualificationResult | None = None
@@ -383,6 +409,7 @@ class MotionAnalysisService:
             self.last_processed_sequence = 0
             self._last_frame_epoch = 0.0
             self.primary_last_processed_at = 0.0
+            self._pipeline_anchor_at = 0.0
             self._pending_analysis_at = 0.0
             self._analysis_request_deferred = False
         self.clear_queue()
@@ -578,18 +605,43 @@ class MotionAnalysisService:
                 sequence=capture_sequence,
                 capture_generation=capture_generation,
                 lifecycle_generation=lifecycle_generation,
+                # Only a read-only capture buffer is safe to keep by reference.
+                source_image=(
+                    frame
+                    if frame is not resized
+                    and frame.ndim == 3
+                    and not frame.flags.writeable
+                    else None
+                ),
             ))
+            self._bound_evidence_source_frames_locked()
             if processed is not None:
                 self.processed_frames.append((frame_epoch, processed))
             else:
                 self.processed_frames.clear()
         return gray, resized, processed
 
+    def _bound_evidence_source_frames_locked(self) -> None:
+        """Drop the oldest full-resolution references beyond the byte budget.
+
+        The newest entry always keeps its reference. Call with ``frame_lock``.
+        """
+        retained = 0
+        for index in range(len(self.evidence_frames) - 1, -1, -1):
+            item = self.evidence_frames[index]
+            if item.source_image is None:
+                continue
+            retained += int(item.source_image.nbytes)
+            if retained > EVIDENCE_SOURCE_FRAME_BUDGET_BYTES and index < len(self.evidence_frames) - 1:
+                self.evidence_frames[index] = replace(item, source_image=None)
+
     def _reset_for_clock_discontinuity(self, frame_epoch: float) -> None:
         with self.frame_lock:
             previous_epoch = self._last_frame_epoch
             self._last_frame_epoch = frame_epoch
-            if previous_epoch <= 0.0 or frame_epoch > previous_epoch:
+            # Only a backward step is a discontinuity. An equal timestamp is a
+            # duplicate sample that the stateful stages skip as stale.
+            if previous_epoch <= 0.0 or frame_epoch >= previous_epoch:
                 return
             self.frames.clear()
             self.color_frames.clear()
@@ -602,6 +654,7 @@ class MotionAnalysisService:
             self.last_scene_change_at = float("-inf")
             self.last_processed_at = 0.0
             self.primary_last_processed_at = 0.0
+            self._pipeline_anchor_at = 0.0
             self._pending_analysis_at = 0.0
             self._analysis_request_deferred = False
         self.limiter.cancel(self.camera_id)
@@ -1083,11 +1136,36 @@ class MotionAnalysisService:
 
     def analyze_continuous(self, captured_at: float) -> None:
         _mode, sensitivity, _frame_width = self.qualification.settings()
+        pipeline_generation = self.qualification.pipeline_generation()
         with self.frame_lock:
+            ring = list(self.color_frames)
+            if len(ring) < 2:
+                return
+            history_started_at = ring[0][0]
+            history_frame_count = len(ring)
+            # The qualification stages are stateful and consume each frame
+            # once; older frames in the ring only cost repeated full-frame work
+            # that the tracker then discards. Resume from the newest frame the
+            # same runtime generation already processed, keeping it as the
+            # pair anchor. A reset runtime, or an anchor that left the ring,
+            # replays the whole ring so the scene model warms up as before.
+            anchor_index = (
+                next(
+                    (
+                        index
+                        for index in range(len(ring) - 1, -1, -1)
+                        if ring[index][0] == self._pipeline_anchor_at
+                    ),
+                    None,
+                )
+                if self._pipeline_anchor_at > 0.0
+                and self._pipeline_anchor_generation == pipeline_generation
+                else None
+            )
             source_samples = (
-                self.color_frames
-                if len(self.color_frames) >= 2
-                else list(self.frames)[-4:]
+                ring
+                if anchor_index is None
+                else ring[min(anchor_index, len(ring) - 2):]
             )
             samples = [
                 (timestamp, self._share_frame(frame, "continuous_samples"))
@@ -1117,8 +1195,6 @@ class MotionAnalysisService:
                         luminance_frames = []
                         break
                     luminance_frames.append(gray)
-        if len(samples) < 2:
-            return
         if cached_processed:
             with self._telemetry_lock:
                 self._telemetry["cached_derivative_reuse_count"] += len(
@@ -1144,6 +1220,8 @@ class MotionAnalysisService:
                         else ""
                     ),
                     luminance_frames=luminance_frames or None,
+                    history_started_at=history_started_at,
+                    history_frame_count=history_frame_count,
                 )
         except Exception as error:
             LOGGER.warning(
@@ -1155,6 +1233,8 @@ class MotionAnalysisService:
         persist_candidate: dict[str, Any] | None = None
         with self.frame_lock:
             self.last_continuous_result = result
+            self._pipeline_anchor_at = samples[-1][0]
+            self._pipeline_anchor_generation = pipeline_generation
             if result.reason in SCENE_CHANGE_REASONS:
                 self.last_scene_change_at = max(self.last_scene_change_at, captured_at)
             self.primary_last_processed_at = captured_at
@@ -1265,167 +1345,16 @@ class MotionAnalysisService:
             )
         observed_monotonic = time.monotonic()
         if trigger_mode == "adaptive":
-            if not self.state.detection_enabled() or not result.accepted:
+            adaptive_decision = self._adaptive_signal_decision(
+                result, captured_at, observed_monotonic,
+            )
+            if adaptive_decision is None:
                 return
-            qualified = EmaQualified(
-                camera_id=self.camera_id,
-                captured_at=captured_at,
-                observed_monotonic=observed_monotonic,
-                result=result,
-                required_score=result.threshold,
-                qualifying_samples=1,
-                window_samples=1,
-                candidate_started_at=captured_at,
-            )
-            decision = EmaSignalDecision(
-                action=EmaSignalAction.QUALIFIED,
-                result=result,
-                required_score=result.threshold,
-                scene_ready=True,
-                qualifying_samples=1,
-                window_samples=1,
-                qualified=qualified,
-            )
+            decision = adaptive_decision
         else:
-            with self._visual_lock:
-                policy = self.qualification.visual_backup_policy()
-                decision = self.ema_v2.evaluate(
-                    result,
-                    captured_at,
-                    observed_monotonic,
-                    policy,
-                    detection_enabled=self.state.detection_enabled(),
-                )
-                try:
-                    watch = (
-                        self._route_watch_provider(self.camera_id, captured_at)
-                        if self._route_watch_provider is not None
-                        else None
-                    )
-                except Exception:
-                    watch = None
-                    LOGGER.exception(
-                        "route detection watch lookup failed for %s",
-                        self.camera_id,
-                    )
-                try:
-                    effectiveness = (
-                        self._onvif_effectiveness_provider()
-                        if self._onvif_effectiveness_provider is not None
-                        else {}
-                    )
-                except Exception:
-                    effectiveness = {}
-                    LOGGER.exception(
-                        "ONVIF effectiveness lookup failed for %s",
-                        self.camera_id,
-                    )
-                onvif_degraded = bool(effectiveness.get("signal_degraded"))
-                onvif_unavailable = bool(
-                    effectiveness.get("signal_effectiveness_status")
-                    == "transport_unavailable"
-                )
-                verification_reason = (
-                    "route_watch"
-                    if watch is not None
-                    else "onvif_degraded"
-                    if onvif_degraded
-                    else "onvif_unavailable"
-                    if onvif_unavailable
-                    else "persistent_ema"
-                )
-                watch_payload = (
-                    watch.as_dict()
-                    if watch is not None and hasattr(watch, "as_dict")
-                    else {}
-                )
-                verification_result = MotionQualificationResult(
-                    accepted=result.accepted,
-                    score=result.score,
-                    threshold=result.threshold,
-                    reason=result.reason,
-                    frame_count=result.frame_count,
-                    features={
-                        **result.features,
-                        "security_verification": True,
-                        "security_verification_bypass_limits": watch is not None,
-                        "security_verification_reason": verification_reason,
-                        "route_detection_watch": watch_payload,
-                        "onvif_signal_effectiveness_status": effectiveness.get(
-                            "signal_effectiveness_status"
-                        ),
-                    },
-                    telemetry=dict(result.telemetry),
-                )
-                # The ordinary edge remains the efficient primary path.  A
-                # second conditioner guarantees that accepted, persistent
-                # motion is eventually verified even below the operator's
-                # rescue score.  Route evidence or proven ONVIF degradation
-                # accelerates that verification; otherwise it requires more
-                # persistence to keep nuisance cost bounded.
-                verification_policy = replace(
-                    policy,
-                    minimum_score=min(
-                        float(policy.minimum_score),
-                        float(result.threshold),
-                    ),
-                    score_margin=0.0,
-                    minimum_consecutive=(
-                        1
-                        if watch is not None
-                        else policy.minimum_consecutive
-                        if onvif_degraded or onvif_unavailable
-                        else policy.minimum_consecutive + 2
-                    ),
-                    grace_seconds=(
-                        0.0
-                        if watch is not None
-                        else policy.grace_seconds
-                        if onvif_degraded or onvif_unavailable
-                        else policy.grace_seconds + 1.0
-                    ),
-                )
-                verification = self.ema_verification.evaluate(
-                    verification_result,
-                    captured_at,
-                    observed_monotonic,
-                    verification_policy,
-                    detection_enabled=self.state.detection_enabled(),
-                )
-                route_verification = bool(
-                    watch is not None
-                    and verification_result.accepted
-                    and verification_result.reason
-                    not in VISUAL_BACKUP_EXCLUDED_REASONS
-                    and self.state.detection_enabled()
-                )
-                if route_verification:
-                    qualified = EmaQualified(
-                        camera_id=self.camera_id,
-                        captured_at=captured_at,
-                        observed_monotonic=observed_monotonic,
-                        result=verification_result,
-                        required_score=float(result.threshold),
-                        qualifying_samples=1,
-                        window_samples=1,
-                        candidate_started_at=captured_at,
-                    )
-                    decision = EmaSignalDecision(
-                        action=EmaSignalAction.QUALIFIED,
-                        result=verification_result,
-                        required_score=float(result.threshold),
-                        scene_ready=True,
-                        qualifying_samples=1,
-                        window_samples=1,
-                        qualified=qualified,
-                    )
-                    self.ema_v2.clear_candidate()
-                    self.ema_verification.clear_candidate()
-                elif decision.action is EmaSignalAction.QUALIFIED:
-                    self.ema_verification.clear_candidate()
-                elif verification.action is EmaSignalAction.QUALIFIED:
-                    self.ema_v2.clear_candidate()
-                    decision = verification
+            decision = self._rescue_signal_decision(
+                result, captured_at, observed_monotonic,
+            )
         result = decision.result
         if decision.action in {EmaSignalAction.DISABLED, EmaSignalAction.REJECTED}:
             if decision.count_nonpromotion:
@@ -1551,82 +1480,20 @@ class MotionAnalysisService:
         try:
             if self._stopping():
                 return
-            fused = MotionQualificationResult(
-                accepted=True,
-                score=result.score,
-                threshold=result.threshold,
-                reason=(
-                    result.reason
-                    if result.reason == "illumination_verification_probe"
-                    else "ema_v2_qualified"
-                ),
-                frame_count=result.frame_count,
-                features={
-                    **result.features,
-                    "visual_backup": trigger_mode == "camera_rescue" and not followup,
-                    "active_event_followup": followup,
-                    **({"live_probe": True} if intent.live_probe else {}),
-                    "ema_v2": True,
-                    "motion_episode_id": intent.episode_id,
-                    "visual_backup_required_score": round(
-                        decision.required_score, 4
-                    ),
-                    "visual_backup_consecutive": decision.qualifying_samples,
-                    "visual_backup_window_samples": decision.window_samples,
-                    "visual_backup_grace_seconds": settings["grace_seconds"],
-                },
-                telemetry=dict(result.telemetry),
+            fused, trigger = self._qualified_ema_trigger(
+                result=result,
+                decision=decision,
+                qualified=qualified,
+                evidence_frame=evidence_frame,
+                intent=intent,
+                followup=followup,
+                trigger_mode=trigger_mode,
+                settings=settings,
+                captured_at=captured_at,
             )
             self.last_continuous_result = fused
-            event_at = datetime.fromtimestamp(captured_at, timezone.utc)
-            qualified_evidence_at = qualified.evidence_frame_at_epoch
-            qualified_evidence_sequence = qualified.evidence_frame_sequence
-            qualified_capture_generation = (
-                qualified.evidence_capture_generation
-            )
-            trigger_enqueued = self._enqueue_trigger(
-                MotionTrigger(
-                    topic=(
-                        "adaptive/active_followup"
-                        if followup
-                        else "adaptive/visual_backup"
-                        if trigger_mode == "camera_rescue"
-                        else "adaptive/motion"
-                    ),
-                    message=(
-                        "new credible motion during active EMA episode"
-                        if followup
-                        else "adaptive visual backup after missing camera notice"
-                        if trigger_mode == "camera_rescue"
-                        else "adaptive motion episode"
-                    ),
-                    event_at=event_at,
-                    received_at=captured_at,
-                    prequalified=fused,
-                    episode_id=intent.episode_id,
-                    detection_intent_id=intent.intent_id,
-                    lifecycle_generation=intent.generation,
-                    evidence_frame_at_epoch=(
-                        float(qualified_evidence_at)
-                        if qualified_evidence_at is not None
-                        else evidence_frame.captured_at_epoch
-                        if evidence_frame is not None
-                        else captured_at
-                    ),
-                    evidence_frame_sequence=(
-                        qualified_evidence_sequence
-                        or (evidence_frame.sequence if evidence_frame is not None else 0)
-                    ),
-                    evidence_capture_generation=(
-                        qualified_capture_generation
-                        or (
-                            evidence_frame.capture_generation
-                            if evidence_frame is not None
-                            else 0
-                        )
-                    ),
-                )
-            )
+            event_at = trigger.event_at
+            trigger_enqueued = self._enqueue_trigger(trigger)
             if not trigger_enqueued and not standalone_route:
                 if followup:
                     self.state.increment_stat("active_followup_queue_rejected", 1)
@@ -1663,6 +1530,283 @@ class MotionAnalysisService:
                         self._enqueue_replacement_camera_notice(replacement)
                 except ValueError:
                     pass
+
+    def _qualified_ema_trigger(
+        self,
+        *,
+        result: MotionQualificationResult,
+        decision: EmaSignalDecision,
+        qualified: EmaQualified,
+        evidence_frame: MotionEvidenceFrame | None,
+        intent: Any,
+        followup: bool,
+        trigger_mode: str,
+        settings: dict[str, float | int],
+        captured_at: float,
+    ) -> tuple[MotionQualificationResult, MotionTrigger]:
+        """Build the prequalified result and trigger for an admitted EMA edge."""
+        fused = MotionQualificationResult(
+            accepted=True,
+            score=result.score,
+            threshold=result.threshold,
+            reason=(
+                result.reason
+                if result.reason == "illumination_verification_probe"
+                else "ema_v2_qualified"
+            ),
+            frame_count=result.frame_count,
+            features={
+                **result.features,
+                "visual_backup": trigger_mode == "camera_rescue" and not followup,
+                "active_event_followup": followup,
+                **({"live_probe": True} if intent.live_probe else {}),
+                "ema_v2": True,
+                "motion_episode_id": intent.episode_id,
+                "visual_backup_required_score": round(
+                    decision.required_score, 4
+                ),
+                "visual_backup_consecutive": decision.qualifying_samples,
+                "visual_backup_window_samples": decision.window_samples,
+                "visual_backup_grace_seconds": settings["grace_seconds"],
+            },
+            telemetry=dict(result.telemetry),
+        )
+        event_at = datetime.fromtimestamp(captured_at, timezone.utc)
+        qualified_evidence_at = qualified.evidence_frame_at_epoch
+        qualified_evidence_sequence = qualified.evidence_frame_sequence
+        qualified_capture_generation = (
+            qualified.evidence_capture_generation
+        )
+        trigger = (
+            MotionTrigger(
+                topic=(
+                    ADAPTIVE_ACTIVE_FOLLOWUP_TOPIC
+                    if followup
+                    else ADAPTIVE_VISUAL_BACKUP_TOPIC
+                    if trigger_mode == "camera_rescue"
+                    else ADAPTIVE_MOTION_TOPIC
+                ),
+                message=(
+                    "new credible motion during active EMA episode"
+                    if followup
+                    else "adaptive visual backup after missing camera notice"
+                    if trigger_mode == "camera_rescue"
+                    else "adaptive motion episode"
+                ),
+                event_at=event_at,
+                received_at=captured_at,
+                prequalified=fused,
+                episode_id=intent.episode_id,
+                detection_intent_id=intent.intent_id,
+                lifecycle_generation=intent.generation,
+                evidence_frame_at_epoch=(
+                    float(qualified_evidence_at)
+                    if qualified_evidence_at is not None
+                    else evidence_frame.captured_at_epoch
+                    if evidence_frame is not None
+                    else captured_at
+                ),
+                evidence_frame_sequence=(
+                    qualified_evidence_sequence
+                    or (evidence_frame.sequence if evidence_frame is not None else 0)
+                ),
+                evidence_capture_generation=(
+                    qualified_capture_generation
+                    or (
+                        evidence_frame.capture_generation
+                        if evidence_frame is not None
+                        else 0
+                    )
+                ),
+            )
+        )
+        return fused, trigger
+
+    def _adaptive_signal_decision(
+        self,
+        result: MotionQualificationResult,
+        captured_at: float,
+        observed_monotonic: float,
+    ) -> EmaSignalDecision | None:
+        """In EMA-triggered mode every accepted sample is a qualified edge."""
+        if not self.state.detection_enabled() or not result.accepted:
+            return None
+        qualified = EmaQualified(
+            camera_id=self.camera_id,
+            captured_at=captured_at,
+            observed_monotonic=observed_monotonic,
+            result=result,
+            required_score=result.threshold,
+            qualifying_samples=1,
+            window_samples=1,
+            candidate_started_at=captured_at,
+        )
+        decision = EmaSignalDecision(
+            action=EmaSignalAction.QUALIFIED,
+            result=result,
+            required_score=result.threshold,
+            scene_ready=True,
+            qualifying_samples=1,
+            window_samples=1,
+            qualified=qualified,
+        )
+        return decision
+
+    def _rescue_signal_decision(
+        self,
+        result: MotionQualificationResult,
+        captured_at: float,
+        observed_monotonic: float,
+    ) -> EmaSignalDecision:
+        """Condition EMA backup motion through the rescue and verification lanes."""
+        with self._visual_lock:
+            policy = self.qualification.visual_backup_policy()
+            decision = self.ema_v2.evaluate(
+                result,
+                captured_at,
+                observed_monotonic,
+                policy,
+                detection_enabled=self.state.detection_enabled(),
+            )
+            watch, effectiveness = self._security_verification_inputs(captured_at)
+            onvif_degraded = bool(effectiveness.get("signal_degraded"))
+            onvif_unavailable = bool(
+                effectiveness.get("signal_effectiveness_status")
+                == "transport_unavailable"
+            )
+            verification_reason = (
+                "route_watch"
+                if watch is not None
+                else "onvif_degraded"
+                if onvif_degraded
+                else "onvif_unavailable"
+                if onvif_unavailable
+                else "persistent_ema"
+            )
+            watch_payload = (
+                watch.as_dict()
+                if watch is not None and hasattr(watch, "as_dict")
+                else {}
+            )
+            verification_result = MotionQualificationResult(
+                accepted=result.accepted,
+                score=result.score,
+                threshold=result.threshold,
+                reason=result.reason,
+                frame_count=result.frame_count,
+                features={
+                    **result.features,
+                    "security_verification": True,
+                    "security_verification_bypass_limits": watch is not None,
+                    "security_verification_reason": verification_reason,
+                    "route_detection_watch": watch_payload,
+                    "onvif_signal_effectiveness_status": effectiveness.get(
+                        "signal_effectiveness_status"
+                    ),
+                },
+                telemetry=dict(result.telemetry),
+            )
+            # The ordinary edge remains the efficient primary path.  A
+            # second conditioner guarantees that accepted, persistent
+            # motion is eventually verified even below the operator's
+            # rescue score.  Route evidence or proven ONVIF degradation
+            # accelerates that verification; otherwise it requires more
+            # persistence to keep nuisance cost bounded.
+            verification_policy = replace(
+                policy,
+                minimum_score=min(
+                    float(policy.minimum_score),
+                    float(result.threshold),
+                ),
+                score_margin=0.0,
+                minimum_consecutive=(
+                    1
+                    if watch is not None
+                    else policy.minimum_consecutive
+                    if onvif_degraded or onvif_unavailable
+                    else policy.minimum_consecutive + 2
+                ),
+                grace_seconds=(
+                    0.0
+                    if watch is not None
+                    else policy.grace_seconds
+                    if onvif_degraded or onvif_unavailable
+                    else policy.grace_seconds + 1.0
+                ),
+            )
+            verification = self.ema_verification.evaluate(
+                verification_result,
+                captured_at,
+                observed_monotonic,
+                verification_policy,
+                detection_enabled=self.state.detection_enabled(),
+            )
+            route_verification = bool(
+                watch is not None
+                and verification_result.accepted
+                and verification_result.reason
+                not in VISUAL_BACKUP_EXCLUDED_REASONS
+                and self.state.detection_enabled()
+            )
+            if route_verification:
+                qualified = EmaQualified(
+                    camera_id=self.camera_id,
+                    captured_at=captured_at,
+                    observed_monotonic=observed_monotonic,
+                    result=verification_result,
+                    required_score=float(result.threshold),
+                    qualifying_samples=1,
+                    window_samples=1,
+                    candidate_started_at=captured_at,
+                )
+                decision = EmaSignalDecision(
+                    action=EmaSignalAction.QUALIFIED,
+                    result=verification_result,
+                    required_score=float(result.threshold),
+                    scene_ready=True,
+                    qualifying_samples=1,
+                    window_samples=1,
+                    qualified=qualified,
+                )
+                self.ema_v2.clear_candidate()
+                self.ema_verification.clear_candidate()
+            elif decision.action is EmaSignalAction.QUALIFIED:
+                self.ema_verification.clear_candidate()
+            elif verification.action is EmaSignalAction.QUALIFIED:
+                self.ema_v2.clear_candidate()
+                decision = verification
+        return decision
+
+    def _security_verification_inputs(
+        self,
+        captured_at: float,
+    ) -> tuple[Any | None, dict[str, Any]]:
+        """Return the active route watch and ONVIF effectiveness, failing soft."""
+        try:
+            watch = (
+                self._route_watch_provider(self.camera_id, captured_at)
+                if self._route_watch_provider is not None
+                else None
+            )
+        except Exception:
+            watch = None
+            LOGGER.exception(
+                "route detection watch lookup failed for %s",
+                self.camera_id,
+            )
+        try:
+            effectiveness = (
+                self._onvif_effectiveness_provider()
+                if self._onvif_effectiveness_provider is not None
+                else {}
+            )
+        except Exception:
+            effectiveness = {}
+            LOGGER.exception(
+                "ONVIF effectiveness lookup failed for %s",
+                self.camera_id,
+            )
+        return watch, effectiveness
 
     def consider_route_watch(self, watch: Any) -> bool:
         """Replay recent accepted EMA evidence when route confirmation is late."""

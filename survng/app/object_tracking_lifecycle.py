@@ -12,6 +12,7 @@ from typing import Any, Callable, Protocol
 import numpy as np
 
 from .config import CameraConfig
+from .object_activity import ObjectActivityAttributor
 from .object_tracking import (
     CatchupFrameProvider,
     FrameProvider,
@@ -48,6 +49,7 @@ class ObjectTrackingLifecycle:
         scene_job_store: Any | None = None,
         drain_cutoff: Callable[[], float | None] | None = None,
         recorded_available: Callable[[], bool] | None = None,
+        activity_attributor: ObjectActivityAttributor | None = None,
     ) -> None:
         self.recorded_available = recorded_available or (lambda: False)
         self.camera = camera
@@ -61,8 +63,7 @@ class ObjectTrackingLifecycle:
         self.cover_frame_provider = cover_frame_provider
         self.snapshot_writer = snapshot_writer
         self.scene_job_store = scene_job_store
-        self.scene_context_memory = None
-        self.activity_attributor = None
+        self.activity_attributor = activity_attributor
         self._scene_lease_owner = uuid.uuid4().hex
         # Terminal drain owns scene admission until detection is explicitly
         # enabled again. This fences a resume racing the stop/join window.
@@ -94,9 +95,8 @@ class ObjectTrackingLifecycle:
             catchup_frame_provider=self.catchup_frame_provider,
             cover_frame_provider=self.cover_frame_provider,
             snapshot_writer=self.snapshot_writer,
+            activity_attributor=self.activity_attributor,
         )
-        session.scene_context_memory = self.scene_context_memory
-        session.activity_attributor = self.activity_attributor
         return session
 
     def prewarm(self) -> FrameSample | None:

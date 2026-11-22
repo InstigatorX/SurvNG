@@ -56,7 +56,7 @@ license when redistributing the worker dependencies.
 
 | Component | Notes |
 |-----------|--------|
-| Ultralytics (optional tracking comparison) | AGPL-3.0 — only if you install and use it; not part of the default SurvNG MIT distribution. See `VIDEO_PIPELINE.md` |
+| Ultralytics (YOLO model export) | AGPL-3.0 — installed only in the model installer's separate export environment (`scripts/install-docker-models.sh`); not part of the SurvNG runtime. The former optional tracking-comparison backend has been removed. |
 | OpenAI / other AI providers | Used only when configured; subject to their API terms |
 
 ## Model installer image (`survng-model-installer`)

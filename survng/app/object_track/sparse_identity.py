@@ -1,11 +1,9 @@
-"""Offline Sparse Identity tracker for SurvNG Compare / evaluation.
+"""Sparse Identity tracker, SurvNG's default (``survng_sparse_identity``).
 
 Keep Hybrid's wall-clock lifecycle and lazy ReID while adding cascaded
 active-before-lost association, buffered IoU fallback, observation-centric
 velocity reset, contested appearance veto, quality-gated multi-gallery memory,
 provisional recovery, and co-occlusion freezes.
-
-Production configuration normalizes this implementation name back to Hybrid.
 """
 
 from __future__ import annotations
@@ -63,7 +61,7 @@ def _crop_quality(detection: dict[str, Any], box: Box) -> float:
 
 
 class SparseIdentityObjectTracker(HybridObjectTracker):
-    """Compare-only tracker oriented at sparse CCTV identity retention."""
+    """Production tracker oriented at sparse CCTV identity retention."""
 
     def __init__(self, config: ObjectTrackingConfig, high_confidence_threshold: float) -> None:
         super().__init__(config, high_confidence_threshold)

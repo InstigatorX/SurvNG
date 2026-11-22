@@ -69,7 +69,7 @@ def test_cover_without_objects_uses_the_snapshot_writer_stamp(tmp_path):
     media = CameraMediaService(
         camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
         storage_dir=tmp_path, image_writer=DurableImageWriter(ImageStorageConfig()),
-        motion_detector=None, frame_provider=lambda _source: None,
+        frame_provider=lambda _source: None,
         rejected_sample_rate=lambda: 0.0, stop_requested=lambda: False,
     )
     path = media.write_snapshot(np.zeros((20, 30, 3), np.uint8), CAPTURED)

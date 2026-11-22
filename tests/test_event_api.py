@@ -776,7 +776,7 @@ class EventApiSerializationTest(unittest.TestCase):
                 "camera_id": "gate",
                 "features_json": "{}",
                 "created_at": "2026-07-27T12:17:16+00:00",
-                "reason": "event_state_active",
+                "reason": "micro_jitter",
                 "event_id": None,
                 "object_detected": None,
             },
@@ -799,11 +799,9 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertFalse(context["decision_outcome"]["visual_backup"])
         self.assertEqual(
             context["decision_outcome"]["interpretation"]["category"],
-            "duplicate_active_event",
+            "filtered_before_object_detection",
         )
-        self.assertEqual(context["related_prior_event"]["event_id"], 99)
-        self.assertEqual(context["related_prior_event"]["seconds_before"], 9.0)
-        self.assertEqual(context["related_prior_event"]["objects"][0]["label"], "person")
+        self.assertIsNone(context["related_prior_event"])
 
     def test_sampled_suppression_context_records_that_object_detection_ran(self) -> None:
         config = AppConfig(cameras=[CameraConfig(

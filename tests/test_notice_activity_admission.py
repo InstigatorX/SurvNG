@@ -107,7 +107,7 @@ def test_handler_and_durable_admission_agree_and_survive_restart(tmp_path, movin
         "", {}, frame_captured_at_epoch=1001, frame_source="recorded_main",
     )
     handler = MotionDecisionHandler(
-        camera_id="gate", events=store, detection_provider=lambda _at: provider,
+        camera_id="gate", events=store, detection_provider=lambda _at, _qualification=None: provider,
         snapshot_writer=lambda *_: "", object_serializer=json.dumps,
         establishment_zone_policy=lambda: policy(zone("Entry", "incident", 0.5, 1), confidence_threshold=0.7),
     )

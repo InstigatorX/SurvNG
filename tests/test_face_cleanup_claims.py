@@ -285,7 +285,7 @@ def claimed_snapshot_handler(tmp_path, events, faces):
     writer = Mock(side_effect=[str(claimed), str(independent)])
     sink = Mock(wraps=faces.ingest_candidates)
     handler = MotionDecisionHandler(
-        camera_id="gate", events=events, detection_provider=lambda _at: result,
+        camera_id="gate", events=events, detection_provider=lambda _at, _qualification=None: result,
         snapshot_writer=writer, object_serializer=json.dumps,
         event_callback=lambda kind, payload: published.append((kind, payload)),
         face_candidate_sink=sink,

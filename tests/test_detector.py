@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 import time
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import cv2
@@ -14,6 +15,104 @@ from survng.app.detector import (
     _class_aware_nms,
     detection_failure,
 )
+
+
+# Scalar oracle for the vectorized YOLO decoder. It lived on the detector but
+# only these parity and speed tests used it.
+def parse_yolo_output_scalar_reference(
+    detector: OpenVinoDetector,
+    output: np.ndarray,
+    metadata: dict[str, float],
+    *,
+    confidence_threshold: float | None = None,
+) -> list[dict[str, Any]]:
+    """Preserve the pre-vectorization parser for offline equivalence replay."""
+    confidence_threshold = detector.config.confidence_threshold if confidence_threshold is None else confidence_threshold
+    detections = np.squeeze(output)
+    if detections.ndim != 2:
+        return []
+    expected_channels = len(detector.labels) + 4 if detector.labels else 0
+    if detections.shape[0] < detections.shape[1] and (
+        detections.shape[0] == expected_channels
+        or (
+            detections.shape[1] != expected_channels
+            and detections.shape[1] > detections.shape[0] * 2
+        )
+    ):
+        detections = detections.T
+
+    boxes: list[list[int]] = []
+    scores: list[float] = []
+    class_ids: list[int] = []
+    image_width = metadata["image_width"]
+    image_height = metadata["image_height"]
+    scale = metadata["scale"]
+    pad_x = metadata["pad_x"]
+    pad_y = metadata["pad_y"]
+
+    for detection in detections:
+        if len(detection) < 5:
+            continue
+        class_scores = np.asarray(detection[4:], dtype=np.float32)
+        if class_scores.size == 0 or not np.all(np.isfinite(class_scores)):
+            continue
+        class_id = int(np.argmax(class_scores))
+        confidence = float(class_scores[class_id])
+        if (
+            not np.isfinite(confidence)
+            or confidence < confidence_threshold
+        ):
+            continue
+
+        center_x, center_y, width, height = [
+            float(value) for value in detection[:4]
+        ]
+        if (
+            not np.all(np.isfinite([center_x, center_y, width, height]))
+            or width <= 0
+            or height <= 0
+        ):
+            continue
+        x1 = (center_x - width / 2 - pad_x) / scale
+        y1 = (center_y - height / 2 - pad_y) / scale
+        x2 = (center_x + width / 2 - pad_x) / scale
+        y2 = (center_y + height / 2 - pad_y) / scale
+        x1 = max(0, min(image_width, x1))
+        y1 = max(0, min(image_height, y1))
+        x2 = max(0, min(image_width, x2))
+        y2 = max(0, min(image_height, y2))
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        boxes.append([int(x1), int(y1), int(x2 - x1), int(y2 - y1)])
+        scores.append(confidence)
+        class_ids.append(class_id)
+
+    if not boxes:
+        return []
+    selected = _class_aware_nms(
+        boxes,
+        scores,
+        class_ids,
+        confidence_threshold,
+        detector.config.nms_threshold,
+    )
+    objects: list[dict[str, Any]] = []
+    for index in selected:
+        x, y, width, height = boxes[index]
+        class_id = class_ids[index]
+        label = detector.labels[class_id] if class_id < len(detector.labels) else str(class_id)
+        objects.append({
+            "label": label,
+            "confidence": round(scores[index], 4),
+            "box": {
+                "x1": x,
+                "y1": y,
+                "x2": x + width,
+                "y2": y + height,
+            },
+        })
+    return objects
 
 
 class _FailingNet:
@@ -231,7 +330,7 @@ class OpenVinoDetectorTest(unittest.TestCase):
         for output in (rows[np.newaxis, ...], rows.T[np.newaxis, ...]):
             metrics: dict[str, float | int] = {}
             vectorized = detector._parse_yolo_output(output, metadata, metrics=metrics)
-            scalar = detector._parse_yolo_output_scalar_reference(output, metadata)
+            scalar = parse_yolo_output_scalar_reference(detector, output, metadata)
 
             self.assertEqual(vectorized, scalar)
             self.assertEqual(metrics["raw"], 8400)
@@ -254,7 +353,7 @@ class OpenVinoDetectorTest(unittest.TestCase):
         output[:, 4:, :] = 0.1
         output[0, 4, :24] = 0.9
         detector._parse_yolo_output(output, metadata)
-        detector._parse_yolo_output_scalar_reference(output, metadata)
+        parse_yolo_output_scalar_reference(detector, output, metadata)
 
         started = time.perf_counter()
         for _ in range(10):
@@ -262,7 +361,7 @@ class OpenVinoDetectorTest(unittest.TestCase):
         vectorized_ms = (time.perf_counter() - started) * 1000 / 10
         started = time.perf_counter()
         for _ in range(2):
-            detector._parse_yolo_output_scalar_reference(output, metadata)
+            parse_yolo_output_scalar_reference(detector, output, metadata)
         scalar_ms = (time.perf_counter() - started) * 1000 / 2
 
         self.assertLess(vectorized_ms, scalar_ms * 0.5)

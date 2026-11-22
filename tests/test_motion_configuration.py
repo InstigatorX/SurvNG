@@ -9,13 +9,12 @@ from survng.app.config import AppConfig, CameraMotionQualificationConfig, Motion
 from survng.app.manager import validate_manager_configuration, validate_motion_pipeline_configuration
 from survng.app.motion_pipeline import (
     MotionPipelineFactory,
-    analysis_preset_selections,
+    adaptive_motion_stage_configs,
     build_builtin_motion_registry,
     guided_fusion_settings,
     identify_analysis_preset,
     resolve_motion_pipeline_graphs,
     resolved_trigger_mode,
-    update_guided_fusion,
 )
 
 
@@ -54,43 +53,99 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
 
         validate_manager_configuration(config)
 
-    def test_guided_helpers_identify_presets_and_update_fusion(self) -> None:
+    def test_guided_helpers_identify_the_adaptive_preset(self) -> None:
         graphs = resolve_motion_pipeline_graphs(
             MotionQualificationConfig(),
             CameraMotionQualificationConfig(),
         )
         self.assertEqual(identify_analysis_preset(graphs.qualification), "adaptive")
-        with self.assertRaisesRegex(ValueError, "unknown motion analysis preset"):
-            analysis_preset_selections("classic")
+        self.assertEqual(guided_fusion_settings(graphs.fusion)["policy"], "audit")
 
-        updated = update_guided_fusion(graphs.fusion, "fusion_policy", "weighted")
-        resolved = resolve_motion_pipeline_graphs(
-            MotionQualificationConfig.model_validate({
-                "pipeline": {"fusion": [stage.model_dump() for stage in updated]},
-            }),
-            CameraMotionQualificationConfig(),
-        )
-        self.assertEqual(guided_fusion_settings(resolved.fusion)["policy"], "weighted")
+    def test_fusion_policies_without_sources_are_rejected(self) -> None:
+        # With no evidence source, any/all/weighted found nothing to combine
+        # and fail-open accepted every motion with score 1.0.
+        for policy in ("any", "all", "weighted"):
+            config = MotionQualificationConfig.model_validate({
+                "mode": "camera",
+                "pipeline": {
+                    "fusion": [{
+                        "stage_id": "evidence_fusion",
+                        "implementation": "buffered_evidence_fusion",
+                        "options": {"policy": policy, "sources": []},
+                    }],
+                },
+            })
+            with self.subTest(policy=policy), self.assertRaisesRegex(
+                ValueError, "motion fusion policy .* is unsupported",
+            ):
+                resolve_motion_pipeline_graphs(config, CameraMotionQualificationConfig())
 
-    def test_guided_fusion_normalizes_scalar_source_for_status(self) -> None:
-        graphs = resolve_motion_pipeline_graphs(
-            MotionQualificationConfig.model_validate({
+    def test_fusion_rejects_unsupported_sources(self) -> None:
+        for sources in (" AUX ", ["depth_object"]):
+            config = MotionQualificationConfig.model_validate({
                 "mode": "adaptive",
                 "pipeline": {
-                    "fusion": [
-                        {
-                            "stage_id": "evidence_fusion",
-                            "implementation": "buffered_evidence_fusion",
-                            "options": {"policy": " ALL ", "sources": " AUX "},
-                        }],
+                    "fusion": [{
+                        "stage_id": "evidence_fusion",
+                        "implementation": "buffered_evidence_fusion",
+                        "options": {"policy": "audit", "sources": sources},
+                    }],
+                },
+            })
+            with self.subTest(sources=sources), self.assertRaisesRegex(
+                ValueError, "motion fusion sources .* are unsupported",
+            ):
+                resolve_motion_pipeline_graphs(config, CameraMotionQualificationConfig())
+
+    def test_saved_ui_fusion_options_still_load(self) -> None:
+        graphs = resolve_motion_pipeline_graphs(
+            MotionQualificationConfig.model_validate({
+                "mode": "camera",
+                "pipeline": {
+                    "fusion": [{
+                        "stage_id": "evidence_fusion",
+                        "implementation": "buffered_evidence_fusion",
+                        "options": {
+                            "policy": " BYPASS ",
+                            "sources": [],
+                            "include_primary": False,
+                            "fail_open": True,
+                            "source_thresholds": {"onvif": 0.5},
+                            "source_weights": {"primary": 1, "onvif": 1},
+                            "weighted_threshold": 0.5,
+                        },
+                    }],
                 },
             }),
             CameraMotionQualificationConfig(),
         )
+        self.assertEqual(guided_fusion_settings(graphs.fusion)["policy"], "bypass")
+        validate_motion_pipeline_configuration(AppConfig.model_validate({
+            "motion_qualification": {
+                "mode": "camera",
+                "pipeline": {"fusion": [{
+                    "stage_id": "evidence_fusion",
+                    "implementation": "buffered_evidence_fusion",
+                    "options": {
+                        "policy": "bypass",
+                        "include_primary": False,
+                        "source_weights": {"primary": 1, "onvif": 1},
+                    },
+                }]},
+            },
+        }))
 
-        settings = guided_fusion_settings(graphs.fusion)
-        self.assertEqual(settings["policy"], "all")
-        self.assertEqual(settings["sources"], ["aux"])
+    def test_retired_fixed_threshold_stages_are_rejected(self) -> None:
+        config = MotionQualificationConfig.model_validate({
+            "pipeline": {
+                "qualification": [
+                    {"stage_id": "preprocess", "implementation": "gray_blur"},
+                    {"stage_id": "difference", "implementation": "frame_difference"},
+                ],
+            },
+        })
+        with self.assertRaisesRegex(ValueError, "retired fixed-threshold"):
+            resolve_motion_pipeline_graphs(config, CameraMotionQualificationConfig())
 
     def test_empty_global_graphs_resolve_to_compatible_defaults(self) -> None:
         graphs = resolve_motion_pipeline_graphs(
@@ -194,7 +249,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                 "pipeline": {
                     "qualification": [{
                         "stage_id": "score_first",
-                        "implementation": "default_motion_score",
+                        "implementation": "adaptive_motion_score",
                     }],
                 },
             }),
@@ -203,7 +258,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "unknown motion stage implementation"):
             factory.create("gate", unknown.qualification)
-        with self.assertRaisesRegex(ValueError, "dominant_track"):
+        with self.assertRaisesRegex(ValueError, "tracked_objects"):
             factory.create("gate", incompatible.qualification)
 
     def test_resolved_implementation_and_options_are_exposed_in_status(self) -> None:
@@ -261,7 +316,14 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                 "stream_url": "rtsp://example.invalid/main",
                 "motion_qualification": {
                     "pipeline": {
-                        "qualification": [stage.model_dump() for stage in analysis_preset_selections("adaptive")],
+                        "qualification": [
+                            {
+                                "stage_id": stage.stage_id,
+                                "implementation": stage.implementation,
+                                "options": dict(stage.options),
+                            }
+                            for stage in adaptive_motion_stage_configs()
+                        ],
                     },
                 },
             }],
@@ -373,27 +435,6 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError,
             "stage 'threshold'.*option 'sigma'.*valid number",
-        ):
-            validate_motion_pipeline_configuration(config)
-
-    def test_application_preflight_rejects_nonfinite_nested_fusion_values(self) -> None:
-        config = AppConfig.model_validate({
-            "motion_qualification": {
-                "pipeline": {
-                    "fusion": [{
-                        "stage_id": "fusion",
-                        "implementation": "buffered_evidence_fusion",
-                        "options": {
-                            "source_thresholds": {"aux": float("nan")},
-                        },
-                    }],
-                },
-            },
-        })
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "source threshold for aux must be finite",
         ):
             validate_motion_pipeline_configuration(config)
 

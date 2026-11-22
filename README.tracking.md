@@ -1,12 +1,14 @@
 # SurvNG Object Tracking
 
-SurvNG uses one production tracker and an offline evaluation workflow:
+SurvNG offers two production trackers, selected with
+`detector.tracking.implementation`:
 
-- **SurvNG Sparse Identity** (`survng_sparse_identity`) is the production default
-  for identity-retention testing. It adds cascaded association, buffered IoU,
-  quality-gated ReID galleries, and entity relink.
+- **SurvNG Sparse Identity** (`survng_sparse_identity`) is the default. It
+  extends Hybrid with cascaded association, buffered IoU, quality-gated ReID
+  galleries, and entity relink.
 - **SurvNG Hybrid** (`survng_hybrid`) remains selectable as the prior production
   engine.
+
 ## SurvNG Hybrid behavior
 
 “Better” here means better suited to SurvNG's normal operating constraints. It

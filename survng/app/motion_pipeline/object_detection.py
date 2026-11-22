@@ -19,7 +19,7 @@ from ..evidence_work import (
     EvidenceWorkPreempted, check_evidence_cancellation, evidence_cancelled,
     evidence_wait_timeout, report_evidence_stage, run_evidence_process,
 )
-from ..config import CameraConfig
+from ..config import CameraConfig, DetectorConfig
 from ..scene_activity_evidence import scene_sample_records as _scene_sample_records
 from ..evidence_gallery import GalleryBatch, encode_gallery
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
@@ -269,7 +269,7 @@ class _DecodedRecordedFrame:
 
 
 class MotionObjectDetectorBackend(Protocol):
-    config: Any
+    config: DetectorConfig
 
     def detect(
         self,
@@ -444,9 +444,10 @@ class RecordedMotionObjectDetector:
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
         decode_budget: RecordedDecodeBudget | None = None,
-        motion_evidence: Any | None = None,
+        activity_attributor: ObjectActivityAttributor | None = None,
     ) -> None:
         self.camera = camera
+        self.activity_attributor = activity_attributor
         self.detector = detector
         self.recorder = recorder
         self.live_frame_provider = live_frame_provider
@@ -456,9 +457,6 @@ class RecordedMotionObjectDetector:
         self.decode_budget = decode_budget
         self._scene_frames: deque[TimestampedLiveFrame] = deque(maxlen=4)
         self._scene_frames_lock = threading.Lock()
-        # Compatibility-only: refinement depth no longer publishes rolling
-        # motion evidence, so callers may keep passing this legacy argument.
-        _ = motion_evidence
 
     def stop_requested(self) -> bool:
         return self._camera_stop_requested() or evidence_cancelled()
@@ -487,7 +485,7 @@ class RecordedMotionObjectDetector:
         qualification = qualification or {}
         if qualification.get("scene_discovery") or qualification.get("scene_confirmation"):
             return None
-        config = getattr(self.detector, "config", None)
+        config = self.detector.config
         stages, _retry, settle_seconds, *_ = resolve_recorded_refinement_plan(
             config, qualification=qualification, event_at=event_at, camera_id=self.camera.id,
         )
@@ -497,7 +495,7 @@ class RecordedMotionObjectDetector:
         adaptive = tuple(offset for offset in (0.0, 0.5, -0.5) if offset in initial)
         newest = (
             max(adaptive)
-            if adaptive and getattr(config, "recorded_adaptive_sampling", True)
+            if adaptive and config.recorded_adaptive_sampling
             else max(initial)
         )
         return self._predicted_index_epoch(event_at.timestamp() + newest, settle_seconds)
@@ -542,7 +540,7 @@ class RecordedMotionObjectDetector:
             retry_interval_seconds,
             representative_timeout_seconds,
         ) = resolve_recorded_refinement_plan(
-            getattr(self.detector, "config", None),
+            self.detector.config,
             qualification=qualification,
             event_at=event_at,
             camera_id=self.camera.id,
@@ -570,9 +568,7 @@ class RecordedMotionObjectDetector:
             )
             and len(_flatten_refinement_stages(stages))
             > refinement_frame_count(
-                _coerce_refinement_stages(
-                    getattr(self.detector.config, "event_refinement_stages", None)
-                )
+                _coerce_refinement_stages(self.detector.config.event_refinement_stages)
                 or RECORDED_EVENT_FRAME_STAGES
             )
         )
@@ -664,8 +660,8 @@ class RecordedMotionObjectDetector:
         # observation belongs to the scene even when it cannot justify an alert.
         _, presented = _temporal_consensus(
             [_RecordedDetectionSample(captured - event_at.timestamp(), sample.frame, objects, "")],
-            int(getattr(self.detector.config, "event_confirmation_frames", 2)),
-            dict(getattr(self.detector.config, "event_class_confirmation_frames", {}) or {}),
+            self.detector.config.event_confirmation_frames,
+            dict(self.detector.config.event_class_confirmation_frames),
         )
         return self._result(
             sample.frame, presented, "", timing, started, refinement_pending=False,
@@ -875,11 +871,7 @@ class RecordedMotionObjectDetector:
         newest_initial_offset = (
             max(adaptive_initial_offsets)
             if adaptive_initial_offsets
-            and getattr(
-                self.detector.config,
-                "recorded_adaptive_sampling",
-                True,
-            )
+            and self.detector.config.recorded_adaptive_sampling
             else max(initial_offsets)
         )
         newest_needed = (
@@ -909,9 +901,9 @@ class RecordedMotionObjectDetector:
         budget = self.decode_budget
         if budget is not None:
             maximum_frames = refinement_frame_count(stages)
-            if (getattr(self.detector.config, "face_recognition_enabled", False)
-                    and getattr(self.detector.config, "face_evidence_enabled", True)):
-                maximum_frames += int(getattr(self.detector.config, "face_evidence_max_extra_frames", 4))
+            if (self.detector.config.face_recognition_enabled
+                    and self.detector.config.face_evidence_enabled):
+                maximum_frames += self.detector.config.face_evidence_max_extra_frames
             frame_bytes = self._frame_bytes_for_rows(prefetched_rows)
             if frame_bytes:
                 budget.observe_frame_bytes(frame_bytes)
@@ -1063,7 +1055,7 @@ class RecordedMotionObjectDetector:
             1,
             min(
                 confirmation_limit,
-                int(getattr(self.detector.config, "event_confirmation_frames", 2)),
+                self.detector.config.event_confirmation_frames,
             ),
         )
         class_confirmations = {
@@ -1072,7 +1064,7 @@ class RecordedMotionObjectDetector:
                 min(confirmation_limit, int(confirmations)),
             )
             for label, confirmations in dict(
-                getattr(self.detector.config, "event_class_confirmation_frames", {}) or {}
+                self.detector.config.event_class_confirmation_frames
             ).items()
         }
         # Cover-image recovery needs a later, settled view.  The early bridge
@@ -1160,11 +1152,7 @@ class RecordedMotionObjectDetector:
             adaptive_stage = bool(
                 stage_index == 0
                 and not scene_confirmation
-                and getattr(
-                    self.detector.config,
-                    "recorded_adaptive_sampling",
-                    True,
-                )
+                and self.detector.config.recorded_adaptive_sampling
             )
             if adaptive_stage:
                 preferred_order = (0.0, 0.5, -0.5, -1.0, 1.0)
@@ -1642,15 +1630,15 @@ class RecordedMotionObjectDetector:
                     detected.get("temporal_sample_offset_seconds", selected.offset)
                 )
                 detected["frame_source"] = "recorded_main"
-        attributor = getattr(self, "activity_attributor", None)
-        if isinstance(attributor, ObjectActivityAttributor) and observations:
+        attributor = self.activity_attributor
+        if attributor is not None and observations:
             attributor.stamp_recorded(
                 observations,
                 event_key=datetime.fromtimestamp(event_epoch, timezone.utc).isoformat(),
                 observed_at_epoch=event_epoch,
             )
         scene_samples = _scene_sample_records(samples,observations,event_epoch,
-            str(getattr(getattr(self,"camera",None),"id","")),confirmation_offsets)
+            self.camera.id, confirmation_offsets)
         gallery = encode_gallery(samples, selected, observations,
             camera_id=self.camera.id, event_epoch=event_epoch, request=gallery_request, timing=timing)
         self._release_nonselected_frames(samples, selected)
@@ -1691,14 +1679,14 @@ class RecordedMotionObjectDetector:
         only for face candidates; they cannot change event qualification/cover.
         """
         config = self.detector.config
-        if not getattr(config, "face_recognition_enabled", False) or not getattr(config, "face_evidence_enabled", True):
+        if not config.face_recognition_enabled or not config.face_evidence_enabled:
             return
         started = time.monotonic()
         deadline = min(
             deadline if deadline is not None else started,
-            started + float(getattr(config, "face_evidence_timeout_seconds", 4)),
+            started + float(config.face_evidence_timeout_seconds),
         )
-        max_extra = int(getattr(config, "face_evidence_max_extra_frames", 4))
+        max_extra = config.face_evidence_max_extra_frames
         timing["face_evidence_samples"] = 0.0
         timing["face_evidence_failed"] = 0.0
 
@@ -1864,19 +1852,10 @@ class RecordedMotionObjectDetector:
         report_evidence_stage("inference")
         enrichment_started = time.monotonic()
         configured_threshold = float(self.detector.config.confidence_threshold)
-        class_thresholds = dict(
-            getattr(
-                self.detector.config,
-                "event_class_confidence_thresholds",
-                {},
-            )
-            or {}
-        )
+        class_thresholds = dict(self.detector.config.event_class_confidence_thresholds)
         # Alert confidence and zones may change without changing what the
         # scene acquisition model observes.
-        candidate_threshold = float(getattr(
-            self.detector.config, "event_candidate_confidence_threshold", 0.25,
-        ))
+        candidate_threshold = float(self.detector.config.event_candidate_confidence_threshold)
         detector_started = time.monotonic()
         detector_method = getattr(
             self.detector,
@@ -1905,10 +1884,9 @@ class RecordedMotionObjectDetector:
             if isinstance(detected, dict) and detected.get("label"):
                 detected["detection_frame_width"] = int(frame_width)
                 detected["detection_frame_height"] = int(frame_height)
-                detected["scene_confirmation_threshold"] = float(getattr(
-                    getattr(self.detector.config, "tracking", None),
-                    "confirmation_confidence_threshold", 0.45,
-                ))
+                detected["scene_confirmation_threshold"] = float(
+                    self.detector.config.tracking.confirmation_confidence_threshold
+                )
                 if str(detected.get("label") or "").strip().lower() == "face":
                     box = _box(detected)
                     if box is not None:
@@ -1927,7 +1905,7 @@ class RecordedMotionObjectDetector:
             int(frame_width),
             int(frame_height),
             configured_threshold,
-            bool(getattr(self.detector.config, "require_incident_zone", True)),
+            self.detector.config.require_incident_zone,
             class_thresholds,
         )
         apply_depth_zone_filters(self.camera, objects)
@@ -1978,16 +1956,12 @@ class RecordedMotionObjectDetector:
             detect_faces,
             max_people=max(
                 1,
-                int(getattr(self.detector.config, "face_enrich_max_people", 4)),
+                self.detector.config.face_enrich_max_people,
             ),
         )
         merged = self._merge_dedicated_faces(objects, dedicated_faces)
         frame_height, frame_width = frame.shape[:2]
-        candidate_threshold = float(getattr(
-            self.detector.config,
-            "event_candidate_confidence_threshold",
-            self.detector.config.confidence_threshold,
-        ))
+        candidate_threshold = float(self.detector.config.event_candidate_confidence_threshold)
         for detected in merged:
             if (
                 not isinstance(detected, dict)
@@ -2033,8 +2007,8 @@ class RecordedMotionObjectDetector:
         *,
         timing: dict[str, float] | None = None,
     ) -> list[dict[str, Any]]:
-        depth_config = getattr(self.detector.config, "depth", None)
-        if depth_config is None or not getattr(depth_config, "enabled", False):
+        depth_config = self.detector.config.depth
+        if not depth_config.enabled:
             return objects
         estimate_depth = getattr(self.detector, "estimate_depth_for_objects", None)
         if not callable(estimate_depth):
@@ -2625,7 +2599,7 @@ class RecordedMotionObjectDetectorFactory:
         timestamped_live_frame_provider: TimestampedLiveFrameProvider | None = None,
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
-        motion_evidence: Any | None = None,
+        activity_attributor: ObjectActivityAttributor | None = None,
     ) -> RecordedMotionObjectDetector:
         return RecordedMotionObjectDetector(
             camera=camera,
@@ -2636,5 +2610,5 @@ class RecordedMotionObjectDetectorFactory:
             timestamped_evidence_frame_provider=timestamped_evidence_frame_provider,
             stop_requested=stop_requested,
             decode_budget=self.decode_budget,
-            motion_evidence=motion_evidence,
+            activity_attributor=activity_attributor,
         )

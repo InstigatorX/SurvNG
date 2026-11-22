@@ -24,7 +24,6 @@ def _service(
     sample_rate: float = 1.0,
     random_value: float = 0.0,
     stopped: list[bool] | None = None,
-    detector: Mock | None = None,
     media_storage: MediaStorageRegistry | None = None,
 ) -> CameraMediaService:
     camera = CameraConfig(
@@ -37,7 +36,6 @@ def _service(
         camera=camera,
         storage_dir=storage_dir,
         image_writer=DurableImageWriter(ImageStorageConfig()),
-        motion_detector=detector or Mock(),
         frame_provider=lambda _source: None if frame is None else frame.copy(),
         rejected_sample_rate=lambda: sample_rate,
         stop_requested=lambda: bool(stopped and stopped[0]),
@@ -204,17 +202,3 @@ def test_snapshot_filename_uses_normalized_event_time_and_injected_suffix() -> N
         decoded = service.read_image(stored)
         assert decoded is not None
         assert decoded.shape == (8, 8, 3)
-
-
-def test_recorded_motion_detection_is_delegated_unchanged() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        detector = Mock()
-        expected = (np.zeros((2, 2, 3), dtype=np.uint8), [{"label": "person"}], "clip.mp4")
-        detector.detect.return_value = expected
-        service = _service(Path(tmpdir), detector=detector)
-        event_at = datetime(2026, 8, 6, tzinfo=timezone.utc)
-
-        result = service.detect_recorded_motion(event_at)
-
-        assert result is expected
-        detector.detect.assert_called_once_with(event_at, None)

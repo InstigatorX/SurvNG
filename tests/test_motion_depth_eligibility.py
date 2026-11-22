@@ -87,7 +87,7 @@ class MotionDepthEligibilityTest(unittest.TestCase):
         events.add_event.return_value = {"id": 1}
         publish = Mock()
         handler = MotionDecisionHandler(
-            camera.id, events, lambda _at: result,
+            camera.id, events, lambda _at, _qualification=None: result,
             lambda _frame, _at: "snapshot.jpg", json.dumps,
             event_callback=publish,
         )

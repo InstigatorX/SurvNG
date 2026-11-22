@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from tests.detector_config_fake import detector_config
 from survng.app.motion_pipeline.decision_handler import MotionDecisionHandler
 from survng.app.motion_pipeline.object_detection import (
     RecordedDetectionResult, RecordedMotionObjectDetector, TimestampedLiveFrame, _RecordedDetectionSample,
@@ -33,6 +34,7 @@ def test_recorded_ledger_retains_objects_absent_from_cover_and_outside_alert_zon
         _RecordedDetectionSample(1, frame, [person(70)], "after.mp4", exact_timestamp=True),
     ]
     detector = RecordedMotionObjectDetector.__new__(RecordedMotionObjectDetector)
+    detector.activity_attributor = None
     detector.camera = SimpleNamespace(id="gate")
     result = detector._recorded_result(
         samples[1], [person(70, snapshot_visible=False,
@@ -69,7 +71,7 @@ def handler(events, objects, frame=None):
         frame_captured_at_epoch=1000, frame_source="recorded_main", frame_timestamp_exact=True,
     )
     return MotionDecisionHandler(
-        camera_id="gate", events=events, detection_provider=lambda _: result,
+        camera_id="gate", events=events, detection_provider=lambda _, _qualification=None: result,
         snapshot_writer=lambda *_: "cover.webp", object_serializer=json.dumps,
     )
 
@@ -81,7 +83,7 @@ def test_paused_recorded_pass_decides_and_persists_nothing():
         timings_ms={}, resume_stage=2, resume_at=1234.5,
     )
     processor = MotionDecisionHandler(
-        camera_id="gate", events=events, detection_provider=lambda _: paused,
+        camera_id="gate", events=events, detection_provider=lambda _, _qualification=None: paused,
         snapshot_writer=lambda *_: "cover.webp", object_serializer=json.dumps,
     )
     outcome = processor.refine("motion", "", datetime.fromtimestamp(1000, timezone.utc),
@@ -183,7 +185,7 @@ def test_discovery_yields_to_security_work_and_drops_stale_samples():
 
 def test_discovery_does_not_relax_configured_alert_confirmation_count():
     detector = SimpleNamespace(
-        config=SimpleNamespace(confidence_threshold=.45, event_confirmation_frames=2,
+        config=detector_config(confidence_threshold=.45, event_confirmation_frames=2,
                                require_incident_zone=False),
         detect=lambda *_args, **_kwargs: [person(confidence=.9)],
     )
@@ -204,7 +206,7 @@ def discovery_backend(objects):
     frame = np.zeros((100, 100, 3), dtype=np.uint8)
     sample = TimestampedLiveFrame(frame, 1000.1, 50.0, 4, 2, 3)
     detector = SimpleNamespace(
-        config=SimpleNamespace(confidence_threshold=.45, event_confirmation_frames=2,
+        config=detector_config(confidence_threshold=.45, event_confirmation_frames=2,
                                event_class_confirmation_frames={'dog': 3}, require_incident_zone=False),
         detect=Mock(side_effect=AssertionError('discovery must use shared refinement inference')),
         detect_refinement=Mock(return_value=objects),
@@ -249,7 +251,7 @@ def test_empty_live_discovery_is_successful_analysis(tmp_path):
     events = EventStore(tmp_path)
     published = []
     processor = MotionDecisionHandler(
-        camera_id='gate', events=events, detection_provider=lambda _: result,
+        camera_id='gate', events=events, detection_provider=lambda _, _qualification=None: result,
         snapshot_writer=lambda *_: 'cover.webp', object_serializer=json.dumps,
         event_callback=lambda kind, payload: published.append((kind, payload)),
     )
@@ -312,7 +314,7 @@ def test_live_discovery_inference_failure_is_retained_as_incomplete(tmp_path):
     events = EventStore(tmp_path)
     published = []
     processor = MotionDecisionHandler(
-        camera_id='gate', events=events, detection_provider=lambda _: result,
+        camera_id='gate', events=events, detection_provider=lambda _, _qualification=None: result,
         snapshot_writer=lambda *_: 'cover.webp', object_serializer=json.dumps,
         event_callback=lambda kind, payload: published.append((kind, payload)),
     )

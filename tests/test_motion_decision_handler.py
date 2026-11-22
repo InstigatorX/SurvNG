@@ -45,7 +45,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [detected],
                 "recording.mp4",
@@ -136,7 +136,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="upper-garage",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{"label": "car", "confidence": 0.9, "incident_eligible": True}],
                 "recording.mp4",
@@ -192,7 +192,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="upper-garage",
             events=events,
-            detection_provider=lambda _event_at: result,
+            detection_provider=lambda _event_at, _qualification=None: result,
             snapshot_writer=lambda _frame, _at: "replayed.webp",
             object_serializer=json.dumps,
             event_callback=lambda kind, payload: published.append((kind, payload)),
@@ -239,7 +239,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="upper-garage",
             events=events,
-            detection_provider=lambda _event_at: result,
+            detection_provider=lambda _event_at, _qualification=None: result,
             snapshot_writer=lambda _frame, _at: "alternate.webp",
             object_serializer=json.dumps,
         )
@@ -271,7 +271,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="upper-garage",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{"label": "car", "confidence": 0.94, "incident_eligible": True}],
                 "recording.mp4",
@@ -307,7 +307,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         published = []
         handler = MotionDecisionHandler(
             camera_id="gate", events=events,
-            detection_provider=lambda _at: (np.zeros((100, 100, 3), dtype=np.uint8), [], "recording.mp4"),
+            detection_provider=lambda _at, _qualification=None: (np.zeros((100, 100, 3), dtype=np.uint8), [], "recording.mp4"),
             snapshot_writer=lambda _frame, _at: "refined.webp",
             object_serializer=json.dumps,
             event_callback=lambda kind, payload: published.append((kind, payload)),
@@ -331,7 +331,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
-            detection_provider=lambda _event_at: failed,
+            detection_provider=lambda _event_at, _qualification=None: failed,
             snapshot_writer=snapshot_writer,
             object_serializer=json.dumps,
         )
@@ -365,7 +365,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="lower-garage",
             events=events,
-            detection_provider=lambda _event_at: result,
+            detection_provider=lambda _event_at, _qualification=None: result,
             snapshot_writer=lambda _frame, _at: "empty-main.webp",
             object_serializer=json.dumps,
             refinement_cover_promoter=promoter,
@@ -417,7 +417,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="back-right",
             events=events,
-            detection_provider=lambda _event_at: result,
+            detection_provider=lambda _event_at, _qualification=None: result,
             snapshot_writer=lambda _frame, at: writes.append(at) or "main.webp",
             object_serializer=json.dumps,
             event_callback=lambda kind, payload: published.append((kind, payload)),
@@ -467,7 +467,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="back-right",
             events=Mock(),
-            detection_provider=lambda _event_at: result,
+            detection_provider=lambda _event_at, _qualification=None: result,
             snapshot_writer=lambda _frame, _at: "main.webp",
             object_serializer=json.dumps,
             spatial_alignment={"mode": "auto", "reliable": False},
@@ -520,7 +520,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="front-door",
             events=events,
-            detection_provider=lambda _event_at: result,
+            detection_provider=lambda _event_at, _qualification=None: result,
             snapshot_writer=lambda value, at: (
                 writes.append((value.shape, at)) or f"snapshot-{len(writes)}.webp"
             ),
@@ -570,7 +570,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="front-door",
             events=events,
-            detection_provider=lambda _event_at: result,
+            detection_provider=lambda _event_at, _qualification=None: result,
             snapshot_writer=lambda _frame, _at: "snapshot.webp",
             object_serializer=json.dumps,
             face_candidate_sink=sink,
@@ -606,7 +606,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="front-door",
             events=events,
-            detection_provider=lambda _event_at: (frame, [detected], "recording.mp4"),
+            detection_provider=lambda _event_at, _qualification=None: (frame, [detected], "recording.mp4"),
             snapshot_writer=lambda _frame, _event_at: "snapshot.webp",
             object_serializer=json.dumps,
             activity_attributor=attributor,
@@ -654,7 +654,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="front-door",
             events=events,
-            detection_provider=lambda _event_at: (frame, [detected], "recording.mp4"),
+            detection_provider=lambda _event_at, _qualification=None: (frame, [detected], "recording.mp4"),
             snapshot_writer=lambda _frame, _event_at: "snapshot.webp",
             object_serializer=json.dumps,
             activity_attributor=attributor,
@@ -685,7 +685,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{"label": "car", "confidence": 0.8, "incident_eligible": True}],
                 "recording.mp4",
@@ -728,7 +728,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="foyer",
             events=events,
-            detection_provider=lambda _event_at: (None, [{"label": "stale"}], ""),
+            detection_provider=lambda _event_at, _qualification=None: (None, [{"label": "stale"}], ""),
             snapshot_writer=lambda _frame, _event_at: self.fail("snapshot writer should not run"),
             object_serializer=json.dumps,
             event_callback=lambda event_type, payload: published.append((event_type, payload)),
@@ -757,7 +757,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
-            detection_provider=lambda _event_at: (frame, [], "recording.mp4"),
+            detection_provider=lambda _event_at, _qualification=None: (frame, [], "recording.mp4"),
             snapshot_writer=lambda _frame, _event_at: "verification.jpg",
             object_serializer=json.dumps,
             event_callback=lambda event_type, payload: published.append((event_type, payload)),
@@ -786,7 +786,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{"status": "detector_unavailable", "error": "worker timed out"}],
                 "recording.mp4",
@@ -811,7 +811,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="front-door",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{
                     "label": "car",
@@ -851,7 +851,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{
                     "label": "car",
@@ -885,7 +885,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{
                     "label": "person",
@@ -926,7 +926,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{
                     "label": "car",
@@ -964,7 +964,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="lower-garage",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{
                     "label": "car",
@@ -1003,7 +1003,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{
                     "label": "person",
@@ -1040,7 +1040,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{
                     "label": "car",
@@ -1078,7 +1078,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{
                     "label": "car",
@@ -1115,7 +1115,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{
                     "label": "person",
@@ -1151,7 +1151,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="front-door",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{
                     "label": "person",
@@ -1192,7 +1192,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="front-door",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{
                     "label": "person",
@@ -1236,7 +1236,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="front-door",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{
                     "label": "person",
@@ -1279,7 +1279,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="back-right",
             events=events,
-            detection_provider=lambda _event_at: (
+            detection_provider=lambda _event_at, _qualification=None: (
                 frame,
                 [{
                     "label": "person",
@@ -1315,7 +1315,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
-            detection_provider=lambda _event_at: (None, [], ""),
+            detection_provider=lambda _event_at, _qualification=None: (None, [], ""),
             snapshot_writer=lambda _frame, _event_at: "",
             object_serializer=json.dumps,
             event_callback=lambda event_type, payload: published.append((event_type, payload)),
@@ -1347,7 +1347,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
-            detection_provider=lambda _event_at: (frame, [], ""),
+            detection_provider=lambda _event_at, _qualification=None: (frame, [], ""),
             snapshot_writer=lambda _frame, _event_at: "snapshot.jpg",
             object_serializer=json.dumps,
             event_callback=lambda _event_type, _payload: (_ for _ in ()).throw(
@@ -1374,7 +1374,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
-            detection_provider=lambda _event_at: (None, [], ""),
+            detection_provider=lambda _event_at, _qualification=None: (None, [], ""),
             snapshot_writer=lambda _frame, _event_at: "",
             object_serializer=json.dumps,
             event_callback=lambda _event_type, _payload: (_ for _ in ()).throw(

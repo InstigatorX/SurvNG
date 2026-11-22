@@ -114,6 +114,34 @@ def test_manual_evidence_remains_priority() -> None:
     assert evidence["score"] == 0.95
 
 
+def test_motion_trigger_kind_classifies_survng_and_camera_topics() -> None:
+    from survng.app.motion_topics import (
+        ADAPTIVE_ACTIVE_FOLLOWUP_TOPIC,
+        ADAPTIVE_MOTION_TOPIC,
+        ADAPTIVE_VISUAL_BACKUP_TOPIC,
+        MANUAL_TEST_TOPIC,
+        SPEECH_TOPIC,
+        MotionTriggerKind,
+        is_manual_topic,
+        motion_trigger_kind,
+    )
+
+    assert motion_trigger_kind(ADAPTIVE_MOTION_TOPIC) is MotionTriggerKind.EMA_MOTION
+    assert motion_trigger_kind(ADAPTIVE_VISUAL_BACKUP_TOPIC) is MotionTriggerKind.EMA_VISUAL_BACKUP
+    assert motion_trigger_kind(ADAPTIVE_ACTIVE_FOLLOWUP_TOPIC) is MotionTriggerKind.EMA_ACTIVE_FOLLOWUP
+    assert motion_trigger_kind("adaptive/future") is MotionTriggerKind.EMA_MOTION
+    assert all(
+        motion_trigger_kind(topic).is_ema
+        for topic in (ADAPTIVE_MOTION_TOPIC, ADAPTIVE_VISUAL_BACKUP_TOPIC, ADAPTIVE_ACTIVE_FOLLOWUP_TOPIC)
+    )
+    assert motion_trigger_kind(MANUAL_TEST_TOPIC) is MotionTriggerKind.MANUAL
+    assert motion_trigger_kind("Manual") is MotionTriggerKind.MANUAL
+    assert is_manual_topic("manual") and not is_manual_topic("tns1:RuleEngine/CellMotionDetector/Motion")
+    assert motion_trigger_kind(SPEECH_TOPIC) is MotionTriggerKind.SPEECH
+    camera = motion_trigger_kind("tns1:RuleEngine/CellMotionDetector/Motion")
+    assert camera is MotionTriggerKind.CAMERA and not camera.is_ema
+
+
 def _onvif_evidence(topic: str, message: str = "", **options: object) -> dict:
     stage = OnvifEventEvidenceStage("onvif", MotionEvidenceRepository("gate"), **options)  # type: ignore[arg-type]
     context = MotionContext(

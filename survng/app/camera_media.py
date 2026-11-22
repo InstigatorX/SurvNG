@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import logging
-import inspect
 import random
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Protocol
+from typing import Any, Callable, Iterator
 
 import cv2
 
@@ -21,20 +20,6 @@ LOGGER = logging.getLogger(__name__)
 REJECTED_SAMPLE_LIMIT = 100
 
 
-class RecordedMotionDetector(Protocol):
-    """Detect objects using the best recorded or live frame for an event."""
-
-    def detect(
-        self,
-        event_at: datetime,
-        qualification: dict[str, Any] | None = None,
-    ) -> tuple[Any | None, list[dict[str, Any]], str]: ...
-
-    def detect_initial(
-        self, event_at: datetime, evidence: dict[str, Any] | None = None
-    ) -> Any: ...
-
-
 class CameraMediaService:
     """Own camera image encoding, evidence persistence, and frame detection."""
 
@@ -44,7 +29,6 @@ class CameraMediaService:
         camera: CameraConfig,
         storage_dir: Path,
         image_writer: DurableImageWriter,
-        motion_detector: RecordedMotionDetector,
         frame_provider: Callable[[str], Any | None],
         rejected_sample_rate: Callable[[], float],
         stop_requested: Callable[[], bool],
@@ -57,7 +41,6 @@ class CameraMediaService:
         self.camera = camera
         self.storage_dir = storage_dir
         self.image_writer = image_writer
-        self.motion_detector = motion_detector
         self.frame_provider = frame_provider
         self.rejected_sample_rate = rejected_sample_rate
         self.stop_requested = stop_requested
@@ -159,29 +142,6 @@ class CameraMediaService:
                 error,
             )
             return ""
-
-    def detect_recorded_motion(
-        self,
-        event_at: datetime,
-        qualification: dict[str, Any] | None = None,
-    ) -> tuple[Any | None, list[dict[str, Any]], str]:
-        detector = self.motion_detector.detect
-        try:
-            accepts_qualification = len(inspect.signature(detector).parameters) >= 2
-        except (TypeError, ValueError):
-            accepts_qualification = True
-        return (
-            detector(event_at, qualification)
-            if accepts_qualification
-            else detector(event_at)
-        )
-
-    def detect_initial_recorded_motion(
-        self,
-        event_at: datetime,
-        evidence: dict[str, Any] | None = None,
-    ) -> Any:
-        return self.motion_detector.detect_initial(event_at, evidence)
 
     @staticmethod
     def read_image(path: str) -> Any | None:
