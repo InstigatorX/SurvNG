@@ -7,24 +7,15 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .camera_semantics import reported_notice_category, reported_notice_state
 from .security import redact_secret_text
 
 MAX_EVENTS = 1000
 MAX_XML_CHARACTERS = 16_384
 
-_TOPIC_CLASSIFICATIONS = {
-    "peopledetect": "person",
-    "persondetect": "person",
-    "humandetect": "person",
-    "vehicledetect": "vehicle",
-    "dogcatdetect": "animal",
-    "petdetect": "animal",
-    "animaldetect": "animal",
-    "facedetect": "face",
-    "motionalarm": "motion",
-    "motion": "motion",
-    "cellmotion": "motion",
-}
+# Object classes come from the shared camera taxonomy (motion_topics and
+# camera_semantics), so this page names notices the way SurvNG decides them.
+_OBJECT_CLASSES = frozenset({"person", "vehicle", "animal", "face"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +28,9 @@ class OnvifInspectorEvent:
     normalized_topic: str
     classification: str | None
     active: bool | None
+    # What the payload's State/IsMotion/IsInside said, for any topic. Unlike
+    # ``active`` it is not a motion start and never drives class state.
+    reported_state: bool | None
     recognized: bool
     changed: bool
     simple_items: tuple[tuple[str, str], ...]
@@ -59,11 +53,16 @@ class OnvifInspector:
         self._lock = threading.RLock()
 
     @staticmethod
-    def classify_topic(normalized_topic: str) -> str | None:
+    def classify_topic(
+        normalized_topic: str,
+        message: str = "",
+        simple_items: tuple[tuple[str, str], ...] | list[tuple[str, str]] | None = None,
+    ) -> str | None:
         topic = str(normalized_topic or "").strip().lower()
+        category = reported_notice_category(topic, message, simple_items)
+        if category in _OBJECT_CLASSES:
+            return category
         terminal = topic.rsplit("/", 1)[-1] if topic else ""
-        if terminal in _TOPIC_CLASSIFICATIONS:
-            return _TOPIC_CLASSIFICATIONS[terminal]
         if "motion" in terminal:
             return "motion"
         return None
@@ -87,7 +86,9 @@ class OnvifInspector:
         camera_id = str(camera_id)
         topic = redact_secret_text(str(topic or ""))[:1024]
         normalized_topic = str(normalized_topic or "").strip().lower()[:1024]
-        classification = self.classify_topic(normalized_topic)
+        raw_items = tuple((str(name), str(value)) for name, value in simple_items)
+        classification = self.classify_topic(normalized_topic, str(message_xml or ""), raw_items)
+        reported_state = reported_notice_state(str(message_xml or ""), raw_items)
         received = received_at or datetime.now(timezone.utc)
         if received.tzinfo is None:
             received = received.replace(tzinfo=timezone.utc)
@@ -130,6 +131,7 @@ class OnvifInspector:
                 normalized_topic=normalized_topic,
                 classification=classification,
                 active=active,
+                reported_state=reported_state,
                 recognized=active is not None,
                 changed=changed,
                 simple_items=items,

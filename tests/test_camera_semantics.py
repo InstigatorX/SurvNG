@@ -166,3 +166,18 @@ def test_dahua_smart_motion_topics_are_semantic() -> None:
         "tns1:RuleEngine/SmartMotionHuman", '<tt:SimpleItem Name="State" Value="false"/>', labels
     )
     assert cleared["kind"] == "generic"
+
+
+def test_reported_state_and_category_describe_any_payload() -> None:
+    from survng.app.camera_semantics import reported_notice_category, reported_notice_state
+
+    assert reported_notice_state('<tt:SimpleItem Name="State" Value="false"/>') is False
+    assert reported_notice_state(items=[("IsMotion", "true"), ("State", "false")]) is True
+    assert reported_notice_state(items=[("State", "pending")]) is None
+    assert reported_notice_state("<broken") is None
+    assert reported_notice_category("tns1:RuleEngine/MyRuleDetector/PetDetect") == "animal"
+    assert reported_notice_category(
+        "RuleEngine/FieldDetector/ObjectsInside",
+        items=[("IsInside", "false"), ("ObjectType", "Vehicle")],
+    ) == "vehicle"
+    assert reported_notice_category("RuleEngine/MyRuleDetector/Package") is None

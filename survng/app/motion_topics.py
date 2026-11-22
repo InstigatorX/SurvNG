@@ -94,7 +94,7 @@ def semantic_motion_kind(topic: str) -> str | None:
     for kind, aliases in (
         ("person", {"person", "persondetect", "persondetected", "persondetection", "persondetector", "people", "peopledetect", "humandetect", "smartmotionhuman"}),
         ("vehicle", {"vehicle", "vehicledetect", "vehicledetected", "vehicledetection", "vehicledetector", "smartmotionvehicle"}),
-        ("animal", {"animal", "animaldetect", "animaldetected", "animaldetection", "animaldetector", "dogcatdetect"}),
+        ("animal", {"animal", "animaldetect", "animaldetected", "animaldetection", "animaldetector", "dogcatdetect", "petdetect"}),
         ("face", {"face", "facedetect", "facedetected", "facedetection", "facedetector"}),
     ):
         if terminal in aliases:
