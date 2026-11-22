@@ -36,6 +36,34 @@ _UNFINISHED_SPEECH_LOOK_SQL = (
 )
 
 
+# Terminal jobs past the general retention window, oldest first.
+PRUNE_EXPIRED_JOBS_SQL = (
+    "select id from detection_jobs "
+    "where state in ('completed','failed') and updated_at < ? "
+    f"and not ({_UNFINISHED_SPEECH_LOOK_SQL}) "
+    "order by updated_at asc limit ?"
+)
+# Scene-discovery jobs keep a shorter history. The partial index carries the
+# discovery flag, so finding them never parses other jobs' payloads. The
+# WHERE must repeat the index's terms literally for SQLite to use it.
+_DISCOVERY_TERMINAL_WHERE = (
+    "state in ('completed','failed') "
+    "and json_extract(payload_json, '$.qualification.scene_discovery') = 1"
+)
+_DISCOVERY_TERMINAL_INDEX_SQL = (
+    "create index if not exists idx_detection_jobs_discovery_terminal "
+    f"on detection_jobs(updated_at) where {_DISCOVERY_TERMINAL_WHERE}"
+)
+# INDEXED BY: without statistics the planner prefers the (state, updated_at)
+# range, which is the full scan this avoids; SQLite errors instead of falling
+# back if the index ever stops matching.
+PRUNE_EXPIRED_DISCOVERY_JOBS_SQL = (
+    "select id from detection_jobs INDEXED BY idx_detection_jobs_discovery_terminal "
+    f"where {_DISCOVERY_TERMINAL_WHERE} "
+    f"and updated_at < ? and not ({_UNFINISHED_SPEECH_LOOK_SQL}) "
+    "order by updated_at asc limit ?"
+)
+
 def _detection_job_occurrence(payload: dict[str, Any]) -> dict[str, Any]:
     qualification = payload.get("qualification")
     qualification = qualification if isinstance(qualification, dict) else {}
@@ -190,6 +218,7 @@ class EventStoreJobsMixin:
                 "create index if not exists idx_detection_jobs_terminal "
                 "on detection_jobs(state, updated_at)"
             )
+            conn.execute(_DISCOVERY_TERMINAL_INDEX_SQL)
             detection_columns = {
                 str(row["name"])
                 for row in conn.execute("pragma table_info(detection_jobs)").fetchall()
@@ -1108,15 +1137,18 @@ class EventStoreJobsMixin:
                 now - timedelta(seconds=max(60.0, float(discovery_retention_seconds)))
             ).isoformat())
             with self._jobs_lock, self._connect_jobs() as conn:
+                # Two index-driven passes instead of one query over every
+                # terminal job newer than the discovery window: that form
+                # parsed up to a week of payloads to find a batch, every
+                # minute while a backlog remained.
                 rows = conn.execute(
-                    "select id from detection_jobs "
-                    "where state in ('completed','failed') and updated_at < ? "
-                    "and (updated_at < ? or json_extract(payload_json, "
-                    "'$.qualification.scene_discovery') = 1) "
-                    f"and not ({_UNFINISHED_SPEECH_LOOK_SQL}) "
-                    "order by updated_at asc limit ?",
-                    (discovery_cutoff, cutoff, batch),
+                    PRUNE_EXPIRED_JOBS_SQL, (cutoff, batch),
                 ).fetchall()
+                if len(rows) < batch:
+                    rows += conn.execute(
+                        PRUNE_EXPIRED_DISCOVERY_JOBS_SQL,
+                        (discovery_cutoff, batch - len(rows)),
+                    ).fetchall()
                 if rows:
                     conn.executemany(
                         "delete from detection_jobs "

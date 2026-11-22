@@ -101,7 +101,8 @@ jobs:
             tests/test_startup_recovery_once.py \
             tests/test_process_logging.py \
             tests/test_async_manager_lock.py \
-            tests/test_scene_write_plans.py
+            tests/test_scene_write_plans.py \
+            tests/test_detection_job_prune_plan.py
       - name: Run scene and evidence regression tests
         run: |
           scripts/run-tests.sh \
