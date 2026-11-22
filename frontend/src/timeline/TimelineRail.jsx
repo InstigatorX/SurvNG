@@ -165,6 +165,9 @@ export function useVerticalScrub({ topEpoch, bottomEpoch, spanSeconds, playhead,
   };
 }
 
+const EVENT_FILTERS = [["all", "All"], ["people", "People"], ["vehicles", "Vehicles"], ["motion", "Motion"]];
+const QUIET_MINUTES = [2, 5, 15, 30];
+
 function KindIcon({ kind, size = 18 }) {
   if (kind === "person") return <UserRound size={size} aria-hidden="true" />;
   if (kind === "vehicle") return <CarFront size={size} aria-hidden="true" />;
@@ -230,7 +233,7 @@ export function EventRail({
   const cards = useMemo(() => allCards
     .filter((card) => card.top + 60 >= y(visible.end) - 60 && card.top <= y(visible.start) + 60), [allCards, visible.end, visible.start, y]);
   const keyHandler = scrubKeyHandler(lineEpoch, spanSeconds, dayStart, topEpoch, scrub.scrollToEpoch);
-  const filters = [["all", "All"], ["people", "People"], ["vehicles", "Vehicles"], ["motion", "Motion"]];
+  const filters = EVENT_FILTERS;
 
   return (
     <aside className="event-rail" aria-label="Event timeline">
@@ -570,41 +573,40 @@ function CameraColumns({ lanes, byCamera, dayStart, topEpoch, playhead, onSeek, 
 /** Option D: the condensed story. Quiet stretches collapse; events come first. */
 export function CatchUpStory({
   events, dayStart, endEpoch, playhead, selectedEventId, onPlayEvent, onShowRealTime, cameraNames, timeZone,
-  quietMinutes, onQuietMinutesChange, autoAdvance, onAutoAdvanceChange,
+  quietMinutes, onQuietMinutesChange, autoAdvance, onAutoAdvanceChange, filter = "all", onFilterChange = null,
 }) {
-  const compact = useViewportQuery("(max-width: 760px)");
   const items = useMemo(() => condenseStory(events, { quietSeconds: quietMinutes * 60, startEpoch: dayStart, endEpoch }), [dayStart, endEpoch, events, quietMinutes]);
   const short = useMemo(() => clockFormatter(timeZone, false), [timeZone]);
-  const ordered = compact ? [...items].reverse() : items;
+  // Newest at top, like the Timeline rail.
+  const ordered = useMemo(() => [...items].reverse(), [items]);
   const selectedRef = useRef(null);
   const listRef = useRef(null);
   useEffect(() => {
     const node = selectedRef.current;
     const list = listRef.current;
     if (!node || !list) return;
-    if (compact) list.scrollTop = Math.max(0, node.offsetTop - 12);
-    else list.scrollLeft = Math.max(0, node.offsetLeft - list.clientWidth / 2 + node.clientWidth / 2);
-  }, [compact, selectedEventId]);
+    list.scrollTop = Math.max(0, node.offsetTop - list.clientHeight / 2 + node.clientHeight / 2);
+  }, [selectedEventId]);
   const eventCount = items.filter((item) => item.type === "event").length;
   const quietTotal = items.filter((item) => item.type === "quiet").reduce((sum, item) => sum + item.seconds, 0);
   return (
-    <section className="catchup-story" aria-label="Catch up">
-      <header className="catchup-header">
-        <div>
+    <aside className="catchup-story" aria-label="Catch up">
+      <div className="event-rail-controls">
+        <div className="event-rail-heading">
           <h2>Catch up</h2>
-          <small>{eventCount} events · {formatQuietDuration(quietTotal)} quiet</small>
+          <div className="event-rail-segmented" role="group" aria-label="Collapse quiet stretches longer than">
+            {QUIET_MINUTES.map((minutes) => (
+              <button key={minutes} type="button" aria-pressed={quietMinutes === minutes} title={`Collapse quiet stretches longer than ${minutes} minutes`} onClick={() => onQuietMinutesChange(minutes)}>{minutes}m</button>
+            ))}
+          </div>
         </div>
-        <label className="catchup-option">
-          <span className="catchup-option-text">Collapse quiet longer than</span>
-          <select aria-label="Collapse quiet stretches longer than" value={quietMinutes} onChange={(event) => onQuietMinutesChange(Number(event.target.value))}>
-            {[2, 5, 15, 30].map((minutes) => <option key={minutes} value={minutes}>{minutes} min</option>)}
-          </select>
-        </label>
-        <label className="catchup-option">
-          <input type="checkbox" checked={autoAdvance} onChange={(event) => onAutoAdvanceChange(event.target.checked)} />
-          Auto-advance
-        </label>
-      </header>
+        <div className="event-rail-filters" role="group" aria-label="Event type">
+          {onFilterChange ? EVENT_FILTERS.map(([value, label]) => (
+            <button key={value} type="button" aria-pressed={filter === value} onClick={() => onFilterChange(value)}>{label}</button>
+          )) : null}
+          <button type="button" className="catchup-autoadvance" aria-pressed={autoAdvance} onClick={() => onAutoAdvanceChange(!autoAdvance)}>Auto-advance</button>
+        </div>
+      </div>
       {!eventCount ? <p className="catchup-empty"><Radar size={16} aria-hidden="true" />No events match this filter today.</p> : null}
       <ol ref={listRef} className="catchup-list">
         {ordered.map((item) => {
@@ -641,6 +643,7 @@ export function CatchUpStory({
           );
         })}
       </ol>
-    </section>
+      <p className="catchup-summary">{eventCount} events · {formatQuietDuration(quietTotal)} quiet · newest at top</p>
+    </aside>
   );
 }

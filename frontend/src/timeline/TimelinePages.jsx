@@ -2853,23 +2853,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           onWindowHoursChange={(hours) => { checkpointTimelineView(); setIncidentRangeHours(hours); }}
         />
       ) : null}
-      {timelineLayout === "catchup" ? (
-        <CatchUpStory
-          events={filteredEvents}
-          dayStart={dayStart}
-          endEpoch={railTopEpoch}
-          playhead={railPlayhead}
-          selectedEventId={storyFocus?.id}
-          onPlayEvent={selectRailEvent}
-          onShowRealTime={(epoch) => { changeTimelineLayout("rail"); playAt(epoch, true); }}
-          cameraNames={cameraNames}
-          timeZone={timeZone}
-          quietMinutes={quietMinutes}
-          onQuietMinutesChange={setQuietMinutes}
-          autoAdvance={autoAdvance}
-          onAutoAdvanceChange={setAutoAdvance}
-        />
-      ) : null}
     </div>
   );
   const railAside = timelineLayout === "rail" ? (
@@ -2897,14 +2880,23 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       onNextDay={date < today ? () => changeDate(addDaysToDateKey(date, 1)) : null}
     />
   ) : timelineLayout === "catchup" ? (
-    <aside className="catchup-now" aria-label={storyCurrent ? "Now playing" : "Up next"}>
-      <h2>{storyCurrent ? "Now playing" : storyFocus ? "Up next" : "Catch up"}</h2>
-      {storyFocus ? <>
-        <strong>{railEventTitle(storyFocus)}</strong>
-        <p>{formatDateTime(storyFocus.incident_epoch, timeZone)}{railEventDurationSeconds(storyFocus) ? ` · ${formatDuration(railEventDurationSeconds(storyFocus))}` : ""} · {cameraNames[storyFocus.camera_id || activeCameraId] || ""}</p>
-        {storyFocus.snapshot_url || storyFocus.snapshot_path ? <div className="catchup-now-thumbs"><img src={eventThumbnailUrl(storyFocus, 480, 78, { objectFocus: true, aspectWidth: 16, aspectHeight: 10 })} alt="" loading="lazy" decoding="async" /></div> : null}
-      </> : <p>No events today for this filter.</p>}
-    </aside>
+    <CatchUpStory
+      events={filteredEvents}
+      dayStart={dayStart}
+      endEpoch={railTopEpoch}
+      playhead={railPlayhead}
+      selectedEventId={storyFocus?.id}
+      onPlayEvent={selectRailEvent}
+      onShowRealTime={(epoch) => { changeTimelineLayout("rail"); playAt(epoch, true); }}
+      cameraNames={cameraNames}
+      timeZone={timeZone}
+      quietMinutes={quietMinutes}
+      onQuietMinutesChange={setQuietMinutes}
+      autoAdvance={autoAdvance}
+      onAutoAdvanceChange={setAutoAdvance}
+      filter={eventFilter}
+      onFilterChange={(value) => { checkpointTimelineView(); setEventFilter(value); }}
+    />
   ) : null;
 
   return (
@@ -2924,7 +2916,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           ariaLabel="Timeline camera"
         />
         <div className="timeline-view-switch" role="group" aria-label="Timeline view">
-          {[["rail", "Timeline", Rows3], ["cameras", "Cameras", Columns3], ["catchup", "Catch up", FastForward]].map(([value, label, Icon]) => (
+          {[["rail", "Timeline", Rows3], ["catchup", "Catch up", FastForward], ["cameras", "Cameras", Columns3]].map(([value, label, Icon]) => (
             <button key={value} type="button" aria-pressed={timelineLayout === value} aria-label={label} title={label} onClick={() => changeTimelineLayout(value)}>
               <Icon size={15} aria-hidden="true" /><span className="timeline-view-label">{label}</span>
             </button>
