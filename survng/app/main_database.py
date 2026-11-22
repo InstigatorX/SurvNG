@@ -114,11 +114,11 @@ def mark_startup_recovered(scope: str, path: Path) -> None:
             _STARTUP_RECOVERED.add(identity)
 
 
-
 def forget_startup_recovery() -> None:
     """Forget recovered databases, as a new process would (tests simulate restarts with this)."""
     with _STARTUP_RECOVERED_LOCK:
         _STARTUP_RECOVERED.clear()
+
 
 _METRICS: dict[str, DatabaseMetrics] = {}
 _METRICS_LOCK = threading.Lock()
