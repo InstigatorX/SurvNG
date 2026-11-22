@@ -9,7 +9,7 @@ import { Accessory, Categories, Characteristic, HAPStorage, Service, SecureVideo
 import { controlServer, identity, privateDirectory } from './control.js';
 import { SyntheticMedia, tiers } from './media.js';
 import { LabRecording } from './fragments.js';
-import { LocalStreams, RemoteStreams } from './transports.js';
+import { LocalStreams, RemoteStreams, watchStreamPermissions } from './transports.js';
 import { serviceStatus } from './diagnostics.js';
 
 async function main(): Promise<void> {
@@ -109,11 +109,8 @@ async function main(): Promise<void> {
     const publishMotion = () => controller!.setMotionDetected(motionPermitted() && recording!.reportingMotion());
     const setMotion = (active: boolean) => { recording!.setMotion(active && motionPermitted()); publishMotion(); };
     recording!.watch(publishMotion);
+    watchStreamPermissions(controller, local, remote);
     controller.on('operating-mode-changed', () => {
-      if (!controller!.streamingAllowed(controller!.multiTierStreamManagementService)) void local!.close();
-      if (!controller!.streamingAllowed(controller!.webrtcStreamManagementService)) {
-        void remote!.close().catch(() => console.error('HomeKit WebRTC session cleanup failed.'));
-      }
       if (!cameraAllowed()) setMotion(false);
       recording!.setAudio(controller!.recordingAudioActive); recording!.reconcile();
     });

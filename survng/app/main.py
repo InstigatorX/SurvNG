@@ -1066,7 +1066,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SurvNG", lifespan=lifespan)
-app.include_router(create_homekit_router(HomeKitRouteDependencies(get_manager=get_manager)))
+app.include_router(create_homekit_router(HomeKitRouteDependencies(get_manager=get_manager, get_config=lambda: config)))
 app.include_router(create_weather_router(lambda: config.weather))
 
 

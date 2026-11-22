@@ -1,7 +1,10 @@
 """Regression coverage for remote encoder ownership and input boundaries."""
 import asyncio
+import copy
 import socket
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -21,13 +24,14 @@ from tests.test_homekit import configuration, _profile
 @pytest.fixture
 def remote(tmp_path):
     service = HomeKitService(configuration(tmp_path), MediaSessionManager(), "review", lambda _: True)
+    service.nodes.reopen()
     enrollment = service.nodes.begin_enrollment("http://localhost")
     token = enrollment["command"].split("/enroll/")[1].split("'")[0]
     enrolled = service.nodes.complete_enrollment(token, "review")
     node = service.nodes.authenticate(enrolled["secret"])
     service.nodes.update_report(node["id"], {"hardware": "qsv", "profiles": {"porch": _profile()}, "backends": {"porch": "qsv"}})
     service.config.cameras[0].homekit.encoder = node["id"]
-    router = create_homekit_router(HomeKitRouteDependencies(lambda: SimpleNamespace(homekit=service)))
+    router = create_homekit_router(HomeKitRouteDependencies(lambda: SimpleNamespace(homekit=service), lambda: service.config))
     endpoints = {route.path: route.endpoint for route in router.routes}
     try:
         yield service, node, enrolled["secret"], endpoints
@@ -204,19 +208,153 @@ def test_encoder_installer_requires_a_published_release(remote, monkeypatch):
     enroll.assert_not_called()
 
 
+@pytest.mark.parametrize(("lan_bind", "listener", "expected"), [
+    ("192.168.86.243", ("0.0.0.0", 8088), "http://192.168.86.243:8088/survng"),
+    ("10.20.30.40", ("172.20.0.2", 8088), "http://10.20.30.40:8088/survng"),
+    ("", ("0.0.0.0", 8088), None),
+    ("203.0.113.42", ("0.0.0.0", 8088), None),
+    ("192.168.86.243", None, None),
+])
+def test_sync_uses_configured_lan_ingest_when_override_is_blank(remote, monkeypatch, lan_bind, listener, expected):
+    from fastapi.testclient import TestClient
+    from survng.app import main
+
+    service, _, secret, _ = remote
+    monkeypatch.setitem(vars(main), "manager", SimpleNamespace(config=service.config, homekit=service))
+    monkeypatch.setattr(main, "config", service.config)
+    service.config.cameras[0].homekit.encoder = "local"
+    service.config.homekit.bind = lan_bind
+    real_sync = service.nodes.sync
+    monkeypatch.setattr(service.nodes, "sync", lambda node, report, assign, timeout: real_sync(node, report, assign, 0))
+
+    async def primary_listener(scope, receive, send):
+        if scope["type"] == "http":
+            scope = {**scope, "server": listener}
+        await main.app(scope, receive, send)
+
+    client = TestClient(primary_listener, base_url="https://controller.example")
+    response = client.post("/survng/api/homekit/nodes/sync", json={}, headers={
+        "Authorization": f"Bearer {secret}", "X-Forwarded-Host": "unrelated.example",
+    })
+    assert response.status_code == 200
+    assert response.json()["ingest"] == expected
+    assert response.json()["assignments"] == []
+    for private_value in (secret, "private-password", "unrelated.example", "controller.example"):
+        assert private_value not in response.text
+
+
+def test_sync_and_installer_use_committed_routes_across_hot_updates(remote, monkeypatch):
+    from fastapi.testclient import TestClient
+    from survng.app import homekit_routes, main
+    from survng.app.config import normalize_config
+    from survng.app.homekit import CameraWorker
+
+    service, _, secret, _ = remote
+    initial = normalize_config(service.config)
+    initial.base_path = "/a"
+    initial.web_auth.enabled = False
+    initial.homekit.ingest_origin = "https://upload.example:9443"
+    manager = Mock(config=initial, homekit=service)
+    monkeypatch.setitem(vars(main), "manager", manager)
+    monkeypatch.setattr(main, "config", initial)
+    monkeypatch.setattr(CameraWorker, "start", lambda self: None)
+    monkeypatch.setattr(homekit_routes, "available_agent_version", lambda: "a" * 64)
+    service.start()
+    workers = dict(service.workers)
+    assert set(workers) == {"porch", "yard"}
+
+    client = TestClient(main.app, base_url="https://control.example")
+    wait_started = threading.Event()
+    original_wait = service.nodes.updates.wait
+
+    def wait(timeout):
+        wait_started.set()
+        return original_wait(timeout)
+
+    monkeypatch.setattr(service.nodes.updates, "wait", wait)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        for prefix, authority in (("/a", initial.homekit.ingest_origin),
+                                  ("/b", initial.homekit.ingest_origin), ("", "https://new-upload.example")):
+            previous = main.config.base_path
+            wait_started.clear()
+            pending = pool.submit(client.post, f"{previous}/api/homekit/nodes/sync", json={},
+                                  headers={"Authorization": f"Bearer {secret}"})
+            try:
+                assert wait_started.wait(3)
+                incoming = main.config.model_copy(deep=True)
+                incoming.base_path = prefix
+                incoming.homekit.ingest_origin = authority
+                _, result = main.apply_config_update(incoming, persist=False)
+                assert not result["camera_workers_restarted"]
+            finally:
+                service.nodes._bump()
+            response = pending.result(timeout=3)
+            assert response.status_code == 200
+            assert response.json()["ingest"] == authority + prefix
+            assert all(service.workers[key] is worker for key, worker in workers.items())
+            # Targeted application sets manager.config before all subsystem steps commit.
+            manager.config = main.config.model_copy(update={"base_path": "/candidate"})
+            try:
+                enrollment = client.post(f"{prefix}/api/homekit/nodes")
+                assert enrollment.status_code == 200
+                root = "https://control.example" + prefix
+                command = enrollment.json()["command"]
+                assert command.startswith(f"curl -fsSL '{root}/api/homekit/enroll/")
+                script_url = command.split("'")[1]
+                assert f"ORIGIN='{root}'" in client.get(script_url).text
+            finally:
+                manager.config = main.config
+
+
+def test_update_targets_require_this_sync_to_advertise_release_protocol(remote, monkeypatch):
+    from survng.app import homekit_routes
+
+    service, node, secret, endpoints = remote
+    releases = {key: char * 64 for key, char in zip(("agent", "ffmpeg", "runtime"), "abc")}
+    monkeypatch.setattr(homekit_routes, "node_releases", lambda ffmpeg: releases)
+    monkeypatch.setattr(homekit_nodes, "available_agent_version", lambda: releases["agent"])
+    real_sync = service.nodes.sync
+    monkeypatch.setattr(service.nodes, "sync", lambda node, report, assign, timeout: real_sync(node, report, assign, 0))
+    sync = endpoints["/api/homekit/nodes/sync"]
+    resync = endpoints["/api/homekit/nodes/{node_id}/resync"]
+    authorized = request(secret, [])
+    service.nodes.feeds[("porch", 1)] = SimpleNamespace(wanted=lambda: True, close=lambda: None)
+    service.nodes.snapshots["porch"] = (threading.Event(), None, "snapshot-request")
+    try:
+        managed = sync(NodeReport(releaseProtocol=1), authorized)
+        assert managed["releases"] == releases
+        assert resync(node["id"], Response()) == {"requested": True}
+        for report in (NodeReport(), NodeReport(releaseProtocol=2)):
+            legacy = sync(report, authorized)
+            assert legacy.get("releases", {}) == {}
+            assert "syncRequest" not in legacy
+            assert legacy["assignments"] == managed["assignments"] and len(legacy["assignments"]) == 1
+            assert legacy["feeds"] == [{"camera": "porch", "tier": 1}]
+            assert legacy["snapshotRequests"] == {"porch": "snapshot-request"}
+            assert service.status()["nodes"][0]["updateState"] == "migration_required"
+            with pytest.raises(HTTPException) as error:
+                resync(node["id"], Response())
+            assert error.value.status_code == 409 and "migration" in error.value.detail.lower()
+        restored = sync(NodeReport(releaseProtocol=1), authorized)
+        assert restored["releases"] == releases and "syncRequest" not in restored
+    finally:
+        del service.nodes.snapshots["porch"]
+
+
 def test_encoder_version_reports_update_status_independently_of_liveness(remote, monkeypatch):
     service, node, _, _ = remote
     available = "a" * 64
     release = Mock(return_value=available)
     monkeypatch.setattr(homekit_nodes, "available_agent_version", release)
 
+    service.nodes.update_report(node["id"], {"releaseProtocol": 1})
     assert service.status()["nodes"][0] == {
         "id": node["id"], "name": "review", "online": True, "hardware": "qsv",
         "lastSeen": int(node["lastSeen"]), "cameras": ["porch"],
         "runningVersion": None, "availableVersion": available, "updateState": "unknown",
     }
     for running, state in (("b" * 64, "outdated"), (available, "current")):
-        service.nodes.update_report(node["id"], {"runningVersion": running})
+        service.nodes.update_report(node["id"], {"releaseProtocol": 1, "runningVersion": running})
         status = service.status()["nodes"][0]
         assert status["online"]
         assert status["runningVersion"] == running
@@ -250,39 +388,40 @@ def test_resync_requests_are_scoped_and_retryable(remote, monkeypatch):
         resync("unknown", response)
     assert error.value.status_code == 404
 
+    service.nodes.update_report(node["id"], {"releaseProtocol": 1})
     generation = service.nodes.generation
     assert resync(node["id"], response) == {"requested": True}
     assert response.headers["cache-control"] == "no-store"
     assert service.nodes.generation > generation
-    first = sync(NodeReport(), node_request)["syncRequest"]
+    first = sync(NodeReport(releaseProtocol=1), node_request)["syncRequest"]
     assert len(first) == 32
     assert service.status()["nodes"][0]["updateState"] == "syncing"
     enrollment = service.nodes.begin_enrollment("http://localhost")
     token = enrollment["command"].split("/enroll/")[1].split("'")[0]
     other = service.nodes.complete_enrollment(token, "other")
-    assert "syncRequest" not in sync(NodeReport(), request(other["secret"], []))
+    assert "syncRequest" not in sync(NodeReport(releaseProtocol=1), request(other["secret"], []))
     assert resync(node["id"], response) == {"requested": True}
-    assert sync(NodeReport(failedSyncRequest="0" * 32), node_request)["syncRequest"] == first
-    assert "syncRequest" not in sync(NodeReport(failedSyncRequest=first), node_request)
+    assert sync(NodeReport(releaseProtocol=1, failedSyncRequest="0" * 32), node_request)["syncRequest"] == first
+    assert "syncRequest" not in sync(NodeReport(releaseProtocol=1, failedSyncRequest=first), node_request)
     assert service.status()["nodes"][0]["updateState"] == "failed"
 
     assert resync(node["id"], response) == {"requested": True}
-    second = sync(NodeReport(failedSyncRequest=first), node_request)["syncRequest"]
+    second = sync(NodeReport(releaseProtocol=1, failedSyncRequest=first), node_request)["syncRequest"]
     assert second != first
     clock.return_value += 3600
-    assert "syncRequest" not in sync(NodeReport(), node_request)
+    assert "syncRequest" not in sync(NodeReport(releaseProtocol=1), node_request)
     assert service.status()["nodes"][0]["updateState"] == "failed"
     assert resync(node["id"], response) == {"requested": True}
-    third = sync(NodeReport(), node_request)["syncRequest"]
+    third = sync(NodeReport(releaseProtocol=1), node_request)["syncRequest"]
     assert third != second
 
     available = "b" * 64
     release.return_value = available
-    assert "syncRequest" not in sync(NodeReport(), node_request)
+    assert "syncRequest" not in sync(NodeReport(releaseProtocol=1), node_request)
     assert resync(node["id"], response) == {"requested": True}
-    assert sync(NodeReport(), node_request)["syncRequest"] != third
+    assert sync(NodeReport(releaseProtocol=1), node_request)["syncRequest"] != third
 
-    assert "syncRequest" not in sync(NodeReport(runningVersion=available), node_request)
+    assert "syncRequest" not in sync(NodeReport(releaseProtocol=1, runningVersion=available), node_request)
     assert service.status()["nodes"][0]["updateState"] == "current"
     with pytest.raises(HTTPException) as error:
         resync(node["id"], response)
@@ -291,11 +430,29 @@ def test_resync_requests_are_scoped_and_retryable(remote, monkeypatch):
     with pytest.raises(HTTPException) as error:
         resync(node["id"], response)
     assert error.value.status_code == 409
-    service.nodes.update_report(node["id"], {})
+    service.nodes.update_report(node["id"], {"releaseProtocol": 1})
     release.return_value = None
     with pytest.raises(HTTPException) as error:
         resync(node["id"], response)
     assert error.value.status_code == 409
+
+
+def test_release_metadata_requires_enrollment_and_does_not_check_in(remote, monkeypatch):
+    from survng.app import homekit_routes
+
+    service, node, secret, endpoints = remote
+    releases = {"agent": "c" * 64}
+    monkeypatch.setattr(homekit_routes, "node_releases", lambda ffmpeg: releases)
+    route = "/api/homekit/nodes/releases"
+    assert is_public_api_path("GET", route)
+    with pytest.raises(HTTPException) as error:
+        endpoints[route](request("invalid", []), Response())
+    assert error.value.status_code == 401
+    original = node.copy()
+    response = Response()
+    assert endpoints[route](request(secret, []), response) == releases
+    assert response.headers["Cache-Control"] == "no-store"
+    assert service.nodes.authenticate(secret) == original
 
 
 def test_agent_archive_request_can_pin_release(remote, monkeypatch):
@@ -495,6 +652,120 @@ def test_pending_remote_snapshot_does_not_block_media_admission(remote):
     assert service.nodes.snapshots == {}
 
 
+def test_staged_registry_loads_persisted_state_at_activation(tmp_path):
+    directory = tmp_path / "homekit"
+    previous = homekit_nodes.NodeRegistry(directory)
+    staged = homekit_nodes.NodeRegistry(directory)
+    assert not directory.exists()
+    previous.reopen()
+    enrollment = previous.begin_enrollment("http://localhost")
+    token = enrollment["command"].split("/enroll/")[1].split("'")[0]
+    enrolled = previous.complete_enrollment(token, "before handoff")
+    previous.update_report(enrolled["id"], {"name": "at handoff"})
+    previous.close()
+
+    assert staged.authenticate(enrolled["secret"]) is None
+    staged.reopen()
+    try:
+        assert staged.authenticate(enrolled["secret"])["name"] == "at handoff"
+    finally:
+        staged.close()
+
+
+def test_closed_registry_preserves_enrollments_and_nodes(remote):
+    service, node, _, _ = remote
+    registry = service.nodes
+    enrollment = registry.begin_enrollment("http://localhost")
+    token = enrollment["command"].split("/enroll/")[1].split("'")[0]
+    registry.close()
+    nodes, tokens = copy.deepcopy(registry.nodes), copy.deepcopy(registry.tokens)
+    saved = registry.path.read_bytes()
+    for operation in (
+        lambda: registry.begin_enrollment("http://localhost"),
+        lambda: registry.enrollment_script(token, "https://example.org"),
+        lambda: registry.complete_enrollment(token, "unused"),
+        lambda: registry.remove(node["id"], []),
+        lambda: registry.update_report(node["id"], {"name": "unused"}),
+    ):
+        with pytest.raises(RuntimeError, match="closed"):
+            operation()
+        assert registry.tokens == tokens and registry.nodes == nodes
+        assert registry.path.read_bytes() == saved
+
+
+def test_registry_keeps_ownership_when_feed_startup_cleanup_fails(remote, monkeypatch):
+    service, _, _, _ = remote
+    registry = service.nodes
+    path = service.directory / "feeds" / "porch" / "1.sock"
+    original_unlink = type(path).unlink
+
+    def unlink(file, *args, **kwargs):
+        if file == path:
+            raise OSError("injected socket unlink failure")
+        return original_unlink(file, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", Mock(side_effect=RuntimeError("injected thread startup failure")))
+        patch.setattr(type(path), "unlink", unlink)
+        with pytest.raises(RuntimeError, match="startup cleanup incomplete"):
+            registry.prepare_feeds("porch", [1])
+    assert path.exists()
+    assert registry.feeds[("porch", 1)].closed
+    with pytest.raises(RuntimeError, match="shutdown incomplete"):
+        registry.prepare_feeds("porch", [1])
+    registry.close()
+    assert not path.exists()
+    registry.reopen()
+    assert registry.prepare_feeds("porch", [1]) == path.parent
+
+
+def test_registry_retains_only_unfinished_feeds_until_drained(remote, tmp_path):
+    service, _, _, _ = remote
+    registry = service.nodes
+    entered, resume = threading.Event(), threading.Event()
+
+    def delayed_close():
+        entered.set()
+        assert resume.wait(3)
+        raise RuntimeError("incomplete test feed")
+
+    pending, stopped = Mock(), Mock()
+    pending.close.side_effect = delayed_close
+    registry.feeds.update({("porch", 1): pending, ("porch", 2): stopped})
+    waiter = registry.begin_snapshot("porch", tmp_path / "snapshot.jpg")
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        draining = executor.submit(registry.close)
+        try:
+            assert entered.wait(2)
+            assert registry.lock.acquire(timeout=1)
+            try:
+                assert registry.closed
+                assert not registry.snapshots and not waiter[0].is_set()
+                with pytest.raises(RuntimeError):
+                    registry.reopen()
+            finally:
+                registry.lock.release()
+        finally:
+            resume.set()
+        with pytest.raises(RuntimeError):
+            draining.result(timeout=2)
+
+    stopped.close.assert_called_once()
+    with pytest.raises(RuntimeError):
+        registry.reopen()
+    with pytest.raises(RuntimeError):
+        registry.prepare_feeds("porch", [1])
+    registry.write_feed("porch", 1, b"unused")
+    pending.write.assert_not_called()
+    pending.close.side_effect = None
+    registry.close()
+    registry.close()
+    assert pending.close.call_count == 2
+    stopped.close.assert_called_once()
+    registry.reopen()
+    assert not registry.closed
+
+
 def test_closed_registry_rejects_stale_sync_and_writers(remote):
     service, node, secret, _ = remote
     assignments = service.node_assignments()
@@ -507,6 +778,32 @@ def test_closed_registry_rejects_stale_sync_and_writers(remote):
         service.nodes.prepare_feeds("porch", [1])
     service.nodes.reopen()
     assert service.nodes.authenticate(secret) is not None
+    with pytest.raises(KeyError):
+        service.nodes.sync(node, {"name": "from prior activation"}, assignments, timeout=0)
+    assert service.nodes.authenticate(secret)["name"] == "review"
+
+
+def test_closing_registry_wakes_sync_and_fences_its_reply_on_reopen(remote, monkeypatch):
+    service, node, _, _ = remote
+    registry = service.nodes
+    waiting = threading.Event()
+    original_wait = registry.updates.wait
+
+    def wait(timeout):
+        waiting.set()
+        return original_wait(timeout)
+
+    def assignments():
+        registry.reopen()
+        return []
+
+    monkeypatch.setattr(registry.updates, "wait", wait)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(registry.sync, node, {}, assignments, 5)
+        assert waiting.wait(2)
+        registry.close()
+        with pytest.raises(KeyError):
+            pending.result(timeout=2)
 
 
 def test_sync_evaluates_assignments_after_the_new_report(remote):
@@ -596,6 +893,7 @@ def test_failed_pairing_reset_restores_worker_supervision(remote, tmp_path):
     import fcntl
     from unittest.mock import Mock, patch
     service, _, _, _ = remote
+    service.started = True
     camera = service.config.cameras[0]
     directory = service.directory / camera.id
     directory.mkdir(mode=0o700)

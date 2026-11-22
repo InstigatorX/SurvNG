@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from survng.app.config import AppConfig, CameraConfig, CameraHomeKitConfig, HomeKitConfig
 from survng.app.config_application import TargetedConfigApplication, manager_owned_config
 from survng.app.homekit import CameraWorker, HomeKitService, camera_port, private_directory, worker_settings
-from survng.app.homekit_nodes import agent_archive, ffmpeg_archive, install_script, media_ingest_root, node_releases, public_api_root, runtime_archive
+from survng.app.homekit_nodes import agent_archive, ffmpeg_archive, install_script, node_releases, public_api_root, runtime_archive
 from survng.app.homekit_routes import HomeKitRouteDependencies, PairingReset, create_homekit_router, pairing_qr
 from survng.app.media_sessions import MediaSessionManager
 from survng.app.security import is_public_api_path, required_api_scope
@@ -126,7 +126,7 @@ def test_worker_status_is_read_only_and_admin_can_retry(tmp_path, monkeypatch):
     assert service.status()["workerBuild"] == homekit_build.STALE
     ensure.assert_not_called()
 
-    router = create_homekit_router(HomeKitRouteDependencies(get_manager=lambda: SimpleNamespace(homekit=service)))
+    router = create_homekit_router(HomeKitRouteDependencies(lambda: SimpleNamespace(homekit=service), lambda: service.config))
     path = "/api/homekit/worker/rebuild"
     assert required_api_scope("POST", path) == "admin"
     assert not is_public_api_path("POST", path)
@@ -200,7 +200,7 @@ def test_per_camera_reconfiguration_preserves_other_workers_and_pairing(tmp_path
     config = configuration(tmp_path)
     service = HomeKitService(config, MediaSessionManager(), "generation", lambda _: True)
     with patch("survng.app.homekit.CameraWorker") as factory:
-        factory.side_effect = lambda service, app, camera: SimpleNamespace(camera=camera, start=Mock(), close=Mock(), status=lambda: {})
+        factory.side_effect = lambda service, app, camera: SimpleNamespace(camera=camera, config=app, start=Mock(), close=Mock(), status=lambda: {})
         service.start()
         first, other = service.workers.values()
         next_config = config.model_copy(deep=True)
@@ -216,6 +216,52 @@ def test_per_camera_reconfiguration_preserves_other_workers_and_pairing(tmp_path
         other.close.assert_not_called()
         service.close()
         other.close.assert_called_once()
+
+
+def test_partial_reconfiguration_recovers_drained_workers_without_replacing_residuals(tmp_path, monkeypatch):
+    config = configuration(tmp_path)
+    config.cameras.append(config.cameras[1].model_copy(update={"id": "driveway"}, deep=True))
+    service = HomeKitService(config, MediaSessionManager(), "generation", lambda _: True)
+    monkeypatch.setattr(service, "ensure_worker_build", lambda: False)
+    with patch("survng.app.homekit.CameraWorker") as factory:
+        factory.side_effect = lambda service, app, camera: SimpleNamespace(camera=camera, config=app, start=Mock(), close=Mock(), status=lambda: {})
+        service.start()
+        original = service.workers.copy()
+        original["yard"].close.side_effect = RuntimeError("injected stop failure")
+        incoming = config.model_copy(deep=True)
+        incoming.cameras[0].homekit.audio = not incoming.cameras[0].homekit.audio
+        incoming.cameras[1].homekit.audio = not incoming.cameras[1].homekit.audio
+
+        with pytest.raises(RuntimeError, match="reconfiguration shutdown incomplete"):
+            service.reconfigure(incoming)
+        assert service.config is config
+        assert service.workers["porch"] is not original["porch"]
+        service.workers["porch"].start.assert_called_once()
+        assert service.workers["driveway"] is original["driveway"]
+        assert service.workers["yard"] is original["yard"]
+        assert service.status()["cameras"][1]["state"] == "stopping"
+        original["driveway"].close.assert_not_called()
+
+        replacement = service.workers["porch"]
+        original["yard"].close.side_effect = None
+        service.reconfigure(config)
+        assert service.workers["porch"] is replacement
+        assert service.workers["yard"] is not original["yard"]
+        assert service.workers["driveway"] is original["driveway"]
+        service.close()
+
+
+def test_reconfigure_before_start_only_updates_desired_homekit_config(tmp_path):
+    initial = configuration(tmp_path)
+    updated = initial.model_copy(deep=True)
+    updated.cameras[0].homekit.enabled = False
+    service = HomeKitService(initial, MediaSessionManager(), "generation", lambda _: True)
+    with patch("survng.app.homekit.CameraWorker") as factory:
+        service.reconfigure(updated)
+        factory.assert_not_called()
+    assert service.config is updated
+    assert not service.started
+    assert not service.workers
 
 
 def test_config_homekit_is_targeted_not_camera_reload(tmp_path):
@@ -247,7 +293,7 @@ def test_private_state_rejects_permissions_and_symlinks(tmp_path):
 def test_pairing_is_admin_only_not_cached_and_reset_requires_confirmation():
     service = Mock()
     service.pairing.return_value = {"setupCode": "123-45-679", "setupUri": "X-HM://0023ISYWY1234"}
-    router = create_homekit_router(HomeKitRouteDependencies(lambda: SimpleNamespace(homekit=service)))
+    router = create_homekit_router(HomeKitRouteDependencies(lambda: SimpleNamespace(homekit=service), lambda: service.config))
     pairing = next(route.endpoint for route in router.routes if route.path.endswith("/pairing"))
     response = Response()
     result = pairing("porch", response)
@@ -277,6 +323,63 @@ def test_pairing_qr_round_trips_through_a_scanner():
     assert cv2.QRCodeDetector().detectAndDecode(image)[0] == uri
 
 
+def test_failed_replacement_start_is_drained_before_camera_is_restored(tmp_path, monkeypatch):
+    config = configuration(tmp_path)
+    service = HomeKitService(config, MediaSessionManager(), "generation", lambda _: True)
+    monkeypatch.setattr(service, "ensure_worker_build", lambda: False)
+    incoming = config.model_copy(deep=True)
+    incoming.cameras[0].homekit.audio = not incoming.cameras[0].homekit.audio
+
+    def make_worker(service, app, camera):
+        error = RuntimeError("start failed") if app is incoming else None
+        return SimpleNamespace(camera=camera, config=app, start=Mock(side_effect=error), close=Mock(), status=lambda: {})
+
+    with patch("survng.app.homekit.CameraWorker", side_effect=make_worker):
+        service.start()
+        unaffected = service.workers["yard"]
+        with pytest.raises(RuntimeError, match="startup incomplete"):
+            service.reconfigure(incoming)
+        failed = service.workers["porch"]
+        assert service.status()["cameras"][0]["state"] == "stopping"
+        service.reconfigure(config)
+        failed.close.assert_called_once()
+        assert service.workers["porch"] is not failed
+        assert service.workers["yard"] is unaffected
+        service.close()
+
+
+def test_compensation_uses_restored_config_even_when_a_replacement_will_not_stop(tmp_path, monkeypatch):
+    config = configuration(tmp_path)
+    incoming = config.model_copy(deep=True)
+    for camera in incoming.cameras:
+        camera.homekit.audio = not camera.homekit.audio
+    incoming.cameras[1].homekit.port = 57321
+    service = HomeKitService(config, MediaSessionManager(), "generation", lambda _: True)
+    monkeypatch.setattr(service, "ensure_worker_build", lambda: False)
+    with patch("survng.app.homekit.CameraWorker") as factory:
+        factory.side_effect = lambda service, app, camera: SimpleNamespace(
+            camera=camera, config=app, start=Mock(), close=Mock(), status=lambda: {},
+        )
+        service.start()
+        service.reconfigure(incoming)
+        retained = service.workers["yard"]
+        retained.close.side_effect = RuntimeError("injected stop failure")
+
+        with pytest.raises(RuntimeError, match="reconfiguration shutdown incomplete"):
+            service.reconfigure(config, rollback=True)
+        assert service.config is config
+        assert service.workers["porch"].config is config
+        assert service.workers["yard"] is retained
+        assert service.status()["cameras"][1]["port"] == 57321
+        with pytest.raises(RuntimeError, match="before resetting its pairing"):
+            service.reset_pairing("yard")
+        retained.close.assert_called_once()
+        retained.close.side_effect = None
+        service.reconfigure(config)
+        assert all(worker.config is config for worker in service.workers.values())
+        service.close()
+
+
 def _profile():
     return {"width": 896, "height": 672, "tiers": [
         {"identifier": 1, "quality": 2, "width": 1600, "height": 1200, "frameRate": 30, "targetAverageBitrate": 1700, "peakBitrate": 1800},
@@ -286,6 +389,7 @@ def _profile():
 def test_encoder_enrollment_is_one_time_and_keeps_secrets_off_status(tmp_path):
     config = configuration(tmp_path)
     service = HomeKitService(config, MediaSessionManager(), "generation", lambda _: True)
+    service.nodes.reopen()
     try:
         started = service.nodes.begin_enrollment("https://survng.example:8443")
         token = started["command"].split("/enroll/")[1].split("'")[0]
@@ -294,8 +398,11 @@ def test_encoder_enrollment_is_one_time_and_keeps_secrets_off_status(tmp_path):
         assert f"TOKEN='{token}'" in script
         assert "linux-${node_arch}" in script
         assert "SURVNG_FFMPEG=%s" in script and "/opt/survng-homekit-node/bin/ffmpeg" in script
-        assert 'agent_checksum=$(sha256sum "$work/survng-homekit-agent.tgz")' in script
-        assert 'agent: process.argv[1]' in script and '\' "$agent_checksum"' in script
+        assert "/api/homekit/nodes/agent?release=$agent_release" in script
+        assert script.index("sha256sum --check") < script.index('tar -xzf "$work/survng-homekit-agent.tgz"')
+        migrate = "node /opt/survng-homekit-node/dist/src/agent-launcher.js --migrate"
+        assert script.index('await writeFile(".releases.json"') < script.index(migrate) < script.index("systemctl enable")
+        assert "/api/homekit/nodes/sync" not in script
         assert "/api/homekit/nodes/ffmpeg" in script
         assert "apt-get install -y --no-install-recommends ca-certificates curl ffmpeg" not in script
         assert "private-password" not in script and "rtsp://" not in script
@@ -354,6 +461,8 @@ def test_agent_archive_ships_the_program_without_cache(tmp_path):
     root = tmp_path / "worker"
     (root / "dist" / "src").mkdir(parents=True)
     (root / "dist" / "src" / "agent.js").write_text("export {}\n")
+    (root / "dist" / "src" / "agent-launcher.js").write_text("export {}\n")
+    (root / "dist" / "src" / "agent-generations.js").write_text("export {}\n")
     (root / "node_modules" / ".cache").mkdir(parents=True)
     (root / "node_modules" / ".cache" / "secret").write_text("nope")
     (root / "node_modules" / "pkg").mkdir()
@@ -372,7 +481,7 @@ def test_encoder_assignment_restarts_only_that_camera(tmp_path):
     config = configuration(tmp_path)
     service = HomeKitService(config, MediaSessionManager(), "generation", lambda _: True)
     with patch("survng.app.homekit.CameraWorker") as factory:
-        factory.side_effect = lambda service, app, camera: SimpleNamespace(camera=camera, start=Mock(), close=Mock(), status=lambda: {})
+        factory.side_effect = lambda service, app, camera: SimpleNamespace(camera=camera, config=app, start=Mock(), close=Mock(), status=lambda: {})
         service.start()
         first, other = service.workers["porch"], service.workers["yard"]
         next_config = config.model_copy(deep=True)
@@ -400,6 +509,117 @@ def test_ffmpeg_archive_ships_only_the_configured_tools(tmp_path):
     subprocess.run(["sh", "-n"], input=script, text=True, check=True)
 
 
+@pytest.mark.parametrize("failure", [None, "enrollment", "enrollment-timeout", "agent", "ffmpeg", "runtime", "start"])
+def test_installer_verifies_pinned_bundle_before_enabling_service(tmp_path, failure):
+    import shutil
+    import sys
+    from survng.app import homekit_nodes
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("installer fixture requires Node.js")
+    bin_dir = tmp_path / "commands"
+    bin_dir.mkdir()
+    for name, body in (
+        ("apt-get", "exit 0"),
+        ("id", "echo 0"),
+        ("node", 'if [ "$1" = --version ]; then echo v24.0.0; else exec "$NODE_BIN" "$@"; fi'),
+        ("systemctl", 'echo "$*" >> "$FIXTURE/systemctl.log"; [ "$1" != enable ] || [ "$FAILURE" != start ]'),
+    ):
+        command = bin_dir / name
+        command.write_text("#!/bin/sh\n" + body + "\n")
+        command.chmod(0o755)
+    curl = bin_dir / "curl"
+    curl.write_text(f"#!{sys.executable}\n" + """import os, shutil, sys
+from pathlib import Path
+args = sys.argv[1:]
+root = Path(os.environ["FIXTURE"])
+url = next(arg for arg in args if arg.startswith("https://"))
+if "/enroll/" in url:
+    if os.environ["FAILURE"] == "enrollment":
+        sys.exit(22)
+    if os.environ["FAILURE"] == "enrollment-timeout":
+        sys.exit(28)
+    print("SURVNG_NODE_ID=0123456789abcdef\\nSURVNG_NODE_SECRET=credential")
+else:
+    assert "Authorization: Bearer credential" in args
+    artifact = url.rsplit("/", 1)[1]
+    if artifact.startswith("agent"):
+        assert artifact == "agent?release=" + os.environ["AGENT_DIGEST"]
+        artifact = "agent"
+    shutil.copyfile(root / artifact, args[args.index("-o") + 1])
+""")
+    curl.chmod(0o755)
+
+    worker = tmp_path / "worker"
+    (worker / "dist/src").mkdir(parents=True)
+    (worker / "node_modules").mkdir()
+    (worker / "package.json").write_text("{}")
+    (worker / "dist/src/agent.js").write_text("")
+    (worker / "dist/src/agent-generations.js").write_text("")
+    # The real migration and recovery behavior has its own launcher process tests.
+    (worker / "dist/src/agent-launcher.js").write_text("""
+const assert = require('node:assert/strict'), fs = require('node:fs');
+assert.deepEqual(process.argv.slice(2), ['--migrate', process.cwd(), process.cwd()]);
+assert.equal(JSON.parse(fs.readFileSync('.releases.json')).agent, process.env.AGENT_DIGEST);
+fs.writeFileSync('migration-ran', 'yes');
+""")
+    (tmp_path / "agent").write_bytes(agent_archive(worker))
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    for name in ("ffmpeg", "ffprobe"):
+        (tools / name).write_bytes(name.encode())
+    ffmpeg = str(tools / "ffmpeg")
+    (tmp_path / "ffmpeg").write_bytes(ffmpeg_archive(ffmpeg))
+    libs = tmp_path / "libs"
+    (libs / "dri").mkdir(parents=True)
+    for name in (*homekit_nodes.RUNTIME_SONAMES, "dri/iHD_drv_video.so"):
+        (libs / name).write_bytes(name.encode())
+    (tmp_path / "runtime").write_bytes(runtime_archive(libs))
+    releases = {"agent": hashlib.sha256((tmp_path / "agent").read_bytes()).hexdigest(),
+                "ffmpeg": homekit_nodes.ffmpeg_release(ffmpeg), "runtime": homekit_nodes.runtime_release(libs)}
+    if failure in releases:
+        releases[failure] = "0" * 64
+    (tmp_path / "releases").write_text(json.dumps(releases))
+    host = tmp_path / "host"
+    (host / "opt").mkdir(parents=True)
+    (host / "etc/systemd/system").mkdir(parents=True)
+    script = install_script("https://fixture", "test-token")
+    for directory in ("/etc/", "/opt/", "/usr/local"):
+        script = script.replace(directory, str(host) + directory)
+    env = {**os.environ, "NODE_BIN": node, "FIXTURE": str(tmp_path), "AGENT_DIGEST": releases["agent"], "FAILURE": failure or "",
+           "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]}
+    def install():
+        return subprocess.run(["sh"], input=script, text=True, env=env, capture_output=True, timeout=10)
+
+    result = install()
+    installed = host / "opt/survng-homekit-node"
+    marker = installed / ".installing-node-id"
+    if failure in {"enrollment", "enrollment-timeout"}:
+        assert result.returncode != 0 and marker.read_text().strip() == "pending"
+        assert "Verify enrollment records" in result.stderr
+        assert not (host / "etc/survng/homekit-node.env").exists()
+    elif failure == "start":
+        assert result.returncode != 0 and marker.read_text().strip() == "0123456789abcdef"
+        assert "revoke that ID" in result.stderr and "Fresh encoder setup was interrupted" in install().stderr
+    elif failure:
+        assert result.returncode != 0 and marker.read_text().strip() == "0123456789abcdef"
+        assert not (installed / ".releases.json").exists()
+        assert not (installed / "migration-ran").exists()
+        assert not (tmp_path / "systemctl.log").exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert not marker.exists()
+        assert (installed / "migration-ran").read_text() == "yes"
+        assert (tmp_path / "systemctl.log").read_text().splitlines() == [
+            "daemon-reload", "enable --now survng-homekit-node.service"]
+        credentials = host / "etc/survng/homekit-node.env"
+        credentials.write_text("existing-enrollment")
+        retry = install()
+        assert retry.returncode != 0 and "already exists" in retry.stderr
+        assert credentials.read_text() == "existing-enrollment"
+
+
 def test_runtime_archive_ships_the_primary_va_stack(tmp_path):
     lib = tmp_path / "lib"
     (lib / "dri").mkdir(parents=True)
@@ -417,15 +637,33 @@ def test_runtime_archive_ships_the_primary_va_stack(tmp_path):
     assert "runtime" in node_releases("/no/such/ffmpeg", tmp_path / "missing", lib_dir=lib)
 
 
-def test_media_ingest_uses_the_lan_listener():
-    assert media_ingest_root(("0.0.0.0", 8088), "192.168.86.243", "/survng") == "http://192.168.86.243:8088/survng"
-    assert media_ingest_root(("192.168.86.243", 8088), "10.0.0.1", "") == "http://192.168.86.243:8088"
+@pytest.mark.parametrize(("origin", "expected"), [
+    (None, None), ("", None), ("https://relay.example", "https://relay.example"),
+    ("https://192.0.2.1:9443/", "https://192.0.2.1:9443"),
+    ("https://[2001:db8::1]:9443", "https://[2001:db8::1]:9443"),
+])
+def test_homekit_ingest_origin(origin, expected):
+    assert HomeKitConfig(ingest_origin=origin).ingest_origin == expected
+
+
+@pytest.mark.parametrize("origin", [
+    "http://relay.example", "relay.example", "https://relay.example/prefix",
+    "https://relay.example/?", "https://relay.example/#", "https://relay.example?q=1",
+    "https://user:password@relay.example", "https://@relay.example", "https://",
+    "https://relay.example:65536", "https://relay.example:",
+    "https://[::1]suffix", "https://[bad::address]", "https://relay.example\\other",
+    "https://relay.example\n", "https://relay%2fother",
+])
+def test_homekit_ingest_rejects_unsafe_or_ambiguous_origins(origin):
+    with pytest.raises(ValidationError):
+        HomeKitConfig(ingest_origin=origin)
 
 
 def test_installer_root_includes_the_survng_prefix():
     assert public_api_root("https://ha.example", "/survng") == "https://ha.example/survng"
     assert public_api_root("https://ha.example/survng/", "/survng") == "https://ha.example/survng"
     assert public_api_root("https://ha.example", "") == "https://ha.example"
+    assert public_api_root("https://survng", "/survng") == "https://survng/survng"
 
 
 def test_homekit_encoder_must_be_local_or_a_node_id():

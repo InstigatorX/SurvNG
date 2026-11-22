@@ -1,15 +1,23 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { once } from 'node:events';
+import { promisify } from 'node:util';
 import type { Readable } from 'node:stream';
 import { encodeVideo, deviceArgs, type VideoEncoding } from './encoding.js';
 import { CameraSource } from './camera-source.js';
 import { tiers, stopChild, childStopRequested, type MediaSource, type Tier } from './media.js';
 
 export type MediaAdmission = (method: 'acquire' | 'release' | 'started' | 'snapshot', token: string, detail?: { purpose?: 'encoder' | 'relay' | 'snapshot'; pid?: number }) => Promise<void>;
+
+/** Query the configured binary's CLI once before publishing the camera. */
+export async function supportsReadrateCatchup(ffmpeg: string, signal?: AbortSignal): Promise<boolean> {
+  const { stdout } = await promisify(execFile)(ffmpeg, ['-hide_banner', '-h', 'long'],
+    { timeout: 3000, killSignal: 'SIGKILL', maxBuffer: 256 * 1024, signal });
+  return /^-readrate_catchup\s/m.test(stdout);
+}
 
 /** The encoder command shared by a local worker and a remote encoder node. */
 export function encoderCommand(url: string, transport: 'tcp' | 'udp', audio: boolean, tier: Tier, encoding: VideoEncoding): string[] {
@@ -43,14 +51,15 @@ export class CameraMedia implements MediaSource {
   get encoderStatus(): object { return { backend: this.encoding.backend, fallbackReason: this.encoding.fallbackReason, sources: [...this.progress.values()] }; }
   readonly counters = { failures: 0, warningChunks: 0, admissionFailures: 0 };
   constructor(private url: string, private audio: boolean, private ffmpeg: string,
-    private transport: 'tcp' | 'udp', private admission: MediaAdmission, private allowed: () => boolean = () => true, private directory = tmpdir(), readonly encoding: VideoEncoding = { backend: 'software' }, private catalog: readonly Tier[] = tiers, private remoteFeeds = '') {}
+    private transport: 'tcp' | 'udp', private admission: MediaAdmission, private allowed: () => boolean = () => true, private directory = tmpdir(), readonly encoding: VideoEncoding = { backend: 'software' }, private catalog: readonly Tier[] = tiers, private remoteFeeds = '', private readrateCatchup = false) {}
 
   // The shared stream is already live. avformat's default five-second probe
   // holds the first picture until that much media has arrived; identify the
   // streams at once instead. Pace reads so a replayed GOP is not dumped into RTP.
   // FFmpeg treats an exact zero burst as its default half-second burst.
   input(tier: Tier): string[] {
-    return ['-probesize', '32768', '-analyzeduration', '0', '-re', '-readrate_initial_burst', '0.001', '-readrate_catchup', '1', '-rw_timeout', '15000000', '-f', 'mpegts', '-i', `survng-homekit:${tier.identifier}`];
+    return ['-probesize', '32768', '-analyzeduration', '0', '-re', '-readrate_initial_burst', '0.001',
+      ...(this.readrateCatchup ? ['-readrate_catchup', '1'] : []), '-rw_timeout', '15000000', '-f', 'mpegts', '-i', `survng-homekit:${tier.identifier}`];
   }
   protected directInput(): string[] {
     // RTSP is a demuxer with its own socket timeout; rw_timeout applies to
@@ -92,12 +101,13 @@ export class CameraMedia implements MediaSource {
     const tier = this.catalog.find(tier => `survng-homekit:${tier.identifier}` === args[sourceIndex]);
     if (!tier) throw new Error('unsupported camera tier');
     const { source, url } = await this.acquireSource(tier);
+    // Close and failed admission can both return the same consumer's reference.
+    let releasing: Promise<void> | undefined;
+    const release = () => releasing ??= this.releaseSource(tier, source);
     try {
       const input = [...args]; input[sourceIndex] = url;
-      const child = await this.spawnAdmitted(input, 'relay');
-      child.once('close', () => { void this.releaseSource(tier, source).catch(() => { this.counters.failures++; }); });
-      return child;
-    } catch (error) { await this.releaseSource(tier, source); throw error; }
+      return await this.spawnAdmitted(input, 'relay', release);
+    } catch (error) { await release(); throw error; }
   }
   start(args: string[]): Promise<ChildProcess> {
     if (this.closed) return Promise.reject(new Error('camera media closed'));
@@ -106,7 +116,7 @@ export class CameraMedia implements MediaSource {
     void task.then(() => this.pending.delete(task), () => this.pending.delete(task));
     return task;
   }
-  private async spawnAdmitted(args: string[], purpose: 'encoder' | 'relay' | 'snapshot'): Promise<ChildProcess> {
+  private async spawnAdmitted(args: string[], purpose: 'encoder' | 'relay' | 'snapshot', releaseSource?: () => Promise<void>): Promise<ChildProcess> {
     const token = String(++this.sequence);
     try { await this.admission('acquire', token, { purpose }); }
     catch {
@@ -153,11 +163,15 @@ export class CameraMedia implements MediaSource {
       this.progress.delete(child);
       if ((code !== 0 || signal !== null) && !childStopRequested(child)) this.counters.failures++;
       void this.admission('release', token).catch(() => { this.counters.failures++; });
+      void releaseSource?.().catch(() => { this.counters.failures++; });
     });
-    if (child.pid) {
-      try { await this.admission('started', token, { pid: child.pid }); }
-      catch { await stopChild(child); throw new Error('media process ownership unavailable'); }
-    }
+    try { await once(child, 'spawn'); }
+    catch { throw new Error('camera encoder unavailable'); }
+    try { await this.admission('started', token, { pid: child.pid }); }
+    catch { await stopChild(child); throw new Error('media process ownership unavailable'); }
+    // Consumers subscribe to close after start resolves. Never hand them a
+    // child whose close event was already consumed while awaiting ownership.
+    if (!this.children.has(child)) throw new Error('media process exited during startup');
     return child;
   }
   async snapshot(): Promise<Buffer> {

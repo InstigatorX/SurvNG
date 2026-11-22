@@ -26,6 +26,7 @@ const ERROR_LABELS = {
 const UPDATE_LABELS = {
   current: "Up to date",
   outdated: "Update available",
+  migration_required: "Local encoder migration required for updates",
   unknown: "Running version not reported",
   unavailable: "No release available",
   syncing: "Syncing encoder…",
@@ -263,6 +264,7 @@ export function HomeKitSettings({ config, updateConfig, cameraId = "" }) {
       </div>
     </fieldset>
     <section className="homekit-nodes" aria-label="HomeKit encoders">
+      <label>Streaming upload origin (optional)<input type="url" value={settings.ingest_origin || ""} placeholder="https://media.example.com" maxLength={2048} onChange={(event) => update("ingest_origin", event.target.value)} autoComplete="off" /><small>Leave blank to use the primary’s private LAN listener when available. Enter an HTTPS origin to override it.</small></label>
       {status?.workerBuild && (status.enabled || status.nodes?.length || status.workerBuildJob?.available) ? <WorkerBuild problem={status.workerBuild} job={status.workerBuildJob} onRetry={rebuildWorker} busy={busy === "rebuild"} requestError={buildError} /> : null}
       {status?.nodeError ? <p role="alert" className="settings-help homekit-error">HomeKit encoder state is unavailable. Check its private directory permissions and saved state.</p> : null}
       <div className="telemetry-section-head"><div><h3>Encoders</h3><p>Run the installer once as root in a new container. It checks in here. Apple Home still reaches this server.</p></div><button type="button" disabled={!!busy || !!status?.workerBuild} onClick={addEncoder}>{busy === "encoder" ? "Working…" : "Add encoder"}</button></div>

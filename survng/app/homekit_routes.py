@@ -5,6 +5,7 @@ public at the session boundary and still reject a missing or reused credential.
 """
 from dataclasses import dataclass
 from collections.abc import Callable
+from ipaddress import IPv4Address, IPv4Network
 from typing import Any
 
 import cv2
@@ -12,15 +13,19 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from .config import AppConfig
 from .homekit_nodes import (
-    SNAPSHOT_LIMIT, available_agent_version, ffmpeg_archive_iter, media_ingest_root,
+    SNAPSHOT_LIMIT, available_agent_version, ffmpeg_archive_iter,
     node_releases, public_api_root, runtime_archive_iter,
 )
 
 
+_PRIVATE_LAN = tuple(IPv4Network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+
 @dataclass(frozen=True)
 class HomeKitRouteDependencies:
     get_manager: Callable[[], Any]
+    get_config: Callable[[], AppConfig]
 
 
 class PairingReset(BaseModel):
@@ -35,6 +40,7 @@ class NodeReport(BaseModel):
     backends: dict = Field(default_factory=dict, max_length=1024)
     fps: dict = Field(default_factory=dict, max_length=1024)
     revisions: dict = Field(default_factory=dict, max_length=1024)
+    releaseProtocol: int | None = Field(default=None, strict=True)
     runningVersion: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     failedSyncRequest: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
 
@@ -105,7 +111,7 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         return {"reset": True}
 
     def installer_root(request: Request) -> str:
-        return public_api_root(str(request.base_url), deps.get_manager().config.base_path)
+        return public_api_root(str(request.base_url), deps.get_config().base_path)
 
     @router.post("/api/homekit/nodes")
     def begin_enrollment(request: Request, response: Response) -> dict:
@@ -164,15 +170,24 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
             payload = service.nodes.sync(node, report.model_dump(), service.node_assignments, timeout=10)
         except (KeyError, OSError, RuntimeError):
             raise HTTPException(status_code=401, detail="encoder authentication required") from None
-        releases = node_releases(service.config.ffmpeg_path)
-        payload["releases"] = releases
-        sync_request = service.nodes.pending_sync_request(node, releases.get("agent"))
-        if sync_request is not None:
-            payload["syncRequest"] = sync_request
-        try:
-            payload["ingest"] = media_ingest_root(request.scope.get("server"), service.config.homekit.bind, service.config.base_path)
-        except (TypeError, ValueError):
-            pass
+        # Negotiate on this poll, including when another generation of the same node checks in.
+        if report.releaseProtocol == 1:
+            releases = node_releases(service.config.ffmpeg_path)
+            payload["releases"] = releases
+            sync_request = service.nodes.pending_sync_request(node, releases.get("agent"))
+            if sync_request is not None:
+                payload["syncRequest"] = sync_request
+        # A hot update may commit while the registry waits for the next node update.
+        config = deps.get_config()
+        origin = config.homekit.ingest_origin
+        if not origin and config.homekit.bind:
+            # Use the local listener's port and the configured LAN address.
+            # Host and forwarded headers describe the enrolled proxy instead.
+            _, port = request.scope.get("server") or (None, None)
+            address = IPv4Address(config.homekit.bind)
+            if port and 1 <= port <= 65535 and any(address in network for network in _PRIVATE_LAN):
+                origin = f"http://{address}:{port}"
+        payload["ingest"] = origin + config.base_path if origin else None
         return payload
 
     @router.post("/api/homekit/nodes/media")
@@ -211,6 +226,13 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         if not accepted:
             raise HTTPException(status_code=404, detail="snapshot was not requested")
         return {"accepted": True}
+
+    @router.get("/api/homekit/nodes/releases")
+    def encoder_releases(request: Request, response: Response) -> dict:
+        service = deps.get_manager().homekit
+        _node(service, request)
+        response.headers["Cache-Control"] = "no-store"
+        return node_releases(service.config.ffmpeg_path)
 
     @router.get("/api/homekit/nodes/agent")
     def node_agent(request: Request, release: str | None = None) -> Response:

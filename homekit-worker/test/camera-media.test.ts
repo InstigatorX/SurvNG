@@ -3,18 +3,18 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile, readdir, lstat, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { execFile, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
-import { CameraMedia, encoderCommand, remoteCopyCommand } from '../src/camera-media.js';
-import { RtpFeed, tiers } from '../src/media.js';
+import { CameraMedia, encoderCommand, remoteCopyCommand, supportsReadrateCatchup } from '../src/camera-media.js';
+import { RtpFeed, stopChild, tiers } from '../src/media.js';
 import { FragmentParser, FragmentRing, videoClock, decodeTime, fragmentDuration } from '../src/fragments.js';
 import { HevcAccessUnitAssembler } from '../src/vendor/sframeRtp.js';
 
-async function until(predicate: () => boolean, timeout = 15000): Promise<void> {
+async function until(predicate: () => boolean | Promise<boolean>, timeout = 15000): Promise<void> {
   const end = Date.now() + timeout;
-  while (!predicate()) {
+  while (!await predicate()) {
     if (Date.now() > end) throw new Error('condition timed out');
     await new Promise(resolve => setTimeout(resolve, 25));
   }
@@ -38,12 +38,30 @@ test('a remote feed is copied and a local encoder keeps the source', () => {
   assert.equal(local.includes('libx265'), true);
 });
 
-test('a live viewer identifies the shared stream without the default five-second probe', () => {
-  const media = new CameraMedia('rtsp://not-opened/camera', false, 'ffmpeg', 'tcp', async () => {});
-  const args = media.input(tiers[0]);
-  assert.equal(args[args.indexOf('-analyzeduration') + 1], '0');
-  assert.equal(args.includes('-re'), true);
-  assert.equal(args.includes('-readrate_initial_burst'), true);
+test('relay pacing uses only the optional catch-up flag reported by its FFmpeg', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'survng-ffmpeg-help-'));
+  try {
+    for (const supported of [false, true]) {
+      const ffmpeg = join(root, `ffmpeg-${supported}`);
+      const option = supported ? '-readrate_catchup <speed>' : '-readrate_catchup_other <speed>';
+      await writeFile(ffmpeg, `#!${process.execPath}
+if (process.argv.slice(2).join(' ') !== '-hide_banner -h long') process.exit(1);
+console.log('-readrate_initial_burst <seconds>\\n${option}');
+`, { mode: 0o700 });
+      const readrateCatchup = await supportsReadrateCatchup(ffmpeg);
+      assert.equal(readrateCatchup, supported);
+      const media = new CameraMedia('unused', true, ffmpeg, 'tcp', async () => {},
+        () => true, root, { backend: 'software' }, tiers, '', readrateCatchup);
+      for (const args of [media.input(tiers[0]), media.recording(tiers[1], true)]) {
+        assert.equal(args[args.indexOf('-analyzeduration') + 1], '0');
+        assert.ok(args.includes('-re'));
+        assert.equal(args[args.indexOf('-readrate_initial_burst') + 1], '0.001');
+        assert.equal(args.includes('-readrate_catchup'), supported);
+        if (supported) assert.equal(args[args.indexOf('-readrate_catchup') + 1], '1');
+      }
+    }
+    await assert.rejects(supportsReadrateCatchup(join(root, 'missing')), { code: 'ENOENT' });
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('RTSP sources use the demuxer timeout while HTTP uses the protocol timeout', () => {
@@ -125,19 +143,110 @@ test('stopping a feed waits for an outstanding media admission', async () => {
   assert.deepEqual(messages, ['acquire', 'started', 'release']);
 });
 
+test('shared relay cleanup survives a delayed started acknowledgement', { timeout: 15000 }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'survng-relay-ack-'));
+  const executable = join(root, 'encoder');
+  await writeFile(executable, `#!${process.execPath}
+const net = require('node:net');
+const input = process.argv.find(arg => arg.startsWith('unix://'));
+if (input) {
+  const client = net.connect(input.slice(7));
+  client.once('data', () => {
+    if (process.argv.includes('early-exit')) {
+      process.stderr.write('invalid relay output');
+      process.exitCode = 7;
+      client.destroy();
+    } else process.stdout.write('ready');
+  });
+} else {
+  setInterval(() => process.stdout.write('packet'), 20);
+}
+`, { mode: 0o700 });
+  try {
+    for (const outcome of ['success after close', 'rejection after close', 'rejection while running']) {
+      await t.test(outcome, async () => {
+        const leases = new Set<string>();
+        const releases: string[] = [];
+        let grant!: () => void, deny!: (error: Error) => void, requested!: () => void;
+        const ack = new Promise<void>((resolve, reject) => { grant = resolve; deny = reject; });
+        const ackRequested = new Promise<void>(resolve => { requested = resolve; });
+        let delayed = '';
+        let delayNextRelay = false;
+        const media = new CameraMedia('unused', true, executable, 'tcp', async (method, token, detail) => {
+          if (method === 'acquire') {
+            leases.add(token);
+            if (detail?.purpose === 'relay' && delayNextRelay) delayed = token;
+          } else if (method === 'started' && token === delayed) {
+            requested();
+            await ack;
+          } else if (method === 'release') {
+            releases.push(token);
+            leases.delete(token);
+          }
+        }, () => true, root);
+        try {
+          const input = media.input(tiers[0]);
+          const sibling = await media.start(input);
+          await once(sibling.stdout!, 'data');
+          delayNextRelay = true;
+          const exits = outcome !== 'rejection while running';
+          const starting = media.start(exits ? [...input, 'early-exit'] : input);
+          await ackRequested;
+          if (exits) await until(() => releases.includes(delayed));
+          const drained = async () => media.children.size === 0 && leases.size === 0
+            && !(await readdir(root)).some(name => name.endsWith('.sock'));
+          if (outcome === 'success after close') {
+            assert.equal(media.children.size, 2, 'one sibling relay and its producer remain');
+            await stopChild(sibling);
+            await until(drained, 2000); // The pending ACK cannot keep the producer or its socket alive.
+            grant();
+          } else deny(new Error('acknowledgement rejected'));
+          await assert.rejects(starting, /exited|ownership unavailable/);
+          if (exits) assert.equal(media.lastError, 'media_error');
+          if (outcome !== 'success after close') {
+            assert.equal(sibling.exitCode, null);
+            assert.equal(media.children.size, 2, 'the failure releases only its own reference');
+            assert.equal((await readdir(root)).filter(name => name.endsWith('.sock')).length, 1);
+            await stopChild(sibling);
+            await until(drained, 2000);
+          }
+          assert.equal(releases.length, 3, 'each relay and producer lease released once');
+        } finally { grant(); await media.stop(); }
+      });
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a relay spawn error releases its shared source and admission', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'survng-relay-spawn-'));
+  const messages: string[] = [];
+  const media = new CameraMedia('unused', true, join(root, 'missing'), 'tcp',
+    async method => { messages.push(method); }, () => true, root);
+  try {
+    await assert.rejects(media.start(media.input(tiers[0])), /unavailable/);
+    await until(() => messages.includes('release'));
+    assert.deepEqual(messages, ['acquire', 'release']);
+    assert.deepEqual(await readdir(root), []);
+    assert.equal(media.children.size, 0);
+  } finally { await media.stop(); await rm(root, { recursive: true, force: true }); }
+});
+
 test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio track', {
   skip: process.env.HKSV_MEDIA_TESTS !== '1', timeout: 60000,
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'survng-camera-media-'));
   const encoding = process.env.HKSV_QSV_TESTS === '1' ? { backend: 'qsv' as const, device: '/dev/dri/renderD128' } : { backend: 'software' as const };
   const execute = promisify(execFile);
+  const ffmpeg = process.env.HKSV_FFMPEG || 'ffmpeg';
+  const ffprobe = join(dirname(ffmpeg), 'ffprobe');
+  const readrateCatchup = await supportsReadrateCatchup(ffmpeg);
   const input = join(root, 'camera.mp4');
   const admitted = new Set<string>();
   let encoderAcquires = 0;
   let media: CameraMedia | undefined;
   const server = createServer();
   try {
-    await execute('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=15',
+    await execute(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=15',
       '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=32000', '-t', '8', '-c:v', 'libx264', '-preset', 'ultrafast',
       '-c:a', 'aac', '-movflags', '+faststart', '-y', input]);
     const fixture = await readFile(input);
@@ -151,10 +260,10 @@ test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio tr
     });
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     const address = server.address() as { port: number };
-    media = new FileCameraMedia(`http://127.0.0.1:${address.port}/camera.mp4`, true, 'ffmpeg', 'tcp', async (method, token, detail) => {
+    media = new FileCameraMedia(`http://127.0.0.1:${address.port}/camera.mp4`, true, ffmpeg, 'tcp', async (method, token, detail) => {
       if (method === 'acquire' && detail?.purpose === 'encoder') encoderAcquires++;
       if (method === 'acquire') admitted.add(token); else if (method === 'release') admitted.delete(token);
-    }, () => true, root, encoding);
+    }, () => true, root, encoding, tiers, '', readrateCatchup);
     for (const audio of [true, false]) {
       const child: ChildProcess = await media.start([...media.recording(tiers[2], audio), '-tag:v', 'hvc1',
         '-movflags', '+frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', 'pipe:1']);
@@ -194,7 +303,7 @@ test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio tr
         } finally { await feed.stop(); }
         const liveFile = join(root, 'camera-live.hevc');
         await writeFile(liveFile, Buffer.concat(annexB));
-        const decoded = await execute('ffmpeg', ['-v', 'error', '-i', liveFile, '-f', 'null', '-']);
+        const decoded = await execute(ffmpeg, ['-v', 'error', '-i', liveFile, '-f', 'null', '-']);
         assert.equal(decoded.stderr, '');
       }
       const code: number = (await once(child, 'close'))[0];
@@ -203,7 +312,7 @@ test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio tr
       assert.equal(admitted.size, 0);
       const output = Buffer.concat(chunks);
       const file = join(root, `recording-${audio}.mp4`); await writeFile(file, output);
-      const probe = JSON.parse((await execute('ffprobe', ['-v', 'error', '-show_streams', '-of', 'json', file])).stdout);
+      const probe = JSON.parse((await execute(ffprobe, ['-v', 'error', '-show_streams', '-of', 'json', file])).stdout);
       const video = probe.streams.find((stream: { codec_type: string }) => stream.codec_type === 'video');
       assert.equal(video.codec_name, 'hevc'); assert.equal(video.width, 640); assert.equal(video.height, 360);
       assert.equal(probe.streams.filter((stream: { codec_type: string }) => stream.codec_type === 'audio').length, audio ? 1 : 0);
@@ -217,10 +326,10 @@ test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio tr
       assert.ok(ring.coverage >= 7.9 && ring.coverage < 8.1);
       assert.ok(Math.abs(ring.fragments[0].duration - 4) < 0.1);
       assert.doesNotThrow(() => ring.cursor(4));
-      await execute('ffmpeg', ['-v', 'error', '-i', file, '-f', 'null', '-']);
+      await execute(ffmpeg, ['-v', 'error', '-i', file, '-f', 'null', '-']);
     }
     await media.stop();
-    media = new FileCameraMedia(`http://127.0.0.1:${address.port}/camera.mp4`, false, 'ffmpeg', 'tcp', async () => {}, () => true, root, encoding);
+    media = new FileCameraMedia(`http://127.0.0.1:${address.port}/camera.mp4`, false, ffmpeg, 'tcp', async () => {}, () => true, root, encoding, tiers, '', readrateCatchup);
     const silentChild: ChildProcess = await media.start([...media.recording(tiers[2], true), '-t', '4', '-tag:v', 'hvc1',
       '-movflags', '+frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', 'pipe:1']);
     const silentChunks: Buffer[] = [];
@@ -228,7 +337,7 @@ test('camera HTTP input is normalized to HEVC/AAC fMP4 with a removable audio tr
     assert.equal((await once(silentChild, 'close'))[0], 0);
     const silentFile = join(root, 'camera-audio-disabled.mp4');
     await writeFile(silentFile, Buffer.concat(silentChunks));
-    const pcm = await execute('ffmpeg', ['-v', 'error', '-i', silentFile, '-map', '0:a:0', '-f', 's16le', 'pipe:1'], { encoding: 'buffer', maxBuffer: 1024 * 1024 });
+    const pcm = await execute(ffmpeg, ['-v', 'error', '-i', silentFile, '-map', '0:a:0', '-f', 's16le', 'pipe:1'], { encoding: 'buffer', maxBuffer: 1024 * 1024 });
     assert.ok(pcm.stdout.length > 10000);
     assert.ok(pcm.stdout.every(byte => byte === 0), 'camera-audio-disabled produces silence');
   } finally {
