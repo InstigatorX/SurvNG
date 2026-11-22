@@ -165,6 +165,8 @@ class FaceStore(
                     on face_observations(observed_at desc);
                 create index if not exists idx_face_observations_person
                     on face_observations(person_id, observed_at desc);
+                create index if not exists idx_face_observations_snapshot
+                    on face_observations(snapshot_path);
                 create table if not exists face_unknown_members (
                     observation_id integer primary key,
                     cluster_id integer not null,
