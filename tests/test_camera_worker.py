@@ -1892,6 +1892,9 @@ class CameraWorkerTest(unittest.TestCase):
             with patch.object(worker.motion_qualification, "run_pipeline", return_value=accepted):
                 with worker._frame_lock:
                     worker.motion_analysis.frames.extend(motion_frame_pair())
+                    worker.motion_analysis.color_frames.extend(
+                        motion_frame_pair(shape=(90, 160, 3))
+                    )
                 worker.motion_analysis.analyze_continuous(2.0)
 
             self.assertTrue(worker.motion_events.queue.empty())
@@ -1959,6 +1962,9 @@ class CameraWorkerTest(unittest.TestCase):
             worker._stop.clear()
             with worker._frame_lock:
                 worker.motion_analysis.frames.extend(motion_frame_pair())
+                worker.motion_analysis.color_frames.extend(
+                    motion_frame_pair(shape=(90, 160, 3))
+                )
             with (
                 patch.object(worker.motion_qualification, "run_pipeline", return_value=accepted),
                 patch.object(worker.motion_qualification, "with_source_evidence", return_value=accepted),
@@ -1992,6 +1998,9 @@ class CameraWorkerTest(unittest.TestCase):
                 ))
             with worker._frame_lock:
                 worker.motion_analysis.frames.extend(motion_frame_pair())
+                worker.motion_analysis.color_frames.extend(
+                    motion_frame_pair(shape=(90, 160, 3))
+                )
             with (
                 patch.object(worker.motion_qualification, "run_pipeline", return_value=accepted),
                 patch.object(worker.motion_qualification, "with_source_evidence", return_value=accepted),
@@ -2016,6 +2025,9 @@ class CameraWorkerTest(unittest.TestCase):
             worker._stop.clear()
             with worker._frame_lock:
                 worker.motion_analysis.frames.extend(motion_frame_pair())
+                worker.motion_analysis.color_frames.extend(
+                    motion_frame_pair(shape=(90, 160, 3))
+                )
             with (
                 patch.object(worker.motion_qualification, "run_pipeline", return_value=rejected),
                 patch.object(

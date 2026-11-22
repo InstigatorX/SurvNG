@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import threading
+from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
@@ -145,6 +146,21 @@ class _ScoringRuntime:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class _IlluminationFrame:
+    """One analysed frame and the motion mask produced when it was newest."""
+
+    timestamp: float
+    color: np.ndarray
+    gray: np.ndarray | None
+    mask: np.ndarray | None
+
+
+# Upper bound on retained illumination frames. The analysis ring normally
+# bounds the window well below this (36 frames with default settings).
+_ILLUMINATION_HISTORY_LIMIT = 256
+
+
 @dataclass(slots=True)
 class _IlluminationRuntime:
     anchor_frame: np.ndarray | None = None
@@ -153,11 +169,19 @@ class _IlluminationRuntime:
     clear_streak: int = 0
     last_evaluated_at: float | None = None
     last_processed_at: float | None = None
+    history: deque[_IlluminationFrame] = field(
+        default_factory=lambda: deque(maxlen=_ILLUMINATION_HISTORY_LIMIT)
+    )
+    pair_evidence: dict[tuple[float, float], dict[str, float] | None] = field(
+        default_factory=dict
+    )
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def snapshot(self) -> "_IlluminationRuntime":
         with self.lock:
             return _IlluminationRuntime(
+                history=deque(self.history, maxlen=_ILLUMINATION_HISTORY_LIMIT),
+                pair_evidence=dict(self.pair_evidence),
                 anchor_frame=(
                     None if self.anchor_frame is None else self.anchor_frame.copy()
                 ),
@@ -1431,6 +1455,73 @@ class IlluminationChangeFilterStage:
             return cached
         return cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
 
+    def _windowed_pair_evidence(
+        self,
+        state: _IlluminationRuntime,
+        context: MotionContext,
+        luminance: tuple[np.ndarray, ...],
+        *,
+        evaluate: bool,
+    ) -> list[dict[str, float]]:
+        """Return pair evidence for every consecutive frame pair in the window.
+
+        Continuous analysis passes only the newest frames, so the stage keeps
+        its own bounded per-frame history and computes each pair's evidence at
+        most once. Each pair uses the motion mask produced when its newer frame
+        was analysed, not a mask recomputed later against an advanced
+        background. The window starts at ``history_started_at`` when the caller
+        supplies one, otherwise at the first supplied frame, which reproduces
+        the full-history behaviour for callers that pass a complete window.
+        """
+        frames = context.frame_history
+        masks = context.motion_mask_history
+        timestamps = context.frame_timestamps
+        raw_start = context.configuration.get("history_started_at")
+        window_start = float(timestamps[0] if raw_start is None else raw_start)
+        with state.lock:
+            history = state.history
+            if history and timestamps[0] < history[-1].timestamp and raw_start is None:
+                # A complete window that starts before retained history (for
+                # example after a replay) replaces it rather than interleaving.
+                history.clear()
+                state.pair_evidence.clear()
+            for index, (timestamp, color) in enumerate(zip(timestamps, frames)):
+                mask_index = index - 1
+                mask = masks[mask_index] if 0 <= mask_index < len(masks) else None
+                gray = luminance[index] if index < len(luminance) else None
+                if not history or timestamp > history[-1].timestamp:
+                    history.append(_IlluminationFrame(float(timestamp), color, gray, mask))
+                elif (
+                    timestamp == history[-1].timestamp
+                    and history[-1].mask is None
+                    and mask is not None
+                ):
+                    history[-1] = replace(history[-1], mask=mask)
+            while history and history[0].timestamp < window_start:
+                history.popleft()
+            retained = tuple(history)
+            for key in [key for key in state.pair_evidence if key[0] < window_start]:
+                del state.pair_evidence[key]
+            if not evaluate:
+                return []
+            evidence: list[dict[str, float]] = []
+            for previous, current in zip(retained, retained[1:]):
+                if current.mask is None:
+                    continue
+                key = (previous.timestamp, current.timestamp)
+                if key not in state.pair_evidence:
+                    state.pair_evidence[key] = self._pair_evidence(
+                        previous.color,
+                        current.color,
+                        current.mask,
+                        previous.gray,
+                        current.gray,
+                    )
+                pair = state.pair_evidence[key]
+                if pair is not None:
+                    evidence.append(pair)
+            return evidence
+
     @classmethod
     def _pair_evidence(
         cls,
@@ -1539,7 +1630,16 @@ class IlluminationChangeFilterStage:
         evidence: list[dict[str, float]] = []
         evaluate = context.scoring.accepted
         aligned_gray = len(luminance) == len(frames)
-        if evaluate:
+        state = context.runtime.state_for(self.stage_id, _IlluminationRuntime)
+        timestamps = context.frame_timestamps
+        if len(timestamps) == len(frames) and frames:
+            evidence.extend(self._windowed_pair_evidence(
+                state,
+                context,
+                luminance if aligned_gray else (),
+                evaluate=evaluate,
+            ))
+        elif evaluate:
             for index, (previous, current) in enumerate(zip(frames, frames[1:])):
                 if index >= len(masks):
                     break
@@ -1553,7 +1653,6 @@ class IlluminationChangeFilterStage:
                 if pair is not None:
                     evidence.append(pair)
 
-        state = context.runtime.state_for(self.stage_id, _IlluminationRuntime)
         current_color = frames[-1] if frames and frames[-1].ndim == 3 else None
         with state.lock:
             is_new_state = (

@@ -64,6 +64,7 @@ class MotionAnalysisQualification(Protocol):
     def continuous_primary_required(self) -> bool: ...
     def continuous_primary_due(self, captured_at: float, previous: float) -> bool: ...
     def run_pipeline(self, *args: Any, **kwargs: Any) -> MotionQualificationResult: ...
+    def pipeline_generation(self) -> int: ...
     def illumination_filter_enabled(self) -> bool: ...
     def trigger_mode(self) -> str: ...
     def with_source_evidence(
@@ -209,6 +210,10 @@ class MotionAnalysisService:
         self._submission_sequence = 0
         self._last_frame_epoch = 0.0
         self.primary_last_processed_at = 0.0
+        # Newest frame timestamp, and the qualification runtime generation,
+        # already handed to the stateful pipeline (see analyze_continuous).
+        self._pipeline_anchor_at = 0.0
+        self._pipeline_anchor_generation = 0
         self._pending_analysis_at = 0.0
         self._analysis_request_deferred = False
         self.last_continuous_result: MotionQualificationResult | None = None
@@ -383,6 +388,7 @@ class MotionAnalysisService:
             self.last_processed_sequence = 0
             self._last_frame_epoch = 0.0
             self.primary_last_processed_at = 0.0
+            self._pipeline_anchor_at = 0.0
             self._pending_analysis_at = 0.0
             self._analysis_request_deferred = False
         self.clear_queue()
@@ -589,7 +595,9 @@ class MotionAnalysisService:
         with self.frame_lock:
             previous_epoch = self._last_frame_epoch
             self._last_frame_epoch = frame_epoch
-            if previous_epoch <= 0.0 or frame_epoch > previous_epoch:
+            # Only a backward step is a discontinuity. An equal timestamp is a
+            # duplicate sample that the stateful stages skip as stale.
+            if previous_epoch <= 0.0 or frame_epoch >= previous_epoch:
                 return
             self.frames.clear()
             self.color_frames.clear()
@@ -602,6 +610,7 @@ class MotionAnalysisService:
             self.last_scene_change_at = float("-inf")
             self.last_processed_at = 0.0
             self.primary_last_processed_at = 0.0
+            self._pipeline_anchor_at = 0.0
             self._pending_analysis_at = 0.0
             self._analysis_request_deferred = False
         self.limiter.cancel(self.camera_id)
@@ -1083,11 +1092,36 @@ class MotionAnalysisService:
 
     def analyze_continuous(self, captured_at: float) -> None:
         _mode, sensitivity, _frame_width = self.qualification.settings()
+        pipeline_generation = self.qualification.pipeline_generation()
         with self.frame_lock:
+            ring = list(self.color_frames)
+            if len(ring) < 2:
+                return
+            history_started_at = ring[0][0]
+            history_frame_count = len(ring)
+            # The qualification stages are stateful and consume each frame
+            # once; older frames in the ring only cost repeated full-frame work
+            # that the tracker then discards. Resume from the newest frame the
+            # same runtime generation already processed, keeping it as the
+            # pair anchor. A reset runtime, or an anchor that left the ring,
+            # replays the whole ring so the scene model warms up as before.
+            anchor_index = (
+                next(
+                    (
+                        index
+                        for index in range(len(ring) - 1, -1, -1)
+                        if ring[index][0] == self._pipeline_anchor_at
+                    ),
+                    None,
+                )
+                if self._pipeline_anchor_at > 0.0
+                and self._pipeline_anchor_generation == pipeline_generation
+                else None
+            )
             source_samples = (
-                self.color_frames
-                if len(self.color_frames) >= 2
-                else list(self.frames)[-4:]
+                ring
+                if anchor_index is None
+                else ring[min(anchor_index, len(ring) - 2):]
             )
             samples = [
                 (timestamp, self._share_frame(frame, "continuous_samples"))
@@ -1117,8 +1151,6 @@ class MotionAnalysisService:
                         luminance_frames = []
                         break
                     luminance_frames.append(gray)
-        if len(samples) < 2:
-            return
         if cached_processed:
             with self._telemetry_lock:
                 self._telemetry["cached_derivative_reuse_count"] += len(
@@ -1144,6 +1176,8 @@ class MotionAnalysisService:
                         else ""
                     ),
                     luminance_frames=luminance_frames or None,
+                    history_started_at=history_started_at,
+                    history_frame_count=history_frame_count,
                 )
         except Exception as error:
             LOGGER.warning(
@@ -1155,6 +1189,8 @@ class MotionAnalysisService:
         persist_candidate: dict[str, Any] | None = None
         with self.frame_lock:
             self.last_continuous_result = result
+            self._pipeline_anchor_at = samples[-1][0]
+            self._pipeline_anchor_generation = pipeline_generation
             if result.reason in SCENE_CHANGE_REASONS:
                 self.last_scene_change_at = max(self.last_scene_change_at, captured_at)
             self.primary_last_processed_at = captured_at

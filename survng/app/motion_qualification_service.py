@@ -636,7 +636,17 @@ class MotionQualificationService:
         processed_frame_implementation: str = "",
         clone_runtime: bool = True,
         luminance_frames: list[np.ndarray] | None = None,
+        history_started_at: float | None = None,
+        history_frame_count: int | None = None,
     ) -> MotionQualificationResult:
+        """Run the qualification graph over ``frames``.
+
+        Continuous analysis passes only the newest frames of its ring. It
+        supplies ``history_started_at`` so stages that look back over the
+        retained window keep their own per-frame evidence for it, and
+        ``history_frame_count`` so the reported frame count still describes
+        the retained window rather than the incremental slice.
+        """
         if (
             processed_frames is not None
             and processed_frame_implementation != self.preprocessor_implementation()
@@ -678,6 +688,11 @@ class MotionQualificationService:
                 "stationary_object_tolerance": self.stationary_object_tolerance(),
                 "illumination_filter_enabled": self.illumination_filter_enabled(),
                 "frame_width": frame_width,
+                **(
+                    {"history_started_at": float(history_started_at)}
+                    if history_started_at is not None
+                    else {}
+                ),
             },
             runtime=pipeline.runtime,
         )
@@ -717,10 +732,18 @@ class MotionQualificationService:
             score=scoring.score,
             threshold=scoring.threshold,
             reason=scoring.reason,
-            frame_count=scoring.frame_count,
+            frame_count=(
+                scoring.frame_count
+                if history_frame_count is None
+                else int(history_frame_count)
+            ),
             features=features,
             telemetry=telemetry,
         )
+
+    def pipeline_generation(self) -> int:
+        """Return the qualification runtime generation; resets advance it."""
+        return int(self.qualification_pipeline.runtime.generation)
 
     def set_debug_enabled(self, enabled: bool) -> None:
         self.debug_store.set_enabled(enabled)

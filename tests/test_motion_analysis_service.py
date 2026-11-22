@@ -56,6 +56,7 @@ def _hooks(
     qualification.continuous_primary_required.return_value = True
     qualification.continuous_primary_due.return_value = True
     qualification.run_pipeline = run_pipeline or Mock()
+    qualification.pipeline_generation.return_value = 1
     qualification.illumination_filter_enabled.return_value = False
     qualification.trigger_mode.return_value = trigger_mode
     qualification.with_source_evidence = with_source_evidence or Mock()
