@@ -237,6 +237,13 @@ server = await createServer({
         { id: "c4", at: new Date(Date.now() - 4 * 86_400_000).toISOString(), actor: "API token Home Assistant", changes: [{ label: "MQTT › Host", kind: "value", before: "broker.local", after: "broker.lan" }] },
       ] });
       if (path === "/api/retention/status") return json(res, { state: "idle", error: "" });
+      if (/^\/api\/cameras\/[^/]+\/stream-info$/.test(path)) {
+        const index = Math.max(0, ids.indexOf(path.split("/")[3]));
+        return json(res, {
+          main: { width: cameraWidth(index) * 2, height: 1440, fps: 20, codec: "h265", measured: "recording" },
+          live: { width: cameraWidth(index), height: 720, fps: 15, measured: "decoder" },
+        });
+      }
       if (path === "/api/incidents/feed") return json(res, { items: [], facets: { camera_ids: [], labels: [], zones: [] }, has_more: false });
       if (path === "/api/faces/people") return json(res, []);
       if (path === "/api/incidents/search") {
@@ -264,7 +271,7 @@ server = await createServer({
         res.setHeader("Content-Type", "image/svg+xml"); res.end(snapshot(incident.camera_id)); return;
       }
       if (path === "/api/semantic-search/status") return json(res, { enabled: false, state: "disabled" });
-      if (/\/(snapshot|preview)\.jpg$/.test(path)) {
+      if (/\/(zone-snapshot|snapshot|preview)\.jpg$/.test(path)) {
         res.setHeader("Content-Type", "image/svg+xml"); res.end(snapshot(path.split("/")[3])); return;
       }
       if (path.endsWith("/day.m3u8")) {

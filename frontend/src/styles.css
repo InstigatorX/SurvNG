@@ -6195,17 +6195,19 @@ button.motion-defaults-action:hover {
   color: var(--danger);
 }
 
-.admin-workspace-cameras:has(.zone-settings) {
+/* The camera settings section (not the Camera Studio workspace, which shares
+   the class) becomes a column while Zones is open. */
+.settings-panel.admin-workspace-cameras:has(.zone-settings) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
-.admin-workspace-cameras:has(.zone-settings) > .camera-section-tabs {
+.settings-panel.admin-workspace-cameras:has(.zone-settings) > .camera-section-tabs {
   flex: 0 0 auto;
 }
 
-.admin-workspace-cameras:has(.zone-settings) > .config-form {
+.settings-panel.admin-workspace-cameras:has(.zone-settings) > .config-form {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
@@ -6251,10 +6253,22 @@ button.motion-defaults-action:hover {
   min-height: 0;
 }
 
+/* The canvas keeps the camera image's aspect ratio and fits inside its cell
+   in both directions, so the snapshot and zones are never stretched. Zone
+   points are fractions of the image, so they stay aligned. */
+.zone-canvas-frame {
+  display: grid;
+  place-items: start center;
+  min-width: 0;
+  min-height: 0;
+  container-type: size;
+}
+
 .zone-canvas {
   position: relative;
   overflow: hidden;
-  height: 100%;
+  width: min(100cqw, calc(100cqh * var(--zone-aspect, 1.7778)));
+  aspect-ratio: var(--zone-aspect, 1.7778);
   min-height: 0;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -6608,8 +6622,13 @@ html.zone-vertex-dragging .zone-canvas-media circle {
     grid-template-columns: 1fr;
   }
 
+  /* Phones size the canvas by width; the frame is not a size container. */
+  .zone-canvas-frame {
+    container-type: normal;
+  }
+
   .zone-canvas {
-    height: clamp(280px, 55dvh, 640px);
+    width: 100%;
   }
 
   .zone-sidebar {

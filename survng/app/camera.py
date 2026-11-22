@@ -799,6 +799,15 @@ class CameraWorker:
             candidates.append((path, seek))
         return candidates
 
+    def latest_closed_main_recording(self) -> Path | None:
+        """Newest closed, stable main recording segment, or None."""
+        candidates = self._stable_recording_candidates()
+        return candidates[0][0] if candidates else None
+
+    def recording_ffmpeg_path(self) -> str:
+        recorder = getattr(self.motion_object_detector, "recorder", None)
+        return str(getattr(recorder, "ffmpeg_path", "") or "ffmpeg")
+
     def _latest_stable_recording_still(self) -> np.ndarray | None:
         """Return one still from the newest closed, playable main recording."""
         recorder = getattr(self.motion_object_detector, "recorder", None)

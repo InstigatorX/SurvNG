@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { fetch } from "../shared/api.js";
-import { formatBytes, formatMilliseconds } from "../shared/format.js";
+import { formatBytes } from "../shared/format.js";
 import { healthCameraRows, healthFindings, latestValue, memoryTrendBytesPerHour, seriesValues } from "../healthSummary.mjs";
 import { Sparkline, UptimeStrip } from "./healthVisuals.jsx";
 import "./overview.css";
@@ -12,16 +12,6 @@ const RANGES = [
 
 function percent(value, digits = 1) {
   return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(value === 100 ? 0 : digits)}%` : "—";
-}
-
-function PipelineRow({ title, description, values, label, value }) {
-  return (
-    <div className="health-pipeline-row">
-      <div><strong>{title}</strong><p>{description}</p></div>
-      <Sparkline values={values} label={label} className="admin-overview-spark health-pipeline-spark" width={200} height={28} emptyText="No samples yet" />
-      <span className="health-pipeline-value">{value}</span>
-    </div>
-  );
 }
 
 /**
@@ -64,6 +54,9 @@ export function HealthSummary({ data, cameraId = "", onAction }) {
   const runtime = data.detector?.runtime || {};
   const semantic = data.semantic_search || {};
   const coverage = latestValue(history, "analysis_coverage_percent");
+  const inferenceMs = Number(runtime.average_inference_ms) || 0;
+  const detectorLabel = [data.detector?.loaded_backend, data.detector?.loaded_device].filter(Boolean).join(" on ") || "Object detector";
+  const semanticState = String(semantic.state || (semantic.enabled ? "starting" : "disabled"));
   const trackingRequested = tracking.reduce((total, point) => total + Number(point.attempts || 0), 0);
   const trackingSkipped = tracking.reduce((total, point) => total + Number(point.skipped || 0), 0);
   const rangeLabel = range === "short" ? "last 2 hours" : "last 7 days";
@@ -107,6 +100,28 @@ export function HealthSummary({ data, cameraId = "", onAction }) {
           <strong>{incidents.toLocaleString()}<small> incidents</small></strong>
           <span className="admin-overview-muted">from {events.toLocaleString()} motion events{events ? ` · ${Math.round(((events - Math.min(incidents, events)) / events) * 100)}% filtered` : ""}</span>
         </article>
+        {cameraId ? null : <>
+          <article title={detectorLabel}>
+            <span className="label">Detector response</span>
+            <strong>{inferenceMs > 0 ? <>{Math.round(inferenceMs)}<small> ms avg</small></> : "—"}</strong>
+            <Sparkline values={seriesValues(history, "inference_ms")} label={`Detector response time, ${rangeLabel}`} emptyText="No samples yet" />
+          </article>
+          <article>
+            <span className="label">Motion analysis</span>
+            <strong>{coverage === null ? "Off" : <>{Math.round(coverage)}<small>% analyzed</small></>}</strong>
+            <Sparkline values={seriesValues(history, "analysis_coverage_percent")} label={`Analysis coverage, ${rangeLabel}`} emptyText="Not active" />
+          </article>
+          <article>
+            <span className="label">Object tracking</span>
+            <strong>{trackingRequested.toLocaleString()}<small> requested{trackingSkipped ? ` · ${trackingSkipped} skipped` : ""}</small></strong>
+            <Sparkline values={seriesValues(tracking, "attempts")} label={`Tracking requests, ${rangeLabel}`} emptyText="No requests yet" />
+          </article>
+          <article>
+            <span className="label">Semantic search index</span>
+            <strong>{Number(semantic.queue_depth || 0).toLocaleString()}<small> queued</small></strong>
+            <span className={`admin-overview-chip ${semanticState === "ready" ? "good" : semanticState === "disabled" ? "muted" : "warn"}`}><i />{semanticState.replaceAll("_", " ")}</span>
+          </article>
+        </>}
       </section>
 
       <section className="admin-overview-panel" aria-labelledby="health-findings">
@@ -150,18 +165,6 @@ export function HealthSummary({ data, cameraId = "", onAction }) {
         ) : <p className="admin-overview-empty">No camera telemetry yet.</p>}
       </section>
 
-      {cameraId ? null : (
-        <section className="admin-overview-panel" aria-labelledby="health-pipeline">
-          <div className="admin-overview-panel-head">
-            <h2 id="health-pipeline">Pipeline</h2>
-            <span>Current value and trend, {rangeLabel}</span>
-          </div>
-          <PipelineRow title="Detector response" description={[data.detector?.loaded_backend, data.detector?.loaded_device].filter(Boolean).join(" on ") || "Object detector"} values={seriesValues(history, "inference_ms")} label={`Detector response time, ${rangeLabel}`} value={formatMilliseconds(runtime.average_inference_ms)} />
-          <PipelineRow title="Enhanced motion analysis" description="Share of sampled frames that were analyzed" values={seriesValues(history, "analysis_coverage_percent")} label={`Analysis coverage, ${rangeLabel}`} value={coverage === null ? "Not active" : `${percent(coverage, 0)} analyzed`} />
-          <PipelineRow title="Object tracking" description="Tracking sessions requested after incidents are confirmed" values={seriesValues(tracking, "attempts")} label={`Tracking requests, ${rangeLabel}`} value={`${trackingRequested.toLocaleString()} requested${trackingSkipped ? ` · ${trackingSkipped} skipped` : ""}`} />
-          <PipelineRow title="Semantic search index" description={String(semantic.state || (semantic.enabled ? "starting" : "disabled")).replaceAll("_", " ")} values={[]} label="Semantic search queue" value={`${Number(semantic.queue_depth || 0).toLocaleString()} queued`} />
-        </section>
-      )}
     </section>
   );
 }

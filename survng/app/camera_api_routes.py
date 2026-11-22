@@ -7,6 +7,7 @@ import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import websockets
@@ -18,6 +19,7 @@ from .go2rtc import Go2RtcError
 from .incident_utils import event_snapshot_path, snapshot_media_type
 from .manager import AppManager
 from .manager_access import ManagerAccessCoordinator
+from .stream_info import RecordingStreamInfo, runtime_stream
 from .media_sessions import (
     MediaResourceClass,
     MediaSessionAdmissionError,
@@ -84,6 +86,9 @@ def live_camera_jpeg(manager: AppManager, camera_id: str, source: str = "live") 
     if image is None:
         raise HTTPException(status_code=503, detail="no frame available")
     return image
+
+
+RECORDING_STREAM_INFO = RecordingStreamInfo()
 
 
 def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundle:
@@ -185,6 +190,27 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
                 }
 
         return with_manager_lease(info)
+
+    @router.get("/api/cameras/{camera_id}/stream-info")
+    def stream_info(camera_id: str, response: Response) -> dict[str, Any]:
+        """Size and frame rate of the main and live streams for Admin."""
+        response.headers["Cache-Control"] = "no-store"
+
+        def current(active_manager: AppManager) -> tuple[dict[str, Any], Path | None, str]:
+            worker = active_manager.workers.get(camera_id)
+            if active_manager.camera(camera_id) is None or worker is None:
+                raise HTTPException(status_code=404, detail="camera not found")
+            status = worker.status()
+            if runtime_stream(status, "main") is not None:
+                return status, None, ""
+            return status, worker.latest_closed_main_recording(), worker.recording_ffmpeg_path()
+
+        status, recording, ffmpeg_path = with_manager_lease(current)
+        main = runtime_stream(status, "main")
+        if main is None:
+            # The probe runs ffprobe; keep it outside the manager lease.
+            main = RECORDING_STREAM_INFO.main(camera_id, recording, ffmpeg_path)
+        return {"main": main, "live": runtime_stream(status, "live")}
 
     @router.get("/api/cameras/{camera_id}/stream-source")
     def stream_source(
