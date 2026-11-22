@@ -203,3 +203,11 @@ Suggested order: T1 and T2, then T3, T5 and T6, with T4 last.
     `_temporal_consensus` (377). They are built around nested closures that
     share mutable locals, so splitting them safely needs characterization
     tests first.
+- **T6 (done):** `VIDEO_PIPELINE.md` rewritten from code. That covers the
+  pipeline structure, ONVIF ingress and the durable trigger queue, motion
+  qualification, fast and recorded detection, tracker choice, the
+  configuration reference, verification and boundaries. Sections 1–3 and
+  7–11 were not re-verified and are marked as such. `README.tracking.md`,
+  `docs/adaptive-motion.md`, `THIRD_PARTY.md` and the Sparse Identity
+  docstrings were corrected too.
+- **T4:** not started.
