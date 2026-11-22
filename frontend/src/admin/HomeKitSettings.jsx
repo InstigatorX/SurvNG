@@ -26,6 +26,7 @@ const ERROR_LABELS = {
 const UPDATE_LABELS = {
   current: "Up to date",
   outdated: "Update available",
+  migration_required: "Local encoder migration required for updates",
   unknown: "Running version not reported",
   unavailable: "No release available",
   syncing: "Syncing encoder…",

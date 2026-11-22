@@ -38,7 +38,8 @@ ARCHIVE = "agent.tar.gz"
 INPUT_FILES = ("package.json", "package-lock.json", "tsconfig.json")
 INPUT_DIRECTORIES = ("scripts", "src", "test")
 # Modules the server starts or ships; a build without them is incomplete.
-REQUIRED_OUTPUTS = (Path("dist") / "src" / "agent.js", Path("dist") / "src" / "camera.js")
+AGENT_OUTPUTS = tuple(Path("dist/src") / name for name in ("agent.js", "agent-launcher.js", "agent-generations.js"))
+REQUIRED_OUTPUTS = (*AGENT_OUTPUTS, Path("dist/src/camera.js"))
 HAP_PACKAGE = Path(".cache") / "hap-nodejs.tgz"
 STAGING_PREFIX = ".build-"
 # Per step (HAP prepare, npm ci, compile). Callers allow at least three steps.
@@ -212,7 +213,7 @@ def read_release_archive(release: Path) -> tuple[str, bytes]:
 
 
 def agent_archive(root: Path) -> bytes:
-    if any(not (root / path).exists() for path in ("package.json", "dist/src/agent.js", "node_modules")):
+    if any(not (root / path).exists() for path in ("package.json", *AGENT_OUTPUTS, "node_modules")):
         raise FileNotFoundError("HomeKit encoder agent is not built")
     buffer = io.BytesIO()
 

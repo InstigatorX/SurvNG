@@ -293,19 +293,55 @@ def test_sync_and_installer_use_committed_routes_across_hot_updates(remote, monk
                 manager.config = main.config
 
 
+def test_update_targets_require_this_sync_to_advertise_release_protocol(remote, monkeypatch):
+    from survng.app import homekit_routes
+
+    service, node, secret, endpoints = remote
+    releases = {key: char * 64 for key, char in zip(("agent", "ffmpeg", "runtime"), "abc")}
+    monkeypatch.setattr(homekit_routes, "node_releases", lambda ffmpeg: releases)
+    monkeypatch.setattr(homekit_nodes, "available_agent_version", lambda: releases["agent"])
+    real_sync = service.nodes.sync
+    monkeypatch.setattr(service.nodes, "sync", lambda node, report, assign, timeout: real_sync(node, report, assign, 0))
+    sync = endpoints["/api/homekit/nodes/sync"]
+    resync = endpoints["/api/homekit/nodes/{node_id}/resync"]
+    authorized = request(secret, [])
+    service.nodes.feeds[("porch", 1)] = SimpleNamespace(wanted=lambda: True, close=lambda: None)
+    service.nodes.snapshots["porch"] = (threading.Event(), None, "snapshot-request")
+    try:
+        managed = sync(NodeReport(releaseProtocol=1), authorized)
+        assert managed["releases"] == releases
+        assert resync(node["id"], Response()) == {"requested": True}
+        for report in (NodeReport(), NodeReport(releaseProtocol=2)):
+            legacy = sync(report, authorized)
+            assert legacy.get("releases", {}) == {}
+            assert "syncRequest" not in legacy
+            assert legacy["assignments"] == managed["assignments"] and len(legacy["assignments"]) == 1
+            assert legacy["feeds"] == [{"camera": "porch", "tier": 1}]
+            assert legacy["snapshotRequests"] == {"porch": "snapshot-request"}
+            assert service.status()["nodes"][0]["updateState"] == "migration_required"
+            with pytest.raises(HTTPException) as error:
+                resync(node["id"], Response())
+            assert error.value.status_code == 409 and "migration" in error.value.detail.lower()
+        restored = sync(NodeReport(releaseProtocol=1), authorized)
+        assert restored["releases"] == releases and "syncRequest" not in restored
+    finally:
+        del service.nodes.snapshots["porch"]
+
+
 def test_encoder_version_reports_update_status_independently_of_liveness(remote, monkeypatch):
     service, node, _, _ = remote
     available = "a" * 64
     release = Mock(return_value=available)
     monkeypatch.setattr(homekit_nodes, "available_agent_version", release)
 
+    service.nodes.update_report(node["id"], {"releaseProtocol": 1})
     assert service.status()["nodes"][0] == {
         "id": node["id"], "name": "review", "online": True, "hardware": "qsv",
         "lastSeen": int(node["lastSeen"]), "cameras": ["porch"],
         "runningVersion": None, "availableVersion": available, "updateState": "unknown",
     }
     for running, state in (("b" * 64, "outdated"), (available, "current")):
-        service.nodes.update_report(node["id"], {"runningVersion": running})
+        service.nodes.update_report(node["id"], {"releaseProtocol": 1, "runningVersion": running})
         status = service.status()["nodes"][0]
         assert status["online"]
         assert status["runningVersion"] == running
@@ -339,39 +375,40 @@ def test_resync_requests_are_scoped_and_retryable(remote, monkeypatch):
         resync("unknown", response)
     assert error.value.status_code == 404
 
+    service.nodes.update_report(node["id"], {"releaseProtocol": 1})
     generation = service.nodes.generation
     assert resync(node["id"], response) == {"requested": True}
     assert response.headers["cache-control"] == "no-store"
     assert service.nodes.generation > generation
-    first = sync(NodeReport(), node_request)["syncRequest"]
+    first = sync(NodeReport(releaseProtocol=1), node_request)["syncRequest"]
     assert len(first) == 32
     assert service.status()["nodes"][0]["updateState"] == "syncing"
     enrollment = service.nodes.begin_enrollment("http://localhost")
     token = enrollment["command"].split("/enroll/")[1].split("'")[0]
     other = service.nodes.complete_enrollment(token, "other")
-    assert "syncRequest" not in sync(NodeReport(), request(other["secret"], []))
+    assert "syncRequest" not in sync(NodeReport(releaseProtocol=1), request(other["secret"], []))
     assert resync(node["id"], response) == {"requested": True}
-    assert sync(NodeReport(failedSyncRequest="0" * 32), node_request)["syncRequest"] == first
-    assert "syncRequest" not in sync(NodeReport(failedSyncRequest=first), node_request)
+    assert sync(NodeReport(releaseProtocol=1, failedSyncRequest="0" * 32), node_request)["syncRequest"] == first
+    assert "syncRequest" not in sync(NodeReport(releaseProtocol=1, failedSyncRequest=first), node_request)
     assert service.status()["nodes"][0]["updateState"] == "failed"
 
     assert resync(node["id"], response) == {"requested": True}
-    second = sync(NodeReport(failedSyncRequest=first), node_request)["syncRequest"]
+    second = sync(NodeReport(releaseProtocol=1, failedSyncRequest=first), node_request)["syncRequest"]
     assert second != first
     clock.return_value += 3600
-    assert "syncRequest" not in sync(NodeReport(), node_request)
+    assert "syncRequest" not in sync(NodeReport(releaseProtocol=1), node_request)
     assert service.status()["nodes"][0]["updateState"] == "failed"
     assert resync(node["id"], response) == {"requested": True}
-    third = sync(NodeReport(), node_request)["syncRequest"]
+    third = sync(NodeReport(releaseProtocol=1), node_request)["syncRequest"]
     assert third != second
 
     available = "b" * 64
     release.return_value = available
-    assert "syncRequest" not in sync(NodeReport(), node_request)
+    assert "syncRequest" not in sync(NodeReport(releaseProtocol=1), node_request)
     assert resync(node["id"], response) == {"requested": True}
-    assert sync(NodeReport(), node_request)["syncRequest"] != third
+    assert sync(NodeReport(releaseProtocol=1), node_request)["syncRequest"] != third
 
-    assert "syncRequest" not in sync(NodeReport(runningVersion=available), node_request)
+    assert "syncRequest" not in sync(NodeReport(releaseProtocol=1, runningVersion=available), node_request)
     assert service.status()["nodes"][0]["updateState"] == "current"
     with pytest.raises(HTTPException) as error:
         resync(node["id"], response)
@@ -380,11 +417,29 @@ def test_resync_requests_are_scoped_and_retryable(remote, monkeypatch):
     with pytest.raises(HTTPException) as error:
         resync(node["id"], response)
     assert error.value.status_code == 409
-    service.nodes.update_report(node["id"], {})
+    service.nodes.update_report(node["id"], {"releaseProtocol": 1})
     release.return_value = None
     with pytest.raises(HTTPException) as error:
         resync(node["id"], response)
     assert error.value.status_code == 409
+
+
+def test_release_metadata_requires_enrollment_and_does_not_check_in(remote, monkeypatch):
+    from survng.app import homekit_routes
+
+    service, node, secret, endpoints = remote
+    releases = {"agent": "c" * 64}
+    monkeypatch.setattr(homekit_routes, "node_releases", lambda ffmpeg: releases)
+    route = "/api/homekit/nodes/releases"
+    assert is_public_api_path("GET", route)
+    with pytest.raises(HTTPException) as error:
+        endpoints[route](request("invalid", []), Response())
+    assert error.value.status_code == 401
+    original = node.copy()
+    response = Response()
+    assert endpoints[route](request(secret, []), response) == releases
+    assert response.headers["Cache-Control"] == "no-store"
+    assert service.nodes.authenticate(secret) == original
 
 
 def test_agent_archive_request_can_pin_release(remote, monkeypatch):

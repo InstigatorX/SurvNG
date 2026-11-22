@@ -37,6 +37,7 @@ class NodeReport(BaseModel):
     backends: dict = Field(default_factory=dict, max_length=1024)
     fps: dict = Field(default_factory=dict, max_length=1024)
     revisions: dict = Field(default_factory=dict, max_length=1024)
+    releaseProtocol: int | None = Field(default=None, strict=True)
     runningVersion: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     failedSyncRequest: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
 
@@ -166,11 +167,13 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
             payload = service.nodes.sync(node, report.model_dump(), service.node_assignments, timeout=10)
         except (KeyError, OSError, RuntimeError):
             raise HTTPException(status_code=401, detail="encoder authentication required") from None
-        releases = node_releases(service.config.ffmpeg_path)
-        payload["releases"] = releases
-        sync_request = service.nodes.pending_sync_request(node, releases.get("agent"))
-        if sync_request is not None:
-            payload["syncRequest"] = sync_request
+        # Negotiate on this poll, including when another generation of the same node checks in.
+        if report.releaseProtocol == 1:
+            releases = node_releases(service.config.ffmpeg_path)
+            payload["releases"] = releases
+            sync_request = service.nodes.pending_sync_request(node, releases.get("agent"))
+            if sync_request is not None:
+                payload["syncRequest"] = sync_request
         # A hot update may commit while the registry waits for the next node update.
         config = deps.get_config()
         origin = config.homekit.ingest_origin
@@ -213,6 +216,13 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         if not accepted:
             raise HTTPException(status_code=404, detail="snapshot was not requested")
         return {"accepted": True}
+
+    @router.get("/api/homekit/nodes/releases")
+    def encoder_releases(request: Request, response: Response) -> dict:
+        service = deps.get_manager().homekit
+        _node(service, request)
+        response.headers["Cache-Control"] = "no-store"
+        return node_releases(service.config.ffmpeg_path)
 
     @router.get("/api/homekit/nodes/agent")
     def node_agent(request: Request, release: str | None = None) -> Response:

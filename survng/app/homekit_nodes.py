@@ -135,12 +135,47 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 ORIGIN='{origin}'
 TOKEN='{token}'
+marker=/opt/survng-homekit-node/.installing-node-id
+fresh_install_help() {{
+  echo "Fresh encoder setup was interrupted." >&2
+  if grep -qx 'pending' "$marker"; then
+    echo "The encoder ID was not recorded. Verify enrollment records on the server before revoking any node." >&2
+    return
+  fi
+  echo "The enrollment ID is recorded in $marker." >&2
+  echo "If the service is running and checking in, keep the installation and remove only that marker." >&2
+  echo "For a failed new container, disable its service and revoke that ID with the admin DELETE /api/homekit/nodes/<id> endpoint. Recreate the empty container and use Add encoder again." >&2
+}}
+if [ -f "$marker" ]; then
+  fresh_install_help
+  exit 1
+fi
+for path in /opt/survng-homekit-node /etc/survng/homekit-node.env /etc/systemd/system/survng-homekit-node.service; do
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    echo "An encoder installation already exists. Use the encoder migration procedure." >&2
+    exit 1
+  fi
+done
 if [ "$(uname -m)" != '{platform.machine()}' ]; then
   echo "This encoder must match the server architecture ({platform.machine()})." >&2
   exit 1
 fi
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+reserved=
+enrollment_attempted=
+cleanup() {{
+  result=$?
+  rm -rf "$work"
+  if [ "$result" -ne 0 ] && [ -n "$reserved" ]; then
+    if [ -n "$enrollment_attempted" ]; then
+      fresh_install_help
+    else
+      rm -f "$marker"
+      rmdir /opt/survng-homekit-node
+    fi
+  fi
+}}
+trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -155,44 +190,76 @@ if ! command -v node >/dev/null 2>&1 || [ "$(node --version | cut -d. -f1)" != "
   tar -xJf "$work/survng-node.tar.xz" -C /usr/local --strip-components=1
   rm -f "$work/survng-node.tar.xz"
 fi
-cred=$(curl -fsSL -X POST "$ORIGIN/api/homekit/enroll/$TOKEN")
+mkdir -m 0700 /opt/survng-homekit-node
+reserved=1
+printf 'pending\\n' > "$marker"
+enrollment_attempted=1
+cred=$(curl -fsS --connect-timeout 10 --max-time 30 -X POST "$ORIGIN/api/homekit/enroll/$TOKEN")
 secret=$(printf '%s\\n' "$cred" | sed -n 's/^SURVNG_NODE_SECRET=//p')
 case "$secret" in
   *[!A-Za-z0-9_-]*|"") echo "Enrollment was rejected." >&2; exit 1 ;;
 esac
-install -d -m 0700 /etc/survng /opt/survng-homekit-node
+node_id=$(printf '%s\\n' "$cred" | sed -n 's/^SURVNG_NODE_ID=//p')
+case "$node_id" in
+  *[!0-9a-f]*|"") echo "Invalid enrollment ID." >&2; exit 1 ;;
+esac
+[ "${{#node_id}}" -eq 16 ] || {{ echo "Invalid enrollment ID." >&2; exit 1; }}
+printf '%s\\n' "$node_id" > "$marker"
+install -d -m 0700 /etc/survng
 printf '%s\\nSURVNG_ORIGIN=%s\\nSURVNG_FFMPEG=%s\\n' "$cred" "$ORIGIN" /opt/survng-homekit-node/bin/ffmpeg > /etc/survng/homekit-node.env
 chmod 0600 /etc/survng/homekit-node.env
-curl -fsSL -H "Authorization: Bearer $secret" -o "$work/survng-homekit-agent.tgz" "$ORIGIN/api/homekit/nodes/agent"
-agent_checksum=$(sha256sum "$work/survng-homekit-agent.tgz")
-agent_checksum=${{agent_checksum%% *}}
-rm -rf /opt/survng-homekit-node/dist /opt/survng-homekit-node/node_modules
+curl -fsS --connect-timeout 10 --max-time 600 -H "Authorization: Bearer $secret" "$ORIGIN/api/homekit/nodes/releases" -o "$work/releases.json"
+agent_release=$(node -e '
+const releases = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+for (const kind of ["agent", "ffmpeg", "runtime"]) {{
+  if (typeof releases[kind] !== "string" || !/^[0-9a-f]{{64}}$/.test(releases[kind])) throw Error("Incomplete encoder release metadata");
+}}
+console.log(releases.agent);
+' "$work/releases.json")
+curl -fsS --connect-timeout 10 --max-time 600 -H "Authorization: Bearer $secret" -o "$work/survng-homekit-agent.tgz" "$ORIGIN/api/homekit/nodes/agent?release=$agent_release"
+printf '%s  %s\\n' "$agent_release" "$work/survng-homekit-agent.tgz" | sha256sum --check --status
 tar -xzf "$work/survng-homekit-agent.tgz" -C /opt/survng-homekit-node
 rm -f "$work/survng-homekit-agent.tgz"
-curl -fsSL -H "Authorization: Bearer $secret" -o "$work/survng-homekit-ffmpeg.tgz" "$ORIGIN/api/homekit/nodes/ffmpeg"
-if tar -tzf "$work/survng-homekit-ffmpeg.tgz" | grep -vxE 'ffmpeg|ffprobe'; then
-  echo "Encoder tools were rejected." >&2
-  exit 1
-fi
-install -d -m 0755 /opt/survng-homekit-node/bin
-tar -xzf "$work/survng-homekit-ffmpeg.tgz" -C /opt/survng-homekit-node/bin
+extract_tools() {{
+  archive=$1
+  destination=$2
+  shift 2
+  printf '%s\\n' "$@" | LC_ALL=C sort > "$work/expected"
+  tar -tzf "$archive" > "$work/members"
+  LC_ALL=C sort -o "$work/members" "$work/members"
+  tar -tvzf "$archive" > "$work/types"
+  if ! cmp -s "$work/expected" "$work/members" || grep -qv '^-' "$work/types"; then
+    echo "Encoder tools archive was rejected." >&2
+    exit 1
+  fi
+  install -d -m 0755 "$destination"
+  tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$destination"
+  rm -f "$archive"
+}}
+curl -fsS --connect-timeout 10 --max-time 600 -H "Authorization: Bearer $secret" -o "$work/survng-homekit-ffmpeg.tgz" "$ORIGIN/api/homekit/nodes/ffmpeg"
+extract_tools "$work/survng-homekit-ffmpeg.tgz" /opt/survng-homekit-node/bin ffmpeg ffprobe
 chmod 0755 /opt/survng-homekit-node/bin/ffmpeg /opt/survng-homekit-node/bin/ffprobe
-rm -f "$work/survng-homekit-ffmpeg.tgz"
-/opt/survng-homekit-node/bin/ffmpeg -hide_banner -encoders > "$work/survng-ffmpeg-encoders"
-grep -q libx265 "$work/survng-ffmpeg-encoders"
-grep -q libopus "$work/survng-ffmpeg-encoders"
-grep -q ' aac ' "$work/survng-ffmpeg-encoders"
-grep -q mjpeg "$work/survng-ffmpeg-encoders"
-rm -f "$work/survng-ffmpeg-encoders"
-curl -fsSL -H "Authorization: Bearer $secret" -o "$work/survng-homekit-runtime.tgz" "$ORIGIN/api/homekit/nodes/runtime"
-if tar -tzf "$work/survng-homekit-runtime.tgz" | grep -vxE 'dri|dri/iHD_drv_video.so|lib[A-Za-z0-9._+-]+[.]so([.][A-Za-z0-9._+-]+)?'; then
-  echo "Encoder runtime was rejected." >&2
-  exit 1
-fi
-rm -rf /opt/survng-homekit-node/lib
-install -d -m 0755 /opt/survng-homekit-node/lib
-tar -xzf "$work/survng-homekit-runtime.tgz" -C /opt/survng-homekit-node/lib
-rm -f "$work/survng-homekit-runtime.tgz"
+curl -fsS --connect-timeout 10 --max-time 600 -H "Authorization: Bearer $secret" -o "$work/survng-homekit-runtime.tgz" "$ORIGIN/api/homekit/nodes/runtime"
+extract_tools "$work/survng-homekit-runtime.tgz" /opt/survng-homekit-node/lib {" ".join(RUNTIME_SONAMES)} dri/iHD_drv_video.so
+cd /opt/survng-homekit-node
+node --input-type=module - "$work/releases.json" <<'VERIFY'
+import {{ createHash }} from "node:crypto";
+import {{ createReadStream }} from "node:fs";
+import {{ readFile, writeFile }} from "node:fs/promises";
+const releases = JSON.parse(await readFile(process.argv[2], "utf8"));
+async function verify(kind, directory, names) {{
+  const hash = createHash("sha256");
+  for (const name of names) {{
+    if (kind === "runtime") hash.update(name);
+    for await (const chunk of createReadStream(directory + "/" + name)) hash.update(chunk);
+  }}
+  if (hash.digest("hex") !== releases[kind]) throw Error("Encoder " + kind + " checksum mismatch");
+}}
+await verify("ffmpeg", "bin", ["ffmpeg", "ffprobe"]);
+await verify("runtime", "lib", {json.dumps([*RUNTIME_SONAMES, "dri/iHD_drv_video.so"])});
+await writeFile(".releases.json", JSON.stringify(releases), {{ mode: 0o600, flag: "wx" }});
+VERIFY
+node /opt/survng-homekit-node/dist/src/agent-launcher.js --migrate /opt/survng-homekit-node /opt/survng-homekit-node
 node_bin=$(command -v node)
 cat > /etc/systemd/system/survng-homekit-node.service <<EOF
 [Unit]
@@ -215,18 +282,9 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
-sync_body=$(curl -fsSL -m 25 -H "Authorization: Bearer $secret" -H "content-type: application/json" -d '{{"name":"encoder"}}' "$ORIGIN/api/homekit/nodes/sync") || sync_body='{{}}'
-printf '%s' "$sync_body" | node -e '
-const fs = require("fs");
-let releases = {{}};
-try {{ releases = JSON.parse(fs.readFileSync(0, "utf8")).releases || {{}}; }}
-catch {{ console.error("Could not read the encoder tools release metadata."); }}
-fs.writeFileSync("/opt/survng-homekit-node/.releases.json", JSON.stringify({{
-  agent: process.argv[1], ffmpeg: String(releases.ffmpeg || ""), runtime: String(releases.runtime || ""),
-}}), {{ mode: 0o600 }});
-' "$agent_checksum"
 systemctl daemon-reload
 systemctl enable --now survng-homekit-node.service
+rm "$marker"
 echo "SurvNG HomeKit encoder is installed and checking in."
 """
 
@@ -535,6 +593,9 @@ class NodeRegistry:
             node["revisions"] = {key: value for key, value in revisions.items()
                 if isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)}
             node["runningVersion"] = _version(report.get("runningVersion"))
+            node["releaseProtocol"] = report.get("releaseProtocol")
+            if node["releaseProtocol"] != 1:
+                self.sync_requests.pop(node_id, None)
             request = self.sync_requests.get(node_id)
             if request is not None:
                 if node["runningVersion"] == request.version:
@@ -555,6 +616,8 @@ class NodeRegistry:
                 raise KeyError(node_id)
             if time.time() - node["lastSeen"] > ONLINE_SECONDS:
                 raise RuntimeError("HomeKit encoder is offline")
+            if node.get("releaseProtocol") != 1:
+                raise RuntimeError("HomeKit encoder requires local migration before updates")
             if available is None:
                 raise RuntimeError("HomeKit encoder release is unavailable")
             if node.get("runningVersion") == available:
@@ -795,7 +858,9 @@ class NodeRegistry:
                 assigned = [camera.id for camera in cameras if camera.homekit.encoder == node_id]
                 running = node.get("runningVersion")
                 request = self.sync_requests.get(node_id)
-                if available is None:
+                if node.get("lastSeen") and node.get("releaseProtocol") != 1:
+                    update_state = "migration_required"
+                elif available is None:
                     update_state = "unavailable"
                 elif running == available:
                     update_state = "current"

@@ -75,7 +75,8 @@ try {
         { id: "abc123abc123abcd", name: "Gate box", online: true, hardware: "qsv", cameras: [],
           runningVersion: gateState === "current" ? availableVersion : olderVersion, availableVersion, updateState: gateState },
         { id: "offline", name: "Offline box", online: false, runningVersion: olderVersion, availableVersion, updateState: "outdated" },
-        { id: "legacy", name: "Legacy box", online: true, runningVersion: null, availableVersion, updateState: "unknown" },
+        { id: "unknown", name: "Unreported box", online: true, runningVersion: null, availableVersion, updateState: "unknown" },
+        { id: "legacy", name: "Legacy box", online: true, runningVersion: olderVersion, availableVersion, updateState: "migration_required" },
         { id: "unavailable", name: "No release box", online: true, runningVersion: olderVersion, availableVersion: null, updateState: "unavailable" },
       ],
         cameras: [{ id: "porch", state: "running", paired: false, port: 52001, encoder: "local" }] }) });
@@ -144,9 +145,12 @@ try {
   const offline = page.getByRole("article", { name: "Offline box" });
   await offline.getByText("Offline", { exact: true }).waitFor();
   assert.equal(await offline.getByRole("button", { name: "Sync now" }).isDisabled(), true);
+  const unknown = page.getByRole("article", { name: "Unreported box" });
+  await unknown.getByRole("status").filter({ hasText: "Running version not reported" }).waitFor();
+  assert.equal(await unknown.getByRole("button", { name: "Sync now" }).isEnabled(), true);
   const legacy = page.getByRole("article", { name: "Legacy box" });
-  await legacy.getByRole("status").filter({ hasText: "Running version not reported" }).waitFor();
-  assert.equal(await legacy.getByRole("button", { name: "Sync now" }).isEnabled(), true);
+  await legacy.getByRole("status").filter({ hasText: "Local encoder migration required" }).waitFor();
+  assert.equal(await legacy.getByRole("button", { name: "Sync now" }).count(), 0);
   const unavailable = page.getByRole("article", { name: "No release box" });
   await unavailable.getByRole("status").filter({ hasText: "No release available" }).waitFor();
   assert.equal(await unavailable.getByRole("button", { name: "Sync now" }).count(), 0);
