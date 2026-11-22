@@ -74,7 +74,7 @@ import { IdentityChip } from "../shared/identity.jsx";
 import { eventThumbnailUrl, recordingDayUrl, recordingWindowUrl, recordingUpdatesUrl, recordingDayHlsUrl, recordingGridDayUrl, recordingGridUpdatesUrl, recordingPreviewUrl, recordingSegmentUrl } from "../shared/mediaUrls.js";
 import { ShakaVideo } from "../shared/media.jsx";
 import { CameraLanes, CatchUpStory, EventRail } from "./TimelineRail.jsx";
-import { condenseStory, nextStoryEvent, railEventDurationSeconds, railEventKind, railEventTitle, storyEventAt } from "../timelineRail.mjs";
+import { condenseStory, nextStoryEvent, storyEventAt } from "../timelineRail.mjs";
 import { RecordingHlsVideo } from "../shared/RecordingHlsVideo.jsx";
 import { PlaybackDiagnostics, playbackDiagnosticsEnabled } from "./PlaybackDiagnostics.jsx";
 import { NativeRecordingVideo } from "../shared/NativeRecordingVideo.jsx";
@@ -308,7 +308,7 @@ function shiftCalendarMonth(year, month, delta) {
   return { year: next.getFullYear(), month: next.getMonth() + 1 };
 }
 
-export function TimelineDatePicker({ value, max, onChange }) {
+export function TimelineDatePicker({ value, max, onChange, label = null, title = undefined }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
   const menuRef = useRef(null);
@@ -390,9 +390,10 @@ export function TimelineDatePicker({ value, max, onChange }) {
         aria-label="Recording day"
         aria-expanded={open}
         aria-haspopup="dialog"
+        title={title}
         onClick={() => setOpen((current) => !current)}
       >
-        {formatTimelineDateLabel(value)}
+        {label || formatTimelineDateLabel(value)}
       </button>
       {open ? (
         <div ref={menuRef} className="recordings-v2-date-calendar" role="dialog" aria-label="Choose recording day">
@@ -775,7 +776,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [timelineLayout, setTimelineLayout] = useState(initialView.view);
   const [railMinutes, setRailMinutes] = useState(initialView.railMinutes);
   const [quietMinutes, setQuietMinutes] = useState(5);
-  const [autoAdvance, setAutoAdvance] = useState(true);
   const [laneData, setLaneData] = useState({ scope: "", recordings: [], events: [] });
   const [timelineViewportAnchor, setTimelineViewportAnchor] = useState(initialView.at);
   const [semanticStatus, setSemanticStatus] = useState(null);
@@ -1180,7 +1180,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       if (String(storyCurrent.id) !== String(selectedEventId)) setSelectedEventId(storyCurrent.id);
       return;
     }
-    if (!autoAdvance || clipPreviewing) return;
+    if (clipPreviewing) return;
     const ranOffEvent = previous?.inEvent && previous.playing && playhead > previous.epoch && playhead - previous.epoch < 3;
     const startedInQuiet = previous && !previous.playing;
     if (!ranOffEvent && !startedInQuiet) return;
@@ -1193,7 +1193,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     playAt(target, true);
     // playAt and snapToRecording are recreated every render; the playhead drives this effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoAdvance, clipPreviewing, pagePlaying, playhead, storyCurrent?.id, storyItems, timelineLayout]);
+  }, [clipPreviewing, pagePlaying, playhead, storyCurrent?.id, storyItems, timelineLayout]);
 
   useVisiblePolling(async (signal) => {
     const response = await fetch("/api/semantic-search/status", { signal });
@@ -2697,6 +2697,38 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     );
   }
 
+  // Player HUD: previous/next day on either side of the date/time picker.
+  function hudDayControls() {
+    return (
+      <div className="timeline-hud-day" role="group" aria-label="Day">
+        <button type="button" onClick={() => changeDate(addDaysToDateKey(date, -1))} aria-label="Previous day" title="Previous day"><ChevronLeft size={16} /></button>
+        <TimelineDatePicker
+          value={date}
+          max={today}
+          onChange={changeDate}
+          label={Number.isFinite(playhead) ? `${formatTimelineDateLabel(date)} ${formatTimeOnly(playhead, timeZone)}` : null}
+          title={Number.isFinite(playhead) ? `${formatDateTime(playhead, timeZone)} · choose a day` : "Choose a day"}
+        />
+        <button type="button" onClick={() => changeDate(addDaysToDateKey(date, 1))} disabled={date >= today} aria-label="Next day" title="Next day"><ChevronRight size={16} /></button>
+      </div>
+    );
+  }
+
+  // Today and playback speed join the transport on the HUD's left.
+  function hudPlayExtras() {
+    return (
+      <>
+        <button type="button" className="timeline-hud-today" onClick={() => changeDate(today)} disabled={date === today}>Today</button>
+        <label className="recordings-playback-rate timeline-hud-rate">
+          <span className="sr-only">Playback speed</span>
+          <select value={playbackRate} onChange={(event) => { checkpointTimelineView(); setPlaybackRate(normalizedTimelinePlaybackRate(event.target.value)); }}>
+            {TIMELINE_PLAYBACK_RATES.map((rate) => <option key={rate} value={rate}>{rate}x</option>)}
+          </select>
+        </label>
+      </>
+    );
+  }
+
   const exportPanel = exportRange ? (
             <section className="recordings-v2-export-panel" aria-label="Export recording">
               <div className="recordings-v2-export-kind" role="group" aria-label="Export type">
@@ -2748,8 +2780,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             </section>
           ) : null;
 
-  const selectedRailEvent = timelineLayout === "catchup" ? storyFocus : selectedEvent;
-  const selectedRailDuration = selectedRailEvent ? railEventDurationSeconds(selectedRailEvent) : 0;
   const cameraNames = Object.fromEntries(cameras.map((camera) => [camera.id, camera.name || camera.id]));
   function changeGridLayoutMode(nextMode) {
     const current = gridSelection.layoutMode;
@@ -2790,8 +2820,12 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     checkpointTimelineView();
     setTimelineLayout(nextLayout);
   }
-  const railActionButtons = (
-    <>
+  // Rail, Catch up and Cameras carry day and event navigation in the player HUD.
+  const hudShown = timelineLayout !== "classic";
+  const hudEventActions = (
+    <div className="timeline-hud-actions" role="group" aria-label="Events">
+      <button type="button" onClick={() => selectRailEvent(previousRailEvent)} disabled={!previousRailEvent} aria-label="Previous event" title="Previous event"><SkipBack size={15} /><span className="timeline-hud-label">Previous</span></button>
+      <button type="button" onClick={() => selectRailEvent(nextRailEvent)} disabled={!nextRailEvent} aria-label="Next event" title="Next event"><span className="timeline-hud-label">Next</span><SkipForward size={15} /></button>
       {!isAllCameras ? <button
         type="button"
         aria-pressed={investigationOpen}
@@ -2801,34 +2835,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       >
         {investigationOpen ? <ChevronDown size={15} /> : <ChevronUp size={15} />}Nearby
       </button> : null}
-      <button type="button" className={exportRange ? "active" : ""} onClick={toggleExport} disabled={isAllCameras || !timeline.length || exportActive}
+      <button type="button" className={exportRange ? "active" : ""} aria-pressed={Boolean(exportRange)} onClick={toggleExport} disabled={isAllCameras || !timeline.length || exportActive}
         title={isAllCameras ? "Select one camera to export" : undefined}>
         <Download size={15} />{isAllCameras ? "Select camera" : exportActive ? "Export running" : exportRange ? "Close export" : "Export"}
       </button>
-    </>
+    </div>
   );
   const railControls = (
     <div className="rail-controls">
-      {/* Desktop day navigation; phones keep theirs in the command bar and on the edge rail. */}
-      <div className="recordings-v2-timeline-toolbar rail-day-toolbar">
-        <div className="recordings-toolbar-day-controls">{timelineDayControls()}</div>
-      </div>
-      <div className="rail-actions">
-        <div className="rail-selected">
-          {selectedRailEvent ? <i className={railEventKind(selectedRailEvent)} aria-hidden="true" /> : null}
-          <div>
-            <strong>{selectedRailEvent ? railEventTitle(selectedRailEvent) : isAllCameras ? "All cameras" : (cameraNames[activeCameraId] || "Recording")}</strong>
-            <small>
-              {selectedRailEvent
-                ? `${formatDateTime(selectedRailEvent.incident_epoch, timeZone)}${selectedRailDuration ? ` · ${formatDuration(selectedRailDuration)}` : ""}${selectedRailEvent.camera_id && selectedRailEvent.camera_id !== activeCameraId ? ` · ${cameraNames[selectedRailEvent.camera_id] || selectedRailEvent.camera_id}` : ""}`
-                : (Number.isFinite(playhead) ? formatDateTime(playhead, timeZone) : "No recording selected")}
-            </small>
-          </div>
-        </div>
-        <button type="button" onClick={() => selectRailEvent(previousRailEvent)} disabled={!previousRailEvent} aria-label="Previous event"><SkipBack size={15} /><span className="rail-action-label">Previous</span></button>
-        <button type="button" onClick={() => selectRailEvent(nextRailEvent)} disabled={!nextRailEvent} aria-label="Next event"><span className="rail-action-label">Next</span><SkipForward size={15} /></button>
-        {railActionButtons}
-      </div>
       {exportPanel}
       {timelineLayout === "cameras" ? (
         <CameraLanes
@@ -2875,7 +2889,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       onEventSelect={selectRailEvent}
       onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
       timeZone={timeZone}
-      extraControls={railActionButtons}
       onPreviousDay={() => changeDate(addDaysToDateKey(date, -1))}
       onNextDay={date < today ? () => changeDate(addDaysToDateKey(date, 1)) : null}
     />
@@ -2892,8 +2905,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       timeZone={timeZone}
       quietMinutes={quietMinutes}
       onQuietMinutesChange={setQuietMinutes}
-      autoAdvance={autoAdvance}
-      onAutoAdvanceChange={setAutoAdvance}
       filter={eventFilter}
       onFilterChange={(value) => { checkpointTimelineView(); setEventFilter(value); }}
     />
@@ -3088,8 +3099,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               Play recording
             </button>
           ) : null}
-          {!isAllCameras && Number.isFinite(playhead) && hasPlaybackMedia && !playbackError && !Number.isFinite(frameSearchEpoch) ? (
+          {!isAllCameras && !Number.isFinite(frameSearchEpoch) && (hudShown || (Number.isFinite(playhead) && hasPlaybackMedia && !playbackError)) ? (
             <div className="recording-grid-controls recording-hero-controls">
+              {Number.isFinite(playhead) && hasPlaybackMedia && !playbackError ? <>
               <button type="button" onClick={() => skipPlayback(-10)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
               <button type="button" className="primary" onClick={toggleHeroPlayback}>
                 {heroPlaying ? <Pause size={17} /> : <Play size={17} fill="currentColor" />}
@@ -3113,9 +3125,13 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               >
                 <Sparkles size={15} />AI
               </button>
-              <time>{formatDateTime(playhead, timeZone)}</time>
+              </> : null}
+              {hudShown ? hudPlayExtras() : null}
+              {hudShown ? <>{hudDayControls()}<span className="timeline-hud-break" aria-hidden="true" /></> : <time>{formatDateTime(playhead, timeZone)}</time>}
+              {Number.isFinite(playhead) && hasPlaybackMedia && !playbackError ? <>
               <button
                 type="button"
+                className="timeline-hud-find"
                 disabled={!semanticReady}
                 onClick={beginFrameSearch}
                 title={semanticReady ? "Freeze this frame and select an area" : "Smart Search is not ready"}
@@ -3123,6 +3139,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
                 <Search size={15} />Find similar
               </button>
               <small className="recording-frame-search-status">{semanticStatusLabel}</small>
+              </> : null}
+              {hudShown ? hudEventActions : null}
               <div className="incident-recording-source" role="group" aria-label="Playback stream">
                 {["main", "live"].map(value => <button key={value} type="button" aria-pressed={source === value}
                   disabled={availableSources.length > 0 && !availableSources.includes(value)}
@@ -3132,12 +3150,15 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               </div>
             </div>
           ) : null}
-          {isAllCameras && Number.isFinite(playhead) ? <div className="recording-grid-controls recording-hero-controls all-cameras-controls">
+          {isAllCameras && (hudShown || Number.isFinite(playhead)) ? <div className="recording-grid-controls recording-hero-controls all-cameras-controls">
+            {Number.isFinite(playhead) ? <>
             <button type="button" onClick={() => skipPlayback(-10, gridPlaying)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
             <button type="button" className="primary" onClick={toggleGridPlayback}>{gridPlaying ? <Pause size={17} /> : <Play size={17} fill="currentColor" />}{gridPlaying ? "Pause" : "Play"}</button>
             <button type="button" onClick={() => skipPlayback(10, gridPlaying)} aria-label="Forward 10 seconds"><SkipForward size={16} /></button>
-            <time>{formatDateTime(playhead, timeZone)}</time>
-            <span
+            </> : null}
+            {hudShown ? hudPlayExtras() : null}
+            {hudShown ? <>{hudDayControls()}<span className="timeline-hud-break" aria-hidden="true" /></> : <time>{formatDateTime(playhead, timeZone)}</time>}
+            {Number.isFinite(playhead) ? <span
               className="all-cameras-summary"
               role="status"
               title={unrecordedGridCameras.length ? `No recording in this 15-minute window: ${unrecordedGridCameras.map((camera) => camera.name || camera.id).join(", ")}` : undefined}
@@ -3146,7 +3167,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               {unrecordedGridCameras.length ? (
                 <em> · No recording: {unrecordedGridCameras.map((camera) => camera.name || camera.id).join(", ")}</em>
               ) : null}
-            </span>
+            </span> : null}
+            {hudShown ? hudEventActions : null}
             <div className="incident-recording-source" role="group" aria-label="Playback stream">
               {["main", "live"].map(value => <button key={value} type="button" aria-pressed={source === value}
                 disabled={availableSources.length > 0 && !availableSources.includes(value)}
