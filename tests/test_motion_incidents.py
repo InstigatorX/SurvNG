@@ -19,12 +19,12 @@ from survng.app.event_store.jobs import (
     DETECTION_EVENT_JOB_MAXIMUM_AGE_SECONDS,
     DETECTION_JOB_MAXIMUM_AGE_SECONDS,
 )
+from tests.detection_job_store_fake import MemoryDetectionJobStore
 from survng.app.motion_incidents import (
     REFINEMENT_EVENT_MAX_QUEUE_AGE_SECONDS,
     REFINEMENT_MAX_QUEUE_AGE_SECONDS,
     REFINEMENT_RECOVERY_POLL_SECONDS,
     MotionIncidentService,
-    _MemoryDetectionJobStore,
     _RefinementJob,
 )
 from survng.app.motion_pipeline.decision_handler import MotionDecisionOutcome
@@ -34,7 +34,7 @@ def _service(
     outcome: MotionDecisionOutcome,
     *,
     tracking_enabled: bool = True,
-    refinement_store: EventStore | None = None,
+    refinement_store: EventStore | MemoryDetectionJobStore | None = None,
 ) -> tuple[MotionIncidentService, Mock, Mock, Mock, Mock]:
     decision = Mock()
     decision.handle.return_value = outcome
@@ -75,7 +75,7 @@ def _service(
         start_tracking=start_tracking,
         prewarm_tracking=prewarm,
         image_reader=image_reader,
-        refinement_store=refinement_store,
+        refinement_store=refinement_store or MemoryDetectionJobStore(),
     )
     return service, decision, tracking, prewarm, image_reader
 
@@ -494,6 +494,7 @@ def test_process_resolves_current_tracking_session_for_hot_reload() -> None:
         start_tracking=start_tracking,
         prewarm_tracking=Mock(),
         image_reader=Mock(),
+        refinement_store=MemoryDetectionJobStore(),
     )
 
     current[0] = second
@@ -1134,7 +1135,7 @@ def test_refinement_thread_start_failure_restores_stopped_state() -> None:
 
 
 def test_memory_refinement_store_coalesces_route_capture_time_drift() -> None:
-    store = _MemoryDetectionJobStore()
+    store = MemoryDetectionJobStore()
     route_id = "route:back-right:back-middle:57993"
     payload = {
         "topic": "adaptive/visual_backup",
@@ -1620,7 +1621,7 @@ def test_refinement_age_constant_matches_detection_job_store() -> None:
 
 
 def test_memory_claim_expires_stale_expired_lease_before_fresh_job() -> None:
-    store = _MemoryDetectionJobStore()
+    store = MemoryDetectionJobStore()
     store.enqueue_detection_job(
         job_id="zombie",
         camera_id="gate",
@@ -1660,7 +1661,7 @@ def test_running_multicamera_burst_survives_queued_age_expiry_while_lease_is_val
     queued-age sweep may discard an old unclaimed episode, but it must retain
     these lease-protected multi-camera jobs.
     """
-    store = _MemoryDetectionJobStore()
+    store = MemoryDetectionJobStore()
     for camera_id in ("back-left", "back-middle", "back-right"):
         job_id = f"{camera_id}-running"
         store.enqueue_detection_job(
@@ -1712,7 +1713,7 @@ def test_running_multicamera_burst_survives_queued_age_expiry_while_lease_is_val
 
 @pytest.fixture(params=["sqlite", "memory"])
 def recovery_store(request, tmp_path):
-    return EventStore(tmp_path) if request.param == "sqlite" else _MemoryDetectionJobStore()
+    return EventStore(tmp_path) if request.param == "sqlite" else MemoryDetectionJobStore()
 
 
 def _recovery_job(intent="recovery", *, existing_event_id=None, checkpointed=False):
@@ -1734,14 +1735,14 @@ def _enqueue_recovery(store, job):
 
 
 def _recovery_row(store, job_id):
-    if isinstance(store, _MemoryDetectionJobStore):
+    if isinstance(store, MemoryDetectionJobStore):
         return dict(store._jobs[job_id])
     with store._connect_jobs() as conn:
         return dict(conn.execute("select * from detection_jobs where id = ?", (job_id,)).fetchone())
 
 
 def _age_recovery_job(store, job_id, age, *, expired_lease=False):
-    if isinstance(store, _MemoryDetectionJobStore):
+    if isinstance(store, MemoryDetectionJobStore):
         store._jobs[job_id]["created_at_monotonic"] = time.monotonic() - age
         if expired_lease:
             store._jobs[job_id]["lease_expires_at"] = 0
@@ -1842,7 +1843,7 @@ def test_bad_refinement_payload_is_terminal_and_next_job_completes(recovery_stor
     def prepare(service, _decision):
         # Make the poison row the next claim under both SQLite's freshness
         # ordering and the compatibility memory store's queue ordering.
-        if isinstance(recovery_store, _MemoryDetectionJobStore):
+        if isinstance(recovery_store, MemoryDetectionJobStore):
             row = recovery_store._jobs[bad_id]
             row.update(state="running", lease_owner=service._lease_owner, lease_expires_at=time.monotonic() + 60)
         else:
@@ -1973,7 +1974,7 @@ def test_stop_cancels_decode_capacity_wait_without_publication_or_lost_job(tmp_p
     from survng.app.evidence_work import evidence_cancelled, optional_evidence_work_active
     from survng.app.motion_pipeline.recorded_decode_budget import RecordedDecodeBudget
 
-    store = EventStore(tmp_path) if durable else _MemoryDetectionJobStore()
+    store = EventStore(tmp_path) if durable else MemoryDetectionJobStore()
     initial = MotionDecisionOutcome(
         event_id=None, snapshot_path="", object_detected=False,
         detected_objects=(), refinement_pending=True,

@@ -105,7 +105,7 @@ const evidenceTimeline = incidentEvidenceTimeline({
   motion_observations: [
     { id: 9, created_epoch: 1020, reason: "event_state_active" },
     { id: 10, created_at: "bad" },
-    { id: 11, created_epoch: 1038, reason: "event_state_cooldown" },
+    { id: 11, created_epoch: 1038 },
   ],
 });
 assert.deepEqual(evidenceTimeline.frames.map((frame) => frame.event.id), [1, 2, 3]);
@@ -115,7 +115,7 @@ assert.equal(evidenceTimeline.durationSeconds, 38);
 assert.equal(evidenceTimeline.frames[0].position, 0);
 assert.ok(Math.abs(evidenceTimeline.frames[1].position - (10 / 38)) < 1e-9);
 assert.ok(Math.abs(evidenceTimeline.frames[2].position - (30 / 38)) < 1e-9);
-assert.deepEqual(evidenceTimeline.motionMarks.map((mark) => mark.label), ["Continued motion", "Motion during cooldown"]);
+assert.deepEqual(evidenceTimeline.motionMarks.map((mark) => mark.label), ["Continued motion", "Continued motion"]);
 assert.ok(Math.abs(evidenceTimeline.motionMarks[0].position - (20 / 38)) < 1e-9);
 assert.equal(evidenceTimeline.motionMarks[1].position, 1);
 assert.deepEqual(incidentEvidenceTimeline({}), { frames: [], motionMarks: [], startEpoch: 0, endEpoch: 0, durationSeconds: 0 });

@@ -97,23 +97,6 @@ class AuditAiTest(unittest.TestCase):
         image_url = request_payload["input"][0]["content"][1]["image_url"]
         self.assertTrue(image_url.startswith("data:image/webp;base64,"))
 
-    def test_active_and_cooldown_audits_are_duplicate_control_not_detector_misses(self) -> None:
-        active = motion_audit_interpretation(
-            reason="event_state_active",
-            event_id=None,
-            object_detected=None,
-        )
-        cooldown = motion_audit_interpretation(
-            reason="event_state_cooldown",
-            event_id=None,
-            object_detected=None,
-        )
-
-        self.assertEqual(active["category"], "duplicate_active_event")
-        self.assertEqual(cooldown["category"], "duplicate_event_cooldown")
-        self.assertFalse(active["object_detection_miss"])
-        self.assertFalse(cooldown["object_detection_miss"])
-
     def test_uncorrelated_backup_object_is_not_treated_as_detector_miss(self) -> None:
         interpretation = motion_audit_interpretation(
             reason="object_not_motion_correlated",

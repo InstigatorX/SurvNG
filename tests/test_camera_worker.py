@@ -22,6 +22,7 @@ from survng.app.camera_capture import (
     FRAME_STALE_SECONDS,
     CapturedFrame,
 )
+from tests.detection_job_store_fake import MemoryDetectionJobStore
 from survng.app.config import (
     CameraConfig,
     DetectorConfig,
@@ -93,7 +94,9 @@ class DummyDetector:
         ]
 
 
-class DummyEvents:
+class DummyEvents(MemoryDetectionJobStore):
+    """Event store double; detection jobs use the in-memory job store."""
+
     def add_motion_audit(self, **payload):
         return {"id": 1, **payload}
 

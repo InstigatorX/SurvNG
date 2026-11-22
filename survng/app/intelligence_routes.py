@@ -272,30 +272,7 @@ class IntelligenceService:
             object_matches += int(row.get('object_detected') == 1)
         interpretation = motion_audit_interpretation(reason=audit.get('reason'), event_id=audit.get('event_id'), object_detected=audit.get('object_detected'))
         related_prior_event: dict[str, Any] | None = None
-        if interpretation['category'] in {'duplicate_active_event', 'duplicate_event_cooldown'}:
-            related_id = audit.get('related_event_id')
-            prior = active_manager.events.get(int(related_id)) if related_id else None
-            try:
-                audit_at = datetime.fromisoformat(str(audit.get('created_at')))
-            except (TypeError, ValueError):
-                audit_at = None
-            if prior is None and audit_at is not None:
-                nearby_events = active_manager.events.for_camera_range(camera_id, (audit_at - timedelta(seconds=60)).isoformat(), audit_at.isoformat(), limit=50)
-                prior = nearby_events[-1] if nearby_events else None
-            if prior is not None:
-                try:
-                    prior_entries = json.loads(str(prior.get('objects_json') or '[]'))
-                except (json.JSONDecodeError, TypeError):
-                    prior_entries = []
-                prior_objects = [{'label': entry.get('label'), 'confidence': entry.get('confidence'), 'incident_eligible': entry.get('incident_eligible', True)} for entry in prior_entries if isinstance(entry, dict) and entry.get('label')] if isinstance(prior_entries, list) else []
-                try:
-                    if audit_at is None:
-                        raise ValueError('audit timestamp unavailable')
-                    seconds_before = max(0.0, (audit_at - datetime.fromisoformat(str(prior.get('created_at')))).total_seconds())
-                except (TypeError, ValueError):
-                    seconds_before = None
-                related_prior_event = {'event_id': prior.get('id'), 'created_at': prior.get('created_at'), 'seconds_before': seconds_before, 'objects': prior_objects}
-        return {'motion_paradigm': motion_paradigm_context(mode=effective_mode, onvif_enabled=camera.onvif.enabled, has_live_substream=bool(camera.live_stream_url), fusion=fusion, require_incident_zone=require_incident_zone), 'audit': {'id': audit.get('id'), 'camera_id': camera_id, 'created_at': audit.get('created_at'), 'score': audit.get('score'), 'threshold': audit.get('threshold'), 'reason': audit.get('reason'), 'category': audit.get('category') or 'qualification', 'mode': audit.get('mode'), 'sensitivity': audit.get('sensitivity'), 'decision_id': audit.get('decision_id'), 'event_id': audit.get('event_id'), 'related_event_id': audit.get('related_event_id'), 'features': features, 'trigger_count': audit.get('trigger_count'), 'object_detected': None if audit.get('object_detected') is None else bool(audit.get('object_detected')), 'qualification': qualification, 'pipeline_telemetry': pipeline_telemetry}, 'decision_outcome': {'interpretation': interpretation, 'filtered_before_object_detection': bool(not audit.get('event_id') and audit.get('object_detected') is None), 'object_detection_ran': bool(audit.get('event_id') or audit.get('object_detected') is not None), 'object_detection_completed': audit.get('object_detected') is not None, 'object_detected': None if audit.get('object_detected') is None else bool(audit.get('object_detected')), 'eligible_object_found': audit.get('object_detected') == 1, 'visual_backup': audit.get('category') == 'visual_backup'}, 'related_prior_event': related_prior_event, 'detected_objects': detected_objects, 'object_tracking': object_tracking, 'effective_settings': effective, 'recent_camera_audits': {'sample_size': len(recent), 'object_matches': object_matches, 'reason_counts': reason_counts}, 'setting_bounds': {'frame_width': [240, 960], 'sample_fps': [2, 10], 'window_seconds': [0.8, 4], 'post_trigger_seconds': [0.5, 6], 'burst_quiet_seconds': [0.1, 2], 'borderline_margin': [0, 0.1], 'visual_backup_warmup_seconds': [0, 120], 'visual_backup_grace_seconds': [0, 5], 'visual_backup_min_score': [0, 1], 'visual_backup_score_margin': [0, 0.5], 'visual_backup_min_consecutive': [2, 10], 'visual_backup_cooldown_seconds': [5, 300], 'visual_backup_max_triggers_5m': [1, 30], 'sensitivity': ['high', 'balanced', 'low'], 'stationary_object_tolerance': ['low', 'balanced', 'high'], 'analysis_preset': ['adaptive', 'modular']}}
+        return {'motion_paradigm': motion_paradigm_context(mode=effective_mode, onvif_enabled=camera.onvif.enabled, has_live_substream=bool(camera.live_stream_url), fusion=fusion, require_incident_zone=require_incident_zone), 'audit': {'id': audit.get('id'), 'camera_id': camera_id, 'created_at': audit.get('created_at'), 'score': audit.get('score'), 'threshold': audit.get('threshold'), 'reason': audit.get('reason'), 'category': audit.get('category') or 'qualification', 'mode': audit.get('mode'), 'sensitivity': audit.get('sensitivity'), 'decision_id': audit.get('decision_id'), 'event_id': audit.get('event_id'), 'related_event_id': audit.get('related_event_id'), 'features': features, 'trigger_count': audit.get('trigger_count'), 'object_detected': None if audit.get('object_detected') is None else bool(audit.get('object_detected')), 'qualification': qualification, 'pipeline_telemetry': pipeline_telemetry}, 'decision_outcome': {'interpretation': interpretation, 'filtered_before_object_detection': bool(not audit.get('event_id') and audit.get('object_detected') is None), 'object_detection_ran': bool(audit.get('event_id') or audit.get('object_detected') is not None), 'object_detection_completed': audit.get('object_detected') is not None, 'object_detected': None if audit.get('object_detected') is None else bool(audit.get('object_detected')), 'eligible_object_found': audit.get('object_detected') == 1, 'visual_backup': audit.get('category') == 'visual_backup'}, 'related_prior_event': related_prior_event, 'detected_objects': detected_objects, 'object_tracking': object_tracking, 'effective_settings': effective, 'recent_camera_audits': {'sample_size': len(recent), 'object_matches': object_matches, 'reason_counts': reason_counts}, 'setting_bounds': {'frame_width': [240, 960], 'sample_fps': [2, 10], 'window_seconds': [0.8, 4], 'post_trigger_seconds': [0.5, 6], 'burst_quiet_seconds': [0.1, 2], 'borderline_margin': [0, 0.1], 'visual_backup_warmup_seconds': [0, 120], 'visual_backup_grace_seconds': [0, 5], 'visual_backup_min_score': [0, 1], 'visual_backup_score_margin': [0, 0.5], 'visual_backup_min_consecutive': [2, 10], 'visual_backup_cooldown_seconds': [5, 300], 'visual_backup_max_triggers_5m': [1, 30], 'sensitivity': ['high', 'balanced', 'low'], 'stationary_object_tolerance': ['low', 'balanced', 'high']}}
 
     def _apply_pipeline_ai_change(self, next_config: AppConfig, camera: CameraConfig, change: AuditAiChange, value: object) -> None:
         target = next_config.motion_qualification if change.scope == 'global' else camera.motion_qualification
@@ -502,9 +479,6 @@ class IntelligenceService:
             incident_event_ids.update((int(event.get('id') or 0) for event in incident.get('events') or []))
             candidates.append({'kind': 'incident', 'camera_id': camera.id, 'record_id': event_id, 'event_id': event_id, 'created_at': incident.get('start_at'), 'category': 'recognized_incident' if incident.get('has_objects') or incident.get('labels') else 'motion_only_incident'})
         for audit in recent_audits:
-            reason = str(audit.get('reason') or '')
-            if reason in {'event_state_active', 'event_state_cooldown'}:
-                continue
             linked_event_id = int(audit.get('event_id') or 0)
             if linked_event_id and linked_event_id in incident_event_ids:
                 continue

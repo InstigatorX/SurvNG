@@ -2120,7 +2120,7 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(active[0]["skipped"], 1)
             self.assertEqual(active[0]["wait_seconds_average"], 2.5)
 
-    def test_motion_effectiveness_separates_visual_filters_from_state_deduplication(self) -> None:
+    def test_motion_effectiveness_counts_visual_filters_and_rescues(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
             created_at = "2099-07-27T12:00:00+00:00"
@@ -2174,7 +2174,6 @@ class EventStoreTest(unittest.TestCase):
                 "features": {},
             }
             store.add_motion_audit(**base_audit, reason="micro_jitter")
-            store.add_motion_audit(**base_audit, reason="event_state_active")
             store.add_motion_audit(
                 **{**base_audit, "object_detected": False, "features": {"suppression_verification": True}},
                 reason="stationary_foreground",
@@ -2196,9 +2195,8 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(summary["suppression_verification_checks"], 2)
             self.assertEqual(summary["suppression_verification_rescues"], 1)
             self.assertEqual(summary["visual_filtered"], 2)
-            self.assertEqual(summary["state_deduplicated"], 1)
             self.assertEqual(summary["unreviewed_visual_filters"], 1)
-            self.assertEqual(summary["total_decisions"], 6)
+            self.assertEqual(summary["total_decisions"], 5)
             self.assertEqual(summary["visual_rejection_rate"], 0.4)
             self.assertEqual(summary["object_yield_rate"], 0.6667)
 
@@ -2778,99 +2776,6 @@ class EventStoreTest(unittest.TestCase):
                 configuration,
             )
 
-    def test_incident_activity_audits_are_summarized_per_episode(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            store = EventStore(Path(tmpdir))
-            event = store.add_event(
-                camera_id="foyer",
-                kind="motion",
-                created_at="2026-08-10T12:00:00+00:00",
-            )
-            base = {
-                "camera_id": "foyer",
-                "snapshot_path": "",
-                "mode": "camera",
-                "sensitivity": "balanced",
-                "score": 0.1,
-                "threshold": 0.5,
-                "reason": "event_state_active",
-                "object_detected": None,
-                "trigger_count": 1,
-                "features": {},
-                "related_event_id": int(event["id"]),
-            }
-            first = store.add_motion_audit(
-                **base,
-                created_at="2026-08-10T12:00:01+00:00",
-                decision_id="active-one",
-            )
-            second = store.add_motion_audit(
-                **base,
-                created_at="2026-08-10T12:00:02+00:00",
-                decision_id="active-two",
-            )
-
-            rows, total = store.motion_audits(
-                camera_id="foyer",
-                include_incident_activity=True,
-            )
-            self.assertEqual(first["id"], second["id"])
-            self.assertEqual(total, 1)
-            self.assertEqual(rows[0]["trigger_count"], 2)
-            features = json.loads(rows[0]["features_json"])
-            self.assertEqual(features["episode_observation_count"], 2)
-            self.assertEqual(
-                features["episode_last_observed_at"],
-                "2026-08-10T12:00:02+00:00",
-            )
-
-    def test_incident_activity_coalescing_replaces_and_cleans_snapshot(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            snapshots = root / "snapshots" / "foyer"
-            snapshots.mkdir(parents=True)
-            old = snapshots / "old.webp"
-            new = snapshots / "new.webp"
-            old.write_bytes(b"old")
-            new.write_bytes(b"new")
-            store = EventStore(root)
-            event = store.add_event(camera_id="foyer", kind="motion")
-            base = {
-                "camera_id": "foyer",
-                "mode": "camera",
-                "sensitivity": "balanced",
-                "score": 0.1,
-                "threshold": 0.5,
-                "reason": "event_state_active",
-                "object_detected": None,
-                "trigger_count": 1,
-                "features": {},
-                "related_event_id": int(event["id"]),
-            }
-            store.add_motion_audit(
-                **base,
-                snapshot_path=str(old),
-                created_at="2026-08-10T12:00:01+00:00",
-                decision_id="active-one",
-            )
-            updated = store.add_motion_audit(
-                **base,
-                snapshot_path=str(new),
-                created_at="2026-08-10T12:00:02+00:00",
-                decision_id="active-two",
-            )
-            retained = store.add_motion_audit(
-                **base,
-                snapshot_path="",
-                created_at="2026-08-10T12:00:03+00:00",
-                decision_id="active-three",
-            )
-
-            self.assertFalse(old.exists())
-            self.assertTrue(new.exists())
-            self.assertEqual(updated["snapshot_path"], "snapshots/foyer/new.webp")
-            self.assertEqual(retained["snapshot_path"], "snapshots/foyer/new.webp")
-
     def test_active_followup_audits_are_persisted_and_reported_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
@@ -3076,47 +2981,6 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(rows[0]["id"], retry["id"])
             self.assertEqual(rows[0]["decision_id"], "decision-gate-1800")
             self.assertEqual(rows[0]["snapshot_path"], "snapshot-now-available.jpg")
-
-    def test_active_observation_links_to_incident_and_legacy_row_is_backfilled(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            store = EventStore(Path(tmpdir))
-            event = store.add_event(
-                camera_id="foyer",
-                kind="motion",
-                created_at="2026-07-27T12:17:07+00:00",
-                objects_json=json.dumps([{"label": "person", "confidence": 0.9}]),
-            )
-            audit = store.add_motion_audit(
-                camera_id="foyer",
-                snapshot_path="audit.jpg",
-                created_at="2026-07-27T12:17:16+00:00",
-                mode="camera",
-                sensitivity="balanced",
-                score=0.728,
-                threshold=0.4817,
-                reason="event_state_active",
-                object_detected=None,
-                trigger_count=1,
-                features={},
-            )
-            self.assertIsNone(audit["related_event_id"])
-
-            reloaded = EventStore(Path(tmpdir))
-            linked = reloaded.get_motion_audit(int(audit["id"]))
-            observations = reloaded.motion_audits_for_related_events([int(event["id"])])
-            visible_audits, visible_total = reloaded.motion_audits(camera_id="foyer")
-            all_audits, all_total = reloaded.motion_audits(
-                camera_id="foyer",
-                include_incident_activity=True,
-            )
-
-            self.assertEqual(linked["related_event_id"], event["id"])
-            self.assertEqual([row["id"] for row in observations], [audit["id"]])
-            self.assertEqual(visible_audits, [])
-            self.assertEqual(visible_total, 0)
-            self.assertEqual([row["id"] for row in all_audits], [audit["id"]])
-            self.assertEqual(all_total, 1)
-
 
     def _motion_demoted_event(self, store: EventStore) -> dict:
         return store.add_event(

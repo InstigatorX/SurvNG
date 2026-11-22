@@ -278,7 +278,7 @@ export function incidentEvidenceTimeline(incident) {
     return [{
       key: `motion-${observation.id ?? index}`,
       epoch,
-      label: observation.reason === "event_state_cooldown" ? "Motion during cooldown" : "Continued motion",
+      label: "Continued motion",
     }];
   });
   const bounds = [

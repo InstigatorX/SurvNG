@@ -320,13 +320,11 @@ class TrainingRoutesTest(unittest.TestCase):
                 self.assertEqual(error.exception.status_code, 404)
         self.preview.assert_not_called()
 
-    def test_main_image_rejects_objects_and_incident_activity(self):
-        for payload in ({"object_detected": True}, {"reason": "event_state_active"},
-                        {"reason": "event_state_cooldown"}):
-            audit = self.add_negative_audit(**payload)
-            with self.assertRaises(HTTPException) as error:
-                self.main_image(audit["id"])
-            self.assertEqual(error.exception.status_code, 422)
+    def test_main_image_rejects_audits_with_detected_objects(self):
+        audit = self.add_negative_audit(object_detected=True)
+        with self.assertRaises(HTTPException) as error:
+            self.main_image(audit["id"])
+        self.assertEqual(error.exception.status_code, 422)
         self.preview.assert_not_called()
 
     def test_main_image_preserves_busy_response(self):

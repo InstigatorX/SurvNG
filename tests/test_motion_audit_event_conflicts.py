@@ -28,7 +28,7 @@ def test_refined_decision_links_to_already_audited_event(tmp_path, existing_deci
     assert completed['object_detected'] == 1
     assert store.get_motion_audit(owner['id'])['event_id'] == event['id']
     assert [a['id'] for a in store.motion_audits_for_related_events([event['id']])] == [completed['id']]
-    rows, total = store.motion_audits(camera_id='gate', include_incident_activity=True)
+    rows, total = store.motion_audits(camera_id='gate')
     assert total == 2
 
 

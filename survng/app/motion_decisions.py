@@ -29,7 +29,6 @@ from .motion_events import (
 
 LOGGER = logging.getLogger(__name__)
 
-INCIDENT_ACTIVITY_REASONS = frozenset({"event_state_active", "event_state_cooldown"})
 # Durable refinement jobs replay a completion shortly after it lands, so recent
 # ids are all that must be remembered to stay idempotent across a restart.
 COMPLETED_REFINEMENT_MEMORY = 512
@@ -434,7 +433,6 @@ class MotionDecisionOrchestrator:
             mode in ENFORCING_MODES
             and not result.accepted
             and not borderline_candidate
-            and not result.reason.startswith("event_state_")
             and (
                 (
                     not adaptive_only
@@ -680,11 +678,7 @@ class MotionDecisionOrchestrator:
             None,
         )
         if snapshot_path is None:
-            snapshot_path = (
-                ""
-                if result.reason in INCIDENT_ACTIVITY_REASONS
-                else self._media.sample_rejected_motion(event_at, result)
-            )
+            snapshot_path = self._media.sample_rejected_motion(event_at, result)
             for item in triggers:
                 item.audit_snapshot_path = snapshot_path
         self._audit_recorder.record_audit(
@@ -699,7 +693,6 @@ class MotionDecisionOrchestrator:
             object_detected=None,
             trigger_count=len(triggers),
             features=audit_features(result),
-            related_event_id=self._related_incident_event_id(result),
         )
 
     def _process_accepted(
@@ -1144,11 +1137,3 @@ class MotionDecisionOrchestrator:
                 )
             except ValueError:
                 pass
-
-    def _related_incident_event_id(
-        self,
-        result: MotionQualificationResult,
-    ) -> int | None:
-        if result.reason not in INCIDENT_ACTIVITY_REASONS:
-            return None
-        return self._events.active_incident_event_id()

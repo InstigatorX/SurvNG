@@ -105,60 +105,6 @@ class EventStoreMotionIntelligenceMixin:
                     (fingerprint, configuration_json, created_at),
                 )
             audit_id: int | None = None
-            if (
-                reason in {"event_state_active", "event_state_cooldown"}
-                and normalized_related_event_id is not None
-                and event_id is None
-            ):
-                existing = conn.execute(
-                    """
-                    select id, trigger_count, features_json, snapshot_path
-                    from motion_audits
-                    where event_id is null and related_event_id = ?
-                      and camera_id = ? and mode = ? and sensitivity = ?
-                      and reason = ? and category = ?
-                    order by id asc limit 1
-                    """,
-                    (
-                        normalized_related_event_id,
-                        camera_id,
-                        mode,
-                        sensitivity,
-                        reason,
-                        normalized_category,
-                    ),
-                ).fetchone()
-                if existing is not None:
-                    audit_id = int(existing["id"])
-                    replaced_snapshot = str(existing["snapshot_path"] or "")
-                    persisted_snapshot = snapshot_path or replaced_snapshot
-                    compact_features["episode_observation_count"] = (
-                        int(existing["trigger_count"] or 1) + normalized_trigger_count
-                    )
-                    compact_features["episode_last_observed_at"] = created_at
-                    features_json = json.dumps(
-                        compact_features,
-                        separators=(",", ":"),
-                        allow_nan=False,
-                    )
-                    conn.execute(
-                        """
-                        update motion_audits
-                        set snapshot_path = ?, created_at = ?, score = max(score, ?),
-                            threshold = ?, trigger_count = trigger_count + ?,
-                            features_json = ?
-                        where id = ?
-                        """,
-                        (
-                            persisted_snapshot,
-                            created_at,
-                            normalized_score,
-                            normalized_threshold,
-                            normalized_trigger_count,
-                            features_json,
-                            audit_id,
-                        ),
-                    )
             if audit_id is None and normalized_decision_id:
                 existing = conn.execute(
                     "select id, snapshot_path from motion_audits where decision_id = ? and decision_id != ''",
@@ -367,12 +313,9 @@ class EventStoreMotionIntelligenceMixin:
         camera_id: str = "",
         outcome: str = "all",
         category: str = "all",
-        include_incident_activity: bool = False,
     ) -> tuple[list[dict[str, Any]], int]:
         clauses: list[str] = []
         values: list[Any] = []
-        if not include_incident_activity:
-            clauses.append("reason not in ('event_state_active', 'event_state_cooldown')")
         if camera_id:
             clauses.append("camera_id = ?")
             values.append(camera_id)
@@ -427,7 +370,6 @@ class EventStoreMotionIntelligenceMixin:
         clauses = [
             "created_at >= ?",
             "created_at < ?",
-            "reason not in ('event_state_active', 'event_state_cooldown')",
         ]
         parameters: list[Any] = [start_at, end_at]
         if before_created_at is not None and before_id is not None:
@@ -745,7 +687,6 @@ class EventStoreMotionIntelligenceMixin:
                 "suppression_verification_checks": 0,
                 "suppression_verification_rescues": 0,
                 "visual_filtered": 0,
-                "state_deduplicated": 0,
                 "unreviewed_visual_filters": 0,
                 "visual_backup_attempts": 0,
                 "visual_backup_objects": 0,
@@ -891,26 +832,19 @@ class EventStoreMotionIntelligenceMixin:
                 else:
                     summary["active_followup_no_object"] += 1
                 continue
-            reason = str(row["reason"] or "")
-            if reason.startswith("event_state_"):
-                summary["state_deduplicated"] += max(
-                    1, int(row["trigger_count"] or 1)
-                )
-            else:
-                summary["visual_filtered"] += 1
-                summary["suppression_verification_checks"] += int(
-                    bool(features.get("suppression_verification"))
-                )
-                summary["unreviewed_visual_filters"] += int(
-                    row["object_detected"] is None
-                )
+            summary["visual_filtered"] += 1
+            summary["suppression_verification_checks"] += int(
+                bool(features.get("suppression_verification"))
+            )
+            summary["unreviewed_visual_filters"] += int(
+                row["object_detected"] is None
+            )
 
         by_camera: dict[str, dict[str, dict[str, Any]]] = {}
         for (camera_id, mode), summary in summaries.items():
             decisions = (
                 summary["allowed_events"]
                 + summary["visual_filtered"]
-                + summary["state_deduplicated"]
             )
             visual_opportunities = summary["allowed_events"] + summary["visual_filtered"]
             summary.update({

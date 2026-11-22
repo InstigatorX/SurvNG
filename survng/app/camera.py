@@ -497,14 +497,7 @@ class CameraWorker:
             start_tracking=self.tracking_lifecycle.start_incident,
             prewarm_tracking=self.tracking_lifecycle.prewarm,
             image_reader=self.media.read_image,
-            refinement_store=(
-                motion_decision_handler_factory.events
-                if hasattr(
-                    motion_decision_handler_factory.events,
-                    "enqueue_detection_job",
-                )
-                else None
-            ),
+            refinement_store=motion_decision_handler_factory.events,
         )
         ring_size = self.motion_config.motion_ring_size()
         self.motion_events = MotionEventCoordinator(

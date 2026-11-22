@@ -499,36 +499,6 @@ class EventStoreJobsMixin:
                 """,
                 (datetime.now(timezone.utc).isoformat(),),
             )
-            # Older active/cooldown observations predate durable linkage. The
-            # state reason guarantees they belong to an already-created event;
-            # attach them to the nearest preceding event for the same camera.
-            # Match the timestamp expression used below: a plain ISO-text
-            # index cannot bound this historical join on large databases.
-            conn.execute("create index if not exists idx_event_camera_epoch on events(camera_id,julianday(created_at),id)")
-            conn.execute(
-                """
-                update motion_audits as audit
-                set related_event_id = (
-                    select event.id from events as event
-                    where event.camera_id = audit.camera_id
-                      and julianday(event.created_at) <= julianday(audit.created_at)
-                      and julianday(event.created_at) >= julianday(audit.created_at) - 301.0 / 86400.0
-                      and (julianday(audit.created_at) - julianday(event.created_at)) * 86400.0 <= 300.0
-                    order by julianday(event.created_at) desc, event.id desc
-                    limit 1
-                )
-                where audit.related_event_id is null
-                  and audit.event_id is null
-                  and audit.reason in ('event_state_active', 'event_state_cooldown')
-                  and exists (
-                    select 1 from events as event
-                    where event.camera_id = audit.camera_id
-                      and julianday(event.created_at) <= julianday(audit.created_at)
-                      and julianday(event.created_at) >= julianday(audit.created_at) - 301.0 / 86400.0
-                      and (julianday(audit.created_at) - julianday(event.created_at)) * 86400.0 <= 300.0
-                )
-                """
-            )
             try:
                 backfill_after_id = int(
                     self._metadata_value(conn, "motion_audit_backfill_event_id") or 0
