@@ -136,6 +136,21 @@ function telemetry() {
   };
 }
 
+// Synthetic day events for the Timeline rail and Catch up: a few earlier in
+// the day (quiet stretches between them) and a burst inside the recording.
+function dayEvents(cameraId) {
+  const offsets = [-4 * 3600, -2.5 * 3600, -45 * 60, 40, 130, 190, 320, 470, 540];
+  const labels = [["person"], ["car"], [], ["person"], ["dog"], ["person", "car"], [], ["car"], ["person"]];
+  return offsets.map((offset, index) => {
+    const epoch = start + offset;
+    return {
+      id: 5000 + index, camera_id: cameraId === "all" ? ids[index % ids.length] : cameraId,
+      start_epoch: epoch, last_epoch: epoch + 12 + index * 3, created_at: new Date(epoch * 1000).toISOString(),
+      has_objects: labels[index].length > 0, labels: labels[index], snapshot_path: "synthetic-preview",
+    };
+  });
+}
+
 function emit() {
   if (scenario === "unavailable") return;
   for (const response of clients) {
@@ -258,7 +273,7 @@ server = await createServer({
       }
       if (path.endsWith(".mp4")) return media(req, res, "sample.mp4");
       const rows = [{ start_epoch: start, end_epoch: start + duration, duration, source: url.searchParams.get("source") || "main", camera_id: path.split("/")[3] }];
-      if (path.endsWith("/recordings/day")) return json(res, { availability: rows, events: [], available_sources: ["main", "live"] });
+      if (path.endsWith("/recordings/day")) return json(res, { availability: rows, events: dayEvents(path.split("/")[3]), available_sources: ["main", "live"] });
       if (path.endsWith("/recordings/window")) return json(res, { start_epoch: start, end_epoch: start + duration, recordings: rows });
       if (path.endsWith("/recordings/updates")) return json(res, { availability: [], events: [] });
       if (path === "/api/exports" && req.method === "POST") {

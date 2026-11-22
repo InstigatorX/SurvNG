@@ -101,24 +101,17 @@
 }
 
 .recordings-v2-page.timeline-layout-rail .rail-controls,
-.recordings-v2-page.timeline-layout-cameras .rail-controls {
+.recordings-v2-page.timeline-layout-cameras .rail-controls,
+.recordings-v2-page.timeline-layout-catchup .rail-controls {
   grid-column: 1;
   grid-row: 2;
 }
 
-.recordings-v2-page.timeline-layout-catchup .rail-controls {
-  grid-column: 1 / -1;
-  grid-row: 2;
-}
-
+/* Catch up sits where the Timeline rail does. */
 .recordings-v2-page.timeline-layout-rail .event-rail,
-.recordings-v2-page.timeline-layout-catchup .catchup-now {
+.recordings-v2-page.timeline-layout-catchup .catchup-story {
   grid-column: 2;
   grid-row: 1 / span 2;
-}
-
-.recordings-v2-page.timeline-layout-catchup .catchup-now {
-  grid-row: 1;
 }
 
 .rail-controls {
@@ -659,49 +652,30 @@
 /* Camera columns (phone) */
 .camera-columns { display: none; }
 
-/* Catch-up story */
+/* Catch-up story: a vertical list in the rail column, newest at top. */
 .catchup-story {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--line);
+  background: var(--panel-solid);
+}
+
+/* Auto-advance is a toggle at the end of the event-type chips. */
+.event-rail-filters .catchup-autoadvance {
+  margin-left: auto;
+}
+
+/* Footer in the rail's hint style; static because the list scrolls above it. */
+.catchup-summary {
+  flex: none;
+  margin: 0;
+  padding: 12px 16px;
   border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: var(--text-sm);
 }
-
-.catchup-header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 16px;
-  padding: 10px 14px;
-}
-
-.catchup-header>div {
-  display: grid;
-  gap: 2px;
-  margin-right: auto;
-}
-
-.catchup-header h2 { margin: 0; font-size: 0.9375rem; }
-.catchup-header small { color: var(--muted); font-size: var(--text-sm); }
-
-.catchup-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text);
-  font-size: var(--text-md);
-}
-
-.catchup-option select {
-  min-height: 34px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--control);
-  color: var(--ink);
-  font: inherit;
-}
-
-.catchup-option input { width: 18px; height: 18px; accent-color: var(--rail-playhead); }
 
 .catchup-empty {
   display: flex;
@@ -713,26 +687,41 @@
 }
 
 .catchup-list {
+  position: relative;
   display: flex;
-  gap: 6px;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
   margin: 0;
-  padding: 0 14px 14px;
-  overflow-x: auto;
+  padding: 12px 14px 12px 44px;
+  overflow-x: hidden;
+  overflow-y: auto;
   list-style: none;
   scrollbar-width: thin;
 }
 
-.catchup-quiet { display: flex; flex: 0 0 auto; }
+/* The spine the cards hang from. */
+.catchup-list::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 27px;
+  width: 2px;
+  background: var(--line);
+}
+
+.catchup-quiet { display: flex; flex: none; }
 
 .catchup-quiet button {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 4px;
-  width: 72px;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
   border: 1px dashed var(--line-strong);
-  border-radius: 10px;
+  border-radius: 16px;
   background: transparent;
   color: var(--muted);
   font-family: inherit;
@@ -741,16 +730,14 @@
   line-height: 1.2;
 }
 
-.catchup-event { flex: 0 0 156px; }
+.catchup-event { flex: none; }
 
 .catchup-event>button {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  justify-content: flex-start;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
   width: 100%;
-  height: 100%;
   box-sizing: border-box;
   padding: 7px;
   border: 1px solid var(--line);
@@ -770,7 +757,7 @@
   position: relative;
   display: grid;
   place-items: center;
-  height: 72px;
+  height: 64px;
   overflow: hidden;
   border-radius: 6px;
   border-bottom: 3px solid var(--rail-object);
@@ -798,7 +785,7 @@
   background: var(--rail-playhead);
 }
 
-.catchup-text { display: grid; gap: 2px; }
+.catchup-text { display: grid; gap: 2px; min-width: 0; }
 .catchup-text strong { font-size: var(--text-md); }
 
 .catchup-text time {
@@ -806,53 +793,12 @@
   font: 500 var(--text-xs)/1.2 ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, monospace;
 }
 
-.catchup-text small { color: var(--muted); font-size: var(--text-xs); }
-
-.catchup-now {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-width: 0;
-  padding: 16px;
-  border-left: 1px solid var(--line);
-  background: var(--panel-solid);
-}
-
-.catchup-now h2 { margin: 0; color: var(--muted); font-size: var(--text-md); font-weight: 600; }
-.catchup-now strong { font-size: var(--text-lg); }
-.catchup-now p { margin: 0; color: var(--muted); font-size: var(--text-md); }
-
-.catchup-now-thumbs {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.catchup-now-thumbs img {
-  width: 100%;
-  aspect-ratio: 16 / 10;
-  object-fit: cover;
-  border-radius: 8px;
-  background: var(--video-bg);
-}
-
-.catchup-now-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: auto;
-}
-
-.catchup-now-actions button {
-  flex: 1 1 0;
-  min-height: 42px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--control);
-  color: var(--ink);
-  font-family: inherit;
-  font-weight: 500;
-  font-size: var(--text-md);
-  line-height: 1;
+.catchup-text small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Phone */
@@ -862,7 +808,8 @@
      loads later, hides the camera select and gives Main/Sub the second
      column; Main/Sub stays on the player's own controls. */
   .recordings-v2-page .recordings-tabs.recordings-commandbar {
-    grid-template-columns: minmax(0, 1fr) auto auto !important;
+    /* The camera keeps a usable width; the date gives way at larger text. */
+    grid-template-columns: minmax(136px, 1fr) minmax(0, auto) auto !important;
   }
 
   .recordings-v2-page .recordings-commandbar .timeline-mobile-camera-select {
@@ -874,6 +821,7 @@
 
   .recordings-v2-page .recordings-commandbar-day-controls .recordings-v2-date {
     grid-column: 2 !important;
+    width: auto;
   }
 
   .recordings-v2-page .recordings-commandbar-day-controls .recordings-v2-player-source {
@@ -962,20 +910,18 @@
     border-top: 0;
   }
 
-  .recordings-v2-page.timeline-layout-cameras .rail-controls,
-  .recordings-v2-page.timeline-layout-catchup .rail-controls {
+  .recordings-v2-page.timeline-layout-cameras .rail-controls {
     grid-row: 2 / span 2;
     min-height: 0;
   }
 
-  .recordings-v2-page.timeline-layout-rail .event-rail {
+  .recordings-v2-page.timeline-layout-rail .event-rail,
+  .recordings-v2-page.timeline-layout-catchup .catchup-story {
     grid-column: 1;
     grid-row: 3;
     border-left: 0;
     border-top: 1px solid var(--line);
   }
-
-  .recordings-v2-page.timeline-layout-catchup .catchup-now { display: none; }
 
   /* A real 16:9 picture with the transport as one row beneath it. */
   :is(.timeline-layout-rail, .timeline-layout-cameras, .timeline-layout-catchup) .recordings-v2-player {
@@ -991,7 +937,7 @@
   }
 
   /* With nothing to show (no export open) the control strip takes no space. */
-  .timeline-layout-rail .rail-controls:not(:has(.recordings-v2-export-panel)) { display: none; }
+  :is(.timeline-layout-rail, .timeline-layout-catchup) .rail-controls:not(:has(.recordings-v2-export-panel)) { display: none; }
 
   :is(.timeline-layout-rail, .timeline-layout-cameras, .timeline-layout-catchup) .recording-hero-media {
     position: relative !important;
@@ -1070,7 +1016,8 @@
   .event-rail-body { order: 1; }
 
   .event-rail-scroller { inset: 0 56px 0 0; }
-  .event-rail-hint { display: none; }
+  .event-rail-hint,
+  .catchup-summary { display: none; }
 
   .event-rail-coverage { left: 56px; width: 8px; }
   .event-rail-mark { left: 68px; }
@@ -1259,57 +1206,7 @@
 
   .camera-columns-controls small { color: var(--muted); font-size: var(--text-xs); line-height: 1.3; }
 
-  .catchup-story {
-    min-height: 0;
-    flex: 1 1 auto;
-    border-top: 1px solid var(--line);
-  }
-
-  .catchup-header { flex-wrap: nowrap; flex-shrink: 0; gap: 8px; padding: 8px 12px; }
-  .catchup-header>div { min-width: 0; }
-  .catchup-header small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .catchup-option { white-space: nowrap; }
-  .catchup-header h2 { font-size: var(--text-base); }
-  .catchup-option-text {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-  }
   .rail-action-label { display: none; }
-
-  .catchup-list {
-    position: relative;
-    flex-direction: column;
-    gap: 8px;
-    padding: 8px 12px 12px 44px;
-    overflow-x: hidden;
-    overflow-y: auto;
-  }
-
-  .catchup-list::before {
-    content: "";
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 27px;
-    width: 2px;
-    background: var(--line);
-  }
-
-  .catchup-event { flex: none; }
-
-  .catchup-event>button {
-    display: grid;
-    grid-template-columns: 112px minmax(0, 1fr);
-    align-items: center;
-    gap: 10px;
-  }
-
-  .catchup-thumb { height: 64px; }
-  .catchup-quiet button { flex-direction: row; width: auto; min-height: 32px; padding: 0 12px; border-radius: 16px; }
 }
 
 /* Card detail line (camera · time · duration) stays on one line. */
