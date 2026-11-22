@@ -429,6 +429,18 @@ class SemanticIndex:
                 on semantic_embeddings(event_id)
                 """
             )
+            # coverage() runs on every status read (telemetry, runtime
+            # monitor, status API). Covering the generation's event_id keeps
+            # count(distinct event_id) on index pages instead of reading every
+            # embedding row (each carries a multi-KB vector blob).
+            connection.execute(
+                """
+                create index if not exists idx_semantic_generation_event
+                on semantic_embeddings(
+                    model_fingerprint, preprocessing_fingerprint, event_id
+                )
+                """
+            )
             # Point lookups by observation must not scan a model generation.
             connection.execute(
                 """
@@ -1290,20 +1302,28 @@ class SemanticIndex:
             all_components[positions].astype(np.float32, copy=False),
         )
 
+    @staticmethod
+    def coverage_query(identity: SemanticModelIdentity | None) -> tuple[str, tuple[Any, ...]]:
+        """SQL and parameters for coverage().
+
+        Served by covering indexes: idx_semantic_generation_event for one
+        generation, idx_semantic_event for all rows.
+        """
+        select = (
+            "select count(*) as evidence_count, count(distinct event_id) as event_count "
+            "from semantic_embeddings"
+        )
+        if identity is None:
+            return select, ()
+        return (
+            select + " where model_fingerprint = ? and preprocessing_fingerprint = ?",
+            (identity.model_fingerprint, identity.preprocessing_fingerprint),
+        )
+
     def coverage(self, identity: SemanticModelIdentity | None = None) -> dict[str, int]:
-        clauses = ""
-        parameters: tuple[Any, ...] = ()
-        if identity is not None:
-            clauses = "where model_fingerprint = ? and preprocessing_fingerprint = ?"
-            parameters = (identity.model_fingerprint, identity.preprocessing_fingerprint)
+        sql, parameters = self.coverage_query(identity)
         with self._connect() as connection:
-            row = connection.execute(
-                f"""
-                select count(*) as evidence_count, count(distinct event_id) as event_count
-                from semantic_embeddings {clauses}
-                """,
-                parameters,
-            ).fetchone()
+            row = connection.execute(sql, parameters).fetchone()
         return {
             "evidence_count": int(row["evidence_count"] if row else 0),
             "event_count": int(row["event_count"] if row else 0),
