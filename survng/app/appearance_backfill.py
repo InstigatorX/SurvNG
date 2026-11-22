@@ -38,7 +38,7 @@ class AppearanceEncoder(Protocol):
 
 
 # Event ids per orphan-check transaction at startup.
-ORPHAN_JOB_BATCH_EVENTS = 20_000
+ORPHAN_JOB_BATCH_EVENTS = 5_000
 # A running job untouched this long has no live worker.
 STALLED_JOB_SECONDS = 600.0
 

@@ -66,8 +66,9 @@ PRUNE_EXPIRED_DISCOVERY_JOBS_SQL = (
     "order by updated_at asc limit ?"
 )
 
-# Rows per orphan-repair transaction (a rowid window, not a row count).
-ORPHAN_REPAIR_BATCH_ROWS = 20_000
+# Rows per orphan-repair transaction (a rowid window, not a row count). A
+# 20,000-row window held the write lock for 1.3 s on a production database.
+ORPHAN_REPAIR_BATCH_ROWS = 5_000
 _ORPHAN_REPAIRS = (
     ("face_observations", "face_observations_deleted",
      "delete from face_observations where rowid between ? and ? "
