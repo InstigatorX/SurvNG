@@ -59,6 +59,7 @@ jobs:
             tests/test_recorder.py \
             tests/test_calibration.py \
             tests/test_live_delivery.py \
+            tests/test_stream_info.py \
             tests/test_detector*.py \
             tests/test_detection*.py \
             tests/test_depth_estimation.py \

@@ -78,7 +78,7 @@ import { ChangeReviewPanel } from "./ChangeReview.jsx";
 import { CameraStudioList } from "./CameraStudioList.jsx";
 import { describeConfigChanges, revertConfigChange, scopeConfigReview } from "../configChanges.mjs";
 import { recordingHealth } from "../recordingHealth.mjs";
-import { cameraStatusSummary, cameraStreamSummary } from "../adminOverview.mjs";
+import { cameraStatusSummary, formatStreamInfo } from "../adminOverview.mjs";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
 import { DetectionOccupancyCard } from "./DetectionOccupancyCard.jsx";
 import { SpeechSettings } from "./SpeechSettings.jsx";
@@ -871,6 +871,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
   const [maintenanceError, setMaintenanceError] = useState("");
   const [adminNavOpen, setAdminNavOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [streamInfo, setStreamInfo] = useState(null);
   // In Camera Studio the Admin rail collapses to icons unless the operator expands it.
   const [adminRailExpanded, setAdminRailExpanded] = useStoredState("survng.adminRailExpanded.v1", "false");
   const [calibrationCommandBar, setCalibrationCommandBar] = useState(null);
@@ -1538,6 +1539,20 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
     setReviewOpen(false);
   }, [settingsTab]);
 
+  // Main and live stream size/rate for the Camera Studio header. Main comes
+  // from the decoder or, when it is only recorded, from the newest recording.
+  const streamInfoCameraId = settingsTab === "cameras" ? selectedCamera?.id || "" : "";
+  useEffect(() => {
+    if (!streamInfoCameraId) return undefined;
+    let cancelled = false;
+    fetch(`/api/cameras/${encodeURIComponent(streamInfoCameraId)}/stream-info`)
+      .then((response) => (response.ok ? response.json() : null))
+      .catch(() => null)
+      .then((payload) => { if (!cancelled) setStreamInfo(payload ? { cameraId: streamInfoCameraId, ...payload } : { cameraId: streamInfoCameraId, main: null, live: null }); });
+    return () => { cancelled = true; };
+  }, [streamInfoCameraId]);
+  const selectedStreamInfo = streamInfo?.cameraId === selectedCamera?.id ? streamInfo : null;
+
   function undoConfigChange(change) {
     const baselineSnapshot = baselineConfigRef.current;
     if (!baselineSnapshot) return;
@@ -1971,7 +1986,11 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
             {selectedCamera ? <div className="camera-studio-heading">
               <h2>{selectedCamera.name || selectedCamera.id}</h2>
               {cameraStatusById[selectedCamera.id] ? <span className={`camera-studio-chip ${cameraStatusById[selectedCamera.id].tone}`}><i aria-hidden="true" />{cameraStatusById[selectedCamera.id].label}</span> : <span className="camera-studio-chip muted">Not saved yet</span>}
-              <span className="camera-studio-stream">{cameraStreamSummary(selectedRuntimeStatus)}</span>
+              <span className="camera-studio-stream">
+                {[["Main", selectedStreamInfo?.main], ["Live", selectedStreamInfo?.live]].map(([label, stream]) => (
+                  <span key={label}><b>{label}</b> {formatStreamInfo(stream) || (selectedStreamInfo ? "unknown" : "…")}</span>
+                ))}
+              </span>
             </div> : null}
             <CameraScopePicker
               className="section-title-picker camera-studio-picker"
@@ -2096,6 +2115,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
     auditCamera,
     auditCategoryTitle,
     baselineRevision,
+    selectedStreamInfo,
     auditLoading,
     auditPage,
     calibrationCommandBar,
@@ -2574,6 +2594,8 @@ export function ZoneEditor({ camera, classOptions = [], onChange }) {
   const [dragPoint, setDragPoint] = useState(null);
   const [pointAddHistory, setPointAddHistory] = useState({});
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
+  // Width / height of the camera snapshot; 16:9 until it loads.
+  const [snapshotAspect, setSnapshotAspect] = useState(16 / 9);
   const canvasRef = useRef(null);
   const viewRef = useRef(view);
   const gestureRef = useRef(null);
@@ -2759,12 +2781,21 @@ export function ZoneEditor({ camera, classOptions = [], onChange }) {
         </div>
       </div>
       <div className="zone-editor-layout">
-        <div className={`zone-canvas${view.scale > 1 ? " is-zoomed" : ""}`} ref={canvasRef}>
+        <div className="zone-canvas-frame">
+        <div className={`zone-canvas${view.scale > 1 ? " is-zoomed" : ""}`} ref={canvasRef} style={{ "--zone-aspect": snapshotAspect }}>
           <div
             className="zone-canvas-media"
             style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}
           >
-            <img src={snapshotUrl} alt={`${camera.name} zone editor`} draggable="false" />
+            <img
+              src={snapshotUrl}
+              alt={`${camera.name} zone editor`}
+              draggable="false"
+              onLoad={(event) => {
+                const { naturalWidth, naturalHeight } = event.currentTarget;
+                if (naturalWidth > 0 && naturalHeight > 0) setSnapshotAspect(naturalWidth / naturalHeight);
+              }}
+            />
             <svg
               viewBox="0 0 100 100"
               preserveAspectRatio="none"
@@ -2820,6 +2851,7 @@ export function ZoneEditor({ camera, classOptions = [], onChange }) {
             <button type="button" aria-label="Zoom out" onClick={() => zoomCentered(1 / 1.25)} disabled={view.scale <= 1}><ZoomOut size={16} /></button>
           </div>
           {!selectedZone ? <div className="zone-canvas-empty">Add a zone to begin</div> : selectedZone.points?.length < 3 ? <div className="zone-canvas-hint">Click at least three points</div> : null}
+        </div>
         </div>
         <aside className="zone-sidebar">
           <div className="zone-sidebar-panel">

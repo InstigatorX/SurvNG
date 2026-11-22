@@ -231,3 +231,11 @@ export function recentChangeRows(entries = [], now = Date.now(), limit = 5) {
       };
     });
 }
+
+/** "3840×2160 · 20 fps" for one stream from /api/cameras/{id}/stream-info, or "". */
+export function formatStreamInfo(stream) {
+  if (!stream || !finite(stream.width) || !finite(stream.height) || stream.width <= 0) return "";
+  const fps = Number(stream.fps);
+  const rate = fps > 0 ? `${fps >= 10 ? Math.round(fps) : fps.toFixed(1)} fps` : "";
+  return [`${stream.width}×${stream.height}`, rate].filter(Boolean).join(" · ");
+}

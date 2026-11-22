@@ -365,36 +365,6 @@
   color: var(--ink);
 }
 
-.health-pipeline-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(110px, auto);
-  gap: 16px;
-  align-items: center;
-  border-top: 1px solid var(--line);
-  padding: 12px 18px;
-}
-
-.health-pipeline-row strong {
-  font-size: var(--text-md);
-}
-
-.health-pipeline-row p {
-  margin: 2px 0 0;
-  color: var(--muted);
-  font-size: var(--text-sm);
-  text-transform: none;
-}
-
-.health-pipeline-spark {
-  height: 28px;
-}
-
-.health-pipeline-value {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: var(--text-md);
-  text-align: right;
-}
-
 .health-details {
   border-top: 1px solid var(--line);
   padding-top: 12px;
@@ -410,15 +380,6 @@
   cursor: pointer;
 }
 
-@media (max-width: 760px) {
-  .health-pipeline-row {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .health-pipeline-spark {
-    display: none;
-  }
-}
 
 /* Needs attention beside Recently changed. */
 .admin-overview-split {

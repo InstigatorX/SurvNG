@@ -131,3 +131,12 @@ import("../src/adminOverview.mjs").then(({ formatRelativeTime, recentChangeRows 
   assert.equal(recentChangeRows(new Array(9).fill({ id: "x", at: "2026-11-21T10:00:00Z", changes: [{ label: "A", kind: "value", before: "1", after: "2" }] }), NOW).length, 5);
   console.log("recently changed tests passed");
 });
+
+import("../src/adminOverview.mjs").then(({ formatStreamInfo }) => {
+  assert.equal(formatStreamInfo({ width: 3840, height: 2160, fps: 19.97 }), "3840×2160 · 20 fps");
+  assert.equal(formatStreamInfo({ width: 640, height: 360, fps: 7.5 }), "640×360 · 7.5 fps");
+  assert.equal(formatStreamInfo({ width: 1280, height: 720, fps: null }), "1280×720");
+  assert.equal(formatStreamInfo(null), "");
+  assert.equal(formatStreamInfo({ width: 0, height: 0 }), "");
+  console.log("stream info format tests passed");
+});
