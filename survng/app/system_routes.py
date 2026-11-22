@@ -191,6 +191,14 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                 # Opt-in for integrations: camera snapshots and changes plus a
                 # light periodic system summary, so they need not poll.
                 include_state = incidents_only and query_params.get("state") == "1"
+                # Web pages may name the event types they read (?types=a,b);
+                # others are not sent. "connected" is always sent.
+                wanted_types = {
+                    item.strip() for item in str(query_params.get("types") or "").split(",") if item.strip()
+                } if not incidents_only else set()
+
+                def wanted(event_type: str) -> bool:
+                    return not wanted_types or event_type in wanted_types
                 camera_views: dict[str, tuple] | None = {} if include_state else None
 
                 async def system_state() -> str:
@@ -216,11 +224,13 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                                           if active_manager.incident_notification_allowed(item)],
                         })
                     else:
-                        yield _sse_message("cameras_state", await asyncio.to_thread(active_manager.statuses))
-                        yield _sse_message(
-                            "system_state",
-                            await asyncio.to_thread(deps.system_telemetry.system_status, active_manager),
-                        )
+                        if wanted("cameras_state"):
+                            yield _sse_message("cameras_state", await asyncio.to_thread(active_manager.statuses))
+                        if wanted("system_state"):
+                            yield _sse_message(
+                                "system_state",
+                                await asyncio.to_thread(deps.system_telemetry.system_status, active_manager),
+                            )
                 else:
                     for event in replay:
                         replayed_ids.add(event.id)
@@ -230,6 +240,8 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                             )
                             if chunk is not None:
                                 yield chunk
+                            continue
+                        if not wanted(event.type):
                             continue
                         yield _sse_message(event.type, (
                             active_manager.incident_notification_payload(event.data)
@@ -298,6 +310,8 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                         )
                         if chunk is not None:
                             yield chunk
+                        continue
+                    if not wanted(event.type):
                         continue
                     yield _sse_message(event.type, (
                         active_manager.incident_notification_payload(event.data)

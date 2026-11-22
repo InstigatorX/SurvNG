@@ -45,7 +45,7 @@ function useLocalPollingData(enabled) {
         return next;
       });
     }
-  }, enabled);
+  }, enabled, ["cameras_state", "camera_state"]);
 
   useVisiblePolling(load, 60_000, enabled);
   useEffect(() => () => { loadSequence.current += 1; }, []);

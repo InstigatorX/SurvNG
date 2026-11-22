@@ -10,9 +10,11 @@ from survng.app.system_routes import SystemRouteDependencies, create_system_rout
 
 
 class StreamRequest:
-    def __init__(self, *, header_cursor: str = "", query_cursor: str = "") -> None:
+    def __init__(self, *, header_cursor: str = "", query_cursor: str = "", types: str = "") -> None:
         self.headers = {"last-event-id": header_cursor} if header_cursor else {}
         self.query_params = {"last_event_id": query_cursor} if query_cursor else {}
+        if types:
+            self.query_params["types"] = types
 
     async def is_disconnected(self) -> bool:
         return False
@@ -454,3 +456,55 @@ def test_state_stream_drops_camera_churn_that_integrations_do_not_display():
     assert f"id: {churn.id}" not in "".join(chunks)  # counter-only churn
     assert "event: cameras_state" in chunks[3]
     assert "event: system_state" in chunks[4]
+
+
+def test_type_filter_skips_unrequested_snapshots_replay_and_live_events(monkeypatch) -> None:
+    # A page that reads only incidents gets no camera/system snapshots and no
+    # motion or object traffic, live or replayed; the cursor still advances.
+    monkeypatch.setattr(system_routes, "SSE_HEARTBEAT_SECONDS", 60.0)
+    broker = StateEventBroker()
+    manager = SimpleNamespace(state_events=broker, statuses=Mock(return_value=[]))
+    telemetry = SimpleNamespace(system_status=Mock(return_value={}))
+    handler = stream_handler(manager, telemetry)
+
+    fresh = asyncio.run(read_chunks(handler, StreamRequest(types="incident"), 2))
+    assert fresh[0] == "retry: 3000\n\n" and "event: connected" in fresh[1]
+    manager.statuses.assert_not_called()
+    telemetry.system_status.assert_not_called()
+
+    first = broker.publish("motion", {"camera_id": "gate"})
+    broker.publish("object", {"camera_id": "gate"})
+    incident = broker.publish("incident", {"event_id": 7})
+    last = broker.publish("motion", {"camera_id": "gate"})
+    replay = asyncio.run(read_chunks(handler, StreamRequest(query_cursor=first.id, types="incident"), 3))
+    assert "event: incident" in replay[1] and f"id: {incident.id}" in replay[1]
+    assert "event: connected" in replay[2] and f"id: {last.id}" in replay[2]
+
+    async def live() -> list[str]:
+        response = await handler(StreamRequest(query_cursor=last.id, types="incident,camera_state"))
+        iterator = response.body_iterator
+        try:
+            chunks = [await anext(iterator), await anext(iterator)]
+            broker.publish("motion", {"camera_id": "gate"})
+            broker.publish("camera_state", {"id": "gate", "running": True})
+            broker.publish("object", {"camera_id": "gate"})
+            broker.publish("incident", {"event_id": 8})
+            chunks += [await anext(iterator), await anext(iterator)]
+            return chunks
+        finally:
+            await iterator.aclose()
+
+    chunks = asyncio.run(live())
+    assert "event: connected" in chunks[1]
+    assert "event: camera_state" in chunks[2]
+    assert "event: incident" in chunks[3]
+
+
+def test_unfiltered_web_stream_still_sends_every_type() -> None:
+    broker = StateEventBroker()
+    first = broker.publish("motion", {"camera_id": "gate"})
+    broker.publish("object", {"camera_id": "gate"})
+    manager = SimpleNamespace(state_events=broker, statuses=Mock(return_value=[]))
+    telemetry = SimpleNamespace(system_status=Mock(return_value={}))
+    chunks = asyncio.run(read_chunks(stream_handler(manager, telemetry), StreamRequest(query_cursor=first.id), 2))
+    assert "event: object" in chunks[1]

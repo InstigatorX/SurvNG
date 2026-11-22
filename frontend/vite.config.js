@@ -12,7 +12,9 @@ export default defineConfig({
     // rewrites HTML asset URLs for its runtime proxy prefix; an absolute build
     // base in JS would escape that prefix and hit the proxy's root application.
     renderBuiltUrl(_filename, { hostType }) {
-      if (hostType === "js") return { relative: true };
+      // CSS asset URLs (the Inter font) must stay relative too, or they
+      // request /static/... outside the proxy prefix and 404.
+      if (hostType === "js" || hostType === "css") return { relative: true };
     },
   },
   plugins: [react()],

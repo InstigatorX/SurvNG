@@ -203,8 +203,11 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
   const canFocus = hasFocusableObjects && (useServerObjectCrop || renderedImage);
   const showFocusButton = canFocus && objectFocusControls;
   // Crop from the full snapshot on the server, then encode near display size.
-  const focusThumbnailWidth = Math.max(320, Math.min(1280, Math.ceil((frameSize?.width || 160) * devicePixelRatio)));
-  const focusThumbnailQuality = 90;
+  // Phones cap density at 2x and use the card thumbnail quality: a 3x, q90
+  // crop is several times larger than the plain card image for little gain.
+  const phoneThumbnail = typeof window !== "undefined" && window.matchMedia?.("(max-width: 760px)").matches;
+  const focusThumbnailWidth = Math.max(320, Math.min(1280, Math.ceil((frameSize?.width || 160) * (phoneThumbnail ? Math.min(2, devicePixelRatio) : devicePixelRatio))));
+  const focusThumbnailQuality = phoneThumbnail ? 82 : 90;
   const focusAspect = incidentObjectFocusAspect(objectFocusAspect, useServerObjectCrop);
   const thumbnailSrc = useServerObjectCrop
     ? eventThumbnailUrl(event, focusThumbnailWidth, focusThumbnailQuality, {
