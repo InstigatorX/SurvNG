@@ -94,7 +94,9 @@ jobs:
             tests/test_worker_topology.py \
             tests/test_recording_path_indexes.py \
             tests/test_main_database_metrics.py \
-            tests/test_main_database.py
+            tests/test_main_database.py \
+            tests/test_slow_lock_sites.py \
+            tests/test_snapshot_reference_plan.py
       - name: Run scene and evidence regression tests
         run: |
           scripts/run-tests.sh \

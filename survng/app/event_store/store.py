@@ -17,7 +17,7 @@ from ..main_database import connect_main_database
 from ..media_storage import MediaStorageRegistry, path_presence
 from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 from ..object_motion import tracking_motion_promotions
-from ..perf_samples import TimedLock
+from ..perf_samples import SlowSiteTable, TimedLock
 from .calibration import EventStoreCalibrationMixin
 from .jobs import EventStoreJobsMixin
 from .evidence import EventStoreEvidenceMixin, EventSnapshotChangedError
@@ -31,6 +31,25 @@ from .scene_tracking import EventStoreSceneTrackingMixin
 from .scene_context import EventStoreSceneContextMixin
 
 LOGGER = logging.getLogger(__name__)
+
+
+# Is a snapshot still referenced by any durable row? The events index on
+# snapshot_path is partial (snapshot_path != ''), so the events probe repeats
+# that condition; otherwise SQLite cannot prove the partial index applies to a
+# bound parameter and scans the whole events table.
+SNAPSHOT_REFERENCE_SQL = """
+    select exists(select 1 from events where snapshot_path = ? and snapshot_path != '')
+        or exists(select 1 from scene_observations where snapshot_path = ?)
+        or exists(select 1 from scene_evidence_images where snapshot_path = ?)
+        or exists(select 1 from acquired_observations where snapshot_path = ?)
+        or exists(select 1 from acquired_samples where snapshot_path = ?)
+        or exists(select 1 from motion_audits where snapshot_path = ?)
+        or exists(select 1 from event_cover_requirements where state='pending'
+            and deadline_epoch > unixepoch() and json_extract(payload_json, '$.snapshot_path') = ?)
+"""
+FACE_SNAPSHOT_REFERENCE_SQL = (
+    "select 1 from face_observations where snapshot_path = ? limit 1"
+)
 
 
 class EventStore(
@@ -73,12 +92,20 @@ class EventStore(
         self.db_path = (database_dir or storage_dir) / "survng.sqlite3"
         self.jobs_db_path = self.db_path.parent / "detection-jobs.sqlite3"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = TimedLock(threading.Lock())
+        # Long holds are attributed to the acquiring call site (diagnostic):
+        # every camera's event writes queue behind this lock.
+        self._lock = TimedLock(
+            threading.Lock(),
+            slow_holds=SlowSiteTable("event store lock hold", 1000.0),
+        )
         self._database_write_lock = database_write_lock or threading.RLock()
         # SQLite permits a single writer.  Camera event/refinement workers share
         # the jobs ledger, so serialize their short local transactions instead
         # of making them contend through SQLite's busy timeout.
-        self._jobs_lock = TimedLock(threading.RLock())
+        self._jobs_lock = TimedLock(
+            threading.RLock(),
+            slow_holds=SlowSiteTable("detection jobs lock hold", 1000.0),
+        )
         self._jobs_maintenance_lock = threading.Lock()
         self._next_detection_job_prune_monotonic = 0.0
         self._snapshot_size_scan_idle_until = 0.0
@@ -99,6 +126,10 @@ class EventStore(
     def lock_wait_status(self) -> dict[str, dict[str, int | float | None]]:
         """Contended waits on the in-process serialization locks."""
         return {"events": self._lock.snapshot(), "jobs": self._jobs_lock.snapshot()}
+
+    def lock_histograms(self) -> dict[str, dict[str, object]]:
+        """Wait/hold histograms and slow-hold call sites for both store locks."""
+        return {"events": self._lock.histograms(), "jobs": self._jobs_lock.histograms()}
 
     def _connect(self) -> sqlite3.Connection:
         conn = connect_main_database(
@@ -1901,19 +1932,11 @@ class EventStore(
         portable = portable_media_path(self.storage_dir, raw_path)
         if not portable:
             return
+        # Every probe must be an index search: this runs under the event-store
+        # lock that all camera writes share, and the tables are large.
         with self._lock, self._connect() as conn:
             referenced = bool(conn.execute(
-                """
-                select exists(select 1 from events where snapshot_path = ?)
-                    or exists(select 1 from scene_observations where snapshot_path = ?)
-                    or exists(select 1 from scene_evidence_images where snapshot_path = ?)
-                    or exists(select 1 from acquired_observations where snapshot_path = ?)
-                    or exists(select 1 from acquired_samples where snapshot_path = ?)
-                    or exists(select 1 from motion_audits where snapshot_path = ?)
-                    or exists(select 1 from event_cover_requirements where state='pending'
-                        and deadline_epoch > unixepoch() and json_extract(payload_json, '$.snapshot_path') = ?)
-                """,
-                (portable, portable, portable, portable, portable, portable, portable),
+                SNAPSHOT_REFERENCE_SQL, (portable,) * 7,
             ).fetchone()[0])
             if not referenced:
                 has_faces = conn.execute(
@@ -1921,10 +1944,8 @@ class EventStore(
                 ).fetchone() is not None
                 referenced = bool(
                     has_faces
-                    and conn.execute(
-                        "select 1 from face_observations where snapshot_path = ? limit 1",
-                        (portable,),
-                    ).fetchone() is not None
+                    and conn.execute(FACE_SNAPSHOT_REFERENCE_SQL, (portable,)).fetchone()
+                    is not None
                 )
         if referenced:
             return

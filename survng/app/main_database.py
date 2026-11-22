@@ -11,6 +11,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Literal
 
+from .perf_samples import SlowSiteTable, caller_site
 from .runtime_metrics import LatencyHistogram
 
 LOGGER = logging.getLogger(__name__)
@@ -67,6 +68,21 @@ def _is_busy_error(error: sqlite3.OperationalError) -> bool:
     return "locked" in text or "busy" in text
 
 
+# Transactions slower than this are attributed to their call site (diagnostic).
+SLOW_TRANSACTION_MS = 1000.0
+# A slow read that never took the shared write lock blocks no other writer, so
+# it is recorded for status but logged at DEBUG; holding the write lock this
+# long is a WARNING.
+def held_write_lock_too_long(_duration_ms: float, extra: dict[str, float]) -> bool:
+    return extra.get("write_lock_ms", 0.0) >= SLOW_TRANSACTION_MS
+
+
+SLOW_TRANSACTIONS = SlowSiteTable(
+    "database transaction",
+    SLOW_TRANSACTION_MS,
+    warn_when=held_write_lock_too_long,
+)
+
 _METRICS: dict[str, DatabaseMetrics] = {}
 _METRICS_LOCK = threading.Lock()
 _METRIC_FAILURES = 0
@@ -94,20 +110,28 @@ def database_metrics_snapshot() -> dict[str, Any]:
     return {
         "metric_failures": _METRIC_FAILURES,
         "domains": {name: metrics.snapshot() for name, metrics in sorted(domains.items())},
+        "slow_transactions": SLOW_TRANSACTIONS.snapshot(),
     }
 
 
 def _record_transaction_safely(
-    domain: str, started: float | None, error: BaseException | None
+    domain: str,
+    started: float | None,
+    error: BaseException | None,
+    site: str | None = None,
+    write_lock_ms: float = 0.0,
 ) -> None:
     """Metrics never raise into, or replace an exception of, a transaction."""
     global _METRIC_FAILURES
     if started is None:
         return
     try:
-        database_metrics(domain).record_transaction(
-            (time.perf_counter() - started) * 1000.0, error
-        )
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        database_metrics(domain).record_transaction(duration_ms, error)
+        if site is not None and duration_ms >= SLOW_TRANSACTION_MS:
+            SLOW_TRANSACTIONS.record(
+                f"{domain} {site}", duration_ms, write_lock_ms=write_lock_ms,
+            )
     except Exception as metric_error:
         _METRIC_FAILURES += 1
         if _METRIC_FAILURES == 1:
@@ -121,9 +145,13 @@ class ClosingDatabaseConnection(sqlite3.Connection):
 
     metrics_domain = "other"
     _transaction_started: float | None = None
+    _transaction_site: str | None = None
+    # Milliseconds this connection held the shared write lock (main only).
+    _write_lock_held_ms = 0.0
 
     def __enter__(self) -> "ClosingDatabaseConnection":
         result = super().__enter__()
+        self._transaction_site = caller_site(1)
         self._transaction_started = time.perf_counter()
         return result
 
@@ -144,7 +172,11 @@ class ClosingDatabaseConnection(sqlite3.Connection):
             raise
         finally:
             _record_transaction_safely(
-                self.metrics_domain, self._transaction_started, error
+                self.metrics_domain,
+                self._transaction_started,
+                error,
+                self._transaction_site,
+                self._write_lock_held_ms,
             )
 
 
@@ -173,6 +205,7 @@ class MainDatabaseConnection(ClosingDatabaseConnection):
     metrics_domain = "main"
     _write_lock: threading.RLock | None = None
     _writer_lock_held = False
+    _write_lock_acquired_at = 0.0
 
     def set_write_lock(self, write_lock: threading.RLock) -> None:
         self._write_lock = write_lock
@@ -185,10 +218,14 @@ class MainDatabaseConnection(ClosingDatabaseConnection):
             raise RuntimeError("main database connection has no write lock")
         self._write_lock.acquire()
         self._writer_lock_held = True
+        self._write_lock_acquired_at = time.perf_counter()
 
     def _release_write_lock(self) -> None:
         if self._writer_lock_held:
             self._writer_lock_held = False
+            self._write_lock_held_ms += (
+                time.perf_counter() - self._write_lock_acquired_at
+            ) * 1000.0
             assert self._write_lock is not None
             self._write_lock.release()
 
