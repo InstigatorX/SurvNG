@@ -40,13 +40,13 @@
 }
 
 .live-command-scope strong {
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 600;
 }
 
 .live-command-scope small {
   color: var(--muted);
-  font-size: 9px;
+  font-size: var(--text-2xs);
   font-weight: 520;
 }
 
@@ -66,7 +66,7 @@
   border-left: 1px solid var(--line);
   border-radius: 0;
   background: transparent;
-  font-size: 11px;
+  font-size: var(--text-xs);
   padding: 0 9px;
 }
 
@@ -99,7 +99,7 @@
 .live-density-pages small {
   min-width: 30px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: var(--text-2xs);
   text-align: center;
 }
 
@@ -116,7 +116,7 @@
   align-content: center;
   border-right: 1px solid var(--line);
   padding: 0 9px;
-  font-size: 9px;
+  font-size: var(--text-2xs);
   font-weight: 580;
   text-transform: none;
 }
@@ -127,7 +127,7 @@
   border-left: 1px solid var(--line);
   border-radius: 0;
   background: transparent;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 560;
   padding-inline: 12px;
 }
@@ -181,7 +181,7 @@
   border-radius: 3px;
   background: rgba(5, 13, 16, .9);
   color: #eef6f7;
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 620;
   line-height: 1;
   padding: 0 7px;
@@ -309,7 +309,7 @@
   border: 1px solid var(--line);
   background: color-mix(in srgb, var(--panel-solid) 94%, transparent);
   color: var(--ink);
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 1.35;
 }
 
@@ -347,7 +347,7 @@
   border-radius: 999px;
   background: var(--control);
   color: var(--ink);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
   padding: 0 12px;
 }
@@ -371,7 +371,7 @@
 }
 
 .events-zone .section-head h2 {
-  font-size: 16px;
+  font-size: 1rem;
   font-weight: 620;
 }
 
@@ -392,7 +392,7 @@
   border-left: 1px solid var(--line);
   border-radius: 0;
   background: transparent;
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 550;
 }
 
@@ -416,7 +416,7 @@
 .shown-bubble {
   border-radius: 4px;
   background: var(--panel-soft);
-  font-size: 9px;
+  font-size: var(--text-2xs);
   font-weight: 560;
   padding: 6px 8px;
 }
@@ -472,7 +472,7 @@
 .live-activity-copy b {
   overflow: hidden;
   color: var(--ink);
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 560;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -490,12 +490,12 @@
 }
 
 .live-activity-kind strong {
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 620;
 }
 
 .live-activity-copy time {
-  font-size: 9px;
+  font-size: var(--text-2xs);
 }
 
 .live-activity-trigger {
@@ -629,7 +629,7 @@
 
   .live-command-mobile-title {
     display: block;
-    font-size: 13px;
+    font-size: var(--text-md);
   }
 
   .live-grid>.camera-zone,

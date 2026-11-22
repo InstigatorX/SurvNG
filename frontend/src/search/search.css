@@ -36,12 +36,12 @@
 
 .search-commandbar small,
 .faces-commandbar small {
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .semantic-status {
   border-radius: 3px;
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 560;
 }
 
@@ -61,12 +61,12 @@
 }
 
 .search-scope-heading strong {
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 620;
 }
 
 .search-scope-heading small {
-  font-size: 9px;
+  font-size: var(--text-2xs);
 }
 
 .search-camera-list {
@@ -80,7 +80,7 @@
   border-left: 3px solid transparent;
   border-radius: 0;
   background: transparent;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 540;
   padding-inline: 12px;
 }
@@ -130,7 +130,7 @@
 }
 
 .semantic-search-workspace form input {
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .semantic-search-workspace form button,
@@ -166,12 +166,12 @@
 }
 
 .semantic-search-results footer strong {
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 620;
 }
 
 .semantic-search-results footer small {
-  font-size: 9px;
+  font-size: var(--text-2xs);
 }
 
 .faces-page {
@@ -192,7 +192,7 @@
   border-left: 1px solid var(--line);
   border-radius: 0;
   background: transparent;
-  font-size: 9px;
+  font-size: var(--text-2xs);
   font-weight: 540;
 }
 
@@ -216,7 +216,7 @@
 }
 
 .faces-panel-heading h2 {
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 620;
 }
 
@@ -241,12 +241,12 @@
 }
 
 .face-person-select strong {
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 620;
 }
 
 .face-person-select small {
-  font-size: 8px;
+  font-size: var(--text-2xs);
 }
 
 .faces-review-panel {
@@ -277,7 +277,7 @@
   border-left: 1px solid var(--line);
   border-radius: 0;
   background: transparent;
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 540;
 }
 
@@ -292,7 +292,7 @@
 .faces-toolbar select {
   min-height: 34px;
   border-radius: 3px;
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .face-messages>* {
@@ -401,7 +401,7 @@
   background: transparent;
   color: var(--muted);
   padding: 4px 10px;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .search-mode-switch button.active {
@@ -437,11 +437,11 @@
 
 .speech-result-meta strong {
   color: var(--ink);
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .speech-result-meta small {
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .speech-result-status {
@@ -449,7 +449,7 @@
   border-radius: 3px;
   background: var(--control-muted);
   padding: 2px 6px;
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 560;
 }
 
@@ -468,14 +468,14 @@
 .speech-result-text {
   margin: 0;
   color: var(--ink);
-  font-size: 14px;
+  font-size: var(--text-base);
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
 .speech-result-text.empty {
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-style: italic;
 }
 
@@ -483,14 +483,14 @@
   margin: 0;
   padding-inline-start: 20px;
   color: var(--warn);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .speech-result nav a {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .speech-load-more {

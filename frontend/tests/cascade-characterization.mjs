@@ -21,8 +21,9 @@ const WORKSPACES = Object.freeze([
 ]);
 const INHERITED_TYPOGRAPHY = Object.freeze({
   fontFamily: '"Inter Variable", Inter, "SF Pro Text", "Segoe UI", ui-sans-serif, system-ui, sans-serif',
-  fontSize: "14px",
-  lineHeight: "18.9px",
+  // Page body is --text-base (15px) with line-height 1.35.
+  fontSize: "15px",
+  lineHeight: "20.25px",
   boxSizing: "border-box",
 });
 const THEME_FINGERPRINTS = Object.freeze({

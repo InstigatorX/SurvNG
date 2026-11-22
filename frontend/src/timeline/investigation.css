@@ -12,7 +12,7 @@
   min-width: 86px;
   place-items: center start;
   color: var(--muted);
-  font-size: 9px;
+  font-size: var(--text-2xs);
   font-weight: 610;
   letter-spacing: .025em;
   text-transform: uppercase;

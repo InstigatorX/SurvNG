@@ -40,7 +40,7 @@
 }
 
 .workspace-brand strong {
-  font-size: 20px;
+  font-size: 1.25rem;
   letter-spacing: -0.025em;
 }
 
@@ -147,12 +147,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.78rem;
+  font-size: var(--text-sm);
 }
 
 .workspace-account small {
   color: var(--muted);
-  font-size: 0.68rem;
+  font-size: var(--text-xs);
   text-transform: capitalize;
 }
 
@@ -239,7 +239,7 @@
   border-radius: 3px;
   background: var(--panel-soft);
   font: inherit;
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-align: center;
 }
 
@@ -422,7 +422,7 @@
     background: transparent;
     color: var(--muted);
     padding: 3px 1px;
-    font-size: 10px;
+    font-size: var(--text-xs);
     text-decoration: none;
   }
 
@@ -473,7 +473,7 @@
   }
 
   .mobile-more-panel>header h2 {
-    font-size: 16px;
+    font-size: 1rem;
   }
 
   .mobile-more-panel>header button {
@@ -800,7 +800,7 @@ a:focus-visible {
 }
 
 .workspace-brand strong {
-  font-size: 21px;
+  font-size: 1.3125rem;
   font-weight: 690;
   letter-spacing: -.025em;
 }
@@ -818,7 +818,7 @@ a:focus-visible {
   border-radius: 0;
   padding: 0 23px;
   color: color-mix(in srgb, var(--ink) 78%, var(--muted));
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 520;
 }
 
@@ -887,13 +887,13 @@ a:focus-visible {
 }
 
 .header-stat small {
-  font-size: 9px;
+  font-size: var(--text-2xs);
   font-weight: 570;
   letter-spacing: .01em;
 }
 
 .header-stat strong {
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 610;
 }
 
