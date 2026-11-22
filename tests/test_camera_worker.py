@@ -1950,6 +1950,42 @@ class CameraWorkerTest(unittest.TestCase):
                 thread.join(timeout=1)
             self.assertLess(elapsed, 0.1)
 
+    def test_ema_evidence_detection_frame_uses_full_resolution_capture(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(
+                camera,
+                Path(tmpdir),
+                motion_config=MotionQualificationConfig(mode="adaptive"),
+            )
+            # A started camera has a positive lifecycle generation; tokens
+            # from generation 0 are rejected as unstarted.
+            generation = 3
+            with worker.runtime_state.lock:
+                worker.runtime_state.generation = generation
+            live = np.full((360, 640, 3), 50, dtype=np.uint8)
+            live.setflags(write=False)
+            worker.motion_analysis._preprocess_frame(
+                live,
+                100.0,
+                captured_at_monotonic=10.0,
+                capture_sequence=9,
+                capture_generation=4,
+                lifecycle_generation=generation,
+            )
+
+            sample = worker._get_evidence_detection_frame({
+                "evidence_frame_at_epoch": 100.0,
+                "evidence_frame_sequence": 9,
+                "evidence_capture_generation": 4,
+                "evidence_lifecycle_generation": generation,
+            })
+
+        self.assertIsNotNone(sample)
+        self.assertIs(sample.frame, live)
+        self.assertEqual((sample.width, sample.height), (640, 360))
+        self.assertEqual(sample.sequence, 9)
+
     def test_episode_controller_bounds_queue_during_chatter(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         accepted = MotionQualificationResult(True, 0.8, 0.5, "qualified", 2, {})

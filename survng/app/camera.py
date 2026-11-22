@@ -1279,10 +1279,13 @@ class CameraWorker:
         )
         if selected is None:
             return None
-        height, width = selected.image.shape[:2]
+        # Detect on the full-resolution live capture EMA analysed, not the
+        # analysis-width copy, when that reference is still retained.
+        image = selected.detection_image
+        height, width = image.shape[:2]
         alignment = self._effective_spatial_alignment
         return TimestampedLiveFrame(
-            frame=selected.image,
+            frame=image,
             captured_at_epoch=selected.captured_at_epoch,
             captured_at_monotonic=selected.captured_at_monotonic,
             sequence=selected.sequence,

@@ -142,3 +142,9 @@ Suggested order: T1 and T2, then T3, T5 and T6, with T4 last.
   replays moving-object, lighting-ramp and static scenes through the old and
   new paths and requires identical decisions.
 - **T2:** not started.
+- **T3 (done):** each EMA evidence frame keeps a reference to the read-only
+  live capture it was derived from (no copy), bounded per camera by
+  `EVIDENCE_SOURCE_FRAME_BUDGET_BYTES` (64 MiB; the newest entry always keeps
+  it). The EMA fast object check now runs on that full-resolution frame and
+  falls back to the analysis-width frame only for entries beyond the budget.
+  Detection recall on real footage has not been measured.

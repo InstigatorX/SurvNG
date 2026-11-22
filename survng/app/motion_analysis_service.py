@@ -39,6 +39,10 @@ from .motion_events import MotionEventCoordinator, MotionTrigger
 from .motion_pipeline import MotionDebugSnapshotStore, MotionEvidenceRepository
 
 LOGGER = logging.getLogger(__name__)
+# Per-camera cap on full-resolution live frames referenced by the evidence
+# ring. The references share capture buffers (no copy); the cap bounds how
+# long those buffers stay alive. Older entries keep only the analysis frame.
+EVIDENCE_SOURCE_FRAME_BUDGET_BYTES = 64 * 1024 * 1024
 CACHED_PREPROCESSOR_IMPLEMENTATION = "gray_blur"
 # Localized scene change worth a discovery sample, including sub-threshold and
 # stationary foreground. Illumination, insects, foliage and jitter are left to
@@ -113,7 +117,13 @@ class MotionFrameSubmission:
 
 @dataclass(frozen=True, slots=True)
 class MotionEvidenceFrame:
-    """Bounded, generation-qualified color evidence retained for fast detection."""
+    """Bounded, generation-qualified color evidence retained for fast detection.
+
+    ``image`` is the analysis-width frame EMA scored. ``source_image`` is the
+    read-only live capture it was derived from, retained for recent entries
+    only (see ``EVIDENCE_SOURCE_FRAME_BUDGET_BYTES``) so the fast object check
+    can run at full live resolution on the exact frame EMA saw.
+    """
 
     image: np.ndarray
     captured_at_epoch: float
@@ -121,6 +131,12 @@ class MotionEvidenceFrame:
     sequence: int
     capture_generation: int
     lifecycle_generation: int
+    source_image: np.ndarray | None = None
+
+    @property
+    def detection_image(self) -> np.ndarray:
+        """Return the highest-resolution retained image of this frame."""
+        return self.source_image if self.source_image is not None else self.image
 
 
 @dataclass(frozen=True, slots=True)
@@ -584,12 +600,35 @@ class MotionAnalysisService:
                 sequence=capture_sequence,
                 capture_generation=capture_generation,
                 lifecycle_generation=lifecycle_generation,
+                # Only a read-only capture buffer is safe to keep by reference.
+                source_image=(
+                    frame
+                    if frame is not resized
+                    and frame.ndim == 3
+                    and not frame.flags.writeable
+                    else None
+                ),
             ))
+            self._bound_evidence_source_frames_locked()
             if processed is not None:
                 self.processed_frames.append((frame_epoch, processed))
             else:
                 self.processed_frames.clear()
         return gray, resized, processed
+
+    def _bound_evidence_source_frames_locked(self) -> None:
+        """Drop the oldest full-resolution references beyond the byte budget.
+
+        The newest entry always keeps its reference. Call with ``frame_lock``.
+        """
+        retained = 0
+        for index in range(len(self.evidence_frames) - 1, -1, -1):
+            item = self.evidence_frames[index]
+            if item.source_image is None:
+                continue
+            retained += int(item.source_image.nbytes)
+            if retained > EVIDENCE_SOURCE_FRAME_BUDGET_BYTES and index < len(self.evidence_frames) - 1:
+                self.evidence_frames[index] = replace(item, source_image=None)
 
     def _reset_for_clock_discontinuity(self, frame_epoch: float) -> None:
         with self.frame_lock:
