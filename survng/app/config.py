@@ -645,6 +645,36 @@ class SpeechConfig(BaseModel):
         return str(Path(self.whisper_models_dir) / f"whisper-{model}")
 
 
+class CameraDoorbellConfig(BaseModel):
+    """ONVIF doorbell-button recognition for a camera that is a doorbell.
+
+    Off by default: many cameras advertise doorbell topics such as Reolink's
+    Visitor whether or not they have a button, so SurvNG never infers a
+    doorbell from the topic alone.
+    """
+
+    enabled: bool = False
+    # ONVIF topics that report the button, compared after namespace prefixes
+    # are removed. Reolink doorbells use RuleEngine/MyRuleDetector/Visitor.
+    topics: list[str] = Field(
+        default_factory=lambda: ["RuleEngine/MyRuleDetector/Visitor"], max_length=8
+    )
+
+    @field_validator("topics")
+    @classmethod
+    def validate_topics(cls, value: list[str]) -> list[str]:
+        topics = list(dict.fromkeys(str(topic).strip() for topic in value if str(topic).strip()))
+        if any(len(topic) > 256 for topic in topics):
+            raise ValueError("doorbell topics must be at most 256 characters")
+        return topics
+
+    @model_validator(mode="after")
+    def require_topic_when_enabled(self) -> "CameraDoorbellConfig":
+        if self.enabled and not self.topics:
+            raise ValueError("an enabled doorbell needs at least one topic")
+        return self
+
+
 class CameraSpeechConfig(BaseModel):
     """Per-camera speech listening; requires the global ``speech.enabled``."""
 
@@ -751,6 +781,7 @@ class CameraConfig(BaseModel):
     motion_qualification: CameraMotionQualificationConfig = Field(default_factory=CameraMotionQualificationConfig)
     onvif: OnvifConfig = Field(default_factory=OnvifConfig)
     speech: CameraSpeechConfig = Field(default_factory=CameraSpeechConfig)
+    doorbell: CameraDoorbellConfig = Field(default_factory=CameraDoorbellConfig)
     zones: list[DetectionZone] = Field(default_factory=list)
 
     @model_validator(mode="after")

@@ -56,6 +56,9 @@ def _service(*, enabled: bool = True, live_clock: float | None = 99.0):
         "inactive_motion_events": 7,
         "unrecognized_notifications": 8,
         "callback_errors": 9,
+        "doorbell_notifications": 13,
+        "doorbell_presses": 14,
+        "last_doorbell_press_at": "doorbell-at",
         "renewal_attempts": 10,
         "renewals": 11,
         "renewal_errors": 12,
@@ -153,6 +156,8 @@ def test_status_snapshot_preserves_api_shape_and_dynamic_subsystem_state() -> No
     }
     assert status["lifecycle"]["active_worker_count"] == 4
     assert status["onvif_poll_timeouts"] == 2
+    assert status["onvif_doorbell_presses"] == 14
+    assert status["onvif_last_doorbell_press_at"] == "doorbell-at"
     assert status["onvif_subscription_lifetime_seconds"] == 3600.0
     assert status["onvif_signal_effectiveness_status"] == "degraded"
     assert status["onvif_signal_degraded"] is True

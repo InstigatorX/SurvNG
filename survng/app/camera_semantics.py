@@ -251,3 +251,42 @@ def reported_notice_category(
             if value_key in aliases:
                 return candidate
     return None
+
+
+_PROPERTY_OPERATION = re.compile(
+    r"PropertyOperation['\"]?\s*[:=]\s*['\"]?([A-Za-z]+)"
+)
+
+
+def notice_property_operation(message: str) -> str | None:
+    """ONVIF PropertyOperation (initialized/changed/deleted) from XML or Zeep text."""
+    match = _PROPERTY_OPERATION.search(str(message or "")[:20000])
+    return match.group(1).lower() if match else None
+
+
+def doorbell_topic_matches(topic: str, configured_topics: Iterable[object]) -> bool:
+    normalized = normalize_motion_topic(topic)
+    return bool(normalized) and normalized in {
+        normalize_motion_topic(str(item)) for item in configured_topics
+    }
+
+
+def doorbell_press(
+    message: str,
+    previous_state: bool | None,
+    items: Iterable[tuple[str, str]] | None = None,
+) -> bool:
+    """Is this doorbell notice a new press?
+
+    A press is the button's state changing to true. ``Initialized`` is the
+    current state the camera reports when SurvNG subscribes, never a press.
+    Without a PropertyOperation, only an observed false-to-true change counts.
+    Reolink holds the state true for about 15 seconds, then reports the
+    release, so a repeated true is the same press.
+    """
+    if reported_notice_state(message, items) is not True or previous_state is True:
+        return False
+    operation = notice_property_operation(message)
+    if operation is not None:
+        return operation == "changed"
+    return previous_state is False

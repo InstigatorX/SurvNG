@@ -808,3 +808,120 @@ class CaptureProtocolTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Captured from a Reolink doorbell (front-door): a press, its release 15 s
+# later, and the state report sent when SurvNG subscribes.
+DOORBELL_PRESS_XML = (
+    '<ns0:Message xmlns:ns0="http://docs.oasis-open.org/wsn/b-2" xmlns:ns1="http://www.onvif.org/ver10/schema">'
+    '<ns1:Message UtcTime="2026-11-22T16:45:43Z" PropertyOperation="Changed">'
+    '<ns1:Source><ns1:SimpleItem Name="Source" Value="000" /></ns1:Source>'
+    '<ns1:Data><ns1:SimpleItem Name="State" Value="true" /></ns1:Data></ns1:Message></ns0:Message>'
+)
+DOORBELL_RELEASE_XML = DOORBELL_PRESS_XML.replace("16:45:43", "16:45:58").replace('Value="true"', 'Value="false"')
+DOORBELL_INITIALIZED_XML = DOORBELL_RELEASE_XML.replace('"Changed"', '"Initialized"')
+VISITOR_TOPIC = "tns1:RuleEngine/MyRuleDetector/Visitor"
+
+
+def doorbell_camera(*, enabled: bool = True) -> CameraConfig:
+    return CameraConfig.model_validate({
+        "id": "front-door", "name": "Front door", "stream_url": "rtsp://example.invalid/main",
+        "onvif": {"enabled": True, "host": "example.invalid", "username": "admin"},
+        "doorbell": {"enabled": enabled},
+    })
+
+
+def run_notifications(listener: OnvifEventListener, batches: list[list[tuple[str, str]]]) -> None:
+    """Drive the real PullMessages loop, one subscription, then stop."""
+    listener._stop.clear()
+    remaining = list(batches)
+
+    def pull_messages(_request):
+        if not remaining:
+            listener._stop.set()
+            return SimpleNamespace(NotificationMessage=[])
+        return SimpleNamespace(NotificationMessage=[
+            SimpleNamespace(Topic=topic, Message=message) for topic, message in remaining.pop(0)
+        ])
+
+    pullpoint = Mock()
+    pullpoint.PullMessages.side_effect = pull_messages
+    modules = {
+        "onvif": SimpleNamespace(ONVIFCamera=type("FakeOnvifCamera", (), {})),
+        "zeep": SimpleNamespace(Transport=object),
+        "zeep.cache": SimpleNamespace(SqliteCache=object),
+    }
+    with (
+        patch.dict(sys.modules, modules),
+        patch.object(listener, "_subscribe", return_value=pullpoint),
+        patch.object(listener, "_unsubscribe"),
+        patch.object(listener, "_close_transport"),
+    ):
+        listener._run_until_stopped()
+
+
+class DoorbellRecognitionTest(unittest.TestCase):
+    def test_press_is_recognized_once_and_never_reaches_motion(self) -> None:
+        on_motion, on_doorbell = Mock(), Mock()
+        listener = OnvifEventListener(doorbell_camera(), on_motion, on_doorbell=on_doorbell)
+
+        run_notifications(listener, [
+            [(VISITOR_TOPIC, DOORBELL_INITIALIZED_XML)],
+            [(VISITOR_TOPIC, DOORBELL_PRESS_XML)],
+            # A repeated true is the same press; Reolink holds it ~15 s.
+            [(VISITOR_TOPIC, DOORBELL_PRESS_XML)],
+            [(VISITOR_TOPIC, DOORBELL_RELEASE_XML)],
+            [(VISITOR_TOPIC, DOORBELL_PRESS_XML.replace("16:45:43", "16:46:30"))],
+        ])
+
+        self.assertEqual(on_doorbell.call_count, 2)
+        topic, message, event_at = on_doorbell.call_args_list[0].args
+        self.assertEqual(topic, VISITOR_TOPIC)
+        self.assertIn('PropertyOperation="Changed"', message)
+        on_motion.assert_not_called()
+        self.assertEqual(listener.doorbell_presses, 2)
+        self.assertEqual(listener.doorbell_notifications, 5)
+        self.assertEqual(listener.unrecognized_notifications, 0)
+        self.assertTrue(listener.last_doorbell_press_at)
+
+    def test_initialized_report_is_never_a_press(self) -> None:
+        on_doorbell = Mock()
+        listener = OnvifEventListener(doorbell_camera(), Mock(), on_doorbell=on_doorbell)
+        pressed_at_subscribe = DOORBELL_PRESS_XML.replace('"Changed"', '"Initialized"')
+
+        run_notifications(listener, [[(VISITOR_TOPIC, pressed_at_subscribe)], [(VISITOR_TOPIC, DOORBELL_RELEASE_XML)]])
+
+        on_doorbell.assert_not_called()
+        self.assertEqual(listener.doorbell_presses, 0)
+
+    def test_disabled_camera_keeps_doorbell_topics_unrecognized(self) -> None:
+        on_motion, on_doorbell = Mock(), Mock()
+        listener = OnvifEventListener(doorbell_camera(enabled=False), on_motion, on_doorbell=on_doorbell)
+
+        run_notifications(listener, [[(VISITOR_TOPIC, DOORBELL_PRESS_XML)]])
+
+        on_doorbell.assert_not_called()
+        on_motion.assert_not_called()
+        self.assertEqual(listener.unrecognized_notifications, 1)
+        self.assertEqual(listener.doorbell_notifications, 0)
+
+    def test_doorbell_topics_never_take_over_motion_notices(self) -> None:
+        camera_config = doorbell_camera()
+        camera_config.doorbell.topics = ["RuleEngine/MyRuleDetector/PeopleDetect"]
+        on_motion, on_doorbell = Mock(), Mock()
+        listener = OnvifEventListener(camera_config, on_motion, on_doorbell=on_doorbell)
+
+        run_notifications(listener, [[("tns1:RuleEngine/MyRuleDetector/PeopleDetect", DOORBELL_PRESS_XML)]])
+
+        on_motion.assert_called_once()
+        on_doorbell.assert_not_called()
+
+    def test_doorbell_callback_failure_is_counted_and_polling_continues(self) -> None:
+        listener = OnvifEventListener(doorbell_camera(), Mock(), on_doorbell=Mock(side_effect=RuntimeError("boom")))
+
+        run_notifications(listener, [[(VISITOR_TOPIC, DOORBELL_PRESS_XML)], [(VISITOR_TOPIC, DOORBELL_RELEASE_XML)]])
+
+        self.assertEqual(listener.callback_errors, 1)
+        self.assertEqual(listener.doorbell_presses, 1)
+        self.assertEqual(listener.doorbell_notifications, 2)
+        self.assertEqual(listener.poll_errors, 0)

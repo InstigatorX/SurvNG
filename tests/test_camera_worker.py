@@ -2341,6 +2341,17 @@ class CameraWorkerTest(unittest.TestCase):
                 worker.motion_analysis.request_stop()
                 thread.join(timeout=1)
 
+    def test_doorbell_press_is_observed_without_queuing_motion(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            self.assertEqual(worker.onvif.on_doorbell, worker.handle_doorbell_press)
+            with self.assertLogs("survng.app.camera", level="INFO") as logs:
+                worker.handle_doorbell_press("tns1:RuleEngine/MyRuleDetector/Visitor", "<x/>", None)
+
+            self.assertIn("Doorbell press on gate", logs.output[0])
+            self.assertEqual(worker.motion_events.queue.qsize(), 0)
+
     def test_event_worker_survives_a_transient_handler_failure(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         # A semantic notice is the camera-primary path in camera_rescue.

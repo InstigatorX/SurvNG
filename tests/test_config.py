@@ -26,6 +26,34 @@ from survng.app.config import (
 
 
 class AppConfigTest(unittest.TestCase):
+    def test_doorbell_change_reloads_the_camera_workers(self) -> None:
+        from survng.app.config_application import manager_owned_config
+
+        def app(enabled: bool) -> AppConfig:
+            return AppConfig.model_validate({"cameras": [{
+                "id": "gate", "name": "Gate", "stream_url": "rtsp://example.invalid/b",
+                "doorbell": {"enabled": enabled},
+            }]})
+
+        # Manager-owned settings rebuild the workers, so the listener sees them.
+        self.assertNotEqual(manager_owned_config(app(False)), manager_owned_config(app(True)))
+
+    def test_doorbell_is_opt_in_per_camera_with_reolink_default_topic(self) -> None:
+        camera = CameraConfig(id="front-door", name="Front door", stream_url="rtsp://example.invalid/a")
+
+        self.assertFalse(camera.doorbell.enabled)
+        self.assertEqual(camera.doorbell.topics, ["RuleEngine/MyRuleDetector/Visitor"])
+        enabled = CameraConfig.model_validate({
+            "id": "gate", "name": "Gate", "stream_url": "rtsp://example.invalid/b",
+            "doorbell": {"enabled": True, "topics": [" Device/Trigger/DigitalInput ", "Device/Trigger/DigitalInput", ""]},
+        })
+        self.assertEqual(enabled.doorbell.topics, ["Device/Trigger/DigitalInput"])
+        with self.assertRaises(ValidationError):
+            CameraConfig.model_validate({
+                "id": "gate", "name": "Gate", "stream_url": "rtsp://example.invalid/b",
+                "doorbell": {"enabled": True, "topics": []},
+            })
+
     def test_detection_zone_can_exclude_ema_without_ignoring_objects(self) -> None:
         zone = DetectionZone(name="Road", exclude_from_ema=True, behavior="none")
 
