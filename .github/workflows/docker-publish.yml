@@ -1,13 +1,8 @@
 name: Publish Docker image
 
 on:
-  push:
-    branches:
-      - v1.0
-      - v1.1
-      - v1.2
-    tags:
-      - "v*"
+  schedule:
+    - cron: "17 9 * * *"
   workflow_dispatch:
 
 permissions:
@@ -22,16 +17,14 @@ concurrency:
 jobs:
   publish:
     # Node 24 actions require Actions Runner >= 2.327.1.
-    runs-on: [self-hosted, Linux, X64]
+    #runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
         include:
-          - target: runtime
-            suffix: ""
-            dockerfile: Dockerfile
           - target: runtime-intel
             suffix: "-intel"
             dockerfile: Dockerfile
