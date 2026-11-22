@@ -2948,7 +2948,7 @@ export function LogViewer({ lines, filter, setFilter, order, setOrder, timeZone 
             <time dateTime={line.time || undefined}>{formatDateTime(line.time, timeZone)}</time>
             <span>{line.level}</span>
             <strong>{line.logger}</strong>
-            <code>{line.message}</code>
+            <code>{line.message}{line.exception ? <><br />{line.exception}</> : null}</code>
           </div>
         )) : <div className="empty-state">No log lines match the current filters.</div>}
       </div>

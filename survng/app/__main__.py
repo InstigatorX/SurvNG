@@ -10,6 +10,7 @@ import uvicorn
 from .bind_policy import assert_network_bind_allowed
 from .config import load_config
 from .local_observability import SOCKET_ENVIRONMENT_VARIABLE, default_socket_path
+from .process_logging import install_stderr_log_handler
 from .tls import uvicorn_tls_kwargs
 
 
@@ -26,6 +27,7 @@ def main() -> None:
         help="owner-only Unix socket used by survngctl status",
     )
     args = parser.parse_args()
+    install_stderr_log_handler()
     os.environ[SOCKET_ENVIRONMENT_VARIABLE] = args.observability_socket
     config = load_config()
     assert_network_bind_allowed(args.host, config)

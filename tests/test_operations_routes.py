@@ -60,3 +60,24 @@ def test_restart_server_reports_restart_safety_conflict() -> None:
 
     assert raised.value.status_code == 409
     assert raised.value.detail == "storage repair is active"
+
+
+def test_log_search_matches_exception_text() -> None:
+    rows = (
+        {"level": "ERROR", "logger": "survng.app.recording_retention",
+         "message": "Recording retention cycle failed",
+         "exception": "RuntimeError: recording retention is already running"},
+        {"level": "INFO", "logger": "survng.app.other", "message": "unrelated"},
+    )
+    router = create_operations_router(OperationsRouteDependencies(
+        get_manager=Mock(),
+        manager_lock=threading.RLock(),
+        log_rows=lambda: rows,
+        storage_maintenance=Mock(),
+        request_server_restart=Mock(),
+        product_update=Mock(),
+    ))
+
+    result = _endpoint(router, "/api/logs", "GET")(q="already running")
+
+    assert [row["message"] for row in result["lines"]] == ["Recording retention cycle failed"]

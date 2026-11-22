@@ -75,7 +75,8 @@ def create_operations_router(deps: OperationsRouteDependencies) -> APIRouter:
                 row
                 for row in rows
                 if query
-                in f"{row.get('level', '')} {row.get('logger', '')} {row.get('message', '')}".lower()
+                in f"{row.get('level', '')} {row.get('logger', '')} {row.get('message', '')} "
+                f"{row.get('exception', '')}".lower()
             ]
         return {"lines": rows[-safe_limit:], "total": len(history)}
 
