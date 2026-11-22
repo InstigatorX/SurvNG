@@ -2,14 +2,73 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 
 # Notice topic used when confirmed speech asks for an incident check. It is
 # SurvNG's own topic, never a camera/ONVIF topic, so it carries no semantics.
 SPEECH_TOPIC = "survng/speech"
+# Topics SurvNG assigns to triggers raised by its own EMA analysis. They are
+# persisted with motion triggers and events, so the strings are a stable
+# format; classify them with ``motion_trigger_kind`` rather than comparing.
+ADAPTIVE_TOPIC_PREFIX = "adaptive/"
+ADAPTIVE_MOTION_TOPIC = "adaptive/motion"
+ADAPTIVE_VISUAL_BACKUP_TOPIC = "adaptive/visual_backup"
+ADAPTIVE_ACTIVE_FOLLOWUP_TOPIC = "adaptive/active_followup"
+# Topic of the Admin test trigger; any topic starting with "manual" is manual.
+MANUAL_TEST_TOPIC = "manual/test"
+
+
+class MotionTriggerKind(StrEnum):
+    """What raised a motion trigger, derived from its topic."""
+
+    CAMERA = "camera"
+    MANUAL = "manual"
+    SPEECH = "speech"
+    EMA_MOTION = "ema_motion"
+    EMA_VISUAL_BACKUP = "ema_visual_backup"
+    EMA_ACTIVE_FOLLOWUP = "ema_active_followup"
+
+    @property
+    def is_ema(self) -> bool:
+        return self in _EMA_KINDS
+
+
+_EMA_KINDS = frozenset({
+    MotionTriggerKind.EMA_MOTION,
+    MotionTriggerKind.EMA_VISUAL_BACKUP,
+    MotionTriggerKind.EMA_ACTIVE_FOLLOWUP,
+})
+_ADAPTIVE_KINDS = {
+    ADAPTIVE_VISUAL_BACKUP_TOPIC: MotionTriggerKind.EMA_VISUAL_BACKUP,
+    ADAPTIVE_ACTIVE_FOLLOWUP_TOPIC: MotionTriggerKind.EMA_ACTIVE_FOLLOWUP,
+}
+
+
+def motion_trigger_kind(topic: str) -> MotionTriggerKind:
+    """Classify a trigger topic. Camera/ONVIF topics are the default.
+
+    SurvNG's own ``adaptive/...`` topics are matched exactly as written (they
+    are never namespaced). Manual and speech topics use the same normalized
+    form as ``semantic_motion_kind``.
+    """
+    raw = str(topic or "")
+    if raw.startswith(ADAPTIVE_TOPIC_PREFIX):
+        return _ADAPTIVE_KINDS.get(raw, MotionTriggerKind.EMA_MOTION)
+    normalized = normalize_motion_topic(raw)
+    if normalized.startswith("manual"):
+        return MotionTriggerKind.MANUAL
+    if normalized == SPEECH_TOPIC:
+        return MotionTriggerKind.SPEECH
+    return MotionTriggerKind.CAMERA
 
 
 def is_speech_topic(topic: str) -> bool:
-    return normalize_motion_topic(topic) == SPEECH_TOPIC
+    return motion_trigger_kind(topic) is MotionTriggerKind.SPEECH
+
+
+def is_manual_topic(topic: str) -> bool:
+    return motion_trigger_kind(topic) is MotionTriggerKind.MANUAL
 
 
 def normalize_motion_topic(topic: str) -> str:

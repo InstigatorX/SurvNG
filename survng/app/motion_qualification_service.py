@@ -13,6 +13,7 @@ import numpy as np
 from .config import CameraConfig, DetectionZone, MotionQualificationConfig
 from .motion import MotionQualificationResult
 from .ema_v2 import EmaPolicy
+from .motion_topics import is_manual_topic
 from .motion_pipeline import (
     MotionContext,
     MotionDebugSnapshotStore,
@@ -292,7 +293,7 @@ class MotionQualificationService:
                         configuration={
                             "observation_kind": "motion_event",
                             "event_source": (
-                                "manual" if topic.startswith("manual") else "onvif"
+                                "manual" if is_manual_topic(topic) else "onvif"
                             ),
                             "event_topic": topic,
                             "event_message": message,

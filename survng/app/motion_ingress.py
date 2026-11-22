@@ -13,7 +13,12 @@ from .camera_semantics import camera_semantic_reports
 from .motion_events import MotionEventCoordinator, MotionEventTiming, MotionTrigger
 from .domain_events import MotionObserved
 from .ema_v2 import CameraNotice, EpisodeDecision, EpisodeDecisionReason
-from .motion_topics import SPEECH_TOPIC
+from .motion_topics import (
+    ADAPTIVE_MOTION_TOPIC,
+    ADAPTIVE_VISUAL_BACKUP_TOPIC,
+    SPEECH_TOPIC,
+    is_manual_topic,
+)
 
 
 class MotionIngressQualification(Protocol):
@@ -159,8 +164,7 @@ class MotionEventIngressService:
             received_at = self.epoch_now()
             receipt_time = datetime.fromtimestamp(received_at, timezone.utc)
             self.state.set_last_motion_at(receipt_time.isoformat())
-            normalized_topic = topic.lower()
-            manual = normalized_topic.startswith("manual")
+            manual = is_manual_topic(topic)
             if manual:
                 normalized_event_at = self._utc(event_at or receipt_time)
                 event_timing = MotionEventTiming(
@@ -373,9 +377,9 @@ class MotionEventIngressService:
             queued = self.enqueue(
                 MotionTrigger(
                     topic=(
-                        "adaptive/visual_backup"
+                        ADAPTIVE_VISUAL_BACKUP_TOPIC
                         if mode == "camera_rescue"
-                        else "adaptive/motion"
+                        else ADAPTIVE_MOTION_TOPIC
                     ),
                     message="EMA fallback after camera admission failure",
                     event_at=datetime.fromtimestamp(

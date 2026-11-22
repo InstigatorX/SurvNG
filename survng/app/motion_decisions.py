@@ -13,7 +13,12 @@ from typing import Any, Callable, Protocol
 from .config import MotionQualificationConfig
 from .database_polling import database_polling_session
 from .motion import MotionQualificationResult
-from .motion_topics import is_speech_topic, semantic_motion_kind
+from .motion_topics import (
+    MotionTriggerKind,
+    is_speech_topic,
+    motion_trigger_kind,
+    semantic_motion_kind,
+)
 from .camera_semantics import active_camera_semantic_kind, camera_semantic_reports
 from .motion_events import (
     MotionEventCoordinator,
@@ -266,7 +271,7 @@ class MotionDecisionOrchestrator:
             mode, _sensitivity, _frame_width = self._qualification.settings()
             immediate_camera_primary = bool(
                 mode == "camera_rescue"
-                and not first.topic.startswith("adaptive/")
+                and not motion_trigger_kind(first.topic).is_ema
                 and first.retry_batch is None
             )
             triggers = self._events.coalesce(
@@ -380,15 +385,17 @@ class MotionDecisionOrchestrator:
             {"camera", "manual"}
         )
         adaptive_only = bool(
-            all(item.topic.startswith("adaptive/") for item in triggers)
+            all(motion_trigger_kind(item.topic).is_ema for item in triggers)
             and not authoritative_sources.intersection({"camera", "manual"})
         )
         visual_backup_queued = any(
-            item.topic == "adaptive/visual_backup" for item in triggers
+            motion_trigger_kind(item.topic) is MotionTriggerKind.EMA_VISUAL_BACKUP
+            for item in triggers
         )
         visual_backup = adaptive_only and visual_backup_queued
         active_followup_queued = any(
-            item.topic == "adaptive/active_followup" for item in triggers
+            motion_trigger_kind(item.topic) is MotionTriggerKind.EMA_ACTIVE_FOLLOWUP
+            for item in triggers
         )
         active_followup = adaptive_only and active_followup_queued
         live_probe = bool(

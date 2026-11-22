@@ -37,6 +37,11 @@ from .motion_decisions import (
 )
 from .motion_events import MotionEventCoordinator, MotionTrigger
 from .motion_pipeline import MotionDebugSnapshotStore, MotionEvidenceRepository
+from .motion_topics import (
+    ADAPTIVE_ACTIVE_FOLLOWUP_TOPIC,
+    ADAPTIVE_MOTION_TOPIC,
+    ADAPTIVE_VISUAL_BACKUP_TOPIC,
+)
 
 LOGGER = logging.getLogger(__name__)
 # Per-camera cap on full-resolution live frames referenced by the evidence
@@ -1662,11 +1667,11 @@ class MotionAnalysisService:
             trigger_enqueued = self._enqueue_trigger(
                 MotionTrigger(
                     topic=(
-                        "adaptive/active_followup"
+                        ADAPTIVE_ACTIVE_FOLLOWUP_TOPIC
                         if followup
-                        else "adaptive/visual_backup"
+                        else ADAPTIVE_VISUAL_BACKUP_TOPIC
                         if trigger_mode == "camera_rescue"
-                        else "adaptive/motion"
+                        else ADAPTIVE_MOTION_TOPIC
                     ),
                     message=(
                         "new credible motion during active EMA episode"
