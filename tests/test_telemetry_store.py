@@ -453,3 +453,56 @@ def test_operational_budget_prunes_fine_grained_history_first(tmp_path) -> None:
         store.camera_history(since=start, resolution_minutes=1)
     )
     assert remaining <= 3
+
+
+def test_camera_availability_returns_hourly_slots_per_camera(tmp_path) -> None:
+    store = TelemetryStore(tmp_path)
+    now = datetime(2026, 11, 21, 12, 30, tzinfo=timezone.utc)
+    current_hour = now.replace(minute=0)
+    previous_hour = current_hour - timedelta(hours=1)
+    store.write_bucket_batch(
+        [],
+        [
+            # Gate: fully available last hour, half available this hour.
+            CameraTelemetryBucket(sampled_at=previous_hour + timedelta(minutes=5), camera_id="gate", available=1.0),
+            CameraTelemetryBucket(sampled_at=current_hour + timedelta(minutes=1), camera_id="gate", available=1.0),
+            CameraTelemetryBucket(
+                sampled_at=current_hour + timedelta(minutes=2),
+                camera_id="gate",
+                available=0.0,
+                capture_interruptions=3,
+            ),
+            # Foyer is disabled (not expected): no outage is reported.
+            CameraTelemetryBucket(sampled_at=current_hour + timedelta(minutes=1), camera_id="foyer", expected=0.0),
+            # Outside the window.
+            CameraTelemetryBucket(sampled_at=now - timedelta(hours=5), camera_id="gate", available=0.0),
+            # Coarser rollups are ignored so samples are not double counted.
+            CameraTelemetryBucket(
+                sampled_at=current_hour, camera_id="gate", resolution_minutes=15, available=0.0
+            ),
+        ],
+    )
+
+    result = store.camera_availability(hours=3, now=now)
+
+    assert sorted(result) == ["foyer", "gate"]
+    gate = result["gate"]
+    assert [slot["started_at"] for slot in gate] == [
+        (current_hour - timedelta(hours=2)).isoformat(),
+        previous_hour.isoformat(),
+        current_hour.isoformat(),
+    ]
+    assert [slot["availability_percent"] for slot in gate] == [None, 100.0, 50.0]
+    assert gate[2]["capture_interruptions"] == 3
+    assert [slot["availability_percent"] for slot in result["foyer"]] == [None, None, None]
+
+
+def test_camera_availability_clamps_the_window(tmp_path) -> None:
+    store = TelemetryStore(tmp_path)
+    now = datetime(2026, 11, 21, 12, 30, tzinfo=timezone.utc)
+    store.write_bucket_batch(
+        [], [CameraTelemetryBucket(sampled_at=now, camera_id="gate", available=1.0)]
+    )
+
+    assert len(store.camera_availability(hours=0, now=now)["gate"]) == 1
+    assert len(store.camera_availability(hours=10_000, now=now)["gate"]) == 168

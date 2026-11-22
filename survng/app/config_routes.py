@@ -91,6 +91,7 @@ class ConfigRouteDependencies:
     validate_config: Callable[[AppConfig], None]
     lock: threading.RLock
     probe_limiter: threading.BoundedSemaphore
+    recent_changes: Callable[[int], list[dict[str, Any]]] | None = None
 
 
 def _encoded_url_password(value: str | None) -> str | None:
@@ -316,6 +317,13 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
     @router.get("/api/config")
     def get_config() -> dict:
         return redacted_config_payload(deps.get_config())
+
+    @router.get("/api/config/changes")
+    def get_config_changes(limit: int = 20) -> dict:
+        """Recently saved configuration changes, newest first, with values redacted."""
+        if deps.recent_changes is None:
+            return {"changes": []}
+        return {"changes": deps.recent_changes(max(1, min(int(limit), 100)))}
 
     @router.put("/api/config")
     def put_config(next_config: AppConfig) -> dict:

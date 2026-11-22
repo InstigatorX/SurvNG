@@ -1,0 +1,471 @@
+/* Admin Overview: summary tiles, attention queue and camera table. */
+.admin-overview {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 24px;
+  overflow-y: auto;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 28px 32px 40px;
+  color: var(--ink);
+}
+
+/* Sections keep their natural height; the Overview itself scrolls. */
+.admin-overview > * {
+  flex-shrink: 0;
+}
+
+.admin-overview-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.admin-overview-head h2 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -.01em;
+}
+
+.admin-overview-head p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.admin-overview-head-actions,
+.admin-overview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.admin-overview button,
+.admin-overview a.button {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--control);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  padding: 0 14px;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.admin-overview button:hover,
+.admin-overview a.button:hover {
+  background: var(--control-muted);
+}
+
+.admin-overview button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--panel-solid);
+}
+
+.admin-overview button.primary:hover {
+  background: color-mix(in srgb, var(--accent) 85%, white);
+}
+
+.admin-overview button:focus-visible,
+.admin-overview a.button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.admin-overview-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.admin-overview-tiles article,
+.admin-overview-panel {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-solid);
+}
+
+.admin-overview-tiles article {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+}
+
+.admin-overview-tiles .label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-overview-tiles strong {
+  font-size: 26px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+
+.admin-overview-tiles strong small {
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.admin-overview-chip {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 550;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+
+.admin-overview-chip i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.admin-overview-chip.good { background: var(--ok-bg); color: var(--ok-ink); }
+.admin-overview-chip.bad { background: var(--bad-bg); color: var(--bad-ink); }
+.admin-overview-chip.warn { background: var(--warn-bg); color: var(--warn); }
+.admin-overview-chip.muted { background: var(--control-muted); color: var(--muted); }
+.admin-overview-chip.mono,
+.admin-overview .mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.admin-overview-meter {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--control-muted);
+}
+
+.admin-overview-meter span {
+  display: block;
+  height: 100%;
+  background: var(--good);
+}
+
+.admin-overview-meter.warn span { background: var(--warn); }
+.admin-overview-meter.bad span { background: var(--danger); }
+
+.admin-overview-spark {
+  width: 100%;
+  height: 24px;
+}
+
+.admin-overview-spark .area { fill: color-mix(in srgb, var(--accent) 18%, transparent); }
+.admin-overview-spark .line { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.admin-overview-spark .point { fill: var(--accent); }
+
+.admin-overview-spark-empty,
+.admin-overview-muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-overview-panel {
+  overflow: hidden;
+}
+
+.admin-overview-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+}
+
+.admin-overview-panel-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.admin-overview-panel-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-overview-attention {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  border-top: 1px solid var(--line);
+  box-shadow: inset 3px 0 0 var(--accent);
+  padding: 14px 18px;
+}
+
+.admin-overview-attention.critical { box-shadow: inset 3px 0 0 var(--danger); }
+.admin-overview-attention.warning { box-shadow: inset 3px 0 0 var(--warn); }
+
+.admin-overview-attention > div:first-child {
+  flex: 1 1 360px;
+  min-width: 0;
+}
+
+.admin-overview-attention strong {
+  font-size: 14px;
+}
+
+.admin-overview-attention p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.admin-overview-empty {
+  margin: 0;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+  padding: 16px 18px;
+}
+
+.admin-overview-table-scroll {
+  overflow-x: auto;
+}
+
+.admin-overview-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+}
+
+.admin-overview-table th[scope="col"] {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  padding: 10px 14px;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.admin-overview-table .uptime-col {
+  width: 240px;
+}
+
+.admin-overview-table th[scope="row"],
+.admin-overview-table td {
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  font-weight: 400;
+  padding: 11px 14px;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.admin-overview-table td.muted {
+  color: var(--muted);
+}
+
+.admin-overview .admin-overview-link {
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-weight: 600;
+  padding: 0;
+}
+
+.admin-overview .admin-overview-link:hover {
+  background: transparent;
+  color: var(--active-ink);
+  text-decoration: underline;
+}
+
+.admin-overview-uptime {
+  display: flex;
+  gap: 2px;
+}
+
+.admin-overview-uptime span {
+  height: 14px;
+  flex: 1;
+  border-radius: 2px;
+  background: var(--control-muted);
+}
+
+.admin-overview-uptime .good { background: var(--good); }
+.admin-overview-uptime .degraded { background: var(--warn); }
+.admin-overview-uptime .offline { background: var(--danger); }
+
+@media (max-width: 1100px) {
+  .admin-overview-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .admin-overview {
+    height: auto;
+    padding: 18px 14px 32px;
+  }
+
+  .admin-overview-tiles {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* The Overview has no command bar or save bar: use the full workspace height. */
+.admin-workspace-surface.admin-workspace-home {
+  grid-row: 1 / -1;
+  grid-template-columns: minmax(0, 1fr);
+  padding-bottom: 0;
+}
+
+/* Health summary sits inside the Health tab panel, which scrolls. */
+.admin-overview.health-summary {
+  height: auto;
+  overflow: visible;
+  padding: 8px 0 24px;
+}
+
+.health-range {
+  display: flex;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-solid);
+  padding: 3px;
+}
+
+.admin-overview .health-range button {
+  min-height: 30px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 12px;
+}
+
+.admin-overview .health-range button.active {
+  background: var(--active);
+  color: var(--ink);
+}
+
+.health-pipeline-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(110px, auto);
+  gap: 16px;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  padding: 12px 18px;
+}
+
+.health-pipeline-row strong {
+  font-size: 13px;
+}
+
+.health-pipeline-row p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: none;
+}
+
+.health-pipeline-spark {
+  height: 28px;
+}
+
+.health-pipeline-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  text-align: right;
+}
+
+.health-details {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.health-details > summary {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+@media (max-width: 760px) {
+  .health-pipeline-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .health-pipeline-spark {
+    display: none;
+  }
+}
+
+/* Needs attention beside Recently changed. */
+.admin-overview-split {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+
+.admin-overview-changes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-overview-changes li {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-top: 1px solid var(--line);
+  padding: 11px 18px;
+  font-size: 13px;
+}
+
+.admin-overview-change-label {
+  overflow-wrap: anywhere;
+}
+
+.admin-overview-changes .mono {
+  overflow-wrap: anywhere;
+}
+
+.admin-overview-changes .muted,
+.admin-overview-change-meta {
+  color: var(--muted);
+}
+
+.admin-overview-changes em {
+  font-style: normal;
+}
+
+.admin-overview-change-meta {
+  font-size: 12px;
+}
+
+@media (max-width: 1100px) {
+  .admin-overview-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -521,6 +521,9 @@ def required_api_scope(method: str, path: str) -> ApiScope:
         return "admin"
     if path == "/api/support-bundle":
         return "admin"
+    # Who changed which setting and when is administrative history.
+    if path == "/api/config/changes":
+        return "admin"
     if path.startswith("/api/tls"):
         return "admin"
     # Transcripts are recorded conversation content, not integration data.

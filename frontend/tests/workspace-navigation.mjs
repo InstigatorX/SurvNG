@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import {
   canonicalWorkspacePath,
   canonicalWorkspaceUrl,
+  compactDesktopNavigation,
+  DESKTOP_COMPACT_WORKSPACES,
   DESKTOP_PRIMARY_WORKSPACES,
   MOBILE_PRIMARY_WORKSPACES,
   resolveWorkspace,
@@ -75,6 +77,22 @@ const stylesSource = [
   readFileSync(new URL("../src/shell/shell.css", import.meta.url), "utf8"),
 ].join("\n");
 assert.equal(stylesSource.includes("grid-template-columns: 176px minmax(0, 1fr)"), false);
-assert.match(stylesSource, /\.app-shell\.workspace-rail-collapsed\s*\{\s*--workspace-rail-width:\s*68px;/);
+// Desktop navigation lives in the top bar; the left workspace rail is gone.
+assert.equal(/\.workspace-sidebar\b/.test(stylesSource), false);
+assert.equal(stylesSource.includes("--workspace-rail-width"), false);
+
+assert.deepEqual(DESKTOP_COMPACT_WORKSPACES, ["live", "incidents", "timeline", "search", "admin"]);
+const desktopIds = [...DESKTOP_PRIMARY_WORKSPACES, "admin"];
+assert.deepEqual(compactDesktopNavigation(desktopIds, "live"), {
+  inline: ["live", "incidents", "timeline", "search", "admin"],
+  overflow: ["property", "exports", "people"],
+});
+// The active workspace stays inline in its usual position even when it normally sits under More.
+assert.deepEqual(compactDesktopNavigation(desktopIds, "people"), {
+  inline: ["live", "incidents", "timeline", "search", "people", "admin"],
+  overflow: ["property", "exports"],
+});
+// Viewers have no Admin link; nothing is invented.
+assert.deepEqual(compactDesktopNavigation(DESKTOP_PRIMARY_WORKSPACES, "exports").inline, ["live", "incidents", "timeline", "exports", "search"]);
 
 console.log("workspace navigation contract tests passed");

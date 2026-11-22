@@ -63,6 +63,7 @@ from .manager import AppManager, validate_manager_configuration
 from .media_sessions import MediaSessionManager
 from .homekit_routes import HomeKitRouteDependencies, create_homekit_router
 from .manager_access import ManagerAccessCoordinator
+from .config_changes import ConfigChangeActorMiddleware, ConfigChangeLog
 from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
 from .local_observability import LocalObservabilityServer, build_runtime_status
 from .perf_samples import TimedLock
@@ -812,7 +813,7 @@ def reload_manager(
             prewarmer_running=_recording_media_runtime.prewarmer_running,
             stop_prewarmer=_recording_media_runtime._stop_recording_prewarmer,
             start_prewarmer=_recording_media_runtime._start_recording_prewarmer,
-            save_config=save_config,
+            save_config=save_config_with_history,
             publish_runtime=publish_runtime,
             refresh_runtime_caches=refresh_runtime_caches,
             storage_error=StorageTasksActiveError,
@@ -838,6 +839,23 @@ def reload_manager(
     return effective
 
 
+CONFIG_CHANGE_LOG = ConfigChangeLog()
+
+
+def save_config_with_history(
+    next_config: AppConfig,
+    path: str | Path | None = None,
+    assign_ids: bool = True,
+) -> None:
+    """Persist configuration, then record what changed against the active config."""
+    previous = config
+    if path is None:
+        save_config(next_config, assign_ids=assign_ids)
+    else:
+        save_config(next_config, path, assign_ids=assign_ids)
+    CONFIG_CHANGE_LOG.record(previous, next_config)
+
+
 def apply_config_update(
     next_config: AppConfig,
     *,
@@ -848,7 +866,7 @@ def apply_config_update(
     global config
     application = TargetedConfigApplication(
         lock=MANAGER_RELOAD_LOCK,
-        save=save_config,
+        save=save_config_with_history,
         active_exports=_recording_media_runtime.active_export_jobs,
         storage_error=StorageTasksActiveError,
     )
@@ -1066,10 +1084,11 @@ app.include_router(
             publish_config=_publish_config_runtime,
             apply_config=apply_config_update,
             reload_manager=reload_manager,
-            save_config=save_config,
+            save_config=save_config_with_history,
             validate_config=validate_manager_configuration,
             lock=MANAGER_RELOAD_LOCK,
             probe_limiter=CONFIG_PROBE_LIMITER,
+            recent_changes=CONFIG_CHANGE_LOG.recent,
         )
     )
 )
@@ -1157,6 +1176,8 @@ async def ai_operations_active_handler(
     )
 
 
+# Innermost: runs after the security boundary has identified the caller.
+app.add_middleware(ConfigChangeActorMiddleware)
 app.add_middleware(ConfiguredBasePathMiddleware)
 app.add_middleware(SecurityBoundaryMiddleware)
 app.add_middleware(JsonGZipMiddleware, minimum_size=1024, compresslevel=5)

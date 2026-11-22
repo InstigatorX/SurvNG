@@ -145,7 +145,9 @@ try {
   await page.setViewportSize({ width: 900, height: 844 });
   await openWorkspace(page, "timeline", ".recordings-toolbar-day-controls .recordings-v2-date");
   await page.getByRole("button", { name: "All events" }).waitFor({ state: "visible" });
-  assert.ok(await page.locator(".workspace-sidebar").evaluate((node) => node.getBoundingClientRect().width <= 68));
+  assert.equal(await page.locator(".topbar-more").isVisible(), true);
+  assert.equal(await page.locator(".topbar-navigation > a.topbar-overflow-link").first().isVisible(), false);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
   assert.ok(await page.locator(".recordings-toolbar-day-controls .recordings-v2-date").evaluate((node) => node.scrollWidth <= node.clientWidth));
   for (const selector of [
     ".recordings-toolbar-day-controls .recordings-v2-date button",
@@ -159,7 +161,7 @@ try {
 
   await page.setViewportSize({ width: 740, height: 844 });
   await openWorkspace(page, "/", ".camera-tile");
-  assert.equal(await page.locator(".workspace-sidebar").isVisible(), false);
+  assert.equal(await page.locator(".topbar-navigation").isVisible(), false);
   assert.equal(await page.locator(".mobile-workspace-nav").isVisible(), true);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
   assert.ok(await page.locator(".mobile-workspace-nav a").first().evaluate((node) => node.getBoundingClientRect().height >= 44));

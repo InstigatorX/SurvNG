@@ -127,6 +127,21 @@ class SystemTelemetryRouterTest(unittest.TestCase):
             'survng-diagnostics-session-1.json"'
         )
 
+    def test_availability_route_clamps_hours_and_reads_the_telemetry_store(self) -> None:
+        telemetry = SimpleNamespace(camera_availability=Mock(return_value={"gate": []}))
+        manager = SimpleNamespace(telemetry=telemetry)
+        router = create_system_telemetry_router(
+            SystemTelemetryDependencies(get_manager=lambda: manager, get_config=Mock()),
+            Mock(),
+        )
+        routes = {(route.path, tuple(route.methods)): route.endpoint for route in router.routes}
+        endpoint = routes[("/api/telemetry/availability", ("GET",))]
+
+        assert endpoint(24) == {"hours": 24, "cameras": {"gate": []}}
+        telemetry.camera_availability.assert_called_with(hours=24)
+        assert endpoint(5000)["hours"] == 168
+        assert endpoint(-3)["hours"] == 1
+
     def test_system_status_includes_lightweight_cpu_and_application_memory(self) -> None:
         manager = SimpleNamespace(
             storage_dir=Path("/tmp"),

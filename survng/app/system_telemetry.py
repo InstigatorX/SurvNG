@@ -833,6 +833,16 @@ def create_system_telemetry_router(
             active_manager, active_config, hours=hours, camera_id=camera_id
         )
 
+    @router.get("/api/telemetry/availability")
+    def camera_availability(hours: int = 24) -> dict[str, Any]:
+        """Hourly availability per camera, for uptime strips in Admin."""
+        active_manager = dependencies.get_manager()
+        span = max(1, min(int(hours), 168))
+        return {
+            "hours": span,
+            "cameras": active_manager.telemetry.camera_availability(hours=span),
+        }
+
     @router.post("/api/telemetry/diagnostics")
     def start_diagnostics(request: DiagnosticSessionRequest) -> dict[str, Any]:
         active_manager = dependencies.get_manager()

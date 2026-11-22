@@ -1,0 +1,461 @@
+/* Camera Studio: camera list, camera heading, collapsed Admin rail, and the
+   "Review before saving" panel shared with the Settings workspace. */
+
+.camera-studio-list {
+  display: none;
+}
+
+.camera-studio-heading {
+  display: none;
+}
+
+.admin-rail-toggle {
+  display: none;
+}
+
+@media (min-width: 901px) {
+  /* Collapsed Admin rail: icons only. */
+  .settings-grid.admin-rail-collapsed {
+    --admin-navigation-width: 56px;
+  }
+
+  .admin-rail-collapsed .admin-navigation>nav {
+    gap: 6px;
+    padding: 14px 8px 12px;
+  }
+
+  .admin-rail-collapsed .admin-navigation nav h2,
+  .admin-rail-collapsed .admin-navigation nav button > span,
+  .admin-rail-collapsed .admin-navigation nav button > .admin-nav-count {
+    display: none;
+  }
+
+  .admin-rail-collapsed .admin-navigation nav button,
+  .admin-rail-collapsed .admin-navigation nav button.secondary {
+    width: 40px;
+    min-height: 40px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .admin-rail-collapsed .admin-navigation nav button svg {
+    display: block;
+  }
+
+  .admin-rail-toggle {
+    display: grid;
+    width: 40px;
+    height: 40px;
+    flex: 0 0 auto;
+    margin: auto 8px 74px;
+    place-items: center;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+  }
+
+  .admin-rail-toggle:hover {
+    background: var(--control-muted);
+    color: var(--ink);
+  }
+
+  .admin-rail-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* Camera list column next to the camera editor. */
+  .admin-workspace-surface.admin-workspace-cameras {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .admin-workspace-cameras>.camera-studio-list {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .admin-workspace-cameras>.settings-panel {
+    grid-column: 2;
+  }
+
+  .camera-studio-list {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+    border-right: 1px solid var(--line);
+    background: var(--subtle);
+    padding: 12px 8px;
+  }
+
+  .camera-studio-list ul {
+    display: grid;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .camera-studio-list li button {
+    display: grid;
+    width: 100%;
+    min-height: 48px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    align-items: center;
+    column-gap: 10px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+    padding: 7px 10px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .camera-studio-list li button:hover {
+    background: var(--control-muted);
+  }
+
+  .camera-studio-list li button.active {
+    background: var(--active);
+  }
+
+  .camera-studio-list li button:focus-visible,
+  .camera-studio-add:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .camera-studio-name {
+    overflow: hidden;
+    font-size: 13px;
+    font-weight: 550;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .camera-studio-list li button.active .camera-studio-name {
+    font-weight: 650;
+  }
+
+  .camera-studio-sub {
+    grid-column: 1;
+    overflow: hidden;
+    color: var(--muted);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .camera-studio-sub.bad {
+    color: var(--bad-ink);
+  }
+
+  .camera-studio-sub.unsaved {
+    color: var(--warn);
+    font-size: 10px;
+    font-weight: 650;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+
+  .camera-studio-dot {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+
+  .camera-studio-dot.good { background: var(--good); }
+  .camera-studio-dot.bad { background: var(--danger); }
+
+  .camera-studio-add {
+    display: inline-flex;
+    min-height: 36px;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    background: var(--control);
+    color: var(--ink);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 550;
+    margin: 0 4px;
+    cursor: pointer;
+  }
+
+  /* Camera heading replaces the camera dropdown at desktop widths. */
+  .camera-studio-heading {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .camera-studio-heading h2 {
+    overflow: hidden;
+    margin: 0;
+    font-size: 18px;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .camera-studio-stream {
+    color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .admin-command-bar .camera-studio-picker {
+    display: none;
+  }
+
+  /* Review panel as a column of the workspace. */
+  .admin-review-open .admin-workspace-surface.admin-workspace-cameras {
+    grid-template-columns: 220px minmax(0, 1fr) minmax(300px, 360px);
+  }
+
+  .admin-review-open .admin-workspace-surface.admin-workspace-general {
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
+  }
+
+  .admin-workspace-surface>.change-review {
+    grid-column: -2 / -1;
+    grid-row: 1;
+  }
+}
+
+.camera-studio-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  background: var(--control-muted);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 550;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+
+.camera-studio-chip i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.camera-studio-chip.good { background: var(--ok-bg); color: var(--ok-ink); }
+.camera-studio-chip.bad { background: var(--bad-bg); color: var(--bad-ink); }
+
+/* Save bar: Review changes is a toggle. */
+.admin-save-actions button.pressed {
+  border-color: var(--accent);
+  background: var(--active);
+  color: var(--active-ink);
+}
+
+.change-review {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-left: 1px solid var(--line-strong);
+  background: var(--panel-solid);
+  color: var(--ink);
+}
+
+.change-review header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  padding: 18px 20px;
+}
+
+.change-review h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.change-review h2:focus {
+  outline: none;
+}
+
+.change-review header p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.change-review-close {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--control);
+  color: var(--ink);
+  padding: 0;
+}
+
+.change-review-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  padding: 6px 20px 16px;
+}
+
+.change-review-body h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 2px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.change-review-body h3 em {
+  color: var(--warn);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 650;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.change-review-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  border-top: 1px solid var(--line);
+  padding: 10px 0;
+}
+
+.change-review-label {
+  font-size: 13px;
+}
+
+.change-review-values {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.change-review-value {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  padding: 0 4px;
+}
+
+.change-review-value.old { background: var(--bad-bg); color: var(--bad-ink); }
+.change-review-value.new { background: var(--ok-bg); color: var(--ok-ink); }
+
+.change-review-undo {
+  min-height: 0;
+  border: 0;
+  background: none;
+  color: var(--active-ink);
+  font: inherit;
+  font-size: 12px;
+  padding: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.change-review footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding: 16px 20px;
+}
+
+.change-review footer button {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--control);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.change-review footer button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--panel-solid);
+}
+
+.change-review footer button:disabled {
+  opacity: .55;
+  cursor: default;
+}
+
+.change-review button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Below the desktop layout the review opens as a sheet over the page. */
+@media (max-width: 900px) {
+  .change-review {
+    position: fixed;
+    z-index: 70;
+    top: var(--topbar-height, 58px);
+    right: 0;
+    bottom: 0;
+    width: min(380px, 100vw);
+    box-shadow: -12px 0 30px rgb(0 0 0 / 30%);
+  }
+}
+
+@media (max-width: 760px) {
+  .change-review {
+    bottom: calc(62px + var(--safe-area-bottom, 0px));
+    width: 100vw;
+  }
+}
+
+/* Keep the save bar's buttons clear of the floating assistant launcher
+   (50 px button fixed 18 px from the bottom-right corner). */
+@media (min-width: 761px) {
+  .admin-save-bar {
+    padding-right: 84px;
+  }
+}
+
+.change-review footer p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}

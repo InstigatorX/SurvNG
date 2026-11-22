@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, adminHomeDestinations, adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, preferredStoredValue, readAdminSubsection, readAdminWorkspace, resolveAdminWorkspace, telemetryLocationOptions } from "../src/adminWorkspace.mjs";
+import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, ADMIN_NAV_GROUPS, adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, preferredStoredValue, readAdminSubsection, readAdminWorkspace, resolveAdminWorkspace, telemetryLocationOptions } from "../src/adminWorkspace.mjs";
 
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS.map((group) => group.label), ["Configure", "Observe", "Act"]);
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS[0].items.slice(0, 5).map((item) => item.label), ["Cameras", "Detection", "Storage", "Integrations", "Access"]);
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS[1].items.slice(0, 2).map((item) => item.label), ["Health", "Audit"]);
 assert.equal(adminDestination("general", { generalSection: "storage" }).id, "storage");
-assert.deepEqual(adminHomeDestinations().map((item) => item.id), ["cameras", "detection", "storage", "integrations", "access", "server"]);
+assert.deepEqual(ADMIN_NAV_GROUPS.map((group) => group.label), ["", "Setup", "Observe", "Maintain"]);
+assert.deepEqual(ADMIN_NAV_GROUPS.flatMap((group) => group.items.map((item) => item.id)), [
+  "home", "cameras", "detection", "storage", "integrations", "homekit", "access", "server",
+  "health", "audit", "logs", "tuneup", "diagnostics", "maintenance",
+]);
+assert.equal(adminDestination("home").label, "Overview");
 assert.equal(adminDestination("home").id, "home");
 assert.equal(adminDestination("telemetry", { telemetrySection: "diagnostics" }).id, "diagnostics");
 assert.equal(adminDestination("telemetry", { telemetrySection: "health" }).id, "health");

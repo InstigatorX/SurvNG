@@ -20,6 +20,24 @@ export const DESKTOP_PRIMARY_WORKSPACES = Object.freeze([
   "people",
 ]);
 
+// Laptop-width top bar: these stay inline, the other desktop workspaces move
+// under "More". The active workspace is always kept inline.
+export const DESKTOP_COMPACT_WORKSPACES = Object.freeze([
+  "live",
+  "incidents",
+  "timeline",
+  "search",
+  "admin",
+]);
+
+/** Split desktop workspace ids into inline links and the "More" menu for the compact top bar. */
+export function compactDesktopNavigation(ids = [], page = "") {
+  const inlineIds = new Set(DESKTOP_COMPACT_WORKSPACES);
+  const inline = ids.filter((id) => inlineIds.has(id) || id === page);
+  const overflow = ids.filter((id) => !inlineIds.has(id) && id !== page);
+  return { inline, overflow };
+}
+
 export const MOBILE_PRIMARY_WORKSPACES = Object.freeze([
   "live",
   "incidents",
