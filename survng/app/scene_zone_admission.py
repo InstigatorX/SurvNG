@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .camera_semantics import semantic_label_compatible
 from .config import CameraConfig, DetectionZone
 from .motion_correlation import _aligned_motion_regions, assess_motion_objects
 from .scene_activity import _number, evaluate_scene_activity
@@ -368,6 +369,64 @@ def _notice_camera_claim(notice) -> dict[str, Any] | None:
     return None
 
 
+CAMERA_NOTICE_POLICY_CLASSES = frozenset({"generic_camera", "semantic_camera"})
+# The only ineligibility a camera's affirmative semantic claim may stand in for.
+SEMANTIC_WAIVABLE_REASONS = frozenset({"temporal_unconfirmed"})
+
+
+def _camera_notice_policy(notice) -> dict[str, Any] | None:
+    """The persisted camera-notice policy, when this notice recorded one.
+
+    Older notices, and manual, speech and adaptive triggers, keep the legacy
+    notice behavior unchanged.
+    """
+    policy = notice.get("camera_admission") if isinstance(notice, dict) else None
+    if not isinstance(policy, dict) or policy.get("version") != 1:
+        return None
+    if policy.get("trigger_class") not in CAMERA_NOTICE_POLICY_CLASSES:
+        return None
+    return policy
+
+
+def _camera_notice_object_admission(payload: dict[str, Any], camera_policy: dict[str, Any], notice) -> tuple[bool, str]:
+    """May this observation corroborate the camera notice that triggered it?
+
+    Generic motion needs SurvNG's own temporal consensus. An affirmative
+    semantic claim is independent confirmation in place of that consensus, but
+    only for a compatible, otherwise eligible detection seen near the notice.
+    Zone, Ignore-zone, confidence and stationary policy are applied separately.
+    """
+    if payload.get("auxiliary_detection"):
+        return False, "auxiliary_detection"
+    if payload.get("confidence_eligible") is False:
+        return False, "below_confidence"
+    if camera_policy.get("trigger_class") != "semantic_camera":
+        if payload.get("temporal_consensus") is not True:
+            return False, "temporal_unconfirmed"
+        if payload.get("incident_eligible") is False:
+            return False, "object_not_incident_eligible"
+        return True, "temporal_consensus"
+    if not semantic_label_compatible(payload.get("label"), camera_policy.get("compatible_labels") or []):
+        return False, "semantic_category_mismatch"
+    if payload.get("incident_eligible") is False:
+        reasons = payload.get("incident_ineligible_reasons")
+        reasons = [str(item) for item in reasons] if isinstance(reasons, list) else [str(reasons)] if reasons else []
+        if not reasons or not set(reasons) <= SEMANTIC_WAIVABLE_REASONS:
+            return False, "object_not_incident_eligible"
+    captured = _number(payload.get("captured_at_epoch", payload.get("frame_captured_at_epoch")))
+    noticed = _number((notice or {}).get("epoch"))
+    if captured is not None and noticed is not None and abs(captured - noticed) > NOTICE_VERIFICATION_SECONDS:
+        return False, "outside_notice_window"
+    return True, "semantic_camera_confirmation"
+
+
+def _unrestricted_admits(payload: dict[str, Any], policy: dict[str, Any] | None) -> bool:
+    """Confidence and stationary policy for a full frame, where zones do not apply."""
+    if not _confidence_admitted(payload, policy):
+        return False
+    return not (stationary_presence_enforced(policy) and str(payload.get("activity_role") or "") == "scene_context")
+
+
 def _motion_region_rejection(located: dict[str, Any] | None) -> str | None:
     if not located or not located["alignment_reliable"] or not located["regions"]:
         return None
@@ -682,12 +741,19 @@ def evaluate_scene_establishment(
         policy = None
     restricting = policy_restricts(policy)
     notice_activity = _notice_activity_assessment(samples, notice)
+    camera_policy = _camera_notice_policy(notice)
     indexed = {}
     interpretations = []
+    notice_admissions: dict[str, tuple[bool, str]] = {}
+    unrestricted_allowed: dict[str, bool] = {}
     for identifier, observation, width, height in _iter_observations(samples):
         interpreted = interpret_establishment_observation(observation, policy, frame_width=width, frame_height=height)
         if identifier:
             indexed[identifier] = interpreted
+            if camera_policy is not None:
+                payload = observation.get("payload", observation)
+                notice_admissions[identifier] = _camera_notice_object_admission(payload, camera_policy, notice)
+                unrestricted_allowed[identifier] = _unrestricted_admits(payload, policy)
         interpretations.append(interpreted)
     zone = {
         "policy_version": 1,
@@ -721,7 +787,76 @@ def evaluate_scene_establishment(
         result["policy_version"] = "establishment_activity_v3"
     if restricting and isinstance(notice, dict) and notice.get("source") == "speech":
         return _speech_establishment(result, zone, activity, interpretations, samples, notice)
+    if camera_policy is not None:
+        result["camera_notice_admission"] = {
+            "trigger_class": camera_policy.get("trigger_class"),
+            "observations": [
+                {"observation_id": key, "admitted": admitted, "reason": reason}
+                for key, (admitted, reason) in sorted(notice_admissions.items())
+            ],
+        }
+
+    def establish_from_camera_notice(eligible_ids) -> bool:
+        admitted_ids = sorted(key for key in eligible_ids if notice_admissions.get(key, (False, ""))[0])
+        semantic = camera_policy.get("trigger_class") == "semantic_camera"
+        if admitted_ids:
+            epochs = []
+            for identifier, observation, _, _ in _iter_observations(samples):
+                if identifier in admitted_ids:
+                    captured = _number(observation.get("payload", observation).get("captured_at_epoch"))
+                    if captured is not None:
+                        epochs.append(captured)
+            zone_reason = "incident_zone" if any(indexed[key]["reason"] == "incident_zone" for key in admitted_ids) else "full_frame"
+            zone.update(establishment_eligible=True, reason=zone_reason)
+            result.update(
+                status="supported",
+                reason="semantic_camera_notice_confirmed" if semantic else "verified_camera_notice",
+                summary=(
+                    "The camera's object report was confirmed by a matching detection."
+                    if semantic else
+                    "A temporally confirmed object verified the camera's motion report."
+                ),
+                activity_epoch=max(epochs) if epochs else notice.get("epoch"),
+                supporting_observation_ids=admitted_ids,
+                evidence_kind="camera_semantic_confirmed_object" if semantic else "temporally_confirmed_object",
+            )
+            claim = _notice_camera_claim(notice)
+            if semantic and claim:
+                result["camera_claim"] = claim
+            return True
+        return False
+
+    def reject_camera_notice(eligible_ids) -> dict[str, Any]:
+        semantic = camera_policy.get("trigger_class") == "semantic_camera"
+        reasons = {notice_admissions[key][1] for key in eligible_ids if key in notice_admissions}
+        if not semantic:
+            reason = "camera_notice_unconfirmed"
+        elif reasons == {"semantic_category_mismatch"}:
+            reason = "semantic_category_mismatch"
+        else:
+            reason = "semantic_notice_unconfirmed"
+        zone.update(establishment_eligible=False, reason=reason)
+        result.update(
+            status="unsupported",
+            reason=reason,
+            summary=(
+                "The camera reported motion; no temporally confirmed object verified it."
+                if not semantic else
+                "The camera reported an object; no matching eligible detection confirmed it."
+            ),
+            activity_epoch=None,
+            supporting_observation_ids=[],
+            evidence_kind="none",
+        )
+        return result
+
     if not restricting and (notice_activity is None or activity["status"] == "supported"):
+        if notice and result.get("status") != "supported" and camera_policy is not None:
+            # A camera notice is a reason to look, not activity by itself.
+            eligible_ids = [key for key, allowed in unrestricted_allowed.items() if allowed]
+            if establish_from_camera_notice(eligible_ids):
+                return result
+            return reject_camera_notice(eligible_ids)
         if notice and result.get("status") != "supported":
             source = notice.get("source") if notice.get("source") in {"camera", "speech"} else "motion"
             result.update(
@@ -752,6 +887,12 @@ def evaluate_scene_establishment(
         # eligible, which would turn an unexplained correlation notice into
         # an incident.
         if not restricting or not region_placement or not region_placement["eligible"]:
+            return False
+        if camera_policy is not None and not (
+            camera_policy.get("trigger_class") == "generic_camera" and camera_policy.get("motion_validated") is True
+        ):
+            # Regions measured on motion SurvNG rejected, or bypassed, cannot
+            # stand in for the object a camera notice still needs.
             return False
         # No detector class explained the notice, but the motion itself sits in
         # an eligible zone. The incident stays unlabeled.
@@ -821,6 +962,14 @@ def evaluate_scene_establishment(
                     zone.update(establishment_eligible=False, reason="object_not_motion_correlated")
                     return result
                 eligible_ids = verified_ids
+            if camera_policy is not None:
+                if establish_from_camera_notice(eligible_ids):
+                    return result
+                if eligible_ids:
+                    if establish_from_motion_regions():
+                        return result
+                    return reject_camera_notice(eligible_ids)
+                eligible_ids = []
             if eligible_ids:
                 epochs = []
                 noticed = _number(notice.get("epoch"))

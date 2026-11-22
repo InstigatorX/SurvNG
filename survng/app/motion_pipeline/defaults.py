@@ -118,15 +118,9 @@ def default_motion_observation_stage_configs() -> list[MotionStageConfig]:
             "enabled": True,
             "base_score": 0.55,
             "priority_score": 0.95,
-            "priority_keywords": [
-                "manual",
-                "person",
-                "people",
-                "human",
-                "vehicle",
-                "animal",
-                "face",
-            ],
+            # Semantic classes come from the shared camera taxonomy; keywords
+            # are only for operator-defined vendor topics.
+            "priority_keywords": [],
         },
     )]
 

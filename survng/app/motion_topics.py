@@ -24,7 +24,8 @@ def semantic_motion_kind(topic: str) -> str | None:
     """Classify known semantic notices without inferring classes from XML data.
 
     Keep the established vendor-neutral aliases and explicitly include
-    Reolink's DogCatDetect, whose topic does not contain the word animal.
+    Reolink's DogCatDetect, whose topic does not contain the word animal, and
+    Dahua Smart Motion Detection's SmartMotionHuman/SmartMotionVehicle.
     Unknown topics remain eligible for the parser's generic motion fallback.
     """
     normalized = normalize_motion_topic(topic)
@@ -32,8 +33,8 @@ def semantic_motion_kind(topic: str) -> str | None:
         return "manual"
     terminal = "".join(character for character in normalized.rsplit("/", 1)[-1] if character.isalnum())
     for kind, aliases in (
-        ("person", {"person", "persondetect", "persondetected", "persondetection", "persondetector", "people", "peopledetect", "humandetect"}),
-        ("vehicle", {"vehicle", "vehicledetect", "vehicledetected", "vehicledetection", "vehicledetector"}),
+        ("person", {"person", "persondetect", "persondetected", "persondetection", "persondetector", "people", "peopledetect", "humandetect", "smartmotionhuman"}),
+        ("vehicle", {"vehicle", "vehicledetect", "vehicledetected", "vehicledetection", "vehicledetector", "smartmotionvehicle"}),
         ("animal", {"animal", "animaldetect", "animaldetected", "animaldetection", "animaldetector", "dogcatdetect"}),
         ("face", {"face", "facedetect", "facedetected", "facedetection", "facedetector"}),
     ):
