@@ -18,9 +18,12 @@ from .motion_topics import (
     MotionTriggerKind,
     is_speech_topic,
     motion_trigger_kind,
-    semantic_motion_kind,
 )
-from .camera_semantics import active_camera_semantic_kind, camera_semantic_reports
+from .camera_semantics import (
+    CAMERA_NOTICE_ADMISSION_VERSION,
+    camera_notice_admission,
+    camera_semantic_reports,
+)
 from .motion_events import (
     MotionEventCoordinator,
     MotionTrigger,
@@ -72,11 +75,57 @@ class MotionDecisionState(Protocol):
     def increment_stat(self, name: str, amount: int = 1) -> None: ...
 
 
-def priority_motion_topic(topic: str, message: str = "") -> bool:
-    return (
-        semantic_motion_kind(topic) == "manual"
-        or active_camera_semantic_kind(topic, message) is not None
+TRIGGER_MANUAL = "manual"
+TRIGGER_SPEECH = "speech"
+TRIGGER_SEMANTIC_CAMERA = "semantic_camera"
+TRIGGER_GENERIC_CAMERA = "generic_camera"
+TRIGGER_ADAPTIVE = "adaptive"
+# Most authoritative first: a batch takes the first class any member has.
+_TRIGGER_CLASS_PRECEDENCE = (
+    TRIGGER_MANUAL,
+    TRIGGER_SPEECH,
+    TRIGGER_SEMANTIC_CAMERA,
+    TRIGGER_GENERIC_CAMERA,
+    TRIGGER_ADAPTIVE,
+)
+# Classes whose notice is primary evidence in camera_rescue: they skip EMA
+# qualification and the burst-coalescing delay. Generic camera motion is not
+# among them; it is validated like any other motion.
+CAMERA_PRIMARY_TRIGGER_CLASSES = frozenset(
+    {TRIGGER_MANUAL, TRIGGER_SPEECH, TRIGGER_SEMANTIC_CAMERA}
+)
+
+
+def classify_motion_trigger(topic: str, message: str = "") -> str:
+    """The one predicate separating manual, speech, semantic, generic and adaptive.
+
+    SurvNG-owned topics are classified by ``motion_trigger_kind``; a camera
+    notice is semantic only when its raw topic and payload affirm a subject.
+    """
+    kind = motion_trigger_kind(topic)
+    if kind.is_ema:
+        return TRIGGER_ADAPTIVE
+    if kind is MotionTriggerKind.MANUAL:
+        return TRIGGER_MANUAL
+    if kind is MotionTriggerKind.SPEECH:
+        return TRIGGER_SPEECH
+    if camera_notice_admission(topic, message)["kind"] == "semantic":
+        return TRIGGER_SEMANTIC_CAMERA
+    return TRIGGER_GENERIC_CAMERA
+
+
+def batch_trigger_class(classes: list[str]) -> str:
+    return next(
+        (item for item in _TRIGGER_CLASS_PRECEDENCE if item in classes),
+        TRIGGER_ADAPTIVE,
     )
+
+
+def priority_motion_topic(topic: str, message: str = "") -> bool:
+    return classify_motion_trigger(topic, message) in {
+        TRIGGER_MANUAL,
+        TRIGGER_SEMANTIC_CAMERA,
+    }
 
 
 def should_verify_suppression(decision_id: str, rate: float) -> bool:
@@ -153,6 +202,15 @@ class _BatchShape:
     visual_backup: bool
     active_followup: bool
     live_probe: bool
+    trigger_class: str
+    # Persisted with the qualification so establishment, refinement and
+    # restarts replay the same notice policy. Mutable: the decision adds
+    # ``motion_validated`` for generic camera notices once EMA has run.
+    camera_notice_policy: dict[str, Any]
+
+    @property
+    def camera_primary(self) -> bool:
+        return self.trigger_class in CAMERA_PRIMARY_TRIGGER_CLASSES
 
     @property
     def trigger_source(self) -> str:
@@ -298,8 +356,9 @@ class MotionDecisionOrchestrator:
             mode, _sensitivity, _frame_width = self._qualification.settings()
             immediate_camera_primary = bool(
                 mode == "camera_rescue"
-                and not motion_trigger_kind(first.topic).is_ema
                 and first.retry_batch is None
+                and classify_motion_trigger(first.topic, first.message)
+                in CAMERA_PRIMARY_TRIGGER_CLASSES
             )
             triggers = self._events.coalesce(
                 first,
@@ -350,6 +409,7 @@ class MotionDecisionOrchestrator:
             priority=batch.priority,
             adaptive_only=batch.adaptive_only,
             speech=batch.speech_trigger,
+            camera_primary=batch.camera_primary,
         )
         if stop_event.is_set():
             self._abort_episode_intents(triggers)
@@ -364,6 +424,10 @@ class MotionDecisionOrchestrator:
             rescue_margin,
         )
         verification_rate = self._qualification.suppression_verification_rate()
+        if batch.trigger_class == TRIGGER_GENERIC_CAMERA:
+            # Measured motion regions may place a generic notice in a zone only
+            # when SurvNG's own qualification accepted that motion.
+            batch.camera_notice_policy["motion_validated"] = bool(result.accepted)
         confident_nuisance = is_confident_nuisance(result)
         suppression_verification_candidate = bool(
             mode in ENFORCING_MODES
@@ -521,7 +585,19 @@ class MotionDecisionOrchestrator:
                 if key not in report_keys:
                     report_keys.add(key)
                     semantic_reports.append(dict(report))
-        priority = bool(priority_triggers or semantic_reports)
+        notice_sources = [
+            (trigger.topic, trigger.message) for trigger in triggers
+        ] + [(notice.topic, notice.message) for notice in retained_notices]
+        notice_classes = [
+            classify_motion_trigger(topic, message)
+            for topic, message in notice_sources
+        ]
+        # Stored reports remain provenance. Only an affirmative claim, judged
+        # from the raw topic and payload, may bypass ordinary validation.
+        priority = any(
+            item in {TRIGGER_MANUAL, TRIGGER_SEMANTIC_CAMERA}
+            for item in notice_classes
+        )
         speech_trigger = bool(
             "speech" in authoritative_sources
             or any(is_speech_topic(item.topic) for item in triggers)
@@ -534,6 +610,33 @@ class MotionDecisionOrchestrator:
             all(motion_trigger_kind(item.topic).is_ema for item in triggers)
             and not authoritative_sources.intersection({"camera", "manual"})
         )
+        trigger_class = (
+            TRIGGER_ADAPTIVE
+            if adaptive_only
+            else TRIGGER_SPEECH
+            if speech_only
+            else batch_trigger_class(notice_classes)
+        )
+        camera_notice_policy: dict[str, Any] = {
+            "version": CAMERA_NOTICE_ADMISSION_VERSION,
+            "trigger_class": trigger_class,
+        }
+        if trigger_class == TRIGGER_SEMANTIC_CAMERA:
+            categories: list[str] = []
+            compatible: list[str] = []
+            for topic, message in notice_sources:
+                admission = camera_notice_admission(topic, message, labels)
+                if admission["kind"] != "semantic":
+                    continue
+                for category in admission["categories"]:
+                    if category not in categories:
+                        categories.append(category)
+                for label in admission["compatible_labels"]:
+                    if label not in compatible:
+                        compatible.append(label)
+            camera_notice_policy.update(
+                categories=categories, compatible_labels=compatible
+            )
         visual_backup_queued = any(
             motion_trigger_kind(item.topic) is MotionTriggerKind.EMA_VISUAL_BACKUP
             for item in triggers
@@ -564,6 +667,8 @@ class MotionDecisionOrchestrator:
             visual_backup=visual_backup,
             active_followup=active_followup,
             live_probe=live_probe,
+            trigger_class=trigger_class,
+            camera_notice_policy=camera_notice_policy,
         )
 
     def _qualification_payload(
@@ -639,6 +744,9 @@ class MotionDecisionOrchestrator:
         }
         if batch.semantic_reports:
             qualification["camera_semantics"] = {"reports": batch.semantic_reports}
+        # Persisted so establishment and every later refinement or restart
+        # replay the same notice policy instead of re-deriving it.
+        qualification["camera_notice_admission"] = batch.camera_notice_policy
         if batch.route_trigger is not None and batch.route_trigger.prequalified is not None:
             # The representative controls the camera-primary presentation and
             # timing, but route provenance controls the durable occurrence
@@ -669,6 +777,7 @@ class MotionDecisionOrchestrator:
         priority: bool,
         adaptive_only: bool,
         speech: bool = False,
+        camera_primary: bool = False,
     ) -> tuple[MotionQualificationResult, dict[str, Any]]:
         prequalified = [
             item.prequalified for item in triggers if item.prequalified is not None
@@ -692,10 +801,10 @@ class MotionDecisionOrchestrator:
             ),
             None,
         )
-        if mode == "camera_rescue" and not adaptive_only:
-            # Camera + EMA Backup makes the camera notice authoritative. EMA
-            # remains an independent rescue source and must never delay or
-            # suppress the primary camera-triggered object check.
+        if mode == "camera_rescue" and not adaptive_only and camera_primary:
+            # Camera + EMA Backup makes a manual, speech or affirmative semantic
+            # notice authoritative. EMA must never delay or suppress that
+            # object check. Generic camera motion is qualified below.
             result = MotionQualificationResult(
                 True,
                 1.0,

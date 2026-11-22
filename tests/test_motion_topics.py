@@ -19,6 +19,8 @@ from survng.app.onvif_events import OnvifEventListener
     ("VehicleDetect", "vehicle"),
     ("DogCatDetect", "animal"),
     ("FaceDetect", "face"),
+    ("SmartMotionHuman", "person"),
+    ("SmartMotionVehicle", "vehicle"),
 ])
 def test_vendor_semantics_agree_across_parser_evidence_and_decision(suffix, kind):
     topic = f"tns1:RuleEngine/tns2:MyRuleDetector/{suffix}"
@@ -138,3 +140,47 @@ def test_motion_trigger_kind_classifies_survng_and_camera_topics() -> None:
     assert motion_trigger_kind(SPEECH_TOPIC) is MotionTriggerKind.SPEECH
     camera = motion_trigger_kind("tns1:RuleEngine/CellMotionDetector/Motion")
     assert camera is MotionTriggerKind.CAMERA and not camera.is_ema
+
+
+def _onvif_evidence(topic: str, message: str = "", **options: object) -> dict:
+    stage = OnvifEventEvidenceStage("onvif", MotionEvidenceRepository("gate"), **options)  # type: ignore[arg-type]
+    context = MotionContext(
+        camera_id="gate", captured_at=10.0, original_frame=None,
+        configuration={"observation_kind": "motion_event", "event_topic": topic, "event_message": message},
+        runtime=MotionRuntimeState("gate"),
+    )
+    return stage.process(context).source_evidence["onvif"]
+
+
+@pytest.mark.parametrize(("topic", "message", "reason"), [
+    ("RuleEngine/MyRuleDetector/PeopleDetect", '<tt:SimpleItem Name="State" Value="unknown"/>', "state_not_affirmative"),
+    ("RuleEngine/MyRuleDetector/PeopleDetect", '<tt:SimpleItem Name="State" Value="false"/>', "state_not_affirmative"),
+    ("RuleEngine/MyRuleDetector/PeopleDetect", "<tt:Message><broken", "unparsed_payload"),
+    # The default configuration no longer matches taxonomy words as substrings.
+    ("tns1:RuleEngine/CellMotionDetector/Motion", "{'Name': 'Rule', 'Value': 'person zone'}", "no_semantic_claim"),
+])
+def test_evidence_does_not_call_unconfirmed_notices_priority(topic: str, message: str, reason: str) -> None:
+    evidence = _onvif_evidence(topic, message)
+    assert evidence["priority"] is False
+    assert evidence["priority_reason"] is None
+    assert evidence["semantic_kind"] is None
+    assert evidence["semantic_admission_reason"] == reason
+    assert evidence["score"] == 0.55
+
+
+def test_evidence_priority_reason_matches_the_decision_predicate() -> None:
+    semantic = _onvif_evidence(
+        "RuleEngine/MyRuleDetector/PeopleDetect", '<tt:SimpleItem Name="State" Value="true"/>'
+    )
+    assert (semantic["priority"], semantic["priority_reason"], semantic["semantic_kind"]) == (
+        True, "semantic", "person"
+    )
+    assert _onvif_evidence("manual")["priority_reason"] == "manual"
+    custom = _onvif_evidence("rule/Tripwire", priority_keywords=("tripwire",))
+    assert (custom["priority"], custom["priority_reason"]) == (True, "keyword")
+    # A configured keyword never overrides a cleared semantic topic.
+    cleared = _onvif_evidence(
+        "RuleEngine/PersonDetect", '<tt:SimpleItem Name="State" Value="false"/>',
+        priority_keywords=("person",),
+    )
+    assert cleared["priority"] is False

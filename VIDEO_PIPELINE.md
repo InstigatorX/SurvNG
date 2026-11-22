@@ -262,15 +262,26 @@ run. It does not classify objects.
 
 | Mode | Starts object detection | Role of EMA |
 | --- | --- | --- |
-| `camera_rescue` (default) | Camera ONVIF notices, manual tests, speech, and qualified EMA backup motion | Continuous backup trigger; never delays or filters a camera notice |
+| `camera_rescue` (default) | Camera ONVIF notices, manual tests, speech, and qualified EMA backup motion | Continuous backup trigger; validates generic camera motion notices, never semantic ones |
 | `camera` | Camera ONVIF notices, manual tests and speech | Optional validator of camera notices (fusion `audit`); `bypass` turns validation off |
 | `adaptive` | Accepted EMA motion, manual tests and speech | The only automatic trigger; ONVIF notices are diagnostic only |
 
-In `camera_rescue`, a camera notice is processed immediately with no burst wait
-and no visual validation (`camera_primary_fast_path`). In `camera` mode a
-notice is validated against EMA results unless validation is bypassed.
-Semantic notices (person, vehicle, animal, face), manual tests and speech
+Each trigger is classified once (`classify_motion_trigger`) as manual, speech,
+semantic camera, generic camera or adaptive. A notice is semantic only when its
+raw topic and payload affirm a person, vehicle, animal or face; cleared,
+ambiguous, malformed and unknown payloads count as generic.
+
+In `camera_rescue`, manual, speech and semantic notices are processed
+immediately with no burst wait and no visual validation
+(`camera_primary_fast_path`). Generic camera motion notices are coalesced and
+validated against EMA like camera mode. In `camera` mode a notice is validated
+unless validation is bypassed; semantic notices, manual tests and speech
 always bypass validation.
+
+The notice policy is persisted with the decision
+(`qualification.camera_notice_admission`). Establishment then requires temporal
+object consensus for a generic notice; a semantic notice can stand in for
+consensus only for a compatible, otherwise eligible detection near the notice.
 
 ### Frame sampling and rings
 

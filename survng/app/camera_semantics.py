@@ -15,7 +15,18 @@ _CATEGORY_LABELS = {
     "face": {"face"},
 }
 _VALUE_FIELDS = {"class", "classification", "objectclass", "objecttype"}
+# IsInside is the state of an ONVIF FieldDetector (Dahua IVS intrusion) rule.
+_STATE_FIELDS = {"state", "ismotion", "motion", "isinside"}
 _INACTIVE = {"false", "0", "off", "inactive"}
+_ACTIVE = {"true", "1", "on", "active"}
+_BROAD_CLASSES = {"people", "human"}
+_ELEMENT_PREFIX = re.compile(r"(</?)[A-Za-z_][\w.-]*:")
+_PREFIXED_ATTRIBUTE = re.compile(r"\s[A-Za-z_][\w.-]*:[\w.-]+\s*=\s*(?:\"[^\"]*\"|'[^']*')")
+
+CAMERA_NOTICE_ADMISSION_VERSION = 1
+# Categories whose affirmative camera claim may stand in for SurvNG's own
+# multi-frame temporal consensus. A face implies a person is present.
+SEMANTIC_FAST_PATH_CATEGORIES = frozenset({"person", "vehicle", "animal", "face"})
 
 
 def _key(value: object) -> str:
@@ -36,7 +47,14 @@ def _explicit_items(message: str) -> list[tuple[str, str]]:
         try:
             root = ElementTree.fromstring(text)
         except ElementTree.ParseError:
-            return []
+            # Fragments with an undeclared prefix (``<tt:SimpleItem .../>``)
+            # are what the ONVIF parser accepts. Drop the prefixes and parse
+            # again strictly, so truncated or broken XML still yields nothing.
+            unprefixed = _ELEMENT_PREFIX.sub(r"\1", _PREFIXED_ATTRIBUTE.sub("", text))
+            try:
+                root = ElementTree.fromstring(unprefixed)
+            except ElementTree.ParseError:
+                return []
         return [
             (str(element.attrib.get("Name") or ""), str(element.attrib.get("Value") or ""))
             for element in root.iter()
@@ -63,7 +81,7 @@ def camera_semantic_reports(topic: str, message: str, configured_labels: Iterabl
     """Return camera claims as provenance, never as detector observations."""
     topic_category = _topic_category(topic)
     items = _explicit_items(message)
-    states = [value.strip().lower() for name, value in items if _key(name) in {"state", "ismotion", "motion"}]
+    states = [value.strip().lower() for name, value in items if _key(name) in _STATE_FIELDS]
     if states and all(value in _INACTIVE for value in states):
         return []
 
@@ -88,7 +106,7 @@ def camera_semantic_reports(topic: str, message: str, configured_labels: Iterabl
     normalized_topic = normalize_motion_topic(topic)
     for category, reported_class in claims[:16]:
         reported_key = _key(reported_class) if reported_class else ""
-        broad = reported_key in {category, "people", "human"}
+        broad = reported_key in {category, *_BROAD_CLASSES}
         if reported_class and not broad:
             exact = label_keys.get(reported_key)
             candidates = [exact] if exact is not None else []
@@ -108,3 +126,79 @@ def active_camera_semantic_kind(topic: str, message: str) -> str | None:
     """Classify an active semantic notice using both topic and payload state."""
     reports = camera_semantic_reports(topic, message)
     return str(reports[0]["category"]) if reports else None
+
+
+def _family_labels(category: str, labels: list[str]) -> list[str]:
+    allowed = _CATEGORY_LABELS[category]
+    if not labels:
+        return sorted(allowed)
+    return [label for label in labels if _key(label) in allowed]
+
+
+def _compatible_labels(report: dict[str, object], labels: list[str]) -> list[str]:
+    """Detector labels that would corroborate one camera claim.
+
+    A broad or topic-only claim keeps the configured candidates the report
+    already resolved (DogCatDetect stays dog/cat). A specific known alias such
+    as "car" admits its configured family, because cameras and detectors
+    routinely disagree within a family. An unknown specific class stays exact.
+    """
+    category = str(report.get("category") or "")
+    if category not in _CATEGORY_LABELS:
+        return []
+    if category == "face":
+        return [*_family_labels("person", labels), *_family_labels("face", labels)]
+    candidates = [str(item) for item in report.get("candidate_model_classes") or [] if str(item)]
+    reported = _key(report.get("reported_class"))
+    if reported and reported not in {category, *_BROAD_CLASSES}:
+        if reported in _CATEGORY_LABELS[category]:
+            return _family_labels(category, labels)
+        return candidates
+    return candidates if labels else _family_labels(category, labels)
+
+
+def camera_notice_admission(
+    topic: str, message: str, configured_labels: Iterable[object] = ()
+) -> dict[str, object]:
+    """Decide whether one camera notice is an affirmative semantic claim.
+
+    Only an affirmative person/vehicle/animal/face claim qualifies. Cleared or
+    ambiguous state, unreadable XML, an unknown topic and generic motion all
+    fall back to ``generic``: ordinary validation, never a bypass. A payload
+    with no state on a semantic topic is a start, matching the ONVIF parser,
+    which has already filtered explicit stops.
+    """
+    labels = [str(label).strip() for label in configured_labels if str(label).strip()]
+    generic = {"version": CAMERA_NOTICE_ADMISSION_VERSION, "kind": "generic"}
+    text = str(message or "").strip()
+    items = _explicit_items(text)
+    if text.startswith("<") and not items:
+        # Unreadable XML. Plain text without Name/Value pairs carries no state,
+        # so, as in the ONVIF parser, the topic decides.
+        return {**generic, "reason": "unparsed_payload"}
+    states = [value.strip().lower() for name, value in items if _key(name) in _STATE_FIELDS]
+    if states and not any(value in _ACTIVE for value in states):
+        return {**generic, "reason": "state_not_affirmative"}
+    reports = [
+        report for report in camera_semantic_reports(topic, text, labels)
+        if report.get("category") in SEMANTIC_FAST_PATH_CATEGORIES
+    ]
+    if not reports:
+        return {**generic, "reason": "no_semantic_claim"}
+    compatible: list[str] = []
+    for report in reports:
+        for label in _compatible_labels(report, labels):
+            if label not in compatible:
+                compatible.append(label)
+    return {
+        "version": CAMERA_NOTICE_ADMISSION_VERSION,
+        "kind": "semantic",
+        "reason": "affirmative_semantic_notice",
+        "categories": list(dict.fromkeys(str(report["category"]) for report in reports)),
+        "compatible_labels": compatible,
+    }
+
+
+def semantic_label_compatible(label: object, compatible_labels: Iterable[object]) -> bool:
+    key = _key(label)
+    return bool(key) and key in {_key(item) for item in compatible_labels}

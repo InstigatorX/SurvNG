@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from ..camera_semantics import active_camera_semantic_kind
+from ..camera_semantics import camera_notice_admission
 from ..motion_topics import semantic_motion_kind
 
 from .context import MotionContext
@@ -29,15 +29,9 @@ class OnvifEventEvidenceStage:
         enabled: bool = True,
         base_score: float = 0.55,
         priority_score: float = 0.95,
-        priority_keywords: tuple[str, ...] = (
-            "manual",
-            "person",
-            "people",
-            "human",
-            "vehicle",
-            "animal",
-            "face",
-        ),
+        # Operator-defined words for vendor topics the shared taxonomy does
+        # not know. Semantic classes come from camera_notice_admission.
+        priority_keywords: tuple[str, ...] = (),
     ) -> None:
         self._stage_id = stage_id
         self.repository = repository
@@ -68,17 +62,31 @@ class OnvifEventEvidenceStage:
         message = str(context.configuration.get("event_message") or "")
         event_source = str(context.configuration.get("event_source") or "onvif")
         searchable = f"{topic} {message}".lower()
-        semantic_kind = active_camera_semantic_kind(topic, message)
-        topic_semantic_kind = semantic_motion_kind(topic)
-        priority = topic_semantic_kind == "manual" or semantic_kind is not None or (
-            topic_semantic_kind is None
-            and any(keyword in searchable for keyword in self.priority_keywords)
+        # The same affirmative predicate the decision orchestrator applies, so
+        # diagnostics never call a cleared or malformed notice a semantic one.
+        admission = camera_notice_admission(topic, message)
+        semantic_kind = (
+            str(admission["categories"][0]) if admission["kind"] == "semantic" else None
         )
+        topic_semantic_kind = semantic_motion_kind(topic)
+        if topic_semantic_kind == "manual":
+            priority_reason: str | None = "manual"
+        elif semantic_kind is not None:
+            priority_reason = "semantic"
+        elif topic_semantic_kind is None and any(
+            keyword in searchable for keyword in self.priority_keywords
+        ):
+            priority_reason = "keyword"
+        else:
+            priority_reason = None
+        priority = priority_reason is not None
         evidence = {
             "warmed": 1.0,
             "score": self.priority_score if priority else self.base_score,
             "priority": priority,
+            "priority_reason": priority_reason,
             "semantic_kind": semantic_kind,
+            "semantic_admission_reason": str(admission["reason"]),
             "topic": topic[:300],
             "message": message[:500],
             "event_source": event_source,
@@ -151,10 +159,7 @@ def _build_onvif_source(
     options: Mapping[str, Any],
     dependencies: MotionStageDependencies,
 ) -> OnvifEventEvidenceStage:
-    raw_keywords = options.get(
-        "priority_keywords",
-        ("manual", "person", "people", "human", "vehicle", "animal", "face"),
-    )
+    raw_keywords = options.get("priority_keywords", ())
     if isinstance(raw_keywords, str):
         priority_keywords = (raw_keywords,)
     elif isinstance(raw_keywords, (list, tuple)):

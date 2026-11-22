@@ -288,3 +288,165 @@ def test_confirmation_with_background_level_change_keeps_evidence_without_incide
     restarted = EventStore(tmp_path)
     with restarted._connect() as conn:
         assert conn.execute("select count(*) from scene_incidents").fetchone()[0] == 0
+
+
+# --- Camera notice policy: a notice is a reason to look, not an incident. ---
+
+from survng.app.scene_zone_admission import evaluate_scene_establishment
+
+GENERIC_NOTICE = {"version": 1, "trigger_class": "generic_camera", "motion_validated": True}
+PERSON_NOTICE = {"version": 1, "trigger_class": "semantic_camera",
+                 "categories": ["person"], "compatible_labels": ["person"]}
+ANIMAL_NOTICE = {"version": 1, "trigger_class": "semantic_camera",
+                 "categories": ["animal"], "compatible_labels": ["dog", "cat"]}
+VEHICLE_NOTICE = {"version": 1, "trigger_class": "semantic_camera",
+                  "categories": ["vehicle"], "compatible_labels": ["car", "truck"]}
+
+
+def one_look(label="person", *, consensus=False, eligible=None, reasons=None, confidence=.92, x=20, y2=70, **extra):
+    """One frame, one box: no multi-frame physical witness."""
+    payload = {"id": "look-0", "label": label, "confidence": confidence,
+               "box": {"x1": x, "y1": y2 - 50, "x2": x + 20, "y2": y2},
+               "detection_frame_width": 160, "detection_frame_height": 100, "captured_at_epoch": 1000.5,
+               "temporal_consensus": consensus,
+               "incident_eligible": consensus if eligible is None else eligible, **extra}
+    if reasons is not None:
+        payload["incident_ineligible_reasons"] = reasons
+    return [{"id": "sample-0", "camera_id": "gate", "captured_epoch": 1000.5, "status": "complete",
+             "observations": [payload], "metadata": {"frame_width": 160, "frame_height": 100}}]
+
+
+def camera_notice(admission):
+    return {"source": "camera", "epoch": 1000.0, "features": {}, "camera_admission": admission}
+
+
+def test_generic_notice_alone_or_with_one_unconfirmed_person_does_not_establish():
+    empty = [{"id": "s", "camera_id": "gate", "captured_epoch": 1000, "status": "complete", "observations": [], "metadata": {}}]
+    alone = evaluate_scene_establishment(empty, policy=None, notice=camera_notice(GENERIC_NOTICE))
+    assert alone["status"] == "unsupported"
+    assert alone["reason"] == "camera_notice_unconfirmed"
+    single = evaluate_scene_establishment(
+        one_look(consensus=False, eligible=False, reasons=["temporal_unconfirmed"]),
+        policy=None, notice=camera_notice(GENERIC_NOTICE))
+    assert single["status"] == "unsupported"
+    assert single["reason"] == "camera_notice_unconfirmed"
+    assert single["camera_notice_admission"]["observations"] == [
+        {"observation_id": "look-0", "admitted": False, "reason": "temporal_unconfirmed"}]
+    # Legacy notices without a recorded policy keep their behavior.
+    legacy = evaluate_scene_establishment(empty, policy=None, notice={"source": "camera", "epoch": 1000.0})
+    assert legacy["reason"] == "admitted_camera_notice"
+
+
+def test_generic_notice_is_established_by_a_temporally_confirmed_object():
+    decision = evaluate_scene_establishment(one_look(consensus=True), policy=None, notice=camera_notice(GENERIC_NOTICE))
+    assert decision["status"] == "supported"
+    assert decision["reason"] == "verified_camera_notice"
+    assert decision["evidence_kind"] == "temporally_confirmed_object"
+    assert decision["supporting_observation_ids"] == ["look-0"]
+
+
+@pytest.mark.parametrize(("admission", "label"), [
+    (PERSON_NOTICE, "person"), (VEHICLE_NOTICE, "truck"), (ANIMAL_NOTICE, "dog"),
+])
+def test_semantic_notice_confirms_one_compatible_eligible_detection(admission, label):
+    decision = evaluate_scene_establishment(
+        one_look(label, consensus=False, eligible=False, reasons=["temporal_unconfirmed"]),
+        policy=None, notice=camera_notice(admission))
+    assert decision["status"] == "supported"
+    assert decision["reason"] == "semantic_camera_notice_confirmed"
+    assert decision["evidence_kind"] == "camera_semantic_confirmed_object"
+    assert decision["supporting_observation_ids"] == ["look-0"]
+
+
+@pytest.mark.parametrize(("admission", "samples", "reason"), [
+    (ANIMAL_NOTICE, one_look("person", eligible=True), "semantic_category_mismatch"),
+    (PERSON_NOTICE, one_look("car", eligible=True), "semantic_category_mismatch"),
+    (PERSON_NOTICE, one_look("person", eligible=False, reasons=["outside_incident_zone"]), "semantic_notice_unconfirmed"),
+    (PERSON_NOTICE, one_look("person", eligible=False), "semantic_notice_unconfirmed"),
+    (PERSON_NOTICE, one_look("person", eligible=True, auxiliary_detection=True), "semantic_notice_unconfirmed"),
+    (PERSON_NOTICE, one_look("person", eligible=True, captured_at_epoch=1030.0), "semantic_notice_unconfirmed"),
+    (PERSON_NOTICE, [{"id": "s", "camera_id": "gate", "captured_epoch": 1000, "status": "complete",
+                      "observations": [], "metadata": {}}], "semantic_notice_unconfirmed"),
+])
+def test_semantic_notice_without_compatible_eligible_evidence_is_retained_only(admission, samples, reason):
+    decision = evaluate_scene_establishment(samples, policy=None, notice=camera_notice(admission))
+    assert decision["status"] == "unsupported"
+    assert decision["reason"] == reason
+
+
+def test_semantic_notice_still_honors_confidence_zones_and_ignore_zones():
+    from tests.test_scene_zone_admission import policy, restricting, zone
+    weak = evaluate_scene_establishment(one_look(confidence=.3, eligible=True),
+                                        policy={"confidence_threshold": .5}, notice=camera_notice(PERSON_NOTICE))
+    assert weak["status"] == "unsupported"
+    # Ignore zone covers the top half; the box's foot sits at y=40 (ignored).
+    ignored = evaluate_scene_establishment(one_look(y2=40, eligible=True), policy=restricting(),
+                                           notice=camera_notice(PERSON_NOTICE))
+    assert ignored["status"] == "unsupported"
+    assert ignored["reason"] == "ignored_zone"
+    outside = evaluate_scene_establishment(one_look(y2=40, eligible=True),
+                                           policy=policy(zone("Yard", "incident", .5, 1)),
+                                           notice=camera_notice(PERSON_NOTICE))
+    assert outside["status"] == "unsupported"
+    assert outside["reason"] == "outside_incident_zone"
+    in_zone = evaluate_scene_establishment(one_look(y2=90, eligible=True), policy=restricting(),
+                                           notice=camera_notice(PERSON_NOTICE))
+    assert in_zone["status"] == "supported"
+    assert in_zone["reason"] == "semantic_camera_notice_confirmed"
+    assert in_zone["zone_interpretation"]["reason"] == "incident_zone"
+    # A zone-eligible generic notice still needs temporal consensus.
+    generic = evaluate_scene_establishment(one_look(y2=90, eligible=True), policy=restricting(),
+                                           notice=camera_notice(GENERIC_NOTICE))
+    assert generic["status"] == "unsupported"
+    assert generic["reason"] == "camera_notice_unconfirmed"
+
+
+def test_generic_motion_regions_need_validated_motion_to_place_a_notice():
+    from tests.test_scene_zone_admission import restricting
+    empty = [{"id": "s", "camera_id": "gate", "captured_epoch": 1000, "status": "complete", "observations": [], "metadata": {}}]
+    regions = {"motion_regions": [[0.3, 0.6, 0.5, 0.9]]}
+    validated = evaluate_scene_establishment(
+        empty, policy=restricting(), notice={**camera_notice(GENERIC_NOTICE), "features": regions})
+    assert validated["reason"] == "eligible_zone_motion"
+    rejected = evaluate_scene_establishment(
+        empty, policy=restricting(),
+        notice={**camera_notice({**GENERIC_NOTICE, "motion_validated": False}), "features": regions})
+    assert rejected["status"] == "unsupported"
+
+
+def _notice_detection(consensus, *, x=20):
+    detected = {"label": "person", "confidence": .95, "temporal_candidate_threshold": .25,
+                "detection_frame_width": 160, "detection_frame_height": 100,
+                "box": {"x1": x, "y1": 20, "x2": x + 20, "y2": 70},
+                "temporal_consensus": consensus, "incident_eligible": consensus,
+                "incident_ineligible_reasons": [] if consensus else ["temporal_unconfirmed"]}
+    observation = scene_observation(detected, captured_at_epoch=1000.5, frame_source="recorded_main")
+    return RecordedDetectionResult(frame=picture(x), objects=[detected, {"status": "scene_observations", "observations": [observation]}],
+                                   recording_path="", timings_ms={}, frame_captured_at_epoch=1000.5, frame_source="recorded_main")
+
+
+def test_generic_notice_event_is_retained_then_promoted_by_temporal_confirmation(tmp_path):
+    store = EventStore(tmp_path)
+    at = datetime.fromtimestamp(1000, timezone.utc)
+    qualification = {"trigger_source": "camera", "features": {}, "camera_notice_admission": dict(GENERIC_NOTICE)}
+    first = processor(store, _notice_detection(False), tmp_path).handle(
+        "tns1:RuleEngine/CellMotionDetector/Motion", '<tt:SimpleItem Name="IsMotion" Value="true"/>', at, dict(qualification))
+    # The raw notice and its observation are retained for review.
+    assert first.event_id is not None
+    event = store.get(first.event_id)
+    assert event["topic"] == "tns1:RuleEngine/CellMotionDetector/Motion"
+    stored_qualification = next(item["motion_qualification"] for item in json.loads(event["objects_json"])
+                                if item.get("status") == "motion_qualification")
+    assert stored_qualification["camera_notice_admission"] == GENERIC_NOTICE
+    with store._connect() as conn:
+        assert conn.execute("select count(*) from scene_incidents").fetchone()[0] == 0
+        assert conn.execute("select count(*) from acquired_observations").fetchone()[0] >= 1
+    # A restart re-reads the persisted policy and still does not establish.
+    assert EventStore(tmp_path).scene_incident(event_id=first.event_id) is None
+
+    refined = processor(store, _notice_detection(True, x=40), tmp_path).refine(
+        "tns1:RuleEngine/CellMotionDetector/Motion", "", at, dict(qualification), existing_event_id=first.event_id)
+    assert refined.event_id == first.event_id
+    incident = store.scene_incident(event_id=first.event_id)
+    assert incident is not None
+    assert incident["establishment"]["status"] == "established"

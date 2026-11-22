@@ -2343,6 +2343,7 @@ class CameraWorkerTest(unittest.TestCase):
 
     def test_event_worker_survives_a_transient_handler_failure(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        # A semantic notice is the camera-primary path in camera_rescue.
         config = MotionQualificationConfig(mode="camera_rescue", burst_quiet_seconds=0.1)
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
@@ -2357,11 +2358,11 @@ class CameraWorkerTest(unittest.TestCase):
             ) as process_event:
                 thread = worker.motion_decisions._thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
-                worker.handle_motion_event("onvif/motion", "first")
+                worker.handle_motion_event("onvif/person", "first")
                 deadline = time.monotonic() + 1
                 while process_event.call_count < 2 and time.monotonic() < deadline:
                     time.sleep(0.01)
-                worker.handle_motion_event("onvif/motion", "second")
+                worker.handle_motion_event("onvif/person", "second")
                 deadline = time.monotonic() + 1
                 while process_event.call_count < 3 and time.monotonic() < deadline:
                     time.sleep(0.01)
@@ -2414,6 +2415,7 @@ class CameraWorkerTest(unittest.TestCase):
 
     def test_event_worker_bounds_retries_for_a_persistent_handler_failure(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        # A semantic notice is the camera-primary path in camera_rescue.
         config = MotionQualificationConfig(mode="camera_rescue", burst_quiet_seconds=0.1)
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
@@ -2425,7 +2427,7 @@ class CameraWorkerTest(unittest.TestCase):
             ) as process_event:
                 thread = worker.motion_decisions._thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
-                worker.handle_motion_event("onvif/motion", "first")
+                worker.handle_motion_event("onvif/person", "first")
                 deadline = time.monotonic() + 3
                 while worker.motion_state._stats["event_retry_drops"] == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)
@@ -3122,6 +3124,7 @@ class CameraWorkerTest(unittest.TestCase):
 
     def test_motion_worker_coalesces_a_trigger_burst(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        # A semantic notice is the camera-primary path in camera_rescue.
         config = MotionQualificationConfig(mode="camera_rescue", burst_quiet_seconds=0.1, window_seconds=0.8)
         published = []
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3144,8 +3147,8 @@ class CameraWorkerTest(unittest.TestCase):
                 thread = worker.motion_decisions._thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 now = datetime.now(timezone.utc)
-                worker.handle_motion_event("onvif/motion", "first", now)
-                worker.handle_motion_event("onvif/motion", "second", now)
+                worker.handle_motion_event("onvif/person", "first", now)
+                worker.handle_motion_event("onvif/person", "second", now)
                 deadline = time.monotonic() + 2
                 while process_event.call_count == 0 and time.monotonic() < deadline:
                     time.sleep(0.02)
