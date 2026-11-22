@@ -181,3 +181,23 @@ def test_reported_state_and_category_describe_any_payload() -> None:
         items=[("IsInside", "false"), ("ObjectType", "Vehicle")],
     ) == "vehicle"
     assert reported_notice_category("RuleEngine/MyRuleDetector/Package") is None
+
+
+def test_doorbell_press_rule_follows_property_operation_and_state() -> None:
+    from survng.app.camera_semantics import doorbell_press, doorbell_topic_matches, notice_property_operation
+
+    changed_true = '<tt:Message PropertyOperation="Changed"><tt:Data><tt:SimpleItem Name="State" Value="true"/></tt:Data></tt:Message>'
+    assert notice_property_operation(changed_true) == "changed"
+    assert notice_property_operation("{'PropertyOperation': 'Initialized'}") == "initialized"
+    assert doorbell_press(changed_true, previous_state=None)
+    assert doorbell_press(changed_true, previous_state=False)
+    assert not doorbell_press(changed_true, previous_state=True)
+    assert not doorbell_press(changed_true.replace("Changed", "Initialized"), previous_state=False)
+    assert not doorbell_press(changed_true.replace("true", "false"), previous_state=False)
+    assert not doorbell_press("<tt:Message PropertyOperation=\"Changed\"><broken", previous_state=False)
+    # No PropertyOperation: only an observed false-to-true change counts.
+    bare = '<tt:SimpleItem Name="State" Value="true"/>'
+    assert doorbell_press(bare, previous_state=False)
+    assert not doorbell_press(bare, previous_state=None)
+    assert doorbell_topic_matches("tns1:RuleEngine/tns2:MyRuleDetector/Visitor", ["RuleEngine/MyRuleDetector/Visitor"])
+    assert not doorbell_topic_matches("tns1:RuleEngine/MyRuleDetector/Package", ["RuleEngine/MyRuleDetector/Visitor"])

@@ -595,6 +595,7 @@ class CameraWorker:
             camera,
             self.handle_motion_event,
             cache_dir=onvif_cache_dir or storage_dir / "onvif",
+            on_doorbell=self.handle_doorbell_press,
         )
         self.motion_analysis.set_onvif_effectiveness_observer(
             self.onvif.record_ema_observation
@@ -1114,6 +1115,23 @@ class CameraWorker:
         active: bool = True,
     ) -> None:
         self.motion_runtime.handle_event(topic, message, event_at, active=active)
+
+    def handle_doorbell_press(
+        self,
+        topic: str,
+        message: str = "",
+        event_at: datetime | None = None,
+    ) -> None:
+        """Observe a doorbell press. Recognition only: no incident is queued.
+
+        The ONVIF listener counts presses for status. The incident trigger and
+        the Home Assistant event build on this callback in later changes.
+        """
+        LOGGER.info(
+            "Doorbell press on %s (%s); incident trigger not enabled yet",
+            self.camera.id,
+            topic[:200],
+        )
 
     def handle_speech(self, started_at: datetime) -> bool:
         """Request an incident check for confirmed speech (not camera motion)."""

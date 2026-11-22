@@ -92,6 +92,11 @@ export function CameraOnvifEditor({ camera, onChange }) {
       <label>Username<input value={camera.onvif?.username || ""} onChange={(event) => update("username", event.target.value)} /></label>
       <label>Password<input type="password" value={secretInputValue(camera.onvif?.password)} placeholder={secretInputHint(camera.onvif?.password)} onChange={(event) => update("password", event.target.value)} /></label>
     </div>
+    <label className="check-field">
+      <input type="checkbox" checked={camera.doorbell?.enabled || false} disabled={!camera.onvif?.enabled} onChange={(event) => onChange(["doorbell", "enabled"], event.target.checked)} />
+      This camera is a doorbell
+    </label>
+    <p className="settings-help">Recognizes button presses ({(camera.doorbell?.topics || ["RuleEngine/MyRuleDetector/Visitor"]).join(", ")}). Many cameras send doorbell events without having a button, so enable this only on a real doorbell.</p>
   </section>;
 }
 

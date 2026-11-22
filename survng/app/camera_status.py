@@ -265,7 +265,8 @@ class CameraStatusService:
             "poll_timeouts", "poll_errors", "resubscriptions",
             "notifications_received", "motion_events_received",
             "inactive_motion_events", "unrecognized_notifications",
-            "callback_errors", "renewal_attempts", "renewals",
+            "callback_errors", "doorbell_notifications", "doorbell_presses",
+            "last_doorbell_press_at", "renewal_attempts", "renewals",
             "renewal_errors", "last_renewed_at", "subscription_current_time",
             "subscription_termination_time", "subscription_lifetime_seconds",
         )

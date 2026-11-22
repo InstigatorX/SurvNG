@@ -17,7 +17,12 @@ from .config import CameraConfig
 from .security import redact_secret_text
 from .onvif_inspector import ONVIF_INSPECTOR
 from .motion_topics import normalize_motion_topic, semantic_motion_kind
-from .camera_semantics import active_camera_semantic_kind
+from .camera_semantics import (
+    active_camera_semantic_kind,
+    doorbell_press,
+    doorbell_topic_matches,
+    reported_notice_state,
+)
 
 LOGGER = logging.getLogger("uvicorn.error")
 MOTION_WORDS = ("motion", "cellmotion", "person", "vehicle", "animal", "alarm")
@@ -147,9 +152,11 @@ class OnvifEventListener:
         on_motion: Callable[..., None],
         *,
         cache_dir: Path | None = None,
+        on_doorbell: Callable[..., None] | None = None,
     ) -> None:
         self.camera = camera
         self.on_motion = on_motion
+        self.on_doorbell = on_doorbell
         self._cache_dir = cache_dir or Path("survng/storage")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -179,6 +186,11 @@ class OnvifEventListener:
         self.motion_events_received = 0
         self.inactive_motion_events = 0
         self.unrecognized_notifications = 0
+        # Doorbell button state per normalized topic, from this subscription.
+        self._doorbell_states: dict[str, bool] = {}
+        self.doorbell_notifications = 0
+        self.doorbell_presses = 0
+        self.last_doorbell_press_at = ""
         self._unknown_notification_samples: deque[dict[str, Any]] = deque(
             maxlen=UNKNOWN_NOTIFICATION_SAMPLE_LIMIT
         )
@@ -379,6 +391,9 @@ class OnvifEventListener:
                     return
                 if self.last_connected_at:
                     self.resubscriptions += 1
+                # A release missed while disconnected must not hide the next
+                # press; the new subscription reports the current state.
+                self._doorbell_states.clear()
                 retry_delay = RETRY_INITIAL_SECONDS
                 self.retry_attempts = 0
                 self.connected = True
@@ -535,7 +550,15 @@ class OnvifEventListener:
                                     "ONVIF motion-end callback failed for %s",
                                     self.camera.id,
                                 )
-                        else:
+                        elif not self._observe_doorbell(
+                            topic,
+                            message,
+                            event_at,
+                            received_at,
+                            raw_notification.simple_items
+                            if raw_notification is not None
+                            else None,
+                        ):
                             self.unrecognized_notifications += 1
                             self._record_unknown_notification(
                                 topic,
@@ -1199,6 +1222,49 @@ class OnvifEventListener:
         topic = str(getattr(notification, "Topic", ""))
         message = self._stringify_message(getattr(notification, "Message", ""))
         return topic, message
+
+    def _observe_doorbell(
+        self,
+        topic: str,
+        message: str,
+        event_at: datetime | None,
+        received_at: datetime,
+        simple_items: tuple[tuple[str, str], ...] | None = None,
+    ) -> bool:
+        """Track a configured doorbell topic; return False for any other topic.
+
+        Only notices that are not motion reach this, so a doorbell setting can
+        never take over a motion notice.
+        """
+        doorbell = getattr(self.camera, "doorbell", None)
+        if doorbell is None or not doorbell.enabled:
+            return False
+        if not doorbell_topic_matches(topic, doorbell.topics):
+            return False
+        key = self._normalized_topic(topic)
+        previous = self._doorbell_states.get(key)
+        state = reported_notice_state(message, simple_items)
+        pressed = doorbell_press(message, previous, simple_items)
+        if state is not None:
+            self._doorbell_states[key] = state
+        self.doorbell_notifications += 1
+        if not pressed:
+            return True
+        self.doorbell_presses += 1
+        self.last_doorbell_press_at = received_at.isoformat()
+        if self.on_doorbell is not None:
+            try:
+                self.on_doorbell(
+                    topic[:1024],
+                    message[:MAX_EVENT_MESSAGE_CHARACTERS],
+                    event_at,
+                )
+            except Exception:
+                self.callback_errors += 1
+                LOGGER.exception(
+                    "ONVIF doorbell callback failed for %s", self.camera.id
+                )
+        return True
 
     def _motion_event_state(self, topic: str, message: str) -> bool | None:
         searchable = f"{topic} {message}".lower()
