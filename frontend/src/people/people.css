@@ -44,7 +44,7 @@
   border-radius: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 700;
   padding: 0 14px;
   white-space: nowrap;
@@ -66,7 +66,7 @@
 .cluster-toolbar-copy small {
   overflow: hidden;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -108,7 +108,7 @@
 .cluster-preview { display: grid; width: 54px; height: 54px; flex: 0 0 54px; }
 .cluster-preview img, .cluster-preview .face-avatar { grid-area: 1 / 1; width: 54px; height: 54px; border-radius: 50%; object-fit: cover; }
 .unknown-cluster-card>span:last-child, .cluster-members>div:first-child { display: grid; gap: 2px; }
-.unknown-cluster-card small, .cluster-members span { color: var(--muted); font-size: 11px; }
+.unknown-cluster-card small, .cluster-members span { color: var(--muted); font-size: var(--text-xs); }
 
 .cluster-members { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; padding: 10px; }
 .cluster-members>div:first-child { padding: 2px 2px 10px; }
@@ -131,7 +131,7 @@
   }
 
   .people-mode-tabs { grid-column: 1; min-height: 44px; padding: 0 6px; }
-  .people-mode-tabs button { min-height: 44px; padding: 0 10px; font-size: 11px; }
+  .people-mode-tabs button { min-height: 44px; padding: 0 10px; font-size: var(--text-xs); }
   .unknown-cluster-layout { grid-template-columns: 1fr; overflow: visible; }
   .unknown-cluster-grid { max-height: 38dvh; border-right: 0; border-bottom: 1px solid var(--line); }
   .cluster-members { min-height: 360px; }
@@ -157,7 +157,7 @@
 .visit-sightings img { width: 100px; height: 100px; object-fit: cover; border-radius: 6px; }
 .visit-snapshot-fallback { display: grid; gap: .4rem; margin: 0; }
 .visit-sightings img.visit-incident-snapshot { width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: contain; background: var(--canvas); }
-.visit-snapshot-fallback figcaption { color: var(--muted); font-size: 12px; }
+.visit-snapshot-fallback figcaption { color: var(--muted); font-size: var(--text-sm); }
 .visit-snapshot-unavailable { padding: 1rem; border: 1px solid var(--border, #444); border-radius: 6px; }
 .visit-link span { flex: 1 1 240px; }
 .visit-suggestions { margin: 1.25rem 0; padding: 1rem; border: 1px solid var(--border, #444); border-radius: 8px; }
@@ -198,7 +198,7 @@
 }
 
 .face-finding-steps strong {
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .face-finding-steps span,
@@ -206,7 +206,7 @@
 .face-finding-hint,
 .face-finding-key {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .face-finding-hint,
@@ -273,7 +273,7 @@
   gap: 8px;
   margin: 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
 }
 
@@ -319,7 +319,7 @@
 .face-finding-queue button.face-finding-row small {
   overflow: hidden;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -389,7 +389,7 @@
   gap: 8px;
   min-height: 22px;
   color: var(--ink);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 640;
 }
 

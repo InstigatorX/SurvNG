@@ -44,7 +44,7 @@
   width: 100%;
   min-width: 0;
   min-height: 44px;
-  font-size: 16px;
+  font-size: 1rem;
 }
 .mobile-incidents .mobile-filter-actions {
   display: flex;

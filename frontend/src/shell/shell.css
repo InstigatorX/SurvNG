@@ -59,7 +59,7 @@
   border-radius: 3px;
   background: var(--panel-soft);
   font: inherit;
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-align: center;
 }
 
@@ -210,7 +210,7 @@
     background: transparent;
     color: var(--muted);
     padding: 3px 1px;
-    font-size: 10px;
+    font-size: var(--text-xs);
     text-decoration: none;
   }
 
@@ -261,7 +261,7 @@
   }
 
   .mobile-more-panel>header h2 {
-    font-size: 16px;
+    font-size: 1rem;
   }
 
   .mobile-more-panel>header button {
@@ -581,7 +581,7 @@ a:focus-visible {
 }
 
 .topbar-brand strong {
-  font-size: 17px;
+  font-size: 1.0625rem;
   font-weight: 690;
   letter-spacing: -.02em;
 }
@@ -605,7 +605,7 @@ a:focus-visible {
   background: transparent;
   color: color-mix(in srgb, var(--ink) 80%, var(--muted));
   font: inherit;
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 540;
   padding: 0 10px;
   text-decoration: none;
@@ -647,7 +647,7 @@ a:focus-visible {
   min-width: 36px;
   border-color: var(--line);
   background: var(--control);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
   padding: 0 8px;
 }
@@ -683,7 +683,7 @@ a:focus-visible {
   background: transparent;
   color: var(--ink);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--text-md);
   padding: 0 10px;
   text-align: left;
   text-decoration: none;
@@ -705,14 +705,14 @@ a:focus-visible {
 
 .topbar-account-identity strong {
   overflow: hidden;
-  font-size: 13px;
+  font-size: var(--text-md);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .topbar-account-identity small {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   text-transform: capitalize;
 }
 
@@ -832,13 +832,14 @@ a:focus-visible {
 }
 
 .header-stat small {
-  font-size: 9px;
+  font-size: var(--text-2xs);
   font-weight: 570;
   letter-spacing: .01em;
 }
 
 .header-stat strong {
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 610;
 }
+
 
