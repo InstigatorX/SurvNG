@@ -925,3 +925,22 @@ class DoorbellRecognitionTest(unittest.TestCase):
         self.assertEqual(listener.doorbell_presses, 1)
         self.assertEqual(listener.doorbell_notifications, 2)
         self.assertEqual(listener.poll_errors, 0)
+
+
+class DoorbellInspectorTest(unittest.TestCase):
+    def test_listener_marks_the_press_for_the_inspector(self) -> None:
+        from survng.app.onvif_inspector import ONVIF_INSPECTOR
+
+        after = ONVIF_INSPECTOR.events_after(0, limit=1)["next"]
+        listener = OnvifEventListener(doorbell_camera(), Mock(), on_doorbell=Mock())
+
+        run_notifications(listener, [
+            [(VISITOR_TOPIC, DOORBELL_INITIALIZED_XML)],
+            [(VISITOR_TOPIC, DOORBELL_PRESS_XML)],
+            [(VISITOR_TOPIC, DOORBELL_RELEASE_XML)],
+        ])
+
+        events = ONVIF_INSPECTOR.events_after(after, camera="front-door")["events"]
+        self.assertEqual([event["doorbell_press"] for event in events], [False, True, False])
+        self.assertEqual([event["changed"] for event in events], [False, True, False])
+        self.assertTrue(all(event["recognized"] for event in events))

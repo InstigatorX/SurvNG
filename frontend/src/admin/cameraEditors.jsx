@@ -96,7 +96,14 @@ export function CameraOnvifEditor({ camera, onChange }) {
       <input type="checkbox" checked={camera.doorbell?.enabled || false} disabled={!camera.onvif?.enabled} onChange={(event) => onChange(["doorbell", "enabled"], event.target.checked)} />
       This camera is a doorbell
     </label>
-    <p className="settings-help">Recognizes button presses ({(camera.doorbell?.topics || ["RuleEngine/MyRuleDetector/Visitor"]).join(", ")}). Many cameras send doorbell events without having a button, so enable this only on a real doorbell.</p>
+    {camera.doorbell?.enabled ? <label className="camera-doorbell-notify">Doorbell notifications
+      <select value={camera.doorbell?.notify || "always"} onChange={(event) => onChange(["doorbell", "notify"], event.target.value)}>
+        <option value="always">Always notify</option>
+        <option value="motion">Follow motion-only rules</option>
+        <option value="never">Only when an object qualifies</option>
+      </select>
+    </label> : null}
+    <p className="settings-help">A button press ({(camera.doorbell?.topics || ["RuleEngine/MyRuleDetector/Visitor"]).join(", ")}) opens an incident, even when nobody is detected. Many cameras send doorbell events without having a button, so enable this only on a real doorbell.</p>
   </section>;
 }
 

@@ -1121,17 +1121,23 @@ class CameraWorker:
         topic: str,
         message: str = "",
         event_at: datetime | None = None,
-    ) -> None:
-        """Observe a doorbell press. Recognition only: no incident is queued.
-
-        The ONVIF listener counts presses for status. The incident trigger and
-        the Home Assistant event build on this callback in later changes.
-        """
+    ) -> bool:
+        """Queue an incident check for a doorbell press (not camera motion)."""
+        doorbell = self.camera.doorbell
+        queued = self.motion_runtime.handle_doorbell(
+            event_at,
+            source_topic=topic,
+            message=message,
+            cooldown_seconds=doorbell.cooldown_seconds,
+            max_per_5m=doorbell.max_per_5m,
+        )
         LOGGER.info(
-            "Doorbell press on %s (%s); incident trigger not enabled yet",
+            "Doorbell press on %s (%s): %s",
             self.camera.id,
             topic[:200],
+            "incident check queued" if queued else "not queued (cooldown or limit)",
         )
+        return queued
 
     def handle_speech(self, started_at: datetime) -> bool:
         """Request an incident check for confirmed speech (not camera motion)."""

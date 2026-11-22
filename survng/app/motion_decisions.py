@@ -16,6 +16,7 @@ from .database_polling import database_polling_session
 from .motion import MotionQualificationResult
 from .motion_topics import (
     MotionTriggerKind,
+    is_doorbell_topic,
     is_speech_topic,
     motion_trigger_kind,
 )
@@ -77,12 +78,14 @@ class MotionDecisionState(Protocol):
 
 TRIGGER_MANUAL = "manual"
 TRIGGER_SPEECH = "speech"
+TRIGGER_DOORBELL = "doorbell"
 TRIGGER_SEMANTIC_CAMERA = "semantic_camera"
 TRIGGER_GENERIC_CAMERA = "generic_camera"
 TRIGGER_ADAPTIVE = "adaptive"
 # Most authoritative first: a batch takes the first class any member has.
 _TRIGGER_CLASS_PRECEDENCE = (
     TRIGGER_MANUAL,
+    TRIGGER_DOORBELL,
     TRIGGER_SPEECH,
     TRIGGER_SEMANTIC_CAMERA,
     TRIGGER_GENERIC_CAMERA,
@@ -92,7 +95,7 @@ _TRIGGER_CLASS_PRECEDENCE = (
 # qualification and the burst-coalescing delay. Generic camera motion is not
 # among them; it is validated like any other motion.
 CAMERA_PRIMARY_TRIGGER_CLASSES = frozenset(
-    {TRIGGER_MANUAL, TRIGGER_SPEECH, TRIGGER_SEMANTIC_CAMERA}
+    {TRIGGER_MANUAL, TRIGGER_DOORBELL, TRIGGER_SPEECH, TRIGGER_SEMANTIC_CAMERA}
 )
 
 
@@ -109,6 +112,8 @@ def classify_motion_trigger(topic: str, message: str = "") -> str:
         return TRIGGER_MANUAL
     if kind is MotionTriggerKind.SPEECH:
         return TRIGGER_SPEECH
+    if kind is MotionTriggerKind.DOORBELL:
+        return TRIGGER_DOORBELL
     if camera_notice_admission(topic, message)["kind"] == "semantic":
         return TRIGGER_SEMANTIC_CAMERA
     return TRIGGER_GENERIC_CAMERA
@@ -198,6 +203,7 @@ class _BatchShape:
     priority: bool
     speech_trigger: bool
     speech_only: bool
+    doorbell_trigger: bool
     adaptive_only: bool
     visual_backup: bool
     active_followup: bool
@@ -218,6 +224,9 @@ class _BatchShape:
             return "visual_backup"
         if self.active_followup:
             return "active_followup"
+        if self.doorbell_trigger:
+            # A press names the incident even when camera motion shares it.
+            return "doorbell"
         if self.speech_only:
             return "speech"
         return "adaptive" if self.adaptive_only else "camera"
@@ -410,6 +419,7 @@ class MotionDecisionOrchestrator:
             adaptive_only=batch.adaptive_only,
             speech=batch.speech_trigger,
             camera_primary=batch.camera_primary,
+            doorbell=batch.doorbell_trigger,
         )
         if stop_event.is_set():
             self._abort_episode_intents(triggers)
@@ -537,8 +547,10 @@ class MotionDecisionOrchestrator:
         priority_triggers = [
             item for item in triggers if priority_motion_topic(item.topic, item.message)
         ]
+        # A press represents the batch: its topic names the incident's trigger.
+        doorbell_triggers = [item for item in triggers if is_doorbell_topic(item.topic)]
         representative = min(
-            priority_triggers or triggers,
+            doorbell_triggers or priority_triggers or triggers,
             key=lambda item: item.event_at,
         )
         route_trigger = next(
@@ -610,9 +622,12 @@ class MotionDecisionOrchestrator:
             all(motion_trigger_kind(item.topic).is_ema for item in triggers)
             and not authoritative_sources.intersection({"camera", "manual"})
         )
+        doorbell_trigger = any(is_doorbell_topic(item.topic) for item in triggers)
         trigger_class = (
             TRIGGER_ADAPTIVE
             if adaptive_only
+            else TRIGGER_DOORBELL
+            if doorbell_trigger
             else TRIGGER_SPEECH
             if speech_only
             else batch_trigger_class(notice_classes)
@@ -621,6 +636,13 @@ class MotionDecisionOrchestrator:
             "version": CAMERA_NOTICE_ADMISSION_VERSION,
             "trigger_class": trigger_class,
         }
+        if trigger_class == TRIGGER_DOORBELL:
+            # The camera topic each press came from, kept as provenance.
+            camera_notice_policy["source_topics"] = list(dict.fromkeys(
+                item.source_topic
+                for item in triggers
+                if is_doorbell_topic(item.topic) and item.source_topic
+            ))
         if trigger_class == TRIGGER_SEMANTIC_CAMERA:
             categories: list[str] = []
             compatible: list[str] = []
@@ -663,6 +685,7 @@ class MotionDecisionOrchestrator:
             priority=priority,
             speech_trigger=speech_trigger,
             speech_only=speech_only,
+            doorbell_trigger=doorbell_trigger,
             adaptive_only=adaptive_only,
             visual_backup=visual_backup,
             active_followup=active_followup,
@@ -778,6 +801,7 @@ class MotionDecisionOrchestrator:
         adaptive_only: bool,
         speech: bool = False,
         camera_primary: bool = False,
+        doorbell: bool = False,
     ) -> tuple[MotionQualificationResult, dict[str, Any]]:
         prequalified = [
             item.prequalified for item in triggers if item.prequalified is not None
@@ -801,7 +825,18 @@ class MotionDecisionOrchestrator:
             ),
             None,
         )
-        if mode == "camera_rescue" and not adaptive_only and camera_primary:
+        if doorbell:
+            # A press is a person's deliberate act, not motion to qualify, in
+            # every mode. The recorded object check still runs for labels.
+            result = MotionQualificationResult(
+                True,
+                1.0,
+                0.0,
+                "doorbell_trigger",
+                0,
+                {"primary_motion_source": "doorbell"},
+            )
+        elif mode == "camera_rescue" and not adaptive_only and camera_primary:
             # Camera + EMA Backup makes a manual, speech or affirmative semantic
             # notice authoritative. EMA must never delay or suppress that
             # object check. Generic camera motion is qualified below.

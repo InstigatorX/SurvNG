@@ -494,6 +494,23 @@ class MotionRuntimeService:
     def handle_speech(self, started_at: datetime) -> bool:
         return self.ingress.handle_speech(started_at)
 
+    def handle_doorbell(
+        self,
+        event_at: datetime | None,
+        *,
+        source_topic: str,
+        message: str = "",
+        cooldown_seconds: float = 30.0,
+        max_per_5m: int = 5,
+    ) -> bool:
+        return self.ingress.handle_doorbell(
+            event_at,
+            source_topic=source_topic,
+            message=message,
+            cooldown_seconds=cooldown_seconds,
+            max_per_5m=max_per_5m,
+        )
+
     def submit_frame(
         self,
         image: Any,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -964,3 +964,64 @@ def test_durable_refinement_dedupe_memory_stays_bounded() -> None:
     # Recent completions stay deduplicated so durable replays remain idempotent.
     assert "decision-0:refinement" not in orchestrator._completed_refinement_contexts
     assert f"decision-{overflow - 1}:refinement" in orchestrator._completed_refinement_contexts
+
+
+DOORBELL_SOURCE = "tns1:RuleEngine/MyRuleDetector/Visitor"
+
+
+@pytest.mark.parametrize("mode", ["camera", "camera_rescue", "adaptive"])
+@pytest.mark.parametrize("companion", [
+    None,
+    (CELL_MOTION_TOPIC, CELL_MOTION_ACTIVE),
+    ("RuleEngine/MyRuleDetector/PeopleDetect", ACTIVE),
+    ("survng/speech", ""),
+])
+def test_doorbell_press_decides_as_a_doorbell_in_every_mode(mode, companion) -> None:
+    from survng.app.motion_topics import DOORBELL_TOPIC
+
+    now = datetime.now(timezone.utc)
+    orchestrator, qualification, incidents, state = _rescue_orchestrator(
+        MotionEventCoordinator(queue_size=4, retry_limit=2)
+    )
+    qualification.settings.return_value = (mode, "balanced", 640)
+    press = MotionTrigger(
+        topic=DOORBELL_TOPIC, message="<press/>", event_at=now,
+        received_at=now.timestamp(), source_topic=DOORBELL_SOURCE,
+    )
+    batch = [press]
+    if companion is not None:
+        # Earlier than the press: the press still represents the batch.
+        batch.insert(0, MotionTrigger(
+            topic=companion[0], message=companion[1],
+            event_at=now - timedelta(seconds=1), received_at=now.timestamp(),
+        ))
+
+    orchestrator._process_batch(MotionTriggerBatch(tuple(batch)), threading.Event())
+
+    qualification.qualify_burst.assert_not_called()
+    topic, message, event_at, persisted = incidents.process.call_args.args[:4]
+    assert topic == DOORBELL_TOPIC
+    assert persisted["reason"] == "doorbell_trigger"
+    assert persisted["trigger_source"] == "doorbell"
+    assert persisted["camera_notice_admission"]["trigger_class"] == "doorbell"
+    assert persisted["camera_notice_admission"]["source_topics"] == [DOORBELL_SOURCE]
+    assert incidents.process.call_args.kwargs["require_eligible_object"] is False
+
+
+def test_doorbell_trigger_survives_durable_round_trip() -> None:
+    from survng.app.motion_topics import DOORBELL_TOPIC
+
+    now = datetime.now(timezone.utc)
+    trigger = MotionTrigger(
+        topic=DOORBELL_TOPIC, message="<press/>", event_at=now,
+        received_at=now.timestamp(), source_topic=DOORBELL_SOURCE,
+    )
+
+    restored = MotionTrigger.from_durable_payload(trigger.durable_payload(), "job-1")
+
+    assert restored.topic == DOORBELL_TOPIC
+    assert restored.source_topic == DOORBELL_SOURCE
+
+
+def test_doorbell_takes_the_fast_path_without_burst_delay() -> None:
+    assert _first_quiet_seconds("survng/doorbell", "") == 0.0

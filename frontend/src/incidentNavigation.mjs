@@ -554,6 +554,7 @@ export function incidentTriggerLabel(incident) {
   const source = String(incident?.trigger_source || "camera").toLowerCase();
   if (["ema", "adaptive", "visual_backup", "adaptive/visual_backup"].includes(source)) return "EMA";
   if (source === "speech" || source === "survng/speech") return "Speech";
+  if (source === "doorbell" || source === "survng/doorbell") return "Doorbell";
   return "Camera";
 }
 
