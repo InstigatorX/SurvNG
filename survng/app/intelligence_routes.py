@@ -65,6 +65,8 @@ from .system_review import (
 from .security import redact_secret_text
 
 LOGGER = logging.getLogger(__name__)
+# A follow-up check failing every minute logs at most this often.
+FOLLOWUP_FAILURE_LOG_SECONDS = 15 * 60.0
 AI_RECOMMENDATION_SECRET = secrets.token_bytes(32)
 AI_RECOMMENDATION_MAX_AGE_SECONDS = 60 * 60
 SYSTEM_REVIEW_RETRY_BACKOFF = timedelta(hours=1)
@@ -156,6 +158,7 @@ class IntelligenceService:
         self.deps = deps
         self._calibration_cancel_lock = threading.Lock()
         self._calibration_cancel_events: dict[int, threading.Event] = {}
+        self._followup_failure_logged_at = float('-inf')
 
     def _run_registered_ai_worker(
         self,
@@ -951,6 +954,8 @@ class IntelligenceService:
 
     def _schedule_system_review(self) -> None:
         with self.deps.manager_lock:
+            if self.deps.application_stopping.is_set():
+                return
             active_config = self.deps.get_config()
             active_manager = self.deps.get_manager()
             active = active_manager.events.calibration_runs(
@@ -1006,18 +1011,18 @@ class IntelligenceService:
             cancel_event = threading.Event()
             with self._calibration_cancel_lock:
                 self._calibration_cancel_events[int(run['id'])] = cancel_event
-        try:
-            self._start_registered_ai_thread(
-                'calibration',
-                self._run_system_calibration,
-                (int(run['id']), camera_ids, 'system_weekly', active_config, active_manager, cancel_event),
-                name=f'survng-system-review-{run["id"]}',
-            )
-        except BaseException as exc:
-            with self._calibration_cancel_lock:
-                self._calibration_cancel_events.pop(int(run['id']), None)
-            active_manager.events.update_calibration_run(int(run['id']), status='failed', error=f'System review could not start: {redact_secret_text(exc)}')
-            raise HTTPException(status_code=503, detail='system review could not start') from exc
+            try:
+                self._start_registered_ai_thread(
+                    'calibration',
+                    self._run_system_calibration,
+                    (int(run['id']), camera_ids, 'system_weekly', active_config, active_manager, cancel_event),
+                    name=f'survng-system-review-{run["id"]}',
+                )
+            except BaseException as exc:
+                with self._calibration_cancel_lock:
+                    self._calibration_cancel_events.pop(int(run['id']), None)
+                active_manager.events.update_calibration_run(int(run['id']), status='failed', error=f'System review could not start: {redact_secret_text(exc)}')
+                raise HTTPException(status_code=503, detail='system review could not start') from exc
         return run
 
     def _complete_daily_review(self, active_manager: AppManager, active_config: AppConfig, camera_ids: list[str], *, skipped_weekly: bool) -> dict:
@@ -1250,18 +1255,18 @@ class IntelligenceService:
             cancel_event = threading.Event()
             with self._calibration_cancel_lock:
                 self._calibration_cancel_events[int(run['id'])] = cancel_event
-        try:
-            self._start_registered_ai_thread(
-                'calibration',
-                self._run_system_calibration,
-                (int(run['id']), camera_ids, request.mode, active_config, active_manager, cancel_event),
-                name=f'survng-calibration-{run['id']}',
-            )
-        except BaseException as exc:
-            with self._calibration_cancel_lock:
-                self._calibration_cancel_events.pop(int(run['id']), None)
-            active_manager.events.update_calibration_run(int(run['id']), status='failed', error=f'Calibration worker could not start: {redact_secret_text(exc)}')
-            raise HTTPException(status_code=503, detail='calibration worker could not start') from exc
+            try:
+                self._start_registered_ai_thread(
+                    'calibration',
+                    self._run_system_calibration,
+                    (int(run['id']), camera_ids, request.mode, active_config, active_manager, cancel_event),
+                    name=f'survng-calibration-{run['id']}',
+                )
+            except BaseException as exc:
+                with self._calibration_cancel_lock:
+                    self._calibration_cancel_events.pop(int(run['id']), None)
+                active_manager.events.update_calibration_run(int(run['id']), status='failed', error=f'Calibration worker could not start: {redact_secret_text(exc)}')
+                raise HTTPException(status_code=503, detail='calibration worker could not start') from exc
         return run
 
     def cancel_calibration_run(self, run_id: int) -> dict:
@@ -1479,15 +1484,28 @@ class IntelligenceService:
                 return
             # The tick takes the manager reload lock and reads the database;
             # off the event loop, a settings reload cannot stall every request.
-            await asyncio.to_thread(self._calibration_followup_tick)
+            try:
+                await asyncio.to_thread(self._calibration_followup_tick)
+            except Exception:
+                # One failed tick (a full disk, a locked database) must not
+                # end automatic follow-ups for the rest of the process.
+                now = time.monotonic()
+                if now - self._followup_failure_logged_at >= FOLLOWUP_FAILURE_LOG_SECONDS:
+                    self._followup_failure_logged_at = now
+                    LOGGER.exception('calibration follow-up check failed')
 
     def _calibration_followup_tick(self) -> None:
+        # Shutdown cancels the monitor task, which cannot stop this thread;
+        # every step that starts work rechecks the stop flag first.
+        if self.deps.application_stopping.is_set():
+            return
         try:
             self._schedule_system_review()
         except Exception:
             LOGGER.exception('system review schedule check failed')
-        selected: tuple[int, AppConfig, AppManager] | None = None
         with self.deps.manager_lock:
+            if self.deps.application_stopping.is_set():
+                return
             active_manager = self.deps.get_manager()
             change_sets = active_manager.events.calibration_change_sets(100)
             if any((item.get('status') == 'reviewing' for item in change_sets)):
@@ -1506,21 +1524,22 @@ class IntelligenceService:
                 if now < ready_at:
                     continue
                 change_set_id = int(item['id'])
+                active_config = self.deps.get_config().model_copy(deep=True)
                 active_manager.events.update_calibration_change_set_status(change_set_id, 'reviewing')
-                selected = (change_set_id, self.deps.get_config().model_copy(deep=True), active_manager)
-                break
-        if selected is not None:
-            change_set_id, active_config, active_manager = selected
-            try:
-                self._start_registered_ai_thread(
-                    'calibration_evaluation',
-                    self._run_calibration_evaluation,
-                    (change_set_id, active_config, active_manager),
-                    name=f'survng-calibration-evaluation-{change_set_id}',
-                )
-            except BaseException as exc:
-                LOGGER.exception('calibration evaluation worker could not start')
-                active_manager.events.update_calibration_evaluation(change_set_id, {'outcome': 'failed', 'error': f'Evaluation worker could not start: {redact_secret_text(exc)}'}, status='evaluation_failed')
+                # Registered before the reload lock is released: a reload is
+                # refused while AI work is registered, so it can never see this
+                # change set 'reviewing' with no worker behind it.
+                try:
+                    self._start_registered_ai_thread(
+                        'calibration_evaluation',
+                        self._run_calibration_evaluation,
+                        (change_set_id, active_config, active_manager),
+                        name=f'survng-calibration-evaluation-{change_set_id}',
+                    )
+                except BaseException as exc:
+                    LOGGER.exception('calibration evaluation worker could not start')
+                    active_manager.events.update_calibration_evaluation(change_set_id, {'outcome': 'failed', 'error': f'Evaluation worker could not start: {redact_secret_text(exc)}'}, status='evaluation_failed')
+                return
 
     def start_calibration_evaluation(self, change_set_id: int) -> dict:
         with self.deps.manager_lock:
@@ -1543,16 +1562,16 @@ class IntelligenceService:
             if datetime.now(timezone.utc) < ready_at:
                 raise HTTPException(status_code=409, detail=f'follow-up evidence is still being collected until {ready_at.isoformat()}')
             active_manager.events.update_calibration_change_set_status(change_set_id, 'reviewing')
-        try:
-            self._start_registered_ai_thread(
-                'calibration_evaluation',
-                self._run_calibration_evaluation,
-                (change_set_id, active_config, active_manager),
-                name=f'survng-calibration-evaluation-{change_set_id}',
-            )
-        except BaseException as exc:
-            active_manager.events.update_calibration_evaluation(change_set_id, {'outcome': 'failed', 'error': f'Evaluation worker could not start: {redact_secret_text(exc)}'}, status='evaluation_failed')
-            raise HTTPException(status_code=503, detail='calibration evaluation worker could not start') from exc
+            try:
+                self._start_registered_ai_thread(
+                    'calibration_evaluation',
+                    self._run_calibration_evaluation,
+                    (change_set_id, active_config, active_manager),
+                    name=f'survng-calibration-evaluation-{change_set_id}',
+                )
+            except BaseException as exc:
+                active_manager.events.update_calibration_evaluation(change_set_id, {'outcome': 'failed', 'error': f'Evaluation worker could not start: {redact_secret_text(exc)}'}, status='evaluation_failed')
+                raise HTTPException(status_code=503, detail='calibration evaluation worker could not start') from exc
         return active_manager.events.get_calibration_change_set(change_set_id) or {}
 
     def calibration_rollback(self, change_set_id: int, request: CalibrationRollbackRequest) -> dict:

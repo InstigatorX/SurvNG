@@ -237,3 +237,14 @@ def test_slow_transaction_splits_time_between_statements_and_commit(
     assert projected["slow_transactions"]["sites"][0]["last_slowest_site"].endswith(
         " _slow_statement"
     )
+
+
+def test_a_record_without_a_slow_statement_clears_the_previous_location() -> None:
+    table = SlowSiteTable("database transaction", 0.0)
+
+    table.record("main a.py:1 f", 50.0, slowest_site="a.py:9 g", slowest_statement_ms=40.0)
+    table.record("main a.py:1 f", 30.0, slowest_statement_ms=2.0)
+
+    row = table.snapshot()["sites"][0]
+    assert "last_slowest_site" not in row
+    assert row["last_slowest_statement_ms"] == 2.0

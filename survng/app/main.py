@@ -1006,6 +1006,12 @@ async def lifespan(app: FastAPI):
                 await calibration_monitor_task
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                # A monitor that already failed must not skip the rest of
+                # shutdown (AI drain, storage tasks, stopping the manager).
+                logging.getLogger(__name__).exception(
+                    "calibration follow-up monitor had failed"
+                )
         remaining_ai = _wait_for_ai_operations(AI_SHUTDOWN_DRAIN_SECONDS)
         if remaining_ai:
             logging.getLogger("uvicorn.error").warning(

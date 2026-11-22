@@ -13,6 +13,7 @@ import pytest
 from survng.app.event_store import EventStore
 from survng.app.face_candidates import FaceCandidate
 from survng.app.faces import FaceStore
+from survng.app.main_database import forget_startup_recovery
 from survng.app.motion_pipeline import MotionDecisionHandler
 from survng.app.motion_pipeline.object_detection import RecordedDetectionResult
 
@@ -256,6 +257,7 @@ def test_crop_claim_uses_existing_snapshot_restart_recovery(tmp_path, deleted):
         )
     if deleted:
         crop.unlink()
+    forget_startup_recovery()  # simulate a new process
     recovered = EventStore(tmp_path)
     with recovered._connect() as connection:
         assert connection.execute("select count(*) from media_deletion_claims").fetchone()[0] == 0

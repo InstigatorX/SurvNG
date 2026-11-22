@@ -10,7 +10,7 @@ import uvicorn
 from .bind_policy import assert_network_bind_allowed
 from .config import load_config
 from .local_observability import SOCKET_ENVIRONMENT_VARIABLE, default_socket_path
-from .process_logging import install_stderr_log_handler
+from .process_logging import uvicorn_log_config
 from .tls import uvicorn_tls_kwargs
 
 
@@ -27,7 +27,6 @@ def main() -> None:
         help="owner-only Unix socket used by survngctl status",
     )
     args = parser.parse_args()
-    install_stderr_log_handler()
     os.environ[SOCKET_ENVIRONMENT_VARIABLE] = args.observability_socket
     config = load_config()
     assert_network_bind_allowed(args.host, config)
@@ -42,6 +41,8 @@ def main() -> None:
         # Forwarded headers are interpreted by SecurityBoundaryMiddleware,
         # which applies the configured trusted-proxy policy dynamically.
         "proxy_headers": False,
+        # Adds the redacted, rate-limited stderr handler (the journal).
+        "log_config": uvicorn_log_config(),
     }
     if tls.get("ssl_certfile") and tls.get("ssl_keyfile"):
         kwargs["ssl_certfile"] = tls["ssl_certfile"]

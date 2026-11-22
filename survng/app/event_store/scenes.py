@@ -13,6 +13,7 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from ..incident_utils import portable_media_path
+from ..main_database import create_index_logged
 from ..scene_identity import observation_identity
 from ..motion_topics import SPEECH_TOPIC
 
@@ -238,7 +239,6 @@ class EventStoreSceneMixin:
                     snapshot_path text not null, recording_path text not null
                 );
                 create index if not exists scene_observation_object on scene_observations(object_id,captured_epoch);
-                create index if not exists scene_track_alias_object on scene_track_aliases(object_id);
                 create index if not exists scene_observation_episode on scene_observations(episode_id,captured_epoch);
                 create index if not exists scene_observation_event_time on scene_observations(event_id,captured_epoch);
                 -- Zone names for cards and day filters. Reading them from payload_json
@@ -381,6 +381,10 @@ class EventStoreSceneMixin:
                 conn.execute("alter table scene_objects add column facet_label text not null default ''")
             conn.execute("create index if not exists scene_object_facet_label on scene_objects(facet_label)")
             conn.execute("create index if not exists scene_observation_source on scene_observations(source_observation_id)")
+            create_index_logged(
+                conn, "scene_track_alias_object",
+                "create index if not exists scene_track_alias_object on scene_track_aliases(object_id)",
+            )
             conn.execute(
                 "create index if not exists scene_observation_recording "
                 "on scene_observations(recording_path) where recording_path != ''"

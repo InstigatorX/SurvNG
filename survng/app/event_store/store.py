@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from ..incident_utils import event_snapshot_path, portable_media_path, snapshot_deletion_claimed
-from ..main_database import connect_main_database
+from ..main_database import (
+    connect_main_database,
+    mark_startup_recovered,
+    stamp_startup_recovery,
+    startup_recovery_pending,
+)
 from ..media_storage import MediaStorageRegistry, path_presence
 from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 from ..object_motion import tracking_motion_promotions
@@ -1766,8 +1771,14 @@ class EventStore(
         return status.state not in self._HEALTHY_SNAPSHOT_LOCATION_STATES
 
     def _recover_snapshot_deletion_claims(self) -> None:
-        """Finish or release snapshot deletion claims left by a process crash."""
+        """Finish or release snapshot deletion claims left by a process crash.
+
+        Once per process: during a settings reload the previous store's
+        snapshot retention may hold a live claim on a file it is deleting.
+        """
         with self._lock, self._connect() as conn:
+            if not startup_recovery_pending(conn, "snapshot_claims", self.db_path):
+                return
             rows = conn.execute(
                 "select path from media_deletion_claims where role = 'snapshot'"
             ).fetchall()
@@ -1794,6 +1805,8 @@ class EventStore(
                 "delete from media_deletion_claims where path = ? and role = 'snapshot'",
                 ((path,) for path in releasable),
             )
+            stamp_startup_recovery(conn, "snapshot_claims")
+        mark_startup_recovered("snapshot_claims", self.db_path)
 
     def _snapshot_retention_candidates(self, cutoff: str, limit: int) -> list[sqlite3.Row]:
         # WAL readers do not need either writer mutex. Candidate discovery may

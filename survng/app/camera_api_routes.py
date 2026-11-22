@@ -91,6 +91,9 @@ def live_camera_jpeg(manager: AppManager, camera_id: str, source: str = "live") 
 RECORDING_STREAM_INFO = RecordingStreamInfo()
 
 
+# Longest an MJPEG frame waits for a settings reload before skipping.
+MJPEG_RELOAD_WAIT_SECONDS = 0.5
+
 def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundle:
     router = APIRouter()
 
@@ -274,9 +277,17 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
         frame_interval = 1.0 / max(0.5, min(4.0, fps))
 
         def next_image() -> bytes | None | bool:
-            with deps.manager_lock:
-                if deps.get_manager().workers.get(camera_id) is not worker:
-                    return False
+            # During a reload, skip the frame instead of keeping an executor
+            # thread waiting for the whole cutover: other to_thread work
+            # shares that pool. False ends the stream (camera replaced).
+            if not deps.manager_lock.acquire(timeout=MJPEG_RELOAD_WAIT_SECONDS):
+                return None
+            try:
+                current = deps.get_manager().workers.get(camera_id) is worker
+            finally:
+                deps.manager_lock.release()
+            if not current:
+                return False
             return worker.snapshot(source)
 
         async def frames():

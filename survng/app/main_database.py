@@ -7,6 +7,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Literal
@@ -85,13 +86,18 @@ SLOW_TRANSACTIONS = SlowSiteTable(
     warn_when=held_write_lock_too_long,
 )
 
-# Startup recovery (marking work interrupted by a restart, repairing orphaned
-# rows, backfills) belongs to a process start, not to a store instance: a
-# settings reload rebuilds every store over the same database, and repeating
-# full-table repairs there held the shared write lock for seconds. Keyed by
-# path and inode, so a recreated or replaced database file is recovered again.
+# Startup recovery (repairing orphaned rows, backfills, re-queueing work a
+# crashed process held) belongs to a process start, not to a store instance:
+# a settings reload rebuilds every store over the same database, and repeating
+# full-table repairs there held the shared write lock for seconds. A database
+# counts as recovered by this process only when both hold:
+#   - its file (path, device, inode) was registered after a recovery commit;
+#   - it carries this process's token, written in that same transaction.
+# A replaced file fails the first; a recreated file that reused the inode
+# number fails the second.
 _STARTUP_RECOVERED: set[tuple[str, str, int, int]] = set()
 _STARTUP_RECOVERED_LOCK = threading.Lock()
+_PROCESS_RECOVERY_TOKEN = uuid.uuid4().hex
 
 
 def _database_identity(scope: str, path: Path) -> tuple[str, str, int, int] | None:
@@ -102,14 +108,39 @@ def _database_identity(scope: str, path: Path) -> tuple[str, str, int, int] | No
     return (scope, str(path.resolve()), stat.st_dev, stat.st_ino)
 
 
-def startup_recovery_pending(scope: str, path: Path) -> bool:
-    """True until ``mark_startup_recovered`` ran for ``scope`` on this file in this process."""
+def startup_recovery_pending(
+    connection: sqlite3.Connection, scope: str, path: Path,
+) -> bool:
+    """True until this process recovered ``scope`` on this database file."""
     identity = _database_identity(scope, Path(path))
     with _STARTUP_RECOVERED_LOCK:
-        return identity is None or identity not in _STARTUP_RECOVERED
+        registered = identity is not None and identity in _STARTUP_RECOVERED
+        token = _PROCESS_RECOVERY_TOKEN
+    if not registered:
+        return True
+    try:
+        row = connection.execute(
+            "select process_token from survng_startup_recovery where scope = ?", (scope,)
+        ).fetchone()
+    except sqlite3.OperationalError:  # table not created yet: never recovered
+        return True
+    return row is None or row[0] != token
+
+
+def stamp_startup_recovery(connection: sqlite3.Connection, scope: str) -> None:
+    """Record, inside the recovery transaction, that this process recovered ``scope``."""
+    connection.execute(
+        "create table if not exists survng_startup_recovery "
+        "(scope text primary key, process_token text not null)"
+    )
+    connection.execute(
+        "insert or replace into survng_startup_recovery(scope, process_token) values (?, ?)",
+        (scope, _PROCESS_RECOVERY_TOKEN),
+    )
 
 
 def mark_startup_recovered(scope: str, path: Path) -> None:
+    """Register the file once the transaction holding the stamp has committed."""
     identity = _database_identity(scope, Path(path))
     if identity is not None:
         with _STARTUP_RECOVERED_LOCK:
@@ -117,10 +148,33 @@ def mark_startup_recovered(scope: str, path: Path) -> None:
 
 
 def forget_startup_recovery() -> None:
-    """Forget recovered databases, as a new process would (tests simulate restarts with this)."""
+    """Behave as a new process would (tests simulate restarts with this)."""
+    global _PROCESS_RECOVERY_TOKEN
     with _STARTUP_RECOVERED_LOCK:
         _STARTUP_RECOVERED.clear()
+        _PROCESS_RECOVERY_TOKEN = uuid.uuid4().hex
 
+
+
+def create_index_logged(connection: sqlite3.Connection, name: str, sql: str) -> None:
+    """Run ``create index if not exists``, logging a first-time build.
+
+    Building an index reads its whole table while holding the write lock.
+    Stores create their indexes while the manager is constructed, before any
+    camera starts, and the statement is a no-op afterwards; on a large
+    database the first start after an upgrade is still slow, so say why.
+    """
+    exists = connection.execute(
+        "select 1 from sqlite_master where type = 'index' and name = ?", (name,)
+    ).fetchone()
+    if exists:
+        return
+    LOGGER.warning("Building database index %s once; this reads its whole table", name)
+    started = time.perf_counter()
+    connection.execute(sql)
+    LOGGER.warning(
+        "Built database index %s in %.1f s", name, time.perf_counter() - started,
+    )
 
 _METRICS: dict[str, DatabaseMetrics] = {}
 _METRICS_LOCK = threading.Lock()

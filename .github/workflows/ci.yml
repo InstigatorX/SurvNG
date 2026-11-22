@@ -102,7 +102,10 @@ jobs:
             tests/test_process_logging.py \
             tests/test_async_manager_lock.py \
             tests/test_scene_write_plans.py \
-            tests/test_detection_job_prune_plan.py
+            tests/test_detection_job_prune_plan.py \
+            tests/test_appearance_backfill_reload.py \
+            tests/test_async_manager_guard.py \
+            tests/test_calibration_followup_monitor.py
       - name: Run scene and evidence regression tests
         run: |
           scripts/run-tests.sh \

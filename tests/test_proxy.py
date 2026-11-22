@@ -118,7 +118,6 @@ def test_server_disables_uvicorn_proxy_header_processing(monkeypatch: pytest.Mon
         lambda config, port: {"port": port},
     )
     monkeypatch.setattr(server_main.uvicorn, "run", lambda **kwargs: captured.update(kwargs))
-    monkeypatch.setattr(server_main, "install_stderr_log_handler", lambda: None)
 
     server_main.main()
 

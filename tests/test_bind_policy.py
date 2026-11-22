@@ -82,7 +82,6 @@ def test_server_main_enforces_bind_policy(monkeypatch: pytest.MonkeyPatch) -> No
         lambda config, port: {"port": port},
     )
     monkeypatch.setattr(server_main.uvicorn, "run", lambda **kwargs: captured.update(kwargs))
-    monkeypatch.setattr(server_main, "install_stderr_log_handler", lambda: None)
 
     with pytest.raises(SystemExit, match="Refusing to bind"):
         server_main.main()

@@ -1547,6 +1547,7 @@ class EventStoreTest(unittest.TestCase):
                 )
             snapshot.unlink()
 
+            forget_startup_recovery()  # simulate a new process
             recovered = EventStore(root)
 
             with recovered._connect() as connection:
@@ -1614,6 +1615,7 @@ class EventStoreTest(unittest.TestCase):
                     (event["snapshot_path"], "2026-01-01T00:00:00+00:00"),
                 )
 
+            forget_startup_recovery()  # simulate a new process
             recovered = EventStore(root)
 
             with recovered._connect() as connection:

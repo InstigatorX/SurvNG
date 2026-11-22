@@ -7,7 +7,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from .main_database import connect_main_database
+from .main_database import connect_main_database, create_index_logged
 
 
 class AppearanceIndex:
@@ -79,9 +79,11 @@ class AppearanceIndex:
             )
             # Scene subject joins and remaps filter on scene_object_id with a
             # bound value, so this is a full index, not a partial one.
-            connection.execute(
+            create_index_logged(
+                connection,
+                "idx_appearance_scene_object",
                 "create index if not exists idx_appearance_scene_object "
-                "on appearance_embeddings(scene_object_id)"
+                "on appearance_embeddings(scene_object_id)",
             )
             connection.execute(
                 """
