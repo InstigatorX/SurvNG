@@ -546,6 +546,21 @@ class MqttService:
                 self.remove_retained_topic(
                     f"{discovery_prefix}/binary_sensor/{object_id}/speech/config"
                 )
+            if camera.get("doorbell_enabled"):
+                # Home Assistant's MQTT event entity: one "press" per recognized
+                # doorbell press. Events are never retained.
+                entities.append(("event", "doorbell", {
+                    "name": "Doorbell",
+                    "unique_id": f"survng_{camera_id}_doorbell",
+                    "state_topic": f"{state_topic}/doorbell",
+                    "event_types": ["press"],
+                    "device_class": "doorbell",
+                    "icon": "mdi:doorbell",
+                }))
+            else:
+                self.remove_retained_topic(
+                    f"{discovery_prefix}/event/{object_id}/doorbell/config"
+                )
             for zone in camera.get("zones") or []:
                 zone_name = str(zone.get("name") or "").strip()
                 if not zone_name:

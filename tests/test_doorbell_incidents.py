@@ -121,3 +121,46 @@ def test_presenter_and_label_name_the_doorbell() -> None:
         "objects_json": '[{"status": "motion_qualification", "motion_qualification": {"trigger_source": "doorbell"}}]',
     })
     assert event["trigger_source"] == "doorbell"
+
+
+def test_manager_publishes_the_press_to_home_assistant_unretained() -> None:
+    from unittest.mock import Mock
+
+    from survng.app.manager import AppManager
+
+    manager = AppManager.__new__(AppManager)
+    manager.mqtt = Mock()
+    manager.state_events = Mock()
+    payload = {"camera_id": "front-door", "event_type": "press", "pressed_at": "2026-11-22T16:45:43+00:00",
+               "source_topic": SOURCE_TOPIC, "incident_check_queued": True}
+
+    manager.publish_event("doorbell", payload)
+
+    manager.mqtt.publish.assert_called_once_with("camera/front-door/doorbell", payload)
+    manager.state_events.publish.assert_called_once_with("doorbell", payload)
+
+
+@pytest.mark.parametrize(("onvif", "doorbell", "expected"), [
+    (True, True, True), (True, False, False), (False, True, False),
+])
+def test_discovery_offers_the_doorbell_only_on_recognizing_cameras(onvif: bool, doorbell: bool, expected: bool) -> None:
+    from unittest.mock import Mock
+
+    from survng.app.config import AppConfig
+    from survng.app.manager import AppManager
+
+    manager = AppManager.__new__(AppManager)
+    manager.config = AppConfig.model_validate({"cameras": [{
+        "id": "front-door", "name": "Front door", "stream_url": "rtsp://camera.local/door",
+        "onvif": {"enabled": onvif, "host": "camera.local", "username": "admin"},
+        "doorbell": {"enabled": doorbell},
+    }]})
+    manager.mqtt = Mock()
+    manager.detector = Mock(labels=["person"])
+    manager.statuses = Mock(return_value=[])
+    manager._unique_cameras = Mock(return_value=list(manager.config.cameras))
+
+    manager._mqtt_connected()
+
+    cameras = manager.mqtt.publish_discovery.call_args.args[0]
+    assert cameras[0]["doorbell_enabled"] is expected

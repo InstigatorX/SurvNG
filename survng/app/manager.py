@@ -1691,6 +1691,7 @@ class AppManager:
                 "model_classes": self.detector.labels,
                 "recording_configured": bool(camera.record or camera.record_sub),
                 "speech_enabled": bool(self.config.speech.enabled and camera.speech.enabled),
+                "doorbell_enabled": bool(camera.onvif.enabled and camera.doorbell.enabled),
                 "zones": [
                     {
                         "name": zone.name,
