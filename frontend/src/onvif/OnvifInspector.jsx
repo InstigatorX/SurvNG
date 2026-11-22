@@ -36,6 +36,26 @@ function classNameForState(value) {
   return "state state-unknown";
 }
 
+// SurvNG's motion-start verdict wins. For topics it does not act on, show what
+// the camera reported in lower case so it never reads as a motion signal.
+function eventStateCell(event) {
+  if (event.active !== null && event.active !== undefined) {
+    return { text: event.active ? "TRUE" : "FALSE", className: classNameForState(event.active), title: "Motion start as SurvNG interpreted it" };
+  }
+  if (event.reported_state === true || event.reported_state === false) {
+    return {
+      text: String(event.reported_state),
+      className: `${classNameForState(event.reported_state)} state-reported`,
+      title: "Reported by the camera; SurvNG does not treat this topic as motion",
+    };
+  }
+  return { text: "?", className: classNameForState(null), title: "No state reported" };
+}
+
+function reportedStateText(value) {
+  return value === true || value === false ? String(value) : "none";
+}
+
 export default function OnvifInspector() {
   const [events, setEvents] = useState([]);
   const [snapshot, setSnapshot] = useState({ cameras: {} });
@@ -117,6 +137,7 @@ export default function OnvifInspector() {
         event.normalized_topic,
         event.classification,
         event.active === null ? "unknown" : String(event.active),
+        reportedStateText(event.reported_state),
         ...(event.simple_items || []).flatMap((item) => [item.name, item.value]),
       ]
         .filter(Boolean)
@@ -275,9 +296,10 @@ export default function OnvifInspector() {
                       {event.normalized_topic || event.topic || "—"}
                     </td>
                     <td>{event.classification || "unknown"}</td>
-                    <td className={classNameForState(event.active)}>
-                      {event.active === null ? "?" : event.active ? "TRUE" : "FALSE"}
-                    </td>
+                    {(() => {
+                      const state = eventStateCell(event);
+                      return <td className={state.className} title={state.title}>{state.text}</td>;
+                    })()}
                     <td>{event.changed ? "●" : ""}</td>
                   </tr>
                 ))}
@@ -296,7 +318,8 @@ export default function OnvifInspector() {
                   <dt>Topic</dt><dd className="mono">{selected.topic || "—"}</dd>
                   <dt>Normalized</dt><dd className="mono">{selected.normalized_topic || "—"}</dd>
                   <dt>Classification</dt><dd>{selected.classification || "unknown"}</dd>
-                  <dt>State</dt><dd>{selected.active === null ? "unknown" : String(selected.active)}</dd>
+                  <dt>Motion state</dt><dd>{selected.active === null ? "not judged" : String(selected.active)}</dd>
+                  <dt>Reported state</dt><dd>{reportedStateText(selected.reported_state)}</dd>
                   <dt>Changed</dt><dd>{String(Boolean(selected.changed))}</dd>
                 </dl>
 

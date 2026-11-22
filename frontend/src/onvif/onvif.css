@@ -83,6 +83,7 @@ tr:last-child td { border-bottom: 0; }
 .state-on { color: #62e38e; }
 .state-off { color: #68758a; }
 .state-unknown { color: #697386; }
+.state-reported { font-weight: 500; font-style: italic; }
 .event-layout { display: grid; grid-template-columns: minmax(680px, 1fr) 520px; min-height: 460px; }
 .event-list { max-height: 650px; border-right: 1px solid #262e3b; }
 .event-row { cursor: pointer; }

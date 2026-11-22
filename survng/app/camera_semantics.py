@@ -202,3 +202,52 @@ def camera_notice_admission(
 def semantic_label_compatible(label: object, compatible_labels: Iterable[object]) -> bool:
     key = _key(label)
     return bool(key) and key in {_key(item) for item in compatible_labels}
+
+
+def _notice_items(message: str, items: Iterable[tuple[str, str]] | None) -> list[tuple[str, str]]:
+    if items is not None:
+        parsed = [(str(name), str(value)) for name, value in items]
+        if parsed:
+            return parsed
+    return _explicit_items(str(message or "").strip())
+
+
+def reported_notice_state(
+    message: str = "", items: Iterable[tuple[str, str]] | None = None
+) -> bool | None:
+    """The camera's own State/IsMotion/IsInside value, for any topic.
+
+    This is a description of the payload, not a motion start: diagnostics use
+    it to show what the camera said about topics SurvNG does not act on.
+    """
+    states = [
+        value.strip().lower()
+        for name, value in _notice_items(message, items)
+        if _key(name) in _STATE_FIELDS
+    ]
+    if any(value in _ACTIVE for value in states):
+        return True
+    if states and all(value in _INACTIVE for value in states):
+        return False
+    return None
+
+
+def reported_notice_category(
+    topic: str, message: str = "", items: Iterable[tuple[str, str]] | None = None
+) -> str | None:
+    """The object class a notice names, by topic or explicit payload class.
+
+    Unlike camera_semantic_reports this ignores state, so a cleared notice
+    still says which class it was about.
+    """
+    category = _topic_category(topic)
+    if category:
+        return category
+    for name, value in _notice_items(message, items)[:32]:
+        if _key(name) not in _VALUE_FIELDS:
+            continue
+        value_key = _key(value)
+        for candidate, aliases in _CATEGORY_LABELS.items():
+            if value_key in aliases:
+                return candidate
+    return None
