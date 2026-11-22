@@ -23,9 +23,9 @@ from survng.app.camera_capture import (
     CapturedFrame,
 )
 from tests.detection_job_store_fake import MemoryDetectionJobStore
+from tests.detector_config_fake import detector_config
 from survng.app.config import (
     CameraConfig,
-    DetectorConfig,
     ImageStorageConfig,
     MotionQualificationConfig,
     ObjectTrackingConfig,
@@ -69,19 +69,7 @@ def incident_outcome(**values: object) -> StubIncidentOutcome:
 class DummyDetector:
     def __init__(self) -> None:
         self.calls = 0
-        # Partial on purpose: recorded refinement still reads optional fields
-        # with module fallbacks. Declare every field CameraWorker reads
-        # directly, using the production defaults.
-        defaults = DetectorConfig()
-        self.config = SimpleNamespace(
-            confidence_threshold=0.5,
-            require_incident_zone=defaults.require_incident_zone,
-            event_class_confidence_thresholds={},
-            object_activity_attribution=defaults.object_activity_attribution,
-            scene_discovery_enabled=defaults.scene_discovery_enabled,
-            scene_discovery_interval_seconds=defaults.scene_discovery_interval_seconds,
-            scene_discovery_heartbeat_seconds=defaults.scene_discovery_heartbeat_seconds,
-        )
+        self.config = detector_config(confidence_threshold=0.5)
 
     def detect(self, frame, confidence_threshold=None):
         self.calls += 1

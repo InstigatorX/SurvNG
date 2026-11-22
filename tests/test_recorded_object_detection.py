@@ -16,6 +16,7 @@ from unittest.mock import Mock, patch
 import cv2
 import numpy as np
 
+from tests.detector_config_fake import detector_config
 from survng.app.config import CameraConfig
 from survng.app.ffmpeg_hw import ffmpeg_hwaccels, render_device_available
 from survng.app.motion_pipeline.decision_handler import MotionDecisionHandler
@@ -86,7 +87,7 @@ class RecordedRefinementPlanTest(unittest.TestCase):
                 return {"path": "unused.mp4", "start_epoch": epoch}
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.65,
                 event_candidate_confidence_threshold=0.25,
                 event_confirmation_frames=2,
@@ -423,7 +424,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 return None
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=1,
@@ -455,7 +456,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
 
     def test_dedicated_face_detector_replaces_generic_face_boxes_as_auxiliary_evidence(self) -> None:
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.45,
                 event_class_confidence_thresholds={},
                 require_incident_zone=False,
@@ -642,7 +643,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             {},
         ))
         detector = SimpleNamespace(
-            config=SimpleNamespace(
+            config=detector_config(
                 confidence_threshold=0.5,
                 depth=SimpleNamespace(enabled=True),
             ),
@@ -675,7 +676,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
     def test_selected_frame_face_enrichment_skips_off_frame_person(self) -> None:
         detect_faces = Mock(return_value=[])
         detector = SimpleNamespace(
-            config=SimpleNamespace(
+            config=detector_config(
                 confidence_threshold=0.5,
                 face_enrich_max_people=4,
             ),
@@ -752,7 +753,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertTrue(success)
         backend = RecordedMotionObjectDetector(
             CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-            SimpleNamespace(config=SimpleNamespace()),
+            SimpleNamespace(config=detector_config()),
             SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="off"),
             lambda: None,
         )
@@ -782,7 +783,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertTrue(ok_first and ok_second)
         backend = RecordedMotionObjectDetector(
             CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-            SimpleNamespace(config=SimpleNamespace()),
+            SimpleNamespace(config=detector_config()),
             SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="off"),
             lambda: None,
         )
@@ -831,7 +832,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
     def test_recorded_frame_batch_seeks_and_downloads_only_selected_surfaces(self) -> None:
         backend = RecordedMotionObjectDetector(
             CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-            SimpleNamespace(config=SimpleNamespace()),
+            SimpleNamespace(config=detector_config()),
             SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="vaapi"),
             lambda: None,
         )
@@ -908,7 +909,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             ], check=True, capture_output=True, timeout=30)
             backend = RecordedMotionObjectDetector(
                 CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-                SimpleNamespace(config=SimpleNamespace()),
+                SimpleNamespace(config=detector_config()),
                 SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="off"),
                 lambda: None,
             )
@@ -939,7 +940,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             ], check=True, capture_output=True, timeout=30)
             backend = RecordedMotionObjectDetector(
                 CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-                SimpleNamespace(config=SimpleNamespace()),
+                SimpleNamespace(config=detector_config()),
                 SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="off"),
                 lambda: None,
             )
@@ -999,7 +1000,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                     ], check=True, capture_output=True, timeout=30)
                     backend = RecordedMotionObjectDetector(
                         CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-                        SimpleNamespace(config=SimpleNamespace()),
+                        SimpleNamespace(config=detector_config()),
                         SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="qsv"),
                         lambda: None,
                     )
@@ -1120,7 +1121,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
 
     def test_per_class_alert_confidence_does_not_change_scene_acquisition_floor(self) -> None:
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.45,
                 event_class_confidence_thresholds={"car": 0.7, "person": 0.3},
                 require_incident_zone=False,
@@ -1355,7 +1356,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 return None
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=2,
@@ -1434,7 +1435,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 return None
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=2,
@@ -1485,7 +1486,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=2,
@@ -1539,7 +1540,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 event_candidate_confidence_threshold=0.25,
                 require_incident_zone=False,
@@ -1616,7 +1617,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=2,
@@ -1666,7 +1667,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 return {"path": "sample.mp4", "start_epoch": epoch}
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=2,
@@ -1722,7 +1723,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         observed: list[int] = []
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=2,
@@ -1785,7 +1786,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
 
         backend = RecordedMotionObjectDetector(
             CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-            SimpleNamespace(config=SimpleNamespace()),
+            SimpleNamespace(config=detector_config()),
             SimpleNamespace(),
             lambda: None,
             timestamped_live_frame_provider=latest,
@@ -1810,7 +1811,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         event_epoch = 1_800_000_000.0
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=2,
@@ -1842,7 +1843,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
 
     def test_initial_detection_rejects_invalid_capture_provenance(self) -> None:
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=2,
@@ -1878,7 +1879,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
 
     def test_untrusted_live_geometry_cannot_admit_zone_object_provisionally(self) -> None:
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=True,
                 event_confirmation_frames=1,
@@ -1938,7 +1939,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         calls: list[str] = []
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=1,
@@ -1977,7 +1978,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         event_epoch = 1_800_000_000.0
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=1,
@@ -2032,7 +2033,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=2,
@@ -2092,7 +2093,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 }
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=2,
@@ -2155,7 +2156,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=2,
@@ -2211,7 +2212,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 }
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=2,
@@ -2281,7 +2282,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=2,
@@ -2354,7 +2355,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                     return {"path": str(path), "start_epoch": start_epoch, "duration_seconds": 6}
 
             class Detector:
-                config = SimpleNamespace(
+                config = detector_config(
                     confidence_threshold=0.5,
                     require_incident_zone=False,
                     event_confirmation_frames=2,
@@ -2422,7 +2423,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.5,
                 require_incident_zone=False,
                 event_confirmation_frames=1,
@@ -2480,7 +2481,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.65,
                 event_candidate_confidence_threshold=0.25,
                 require_incident_zone=False,
@@ -2540,7 +2541,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
 
         class Detector:
-            config = SimpleNamespace(
+            config = detector_config(
                 confidence_threshold=0.65,
                 event_candidate_confidence_threshold=0.25,
                 require_incident_zone=False,
@@ -2599,7 +2600,7 @@ class RecordedEvidenceReadinessTest(unittest.TestCase):
             segment_seconds=10.0,
             recording_rows_between=Mock(return_value=rows),
         )
-        detector = SimpleNamespace(config=SimpleNamespace(recorded_adaptive_sampling=True))
+        detector = SimpleNamespace(config=detector_config(recorded_adaptive_sampling=True))
         return RecordedMotionObjectDetector(
             CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
             detector, recorder, lambda: None,
@@ -2627,7 +2628,7 @@ class RecordedEvidenceReadinessTest(unittest.TestCase):
             recording_rows_between=Mock(return_value=[row]),
             recording_at=lambda _camera, epoch: row if row["start_epoch"] <= epoch <= row["end_epoch"] else None,
         )
-        config = SimpleNamespace(
+        config = detector_config(
             recorded_adaptive_sampling=True, event_confirmation_frames=2,
             event_refinement_stages=[[0.0], [6.0]], event_refinement_retry_seconds=0.5,
             event_refinement_settle_seconds=0.0, event_refinement_retry_interval_seconds=0.05,
