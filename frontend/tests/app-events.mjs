@@ -123,4 +123,36 @@ assert.equal(pendingTimers.size, 1);
 pendingTimers.values().next().value();
 assert.equal(FakeEventSource.instances[2].closed, true);
 
+// Listeners may name the event types they read; the stream asks the server
+// for their union, and any listener that reads everything widens it to all.
+const runTimers = () => {
+  const callbacks = [...pendingTimers.values()];
+  pendingTimers.clear();
+  callbacks.forEach((callback) => callback());
+};
+const sourceCount = () => FakeEventSource.instances.length;
+const latest = () => FakeEventSource.instances.at(-1);
+const incidentsOnly = subscribeAppEvents(() => {}, ["incident"]);
+assert.match(latest().url, /types=incident$/);
+const runtime = subscribeAppEvents(() => {}, ["camera_state", "cameras_state"]);
+assert.match(latest().url, /types=camera_state%2Ccameras_state%2Cincident$/);
+assert.equal(FakeEventSource.instances.at(-2).closed, true, "the narrower stream is replaced");
+const filteredCount = sourceCount();
+const everything = subscribeAppEvents(() => {});
+assert.equal(sourceCount(), filteredCount + 1);
+assert.doesNotMatch(latest().url, /types=/);
+everything();
+assert.equal(sourceCount(), filteredCount + 1, "narrowing waits for the page change to settle");
+runTimers();
+assert.match(latest().url, /types=camera_state%2Ccameras_state%2Cincident$/);
+const settledCount = sourceCount();
+// Same types after settling: no reconnect.
+runtime();
+const runtimeAgain = subscribeAppEvents(() => {}, ["cameras_state", "camera_state"]);
+runTimers();
+assert.equal(sourceCount(), settledCount);
+runtimeAgain();
+incidentsOnly();
+runTimers();
+
 console.log("application event stream tests passed");

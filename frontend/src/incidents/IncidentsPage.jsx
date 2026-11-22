@@ -460,7 +460,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       },
       1000,
     );
-  });
+  }, true, ["incident"]);
 
   useEffect(() => () => {
     window.clearTimeout(incidentEventRefreshTimer.current);

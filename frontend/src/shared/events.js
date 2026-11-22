@@ -1,17 +1,30 @@
 import { useEffect, useRef } from "react";
 import { appUrl } from "./api.js";
 import { APP_EVENT_TYPES } from "./constants.js";
+import { appEventTypesKey } from "./appEventTypes.mjs";
+
+export { appEventTypesKey };
 
 const appEventListeners = new Set();
+// Event types each listener reads; null means every type.
+const appEventListenerTypes = new Map();
 let appEventSource = null;
+let appEventSourceTypes = "";
+let appEventReconcileTimer = null;
 let appEventCloseTimer = null;
 let lastAppEventId = "";
 let visibilityListenerAttached = false;
 
-function streamUrl() {
+function wantedTypesKey() {
+  return appEventTypesKey(appEventListenerTypes.values());
+}
+
+function streamUrl(typesKey) {
+  const params = new URLSearchParams();
+  if (lastAppEventId) params.set("last_event_id", lastAppEventId);
+  if (typesKey) params.set("types", typesKey);
   const url = appUrl("/api/events/stream");
-  if (!lastAppEventId) return url;
-  return `${url}?last_event_id=${encodeURIComponent(lastAppEventId)}`;
+  return params.size ? `${url}?${params}` : url;
 }
 
 function documentIsHidden() {
@@ -34,9 +47,13 @@ function connectAppEventSource() {
     closeAppEventSource();
     return;
   }
-  if (appEventSource) return;
-  const source = new EventSource(streamUrl());
+  const typesKey = wantedTypesKey();
+  if (appEventSource && appEventSourceTypes === typesKey) return;
+  // Listeners now need a different set of types: reconnect from the cursor.
+  closeAppEventSource();
+  const source = new EventSource(streamUrl(typesKey));
   appEventSource = source;
+  appEventSourceTypes = typesKey;
   source.addEventListener("connected", (event) => {
     if (source !== appEventSource) return;
     rememberEventId(event);
@@ -79,8 +96,19 @@ function detachVisibilityListener() {
   visibilityListenerAttached = false;
 }
 
-export function subscribeAppEvents(listener) {
+// A page change unsubscribes one page before the next subscribes; settle
+// before narrowing the stream so it does not reconnect twice.
+function scheduleAppEventConnect() {
+  if (appEventReconcileTimer) return;
+  appEventReconcileTimer = window.setTimeout(() => {
+    appEventReconcileTimer = null;
+    connectAppEventSource();
+  }, 0);
+}
+
+export function subscribeAppEvents(listener, types = null) {
   appEventListeners.add(listener);
+  appEventListenerTypes.set(listener, Array.isArray(types) && types.length ? [...types] : null);
   attachVisibilityListener();
   if (appEventCloseTimer) {
     window.clearTimeout(appEventCloseTimer);
@@ -89,6 +117,8 @@ export function subscribeAppEvents(listener) {
   connectAppEventSource();
   return () => {
     appEventListeners.delete(listener);
+    appEventListenerTypes.delete(listener);
+    if (appEventListeners.size) scheduleAppEventConnect();
     if (!appEventListeners.size) {
       detachVisibilityListener();
       if (!appEventSource) return;
@@ -102,10 +132,12 @@ export function subscribeAppEvents(listener) {
   };
 }
 
-export function useAppEvents(handler, enabled = true) {
+/** `types`: the event types this handler reads; omit for every type. */
+export function useAppEvents(handler, enabled = true, types = null) {
   const handlerRef = useRef(handler);
   handlerRef.current = handler;
+  const typesKey = Array.isArray(types) ? types.join(",") : "";
   useEffect(() => (
-    enabled ? subscribeAppEvents((event) => handlerRef.current(event)) : undefined
-  ), [enabled]);
+    enabled ? subscribeAppEvents((event) => handlerRef.current(event), typesKey ? typesKey.split(",") : null) : undefined
+  ), [enabled, typesKey]);
 }

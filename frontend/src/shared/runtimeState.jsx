@@ -5,6 +5,7 @@ import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { loadRuntimeState } from "./runtimeState.mjs";
 
 const RuntimeStateContext = createContext(null);
+const RUNTIME_EVENT_TYPES = ["cameras_state", "camera_state", "system_state"];
 
 export function RuntimeStateProvider({ children }) {
   const [cameras, setCameras] = useState([]);
@@ -75,7 +76,7 @@ export function RuntimeStateProvider({ children }) {
       setSystemUpdatedAt(Date.now());
       setSystemError(false);
     }
-  });
+  }, true, RUNTIME_EVENT_TYPES);
 
   useVisiblePolling(refresh, 60_000);
   const value = useMemo(() => ({
