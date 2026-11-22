@@ -109,7 +109,7 @@ export function IncidentObjectBadges({ labels }) {
 
 export function IncidentSourceDot({ trigger, className = "", onClick = null, ariaLabel = "", title = "" }) {
   const normalized = String(trigger || "Camera").toUpperCase();
-  const source = normalized === "EMA" ? "EMA" : normalized === "SPEECH" ? "Speech" : "Camera";
+  const source = normalized === "EMA" ? "EMA" : normalized === "SPEECH" ? "Speech" : normalized === "DOORBELL" ? "Doorbell" : "Camera";
   const classes = `incident-source-dot source-${source.toLowerCase()} ${className}`.trim();
   const label = ariaLabel || `${source} trigger`;
   if (onClick) {

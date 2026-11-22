@@ -48,6 +48,9 @@ class OnvifInspectorEvent:
     reported_state: bool | None
     # Display-only label for known non-object events (doorbell, package, ...).
     event_type: str | None
+    # True when SurvNG recognized this notice as a new doorbell press; False
+    # for other notices on a configured doorbell topic; None otherwise.
+    doorbell_press: bool | None
     recognized: bool
     changed: bool
     simple_items: tuple[tuple[str, str], ...]
@@ -111,6 +114,7 @@ class OnvifInspector:
         message_xml: str = "",
         received_at: datetime | None = None,
         event_at: datetime | None = None,
+        doorbell_press: bool | None = None,
     ) -> OnvifInspectorEvent:
         camera_id = str(camera_id)
         topic = redact_secret_text(str(topic or ""))[:1024]
@@ -142,7 +146,7 @@ class OnvifInspector:
         key = (camera_id, normalized_topic)
         with self._lock:
             previous = self._topic_states.get(key)
-            changed = active is not None and previous != active
+            changed = (active is not None and previous != active) or doorbell_press is True
             if active is not None:
                 self._topic_states[key] = bool(active)
                 if classification is not None:
@@ -163,7 +167,8 @@ class OnvifInspector:
                 active=active,
                 reported_state=reported_state,
                 event_type=event_type,
-                recognized=active is not None,
+                doorbell_press=doorbell_press,
+                recognized=active is not None or doorbell_press is not None,
                 changed=changed,
                 simple_items=items,
                 message_xml=safe_xml,

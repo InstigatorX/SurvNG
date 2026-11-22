@@ -659,6 +659,14 @@ class CameraDoorbellConfig(BaseModel):
     topics: list[str] = Field(
         default_factory=lambda: ["RuleEngine/MyRuleDetector/Visitor"], max_length=8
     )
+    # A press opens an incident check. Reolink already holds a press for about
+    # 15 s; the cooldown and 5-minute cap bound a stuck or noisy button.
+    cooldown_seconds: float = Field(default=30.0, ge=0.0, le=3600.0)
+    max_per_5m: int = Field(default=5, ge=1, le=60)
+    # Notifications for incidents a press started: "always" notifies even with
+    # no eligible object, "motion" follows the motion-only rules, "never"
+    # leaves notification to the objects the incident finds.
+    notify: Literal["always", "motion", "never"] = "always"
 
     @field_validator("topics")
     @classmethod

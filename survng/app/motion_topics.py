@@ -8,6 +8,9 @@ from enum import StrEnum
 # Notice topic used when confirmed speech asks for an incident check. It is
 # SurvNG's own topic, never a camera/ONVIF topic, so it carries no semantics.
 SPEECH_TOPIC = "survng/speech"
+# Notice topic for a recognized doorbell press. Like speech it is SurvNG's own
+# topic; the camera's ONVIF topic is kept on the trigger as provenance.
+DOORBELL_TOPIC = "survng/doorbell"
 # Topics SurvNG assigns to triggers raised by its own EMA analysis. They are
 # persisted with motion triggers and events, so the strings are a stable
 # format; classify them with ``motion_trigger_kind`` rather than comparing.
@@ -25,6 +28,7 @@ class MotionTriggerKind(StrEnum):
     CAMERA = "camera"
     MANUAL = "manual"
     SPEECH = "speech"
+    DOORBELL = "doorbell"
     EMA_MOTION = "ema_motion"
     EMA_VISUAL_BACKUP = "ema_visual_backup"
     EMA_ACTIVE_FOLLOWUP = "ema_active_followup"
@@ -60,11 +64,17 @@ def motion_trigger_kind(topic: str) -> MotionTriggerKind:
         return MotionTriggerKind.MANUAL
     if normalized == SPEECH_TOPIC:
         return MotionTriggerKind.SPEECH
+    if normalized == DOORBELL_TOPIC:
+        return MotionTriggerKind.DOORBELL
     return MotionTriggerKind.CAMERA
 
 
 def is_speech_topic(topic: str) -> bool:
     return motion_trigger_kind(topic) is MotionTriggerKind.SPEECH
+
+
+def is_doorbell_topic(topic: str) -> bool:
+    return motion_trigger_kind(topic) is MotionTriggerKind.DOORBELL
 
 
 def is_manual_topic(topic: str) -> bool:

@@ -223,6 +223,8 @@ assert.equal(incidentTriggerLabel({ trigger_source: "camera" }), "Camera");
 assert.equal(incidentTriggerLabel({ trigger_source: "ema" }), "EMA");
 assert.equal(incidentTriggerLabel({ trigger_source: "visual_backup" }), "EMA");
 assert.equal(incidentTriggerLabel({ trigger_source: "speech" }), "Speech");
+assert.equal(incidentTriggerLabel({ trigger_source: "doorbell" }), "Doorbell");
+assert.equal(incidentTriggerLabel({ trigger_source: "survng/doorbell" }), "Doorbell");
 assert.equal(incidentTriggerLabel({}), "Camera");
 assert.equal(incidentObjectIconName("person"), "person");
 assert.equal(incidentObjectIconName("robot lawnmower"), "mower");

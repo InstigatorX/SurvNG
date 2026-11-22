@@ -85,6 +85,9 @@ class MotionTrigger:
     evidence_capture_generation: int = 0
     delivery_job_id: str = ""
     camera_semantics: dict[str, Any] | None = None
+    # The camera's own topic when ``topic`` is a SurvNG-owned notice topic,
+    # such as a doorbell press. Provenance only; it never changes the class.
+    source_topic: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.topic, str) or not self.topic.strip():
@@ -183,6 +186,7 @@ class MotionTrigger:
             "evidence_frame_sequence": self.evidence_frame_sequence,
             "evidence_capture_generation": self.evidence_capture_generation,
             "camera_semantics": self.camera_semantics,
+            "source_topic": self.source_topic,
         }
 
     @classmethod
@@ -243,6 +247,7 @@ class MotionTrigger:
                 if isinstance(payload.get("camera_semantics"), dict)
                 else None
             ),
+            source_topic=str(payload.get("source_topic") or "")[:1024],
             delivery_job_id=job_id,
         )
 

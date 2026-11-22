@@ -708,6 +708,41 @@ def _speech_establishment(result, zone, activity, interpretations, samples, noti
     return result
 
 
+DOORBELL_EVIDENCE_KIND = "doorbell_press"
+
+
+def _doorbell_establishment(result, zone, interpretations, samples, notice):
+    """A doorbell press establishes activity on its own.
+
+    It is a deliberate human act, so neither a missing detection nor zones
+    decide it: the visitor often stands where a doorbell camera cannot detect
+    them, and the button is at the door whatever the zones cover. People seen
+    in eligible zones are recorded as supporting evidence only.
+    """
+    labels = {
+        identifier: str((observation.get("payload", observation) or {}).get("label") or "").lower()
+        for identifier, observation, _, _ in _iter_observations(samples)
+        if identifier
+    }
+    visitors = sorted(
+        item["observation_id"]
+        for item in interpretations
+        if item.get("observation_id")
+        and labels.get(item["observation_id"]) in SPEECH_SUBJECT_LABELS
+        and _admits_activity(item)
+    )
+    zone.update(establishment_eligible=True, reason="doorbell_press")
+    result.update(
+        status="supported",
+        reason="admitted_doorbell_press",
+        summary="Someone rang the doorbell.",
+        activity_epoch=notice.get("epoch"),
+        supporting_observation_ids=visitors,
+        evidence_kind=DOORBELL_EVIDENCE_KIND,
+    )
+    return result
+
+
 def evaluate_scene_establishment(
     samples,
     *,
@@ -785,6 +820,8 @@ def evaluate_scene_establishment(
     if notice_activity is not None:
         result["notice_activity"] = notice_activity
         result["policy_version"] = "establishment_activity_v3"
+    if isinstance(notice, dict) and notice.get("source") == "doorbell":
+        return _doorbell_establishment(result, zone, interpretations, samples, notice)
     if restricting and isinstance(notice, dict) and notice.get("source") == "speech":
         return _speech_establishment(result, zone, activity, interpretations, samples, notice)
     if camera_policy is not None:

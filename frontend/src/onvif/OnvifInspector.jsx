@@ -39,6 +39,9 @@ function classNameForState(value) {
 // SurvNG's motion-start verdict wins. For topics it does not act on, show what
 // the camera reported in lower case so it never reads as a motion signal.
 function eventStateCell(event) {
+  if (event.doorbell_press === true) {
+    return { text: "PRESS", className: classNameForState(true), title: "Doorbell press recognized by SurvNG" };
+  }
   if (event.active !== null && event.active !== undefined) {
     return { text: event.active ? "TRUE" : "FALSE", className: classNameForState(event.active), title: "Motion start as SurvNG interpreted it" };
   }
@@ -343,6 +346,7 @@ export default function OnvifInspector() {
                   <dt>Event type</dt><dd>{EVENT_TYPE_LABELS[selected.event_type] || "—"}</dd>
                   <dt>Motion state</dt><dd>{selected.active === null ? "not judged" : String(selected.active)}</dd>
                   <dt>Reported state</dt><dd>{reportedStateText(selected.reported_state)}</dd>
+                  {selected.doorbell_press === null || selected.doorbell_press === undefined ? null : <><dt>Doorbell press</dt><dd>{selected.doorbell_press ? "yes" : "no"}</dd></>}
                   <dt>Changed</dt><dd>{String(Boolean(selected.changed))}</dd>
                 </dl>
 

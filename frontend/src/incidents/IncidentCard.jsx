@@ -177,7 +177,7 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
   const observationCount = Number(incident.motion_observation_count || motionObservations.length || 0);
   const countText = `${eventCount} ${eventCount === 1 ? "event" : "events"}${observationCount ? ` · ${observationCount} additional motion update${observationCount === 1 ? "" : "s"}` : ""}`;
   const triggerLabel = incidentTriggerLabel(incident);
-  const triggerTitle = triggerLabel === "EMA" ? "EMA visual backup trigger" : triggerLabel === "Speech" ? "Speech trigger" : "Camera motion trigger";
+  const triggerTitle = triggerLabel === "EMA" ? "EMA visual backup trigger" : triggerLabel === "Speech" ? "Speech trigger" : triggerLabel === "Doorbell" ? "Doorbell press" : "Camera motion trigger";
   const timeText = incident.start_at && incident.end_at && incident.start_at !== incident.end_at
     ? `${formatDateTime(incident.start_at, timeZone)} - ${formatDuration(incident.duration_seconds)}`
     : formatDateTime(incident.created_at, timeZone);

@@ -1788,12 +1788,18 @@ class AppManager:
         camera = next((c for c in self.config.cameras if c.id == event.get("camera_id", payload.get("camera_id"))), None)
         if camera is not None and not camera.incident_notifications_enabled:
             return False
+        doorbell_started = "doorbell" in {event.get("trigger_source"), payload.get("trigger_source")}
+        if doorbell_started and camera is not None and camera.doorbell.notify == "always":
+            # A press is a visitor at the door: notify whatever the video found.
+            return True
         rules = {zone.name: zone.notifications_enabled for zone in camera.zones} if camera else {}
         for subject in decision.get("objects", []):
             zones = subject.get("zones") or []
             if subject.get("eligible") and (not zones or any(rules.get(zone, True) for zone in zones)):
                 return True
         if decision.get("objects"):
+            return False
+        if doorbell_started and camera is not None and camera.doorbell.notify == "never":
             return False
         speech_started = "speech" in {event.get("trigger_source"), payload.get("trigger_source")}
         if speech_started and camera is not None and camera.speech.notify != "motion":

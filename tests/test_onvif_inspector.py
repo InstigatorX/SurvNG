@@ -190,3 +190,16 @@ def test_doorbell_press_is_not_a_person_claim():
 
     pressed = '<tt:SimpleItem Name="State" Value="true"/>'
     assert classify_motion_trigger("tns1:RuleEngine/MyRuleDetector/Visitor", pressed) == "generic_camera"
+
+
+def test_doorbell_press_is_recorded_and_other_topics_are_not_marked():
+    inspector = OnvifInspector()
+    press = inspector.record(camera_id="front-door", topic="tns1:RuleEngine/MyRuleDetector/Visitor",
+                             normalized_topic="ruleengine/myruledetector/visitor", active=None,
+                             simple_items=(("state", "true"),), doorbell_press=True)
+    package = inspector.record(camera_id="front-door", topic="tns1:RuleEngine/MyRuleDetector/Package",
+                               normalized_topic="ruleengine/myruledetector/package", active=None)
+    assert (press.doorbell_press, press.recognized, press.changed) == (True, True, True)
+    assert (package.doorbell_press, package.recognized) == (None, False)
+    # A press never feeds per-class motion state.
+    assert inspector.state_snapshot()["cameras"].get("front-door", {}).get("classes", {}) == {}

@@ -2341,16 +2341,93 @@ class CameraWorkerTest(unittest.TestCase):
                 worker.motion_analysis.request_stop()
                 thread.join(timeout=1)
 
-    def test_doorbell_press_is_observed_without_queuing_motion(self) -> None:
-        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+    def test_doorbell_press_queues_its_own_incident_check(self) -> None:
+        from survng.app.motion_topics import DOORBELL_TOPIC
+
+        camera = CameraConfig.model_validate({
+            "id": "gate", "name": "Gate", "stream_url": "rtsp://example.invalid/main",
+            "doorbell": {"enabled": True, "cooldown_seconds": 30, "max_per_5m": 5},
+        })
+        # Presses are admitted in every mode, like speech.
+        config = MotionQualificationConfig(mode="adaptive")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            worker._stop.clear()
+            self.assertEqual(worker.onvif.on_doorbell, worker.handle_doorbell_press)
+            pressed_at = datetime.now(timezone.utc)
+
+            self.assertTrue(worker.handle_doorbell_press(
+                "tns1:RuleEngine/MyRuleDetector/Visitor", "<press/>", pressed_at
+            ))
+            # A second press inside the cooldown does not queue more work.
+            self.assertFalse(worker.handle_doorbell_press(
+                "tns1:RuleEngine/MyRuleDetector/Visitor", "<press/>", pressed_at
+            ))
+
+            trigger = worker.motion_events.queue.get_nowait()
+            self.assertEqual(trigger.topic, DOORBELL_TOPIC)
+            self.assertEqual(trigger.source_topic, "tns1:RuleEngine/MyRuleDetector/Visitor")
+            self.assertEqual(trigger.message, "<press/>")
+            self.assertEqual(worker.motion_events.queue.qsize(), 0)
+            self.assertEqual(worker.motion_state._stats["doorbell_cooldown_dropped"], 1)
+            # A press is not camera motion: no motion activity is recorded.
+            self.assertFalse(worker.motion_state.last_motion_at())
+
+    def test_doorbell_presses_are_capped_per_five_minutes(self) -> None:
+        camera = CameraConfig.model_validate({
+            "id": "gate", "name": "Gate", "stream_url": "rtsp://example.invalid/main",
+            "doorbell": {"enabled": True, "cooldown_seconds": 0, "max_per_5m": 2},
+        })
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
-            self.assertEqual(worker.onvif.on_doorbell, worker.handle_doorbell_press)
-            with self.assertLogs("survng.app.camera", level="INFO") as logs:
-                worker.handle_doorbell_press("tns1:RuleEngine/MyRuleDetector/Visitor", "<x/>", None)
+            worker._stop.clear()
+            results = [
+                worker.handle_doorbell_press("tns1:RuleEngine/MyRuleDetector/Visitor", "", None)
+                for _ in range(3)
+            ]
 
-            self.assertIn("Doorbell press on gate", logs.output[0])
-            self.assertEqual(worker.motion_events.queue.qsize(), 0)
+            self.assertEqual(results, [True, True, False])
+            self.assertEqual(worker.motion_state._stats["doorbell_rate_limited"], 1)
+
+    def test_doorbell_press_is_decided_as_a_doorbell_incident(self) -> None:
+        camera = CameraConfig.model_validate({
+            "id": "gate", "name": "Gate", "stream_url": "rtsp://example.invalid/main",
+            "doorbell": {"enabled": True},
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=MotionQualificationConfig(mode="adaptive"))
+            worker._stop.clear()
+            with patch.object(
+                worker.motion_incidents,
+                "process",
+                return_value=incident_outcome(event_id=7, snapshot_path="", object_detected=False),
+            ) as process_event, patch.object(
+                worker.motion_qualification, "qualify_burst",
+                side_effect=AssertionError("a press is never EMA-qualified"),
+            ):
+                thread = worker.motion_decisions._thread = threading.Thread(
+                    target=worker.motion_decisions.run, args=(worker._stop,)
+                )
+                thread.start()
+                worker.handle_doorbell_press("tns1:RuleEngine/MyRuleDetector/Visitor", "<press/>", None)
+                deadline = time.monotonic() + 2
+                while process_event.call_count == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                worker._stop.set()
+                worker.motion_events.queue.put_nowait(None)
+                thread.join(timeout=2)
+
+            process_event.assert_called_once()
+            qualification = process_event.call_args.args[3]
+            self.assertEqual(qualification["reason"], "doorbell_trigger")
+            self.assertEqual(qualification["trigger_source"], "doorbell")
+            self.assertTrue(qualification["effective_accepted"])
+            self.assertEqual(qualification["camera_notice_admission"], {
+                "version": 1,
+                "trigger_class": "doorbell",
+                "source_topics": ["tns1:RuleEngine/MyRuleDetector/Visitor"],
+            })
+            self.assertFalse(process_event.call_args.kwargs["require_eligible_object"])
 
     def test_event_worker_survives_a_transient_handler_failure(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")

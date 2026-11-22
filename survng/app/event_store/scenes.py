@@ -14,7 +14,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from ..incident_utils import portable_media_path
 from ..scene_identity import observation_identity
-from ..motion_topics import SPEECH_TOPIC
+from ..motion_topics import DOORBELL_TOPIC, SPEECH_TOPIC
 
 # Each camera episode's recorded analysis is recomputed from all of its
 # observations, so one episode is bounded. Longer activity continues the same
@@ -1409,7 +1409,7 @@ class EventStoreSceneMixin:
             )
             opener=members[0] if members else None
             raw_trigger=str((opener["topic"] if opener else None) or "camera").lower()
-            trigger="ema" if raw_trigger in {"ema","adaptive","visual_backup","adaptive/visual_backup"} else "speech" if raw_trigger==SPEECH_TOPIC else "camera"
+            trigger="ema" if raw_trigger in {"ema","adaptive","visual_backup","adaptive/visual_backup"} else "speech" if raw_trigger==SPEECH_TOPIC else "doorbell" if raw_trigger==DOORBELL_TOPIC else "camera"
             snapshot_observation_id=None
             snapshot_url=None
             captured_by={event["id"]:event["snapshot_captured_at"] for event in presented_members

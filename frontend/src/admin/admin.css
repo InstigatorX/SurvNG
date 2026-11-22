@@ -662,6 +662,11 @@ a.button {
   box-shadow: 0 0 0 2px rgba(167, 139, 250, .14);
 }
 
+.incident-source-dot.source-doorbell::before {
+  background: #f472b6;
+  box-shadow: 0 0 0 2px rgba(244, 114, 182, .14);
+}
+
 .incident-mosaic-source {
   position: absolute;
   z-index: 6;

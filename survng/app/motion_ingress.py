@@ -16,6 +16,7 @@ from .ema_v2 import CameraNotice, EpisodeDecision, EpisodeDecisionReason
 from .motion_topics import (
     ADAPTIVE_MOTION_TOPIC,
     ADAPTIVE_VISUAL_BACKUP_TOPIC,
+    DOORBELL_TOPIC,
     SPEECH_TOPIC,
     is_manual_topic,
 )
@@ -148,6 +149,8 @@ class MotionEventIngressService:
         self.epoch_now = epoch_now
         self.model_labels = model_labels or (lambda: [])
         self.event_clock = MotionEventClock()
+        self._doorbell_lock = threading.Lock()
+        self._doorbell_accepted: deque[float] = deque()
 
     def handle(
         self,
@@ -305,6 +308,60 @@ class MotionEventIngressService:
                 )
                 if not queued:
                     self._enqueue_ema_fallback(admission)
+            return queued
+        finally:
+            self.state.end_ingress(generation)
+
+    def handle_doorbell(
+        self,
+        event_at: datetime | None,
+        *,
+        source_topic: str,
+        message: str = "",
+        cooldown_seconds: float = 30.0,
+        max_per_5m: int = 5,
+    ) -> bool:
+        """Queue an incident check for a recognized doorbell press.
+
+        A press is not camera motion, like speech: it never sets
+        ``last_motion_at``, publishes no motion activity event, and is
+        admitted in every qualification mode. Unlike speech it goes straight
+        to the decision queue instead of through the episode controller, so a
+        press can never be folded into a detection request that is already
+        running: every accepted press gets its own decision. Returns True when
+        the check was queued.
+        """
+        generation = self.state.begin_ingress()
+        if generation is None:
+            return False
+        try:
+            received_at = self.epoch_now()
+            monotonic_now = time.monotonic()
+            with self._doorbell_lock:
+                accepted = self._doorbell_accepted
+                while accepted and monotonic_now - accepted[0] > 300.0:
+                    accepted.popleft()
+                if accepted and monotonic_now - accepted[-1] < max(0.0, cooldown_seconds):
+                    self.state.increment_stat("doorbell_cooldown_dropped", 1)
+                    return False
+                if len(accepted) >= max(1, int(max_per_5m)):
+                    self.state.increment_stat("doorbell_rate_limited", 1)
+                    return False
+                accepted.append(monotonic_now)
+            event_timing = self.event_clock.resolve(event_at, received_at)
+            queued = self.enqueue(MotionTrigger(
+                topic=DOORBELL_TOPIC,
+                message=message,
+                event_at=event_timing.sampling_at,
+                received_at=received_at,
+                event_timing=event_timing,
+                source_topic=str(source_topic or "")[:1024],
+            ), evict_oldest=False)
+            if not queued:
+                # Nothing was queued, so this press must not consume budget.
+                with self._doorbell_lock:
+                    if self._doorbell_accepted and self._doorbell_accepted[-1] == monotonic_now:
+                        self._doorbell_accepted.pop()
             return queued
         finally:
             self.state.end_ingress(generation)
