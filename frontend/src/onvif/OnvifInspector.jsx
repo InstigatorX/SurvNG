@@ -52,6 +52,24 @@ function eventStateCell(event) {
   return { text: "?", className: classNameForState(null), title: "No state reported" };
 }
 
+const EVENT_TYPE_LABELS = {
+  doorbell: "doorbell",
+  package: "package",
+  object_count: "object count",
+  tamper: "tamper",
+  io: "relay / input",
+  device: "device",
+};
+
+// Object classes come first. A known non-object event gets a muted label;
+// it describes the event and is never an object class.
+function eventClassCell(event) {
+  if (event.classification) return { text: event.classification, className: "" };
+  const label = EVENT_TYPE_LABELS[event.event_type];
+  if (label) return { text: label, className: "event-type", title: "Event type; not an object class" };
+  return { text: "unknown", className: "" };
+}
+
 function reportedStateText(value) {
   return value === true || value === false ? String(value) : "none";
 }
@@ -136,6 +154,7 @@ export default function OnvifInspector() {
         event.topic,
         event.normalized_topic,
         event.classification,
+        EVENT_TYPE_LABELS[event.event_type],
         event.active === null ? "unknown" : String(event.active),
         reportedStateText(event.reported_state),
         ...(event.simple_items || []).flatMap((item) => [item.name, item.value]),
@@ -295,7 +314,10 @@ export default function OnvifInspector() {
                     <td className="topic-cell">
                       {event.normalized_topic || event.topic || "—"}
                     </td>
-                    <td>{event.classification || "unknown"}</td>
+                    {(() => {
+                      const cls = eventClassCell(event);
+                      return <td className={cls.className} title={cls.title}>{cls.text}</td>;
+                    })()}
                     {(() => {
                       const state = eventStateCell(event);
                       return <td className={state.className} title={state.title}>{state.text}</td>;
@@ -317,7 +339,8 @@ export default function OnvifInspector() {
                   <dt>Event time</dt><dd>{selected.event_at || "—"}</dd>
                   <dt>Topic</dt><dd className="mono">{selected.topic || "—"}</dd>
                   <dt>Normalized</dt><dd className="mono">{selected.normalized_topic || "—"}</dd>
-                  <dt>Classification</dt><dd>{selected.classification || "unknown"}</dd>
+                  <dt>Classification</dt><dd>{selected.classification || "none"}</dd>
+                  <dt>Event type</dt><dd>{EVENT_TYPE_LABELS[selected.event_type] || "—"}</dd>
                   <dt>Motion state</dt><dd>{selected.active === null ? "not judged" : String(selected.active)}</dd>
                   <dt>Reported state</dt><dd>{reportedStateText(selected.reported_state)}</dd>
                   <dt>Changed</dt><dd>{String(Boolean(selected.changed))}</dd>

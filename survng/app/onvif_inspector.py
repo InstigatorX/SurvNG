@@ -17,6 +17,21 @@ MAX_XML_CHARACTERS = 16_384
 # camera_semantics), so this page names notices the way SurvNG decides them.
 _OBJECT_CLASSES = frozenset({"person", "vehicle", "animal", "face"})
 
+# Display-only names for well-known ONVIF events that are not object classes.
+# They label the inspector; nothing in motion or incident admission reads them.
+# A doorbell press is deliberately not a person claim: see classify_topic.
+_EVENT_TYPES_BY_TERMINAL = {
+    "visitor": "doorbell",  # Reolink doorbell button
+    "package": "package",  # Reolink package detection
+}
+_EVENT_TYPES_BY_PREFIX = (
+    ("ruleengine/countaggregation/", "object_count"),
+    ("videosource/globalscenechange/", "tamper"),
+    ("device/trigger/", "io"),
+    ("device/", "device"),
+    ("monitoring/", "device"),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class OnvifInspectorEvent:
@@ -31,6 +46,8 @@ class OnvifInspectorEvent:
     # What the payload's State/IsMotion/IsInside said, for any topic. Unlike
     # ``active`` it is not a motion start and never drives class state.
     reported_state: bool | None
+    # Display-only label for known non-object events (doorbell, package, ...).
+    event_type: str | None
     recognized: bool
     changed: bool
     simple_items: tuple[tuple[str, str], ...]
@@ -67,6 +84,18 @@ class OnvifInspector:
             return "motion"
         return None
 
+    @staticmethod
+    def event_type(normalized_topic: str) -> str | None:
+        """Name a known event that is not an object class, for display only."""
+        topic = str(normalized_topic or "").strip().lower()
+        terminal = topic.rsplit("/", 1)[-1] if topic else ""
+        if terminal in _EVENT_TYPES_BY_TERMINAL:
+            return _EVENT_TYPES_BY_TERMINAL[terminal]
+        for prefix, label in _EVENT_TYPES_BY_PREFIX:
+            if topic.startswith(prefix):
+                return label
+        return None
+
     def register_listener(self, camera_id: str, listener: Any) -> None:
         with self._lock:
             self._listeners[str(camera_id)] = weakref.ref(listener)
@@ -89,6 +118,7 @@ class OnvifInspector:
         raw_items = tuple((str(name), str(value)) for name, value in simple_items)
         classification = self.classify_topic(normalized_topic, str(message_xml or ""), raw_items)
         reported_state = reported_notice_state(str(message_xml or ""), raw_items)
+        event_type = None if classification else self.event_type(normalized_topic)
         received = received_at or datetime.now(timezone.utc)
         if received.tzinfo is None:
             received = received.replace(tzinfo=timezone.utc)
@@ -132,6 +162,7 @@ class OnvifInspector:
                 classification=classification,
                 active=active,
                 reported_state=reported_state,
+                event_type=event_type,
                 recognized=active is not None,
                 changed=changed,
                 simple_items=items,
