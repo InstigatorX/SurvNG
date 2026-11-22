@@ -19,7 +19,7 @@ from ..evidence_work import (
     EvidenceWorkPreempted, check_evidence_cancellation, evidence_cancelled,
     evidence_wait_timeout, report_evidence_stage, run_evidence_process,
 )
-from ..config import CameraConfig
+from ..config import CameraConfig, DetectorConfig
 from ..scene_activity_evidence import scene_sample_records as _scene_sample_records
 from ..evidence_gallery import GalleryBatch, encode_gallery
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
@@ -269,7 +269,7 @@ class _DecodedRecordedFrame:
 
 
 class MotionObjectDetectorBackend(Protocol):
-    config: Any
+    config: DetectorConfig
 
     def detect(
         self,

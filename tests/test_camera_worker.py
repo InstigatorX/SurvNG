@@ -22,7 +22,13 @@ from survng.app.camera_capture import (
     FRAME_STALE_SECONDS,
     CapturedFrame,
 )
-from survng.app.config import CameraConfig, ImageStorageConfig, MotionQualificationConfig, ObjectTrackingConfig
+from survng.app.config import (
+    CameraConfig,
+    DetectorConfig,
+    ImageStorageConfig,
+    MotionQualificationConfig,
+    ObjectTrackingConfig,
+)
 from survng.app.detector import objects_to_json
 from survng.app.image_storage import DurableImageWriter
 from survng.app.motion import MotionQualificationResult
@@ -63,7 +69,19 @@ def incident_outcome(**values: object) -> StubIncidentOutcome:
 class DummyDetector:
     def __init__(self) -> None:
         self.calls = 0
-        self.config = SimpleNamespace(confidence_threshold=0.5)
+        # Partial on purpose: recorded refinement still reads optional fields
+        # with module fallbacks. Declare every field CameraWorker reads
+        # directly, using the production defaults.
+        defaults = DetectorConfig()
+        self.config = SimpleNamespace(
+            confidence_threshold=0.5,
+            require_incident_zone=defaults.require_incident_zone,
+            event_class_confidence_thresholds={},
+            object_activity_attribution=defaults.object_activity_attribution,
+            scene_discovery_enabled=defaults.scene_discovery_enabled,
+            scene_discovery_interval_seconds=defaults.scene_discovery_interval_seconds,
+            scene_discovery_heartbeat_seconds=defaults.scene_discovery_heartbeat_seconds,
+        )
 
     def detect(self, frame, confidence_threshold=None):
         self.calls += 1

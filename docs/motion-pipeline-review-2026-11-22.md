@@ -148,3 +148,27 @@ Suggested order: T1 and T2, then T3, T5 and T6, with T4 last.
   it). The EMA fast object check now runs on that full-resolution frame and
   falls back to the analysis-width frame only for entries beyond the budget.
   Detection recall on real footage has not been measured.
+- **T5 (partly done):**
+  - The motion ring size is computed once
+    (`MotionQualificationConfig.motion_ring_size`).
+  - Detection providers share one declared `(event_at, qualification)`
+    contract; call-time `inspect.signature` checks are gone. They were
+    covering a real case: the live fast-path provider was wired with one
+    argument.
+  - `MotionTriggerKind` / `motion_trigger_kind()` classify trigger topics.
+    SurvNG's own topics are defined once, and manual-topic detection uses
+    one rule everywhere.
+  - The activity attributor is passed through constructors to the recorded
+    detector, the tracking lifecycle and every session it creates. The
+    write-only `scene_context_memory` attributes were removed.
+  - `CameraWorker` reads detector configuration fields directly, including
+    on the per-frame capture path.
+  - Remaining:
+    - Splitting the oversized functions.
+    - Removing the pass-through detection layers.
+    - Converting the roughly 37 `getattr(config, ...)` reads in
+      `motion_pipeline/object_detection.py`. Several of those fallbacks
+      (`event_refinement_stages`, `event_route_refinement_stages`,
+      `tracking`, `depth`) differ from the `DetectorConfig` defaults, so test
+      doubles that supply partial configs exercise non-production refinement
+      settings. Converting them requires migrating those doubles first.

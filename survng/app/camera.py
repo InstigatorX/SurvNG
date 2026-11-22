@@ -29,7 +29,7 @@ from .camera_lifecycle import (
     CameraRuntimeState,
     CameraStopTicket,
 )
-from .config import CameraConfig, DetectionZone, MotionQualificationConfig
+from .config import CameraConfig, DetectionZone, DetectorConfig, MotionQualificationConfig
 from .image_storage import DurableImageWriter
 from .media_storage import MediaStorageRegistry
 from .media_sessions import MediaSessionManager
@@ -381,9 +381,7 @@ class CameraWorker:
         # refinement and tracking sessions. Built before its consumers so each
         # receives it at construction.
         self.activity_attributor = self._build_activity_attributor(
-            detector_config=getattr(
-                motion_object_detector_factory.detector, "config", None,
-            ),
+            detector_config=motion_object_detector_factory.detector.config,
             decision_factory=motion_decision_handler_factory,
         )
         self.motion_object_detector = motion_object_detector_factory.create(
@@ -441,15 +439,16 @@ class CameraWorker:
         detector_factory = motion_object_detector_factory
 
         def establishment_zones() -> dict[str, Any]:
-            config = getattr(getattr(detector_factory, "detector", None), "config", None)
+            # Read per call: the detector configuration is reloadable.
+            config = detector_factory.detector.config
             require = self.camera.require_incident_zone
             if require is None:
-                require = True if config is None else bool(getattr(config, "require_incident_zone", True))
+                require = config.require_incident_zone
             return establishment_zone_policy(
                 self.camera,
                 require_incident_zone=require,
-                confidence_threshold=None if config is None else getattr(config, "confidence_threshold", None),
-                class_confidence_thresholds=None if config is None else getattr(config, "event_class_confidence_thresholds", None),
+                confidence_threshold=config.confidence_threshold,
+                class_confidence_thresholds=config.event_class_confidence_thresholds,
                 detector_config=config,
             )
 
@@ -995,11 +994,11 @@ class CameraWorker:
     def _build_activity_attributor(
         self,
         *,
-        detector_config: Any,
+        detector_config: DetectorConfig,
         decision_factory: MotionDecisionHandlerFactory,
     ) -> ObjectActivityAttributor:
         mode = (
-            getattr(detector_config, "object_activity_attribution", "enforce")
+            detector_config.object_activity_attribution
             if self.camera.object_activity_attribution == "inherit"
             else self.camera.object_activity_attribution
         )
@@ -1174,15 +1173,11 @@ class CameraWorker:
                     source="live",
                 )
                 detector_config = self.motion_object_detector.detector.config
-                discovery_interval = float(getattr(
-                    detector_config, "scene_discovery_interval_seconds", 10.0,
-                ))
-                discovery_heartbeat = float(getattr(
-                    detector_config, "scene_discovery_heartbeat_seconds", 120.0,
-                ))
+                discovery_interval = detector_config.scene_discovery_interval_seconds
+                discovery_heartbeat = detector_config.scene_discovery_heartbeat_seconds
                 since_discovery = frame.captured_at_monotonic - self._last_scene_discovery_at
                 if (
-                    bool(getattr(detector_config, "scene_discovery_enabled", True))
+                    detector_config.scene_discovery_enabled
                     and (
                         since_discovery >= max(discovery_interval, discovery_heartbeat)
                         or (
