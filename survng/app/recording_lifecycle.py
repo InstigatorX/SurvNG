@@ -92,9 +92,20 @@ class RecordingLifecycle:
                 return
             self.recorder.set_camera_enabled(camera_id, enabled)
 
+    def set_session_released(self, camera_id: str, released: bool) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self.recorder.set_session_released(camera_id, released)
+
+    def session_released(self, camera_id: str) -> bool:
+        return self.recorder.session_released(camera_id)
+
     def start_camera(self, camera: CameraConfig) -> None:
         with self._lock:
             if self._closed:
+                return
+            if camera.battery_powered() and not self.recorder.session_released(camera.id):
                 return
             if camera.record:
                 self.recorder.start(camera, "main")

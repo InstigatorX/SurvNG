@@ -142,12 +142,17 @@ class OperationalTelemetryCollector:
             raw_frame_age = status.get("last_frame_age_seconds")
             frame_age = _finite_float(raw_frame_age)
             fresh = raw_frame_age is None or (frame_age is not None and frame_age <= 5.0)
+            connectivity = str(status.get("capture_connectivity") or "")
+            # Ordinary battery sleep is healthy. A failed wake is not.
+            asleep = connectivity == "asleep"
             cameras.append(
                 CameraTelemetryBucket(
                     sampled_at=sampled_at,
                     camera_id=camera_id,
                     expected=float(expected),
-                    available=float(expected and bool(status.get("connected")) and fresh),
+                    available=float(
+                        expected and (asleep or (bool(status.get("connected")) and fresh))
+                    ),
                     live_fps=float(live.get("fps") or 0.0),
                     main_fps=float(main.get("fps") or 0.0),
                     **deltas,

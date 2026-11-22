@@ -30,6 +30,14 @@ LOGGER = logging.getLogger(__name__)
 _VERSION_IDENTITY: dict[str, Any] = {}
 
 
+def _recording_expected_now(camera: dict[str, Any]) -> bool:
+    """Sleeping battery cameras are not missing a recorder."""
+    if camera.get("power") != "battery":
+        return True
+    phase = str((camera.get("wake") or {}).get("phase") or "asleep")
+    return phase in {"connecting", "awake"}
+
+
 class DiagnosticSessionRequest(BaseModel):
     scope: str = Field(default="system", max_length=32)
     camera_id: str = Field(default="", max_length=128)
@@ -96,6 +104,7 @@ class SystemTelemetryService:
             camera
             for camera in enabled_cameras
             if camera.get("recording_configured") and camera.get("recording_enabled", True)
+            and _recording_expected_now(camera)
         ]
         payload = {
             "instance_id": self.process_instance_id,
