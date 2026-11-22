@@ -204,3 +204,36 @@ def test_status_projection_exposes_sanitized_slow_sites() -> None:
     assert snapshot["event_store_locks"]["events"]["slow_holds"]["sites"]
     assert snapshot["event_store_locks"]["jobs"]["slow_holds"] is None
     json.dumps(snapshot, allow_nan=False)
+
+
+def _slow_statement(connection) -> None:
+    connection.execute("insert into t(value) select pause(0.06)")
+
+
+def test_slow_transaction_splits_time_between_statements_and_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = SlowSiteTable("database transaction", 20.0)
+    monkeypatch.setattr(main_database, "SLOW_TRANSACTIONS", table)
+    monkeypatch.setattr(main_database, "SLOW_TRANSACTION_MS", 20.0)
+    monkeypatch.setattr(main_database, "SLOW_STATEMENT_MS", 20.0)
+    write_lock = TimedLock(threading.RLock())
+    path = tmp_path / "survng.sqlite3"
+    with connect_main_database(path, timeout=1.0, write_lock=write_lock) as connection:
+        connection.execute("create table t (value integer)")
+
+    with connect_main_database(path, timeout=1.0, write_lock=write_lock) as connection:
+        connection.create_function("pause", 1, lambda seconds: time.sleep(seconds) or 1)
+        _slow_statement(connection)
+
+    row = table.snapshot()["sites"][0]
+    assert row["last_statements_ms"] >= 50.0
+    assert row["last_slowest_statement_ms"] >= 50.0
+    assert row["last_slowest_statement_ms"] <= row["last_statements_ms"]
+    assert "last_commit_ms" in row
+    assert row["last_slowest_site"].endswith(" _slow_statement")
+    projected = _database_snapshot({"domains": {}, "slow_transactions": table.snapshot()},
+                                   write_lock, None)
+    assert projected["slow_transactions"]["sites"][0]["last_slowest_site"].endswith(
+        " _slow_statement"
+    )
