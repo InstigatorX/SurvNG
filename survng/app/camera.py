@@ -399,7 +399,6 @@ class CameraWorker:
             camera=camera,
             storage_dir=storage_dir,
             image_writer=image_writer,
-            motion_detector=self.motion_object_detector,
             frame_provider=lambda source: self._get_latest_frame(source),
             rejected_sample_rate=lambda: self.motion_config.rejected_sample_rate,
             stop_requested=self._stop.is_set,
@@ -455,20 +454,16 @@ class CameraWorker:
         self.motion_decision_handler = motion_decision_handler_factory.create(
             camera_id=camera.id,
             establishment_zone_policy=establishment_zones,
-            detection_provider=lambda event_at, qualification=None: self._recorded_motion_frame(
-                event_at, qualification=qualification
+            # Resolve the detector at call time so a replaced or patched
+            # detector is honoured.
+            detection_provider=lambda event_at, qualification=None: (
+                self.motion_object_detector.detect(event_at, qualification)
             ),
-            initial_detection_provider=(
-                lambda event_at, _qualification: self._recorded_motion_frame(
-                    event_at, initial=True,
-                )
+            initial_detection_provider=lambda event_at, _qualification: (
+                self.motion_object_detector.detect_initial(event_at)
             ),
-            initial_evidence_detection_provider=(
-                lambda event_at, evidence: self._recorded_motion_frame(
-                    event_at,
-                    initial=True,
-                    evidence=evidence,
-                )
+            initial_evidence_detection_provider=lambda event_at, evidence: (
+                self.motion_object_detector.detect_initial(event_at, evidence)
             ),
             snapshot_writer=lambda frame, event_at: self._write_snapshot(frame, event_at),
             event_callback=(
@@ -1320,18 +1315,6 @@ class CameraWorker:
             frame_width,
             after_epoch=after_epoch,
         )
-
-    def _recorded_motion_frame(
-        self,
-        event_at: datetime,
-        *,
-        initial: bool = False,
-        evidence: dict[str, Any] | None = None,
-        qualification: dict[str, Any] | None = None,
-    ) -> Any:
-        if initial:
-            return self.media.detect_initial_recorded_motion(event_at, evidence)
-        return self.media.detect_recorded_motion(event_at, qualification)
 
     def _write_snapshot(self, frame: Any, event_at: datetime | None = None) -> str:
         return self.media.write_snapshot(frame, event_at)

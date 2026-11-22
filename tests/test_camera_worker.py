@@ -1323,7 +1323,8 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), events=events)
             with (
-                patch.object(worker, "_recorded_motion_frame", return_value=(frame, objects, "recording.mp4")),
+                patch.object(worker.motion_object_detector, "detect", return_value=(frame, objects, "recording.mp4")),
+                patch.object(worker.motion_object_detector, "detect_initial", return_value=(frame, objects, "recording.mp4")),
                 patch.object(worker, "_write_snapshot", return_value="snapshot.jpg"),
             ):
                 outcome = worker.motion_incidents.process(
@@ -1349,11 +1350,8 @@ class CameraWorkerTest(unittest.TestCase):
                 reid_enabled=False,
             )
             with (
-                patch.object(
-                    worker,
-                    "_recorded_motion_frame",
-                    return_value=(frame, objects, "recording.mp4"),
-                ),
+                patch.object(worker.motion_object_detector, "detect", return_value=(frame, objects, "recording.mp4")),
+                patch.object(worker.motion_object_detector, "detect_initial", return_value=(frame, objects, "recording.mp4")),
                 patch.object(worker, "_write_snapshot", return_value="snapshot.jpg"),
                 patch("survng.app.camera_media.cv2.imread", return_value=seed) as imread,
                 patch.object(worker, "_get_latest_tracking_frame", return_value=None) as prewarm,
@@ -1383,7 +1381,8 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), events=events)
             with (
-                patch.object(worker, "_recorded_motion_frame", return_value=(frame, [], "recording.mp4")),
+                patch.object(worker.motion_object_detector, "detect", return_value=(frame, [], "recording.mp4")),
+                patch.object(worker.motion_object_detector, "detect_initial", return_value=(frame, [], "recording.mp4")),
                 patch.object(worker, "_write_snapshot", return_value="snapshot.jpg"),
             ):
                 outcome = worker.motion_incidents.process(
@@ -3120,7 +3119,10 @@ class CameraWorkerTest(unittest.TestCase):
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
-            with patch.object(worker, "_recorded_motion_frame") as recorded_frame:
+            with (
+                patch.object(worker.motion_object_detector, "detect") as recorded_frame,
+                patch.object(worker.motion_object_detector, "detect_initial"),
+            ):
                 worker.handle_motion_event("onvif/motion", "motion")
 
             self.assertEqual(worker.motion_events.queue.qsize(), 1)
@@ -3315,7 +3317,7 @@ class CameraWorkerTest(unittest.TestCase):
                 patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_SECONDS", 0.0),
                 patch.object(worker, "_get_latest_frame", lambda source="live": frame.copy()),
             ):
-                fallback, objects, recording_path = worker._recorded_motion_frame(
+                fallback, objects, recording_path = worker.motion_object_detector.detect(
                     datetime(2026, 7, 11, 15, 36, 57, tzinfo=timezone.utc)
                 )
 
@@ -3378,7 +3380,7 @@ class CameraWorkerTest(unittest.TestCase):
                 ),
                 patch.object(worker, "_get_latest_frame", return_value=fallback.copy()),
             ):
-                frame, objects, recording_path = worker._recorded_motion_frame(
+                frame, objects, recording_path = worker.motion_object_detector.detect(
                     datetime.fromtimestamp(event_epoch, timezone.utc)
                 )
             elapsed = time.monotonic() - started
