@@ -1,7 +1,10 @@
 """Regression coverage for remote encoder ownership and input boundaries."""
 import asyncio
+import copy
 import socket
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -21,6 +24,7 @@ from tests.test_homekit import configuration, _profile
 @pytest.fixture
 def remote(tmp_path):
     service = HomeKitService(configuration(tmp_path), MediaSessionManager(), "review", lambda _: True)
+    service.nodes.reopen()
     enrollment = service.nodes.begin_enrollment("http://localhost")
     token = enrollment["command"].split("/enroll/")[1].split("'")[0]
     enrolled = service.nodes.complete_enrollment(token, "review")
@@ -495,6 +499,120 @@ def test_pending_remote_snapshot_does_not_block_media_admission(remote):
     assert service.nodes.snapshots == {}
 
 
+def test_staged_registry_loads_persisted_state_at_activation(tmp_path):
+    directory = tmp_path / "homekit"
+    previous = homekit_nodes.NodeRegistry(directory)
+    staged = homekit_nodes.NodeRegistry(directory)
+    assert not directory.exists()
+    previous.reopen()
+    enrollment = previous.begin_enrollment("http://localhost")
+    token = enrollment["command"].split("/enroll/")[1].split("'")[0]
+    enrolled = previous.complete_enrollment(token, "before handoff")
+    previous.update_report(enrolled["id"], {"name": "at handoff"})
+    previous.close()
+
+    assert staged.authenticate(enrolled["secret"]) is None
+    staged.reopen()
+    try:
+        assert staged.authenticate(enrolled["secret"])["name"] == "at handoff"
+    finally:
+        staged.close()
+
+
+def test_closed_registry_preserves_enrollments_and_nodes(remote):
+    service, node, _, _ = remote
+    registry = service.nodes
+    enrollment = registry.begin_enrollment("http://localhost")
+    token = enrollment["command"].split("/enroll/")[1].split("'")[0]
+    registry.close()
+    nodes, tokens = copy.deepcopy(registry.nodes), copy.deepcopy(registry.tokens)
+    saved = registry.path.read_bytes()
+    for operation in (
+        lambda: registry.begin_enrollment("http://localhost"),
+        lambda: registry.enrollment_script(token, "https://example.org"),
+        lambda: registry.complete_enrollment(token, "unused"),
+        lambda: registry.remove(node["id"], []),
+        lambda: registry.update_report(node["id"], {"name": "unused"}),
+    ):
+        with pytest.raises(RuntimeError, match="closed"):
+            operation()
+        assert registry.tokens == tokens and registry.nodes == nodes
+        assert registry.path.read_bytes() == saved
+
+
+def test_registry_keeps_ownership_when_feed_startup_cleanup_fails(remote, monkeypatch):
+    service, _, _, _ = remote
+    registry = service.nodes
+    path = service.directory / "feeds" / "porch" / "1.sock"
+    original_unlink = type(path).unlink
+
+    def unlink(file, *args, **kwargs):
+        if file == path:
+            raise OSError("injected socket unlink failure")
+        return original_unlink(file, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", Mock(side_effect=RuntimeError("injected thread startup failure")))
+        patch.setattr(type(path), "unlink", unlink)
+        with pytest.raises(RuntimeError, match="startup cleanup incomplete"):
+            registry.prepare_feeds("porch", [1])
+    assert path.exists()
+    assert registry.feeds[("porch", 1)].closed
+    with pytest.raises(RuntimeError, match="shutdown incomplete"):
+        registry.prepare_feeds("porch", [1])
+    registry.close()
+    assert not path.exists()
+    registry.reopen()
+    assert registry.prepare_feeds("porch", [1]) == path.parent
+
+
+def test_registry_retains_only_unfinished_feeds_until_drained(remote, tmp_path):
+    service, _, _, _ = remote
+    registry = service.nodes
+    entered, resume = threading.Event(), threading.Event()
+
+    def delayed_close():
+        entered.set()
+        assert resume.wait(3)
+        raise RuntimeError("incomplete test feed")
+
+    pending, stopped = Mock(), Mock()
+    pending.close.side_effect = delayed_close
+    registry.feeds.update({("porch", 1): pending, ("porch", 2): stopped})
+    waiter = registry.begin_snapshot("porch", tmp_path / "snapshot.jpg")
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        draining = executor.submit(registry.close)
+        try:
+            assert entered.wait(2)
+            assert registry.lock.acquire(timeout=1)
+            try:
+                assert registry.closed
+                assert not registry.snapshots and not waiter[0].is_set()
+                with pytest.raises(RuntimeError):
+                    registry.reopen()
+            finally:
+                registry.lock.release()
+        finally:
+            resume.set()
+        with pytest.raises(RuntimeError):
+            draining.result(timeout=2)
+
+    stopped.close.assert_called_once()
+    with pytest.raises(RuntimeError):
+        registry.reopen()
+    with pytest.raises(RuntimeError):
+        registry.prepare_feeds("porch", [1])
+    registry.write_feed("porch", 1, b"unused")
+    pending.write.assert_not_called()
+    pending.close.side_effect = None
+    registry.close()
+    registry.close()
+    assert pending.close.call_count == 2
+    stopped.close.assert_called_once()
+    registry.reopen()
+    assert not registry.closed
+
+
 def test_closed_registry_rejects_stale_sync_and_writers(remote):
     service, node, secret, _ = remote
     assignments = service.node_assignments()
@@ -507,6 +625,32 @@ def test_closed_registry_rejects_stale_sync_and_writers(remote):
         service.nodes.prepare_feeds("porch", [1])
     service.nodes.reopen()
     assert service.nodes.authenticate(secret) is not None
+    with pytest.raises(KeyError):
+        service.nodes.sync(node, {"name": "from prior activation"}, assignments, timeout=0)
+    assert service.nodes.authenticate(secret)["name"] == "review"
+
+
+def test_closing_registry_wakes_sync_and_fences_its_reply_on_reopen(remote, monkeypatch):
+    service, node, _, _ = remote
+    registry = service.nodes
+    waiting = threading.Event()
+    original_wait = registry.updates.wait
+
+    def wait(timeout):
+        waiting.set()
+        return original_wait(timeout)
+
+    def assignments():
+        registry.reopen()
+        return []
+
+    monkeypatch.setattr(registry.updates, "wait", wait)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(registry.sync, node, {}, assignments, 5)
+        assert waiting.wait(2)
+        registry.close()
+        with pytest.raises(KeyError):
+            pending.result(timeout=2)
 
 
 def test_sync_evaluates_assignments_after_the_new_report(remote):
@@ -596,6 +740,7 @@ def test_failed_pairing_reset_restores_worker_supervision(remote, tmp_path):
     import fcntl
     from unittest.mock import Mock, patch
     service, _, _, _ = remote
+    service.started = True
     camera = service.config.cameras[0]
     directory = service.directory / camera.id
     directory.mkdir(mode=0o700)

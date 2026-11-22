@@ -253,14 +253,18 @@ class _TierFeed:
         self._outbound: dict[socket.socket, bytearray] = {}
         self.closed = False
         self.lock = threading.Lock()
+        self._bound = False
+        self.thread = threading.Thread(target=self._accept, name=f"homekit-feed-{path.parent.name}-{path.stem}", daemon=True)
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        if path.exists() or path.is_symlink():
-            path.unlink()
-        self.server.bind(str(path))
-        os.chmod(path, 0o600)
+
+    def start(self) -> None:
+        if self.path.exists() or self.path.is_symlink():
+            self.path.unlink()
+        self.server.bind(str(self.path))
+        self._bound = True
+        os.chmod(self.path, 0o600)
         self.server.listen(4)
         self.server.settimeout(0.5)
-        self.thread = threading.Thread(target=self._accept, name=f"homekit-feed-{path.parent.name}-{path.stem}", daemon=True)
         self.thread.start()
 
     def _accept(self) -> None:
@@ -355,10 +359,13 @@ class _TierFeed:
         with self.lock:
             for client in list(self.clients):
                 self._drop_client(client)
-        self.path.unlink(missing_ok=True)
-        self.thread.join(timeout=1)
+        if self.thread.ident is not None:
+            self.thread.join(timeout=1)
         if self.thread.is_alive():
             raise RuntimeError("HomeKit feed shutdown incomplete")
+        if self._bound:
+            self.path.unlink(missing_ok=True)
+            self._bound = False
 
 
 @dataclass(frozen=True, eq=False)
@@ -382,6 +389,7 @@ class NodeRegistry:
         self.directory = directory
         self.path = directory / "nodes.json"
         self.lock = threading.RLock()
+        self._close_lock = threading.Lock()
         self.updates = threading.Condition()
         self.generation = 0
         self.closed = True
@@ -392,7 +400,6 @@ class NodeRegistry:
         self.uploads: dict[tuple[str, int], EncoderUploadClaim] = {}
         self.snapshots: dict[str, tuple[threading.Event, Path, str]] = {}
         self.sync_requests: dict[str, _SyncRequest] = {}
-        self.reopen()
 
     def _bump(self) -> None:
         with self.updates:
@@ -436,9 +443,12 @@ class NodeRegistry:
         self.tokens = tokens
         self.nodes = {item["id"]: item for item in nodes}
 
-    def _save(self) -> None:
+    def _require_open(self) -> None:
         if self.closed:
             raise RuntimeError("HomeKit registry is closed")
+
+    def _save(self) -> None:
+        self._require_open()
         payload = {"version": 1, "tokens": self.tokens, "nodes": list(self.nodes.values())}
         temporary = self.path.with_suffix(".tmp")
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
@@ -454,6 +464,7 @@ class NodeRegistry:
         token = secrets.token_urlsafe(32)
         expires = time.time() + TOKEN_SECONDS
         with self.lock:
+            self._require_open()
             self.tokens = [item for item in self.tokens if item.get("expires", 0) > time.time()]
             self.tokens.append({"hash": _hash(token), "expires": expires, "origin": origin})
             self._save()
@@ -476,6 +487,7 @@ class NodeRegistry:
 
     def enrollment_script(self, token: str, origin: str | None = None) -> str:
         with self.lock:
+            self._require_open()
             now = time.time()
             match = next((item for item in self.tokens
                 if item.get("expires", 0) > now and isinstance(item.get("hash"), str) and isinstance(item.get("origin"), str)
@@ -490,6 +502,7 @@ class NodeRegistry:
     def complete_enrollment(self, token: str, name: str) -> dict:
         name = "".join(character for character in name if character.isprintable() and character not in "\r\n")[:64] or "encoder"
         with self.lock:
+            self._require_open()
             self._take_token(token)
             node_id = secrets.token_hex(8)
             secret = secrets.token_urlsafe(32)
@@ -513,8 +526,7 @@ class NodeRegistry:
 
     def update_report(self, node_id: str, report: dict) -> None:
         with self.lock:
-            if self.closed:
-                raise RuntimeError("HomeKit registry is closed")
+            self._require_open()
             node = self.nodes.get(node_id)
             if node is None:
                 raise KeyError(node_id)
@@ -549,12 +561,14 @@ class NodeRegistry:
 
     def request_sync(self, node_id: str) -> None:
         with self.lock:
-            if node_id not in self.nodes:
-                raise KeyError(node_id)
+            self._require_open()
+            node = self.nodes[node_id]
         available = available_agent_version()
         with self.lock:
-            node = self.nodes[node_id]
-            if self.closed or time.time() - node["lastSeen"] > ONLINE_SECONDS:
+            self._require_open()
+            if self.nodes.get(node_id) is not node:
+                raise KeyError(node_id)
+            if time.time() - node["lastSeen"] > ONLINE_SECONDS:
                 raise RuntimeError("HomeKit encoder is offline")
             if available is None:
                 raise RuntimeError("HomeKit encoder release is unavailable")
@@ -579,7 +593,10 @@ class NodeRegistry:
     def sync(self, node: dict, report: dict, assignments: list[dict] | Callable[[], list[dict]], timeout: float) -> dict:
         with self.updates:
             seen = self.generation
-        self.update_report(node["id"], report)
+        with self.lock:
+            if self.nodes.get(node["id"]) is not node:
+                raise KeyError(node["id"])
+            self.update_report(node["id"], report)
         deadline = time.monotonic() + max(0, timeout)
         with self.updates:
             while time.monotonic() < deadline and self.generation == seen:
@@ -587,7 +604,11 @@ class NodeRegistry:
                 if remaining <= 0:
                     break
                 self.updates.wait(remaining)
-        return self.assignment_payload(node["id"], assignments() if callable(assignments) else assignments)
+        current = assignments() if callable(assignments) else assignments
+        with self.lock:
+            if self.nodes.get(node["id"]) is not node:
+                raise KeyError(node["id"])
+            return self.assignment_payload(node["id"], current)
 
     def assignment_payload(self, node_id: str, assignments: list[dict]) -> dict:
         with self.lock:
@@ -645,20 +666,37 @@ class NodeRegistry:
     def prepare_feeds(self, camera_id: str, tiers: list[int]) -> Path:
         directory = self.directory / "feeds" / camera_id
         with self.lock:
-            if self.closed:
-                raise RuntimeError("HomeKit registry is closed")
+            self._require_open()
             _private_directory(self.directory / "feeds")
             _private_directory(directory)
             for tier in tiers:
-                if (camera_id, tier) not in self.feeds:
-                    self.feeds[(camera_id, tier)] = _TierFeed(directory / f"{tier}.sock", self._bump)
+                key = (camera_id, tier)
+                existing = self.feeds.get(key)
+                if existing is not None:
+                    if existing.closed:
+                        raise RuntimeError("HomeKit feed shutdown incomplete")
+                    continue
+                feed = _TierFeed(directory / f"{tier}.sock", self._bump)
+                self.feeds[key] = feed
+                try:
+                    feed.start()
+                except BaseException as start_error:
+                    try:
+                        feed.close()
+                    except Exception as close_error:
+                        raise RuntimeError("HomeKit feed startup cleanup incomplete") from BaseExceptionGroup(
+                            "HomeKit feed startup", [start_error, close_error],
+                        )
+                    del self.feeds[key]
+                    raise
         return directory
 
     def write_feed(self, camera_id: str, tier: int, data: bytes) -> None:
         with self.lock:
-            feed = self.feeds.get((camera_id, tier))
-        if feed:
-            feed.write(data)
+            if not self.closed:
+                feed = self.feeds.get((camera_id, tier))
+                if feed:
+                    feed.write(data)
 
     def feed_allowed(self, node: dict, camera_id: str, tier: str, assignments: list[dict], revision: str) -> bool:
         if not revision or tier not in {"1", "2", "3"}:
@@ -715,7 +753,8 @@ class NodeRegistry:
 
     def begin_snapshot(self, camera_id: str, destination: Path) -> tuple[threading.Event, Path, str]:
         with self.lock:
-            if self.closed or camera_id in self.snapshots:
+            self._require_open()
+            if camera_id in self.snapshots:
                 raise RuntimeError("snapshot already pending")
             waiter = (threading.Event(), destination, secrets.token_hex(16))
             self.snapshots[camera_id] = waiter
@@ -750,6 +789,7 @@ class NodeRegistry:
         if assigned:
             raise RuntimeError("encoder is assigned to a camera")
         with self.lock:
+            self._require_open()
             if node_id not in self.nodes:
                 raise KeyError(node_id)
             self.nodes.pop(node_id)
@@ -786,21 +826,35 @@ class NodeRegistry:
             return rows
 
     def close(self) -> None:
-        with self.lock:
-            self.closed = True
-            feeds = list(self.feeds.values())
-            self.feeds.clear()
-            self.uploads.clear()
-            self.snapshots.clear()
-            self.sync_requests.clear()
-            self._bump()
-        for feed in feeds:
-            feed.close()
+        with self._close_lock:
+            with self.lock:
+                if self.closed and not self.feeds:
+                    return
+                self.closed = True
+                feeds = list(self.feeds.items())
+                self.uploads.clear()
+                self.snapshots.clear()
+                self.sync_requests.clear()
+                self._bump()
+            first_error = None
+            for key, feed in feeds:
+                try:
+                    feed.close()
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+                else:
+                    with self.lock:
+                        del self.feeds[key]
+            if first_error is not None:
+                raise RuntimeError("HomeKit feed shutdown incomplete") from first_error
 
     def reopen(self) -> None:
         with self.lock:
             if not self.closed:
                 return
+            if self.feeds:
+                raise RuntimeError("HomeKit feed shutdown incomplete")
             try:
                 _private_directory(self.directory)
                 self._load()

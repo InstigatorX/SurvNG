@@ -200,7 +200,7 @@ def test_per_camera_reconfiguration_preserves_other_workers_and_pairing(tmp_path
     config = configuration(tmp_path)
     service = HomeKitService(config, MediaSessionManager(), "generation", lambda _: True)
     with patch("survng.app.homekit.CameraWorker") as factory:
-        factory.side_effect = lambda service, app, camera: SimpleNamespace(camera=camera, start=Mock(), close=Mock(), status=lambda: {})
+        factory.side_effect = lambda service, app, camera: SimpleNamespace(camera=camera, config=app, start=Mock(), close=Mock(), status=lambda: {})
         service.start()
         first, other = service.workers.values()
         next_config = config.model_copy(deep=True)
@@ -216,6 +216,52 @@ def test_per_camera_reconfiguration_preserves_other_workers_and_pairing(tmp_path
         other.close.assert_not_called()
         service.close()
         other.close.assert_called_once()
+
+
+def test_partial_reconfiguration_recovers_drained_workers_without_replacing_residuals(tmp_path, monkeypatch):
+    config = configuration(tmp_path)
+    config.cameras.append(config.cameras[1].model_copy(update={"id": "driveway"}, deep=True))
+    service = HomeKitService(config, MediaSessionManager(), "generation", lambda _: True)
+    monkeypatch.setattr(service, "ensure_worker_build", lambda: False)
+    with patch("survng.app.homekit.CameraWorker") as factory:
+        factory.side_effect = lambda service, app, camera: SimpleNamespace(camera=camera, config=app, start=Mock(), close=Mock(), status=lambda: {})
+        service.start()
+        original = service.workers.copy()
+        original["yard"].close.side_effect = RuntimeError("injected stop failure")
+        incoming = config.model_copy(deep=True)
+        incoming.cameras[0].homekit.audio = not incoming.cameras[0].homekit.audio
+        incoming.cameras[1].homekit.audio = not incoming.cameras[1].homekit.audio
+
+        with pytest.raises(RuntimeError, match="reconfiguration shutdown incomplete"):
+            service.reconfigure(incoming)
+        assert service.config is config
+        assert service.workers["porch"] is not original["porch"]
+        service.workers["porch"].start.assert_called_once()
+        assert service.workers["driveway"] is original["driveway"]
+        assert service.workers["yard"] is original["yard"]
+        assert service.status()["cameras"][1]["state"] == "stopping"
+        original["driveway"].close.assert_not_called()
+
+        replacement = service.workers["porch"]
+        original["yard"].close.side_effect = None
+        service.reconfigure(config)
+        assert service.workers["porch"] is replacement
+        assert service.workers["yard"] is not original["yard"]
+        assert service.workers["driveway"] is original["driveway"]
+        service.close()
+
+
+def test_reconfigure_before_start_only_updates_desired_homekit_config(tmp_path):
+    initial = configuration(tmp_path)
+    updated = initial.model_copy(deep=True)
+    updated.cameras[0].homekit.enabled = False
+    service = HomeKitService(initial, MediaSessionManager(), "generation", lambda _: True)
+    with patch("survng.app.homekit.CameraWorker") as factory:
+        service.reconfigure(updated)
+        factory.assert_not_called()
+    assert service.config is updated
+    assert not service.started
+    assert not service.workers
 
 
 def test_config_homekit_is_targeted_not_camera_reload(tmp_path):
@@ -277,6 +323,63 @@ def test_pairing_qr_round_trips_through_a_scanner():
     assert cv2.QRCodeDetector().detectAndDecode(image)[0] == uri
 
 
+def test_failed_replacement_start_is_drained_before_camera_is_restored(tmp_path, monkeypatch):
+    config = configuration(tmp_path)
+    service = HomeKitService(config, MediaSessionManager(), "generation", lambda _: True)
+    monkeypatch.setattr(service, "ensure_worker_build", lambda: False)
+    incoming = config.model_copy(deep=True)
+    incoming.cameras[0].homekit.audio = not incoming.cameras[0].homekit.audio
+
+    def make_worker(service, app, camera):
+        error = RuntimeError("start failed") if app is incoming else None
+        return SimpleNamespace(camera=camera, config=app, start=Mock(side_effect=error), close=Mock(), status=lambda: {})
+
+    with patch("survng.app.homekit.CameraWorker", side_effect=make_worker):
+        service.start()
+        unaffected = service.workers["yard"]
+        with pytest.raises(RuntimeError, match="startup incomplete"):
+            service.reconfigure(incoming)
+        failed = service.workers["porch"]
+        assert service.status()["cameras"][0]["state"] == "stopping"
+        service.reconfigure(config)
+        failed.close.assert_called_once()
+        assert service.workers["porch"] is not failed
+        assert service.workers["yard"] is unaffected
+        service.close()
+
+
+def test_compensation_uses_restored_config_even_when_a_replacement_will_not_stop(tmp_path, monkeypatch):
+    config = configuration(tmp_path)
+    incoming = config.model_copy(deep=True)
+    for camera in incoming.cameras:
+        camera.homekit.audio = not camera.homekit.audio
+    incoming.cameras[1].homekit.port = 57321
+    service = HomeKitService(config, MediaSessionManager(), "generation", lambda _: True)
+    monkeypatch.setattr(service, "ensure_worker_build", lambda: False)
+    with patch("survng.app.homekit.CameraWorker") as factory:
+        factory.side_effect = lambda service, app, camera: SimpleNamespace(
+            camera=camera, config=app, start=Mock(), close=Mock(), status=lambda: {},
+        )
+        service.start()
+        service.reconfigure(incoming)
+        retained = service.workers["yard"]
+        retained.close.side_effect = RuntimeError("injected stop failure")
+
+        with pytest.raises(RuntimeError, match="reconfiguration shutdown incomplete"):
+            service.reconfigure(config, rollback=True)
+        assert service.config is config
+        assert service.workers["porch"].config is config
+        assert service.workers["yard"] is retained
+        assert service.status()["cameras"][1]["port"] == 57321
+        with pytest.raises(RuntimeError, match="before resetting its pairing"):
+            service.reset_pairing("yard")
+        retained.close.assert_called_once()
+        retained.close.side_effect = None
+        service.reconfigure(config)
+        assert all(worker.config is config for worker in service.workers.values())
+        service.close()
+
+
 def _profile():
     return {"width": 896, "height": 672, "tiers": [
         {"identifier": 1, "quality": 2, "width": 1600, "height": 1200, "frameRate": 30, "targetAverageBitrate": 1700, "peakBitrate": 1800},
@@ -286,6 +389,7 @@ def _profile():
 def test_encoder_enrollment_is_one_time_and_keeps_secrets_off_status(tmp_path):
     config = configuration(tmp_path)
     service = HomeKitService(config, MediaSessionManager(), "generation", lambda _: True)
+    service.nodes.reopen()
     try:
         started = service.nodes.begin_enrollment("https://survng.example:8443")
         token = started["command"].split("/enroll/")[1].split("'")[0]
@@ -372,7 +476,7 @@ def test_encoder_assignment_restarts_only_that_camera(tmp_path):
     config = configuration(tmp_path)
     service = HomeKitService(config, MediaSessionManager(), "generation", lambda _: True)
     with patch("survng.app.homekit.CameraWorker") as factory:
-        factory.side_effect = lambda service, app, camera: SimpleNamespace(camera=camera, start=Mock(), close=Mock(), status=lambda: {})
+        factory.side_effect = lambda service, app, camera: SimpleNamespace(camera=camera, config=app, start=Mock(), close=Mock(), status=lambda: {})
         service.start()
         first, other = service.workers["porch"], service.workers["yard"]
         next_config = config.model_copy(deep=True)

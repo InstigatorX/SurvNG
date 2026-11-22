@@ -258,7 +258,7 @@ class TargetedConfigApplication:
             applied: list[str] = []
             try:
                 steps = [
-                    ("homekit" in changes, "homekit", lambda c: runtime.homekit.reconfigure(c), lambda c: runtime.homekit.reconfigure(c)),
+                    ("homekit" in changes, "homekit", lambda c: runtime.homekit.reconfigure(c), lambda c: runtime.homekit.reconfigure(c, rollback=True)),
                     (bool(recorder_changes), "recorders", lambda c: runtime.reconfigure_recorders(c), lambda c: runtime.reconfigure_recorders(c)),
                     (mqtt_changed, "mqtt", lambda c: runtime.reconfigure_mqtt(c.mqtt), lambda c: runtime.reconfigure_mqtt(c.mqtt)),
                     (retention_changed, "retention", runtime.reconfigure_recording_retention, runtime.reconfigure_recording_retention),
