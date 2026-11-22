@@ -15,7 +15,8 @@ _CATEGORY_LABELS = {
     "face": {"face"},
 }
 _VALUE_FIELDS = {"class", "classification", "objectclass", "objecttype"}
-_STATE_FIELDS = {"state", "ismotion", "motion"}
+# IsInside is the state of an ONVIF FieldDetector (Dahua IVS intrusion) rule.
+_STATE_FIELDS = {"state", "ismotion", "motion", "isinside"}
 _INACTIVE = {"false", "0", "off", "inactive"}
 _ACTIVE = {"true", "1", "on", "active"}
 _BROAD_CLASSES = {"people", "human"}

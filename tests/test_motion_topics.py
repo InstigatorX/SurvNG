@@ -19,6 +19,8 @@ from survng.app.onvif_events import OnvifEventListener
     ("VehicleDetect", "vehicle"),
     ("DogCatDetect", "animal"),
     ("FaceDetect", "face"),
+    ("SmartMotionHuman", "person"),
+    ("SmartMotionVehicle", "vehicle"),
 ])
 def test_vendor_semantics_agree_across_parser_evidence_and_decision(suffix, kind):
     topic = f"tns1:RuleEngine/tns2:MyRuleDetector/{suffix}"

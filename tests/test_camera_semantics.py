@@ -127,3 +127,38 @@ def test_undeclared_prefix_fragment_reads_its_state() -> None:
     assert camera_semantic_reports(
         "RuleEngine/PersonDetect", '<tt:SimpleItem Name="State" Value="false"/>', ["person"]
     ) == []
+
+
+def test_dahua_ivs_cleared_intrusion_is_not_a_semantic_claim() -> None:
+    from survng.app.camera_semantics import camera_notice_admission
+
+    topic = "tns1:RuleEngine/FieldDetector/ObjectsInside"
+
+    def payload(inside: str) -> str:
+        return (
+            '<tt:Data><tt:SimpleItem Name="IsInside" Value="' + inside + '"/>'
+            '<tt:SimpleItem Name="ObjectType" Value="Human"/></tt:Data>'
+        )
+
+    entered = camera_notice_admission(topic, payload("true"), ["person", "car"])
+    assert entered["kind"] == "semantic"
+    assert entered["compatible_labels"] == ["person"]
+    assert camera_semantic_reports(topic, payload("false"), ["person"]) == []
+    assert camera_notice_admission(topic, payload("false"), ["person"]) == {
+        "version": 1, "kind": "generic", "reason": "state_not_affirmative",
+    }
+
+
+def test_dahua_smart_motion_topics_are_semantic() -> None:
+    from survng.app.camera_semantics import camera_notice_admission
+
+    active = '<tt:SimpleItem Name="State" Value="true"/>'
+    labels = ["person", "car", "truck"]
+    human = camera_notice_admission("tns1:RuleEngine/SmartMotionHuman", active, labels)
+    vehicle = camera_notice_admission("tns1:RuleEngine/SmartMotionVehicle", active, labels)
+    assert (human["kind"], human["compatible_labels"]) == ("semantic", ["person"])
+    assert (vehicle["kind"], vehicle["compatible_labels"]) == ("semantic", ["car", "truck"])
+    cleared = camera_notice_admission(
+        "tns1:RuleEngine/SmartMotionHuman", '<tt:SimpleItem Name="State" Value="false"/>', labels
+    )
+    assert cleared["kind"] == "generic"
