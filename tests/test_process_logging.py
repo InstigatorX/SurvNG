@@ -5,10 +5,15 @@ from __future__ import annotations
 import io
 import logging
 
-from survng.app.process_logging import install_stderr_log_handler
+from survng.app.process_logging import STDERR_HANDLER_NAME, install_stderr_log_handler
 
 
 def test_errors_reach_stderr_with_redacted_traceback() -> None:
+    root = logging.getLogger()
+    # Another test may have run the service entry point, which installs it.
+    previous = [h for h in root.handlers if getattr(h, "name", "") == STDERR_HANDLER_NAME]
+    for existing in previous:
+        root.removeHandler(existing)
     stream = io.StringIO()
     handler = install_stderr_log_handler(stream)
     try:
@@ -20,7 +25,9 @@ def test_errors_reach_stderr_with_redacted_traceback() -> None:
         except RuntimeError:
             logger.exception("Recording retention cycle failed")
     finally:
-        logging.getLogger().removeHandler(handler)
+        root.removeHandler(handler)
+        for existing in previous:
+            root.addHandler(existing)
 
     output = stream.getvalue()
     assert "routine detail" not in output

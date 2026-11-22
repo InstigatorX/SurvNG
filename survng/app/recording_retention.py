@@ -875,6 +875,15 @@ class RecordingRetentionService:
                     else RETENTION_CLEANUP_INTERVAL_SECONDS
                 )
             except Exception as error:
+                if self._stop.is_set():
+                    # stop() aborts an in-flight scan through the progress
+                    # handler (sqlite3 "interrupted"); that is a cancellation,
+                    # e.g. a settings reload replacing this worker.
+                    LOGGER.info(
+                        "Recording retention cycle cancelled: worker stopping (%s)",
+                        type(error).__name__,
+                    )
+                    return
                 LOGGER.exception("Recording retention cycle failed")
                 with self._state_lock:
                     self._cleanup_active = False

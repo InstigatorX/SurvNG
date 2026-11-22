@@ -1477,45 +1477,50 @@ class IntelligenceService:
             await asyncio.sleep(60)
             if self.deps.application_stopping.is_set():
                 return
-            try:
-                self._schedule_system_review()
-            except Exception:
-                LOGGER.exception('system review schedule check failed')
-            selected: tuple[int, AppConfig, AppManager] | None = None
-            with self.deps.manager_lock:
-                active_manager = self.deps.get_manager()
-                change_sets = active_manager.events.calibration_change_sets(100)
-                if any((item.get('status') == 'reviewing' for item in change_sets)):
+            # The tick takes the manager reload lock and reads the database;
+            # off the event loop, a settings reload cannot stall every request.
+            await asyncio.to_thread(self._calibration_followup_tick)
+
+    def _calibration_followup_tick(self) -> None:
+        try:
+            self._schedule_system_review()
+        except Exception:
+            LOGGER.exception('system review schedule check failed')
+        selected: tuple[int, AppConfig, AppManager] | None = None
+        with self.deps.manager_lock:
+            active_manager = self.deps.get_manager()
+            change_sets = active_manager.events.calibration_change_sets(100)
+            if any((item.get('status') == 'reviewing' for item in change_sets)):
+                return
+            now = datetime.now(timezone.utc)
+            for item in reversed(change_sets):
+                if item.get('action') != 'apply' or item.get('status') != 'collecting':
                     continue
-                now = datetime.now(timezone.utc)
-                for item in reversed(change_sets):
-                    if item.get('action') != 'apply' or item.get('status') != 'collecting':
-                        continue
-                    try:
-                        created = datetime.fromisoformat(str(item.get('created_at') or '').replace('Z', '+00:00'))
-                        if created.tzinfo is None:
-                            created = created.replace(tzinfo=timezone.utc)
-                        ready_at = created + timedelta(hours=float(item.get('evaluation_hours') or 24))
-                    except (TypeError, ValueError):
-                        continue
-                    if now < ready_at:
-                        continue
-                    change_set_id = int(item['id'])
-                    active_manager.events.update_calibration_change_set_status(change_set_id, 'reviewing')
-                    selected = (change_set_id, self.deps.get_config().model_copy(deep=True), active_manager)
-                    break
-            if selected is not None:
-                change_set_id, active_config, active_manager = selected
                 try:
-                    self._start_registered_ai_thread(
-                        'calibration_evaluation',
-                        self._run_calibration_evaluation,
-                        (change_set_id, active_config, active_manager),
-                        name=f'survng-calibration-evaluation-{change_set_id}',
-                    )
-                except BaseException as exc:
-                    LOGGER.exception('calibration evaluation worker could not start')
-                    active_manager.events.update_calibration_evaluation(change_set_id, {'outcome': 'failed', 'error': f'Evaluation worker could not start: {redact_secret_text(exc)}'}, status='evaluation_failed')
+                    created = datetime.fromisoformat(str(item.get('created_at') or '').replace('Z', '+00:00'))
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                    ready_at = created + timedelta(hours=float(item.get('evaluation_hours') or 24))
+                except (TypeError, ValueError):
+                    continue
+                if now < ready_at:
+                    continue
+                change_set_id = int(item['id'])
+                active_manager.events.update_calibration_change_set_status(change_set_id, 'reviewing')
+                selected = (change_set_id, self.deps.get_config().model_copy(deep=True), active_manager)
+                break
+        if selected is not None:
+            change_set_id, active_config, active_manager = selected
+            try:
+                self._start_registered_ai_thread(
+                    'calibration_evaluation',
+                    self._run_calibration_evaluation,
+                    (change_set_id, active_config, active_manager),
+                    name=f'survng-calibration-evaluation-{change_set_id}',
+                )
+            except BaseException as exc:
+                LOGGER.exception('calibration evaluation worker could not start')
+                active_manager.events.update_calibration_evaluation(change_set_id, {'outcome': 'failed', 'error': f'Evaluation worker could not start: {redact_secret_text(exc)}'}, status='evaluation_failed')
 
     def start_calibration_evaluation(self, change_set_id: int) -> dict:
         with self.deps.manager_lock:

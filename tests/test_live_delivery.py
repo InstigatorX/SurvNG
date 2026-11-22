@@ -14,6 +14,17 @@ from survng.app.main import live_info, relay_go2rtc_websocket, stream, stream_so
 from starlette.websockets import WebSocketDisconnect
 
 
+
+def _to_thread_resolving(url: str) -> AsyncMock:
+    """Run the relay's locked camera lookup; answer the go2rtc URL resolution."""
+
+    async def to_thread(function, *args, **kwargs):
+        if getattr(function, "__name__", "") == "select_camera":
+            return function(*args, **kwargs)
+        return url
+
+    return AsyncMock(side_effect=to_thread)
+
 class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
     async def test_snapshot_releases_generation_lock_before_camera_io(self) -> None:
         class GenerationLock:
@@ -146,7 +157,7 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
             patch("survng.app.main.manager.go2rtc.websocket_url") as websocket_url,
             patch(
                 "survng.app.main.asyncio.to_thread",
-                new=AsyncMock(return_value="ws://go2rtc.invalid/api/ws"),
+                new=_to_thread_resolving("ws://go2rtc.invalid/api/ws"),
             ) as to_thread,
             patch("survng.app.camera_api_routes.websockets.connect", side_effect=OSError("offline")) as connect,
         ):
@@ -154,7 +165,7 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
 
         # Legacy compat parameters are deliberately ignored; relay ownership
         # stops at selecting the configured native go2rtc source.
-        to_thread.assert_awaited_once_with(websocket_url, camera, "main")
+        to_thread.assert_awaited_with(websocket_url, camera, "main")
         websocket.accept.assert_not_awaited()
         self.assertEqual(connect.call_args.kwargs["max_size"], 8 * 1024 * 1024)
         self.assertEqual(connect.call_args.kwargs["max_queue"], 4)
@@ -213,7 +224,7 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
             patch("survng.app.main.manager.workers", {"gate": worker}),
             patch(
                 "survng.app.main.asyncio.to_thread",
-                new=AsyncMock(return_value="ws://go2rtc.invalid/api/ws"),
+                new=_to_thread_resolving("ws://go2rtc.invalid/api/ws"),
             ),
             patch("survng.app.camera_api_routes.websockets.connect", return_value=Connection()),
         ):
@@ -235,7 +246,7 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
             patch("survng.app.main.manager.workers", {"gate": worker}),
             patch(
                 "survng.app.main.asyncio.to_thread",
-                new=AsyncMock(return_value="ws://go2rtc.invalid/api/ws"),
+                new=_to_thread_resolving("ws://go2rtc.invalid/api/ws"),
             ),
             patch(
                 "survng.app.camera_api_routes.websockets.connect",

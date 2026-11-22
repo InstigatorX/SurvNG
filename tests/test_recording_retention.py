@@ -1011,3 +1011,25 @@ class RecordingRetentionConfigTest(unittest.TestCase):
             RecordingRetentionConfig(minimum_free_percent=20, target_free_percent=20)
         with self.assertRaisesRegex(ValueError, "emergency free"):
             RecordingRetentionConfig(emergency_free_percent=15)
+
+
+def test_scan_aborted_by_stop_is_logged_as_cancellation_not_failure(tmp_path, caplog) -> None:
+    import logging
+
+    service = RecordingRetentionService(
+        tmp_path, tmp_path / "recordings", lambda: sqlite3.connect(":memory:"),
+        RecordingRetentionConfig(),
+    )
+
+    def plan(**_kwargs):
+        service._stop.set()  # what stop() does while a scan is running
+        raise sqlite3.OperationalError("interrupted")
+
+    service.plan = plan  # type: ignore[method-assign]
+    with patch("survng.app.recording_retention.RETENTION_INITIAL_DELAY_SECONDS", 0), \
+            caplog.at_level(logging.INFO, logger="survng.app.recording_retention"):
+        service._loop()
+
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("cancelled" in r.getMessage() for r in caplog.records)
+    assert service.status()["state"] != "error"
