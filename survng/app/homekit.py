@@ -443,7 +443,7 @@ class HomeKitService:
     def _reconfigure(self, config, *, rollback: bool) -> None:
         def signature(app, camera):
             settings = camera.homekit.model_dump(exclude={"object_motion"})
-            return (app.homekit, app.ffmpeg_path, app.capture_rtsp_transport,
+            return (app.homekit.bind, app.homekit.node_path, app.ffmpeg_path, app.capture_rtsp_transport,
                     camera.name, camera.source_url(camera.homekit.source), settings)
         with self.lock:
             if self._closing:

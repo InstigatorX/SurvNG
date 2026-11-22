@@ -4,7 +4,25 @@ import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { Readable } from 'node:stream';
-import { post } from '../src/agent-http.js';
+import { mediaUploadOrigin, post } from '../src/agent-http.js';
+
+test('media routing uses the enrolled endpoint again after an override is removed', () => {
+  const enrolled = 'https://survng.example/cameras';
+  assert.equal(mediaUploadOrigin(enrolled, 'https://[::1]:8443/new'), 'https://[::1]:8443/new');
+  assert.equal(mediaUploadOrigin(enrolled, null), enrolled);
+  assert.equal(mediaUploadOrigin(enrolled, undefined), enrolled);
+  assert.equal(mediaUploadOrigin('http://survng.example/cameras', null), 'http://survng.example/cameras');
+});
+
+test('media routing rejects downgrade, credentials and URL components outside the endpoint', () => {
+  const enrolled = 'https://survng.example/cameras';
+  for (const invalid of ['http://survng.example/cameras', 'https://user:pw@media.example',
+    'https://media.example?redirect=somewhere', 'https://media.example/#', '//media.example',
+    'https:///media.example', 'https://media.example/a/../b', 'https://media.example/a//b', 'https://media.example/%2f', 123]) {
+    assert.throws(() => mediaUploadOrigin(enrolled, invalid));
+  }
+  assert.throws(() => mediaUploadOrigin('http://survng.example', 'http://media.example'));
+});
 
 // Measure live buffers in a fresh process so other media fixtures and allocator
 // high-water marks cannot hide retention. The upload deliberately never ends.

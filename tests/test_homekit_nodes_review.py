@@ -31,7 +31,7 @@ def remote(tmp_path):
     node = service.nodes.authenticate(enrolled["secret"])
     service.nodes.update_report(node["id"], {"hardware": "qsv", "profiles": {"porch": _profile()}, "backends": {"porch": "qsv"}})
     service.config.cameras[0].homekit.encoder = node["id"]
-    router = create_homekit_router(HomeKitRouteDependencies(lambda: SimpleNamespace(homekit=service)))
+    router = create_homekit_router(HomeKitRouteDependencies(lambda: SimpleNamespace(homekit=service), lambda: service.config))
     endpoints = {route.path: route.endpoint for route in router.routes}
     try:
         yield service, node, enrolled["secret"], endpoints
@@ -206,6 +206,91 @@ def test_encoder_installer_requires_a_published_release(remote, monkeypatch):
         endpoints["/api/homekit/nodes"](request("admin", []), Response())
     assert error.value.status_code == 409
     enroll.assert_not_called()
+
+
+@pytest.mark.parametrize("control_origin", ["https://controller.example", "http://192.0.2.1:8088"])
+def test_sync_leaves_ingest_on_enrolled_control_origin(remote, monkeypatch, control_origin):
+    from fastapi.testclient import TestClient
+    from survng.app import main
+
+    service, _, secret, _ = remote
+    monkeypatch.setitem(vars(main), "manager", SimpleNamespace(config=service.config, homekit=service))
+    monkeypatch.setattr(main, "config", service.config)
+    service.config.cameras[0].homekit.encoder = "local"
+    real_sync = service.nodes.sync
+    monkeypatch.setattr(service.nodes, "sync", lambda node, report, assign, timeout: real_sync(node, report, assign, 0))
+    client = TestClient(main.app, base_url=control_origin)
+    response = client.post("/survng/api/homekit/nodes/sync", json={}, headers={
+        "Authorization": f"Bearer {secret}", "X-Forwarded-Host": "unrelated.example",
+    })
+    assert response.status_code == 200
+    assert response.json()["ingest"] is None
+    assert response.json()["assignments"] == []
+    for private_value in (secret, "private-password", "unrelated.example", service.config.homekit.bind):
+        assert private_value not in response.text
+
+
+def test_sync_and_installer_use_committed_routes_across_hot_updates(remote, monkeypatch):
+    from fastapi.testclient import TestClient
+    from survng.app import homekit_routes, main
+    from survng.app.config import normalize_config
+    from survng.app.homekit import CameraWorker
+
+    service, _, secret, _ = remote
+    initial = normalize_config(service.config)
+    initial.base_path = "/a"
+    initial.web_auth.enabled = False
+    initial.homekit.ingest_origin = "https://upload.example:9443"
+    manager = Mock(config=initial, homekit=service)
+    monkeypatch.setitem(vars(main), "manager", manager)
+    monkeypatch.setattr(main, "config", initial)
+    monkeypatch.setattr(CameraWorker, "start", lambda self: None)
+    monkeypatch.setattr(homekit_routes, "available_agent_version", lambda: "a" * 64)
+    service.start()
+    workers = dict(service.workers)
+    assert set(workers) == {"porch", "yard"}
+
+    client = TestClient(main.app, base_url="https://control.example")
+    wait_started = threading.Event()
+    original_wait = service.nodes.updates.wait
+
+    def wait(timeout):
+        wait_started.set()
+        return original_wait(timeout)
+
+    monkeypatch.setattr(service.nodes.updates, "wait", wait)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        for prefix, authority in (("/a", initial.homekit.ingest_origin),
+                                  ("/b", initial.homekit.ingest_origin), ("", "https://new-upload.example")):
+            previous = main.config.base_path
+            wait_started.clear()
+            pending = pool.submit(client.post, f"{previous}/api/homekit/nodes/sync", json={},
+                                  headers={"Authorization": f"Bearer {secret}"})
+            try:
+                assert wait_started.wait(3)
+                incoming = main.config.model_copy(deep=True)
+                incoming.base_path = prefix
+                incoming.homekit.ingest_origin = authority
+                _, result = main.apply_config_update(incoming, persist=False)
+                assert not result["camera_workers_restarted"]
+            finally:
+                service.nodes._bump()
+            response = pending.result(timeout=3)
+            assert response.status_code == 200
+            assert response.json()["ingest"] == authority + prefix
+            assert all(service.workers[key] is worker for key, worker in workers.items())
+            # Targeted application sets manager.config before all subsystem steps commit.
+            manager.config = main.config.model_copy(update={"base_path": "/candidate"})
+            try:
+                enrollment = client.post(f"{prefix}/api/homekit/nodes")
+                assert enrollment.status_code == 200
+                root = "https://control.example" + prefix
+                command = enrollment.json()["command"]
+                assert command.startswith(f"curl -fsSL '{root}/api/homekit/enroll/")
+                script_url = command.split("'")[1]
+                assert f"ORIGIN='{root}'" in client.get(script_url).text
+            finally:
+                manager.config = main.config
 
 
 def test_encoder_version_reports_update_status_independently_of_liveness(remote, monkeypatch):

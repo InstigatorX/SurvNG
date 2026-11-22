@@ -101,29 +101,14 @@ def clean_profile(raw: object) -> dict | None:
     return {"width": width, "height": height, "tiers": cleaned, "resolutions": clean_resolutions}
 
 
-def media_ingest_root(server, bind: str, base_path: str = "") -> str:
-    """LAN address for the encoder's video upload. The public proxy buffers that body."""
-    host, port = "", 80
-    if isinstance(server, (list, tuple)) and len(server) >= 2:
-        host, port = str(server[0] or ""), int(server[1])
-    if host in {"", "0.0.0.0", "::", "::0"}:
-        host = str(bind or "").strip()
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    if not host or not 1 <= port <= 65535:
-        raise ValueError("no direct ingest address")
-    prefix = str(base_path or "").strip().rstrip("/")
-    if prefix and not prefix.startswith("/"):
-        prefix = "/" + prefix
-    return install_origin(f"http://{host}:{port}{prefix}")
-
-
 def public_api_root(base_url: str, base_path: str = "") -> str:
     """Host the admin reached, plus the /survng prefix when the API lives under it."""
     root = install_origin(str(base_url).strip())
     prefix = str(base_path or "").strip().rstrip("/")
-    if prefix and not (root.endswith(prefix) or root.endswith(prefix + "/")):
-        root = f"{root}{prefix if prefix.startswith('/') else '/' + prefix}"
+    if prefix:
+        prefix = "/" + prefix.lstrip("/")
+        if not urlsplit(root).path.endswith(prefix):
+            root += prefix
     return install_origin(root)
 
 

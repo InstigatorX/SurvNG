@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from survng.app.config import AppConfig, CameraConfig, CameraHomeKitConfig, HomeKitConfig
 from survng.app.config_application import TargetedConfigApplication, manager_owned_config
 from survng.app.homekit import CameraWorker, HomeKitService, camera_port, private_directory, worker_settings
-from survng.app.homekit_nodes import agent_archive, ffmpeg_archive, install_script, media_ingest_root, node_releases, public_api_root, runtime_archive
+from survng.app.homekit_nodes import agent_archive, ffmpeg_archive, install_script, node_releases, public_api_root, runtime_archive
 from survng.app.homekit_routes import HomeKitRouteDependencies, PairingReset, create_homekit_router, pairing_qr
 from survng.app.media_sessions import MediaSessionManager
 from survng.app.security import is_public_api_path, required_api_scope
@@ -126,7 +126,7 @@ def test_worker_status_is_read_only_and_admin_can_retry(tmp_path, monkeypatch):
     assert service.status()["workerBuild"] == homekit_build.STALE
     ensure.assert_not_called()
 
-    router = create_homekit_router(HomeKitRouteDependencies(get_manager=lambda: SimpleNamespace(homekit=service)))
+    router = create_homekit_router(HomeKitRouteDependencies(lambda: SimpleNamespace(homekit=service), lambda: service.config))
     path = "/api/homekit/worker/rebuild"
     assert required_api_scope("POST", path) == "admin"
     assert not is_public_api_path("POST", path)
@@ -293,7 +293,7 @@ def test_private_state_rejects_permissions_and_symlinks(tmp_path):
 def test_pairing_is_admin_only_not_cached_and_reset_requires_confirmation():
     service = Mock()
     service.pairing.return_value = {"setupCode": "123-45-679", "setupUri": "X-HM://0023ISYWY1234"}
-    router = create_homekit_router(HomeKitRouteDependencies(lambda: SimpleNamespace(homekit=service)))
+    router = create_homekit_router(HomeKitRouteDependencies(lambda: SimpleNamespace(homekit=service), lambda: service.config))
     pairing = next(route.endpoint for route in router.routes if route.path.endswith("/pairing"))
     response = Response()
     result = pairing("porch", response)
@@ -521,15 +521,33 @@ def test_runtime_archive_ships_the_primary_va_stack(tmp_path):
     assert "runtime" in node_releases("/no/such/ffmpeg", tmp_path / "missing", lib_dir=lib)
 
 
-def test_media_ingest_uses_the_lan_listener():
-    assert media_ingest_root(("0.0.0.0", 8088), "192.168.86.243", "/survng") == "http://192.168.86.243:8088/survng"
-    assert media_ingest_root(("192.168.86.243", 8088), "10.0.0.1", "") == "http://192.168.86.243:8088"
+@pytest.mark.parametrize(("origin", "expected"), [
+    (None, None), ("", None), ("https://relay.example", "https://relay.example"),
+    ("https://192.0.2.1:9443/", "https://192.0.2.1:9443"),
+    ("https://[2001:db8::1]:9443", "https://[2001:db8::1]:9443"),
+])
+def test_homekit_ingest_origin(origin, expected):
+    assert HomeKitConfig(ingest_origin=origin).ingest_origin == expected
+
+
+@pytest.mark.parametrize("origin", [
+    "http://relay.example", "relay.example", "https://relay.example/prefix",
+    "https://relay.example/?", "https://relay.example/#", "https://relay.example?q=1",
+    "https://user:password@relay.example", "https://@relay.example", "https://",
+    "https://relay.example:65536", "https://relay.example:",
+    "https://[::1]suffix", "https://[bad::address]", "https://relay.example\\other",
+    "https://relay.example\n", "https://relay%2fother",
+])
+def test_homekit_ingest_rejects_unsafe_or_ambiguous_origins(origin):
+    with pytest.raises(ValidationError):
+        HomeKitConfig(ingest_origin=origin)
 
 
 def test_installer_root_includes_the_survng_prefix():
     assert public_api_root("https://ha.example", "/survng") == "https://ha.example/survng"
     assert public_api_root("https://ha.example/survng/", "/survng") == "https://ha.example/survng"
     assert public_api_root("https://ha.example", "") == "https://ha.example"
+    assert public_api_root("https://survng", "/survng") == "https://survng/survng"
 
 
 def test_homekit_encoder_must_be_local_or_a_node_id():

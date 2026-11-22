@@ -12,8 +12,9 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from .config import AppConfig
 from .homekit_nodes import (
-    SNAPSHOT_LIMIT, available_agent_version, ffmpeg_archive_iter, media_ingest_root,
+    SNAPSHOT_LIMIT, available_agent_version, ffmpeg_archive_iter,
     node_releases, public_api_root, runtime_archive_iter,
 )
 
@@ -21,6 +22,7 @@ from .homekit_nodes import (
 @dataclass(frozen=True)
 class HomeKitRouteDependencies:
     get_manager: Callable[[], Any]
+    get_config: Callable[[], AppConfig]
 
 
 class PairingReset(BaseModel):
@@ -105,7 +107,7 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         return {"reset": True}
 
     def installer_root(request: Request) -> str:
-        return public_api_root(str(request.base_url), deps.get_manager().config.base_path)
+        return public_api_root(str(request.base_url), deps.get_config().base_path)
 
     @router.post("/api/homekit/nodes")
     def begin_enrollment(request: Request, response: Response) -> dict:
@@ -169,10 +171,10 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         sync_request = service.nodes.pending_sync_request(node, releases.get("agent"))
         if sync_request is not None:
             payload["syncRequest"] = sync_request
-        try:
-            payload["ingest"] = media_ingest_root(request.scope.get("server"), service.config.homekit.bind, service.config.base_path)
-        except (TypeError, ValueError):
-            pass
+        # A hot update may commit while the registry waits for the next node update.
+        config = deps.get_config()
+        origin = config.homekit.ingest_origin
+        payload["ingest"] = origin + config.base_path if origin else None
         return payload
 
     @router.post("/api/homekit/nodes/media")

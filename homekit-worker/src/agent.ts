@@ -13,9 +13,9 @@ import { stopChild, type Tier } from './media.js';
 import { AgentFeeds, AgentJobs, changedAssignments } from './agent-state.js';
 import { replaceUpdate, validateArchive } from './agent-update.js';
 import { AgentProgress, superviseAgent } from './agent-lifecycle.js';
-import { post } from './agent-http.js';
+import { mediaUploadOrigin, post } from './agent-http.js';
 
-const origin = process.env.SURVNG_ORIGIN?.replace(/\/$/, '');
+const origin = (process.env.SURVNG_ORIGIN || '').replace(/\/$/, '');
 let mediaOrigin = origin;
 const secret = process.env.SURVNG_NODE_SECRET || '';
 const home = process.cwd();
@@ -241,10 +241,11 @@ async function main(): Promise<void> {
   if (versionCode !== 0) throw new Error('FFmpeg unavailable');
   ffmpegVersion = Buffer.concat(banner).toString('utf8').split('\n')[0]?.slice(0, 80) || '';
   let preparationCursor = 0;
+  let warnedAboutIngest = false;
   while (!shutdown.signal.aborted) {
     const backends = Object.fromEntries([...encodings].map(([id, value]) => [id, value === 'unavailable' ? 'unavailable' : value.backend]));
     let desired: { assignments?: Assignment[]; feeds?: { camera: string; tier: number }[]; snapshots?: string[];
-      snapshotRequests?: Record<string, string>; releases?: Releases; ingest?: string; syncRequest?: string } = {};
+      snapshotRequests?: Record<string, string>; releases?: Releases; ingest?: string | null; syncRequest?: string } = {};
     try {
       progress.enter('sync', 20000);
       const response = await request('/api/homekit/nodes/sync', JSON.stringify({
@@ -263,8 +264,19 @@ async function main(): Promise<void> {
       await new Promise(resolve => setTimeout(resolve, 3000));
       continue;
     }
-    const ingest = typeof desired.ingest === 'string' ? desired.ingest.replace(/\/$/, '') : '';
-    if (/^https?:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[A-Za-z0-9._~-]+)*$/.test(ingest)) mediaOrigin = ingest;
+    let nextMediaOrigin = origin;
+    try {
+      nextMediaOrigin = mediaUploadOrigin(origin, desired.ingest);
+      warnedAboutIngest = false;
+    } catch {
+      if (!warnedAboutIngest) console.error('HomeKit rejected an invalid media endpoint. Using the enrolled server.');
+      warnedAboutIngest = true;
+    }
+    if (nextMediaOrigin !== mediaOrigin) {
+      progress.enter('assignment cleanup', 15000);
+      await feeds.stopAll();
+      mediaOrigin = nextMediaOrigin;
+    }
     progress.enter('updates', 300000);
     const requestId = desired.syncRequest;
     const requested = typeof requestId === 'string' && syncToken.test(requestId) && requestId !== handledSyncRequest;

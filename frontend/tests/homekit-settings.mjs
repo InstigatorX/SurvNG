@@ -129,6 +129,11 @@ try {
   await page.getByRole("button", { name: "Sub", exact: true }).click();
   await page.getByRole("button", { name: "Show HomeKit service" }).click();
   assert.equal(await page.getByRole("checkbox", { name: "Enable HomeKit for this camera" }).count(), 0);
+  const uploadOrigin = page.getByLabel("Streaming upload origin (optional)");
+  await uploadOrigin.fill("https://media.example.test:8443");
+  assert.equal(JSON.parse(await page.getByTestId("config").textContent()).homekit.ingest_origin, "https://media.example.test:8443");
+  await uploadOrigin.clear();
+  assert.equal(JSON.parse(await page.getByTestId("config").textContent()).homekit.ingest_origin, "");
   await page.getByRole("heading", { name: "Gate box" }).waitFor();
   const gate = page.getByRole("article", { name: "Gate box" });
   const gateSync = gate.getByRole("button", { name: "Sync now" });

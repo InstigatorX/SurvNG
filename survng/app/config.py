@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.parse import unquote, urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationInfo, field_validator, model_validator
 
 from .proxy import ProxyConfig
 
@@ -691,6 +691,21 @@ class HomeKitConfig(BaseModel):
     enabled: bool = False
     bind: str = Field(default="", max_length=64)
     node_path: str = Field(default="node", min_length=1, max_length=4096)
+    ingest_origin: str | None = Field(default=None, max_length=2048)
+
+    @field_validator("ingest_origin")
+    @classmethod
+    def validate_ingest_origin(cls, value: str | None) -> str | None:
+        if not value:
+            return None
+        # Check the raw input before URL parsers can discard delimiters or normalize paths.
+        authority = r"https://(?:[a-z0-9.-]+|\[[0-9a-f:.]+\])(?::[0-9]+)?/?"
+        if not re.fullmatch(authority, value, re.IGNORECASE | re.ASCII):
+            raise ValueError("HomeKit ingest_origin must be an HTTPS origin with only a host and optional port")
+        origin = HttpUrl(value)
+        if origin.port == 0:
+            raise ValueError("HomeKit ingest_origin port must be at least 1")
+        return str(origin).removesuffix("/")
 
     @field_validator("bind")
     @classmethod

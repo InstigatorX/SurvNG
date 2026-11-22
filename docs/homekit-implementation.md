@@ -172,11 +172,26 @@ camera ID; collisions require a custom port. Backup this state with the database
 Only an explicit reset removes HomeKit identity and HAP state for that camera.
 Disablement, camera removal, startup failure and service shutdown never reset it.
 
-All `/api/homekit` routes require admin scope. Status is allowlisted; pairing uses
+HomeKit administration routes require admin scope. Encoder enrollment and sync
+use their own enrollment or node credentials. Status is allowlisted; pairing uses
 an explicit POST and no-store response. QR generation uses existing OpenCV,
 without an external QR service or another dependency. The UI clears setup
 material on backgrounding, navigation, connection failure, successful pairing,
 or after two minutes. Reset requires camera-specific confirmation.
+
+Remote encoders upload through their enrolled server URL by default, including
+native HTTPS. A reverse proxy on that path must stream the request body to
+SurvNG without buffering it. When that is impractical, set `homekit.ingest_origin`
+to a separate, certificate-valid HTTPS origin without a path. Use a trusted
+proxy for the same SurvNG instance because it receives the encoder bearer token
+and media. SurvNG combines the origin
+with the effective web base path. The encoder drains existing uploads when that
+endpoint changes. Clear the override to resume using the enrolled URL.
+
+If the public base path changes, update `SURVNG_ORIGIN` in each installed
+encoder's systemd environment file and restart the encoder. Keep the existing
+node ID and secret, so re-enrollment is unnecessary. Restart or upgrade legacy
+agents that may still hold a previously advertised LAN endpoint in memory.
 
 Validation covers real H.264/AAC input over a local HTTP fixture, shared live and
 recording normalization to HEVC, Opus RTP, decoded fMP4 with/without audio,
