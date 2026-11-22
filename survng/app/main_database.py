@@ -189,6 +189,8 @@ class ClosingDatabaseConnection(sqlite3.Connection):
     _transaction_site: str | None = None
     # Milliseconds this connection held the shared write lock (main only).
     _write_lock_held_ms = 0.0
+    # Milliseconds spent committing or rolling back.
+    _commit_ms = 0.0
 
     def __enter__(self) -> "ClosingDatabaseConnection":
         result = super().__enter__()
@@ -204,9 +206,13 @@ class ClosingDatabaseConnection(sqlite3.Connection):
     ) -> Literal[False]:
         error = exc_value if isinstance(exc_value, BaseException) else None
         try:
+            # sqlite3's own __exit__ commits (or rolls back) without calling
+            # the Python-level commit(), so its cost is measured here.
+            exit_started = time.perf_counter()
             try:
                 return super().__exit__(exc_type, exc_value, traceback)
             finally:
+                self._commit_ms += (time.perf_counter() - exit_started) * 1000.0
                 self.close()
         except BaseException as exit_error:
             error = exit_error
@@ -254,7 +260,6 @@ class MainDatabaseConnection(ClosingDatabaseConnection):
     # statements, in COMMIT (fsync, WAL checkpoint), or neither (Python work
     # between statements, row fetching, or waiting for the GIL).
     _statements_ms = 0.0
-    _commit_ms = 0.0
     _slowest_statement_ms = 0.0
     _slowest_statement_site = ""
 

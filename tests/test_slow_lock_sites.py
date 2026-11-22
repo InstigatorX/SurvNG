@@ -230,7 +230,7 @@ def test_slow_transaction_splits_time_between_statements_and_commit(
     assert row["last_statements_ms"] >= 50.0
     assert row["last_slowest_statement_ms"] >= 50.0
     assert row["last_slowest_statement_ms"] <= row["last_statements_ms"]
-    assert "last_commit_ms" in row
+    assert row["last_commit_ms"] > 0.0  # the with-block commit is timed
     assert row["last_slowest_site"].endswith(" _slow_statement")
     projected = _database_snapshot({"domains": {}, "slow_transactions": table.snapshot()},
                                    write_lock, None)
