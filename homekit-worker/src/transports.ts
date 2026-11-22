@@ -2,6 +2,7 @@ import { randomInt } from 'node:crypto';
 import { isIP } from 'node:net';
 import type { Socket } from 'node:dgram';
 import { MediaStreamTrack, RTCPeerConnection, RTCRtpCodecParameters, RTCRtpHeaderExtensionParameters, RtpPacket, SrtpSession, SrtcpSession, RtcpSrPacket, RtcpSenderInfo, RtcpPacketConverter, isRtcp } from 'werift';
+import { Characteristic, type SecureVideoController } from '@homebridge/hap-nodejs';
 import type { MultiTierRTPStreamingDelegate, MultiTierPrepareStreamRequest, MultiTierPrepareStreamResponse,
   MultiTierStreamStartRequest, WebRTCStreamingDelegate, WebRTCSolicitOfferRequest, WebRTCOffer,
   WebRTCProvideAnswerRequest, WebRTCReofferRequest, WebRTCReofferAnswer, WebRTCUpdateSessionRequest } from '@homebridge/hap-nodejs';
@@ -9,6 +10,23 @@ import { type MediaSource, RtpFeed, tiers, udp, type Tier } from './media.js';
 import { SecureVideoSFrame } from './vendor/sframe.js';
 import { HevcAccessUnitAssembler, SFrameRtpPacketizer } from './vendor/sframeRtp.js';
 import { ReceiverFeedback } from './diagnostics.js';
+
+export function watchStreamPermissions(controller: SecureVideoController,
+  local: Pick<LocalStreams, 'close'>, remote: Pick<RemoteStreams, 'close'>): void {
+  const rtp = controller.multiTierStreamManagementService;
+  const webrtc = controller.webrtcStreamManagementService;
+  const reconcile = () => {
+    if (!controller.streamingAllowed(rtp)) void local.close().catch(() => console.error('HomeKit RTP session cleanup failed.'));
+    if (!controller.streamingAllowed(webrtc)) void remote.close().catch(() => console.error('HomeKit WebRTC session cleanup failed.'));
+  };
+  controller.on('operating-mode-changed', reconcile);
+  rtp?.getCharacteristic(Characteristic.StreamingEnabled).on('change', reconcile);
+  webrtc?.getCharacteristic(Characteristic.StreamingEnabled).on('change', reconcile);
+  const global = controller.globalOperatingModeService;
+  if (global?.testCharacteristic(Characteristic.ManuallyDisabled)) {
+    global.getCharacteristic(Characteristic.ManuallyDisabled).on('change', reconcile);
+  }
+}
 
 type Crypto = { cryptoSuite: number; masterKey: Buffer; masterSalt: Buffer };
 export const STREAM_ID_URI = 'urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id';
@@ -52,7 +70,7 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
         // HKSV3 uses the controller's negotiated SRTP parameters in both directions.
         videoSSRC: randomInt(1, 0x7fffffff), audioSSRC: randomInt(1, 0x7fffffff), video: request.video, audio: request.audio };
       const session: LocalSession = { request, response, sockets, closed: false,
-        timeout: setTimeout(() => void this.stopStream(id), 60_000) };
+        timeout: setTimeout(() => { if (this.sessions.get(id) === session) void this.stopStream(id); }, 60_000) };
       const incoming = [request.video, request.audio].map(value => new SrtcpSession(keys(value)));
       sockets.forEach((socket, index) => socket.on('message', data => {
         if (session.closed || !isRtcp(data)) return;
@@ -66,7 +84,8 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
       }));
       this.sessions.set(id, session);
       sockets.forEach(socket => socket.on('error', () => {
-        if (!session.closed) this.counters.failures++;
+        if (session.closed || this.sessions.get(id) !== session) return;
+        this.counters.failures++;
         void this.stopStream(id);
       }));
       return response;
@@ -77,12 +96,18 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
     const id = request.sessionIdentifier;
     const session = this.sessions.get(id);
     const tier = this.catalog.find(t => t.identifier === request.videoTier);
-    if (!session || session.feed || !tier || !this.allowed()) throw new Error('local stream unavailable');
+    if (!session || session.closed || session.feed || !tier || !this.allowed()) throw new Error('local stream unavailable');
     this.negotiation = { videoTier: request.videoTier, audioTier: request.audioTier,
       videoSSRCMatchesPrepared: request.videoSSRC === session.response.videoSSRC,
       audioSSRCMatchesPrepared: request.audioSSRC === session.response.audioSSRC };
     clearTimeout(session.timeout);
-    const fail = () => { if (!session.closed) this.counters.failures++; void this.stopStream(id); };
+    const active = () => !session.closed && this.sessions.get(id) === session;
+    const canForward = () => active() && this.allowed();
+    const fail = () => {
+      if (!active()) return;
+      this.counters.failures++;
+      void this.stopStream(id);
+    };
     const response = session.response;
     const states = [response.video, response.audio].map((value, index) => ({
       srtp: new SrtpSession(keys(value)), srtcp: new SrtcpSession(keys(value)),
@@ -91,7 +116,7 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
     }));
     // The controller receives the SSRC returned by prepare, not the later START hint.
     const send = (index: number, packet: RtpPacket) => {
-      if (session.closed) return;
+      if (!canForward()) return;
       const state = states[index];
       if (index === 0) this.sent.videoPackets++; else this.sent.audioPackets++;
       packet.header.ssrc = state.ssrc; packet.header.payloadType = index === 0 ? 99 : 110;
@@ -101,8 +126,9 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
         session.request.targetAddress, error => { if (error) fail(); });
     };
     session.reports = setInterval(() => {
+      if (!canForward()) return;
       states.forEach((state, index) => {
-        if (!state.count || session.closed) return;
+        if (!state.count) return;
         const ms = BigInt(state.wall);
         const sr = new RtcpSrPacket({ ssrc: state.ssrc, senderInfo: new RtcpSenderInfo({
           ntpTimestamp: ((ms / 1000n + 2208988800n) << 32n) | ((ms % 1000n) << 32n) / 1000n,
@@ -116,8 +142,14 @@ export class LocalStreams implements MultiTierRTPStreamingDelegate {
     // Bound abandoned lab sessions even if the controller never sends END.
     session.timeout = setTimeout(fail, 10 * 60_000);
     session.feed = new RtpFeed(this.media, tier);
-    try { await session.feed.start(packet => send(0, packet), packet => send(1, packet), fail); this.counters.started++; }
-    catch (error) { await this.stopStream(id); throw error; }
+    try {
+      await session.feed.start(packet => send(0, packet), packet => send(1, packet), fail);
+      if (!canForward()) throw new Error('local stream cancelled');
+      this.counters.started++;
+    } catch (error) {
+      if (this.sessions.get(id) === session) await this.stopStream(id);
+      throw error;
+    }
   }
   async stopStream(id: string): Promise<void> {
     const session = this.sessions.get(id);
@@ -188,11 +220,12 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
     const vtrack = new MediaStreamTrack({ kind: 'video' }); const atrack = new MediaStreamTrack({ kind: 'audio' });
     const video = pc.addTransceiver(vtrack, { direction: 'sendonly' });
     const audio = pc.addTransceiver(atrack, { direction: 'sendonly' });
-    video.sender.onRtcp.subscribe(packet => this.feedback.video.observe(packet, video.sender.ssrc));
-    audio.sender.onRtcp.subscribe(packet => this.feedback.audio.observe(packet, audio.sender.ssrc));
+    const active = () => !session.closed && this.sessions.get(id) === session;
+    const canForward = () => active() && this.allowed();
+    video.sender.onRtcp.subscribe(packet => { if (active()) this.feedback.video.observe(packet, video.sender.ssrc); });
+    audio.sender.onRtcp.subscribe(packet => { if (active()) this.feedback.audio.observe(packet, audio.sender.ssrc); });
     const fail = () => {
-      const current = this.sessions.get(id);
-      if (!current || current.closed) return;
+      if (!active()) return;
       this.counters.failures++;
       void this.endSession(id).catch(() => console.error('HomeKit WebRTC session cleanup failed.'));
     };
@@ -206,9 +239,10 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
       candidates.push({ candidate: value.candidate, sdpMid: value.sdpMid ?? undefined, sdpMLineIndex: value.sdpMLineIndex ?? undefined });
     });
     pc.connectionStateChange.subscribe(state => {
-      if (!session.closed) this.counters.lastState = state;
+      if (!active()) return;
+      this.counters.lastState = state;
       if (state === 'failed' || state === 'disconnected' || state === 'closed') fail();
-      if (state !== 'connected' || session.closed || session.feed) return;
+      if (state !== 'connected' || session.feed) return;
       if (!this.allowed()) { fail(); return; }
       clearTimeout(session.timeout); session.timeout = setTimeout(fail, 10 * 60_000);
       const assembler = new HevcAccessUnitAssembler();
@@ -218,6 +252,7 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
       session.feed = new RtpFeed(this.media, this.catalog[0]);
       this.counters.started++;
       void session.feed.start(packet => {
+        if (!canForward()) return;
         const frame = assembler.push(packet);
         if (frame) for (const value of vp.packetize(vc.protectFrame(frame.data), frame.timestamp, true)) {
           // Match Scrypted's signaling-only RID interoperability behavior.
@@ -226,6 +261,7 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
           this.counters.videoPackets++;
         }
       }, packet => {
+        if (!canForward()) return;
         for (const value of ap.packetize(ac.protectFrame(packet.payload), packet.header.timestamp, packet.header.marker)) {
           atrack.writeRtp(value);
           this.counters.audioPackets++;
@@ -234,30 +270,51 @@ export class RemoteStreams implements WebRTCStreamingDelegate {
     });
     try {
       const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
-      if (session.closed || !this.allowed()) throw new Error('remote session cancelled');
+      if (!canForward()) throw new Error('remote session cancelled');
       this.counters.offers++;
       return { sdpOffer: videoOffer(pc.localDescription!.sdp, this.catalog[0]), candidates, sframe: session.frame.senderKey };
-    } catch (error) { await this.handleEndSession(id); throw error; }
+    } catch (error) {
+      if (this.sessions.get(id) === session) await this.handleEndSession(id);
+      throw error;
+    }
   }
   async handleProvideAnswer(request: WebRTCProvideAnswerRequest): Promise<void> {
-    const session = this.sessions.get(request.sessionIdentifier);
-    if (!session || session.answered || session.closed) throw new Error('unknown remote session');
+    const id = request.sessionIdentifier;
+    const session = this.sessions.get(id);
+    if (!session || session.answered || session.closed || !this.allowed()) throw new Error('unknown remote session');
+    const active = () => this.sessions.get(id) === session && !session.closed && this.allowed();
     try {
       await session.pc.setRemoteDescription({ type: 'answer', sdp: request.sdpAnswer });
       session.answered = true;
-      for (const candidate of request.candidates) await session.pc.addIceCandidate(candidate);
+      for (const candidate of request.candidates) {
+        if (!active()) throw new Error('remote session cancelled');
+        await session.pc.addIceCandidate(candidate);
+      }
+      if (!active()) throw new Error('remote session cancelled');
       this.counters.answers++;
-    } catch (error) { await this.handleEndSession(request.sessionIdentifier); throw error; }
+    } catch (error) {
+      if (this.sessions.get(id) === session) await this.handleEndSession(id);
+      throw error;
+    }
   }
   async handleReoffer(request: WebRTCReofferRequest): Promise<WebRTCReofferAnswer> {
-    const session = this.sessions.get(request.sessionIdentifier);
-    if (!session || session.closed) throw new Error('unknown remote session');
+    const id = request.sessionIdentifier;
+    const session = this.sessions.get(id);
+    if (!session || session.closed || !this.allowed()) throw new Error('unknown remote session');
+    const active = () => this.sessions.get(id) === session && !session.closed && this.allowed();
     try {
       await session.pc.setRemoteDescription({ type: 'offer', sdp: request.sdpOffer });
-      await session.pc.setLocalDescription(await session.pc.createAnswer());
+      if (!active()) throw new Error('remote session cancelled');
+      const answer = await session.pc.createAnswer();
+      if (!active()) throw new Error('remote session cancelled');
+      await session.pc.setLocalDescription(answer);
+      if (!active()) throw new Error('remote session cancelled');
       this.counters.reoffers++;
       return { sdpAnswer: session.pc.localDescription!.sdp };
-    } catch (error) { await this.endSession(request.sessionIdentifier); throw error; }
+    } catch (error) {
+      if (this.sessions.get(id) === session) await this.endSession(id);
+      throw error;
+    }
   }
   async handleUpdateSession(request: WebRTCUpdateSessionRequest): Promise<void> {
     const session = this.sessions.get(request.sessionIdentifier);

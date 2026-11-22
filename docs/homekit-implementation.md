@@ -79,9 +79,11 @@ negative tests for each; it does not reject an otherwise valid GPB picture label
 
 Playback also had a separate, reproduced pacing bug. FFmpeg's demuxer probe
 buffered video and then dumped roughly eight seconds of media into RTP in 2.93
-seconds. Shared-source consumers now use timestamp-based real-time reads, a
-one-millisecond initial burst and no accelerated catch-up. An exact zero burst
-would restore FFmpeg's default half-second burst, so it is deliberately avoided.
+seconds. Shared-source consumers use timestamp-based real-time reads and a
+one-millisecond initial burst. At startup the camera worker checks whether its
+configured FFmpeg supports explicit catch-up control and disables accelerated
+catch-up where supported. Older builds use their native real-time pacing.
+An exact zero burst would restore FFmpeg's default half-second burst.
 The same 120-frame diagnostic then spanned about 7.84 seconds for eight seconds
 of media, with no local sequence gaps. The automated real-input test checks
 pacing over a four-second window, allowing bounded codec-startup latency.
@@ -125,8 +127,10 @@ The Python manager owns one optional Node worker process group per enabled
 camera. Camera URLs travel over an inherited pipe, not the Node command line or
 persisted worker configuration. A versioned admission protocol reserves media
 capacity before each child starts, records its actual process PID, and releases
-its lease after child closure. Crashed workers and their FFmpeg descendants are
-terminated as a group before reservations are released. Disabled/off cameras stop
+its lease after child closure. A shared-source consumer also registers its source
+release before waiting for the supervisor to acknowledge the child. Crashed
+workers and their FFmpeg descendants are terminated as a group before reservations
+are released. Disabled/off cameras stop
 workers; restart, disable/enable and independent camera changes preserve identity.
 
 Each demanded video tier has one shared live HEVC/AAC MPEG-TS producer. Recording
@@ -141,6 +145,9 @@ Two same-tier recording prebuffers therefore consume two encoders; live viewers
 can join them without starting two more encoders. A different requested tier
 still requires available encoder capacity. No indexed recording is used as a
 pretend live source.
+
+When privacy or streaming permission is turned off, remote WebRTC stops
+forwarding new audio and video packets before waiting for FFmpeg teardown.
 
 The recording ring is bounded by time and bytes. Coverage and pre-roll now use
 MP4 sample durations, including AAC alignment, rather than an assumed two-second

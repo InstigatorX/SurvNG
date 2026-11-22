@@ -9,10 +9,10 @@ import { Accessory, Categories, Characteristic, HAPStorage, Service, SecureVideo
   VideoCodecType, H264Level, H264Profile, AudioRecordingCodecType, AudioBitrate, AudioRecordingSamplerate, uuid } from '@homebridge/hap-nodejs';
 import { controlServer, identity, privateDirectory } from './control.js';
 import { LabRecording } from './fragments.js';
-import { LocalStreams, RemoteStreams } from './transports.js';
+import { LocalStreams, RemoteStreams, watchStreamPermissions } from './transports.js';
 import { probeFrame, qualifyEncoding, selectEncoding, streamProfile, EncodingUnavailableError, type VideoEncoding } from './encoding.js';
 import type { Tier } from './media.js';
-import { CameraMedia, type MediaAdmission } from './camera-media.js';
+import { CameraMedia, supportsReadrateCatchup, type MediaAdmission } from './camera-media.js';
 
 async function main(): Promise<void> {
   process.umask(0o077);
@@ -98,8 +98,9 @@ async function main(): Promise<void> {
       qualificationAbort.signal.throwIfAborted();
       profile = streamProfile(frame.width, frame.height);
     }
+    const readrateCatchup = await supportsReadrateCatchup(config.ffmpeg, qualificationAbort.signal);
     media = new CameraMedia(config.url || 'http://127.0.0.1/homekit-remote', config.audio, config.ffmpeg, config.transport, admission,
-      () => !closing && !!controller?.homeKitCameraActive, state, encoding, profile.tiers, config.remote ? config.feeds : '');
+      () => !closing && !!controller?.homeKitCameraActive, state, encoding, profile.tiers, config.remote ? config.feeds : '', readrateCatchup);
     const saved = await identity(state);
     const persist = join(state, 'hap'); await privateDirectory(persist);
     HAPStorage.setCustomStoragePath(persist);
@@ -148,11 +149,8 @@ async function main(): Promise<void> {
     const publishMotion = () => controller!.setMotionDetected(motionPermitted() && recording!.reportingMotion());
     const setMotion = (active: boolean) => { recording!.setMotion(active && motionPermitted()); publishMotion(); };
     recording!.watch(publishMotion);
+    watchStreamPermissions(controller, local, remote);
     controller.on('operating-mode-changed', () => {
-      if (!controller!.streamingAllowed(controller!.multiTierStreamManagementService)) void local!.close();
-      if (!controller!.streamingAllowed(controller!.webrtcStreamManagementService)) {
-        void remote!.close().catch(() => console.error('HomeKit WebRTC session cleanup failed.'));
-      }
       if (!cameraAllowed()) { setMotion(false); void media!.cancelSnapshots(); }
       recording!.setAudio(controller!.recordingAudioActive); recording!.reconcile();
     });

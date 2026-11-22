@@ -13,8 +13,8 @@ import { FragmentRing, FragmentParser, LabRecording, producerReferenceTime, boxe
 import { privateDirectory, identity, controlServer } from '../src/control.js';
 import { SecureVideoSFrame, SFrameCipherSuite, SFrameReceiver, encodeHeader } from '../src/vendor/sframe.js';
 import { HevcAccessUnitAssembler, SFrameRtpPacketizer } from '../src/vendor/sframeRtp.js';
-import { LocalStreams, RemoteStreams, videoOffer } from '../src/transports.js';
-import { SyntheticMedia, tiers } from '../src/media.js';
+import { LocalStreams, RemoteStreams, videoOffer, watchStreamPermissions } from '../src/transports.js';
+import { RtpFeed, SyntheticMedia, tiers } from '../src/media.js';
 
 test('fragment retention has an explicit gap instead of skipping a slow reader', async () => {
   const ring = new FragmentRing(32, 6);
@@ -128,6 +128,104 @@ test('remote SDP has tier bounds and a unique RTP stream extension advertisement
   assert.ok(offer.indexOf('a=simulcast:send 1') < offer.indexOf('m=audio'));
 });
 
+for (const transport of ['local', 'remote'] as const) {
+  test(`${transport} audio and video forwarding ends before feed shutdown completes`, async t => {
+    let allowed = true;
+    const media = new SyntheticMedia(tmpdir());
+    const local = new LocalStreams(media, () => allowed);
+    const remote = new RemoteStreams(media, () => allowed, '127.0.0.1');
+    const streams = transport === 'local' ? local : remote;
+    const id = 'privacy-test';
+    const writes = { video: 0, audio: 0 };
+    let callbacks!: Parameters<RtpFeed['start']>;
+    t.mock.method(RtpFeed.prototype, 'start', async (...handlers: Parameters<RtpFeed['start']>) => {
+      callbacks = handlers;
+    });
+    let releaseStop!: () => void;
+    const stopping = new Promise<void>(resolve => { releaseStop = resolve; });
+    t.mock.method(RtpFeed.prototype, 'stop', () => stopping);
+    t.mock.method(RTCPeerConnection.prototype, 'setLocalDescription', async function (
+      this: RTCPeerConnection, offer: RTCSessionDescriptionInit,
+    ) {
+      Object.defineProperty(this, 'localDescription', { value: offer });
+    });
+    const start = async () => {
+      if (transport === 'remote') {
+        await remote.handleSolicitOffer({ sessionIdentifier: id, options: { sframeEnabled: true } });
+        const { pc } = remote.sessions.get(id)!;
+        for (const { track } of pc.getSenders()) {
+          const kind = track!.kind === 'video' ? 'video' : 'audio';
+          t.mock.method(track!, 'writeRtp', () => writes[kind]++);
+        }
+        pc.connectionStateChange.execute('connected');
+      } else {
+        const crypto = { cryptoSuite: 0, masterKey: Buffer.alloc(16), masterSalt: Buffer.alloc(14) };
+        const response = await local.prepareStream({ sessionIdentifier: id, addressVersion: 'ipv4',
+          targetAddress: '127.0.0.1', sourceAddress: '127.0.0.1', controllerVideoPort: 1, controllerAudioPort: 1,
+          video: crypto, audio: crypto });
+        const { sockets } = local.sessions.get(id)!;
+        t.mock.method(sockets[0], 'send', () => writes.video++);
+        t.mock.method(sockets[1], 'send', () => writes.audio++);
+        await local.startStream({ sessionIdentifier: id, videoTier: tiers[0].identifier, videoSSRC: response.videoSSRC });
+      }
+      return callbacks;
+    };
+    const deliver = ([video, audio]: Parameters<RtpFeed['start']>) => {
+      const header = () => new RtpHeader({ ssrc: 1, timestamp: 90, marker: true });
+      video(new RtpPacket(header(), Buffer.from([0x26, 0x01, 3])));
+      audio(new RtpPacket(header(), Buffer.from([1, 2, 3])));
+    };
+    try {
+      const first = await start();
+      deliver(first);
+      assert.deepEqual(writes, { video: 1, audio: 1 });
+      allowed = false;
+      deliver(first);
+      assert.deepEqual(writes, { video: 1, audio: 1 });
+
+      const closed = streams.close();
+      allowed = true;
+      deliver(first);
+      assert.deepEqual(writes, { video: 1, audio: 1 });
+      releaseStop();
+      await closed;
+
+      const replacement = await start();
+      deliver(first);
+      first[2](); // A delayed feed error still belongs to the retired session.
+      deliver(replacement);
+      assert.equal(streams.counters.failures, 0);
+      assert.deepEqual(writes, { video: 2, audio: 2 });
+    } finally {
+      releaseStop();
+      await streams.close();
+    }
+  });
+}
+
+test('local start is cancelled if the stream closes while media starts', async t => {
+  const local = new LocalStreams(new SyntheticMedia(tmpdir()), () => true);
+  let resume!: () => void;
+  t.mock.method(RtpFeed.prototype, 'start', () => new Promise<void>(resolve => { resume = resolve; }));
+  t.mock.method(RtpFeed.prototype, 'stop', async () => {});
+  const crypto = { cryptoSuite: 0, masterKey: Buffer.alloc(16), masterSalt: Buffer.alloc(14) };
+  const id = 'pending-local-start';
+  const response = await local.prepareStream({ sessionIdentifier: id, addressVersion: 'ipv4',
+    targetAddress: '127.0.0.1', sourceAddress: '127.0.0.1', controllerVideoPort: 1, controllerAudioPort: 1,
+    video: crypto, audio: crypto });
+  try {
+    const starting = local.startStream({ sessionIdentifier: id, videoTier: tiers[0].identifier, videoSSRC: response.videoSSRC });
+    const rejected = assert.rejects(starting, /local stream cancelled/);
+    await local.stopStream(id);
+    resume();
+    await rejected;
+    assert.equal(local.counters.started, 0);
+  } finally {
+    resume?.();
+    await local.close();
+  }
+});
+
 test('closing WebRTC transports releases the HAP session cap', async t => {
   // Build real offers and exercise HAP's characteristic handler without opening ICE sockets.
   let beforeLocalDescription: (() => Promise<void>) | undefined;
@@ -159,6 +257,8 @@ test('closing WebRTC transports releases the HAP session cap', async t => {
   });
   const accessory = new Accessory('WebRTC Session Cap', uuid.generate('webrtc-session-cap'));
   accessory.configureController(controller);
+  const localClose = t.mock.fn(async () => {});
+  watchStreamPermissions(controller, { close: localClose }, remote);
   const solicit = controller.webrtcStreamManagementService!.getCharacteristic(Characteristic.WebRTCSolicitOffer);
   try {
     for (let i = 0; i < 6; i++) await solicit.handleSetRequest('');
@@ -192,6 +292,36 @@ test('closing WebRTC transports releases the HAP session cap', async t => {
     assert.equal(remote.counters.offers, 7);
     assert.equal(remote.sessions.size, 0);
     assert.equal(controller.activeWebRTCSessions.length, 0);
+
+    beforeLocalDescription = undefined;
+    await solicit.handleSetRequest('');
+    const [active] = remote.sessions.values();
+    assert.ok(active);
+    controller.webrtcStreamManagementService!.updateCharacteristic(Characteristic.StreamingEnabled, false);
+    assert.ok(active.closed);
+    await active.stopping;
+    assert.equal(remote.sessions.size, 0);
+    assert.equal(localClose.mock.callCount(), 0);
+    controller.multiTierStreamManagementService!.updateCharacteristic(Characteristic.StreamingEnabled, false);
+    assert.equal(localClose.mock.callCount(), 1);
+
+    controller.webrtcStreamManagementService!.updateCharacteristic(Characteristic.StreamingEnabled, true);
+    for (const operation of ['answer', 'reoffer'] as const) {
+      await solicit.handleSetRequest('');
+      const [id] = controller.activeWebRTCSessions;
+      const { pc } = remote.sessions.get(id)!;
+      let resume!: () => void;
+      t.mock.method(pc, 'setRemoteDescription', () => new Promise<void>(resolve => { resume = resolve; }));
+      const counters = { answers: remote.counters.answers, reoffers: remote.counters.reoffers };
+      const pending = operation === 'answer'
+        ? remote.handleProvideAnswer({ sessionIdentifier: id, sdpAnswer: '', candidates: [] })
+        : remote.handleReoffer({ sessionIdentifier: id, sdpOffer: '' });
+      const cancelled = assert.rejects(pending, /remote session cancelled/);
+      try { await remote.close(); } finally { resume(); }
+      await cancelled;
+      assert.equal(remote.counters.answers, counters.answers);
+      assert.equal(remote.counters.reoffers, counters.reoffers);
+    }
   } finally {
     await remote.close();
     await Promise.all(controller.activeWebRTCSessions.map(id => controller.endWebRTCSession(id)));
