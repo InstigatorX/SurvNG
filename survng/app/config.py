@@ -412,6 +412,20 @@ class MotionQualificationConfig(BaseModel):
     borderline_margin: float = Field(default=0.03, ge=0.0, le=0.10)
     pipeline: MotionPipelineConfig = Field(default_factory=MotionPipelineConfig)
 
+    def motion_ring_size(self) -> int:
+        """Frames retained per camera for qualification and its evidence.
+
+        Covers the analysis window, the post-trigger horizon, and three
+        seconds of margin for timestamp jitter.
+        """
+        return max(
+            12,
+            round(
+                self.sample_fps
+                * (self.window_seconds + self.post_trigger_seconds + 3.0)
+            ),
+        )
+
 
 class MotionSpatialAlignmentConfig(BaseModel):
     mode: Literal["auto", "identity", "affine", "untrusted"] = "auto"

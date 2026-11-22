@@ -496,13 +496,7 @@ class CameraWorker:
                 else None
             ),
         )
-        ring_size = max(
-            12,
-            round(
-                self.motion_config.sample_fps
-                * (self.motion_config.window_seconds + self.motion_config.post_trigger_seconds + 3.0)
-            ),
-        )
+        ring_size = self.motion_config.motion_ring_size()
         self.motion_events = MotionEventCoordinator(
             queue_size=MOTION_QUEUE_SIZE,
             retry_limit=MOTION_EVENT_MAX_RETRIES,

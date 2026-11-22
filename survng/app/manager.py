@@ -751,18 +751,10 @@ class AppManager:
         motion_config = self.config.motion_qualification
         override = camera.motion_qualification
         graphs = resolve_motion_pipeline_graphs(motion_config, override)
-        ring_size = max(
-            12,
-            round(
-                motion_config.sample_fps
-                * (
-                    motion_config.window_seconds
-                    + motion_config.post_trigger_seconds
-                    + 3.0
-                )
-            ),
+        evidence = MotionEvidenceRepository(
+            camera.id,
+            max_samples_per_source=motion_config.motion_ring_size(),
         )
-        evidence = MotionEvidenceRepository(camera.id, max_samples_per_source=ring_size)
         self.motion_evidence[camera.id] = evidence
         dependencies = MotionStageDependencies(
             services={EVIDENCE_REPOSITORY_SERVICE: evidence},
