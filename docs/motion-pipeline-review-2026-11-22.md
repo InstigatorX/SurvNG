@@ -168,7 +168,7 @@ Suggested order: T1 and T2, then T3, T5 and T6, with T4 last.
   it). The EMA fast object check now runs on that full-resolution frame and
   falls back to the analysis-width frame only for entries beyond the budget.
   Detection recall on real footage has not been measured.
-- **T5 (partly done):**
+- **T5 (done, with one item deferred):**
   - The motion ring size is computed once
     (`MotionQualificationConfig.motion_ring_size`).
   - Detection providers share one declared `(event_at, qualification)`
@@ -181,14 +181,25 @@ Suggested order: T1 and T2, then T3, T5 and T6, with T4 last.
   - The activity attributor is passed through constructors to the recorded
     detector, the tracking lifecycle and every session it creates. The
     write-only `scene_context_memory` attributes were removed.
-  - `CameraWorker` reads detector configuration fields directly, including
-    on the per-frame capture path.
-  - Remaining:
-    - Splitting the oversized functions.
-    - Removing the pass-through detection layers.
-    - Converting the roughly 37 `getattr(config, ...)` reads in
-      `motion_pipeline/object_detection.py`. Several of those fallbacks
-      (`event_refinement_stages`, `event_route_refinement_stages`,
-      `tracking`, `depth`) differ from the `DetectorConfig` defaults, so test
-      doubles that supply partial configs exercise non-production refinement
-      settings. Converting them requires migrating those doubles first.
+  - Detector configuration fields are read directly in `CameraWorker`
+    (including the per-frame capture path) and in
+    `RecordedMotionObjectDetector`. Test doubles build their config with
+    `tests/detector_config_fake.py`, which uses production defaults.
+    `resolve_recorded_refinement_plan` keeps its documented module-constant
+    fallback for the refinement budgets, which tests patch to shorten waits.
+  - The pass-through detection layers are gone: decision-handler providers
+    call `RecordedMotionObjectDetector` directly, and `CameraMediaService`
+    no longer holds a detector.
+  - Function splits:
+
+    | Function | Before | After | Extracted |
+    | --- | ---: | ---: | --- |
+    | `MotionDecisionOrchestrator._process_batch` | 290 | 140 | `_classify_batch` (typed `_BatchShape`), `_qualification_payload` |
+    | `MotionAnalysisService.consider_visual_backup` | 433 | 220 | `_adaptive_signal_decision`, `_rescue_signal_decision`, `_security_verification_inputs`, `_qualified_ema_trigger` |
+
+  - Deferred: `ObjectTrackingSession._run` (875 lines),
+    `MotionDecisionHandler._handle_with_provider` (661),
+    `_detect_with_budget` (449), `_run_refinements_until_error` (390) and
+    `_temporal_consensus` (377). They are built around nested closures that
+    share mutable locals, so splitting them safely needs characterization
+    tests first.
