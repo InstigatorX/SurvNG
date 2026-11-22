@@ -108,6 +108,8 @@ def test_notice_admission_accepts_only_affirmative_semantic_claims() -> None:
     )
     assert mower["compatible_labels"] == ["robot_lawnmower"]
     assert camera_notice_admission("RuleEngine/DogCatDetect", "", labels)["compatible_labels"] == ["dog", "cat"]
+    # Plain text carries no state; the semantic topic decides, as at ingest.
+    assert camera_notice_admission("RuleEngine/PersonDetect", "person", labels)["kind"] == "semantic"
     assert semantic_label_compatible("Truck", car["compatible_labels"])
     assert not semantic_label_compatible("person", car["compatible_labels"])
 
@@ -116,7 +118,7 @@ def test_notice_admission_accepts_only_affirmative_semantic_claims() -> None:
         ("RuleEngine/PersonDetect", '<tt:SimpleItem Name="State" Value="false"/>', "state_not_affirmative"),
         ("RuleEngine/PersonDetect", '<tt:SimpleItem Name="State" Value="pending"/>', "state_not_affirmative"),
         ("RuleEngine/PersonDetect", "<tt:Message><broken", "unparsed_payload"),
-        ("RuleEngine/PersonDetect", "vendor text", "unparsed_payload"),
+        ("RuleEngine/PersonDetect", "<tt:Message><tt:Data/></tt:Message>", "unparsed_payload"),
         ("RuleEngine/PersonCount", active, "no_semantic_claim"),
     ]:
         admission = camera_notice_admission(topic, message, labels)

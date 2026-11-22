@@ -166,16 +166,18 @@ def camera_notice_admission(
     """Decide whether one camera notice is an affirmative semantic claim.
 
     Only an affirmative person/vehicle/animal/face claim qualifies. Cleared or
-    ambiguous state, an unparseable payload, an unknown topic and generic
-    motion all fall back to ``generic``: ordinary validation, never a bypass.
-    An empty payload on a semantic topic is a start, matching the ONVIF
-    parser, which has already filtered explicit stops.
+    ambiguous state, unreadable XML, an unknown topic and generic motion all
+    fall back to ``generic``: ordinary validation, never a bypass. A payload
+    with no state on a semantic topic is a start, matching the ONVIF parser,
+    which has already filtered explicit stops.
     """
     labels = [str(label).strip() for label in configured_labels if str(label).strip()]
     generic = {"version": CAMERA_NOTICE_ADMISSION_VERSION, "kind": "generic"}
     text = str(message or "").strip()
     items = _explicit_items(text)
-    if text and not items:
+    if text.startswith("<") and not items:
+        # Unreadable XML. Plain text without Name/Value pairs carries no state,
+        # so, as in the ONVIF parser, the topic decides.
         return {**generic, "reason": "unparsed_payload"}
     states = [value.strip().lower() for name, value in items if _key(name) in _STATE_FIELDS]
     if states and not any(value in _ACTIVE for value in states):
