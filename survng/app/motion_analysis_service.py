@@ -1480,82 +1480,20 @@ class MotionAnalysisService:
         try:
             if self._stopping():
                 return
-            fused = MotionQualificationResult(
-                accepted=True,
-                score=result.score,
-                threshold=result.threshold,
-                reason=(
-                    result.reason
-                    if result.reason == "illumination_verification_probe"
-                    else "ema_v2_qualified"
-                ),
-                frame_count=result.frame_count,
-                features={
-                    **result.features,
-                    "visual_backup": trigger_mode == "camera_rescue" and not followup,
-                    "active_event_followup": followup,
-                    **({"live_probe": True} if intent.live_probe else {}),
-                    "ema_v2": True,
-                    "motion_episode_id": intent.episode_id,
-                    "visual_backup_required_score": round(
-                        decision.required_score, 4
-                    ),
-                    "visual_backup_consecutive": decision.qualifying_samples,
-                    "visual_backup_window_samples": decision.window_samples,
-                    "visual_backup_grace_seconds": settings["grace_seconds"],
-                },
-                telemetry=dict(result.telemetry),
+            fused, trigger = self._qualified_ema_trigger(
+                result=result,
+                decision=decision,
+                qualified=qualified,
+                evidence_frame=evidence_frame,
+                intent=intent,
+                followup=followup,
+                trigger_mode=trigger_mode,
+                settings=settings,
+                captured_at=captured_at,
             )
             self.last_continuous_result = fused
-            event_at = datetime.fromtimestamp(captured_at, timezone.utc)
-            qualified_evidence_at = qualified.evidence_frame_at_epoch
-            qualified_evidence_sequence = qualified.evidence_frame_sequence
-            qualified_capture_generation = (
-                qualified.evidence_capture_generation
-            )
-            trigger_enqueued = self._enqueue_trigger(
-                MotionTrigger(
-                    topic=(
-                        ADAPTIVE_ACTIVE_FOLLOWUP_TOPIC
-                        if followup
-                        else ADAPTIVE_VISUAL_BACKUP_TOPIC
-                        if trigger_mode == "camera_rescue"
-                        else ADAPTIVE_MOTION_TOPIC
-                    ),
-                    message=(
-                        "new credible motion during active EMA episode"
-                        if followup
-                        else "adaptive visual backup after missing camera notice"
-                        if trigger_mode == "camera_rescue"
-                        else "adaptive motion episode"
-                    ),
-                    event_at=event_at,
-                    received_at=captured_at,
-                    prequalified=fused,
-                    episode_id=intent.episode_id,
-                    detection_intent_id=intent.intent_id,
-                    lifecycle_generation=intent.generation,
-                    evidence_frame_at_epoch=(
-                        float(qualified_evidence_at)
-                        if qualified_evidence_at is not None
-                        else evidence_frame.captured_at_epoch
-                        if evidence_frame is not None
-                        else captured_at
-                    ),
-                    evidence_frame_sequence=(
-                        qualified_evidence_sequence
-                        or (evidence_frame.sequence if evidence_frame is not None else 0)
-                    ),
-                    evidence_capture_generation=(
-                        qualified_capture_generation
-                        or (
-                            evidence_frame.capture_generation
-                            if evidence_frame is not None
-                            else 0
-                        )
-                    ),
-                )
-            )
+            event_at = trigger.event_at
+            trigger_enqueued = self._enqueue_trigger(trigger)
             if not trigger_enqueued and not standalone_route:
                 if followup:
                     self.state.increment_stat("active_followup_queue_rejected", 1)
@@ -1592,6 +1530,97 @@ class MotionAnalysisService:
                         self._enqueue_replacement_camera_notice(replacement)
                 except ValueError:
                     pass
+
+    def _qualified_ema_trigger(
+        self,
+        *,
+        result: MotionQualificationResult,
+        decision: EmaSignalDecision,
+        qualified: EmaQualified,
+        evidence_frame: MotionEvidenceFrame | None,
+        intent: Any,
+        followup: bool,
+        trigger_mode: str,
+        settings: dict[str, float | int],
+        captured_at: float,
+    ) -> tuple[MotionQualificationResult, MotionTrigger]:
+        """Build the prequalified result and trigger for an admitted EMA edge."""
+        fused = MotionQualificationResult(
+            accepted=True,
+            score=result.score,
+            threshold=result.threshold,
+            reason=(
+                result.reason
+                if result.reason == "illumination_verification_probe"
+                else "ema_v2_qualified"
+            ),
+            frame_count=result.frame_count,
+            features={
+                **result.features,
+                "visual_backup": trigger_mode == "camera_rescue" and not followup,
+                "active_event_followup": followup,
+                **({"live_probe": True} if intent.live_probe else {}),
+                "ema_v2": True,
+                "motion_episode_id": intent.episode_id,
+                "visual_backup_required_score": round(
+                    decision.required_score, 4
+                ),
+                "visual_backup_consecutive": decision.qualifying_samples,
+                "visual_backup_window_samples": decision.window_samples,
+                "visual_backup_grace_seconds": settings["grace_seconds"],
+            },
+            telemetry=dict(result.telemetry),
+        )
+        event_at = datetime.fromtimestamp(captured_at, timezone.utc)
+        qualified_evidence_at = qualified.evidence_frame_at_epoch
+        qualified_evidence_sequence = qualified.evidence_frame_sequence
+        qualified_capture_generation = (
+            qualified.evidence_capture_generation
+        )
+        trigger = (
+            MotionTrigger(
+                topic=(
+                    ADAPTIVE_ACTIVE_FOLLOWUP_TOPIC
+                    if followup
+                    else ADAPTIVE_VISUAL_BACKUP_TOPIC
+                    if trigger_mode == "camera_rescue"
+                    else ADAPTIVE_MOTION_TOPIC
+                ),
+                message=(
+                    "new credible motion during active EMA episode"
+                    if followup
+                    else "adaptive visual backup after missing camera notice"
+                    if trigger_mode == "camera_rescue"
+                    else "adaptive motion episode"
+                ),
+                event_at=event_at,
+                received_at=captured_at,
+                prequalified=fused,
+                episode_id=intent.episode_id,
+                detection_intent_id=intent.intent_id,
+                lifecycle_generation=intent.generation,
+                evidence_frame_at_epoch=(
+                    float(qualified_evidence_at)
+                    if qualified_evidence_at is not None
+                    else evidence_frame.captured_at_epoch
+                    if evidence_frame is not None
+                    else captured_at
+                ),
+                evidence_frame_sequence=(
+                    qualified_evidence_sequence
+                    or (evidence_frame.sequence if evidence_frame is not None else 0)
+                ),
+                evidence_capture_generation=(
+                    qualified_capture_generation
+                    or (
+                        evidence_frame.capture_generation
+                        if evidence_frame is not None
+                        else 0
+                    )
+                ),
+            )
+        )
+        return fused, trigger
 
     def _adaptive_signal_decision(
         self,
