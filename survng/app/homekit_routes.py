@@ -5,6 +5,7 @@ public at the session boundary and still reject a missing or reused credential.
 """
 from dataclasses import dataclass
 from collections.abc import Callable
+from ipaddress import IPv4Address, IPv4Network
 from typing import Any
 
 import cv2
@@ -18,6 +19,8 @@ from .homekit_nodes import (
     node_releases, public_api_root, runtime_archive_iter,
 )
 
+
+_PRIVATE_LAN = tuple(IPv4Network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 
 @dataclass(frozen=True)
 class HomeKitRouteDependencies:
@@ -177,6 +180,13 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         # A hot update may commit while the registry waits for the next node update.
         config = deps.get_config()
         origin = config.homekit.ingest_origin
+        if not origin and config.homekit.bind:
+            # Use the local listener's port and the configured LAN address.
+            # Host and forwarded headers describe the enrolled proxy instead.
+            _, port = request.scope.get("server") or (None, None)
+            address = IPv4Address(config.homekit.bind)
+            if port and 1 <= port <= 65535 and any(address in network for network in _PRIVATE_LAN):
+                origin = f"http://{address}:{port}"
         payload["ingest"] = origin + config.base_path if origin else None
         return payload
 

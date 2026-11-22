@@ -208,8 +208,14 @@ def test_encoder_installer_requires_a_published_release(remote, monkeypatch):
     enroll.assert_not_called()
 
 
-@pytest.mark.parametrize("control_origin", ["https://controller.example", "http://192.0.2.1:8088"])
-def test_sync_leaves_ingest_on_enrolled_control_origin(remote, monkeypatch, control_origin):
+@pytest.mark.parametrize(("lan_bind", "listener", "expected"), [
+    ("192.168.86.243", ("0.0.0.0", 8088), "http://192.168.86.243:8088/survng"),
+    ("10.20.30.40", ("172.20.0.2", 8088), "http://10.20.30.40:8088/survng"),
+    ("", ("0.0.0.0", 8088), None),
+    ("203.0.113.42", ("0.0.0.0", 8088), None),
+    ("192.168.86.243", None, None),
+])
+def test_sync_uses_configured_lan_ingest_when_override_is_blank(remote, monkeypatch, lan_bind, listener, expected):
     from fastapi.testclient import TestClient
     from survng.app import main
 
@@ -217,16 +223,23 @@ def test_sync_leaves_ingest_on_enrolled_control_origin(remote, monkeypatch, cont
     monkeypatch.setitem(vars(main), "manager", SimpleNamespace(config=service.config, homekit=service))
     monkeypatch.setattr(main, "config", service.config)
     service.config.cameras[0].homekit.encoder = "local"
+    service.config.homekit.bind = lan_bind
     real_sync = service.nodes.sync
     monkeypatch.setattr(service.nodes, "sync", lambda node, report, assign, timeout: real_sync(node, report, assign, 0))
-    client = TestClient(main.app, base_url=control_origin)
+
+    async def primary_listener(scope, receive, send):
+        if scope["type"] == "http":
+            scope = {**scope, "server": listener}
+        await main.app(scope, receive, send)
+
+    client = TestClient(primary_listener, base_url="https://controller.example")
     response = client.post("/survng/api/homekit/nodes/sync", json={}, headers={
         "Authorization": f"Bearer {secret}", "X-Forwarded-Host": "unrelated.example",
     })
     assert response.status_code == 200
-    assert response.json()["ingest"] is None
+    assert response.json()["ingest"] == expected
     assert response.json()["assignments"] == []
-    for private_value in (secret, "private-password", "unrelated.example", service.config.homekit.bind):
+    for private_value in (secret, "private-password", "unrelated.example", "controller.example"):
         assert private_value not in response.text
 
 

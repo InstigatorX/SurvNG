@@ -93,6 +93,12 @@ the product updater can start a rebuild immediately. Set
 manual command `python -m survng.app.homekit_build`, run from the SurvNG
 checkout as the SurvNG service account on a native install.
 
+Continuous video uploads use the primary’s configured private IPv4 LAN
+address and listener port when **Streaming upload origin** is blank. If no
+private LAN destination is available, uploads use the enrolled server URL.
+Set an explicit HTTPS origin to override the video upload route. Heartbeats,
+snapshots, and updates always use the enrolled URL.
+
 ### Remote encoder updates
 
 A managed encoder stages and checks a complete release while it handles
