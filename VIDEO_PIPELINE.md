@@ -5,76 +5,57 @@ describes the implementation currently in the repository, not an aspirational
 design. Update it whenever ingest, recording, motion qualification, inference,
 incident generation, media storage, or browser playback behavior changes.
 
-Last reviewed: 2026-08-24
+Last reviewed: 2026-11-22 (motion qualification, detection sampling and
+tracking sections rewritten from code; other sections not re-verified)
 
-## Motion Pipeline Migration
+## Motion Pipeline Structure
 
-Motion qualification now enters through the typed, per-camera orchestration
-contracts in `survng/app/motion_pipeline`. `AppManager` assembles and injects a
-separate `MotionPipeline` for every camera from an instance-scoped stage
-registry. The pipeline owns per-camera runtime state, executes stages in order,
-and records call, failure, last, average, and maximum timing for each stage.
+Each camera gets its own `MotionPipeline` instances, assembled by `AppManager`
+from an instance-scoped `MotionStageRegistry`
+(`survng/app/motion_pipeline`). A pipeline owns per-camera runtime state, runs
+its stages in order, and records call, failure, last, average and maximum
+timing per stage. The factory validates stage IDs, options and required
+artifacts before a camera starts.
 
-The adaptive qualification preset uses independently registered grayscale
-preprocessing, a selective EMA scene model, background difference, robust
-statistical thresholding, morphology, connected-component measurements,
-noise-aware blob filtering, persistent multi-region tracking, and adaptive
-credibility scoring. It learns per-camera noise and brightness, accelerates
-learning for whole-scene illumination changes, protects moving pixels from
-immediate absorption, and penalizes tiny erratic edge motion. The prior
-production frame-difference qualification graph remains available as the
-fixed-threshold modular rollback preset and uses independently
-registered preprocessing, frame-difference, threshold, morphology, contour
-extraction, minimum-area filtering, dominant-centroid tracking, and scoring
-stages. The final graph then runs evidence fusion, the persistent event-state
-machine, and a transition-only trigger decision so continuous activity does
-not create repeated incidents. Each stage consumes and publishes typed context
-artifacts without invoking or depending on concrete neighboring stages. The
-original all-in-one `legacy_qualifier` and combined `legacy_motion_scorer`
-remain registered as parity/reference implementations.
+Three graphs exist per camera:
 
-Supporting evidence runs through a separate observation pipeline. The built-in
-`onvif_event_evidence` stage normalizes camera motion events into an injected,
-bounded `MotionEvidenceRepository`. A later `buffered_evidence_fusion` stage
-selects samples by event time and adds aggregated evidence to `MotionContext`.
-The repository boundary allows future optical-flow or AI sources to run
-independently and join the same fusion stage without calling each other.
+- **Qualification** — Enhanced Motion Analysis (EMA), the only qualification
+  graph: `gray_blur` preprocessing, `adaptive_ema_background`,
+  `adaptive_statistical_threshold`, `ema_zone_exclusion`, `open_close`
+  morphology, `connected_component_blobs`, `adaptive_blob_filter`,
+  `persistent_centroid_tracker`, `adaptive_motion_score` and
+  `illumination_change_filter`. The former fixed-threshold frame-difference
+  graph is retired; a configuration that names its stages
+  (`frame_difference`, `fixed_threshold`, `contour_blobs`, `minimum_area`,
+  `dominant_centroid`, `default_motion_score`) is rejected with an explicit
+  error.
+- **Observation** — `onvif_event_evidence` records each normalized camera
+  notice in a bounded per-camera `MotionEvidenceRepository`. It is diagnostic
+  only: camera status shows it, but no decision consumes it.
+- **Fusion** — `buffered_evidence_fusion` is the EMA validation switch. Policy
+  `audit` keeps the EMA decision; `bypass` disables EMA validation (camera
+  mode). No evidence source can be selected, and other policies are rejected.
 
-New motion implementations are registered explicitly with a
-`MotionStageRegistry`; there is no mutable module-level plugin registry. The
-factory validates stage IDs and required context artifacts before a camera
-pipeline starts. Object inference, recording lookup, event persistence, MQTT,
-and SSE remain outside the motion pipeline.
+Downstream of qualification:
+
+- `MotionRuntimeService` owns the analysis and decision workers, their queues,
+  retry state, the evidence repository and the pipeline generation.
+- `MotionEpisodeController` (`ema_v2.py`) merges camera notices and qualified
+  EMA edges into per-camera motion episodes and is the only owner of detector
+  reservation, admission, follow-up limits and incident linkage.
+- `MotionDecisionOrchestrator` coalesces triggers into a batch, qualifies it and
+  hands accepted work to `MotionIncidentService`, which persists the incident
+  and queues durable recorded refinement.
+- `MotionDecisionHandler` runs object detection through
+  `RecordedMotionObjectDetector` (fast live check and recorded main-stream
+  refinement) and owns event persistence and notifications.
+- `CameraWorker` assembles these collaborators and exposes the camera-facing
+  API; it owns no motion policy.
 
 Process-wide camera admission and teardown are owned by
-`CameraFleetLifecycle`. It snapshots startup detection preferences, reads the
-current recording preference when a queued camera is admitted and starts its recorders,
-tracks live camera power changes during progressive admission, releases ONVIF
-subscriptions early, and broadcasts nonblocking stop requests before waiting
-for the fleet against one absolute deadline. Cameras retain ownership of their
-workers; residual camera IDs remain observable and shared inference/recording
-services stay alive until every camera reports stopped. Resource `close()` then
-runs only for inactive cameras and is not represented as an I/O timeout.
-`AppManager` sequences this boundary with inference, recorder, MQTT, and
-auxiliary-service lifecycles without detached per-camera shutdown threads.
-
-`InferenceLifecycle` owns the process inference generation as one transaction:
-the object detector supervisor, face queue, person/vehicle ReID adapters,
-per-camera tracking-session factory and limiter, deferred appearance backfill,
-and semantic search. Camera workers are bound once after construction. Runtime
-model or tracking changes are prepared before cutover, roll back every swapped
-session on failure, and retire old search/backfill generations only after the
-replacement is committed. Failed retirement is retained for shutdown retry so
-configuration state never points back at a partially closed generation.
-
-`MotionDecisionHandler` owns downstream event persistence and notifications.
-It receives object evidence from an injected `RecordedMotionObjectDetector`,
-which owns recorded-frame selection, decode, zone-aware inference, and live
-fallback. `MotionRuntimeService` is the single lifecycle boundary for the
-analysis and decision workers, their queues, retry state, evidence repository,
-and pipeline generation. `CameraWorker` only assembles these typed
-collaborators and exposes the camera-facing API; it owns no motion policy or
-motion worker lifecycle.
+`CameraFleetLifecycle`, and `InferenceLifecycle` owns the inference generation
+(object detector supervisor, face queue, ReID adapters, tracking factory and
+limiter, deferred appearance backfill and semantic search) as one transaction.
 
 ## Pipeline At A Glance
 
@@ -260,118 +241,145 @@ path is intentionally lightweight:
 
 1. Normalize the camera timestamp to UTC.
 2. Publish the raw motion state through the realtime/MQTT path.
-3. Add a trigger to the camera's bounded motion queue.
-4. Return immediately so ONVIF polling is not blocked by inference.
+3. Offer the notice to the camera's motion episode controller, which decides
+   whether it reserves a detection request or joins an existing episode.
+4. Enqueue a trigger for a reserved request and return immediately, so ONVIF
+   polling is never blocked by inference.
 
-The queue holds at most 32 triggers. If it is full, the oldest trigger is
-dropped in favor of the newest and the drop is counted in runtime telemetry.
+The in-memory trigger queue holds 32 triggers. Admitted triggers are also
+written to a durable queue in the event store; when the in-memory queue is
+full, the trigger stays in that durable FIFO and is delivered later rather
+than dropped. Triggers are retried at most twice.
 
 ## 5. Motion Qualification
 
-Motion qualification reduces insect, lighting, rain, and transient-noise
-triggers before the high-resolution OpenVINO cycle.
-
-### Frame ring
-
-The existing live/substream capture publishes its stable stored-frame reference
-to a one-slot, latest-only motion mailbox at
-`motion_qualification.sample_fps`. The capture callback performs no resize or
-color conversion. The camera's motion-analysis worker acquires the shared CPU
-analysis slot, downscales the newest frame to
-`motion_qualification.frame_width`, converts it to grayscale, and appends both
-compact derivatives to their bounded rings. If analysis falls behind, a pending
-raw frame is replaced rather than building stale work. The global width default
-is 320 pixels; cameras with small or distant objects can override it
-independently. This does not open another camera connection. The ring is sized
-from the configured sample rate, analysis window, and post-trigger horizon with
-additional history for timestamp jitter.
-
-### ONVIF event evidence
-
-Each accepted ONVIF motion notification also traverses the observation graph.
-The `onvif_event_evidence` stage records the normalized topic, bounded message,
-camera event timestamp, local receipt timestamp, source type, and score. Basic
-motion events default to `0.55`; semantic topics containing configured person,
-vehicle, animal, face, or manual keywords default to `0.95`. These values and
-keywords are stage options, not hard-coded fusion policy.
-
-Frame and event observations can arrive concurrently. Irrelevant stages no-op
-based on the observation kind. The shared repository is thread-safe and
-bounded. Evidence-stage failure is logged but never blocks the established
-trigger queue.
-
-### Burst coalescing
-
-ONVIF cameras often emit many messages for one physical event. The per-camera
-worker collects triggers until `burst_quiet_seconds` elapses, subject to a hard
-deadline, and processes the group as one motion burst.
-
-### Timing And Rolling Windows
-
-Each ONVIF trigger retains both the camera-provided event time and SurvNG's
-local receipt time. Because decoded RTSP frames can arrive later than the ONVIF
-message, the qualifier evaluates overlapping windows until
-`post_trigger_seconds` has elapsed and keeps the strongest result. This avoids
-assuming that camera event timestamps and FFmpeg frame-receipt timestamps share
-the same media latency.
-
-If every usable window has an all-zero foreground score, the result is marked
-`no_temporal_signal` and fails open. An apparently static window is treated as
-inconclusive rather than proof that the ONVIF trigger was false.
-
-### Scoring
-
-The qualifier analyzes consecutive grayscale frames with thresholded frame
-differences, morphology, and connected contours. Its score combines:
-
-- Persistence across the temporal window.
-- Centroid direction and velocity consistency.
-- Foreground-area stability.
-- Distance from image edges, with relief for coherent inward trajectories and
-  stable tracks that travel along an edge.
-- Concentration versus fragmentation of changed pixels.
-- A penalty for global image changes such as exposure or lighting shifts.
-
-Sensitivity selects the acceptance threshold:
-
-| Sensitivity | Threshold | Behavior |
-| --- | ---: | --- |
-| High | 0.36 | More permissive; favors recall |
-| Balanced | 0.48 | Default calibration |
-| Low | 0.60 | More selective; favors noise reduction |
-
-The names describe motion sensitivity: `high` accepts more candidate motion,
-while `low` requires stronger temporal evidence.
+Motion qualification decides when the high-resolution object detector should
+run. It does not classify objects.
 
 ### Trigger modes
 
-- `camera`: only ONVIF and manual notices enter the event queue. EMA validation
-  is optional and never creates an event.
-- `adaptive`: accepted EMA motion is the only automatic trigger. Ordinary
-  ONVIF notices remain diagnostic evidence only.
+`motion_qualification.mode` (cameras can `inherit` or override it):
 
-Semantic ONVIF topics containing person, people, human, vehicle, animal, or
-face bypass suppression. Manual test triggers also bypass it. If fewer than
-four usable frames surround the event timestamp, qualification fails open so a
-capture outage cannot silently suppress a real event.
+| Mode | Starts object detection | Role of EMA |
+| --- | --- | --- |
+| `camera_rescue` (default) | Camera ONVIF notices, manual tests, speech, and qualified EMA backup motion | Continuous backup trigger; never delays or filters a camera notice |
+| `camera` | Camera ONVIF notices, manual tests and speech | Optional validator of camera notices (fusion `audit`); `bypass` turns validation off |
+| `adaptive` | Accepted EMA motion, manual tests and speech | The only automatic trigger; ONVIF notices are diagnostic only |
 
-### Borderline object rescue
+In `camera_rescue`, a camera notice is processed immediately with no burst wait
+and no visual validation (`camera_primary_fast_path`). In `camera` mode a
+notice is validated against EMA results unless validation is bypassed.
+Semantic notices (person, vehicle, animal, face), manual tests and speech
+always bypass validation.
 
-When enabled, a rejected score within `borderline_margin` of the active
-threshold is allowed through the high-resolution detector. The motion burst is
-accepted only when that detector finds an incident-eligible object. The default
-margin is `0.03`; clearly weak motion does not incur inference. Global rescue
-settings can be inherited or overridden per camera.
+### Frame sampling and rings
 
-Each camera can inherit or override the global mode and sensitivity. A sampled
-percentage of rejected validation decisions is saved under:
+The live/substream capture publishes each frame to a latest-only mailbox. The
+camera's analysis worker admits frames at `sample_fps` (default 5), downscales
+to `frame_width` (default 320 px on the longer side), converts to grayscale and
+applies a 5x5 Gaussian blur once per frame. Retained per camera:
 
-```text
-STORAGE_DIR/motion_samples/CAMERA_ID/
-```
+- a grayscale ring of `motion_ring_size()` frames:
+  `max(12, round(sample_fps * (window_seconds + post_trigger_seconds + 3)))`,
+  36 with defaults;
+- a 4-frame color and blurred window for continuous analysis;
+- an evidence ring (6–16 frames) holding the analysis frame plus a reference to
+  the read-only full-resolution live capture it came from. Those references
+  share the capture buffers and are bounded per camera by
+  `EVIDENCE_SOURCE_FRAME_BUDGET_BYTES` (64 MiB); older entries keep only the
+  analysis frame.
 
-The sample filename records timestamp, score, and rejection reason. Retention
-is capped at 100 samples per camera.
+A backward wall-clock step clears the rings and resets the EMA runtime; an
+equal timestamp is treated as a duplicate sample.
+
+### Continuous EMA analysis
+
+EMA runs continuously whenever EMA validation is in use or the mode is
+`camera_rescue` or `adaptive`: every admitted sample in `adaptive`, otherwise
+at `min(sample_fps, camera_mode_background_fps)` (default 2 per second). A
+fleet-wide fair limiter allows `max_concurrent_analysis` cameras (default 2)
+to run qualification at once; a waiting camera keeps one pending request and
+keeps filling its rings.
+
+The EMA stages are stateful and process each frame exactly once. Each cycle
+passes the newest frame already processed (as the pair anchor) plus newer
+frames; after a runtime reset the retained window is replayed once.
+
+- **Background:** a selective EMA background learns quiet pixels at
+  `learning_rate`, learns quickly on whole-scene changes
+  (`global_change_ratio`), and absorbs pixels that stay changed for the
+  stationary-learning period slowly. It tracks scene noise and brightness.
+- **Threshold:** a smoothed threshold from the median/MAD of each difference
+  image, bounded by `minimum` and `maximum`.
+- **Zones:** detection zones with **Exclude from EMA** are masked out after
+  thresholding.
+- **Blobs and tracking:** open/close morphology, connected components, and a
+  noise-scaled filter on area, fill, aspect ratio and edge contact. A
+  persistent centroid tracker keeps multi-region tracks across samples.
+- **Scoring:** each track is scored on persistence, translation, size,
+  direction and speed consistency, fill, interior position and zone weight,
+  minus an insect-like penalty. The acceptance threshold comes from
+  sensitivity, raised for noisy scenes (up to +0.12) and at night (+0.025),
+  capped at 0.78. Stationary-motion policy (`stationary_object_tolerance`)
+  rejects confined shimmer, oscillation and persistent scene motion.
+- **Illumination filter** (`illumination_filter_enabled`, default off):
+  rejects accepted motion whose color, luminance-polarity and edge-structure
+  evidence indicates a lighting change. Evidence is computed once per frame
+  pair.
+
+| Sensitivity | Base threshold |
+| --- | ---: |
+| `high` | 0.36 |
+| `balanced` | 0.48 |
+| `low` | 0.60 |
+
+### Camera-notice validation (camera mode)
+
+Notices are coalesced until `burst_quiet_seconds` (default 0.5) pass without
+another trigger, bounded by a hard deadline of `max(2 s, 4 x quiet)`. The
+decision then reads the continuous EMA results produced since the notice
+arrived, for up to `post_trigger_seconds` (default 2.5), and accepts on the
+first accepted result; otherwise it keeps the strongest. If no usable result
+exists the burst fails open (`insufficient_frames`); an all-zero score also
+fails open (`no_temporal_signal`).
+
+A rejected score within `borderline_margin` (default 0.03) of the threshold is
+still sent to the detector when borderline rescue is enabled, and accepted
+only if an eligible object is found. A sampled fraction of other rejections
+(`suppression_verification_rate`, default 0.05) is also verified by the
+detector.
+
+### EMA backup (camera_rescue)
+
+An EMA signal conditioner turns continuous results into a single qualified
+edge:
+
+- After a learning period (`visual_backup_warmup_seconds`, default 10), a
+  sample is strong when accepted, at or above the required score
+  (`visual_backup_min_score` 0.70 or threshold plus
+  `visual_backup_score_margin` 0.15) and not a nuisance reason
+  (illumination, insect-like, persistent-scene, stationary motion).
+- An edge qualifies after `visual_backup_min_consecutive` (3) strong samples
+  spanning `visual_backup_grace_seconds` (1.5 s).
+- A slower verification lane accepts persistent motion below the rescue score
+  with two more samples and one more second of persistence. A confirmed
+  upstream route watch needs one sample; proven ONVIF degradation or an
+  unavailable ONVIF transport uses the normal persistence.
+
+The episode controller then applies `visual_backup_cooldown_seconds` (20) and
+`visual_backup_max_triggers_5m` (3), except for a one-shot route watch. A
+backup invocation never creates an empty incident: the recorded refinement must
+find an incident-eligible object that moved or explains the EMA motion region.
+
+In `adaptive` mode every accepted EMA sample is a qualified edge for the
+episode controller.
+
+### Motion audit
+
+Rejected and backup decisions are stored in the `motion_audits` table and shown
+under Admin > Motion Audit. `rejected_sample_rate` (default 1.0) controls how
+often a rejected decision keeps an image; samples are capped at 100 per camera
+under `STORAGE_DIR/motion_samples/CAMERA_ID/`.
 
 ### AI audit advisor
 
@@ -387,21 +395,35 @@ server. Applying recommendations is disabled by default and always requires an
 explicit UI confirmation. Enabling apply writes the selected changes to
 `config.json` and reloads camera workers.
 
-API keys are stored in local `config.json`; keep that file out of source
-control and restrict its filesystem permissions.
+API keys are stored in the encrypted secrets sidecar, not in `config.json`.
 
 ## 6. High-Resolution Object Detection
 
-An accepted motion burst uses finalized main recording fragments rather than
-the low-resolution qualification frames. By default SurvNG samples five target
-times around the ONVIF event:
+An accepted batch gets two object checks:
+
+1. **Fast check** on a live frame, so the initial decision does not wait for a
+   recording segment to close. EMA-triggered work uses the exact frame EMA
+   analysed, at full live resolution while its reference is retained
+   (otherwise the analysis-width copy). Camera notices use the latest live
+   frame. Either frame must be at most 1 s old, or the fast check reports
+   `fast_frame_stale` and relies on refinement. Results are provisional; if the live and
+   main geometry is not reliably aligned, zone-based eligibility waits for
+   refinement.
+2. **Recorded refinement**, queued as a durable detection job, decodes the
+   main recording around the event in stages
+   (`detector.event_refinement_stages`):
 
 ```text
--1.0s, -0.5s, event time, +0.5s, +1.0s
+[-1.0, -0.5, 0.0, +0.5, +1.0]  [1.5 ... 3.0]  [3.5 ... 4.5]  [8.0, 8.5]  [12.0, 12.5]
 ```
 
-`detector.event_refinement_stages` can narrow or extend that window. Within each
-stage, inference stops early once temporal confirmation is already satisfied.
+A confirmed route watch uses the denser `event_route_refinement_stages`. Within
+each stage, inference stops early once temporal confirmation is satisfied.
+Recordings are plain MP4 segments that can only be read once closed, so
+refinement waits for the segment to be indexed (predicted from the newest
+indexed segment), plus `event_refinement_settle_seconds` (0.75). It retries
+for up to `event_refinement_retry_seconds` (24) at
+`event_refinement_retry_interval_seconds` (1.0) intervals.
 
 For each available target:
 
@@ -518,59 +540,13 @@ box in amber so an operator can verify the handoff against the recording.
 Offline comparisons remain eager so both engines receive identical appearance
 inputs and comparison runs are reproducible.
 
-The object-tracking implementation is internally pluggable, but production
-sessions intentionally use `survng_hybrid`; historical `bytetrack`, BoT-SORT,
-and Deep OC-SORT configuration values normalize to Hybrid. Deep OC-SORT is an
-optional, offline comparison adapter rather than a production tracker. It
-retains one tracker instance per comparison, prevents association across object
-classes, disables global camera-motion compensation for fixed cameras, and can
-consume the same isolated OpenVINO appearance embeddings used by Hybrid.
-Install `requirements-ultralytics-tracking.txt` to enable Compare. This optional
-runtime adds a large PyTorch dependency. The requirements pin the reviewed
-Ultralytics version for reproducible installs; SurvNG also accepts compatible
-patches on the reviewed 8.4.x API line. Adapter regression tests exercise the
-private APIs SurvNG uses. Ultralytics is distributed under AGPL-3.0;
-deployments that redistribute SurvNG with this optional dependency should
-review the applicable license terms.
-
-Tracking runs only after an eligible object is found and recorded confirmation
-has completed (or been dropped). It samples the main camera source at
-`sample_fps`, decoding in software and scaling only the sampled frames.
-`max_active_cameras` bounds simultaneous sessions so a burst
-of camera activity cannot create unbounded inference and decode load. Track
-summaries, trajectories, zones, observation counts, and first/last-seen
-timestamps are stored with the originating incident.
-`max_tracks_per_session` additionally bounds association work and persisted
-metadata if a detector produces an abnormal number of boxes.
-
-The Incidents workspace visualizes that persisted metadata without rerunning
-inference. Expanding a tracked incident or opening its viewer draws each track
-in a stable color, labels its last stored box with `#<track_id>`, and connects
-the sampled centers as a path. New tracking sessions also store a bounded box
-history. During incident-video playback, the viewer interpolates those sampled
-boxes against the recording clock and progressively draws each path. The
-viewer’s **Tracks** control toggles both layers, while the inspector reports the
-implementation, sampling rate, observation count, duration, zones, and ReID
-recoveries. Historical incidents without box history retain snapshot trails
-but cannot show synchronized video boxes. Snapshot boxes represent the last
-stored position and can therefore be later than the representative snapshot.
-
-The incident viewer’s **Compare** action is an explicit, offline diagnostic.
-It decodes a bounded 30-second recording window, runs OpenVINO detection and optional
-person/vehicle appearance extraction once per sampled frame, then gives that identical
-detection sequence to SurvNG Hybrid and Deep OC-SORT. The result shows
-side-by-side paths, track and observation counts, extra-track-ID and processing
-time signals, and lets either result replay over the same recording. Detection
-and appearance costs are reported separately because they are shared inputs,
-not tracker costs. Extra track IDs are only a fragmentation proxy: without
-labeled ground truth, the comparison cannot claim a true ID-switch count or
-choose a winner automatically. After watching the replays, an operator can
-mark Hybrid, Deep OC-SORT, or no clear winner. SurvNG retains only compact evidence
-for the latest 100 compared incidents per camera (not the replay trajectories),
-shows the reviewed totals in the incident viewer, and resets an incident's
-verdict when that incident is compared again. This evidence never changes the
-configured tracker automatically. A single-job limiter prevents concurrent
-reviews from competing with live inference.
+Two tracker implementations are available through
+`detector.tracking.implementation`: `survng_sparse_identity` (the default) and
+`survng_hybrid`. Sparse Identity extends Hybrid with cascaded association,
+buffered IoU fallback, quality-gated ReID galleries and entity relink; see
+[README.tracking.md](README.tracking.md). Both run on the existing NumPy/OpenCV
+stack. The former tracker comparison UI, APIs, replay command and optional
+Ultralytics backends have been removed.
 
 Model thresholds are applied before zone eligibility. Detection boxes use the
 source image coordinate system and are persisted with labels, confidence,
@@ -770,17 +746,28 @@ Global motion qualification:
 ```json
 {
   "motion_qualification": {
-    "mode": "camera",
+    "mode": "camera_rescue",
     "sensitivity": "balanced",
+    "stationary_object_tolerance": "balanced",
+    "illumination_filter_enabled": false,
     "frame_width": 320,
     "sample_fps": 5.0,
+    "camera_mode_background_fps": 2.0,
     "window_seconds": 1.6,
     "post_trigger_seconds": 2.5,
     "burst_quiet_seconds": 0.5,
     "max_concurrent_analysis": 2,
-    "rejected_sample_rate": 0.05,
+    "rejected_sample_rate": 1.0,
+    "suppression_verification_rate": 0.05,
     "borderline_rescue_enabled": true,
     "borderline_margin": 0.03,
+    "visual_backup_warmup_seconds": 10.0,
+    "visual_backup_grace_seconds": 1.5,
+    "visual_backup_min_score": 0.7,
+    "visual_backup_score_margin": 0.15,
+    "visual_backup_min_consecutive": 3,
+    "visual_backup_cooldown_seconds": 20.0,
+    "visual_backup_max_triggers_5m": 3,
     "pipeline": {
       "qualification": [],
       "observation": [],
@@ -837,45 +824,32 @@ Per-camera override:
 
 Empty global pipeline lists select SurvNG's built-in graphs. A `null`
 per-camera graph inherits the global graph; a non-empty per-camera list
-replaces that graph for only that camera. Each configured item contains a
-stable stage ID, a registered implementation name, and implementation-specific
-options. For example, this swaps one camera back to the parity qualifier
-without changing application code:
+replaces that graph for only that camera. Each item has a stable stage ID, a
+registered implementation and its options. Only EMA stages are registered for
+qualification, so a custom qualification graph is a re-tuned EMA graph, for
+example a camera with a less aggressive blob filter:
 
 ```json
 {
-  "motion_qualification": {
-    "pipeline": {
-      "qualification": [
-        {
-          "stage_id": "qualification",
-          "implementation": "legacy_qualifier",
-          "options": {}
-        }
-      ]
-    }
-  }
+  "stage_id": "blob_filter",
+  "implementation": "adaptive_blob_filter",
+  "options": {"minimum_area_ratio": 0.0005}
 }
 ```
 
 Configured graphs are checked for non-empty names, duplicate IDs, registered
-implementations, and artifact ordering before config is saved or workers are
-stopped. Camera status reports the resolved implementation, options, and
-whether each graph came from built-in defaults, global config, or a camera
-override.
+implementations, known options and artifact ordering before configuration is
+saved or workers are stopped. Retired implementations (MOG2 and the
+fixed-threshold stages) are rejected with an explicit message. Camera status
+reports the resolved implementation, options and whether each graph came from
+built-in defaults, global config or a camera override.
 
-The built-in final graph uses adaptive validation, starts after one accepted
-decision, releases after three rejected decisions, applies a five-second
-cooldown, and expires state after 10 seconds of inactivity. Custom final graphs
-may select registered evidence sources through the generic fusion interface.
-
-Fusion policies are `bypass`, `audit` (adaptive only), `any`, `all`, and
-`weighted`. Unavailable or unwarmed selected validators fail open when
-`fail_open` is enabled. Generic
-evidence producers only need to write
-`score` and optional `warmed` values to the per-camera repository. The final
-graph must provide a trigger `decision`; preflight validation rejects partial
-graphs before configuration is persisted.
+The fusion graph accepts only `buffered_evidence_fusion` with policy `audit`
+or `bypass` and no sources. Configurations saved by the UI may still contain
+`source_thresholds`, `source_weights`, `weighted_threshold`,
+`minimum_sources`, `require_warmed` or `fail_open`; they load and are
+ignored. The UI records "EMA validation off" as policy `bypass` with
+`include_primary: false`; either one disables EMA validation.
 
 AI audit advisor:
 
@@ -901,19 +875,25 @@ camera with unreliable ONVIF to visual-triggered mode.
 
 Relevant automated coverage includes:
 
-- Motion scoring for coherent movement, erratic edge movement, global
-  brightness changes, and insufficient-frame fail-open behavior.
-- EMA scene learning, persistent motion tracking, evidence aggregation, and
-  fail-open validator behavior.
-- Concurrent ONVIF event normalization, semantic priority scoring, bounded
-  storage, and event-window aggregation.
-- Event-state activation/release hysteresis, cooldown, timeout reset, and
-  per-camera isolation.
-- Bypass, adaptive-only, any-source, all-source, weighted, and source-only
-  evidence-fusion policies.
-- Non-blocking event enqueue and ONVIF burst coalescing.
+- EMA scene learning, thresholding, persistent tracking, scoring, stationary
+  policy and the illumination filter (`tests/test_adaptive_motion.py`,
+  `tests/test_motion_pipeline.py`, `tests/test_stationary_policy.py`).
+- Incremental continuous analysis matching a full-window replay for moving,
+  lighting-ramp and static scenes
+  (`tests/test_motion_incremental_qualification.py`).
+- EMA signal conditioning and the motion episode controller
+  (`tests/test_ema_v2.py`, `tests/test_motion_analysis_service.py`).
+- Fusion validation: audit/bypass only, rejected policies and sources, saved
+  UI options still loading (`tests/test_motion_configuration.py`,
+  `tests/test_motion_evidence.py`).
+- ONVIF event normalization, semantic priority, burst coalescing and durable
+  trigger delivery (`tests/test_motion_ingress.py`,
+  `tests/test_motion_events.py`, `tests/test_motion_decisions.py`).
+- Fast live checks, recorded refinement, temporal consensus and full-resolution
+  evidence frames (`tests/test_recorded_object_detection.py`,
+  `tests/test_camera_worker.py`).
 - Recorder ownership, failure isolation, indexing, media validation, recording
-  range selection, and playback continuity helpers.
+  range selection and playback continuity helpers.
 - Incident grouping and event clip behavior.
 
 Run backend tests and build the production UI with:
@@ -928,21 +908,16 @@ Chrome across repeated seeks and many segment boundaries.
 
 ## 14. Current Boundaries And Future Work
 
-The repository and fusion stage accept multiple independently produced motion
-sources, but SurvNG does not yet calculate dense/sparse optical flow, maintain
-semantic object tracks, use a KNN background model, or consume vendor motion
-bounding boxes beyond normalized ONVIF event signals. Those remain possible
-source stages if audit data shows that EMA cannot separate scene motion from
-insects reliably enough.
+EMA is the only visual motion analysis. SurvNG does not calculate optical flow,
+use a KNN or MOG background model, or consume vendor motion bounding boxes
+beyond normalized ONVIF event signals. Optical flow is on the roadmap as an
+optional evidence source (`docs/motion-roadmap.md`); it would need a fusion
+source contract again, which the current audit/bypass fusion stage does not
+provide.
 
-The next evidence-driven progression is:
-
-1. Run camera-triggered / balanced with adaptive validation.
-2. Review rejected samples and borderline rescues that produced objects.
-3. Tune per-camera sensitivity before changing global behavior.
-4. Use visual-triggered mode only for cameras with unreliable ONVIF.
-5. Add optical flow only where measured failures justify the additional CPU
-   and complexity.
+Recorded refinement cannot start until a segment closes, which adds up to one
+segment duration (10 s by default) of latency. See
+`docs/motion-pipeline-review-2026-11-22.md` for this and other open items.
 
 ## 15. MQTT Incident Lifecycle
 

@@ -92,7 +92,7 @@ Only enabled visual processors consume analysis time. Camera + EMA backup and EM
 
 The former `motion_qualification.temporal_filter_threshold` shortcut is retired. Existing configuration files containing it remain valid, but the value is ignored and its control no longer appears in Admin. Every cadence-due sample now reaches the scene-aware pipeline so quiet frames and small motion can update the adaptive background. Sampling rate, latest-frame mailboxes, and the shared concurrency limit still bound the work, though installations that previously skipped many quiet frames should expect higher EMA CPU use.
 
-The classic modular scorer now waits for four frames before it can produce a continuous trigger. Camera-event validation remains fail-open while a frame window is incomplete or has no temporal signal. In custom adaptive graphs, explicit `stationary_displacement_ratio` and `stationary_path_ratio` stage options override the named Light, Standard, or Strong stationary policy; omit those options to follow the named policy.
+Camera-event validation remains fail-open while no EMA result is available or the window has no temporal signal. The former fixed-threshold frame-difference scorer is retired; EMA is the only qualification graph. In custom EMA graphs, explicit `stationary_displacement_ratio` and `stationary_path_ratio` stage options override the named Light, Standard, or Strong stationary policy; omit those options to follow the named policy.
 
 ## Episode admission
 
