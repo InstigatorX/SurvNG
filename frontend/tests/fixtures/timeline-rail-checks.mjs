@@ -18,7 +18,7 @@ async function railSeconds(page) {
 }
 
 async function playheadSeconds(page) {
-  const text = await page.locator(".recording-hero-controls time").first().textContent();
+  const text = await page.locator(".recording-hero-controls :is(time, .recordings-v2-date-toggle)").first().textContent();
   const match = /(\d+):(\d\d):(\d\d)\s*([AP]M)/.exec(text || "");
   if (!match) return NaN;
   const hours = (Number(match[1]) % 12) + (match[4] === "PM" ? 12 : 0);
@@ -68,7 +68,7 @@ export async function checks({ open, shot, query, at, assert }) {
   assert.ok(settled >= afterWheel - 1 && settled - afterWheel < 5, `a committed scrub is not undone by stale playback time (${afterWheel} → ${settled})`);
   await desktop.waitForFunction(() => {
     const rail = document.querySelector(".event-rail .event-rail-playhead span")?.textContent?.trim();
-    const hero = /(\d+:\d\d:\d\d)/.exec(document.querySelector(".recording-hero-controls time")?.textContent || "")?.[1];
+    const hero = /(\d+:\d\d:\d\d)/.exec(document.querySelector(".recording-hero-controls :is(time, .recordings-v2-date-toggle)")?.textContent || "")?.[1];
     return rail && rail === hero;
   }, null, { timeout: 5000 }).catch(() => { throw new Error("the rail line matches playback after a scrub"); });
   await desktop.locator(".event-rail-card", { hasText: "Car" }).first().click();
@@ -123,20 +123,25 @@ export async function checks({ open, shot, query, at, assert }) {
   await lanes.getByRole("group", { name: "Timeline view" }).getByRole("button", { name: "Catch up" }).click();
   await lanes.waitForSelector(".catchup-event");
   assert.ok(await lanes.locator(".catchup-quiet").count() > 0, "quiet stretches collapse");
+  assert.equal(await lanes.getByRole("button", { name: "Auto-advance" }).count(), 0, "Catch up always advances; there is no toggle");
   await lanes.locator(".catchup-event button", { hasText: "Person" }).first().click();
   await waitParam(lanes, "event", "value !== null", "a story card plays its event");
   assert.deepEqual(lanes.errors, [], "lanes and catch-up interactions must not raise errors");
   await lanes.close();
 
-  // Desktop day navigation lives in the rail controls.
+  // Desktop day navigation lives in the player HUD: previous/next day on
+  // either side of the date picker; Today and speed beside the transport.
   const days = await open({ width: 1440, height: 900 }, query);
   await settle(days);
-  for (const name of ["Previous day", "Next day"]) assert.ok(await days.getByRole("button", { name, exact: true }).first().isVisible(), `${name} is visible on desktop`);
-  assert.ok(await days.getByRole("button", { name: "Today" }).isVisible(), "Today is visible on desktop");
-  assert.ok(await days.locator(".rail-day-toolbar .recordings-playback-rate select").isVisible(), "playback speed is visible on desktop");
-  await days.locator(".rail-day-toolbar").getByRole("button", { name: "Previous day" }).click();
+  const hud = days.locator(".recording-hero-controls");
+  for (const name of ["Previous day", "Next day", "Previous event", "Next event"]) assert.ok(await hud.getByRole("button", { name, exact: true }).isVisible(), `${name} is in the HUD on desktop`);
+  for (const name of ["Today", "Nearby", "Export"]) assert.ok(await hud.getByRole("button", { name }).isVisible(), `${name} is in the HUD on desktop`);
+  assert.ok(await hud.locator(".timeline-hud-rate select").isVisible(), "playback speed is in the HUD on desktop");
+  assert.equal(await hud.locator(".timeline-hud-day .recordings-v2-date-toggle").count(), 1, "the HUD date opens the day picker");
+  assert.equal(await days.locator(".rail-controls").isVisible(), false, "no control row under the player");
+  await hud.getByRole("button", { name: "Previous day", exact: true }).click();
   await waitParam(days, "date", "value === '2026-09-08'", "Previous day changes the recording day");
-  await days.locator(".rail-day-toolbar").getByRole("button", { name: "Next day" }).click();
+  await days.locator(".recording-hero-controls").getByRole("button", { name: "Next day", exact: true }).click();
   await waitParam(days, "date", "value === '2026-09-09'", "Next day changes the recording day");
   assert.deepEqual(days.errors, [], "day navigation must not raise errors");
   await days.close();

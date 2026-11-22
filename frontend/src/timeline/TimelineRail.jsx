@@ -187,7 +187,7 @@ function scrubKeyHandler(lineEpoch, spanSeconds, bottomEpoch, topEpoch, scrollTo
 /** Option A: the vertical Event Rail. */
 export function EventRail({
   cameraId, source, dayStart, dayEnd, topEpoch, playhead, recordings, events, densityEvents,
-  spanMinutes, onSpanChange, filter, onFilterChange, selectedEventId, onEventSelect, onSeek, timeZone, extraControls = null,
+  spanMinutes, onSpanChange, filter, onFilterChange, selectedEventId, onEventSelect, onSeek, timeZone,
   onPreviousDay = null, onNextDay = null, cameraNames = null,
 }) {
   const spanSeconds = spanMinutes * 60;
@@ -251,7 +251,6 @@ export function EventRail({
             <button key={value} type="button" aria-pressed={filter === value} onClick={() => onFilterChange(value)}>{label}</button>
           ))}
         </div>
-        {extraControls ? <div className="event-rail-extra">{extraControls}</div> : null}
       </div>
       <div className="event-rail-body">
         <div
@@ -573,7 +572,7 @@ function CameraColumns({ lanes, byCamera, dayStart, topEpoch, playhead, onSeek, 
 /** Option D: the condensed story. Quiet stretches collapse; events come first. */
 export function CatchUpStory({
   events, dayStart, endEpoch, playhead, selectedEventId, onPlayEvent, onShowRealTime, cameraNames, timeZone,
-  quietMinutes, onQuietMinutesChange, autoAdvance, onAutoAdvanceChange, filter = "all", onFilterChange = null,
+  quietMinutes, onQuietMinutesChange, filter = "all", onFilterChange = null,
 }) {
   const items = useMemo(() => condenseStory(events, { quietSeconds: quietMinutes * 60, startEpoch: dayStart, endEpoch }), [dayStart, endEpoch, events, quietMinutes]);
   const short = useMemo(() => clockFormatter(timeZone, false), [timeZone]);
@@ -604,7 +603,6 @@ export function CatchUpStory({
           {onFilterChange ? EVENT_FILTERS.map(([value, label]) => (
             <button key={value} type="button" aria-pressed={filter === value} onClick={() => onFilterChange(value)}>{label}</button>
           )) : null}
-          <button type="button" className="catchup-autoadvance" aria-pressed={autoAdvance} onClick={() => onAutoAdvanceChange(!autoAdvance)}>Auto-advance</button>
         </div>
       </div>
       {!eventCount ? <p className="catchup-empty"><Radar size={16} aria-hidden="true" />No events match this filter today.</p> : null}
