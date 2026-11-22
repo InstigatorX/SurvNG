@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { fetch } from "../shared/api.js";
 import { formatBytes } from "../shared/format.js";
-import { healthCameraRows, healthFindings, latestValue, memoryTrendBytesPerHour, seriesValues } from "../healthSummary.mjs";
+import { healthCameraRows, healthFindings, latestValue, memoryTrendBytesPerHour, seriesValues, trackingCapacitySummary } from "../healthSummary.mjs";
 import { Sparkline, UptimeStrip } from "./healthVisuals.jsx";
 import "./overview.css";
 
@@ -57,8 +57,8 @@ export function HealthSummary({ data, cameraId = "", onAction }) {
   const inferenceMs = Number(runtime.average_inference_ms) || 0;
   const detectorLabel = [data.detector?.loaded_backend, data.detector?.loaded_device].filter(Boolean).join(" on ") || "Object detector";
   const semanticState = String(semantic.state || (semantic.enabled ? "starting" : "disabled"));
-  const trackingRequested = tracking.reduce((total, point) => total + Number(point.attempts || 0), 0);
-  const trackingSkipped = tracking.reduce((total, point) => total + Number(point.skipped || 0), 0);
+  const trackingCapacity = trackingCapacitySummary(tracking);
+  const onTimePercent = trackingCapacity.onTimePercent;
   const rangeLabel = range === "short" ? "last 2 hours" : "last 7 days";
   const offline = rows.filter((row) => row.offlineNow);
   const summary = !rows.length
@@ -111,10 +111,11 @@ export function HealthSummary({ data, cameraId = "", onAction }) {
             <strong>{coverage === null ? "Off" : <>{Math.round(coverage)}<small>% analyzed</small></>}</strong>
             <Sparkline values={seriesValues(history, "analysis_coverage_percent")} label={`Analysis coverage, ${rangeLabel}`} emptyText="Not active" />
           </article>
-          <article>
+          <article title={trackingCapacity.requests ? `${trackingCapacity.requests.toLocaleString()} tracking requests · ${trackingCapacity.waited.toLocaleString()} waited for a free slot${trackingCapacity.waited ? ` (longest ${trackingCapacity.longestWaitSeconds.toFixed(1)} s)` : ""} · ${trackingCapacity.skipped.toLocaleString()} skipped` : undefined}>
             <span className="label">Object tracking</span>
-            <strong>{trackingRequested.toLocaleString()}<small> requested{trackingSkipped ? ` · ${trackingSkipped} skipped` : ""}</small></strong>
-            <Sparkline values={seriesValues(tracking, "attempts")} label={`Tracking requests, ${rangeLabel}`} emptyText="No requests yet" />
+            <strong>{onTimePercent === null ? "—" : <>{onTimePercent >= 99.95 ? "100" : onTimePercent.toFixed(1).replace(/\.0$/, "")}<small>% on time</small></>}</strong>
+            {trackingCapacity.skipped ? <span className="admin-overview-chip bad"><i />{trackingCapacity.skipped.toLocaleString()} skipped</span> : null}
+            <Sparkline values={trackingCapacity.lateSeries} label={`Tracking requests that waited or were skipped, ${rangeLabel}`} emptyText="No requests yet" />
           </article>
           <article>
             <span className="label">Semantic search index</span>

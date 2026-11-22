@@ -5,6 +5,7 @@ import {
   latestValue,
   memoryTrendBytesPerHour,
   seriesValues,
+  trackingCapacitySummary,
   unavailableMinutes,
 } from "../src/healthSummary.mjs";
 
@@ -74,5 +75,26 @@ const memory = [
 ];
 assert.equal(memoryTrendBytesPerHour(memory), 4 * 1024 ** 2);
 assert.equal(memoryTrendBytesPerHour(memory.slice(0, 1)), null);
+
+// Object tracking: share of requests that started without waiting.
+{
+  const summary = trackingCapacitySummary([
+    { attempts: 10, waited: 0, skipped: 0, wait_seconds_max: 0 },
+    // Skips waited first (limit above zero): late = waits.
+    { attempts: 5, waited: 3, skipped: 1, wait_seconds_max: 5 },
+    // Limit of zero: skips never wait, so late = skips.
+    { attempts: 5, waited: 0, skipped: 2, wait_seconds_max: 0 },
+  ]);
+  assert.deepEqual(summary.lateSeries, [0, 3, 2]);
+  assert.equal(summary.requests, 20);
+  assert.equal(summary.waited, 3);
+  assert.equal(summary.skipped, 3);
+  assert.equal(summary.onTimePercent, 75);
+  assert.equal(summary.longestWaitSeconds, 5);
+  assert.equal(trackingCapacitySummary([{ attempts: 0 }]).onTimePercent, null);
+  assert.equal(trackingCapacitySummary(null).requests, 0);
+  // Bad counts never push a bucket past its own requests.
+  assert.deepEqual(trackingCapacitySummary([{ attempts: 1, waited: 4, skipped: -2 }]).lateSeries, [1]);
+}
 
 console.log("health summary tests passed");
