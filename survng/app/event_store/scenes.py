@@ -57,6 +57,14 @@ def _incident_display_summary(objects):
     return text[:1].upper() + text[1:] + " observed"
 
 
+
+# Moving a duplicate subject onto the retained one. Both filter on an object
+# id; without idx_appearance_scene_object (appearance_index) and
+# scene_track_alias_object they scanned whole tables, and the embeddings scan
+# held the main write lock for 3-4 s per subject join in production.
+JOIN_SUBJECT_ALIASES_SQL = "update scene_track_aliases set object_id=? where object_id=?"
+JOIN_SUBJECT_EMBEDDINGS_SQL = "update appearance_embeddings set scene_object_id=? where scene_object_id=?"
+
 class SceneConflict(ValueError):
     """A correction was based on an obsolete incident revision."""
 
@@ -230,6 +238,7 @@ class EventStoreSceneMixin:
                     snapshot_path text not null, recording_path text not null
                 );
                 create index if not exists scene_observation_object on scene_observations(object_id,captured_epoch);
+                create index if not exists scene_track_alias_object on scene_track_aliases(object_id);
                 create index if not exists scene_observation_episode on scene_observations(episode_id,captured_epoch);
                 create index if not exists scene_observation_event_time on scene_observations(event_id,captured_epoch);
                 -- Zone names for cards and day filters. Reading them from payload_json
@@ -499,10 +508,10 @@ class EventStoreSceneMixin:
             # one shared frame into an association of their entire histories.
             return False
         conn.execute("update scene_observations set object_id=? where object_id=?",(retained,duplicate))
-        conn.execute("update scene_track_aliases set object_id=? where object_id=?",(retained,duplicate))
+        conn.execute(JOIN_SUBJECT_ALIASES_SQL,(retained,duplicate))
         columns={r[1] for r in conn.execute("pragma table_info(appearance_embeddings)")}
         if "scene_object_id" in columns:
-            conn.execute("update appearance_embeddings set scene_object_id=? where scene_object_id=?",(retained,duplicate))
+            conn.execute(JOIN_SUBJECT_EMBEDDINGS_SQL,(retained,duplicate))
         return True
 
     @staticmethod

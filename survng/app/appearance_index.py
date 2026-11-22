@@ -77,6 +77,12 @@ class AppearanceIndex:
             connection.execute(
                 "create index if not exists idx_appearance_event on appearance_embeddings(event_id)"
             )
+            # Scene subject joins and remaps filter on scene_object_id with a
+            # bound value, so this is a full index, not a partial one.
+            connection.execute(
+                "create index if not exists idx_appearance_scene_object "
+                "on appearance_embeddings(scene_object_id)"
+            )
             connection.execute(
                 """
                 create index if not exists idx_appearance_model_created

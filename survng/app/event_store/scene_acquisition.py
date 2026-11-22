@@ -27,6 +27,16 @@ def _epoch(value):
     return value
 
 
+
+# Fill missing observation snapshots for one sample. The unary + keeps the
+# planner off the snapshot_path index: equality on '' matches every
+# observation still without a snapshot, and walking those held the main write
+# lock for 19 s in production. The sample's few observation ids drive it.
+REFRESH_SAMPLE_OBSERVATION_SNAPSHOTS_SQL = (
+    "update acquired_observations set snapshot_path=? where +snapshot_path='' and id in "
+    "(select observation_id from acquired_sample_observations where sample_id=?)"
+)
+
 class EventStoreSceneAcquisitionMixin:
     def _init_scene_acquisition_db(self):
         with self._lock, self._connect() as conn:
@@ -258,8 +268,7 @@ class EventStoreSceneAcquisitionMixin:
             if snapshot and not existing["snapshot_path"]:
                 refresh = True
                 conn.execute("update acquired_samples set snapshot_path=? where id=?", (snapshot,sample_id))
-                conn.execute("update acquired_observations set snapshot_path=? where snapshot_path='' and id in "
-                             "(select observation_id from acquired_sample_observations where sample_id=?)", (snapshot,sample_id))
+                conn.execute(REFRESH_SAMPLE_OBSERVATION_SNAPSHOTS_SQL, (snapshot,sample_id))
                 self._register_acquired_snapshot(conn,snapshot,camera_id,captured_epoch,(metadata or {}).get("snapshot_size_bytes",0))
             if request_confirmation:
                 self._enqueue_scene_candidate(conn, camera_id, seed_sample_id=sample_id, **request_confirmation)
