@@ -36,6 +36,7 @@ import { appUrl, fetch } from "./api.js";
 import { formatDateTime } from "./format.js";
 import { useStoredState, useModalFocus } from "./hooks.js";
 import { eventSnapshotUrl, eventThumbnailUrl, eventClipUrl } from "./mediaUrls.js";
+import { RetryingImage } from "./RetryingImage.jsx";
 import { AI_DETECTION_SAMPLE_MS, advanceDebugDetectionTracks, debugDetectionIou, updateDebugDetectionTracks } from "../debugDetectionTracks.mjs";
 
 export function eventObjects(event) {
@@ -354,7 +355,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
         {event?.snapshot_path && eventSnapshotUrl(event) ? (
           progressive && !useServerObjectCrop ? (
             <div className={`snapshot-progressive-stack ${progressiveReady.full ? "full-resolution-ready" : ""}`}>
-              <img
+              <RetryingImage
                 key={`${progressiveImageKey}-base`}
                 className="snapshot-progressive-base"
                 src={eventThumbnailUrl(event)}
@@ -386,7 +387,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
                 />
               ) : null}
             </div>
-          ) : <img key={thumbnail && useServerObjectCrop ? focusImageKey : progressiveImageKey} className={thumbnail ? "snapshot-thumbnail-image" : "snapshot-original-image"} src={thumbnail ? thumbnailSrc : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={(loadEvent) => onImageLoad(loadEvent, thumbnail && useServerObjectCrop ? focusImageKey : progressiveImageKey)} />
+          ) : <RetryingImage key={thumbnail && useServerObjectCrop ? focusImageKey : progressiveImageKey} className={thumbnail ? "snapshot-thumbnail-image" : "snapshot-original-image"} src={thumbnail ? thumbnailSrc : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={(loadEvent) => onImageLoad(loadEvent, thumbnail && useServerObjectCrop ? focusImageKey : progressiveImageKey)} />
         ) : <div className="empty-thumb"><Camera size={iconSize} /></div>}
         {imageReady && showAnnotations && (!showTracking || !renderedTracks.length) && renderedBoxes.length ? (
           <div className={`object-box-layer${onSelectObject ? " interactive" : ""}`} aria-hidden={onSelectObject ? undefined : "true"}>

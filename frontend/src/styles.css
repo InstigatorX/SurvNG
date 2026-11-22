@@ -3316,6 +3316,12 @@ button.live-overlay-backdrop:active {
   z-index: 0;
 }
 
+/* Snapshot images stay hidden until fully loaded (RetryingImage), so a
+   stalled download never shows as a half-drawn picture. */
+.snapshot-frame img.image-loading {
+  visibility: hidden;
+}
+
 .snapshot-progressive-image {
   position: absolute;
   inset: 0;
