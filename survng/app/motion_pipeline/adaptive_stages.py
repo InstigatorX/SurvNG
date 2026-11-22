@@ -1470,8 +1470,11 @@ class IlluminationChangeFilterStage:
         most once. Each pair uses the motion mask produced when its newer frame
         was analysed, not a mask recomputed later against an advanced
         background. The window starts at ``history_started_at`` when the caller
-        supplies one, otherwise at the first supplied frame, which reproduces
-        the full-history behaviour for callers that pass a complete window.
+        supplies one, otherwise at the first supplied frame. A complete window
+        without ``history_started_at`` that starts before the retained history
+        replaces it and scores pairs with the masks it carries, so its scores
+        can differ slightly (fourth decimal on lighting scenes) from the
+        incremental path, which keeps the contemporaneous masks.
         """
         frames = context.frame_history
         masks = context.motion_mask_history

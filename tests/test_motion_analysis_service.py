@@ -312,6 +312,48 @@ def test_evidence_source_frames_respect_byte_budget(monkeypatch: pytest.MonkeyPa
     assert oldest.detection_image is oldest.image
 
 
+
+def test_live_frame_above_the_inference_limit_falls_back_to_the_analysis_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Inference rejects frames above MAX_INFERENCE_FRAME_BYTES (an ~8K BGR
+    # frame is 95 MB). Keeping such a frame would make the fast check fail
+    # with no fallback, although the analysis-width copy is right there.
+    live = np.full((360, 640, 3), 33, dtype=np.uint8)
+    live.setflags(write=False)
+    monkeypatch.setattr(
+        "survng.app.motion_analysis_service.MAX_INFERENCE_FRAME_BYTES", int(live.nbytes - 1),
+    )
+    service = _service(_hooks())
+
+    _submit_and_preprocess(service, live, clock=10.0, epoch=100.0, sequence=5)
+
+    selected = service.evidence_frame_near(
+        100.0, sequence=5, capture_generation=7, lifecycle_generation=3,
+    )
+    assert selected is not None
+    assert selected.source_image is None
+    assert selected.detection_image is selected.image
+    assert selected.detection_image.shape == (180, 320, 3)
+
+
+def test_detection_image_never_returns_a_frame_inference_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from survng.app.motion_analysis_service import MotionEvidenceFrame
+
+    analysis = np.zeros((180, 320, 3), dtype=np.uint8)
+    source = np.zeros((360, 640, 3), dtype=np.uint8)
+    frame = MotionEvidenceFrame(
+        image=analysis, captured_at_epoch=1.0, captured_at_monotonic=1.0, sequence=1,
+        capture_generation=1, lifecycle_generation=1, source_image=source,
+    )
+    assert frame.detection_image is source
+    monkeypatch.setattr(
+        "survng.app.motion_analysis_service.MAX_INFERENCE_FRAME_BYTES", int(source.nbytes - 1),
+    )
+    assert frame.detection_image is analysis
+
 def test_evidence_frame_selection_is_nearest_and_generation_bounded() -> None:
     service = _service(_hooks())
     stop_event = threading.Event()

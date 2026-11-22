@@ -29,6 +29,7 @@ from .ema_v2 import (
     MotionSource,
 )
 from .ema_route_cache import EmaCandidateSubmitResult
+from .inference_runtime.types import MAX_INFERENCE_FRAME_BYTES
 from .motion_analysis import FairMotionAnalysisLimiter
 from .motion_decisions import (
     MotionAuditRecorder,
@@ -140,8 +141,16 @@ class MotionEvidenceFrame:
 
     @property
     def detection_image(self) -> np.ndarray:
-        """Return the highest-resolution retained image of this frame."""
-        return self.source_image if self.source_image is not None else self.image
+        """Return the highest-resolution retained image inference accepts.
+
+        A live frame above the inference worker's frame limit (about 6300 px
+        wide at 16:9 BGR) would be rejected outright, so the analysis-width
+        copy of the same frame is used instead.
+        """
+        source = self.source_image
+        if source is not None and source.nbytes <= MAX_INFERENCE_FRAME_BYTES:
+            return source
+        return self.image
 
 
 @dataclass(frozen=True, slots=True)
@@ -605,12 +614,14 @@ class MotionAnalysisService:
                 sequence=capture_sequence,
                 capture_generation=capture_generation,
                 lifecycle_generation=lifecycle_generation,
-                # Only a read-only capture buffer is safe to keep by reference.
+                # Only a read-only capture buffer is safe to keep by reference,
+                # and only one inference can accept.
                 source_image=(
                     frame
                     if frame is not resized
                     and frame.ndim == 3
                     and not frame.flags.writeable
+                    and frame.nbytes <= MAX_INFERENCE_FRAME_BYTES
                     else None
                 ),
             ))
