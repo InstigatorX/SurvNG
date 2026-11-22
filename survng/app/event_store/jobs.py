@@ -9,7 +9,11 @@ from typing import Any
 
 from ..database_polling import polling_connection
 from ..durable_payload import durable_json_dumps
-from ..main_database import closing_connection_factory
+from ..main_database import (
+    closing_connection_factory,
+    mark_startup_recovered,
+    startup_recovery_pending,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -240,6 +244,7 @@ class EventStoreJobsMixin:
 
 
     def _init_db(self) -> None:
+        recover = startup_recovery_pending("event_store", self.db_path)
         with self._lock, self._connect() as conn:
             conn.execute("pragma journal_mode = wal")
             conn.execute("pragma synchronous = normal")
@@ -472,6 +477,10 @@ class EventStoreJobsMixin:
             conn.execute(
                 "create index if not exists idx_calibration_change_sets_created on calibration_change_sets(created_at desc, id desc)"
             )
+            # Restart recovery and repair run once per process: a settings
+            # reload rebuilds this store over the same database.
+            if not recover:
+                return
             conn.execute(
                 "update calibration_runs set status = 'interrupted', error = 'SurvNG restarted before calibration completed', updated_at = ? where status in ('queued', 'running', 'cancelling')",
                 (datetime.now(timezone.utc).isoformat(),),
@@ -523,6 +532,7 @@ class EventStoreJobsMixin:
                         f"{key}={value}" for key, value in repaired.items() if value
                     ),
                 )
+        mark_startup_recovered("event_store", self.db_path)
 
     def _repair_orphan_event_references(
         self, conn: sqlite3.Connection

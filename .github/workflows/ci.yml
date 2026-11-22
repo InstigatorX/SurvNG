@@ -97,7 +97,8 @@ jobs:
             tests/test_main_database.py \
             tests/test_slow_lock_sites.py \
             tests/test_snapshot_reference_plan.py \
-            tests/test_semantic_coverage_plan.py
+            tests/test_semantic_coverage_plan.py \
+            tests/test_startup_recovery_once.py
       - name: Run scene and evidence regression tests
         run: |
           scripts/run-tests.sh \

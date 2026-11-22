@@ -83,6 +83,43 @@ SLOW_TRANSACTIONS = SlowSiteTable(
     warn_when=held_write_lock_too_long,
 )
 
+# Startup recovery (marking work interrupted by a restart, repairing orphaned
+# rows, backfills) belongs to a process start, not to a store instance: a
+# settings reload rebuilds every store over the same database, and repeating
+# full-table repairs there held the shared write lock for seconds. Keyed by
+# path and inode, so a recreated or replaced database file is recovered again.
+_STARTUP_RECOVERED: set[tuple[str, str, int, int]] = set()
+_STARTUP_RECOVERED_LOCK = threading.Lock()
+
+
+def _database_identity(scope: str, path: Path) -> tuple[str, str, int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (scope, str(path.resolve()), stat.st_dev, stat.st_ino)
+
+
+def startup_recovery_pending(scope: str, path: Path) -> bool:
+    """True until ``mark_startup_recovered`` ran for ``scope`` on this file in this process."""
+    identity = _database_identity(scope, Path(path))
+    with _STARTUP_RECOVERED_LOCK:
+        return identity is None or identity not in _STARTUP_RECOVERED
+
+
+def mark_startup_recovered(scope: str, path: Path) -> None:
+    identity = _database_identity(scope, Path(path))
+    if identity is not None:
+        with _STARTUP_RECOVERED_LOCK:
+            _STARTUP_RECOVERED.add(identity)
+
+
+
+def forget_startup_recovery() -> None:
+    """Forget recovered databases, as a new process would (tests simulate restarts with this)."""
+    with _STARTUP_RECOVERED_LOCK:
+        _STARTUP_RECOVERED.clear()
+
 _METRICS: dict[str, DatabaseMetrics] = {}
 _METRICS_LOCK = threading.Lock()
 _METRIC_FAILURES = 0

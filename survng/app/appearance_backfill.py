@@ -19,7 +19,11 @@ from .config import ObjectTrackingConfig
 from .evidence_work import attributed_inference
 from .incident_utils import event_snapshot_path
 from .inference import InferenceUnavailable
-from .main_database import connect_main_database
+from .main_database import (
+    connect_main_database,
+    mark_startup_recovered,
+    startup_recovery_pending,
+)
 from .media_storage import MediaStorageRegistry
 
 
@@ -71,6 +75,7 @@ class DeferredAppearanceBackfill:
         return connection
 
     def _init_db(self) -> None:
+        recover = startup_recovery_pending("appearance_backfill", self.database_path)
         with self._connect() as connection:
             connection.execute(
                 """
@@ -102,6 +107,10 @@ class DeferredAppearanceBackfill:
                         "on conflict(event_id) do update set state='queued',attempts=0,reason='scene observation backfill'",
                         (now, now),
                     )
+            # Restart recovery runs once per process: a settings reload builds
+            # this service while the previous worker may still hold a job.
+            if not recover:
+                return
             connection.execute(
                 """
                 delete from appearance_backfill_jobs
@@ -113,6 +122,7 @@ class DeferredAppearanceBackfill:
             connection.execute(
                 "update appearance_backfill_jobs set state = 'queued', reason = 'resumed after restart' where state = 'running'"
             )
+        mark_startup_recovered("appearance_backfill", self.database_path)
 
     def start(self) -> None:
         if not self.config.deferred_reid_enabled or not self.config.appearance_reid_enabled:

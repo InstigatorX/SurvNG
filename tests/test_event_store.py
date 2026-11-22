@@ -17,6 +17,7 @@ import numpy as np
 from survng.app.config import MediaStorageConfig, MediaStorageLocationConfig
 from survng.app.events import EventStore
 from survng.app.incident_presenter import _event_row
+from survng.app.main_database import forget_startup_recovery
 from survng.app.media_storage import MediaStorageRegistry
 
 
@@ -2674,6 +2675,7 @@ class EventStoreTest(unittest.TestCase):
                 created_at="2026-07-16T12:00:00+00:00",
             )
 
+            forget_startup_recovery()  # simulate a new process
             reloaded = EventStore(Path(tmpdir))
             object_rows, object_total = reloaded.motion_audits(outcome="object")
             clear_rows, clear_total = reloaded.motion_audits(outcome="clear")
@@ -2859,6 +2861,7 @@ class EventStoreTest(unittest.TestCase):
                 ]),
             )
 
+            forget_startup_recovery()  # simulate a new process
             reloaded = EventStore(Path(tmpdir))
             rows, total = reloaded.motion_audits(category="visual_backup")
 
