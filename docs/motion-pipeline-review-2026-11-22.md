@@ -154,10 +154,14 @@ Suggested order: T1 and T2, then T3, T5 and T6, with T4 last.
     `build_default_motion_pipeline`, the ignored `motion_evidence` argument,
     and the impossible external-confirmation wait.
   - The YOLO scalar oracle moved into `tests/test_detector.py`.
-  - Not done: the in-memory detection job store used only as a test
-    fallback (`motion_incidents._MemoryDetectionJobStore`), and the
-    `event_state_*` audit-reason filters, which only match older stored
-    rows.
+  - `MotionIncidentService` requires a detection job store. The in-memory
+    store it used to fall back to now lives in
+    `tests/detection_job_store_fake.py`.
+  - The `event_state_active` / `event_state_cooldown` audit reasons, which
+    nothing writes any more, are gone. That covers the startup migration
+    that linked such rows on every boot, the write-time coalescing, the
+    query filters, the "merged with ongoing activity" counter, the AI-advisor
+    text and interpretations, and two UI labels.
 - **T3 (done):** each EMA evidence frame keeps a reference to the read-only
   live capture it was derived from (no copy), bounded per camera by
   `EVIDENCE_SOURCE_FRAME_BUDGET_BYTES` (64 MiB; the newest entry always keeps
