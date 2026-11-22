@@ -11,6 +11,7 @@ from typing import Any
 import cv2
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
+from starlette.requests import ClientDisconnect
 from pydantic import BaseModel, Field
 
 from .config import AppConfig
@@ -206,6 +207,10 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
                     accepted = service.write_encoder_upload(node, camera_id, tier, claim, chunk)
                     if not accepted:
                         raise HTTPException(status_code=404, detail="encoder feed was not requested")
+        except ClientDisconnect:
+            # A node ends its long-lived upload by disconnecting when it stops
+            # or switches feeds; that is the end of the stream, not an error.
+            pass
         finally:
             service.release_encoder_upload(camera_id, tier, claim)
         return Response(status_code=204)
@@ -216,10 +221,14 @@ def create_homekit_router(deps: HomeKitRouteDependencies) -> APIRouter:
         node = _node(service, request)
         camera_id = request.headers.get("x-survng-camera", "")
         data = bytearray()
-        async for chunk in request.stream():
-            if len(data) + len(chunk) > SNAPSHOT_LIMIT:
-                raise HTTPException(status_code=413, detail="snapshot is too large")
-            data.extend(chunk)
+        try:
+            async for chunk in request.stream():
+                if len(data) + len(chunk) > SNAPSHOT_LIMIT:
+                    raise HTTPException(status_code=413, detail="snapshot is too large")
+                data.extend(chunk)
+        except ClientDisconnect:
+            # The node gave up mid-upload; answered without a traceback.
+            raise HTTPException(status_code=400, detail="snapshot upload was interrupted") from None
         accepted = service.accept_encoder_snapshot(
             node, camera_id, bytes(data), request.headers.get("x-survng-request", ""),
         )
