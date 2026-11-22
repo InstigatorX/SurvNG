@@ -70,7 +70,18 @@ def _is_busy_error(error: sqlite3.OperationalError) -> bool:
 
 # Transactions slower than this are attributed to their call site (diagnostic).
 SLOW_TRANSACTION_MS = 1000.0
-SLOW_TRANSACTIONS = SlowSiteTable("database transaction", SLOW_TRANSACTION_MS)
+# A slow read that never took the shared write lock blocks no other writer, so
+# it is recorded for status but logged at DEBUG; holding the write lock this
+# long is a WARNING.
+def held_write_lock_too_long(_duration_ms: float, extra: dict[str, float]) -> bool:
+    return extra.get("write_lock_ms", 0.0) >= SLOW_TRANSACTION_MS
+
+
+SLOW_TRANSACTIONS = SlowSiteTable(
+    "database transaction",
+    SLOW_TRANSACTION_MS,
+    warn_when=held_write_lock_too_long,
+)
 
 _METRICS: dict[str, DatabaseMetrics] = {}
 _METRICS_LOCK = threading.Lock()

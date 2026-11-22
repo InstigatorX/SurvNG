@@ -69,6 +69,53 @@ def test_slow_site_warnings_are_rate_limited_per_site(caplog: pytest.LogCaptureF
     assert sum("other.py:2 site" in message for message in messages) == 1
 
 
+
+def test_records_that_hold_no_lock_log_at_debug_but_stay_in_status(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    table = SlowSiteTable(
+        "probe", 0.0,
+        warn_when=lambda _duration, extra: extra.get("write_lock_ms", 0.0) >= 1000.0,
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="survng.app.perf_samples"):
+        table.record("read.py:1 scan", 30000.0, write_lock_ms=0.0)
+        table.record("write.py:2 commit", 5000.0, write_lock_ms=4000.0)
+
+    levels = {record.getMessage().split(": ", 1)[1].split(" took")[0]: record.levelno
+              for record in caplog.records}
+    assert levels == {"read.py:1 scan": logging.DEBUG, "write.py:2 commit": logging.WARNING}
+    assert {row["site"] for row in table.snapshot()["sites"]} == {
+        "read.py:1 scan", "write.py:2 commit",
+    }
+
+
+def _slow_read(path: Path, write_lock: TimedLock) -> None:
+    with connect_main_database(path, timeout=1.0, write_lock=write_lock) as connection:
+        connection.execute("select count(*) from t").fetchone()
+        time.sleep(0.02)
+
+
+def test_slow_read_only_transactions_do_not_warn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(main_database, "SLOW_TRANSACTION_MS", 1.0)
+    monkeypatch.setattr(main_database, "SLOW_TRANSACTIONS", SlowSiteTable(
+        "database transaction", 1.0, warn_when=main_database.held_write_lock_too_long,
+    ))
+    path = tmp_path / "survng.sqlite3"
+    write_lock = TimedLock(threading.RLock())
+    with connect_main_database(path, timeout=1.0, write_lock=write_lock) as connection:
+        connection.execute("create table t (value integer not null)")
+
+    with caplog.at_level(logging.DEBUG, logger="survng.app.perf_samples"):
+        _slow_read(path, write_lock)
+
+    read_records = [r for r in caplog.records if " _slow_read took" in r.getMessage()]
+    assert read_records and all(r.levelno == logging.DEBUG for r in read_records)
+    sites = main_database.SLOW_TRANSACTIONS.snapshot()["sites"]
+    assert any(site["site"].endswith(" _slow_read") for site in sites)
+
 def _hold_for(lock: TimedLock, seconds: float) -> None:
     with lock:
         time.sleep(seconds)

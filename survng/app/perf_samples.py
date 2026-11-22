@@ -6,6 +6,7 @@ import math
 import sys
 import threading
 import time
+from typing import Callable
 
 from .runtime_metrics import LatencyHistogram
 
@@ -105,7 +106,10 @@ class SlowSiteTable:
     Diagnostic for lock and transaction stalls. Fast operations cost one
     comparison. At most ``SLOW_SITE_LIMIT`` sites are kept; when full, a new
     site replaces the one with the smallest maximum only if it is slower.
-    Each site logs at most one warning per ``SLOW_SITE_LOG_INTERVAL_SECONDS``.
+    Each site logs at most one message per ``SLOW_SITE_LOG_INTERVAL_SECONDS``.
+    It is a WARNING unless ``warn_when`` returns False for that record (for
+    example a slow read that held no lock), in which case it is DEBUG; every
+    record is still kept for status either way.
     """
 
     def __init__(
@@ -115,8 +119,10 @@ class SlowSiteTable:
         *,
         limit: int = SLOW_SITE_LIMIT,
         log_interval_seconds: float = SLOW_SITE_LOG_INTERVAL_SECONDS,
+        warn_when: Callable[[float, dict[str, float]], bool] | None = None,
     ) -> None:
         self.name = name
+        self._warn_when = warn_when
         self.threshold_ms = float(threshold_ms)
         self._limit = max(1, int(limit))
         self._log_interval = float(log_interval_seconds)
@@ -158,7 +164,9 @@ class SlowSiteTable:
             details = "".join(
                 f", {key}={value:.0f} ms" for key, value in sorted(extra_ms.items())
             )
-            LOGGER.warning(
+            warn = self._warn_when is None or self._warn_when(duration_ms, extra_ms)
+            LOGGER.log(
+                logging.WARNING if warn else logging.DEBUG,
                 "slow %s: %s took %.0f ms%s (count=%d, max=%.0f ms; "
                 "further reports for this site suppressed for %.0f s)",
                 self.name, site, duration_ms, details, int(log_entry["count"]),
