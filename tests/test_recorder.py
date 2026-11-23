@@ -1524,6 +1524,42 @@ class RecorderTest(unittest.TestCase):
         refresh_index.assert_called_once_with({}, full=False, run_maintenance=False)
         refresh_edge.assert_called_once_with("gate", "main", event_epoch)
 
+    def test_index_loop_releases_readers_waiting_for_a_requested_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            generation = recorder.recording_edge_refresh_generation("gate")
+            self.assertFalse(recorder.wait_for_recording_edge_refresh("gate", generation, 0.01))
+            released: list[tuple[bool, float]] = []
+
+            def reader() -> None:
+                started = time.monotonic()
+                done = recorder.wait_for_recording_edge_refresh("gate", generation, 5.0)
+                released.append((done, time.monotonic() - started))
+
+            waiter = threading.Thread(target=reader)
+            waiter.start()
+            recorder.request_recording_edge_refresh("gate", "main", time.time())
+
+            def failing_refresh(*_args) -> int:
+                recorder._index_stop.set()
+                raise OSError("media location offline")
+
+            with (
+                patch.object(recorder, "refresh_recording_index"),
+                patch.object(recorder, "refresh_recording_edge", side_effect=failing_refresh),
+                patch.object(recorder, "_log_index_exception"),
+            ):
+                recorder._recording_index_loop({})
+            waiter.join(5.0)
+
+            # A failed discovery ends the wait too: the reader retries normally.
+            self.assertEqual(len(released), 1)
+            self.assertTrue(released[0][0])
+            self.assertLess(released[0][1], 2.0)
+            self.assertEqual(recorder.recording_edge_refresh_generation("gate"), generation + 1)
+            # Another camera's discovery does not release this one.
+            self.assertEqual(recorder.recording_edge_refresh_generation("door"), 0)
+
     def test_recent_index_discovery_defers_media_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)

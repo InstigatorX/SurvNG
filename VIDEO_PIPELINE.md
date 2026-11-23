@@ -442,6 +442,11 @@ refinement waits for the segment to be indexed (predicted from the newest
 indexed segment), plus `event_refinement_settle_seconds` (0.75). It retries
 for up to `event_refinement_retry_seconds` (24) at
 `event_refinement_retry_interval_seconds` (1.0) intervals.
+A segment that has just closed is usually not indexed yet, because the indexer
+polls every 10 s. The first lookup that misses asks the indexer for it, and
+the worker waits for that one discovery to finish instead of a whole retry
+interval. Later misses in the same stage mean the segment is still open and
+use the plain interval.
 
 For each available target:
 

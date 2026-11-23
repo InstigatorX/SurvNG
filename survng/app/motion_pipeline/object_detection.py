@@ -499,6 +499,15 @@ class RecordedMotionObjectDetector:
         )
         return self._predicted_index_epoch(event_at.timestamp() + newest, settle_seconds)
 
+    def _index_refresh_generation(self) -> int | None:
+        """Finished-discovery count to wait against, where the recorder has one."""
+        generation = getattr(self.recorder, "recording_edge_refresh_generation", None)
+        if not callable(generation) or not callable(
+            getattr(self.recorder, "wait_for_recording_edge_refresh", None)
+        ):
+            return None
+        return int(generation(self.camera.id))
+
     def _predicted_index_epoch(self, target: float, settle_seconds: float) -> float:
         ready = target + settle_seconds
         segment = float(getattr(self.recorder, "segment_seconds", 0.0) or 0.0)
@@ -1164,6 +1173,11 @@ class RecordedMotionObjectDetector:
             else:
                 ordered_stage_offsets = stage_offsets
                 adaptive_limit = len(stage_offsets)
+            # A just-closed segment is usually not indexed yet: the first miss
+            # asks the indexer for it. Wait for that one discovery rather than a
+            # full retry interval. Later misses mean the segment is still open
+            # and keep the plain interval, so discovery is not requested faster.
+            index_refresh_wait_available = True
             while True:
                 if self.stop_requested():
                     return self._result(
@@ -1174,6 +1188,7 @@ class RecordedMotionObjectDetector:
                         workflow_started,
                         refinement_pending=False,
                     )
+                index_generation = self._index_refresh_generation()
                 stage_deadline = min(
                     deadline,
                     refinement_deadline
@@ -1415,7 +1430,20 @@ class RecordedMotionObjectDetector:
                 if remaining <= 0:
                     break
                 slept = min(retry_interval_seconds, remaining)
-                time.sleep(slept)
+                if (
+                    recording_missing
+                    and not future_sample
+                    and index_refresh_wait_available
+                    and index_generation is not None
+                ):
+                    index_refresh_wait_available = False
+                    wait_started = time.monotonic()
+                    self.recorder.wait_for_recording_edge_refresh(
+                        self.camera.id, index_generation, slept,
+                    )
+                    slept = time.monotonic() - wait_started
+                else:
+                    time.sleep(slept)
                 wait_key = (
                     "recording_wait_ms"
                     if recording_missing and not future_sample

@@ -956,6 +956,14 @@ class RecordingIndexMixin:
                         camera_id,
                         source,
                     )
+                finally:
+                    # A failed discovery also ends the wait: the row is not coming.
+                    with self._edge_refresh_done:
+                        key = (camera_id, source)
+                        self._edge_refresh_generations[key] = (
+                            self._edge_refresh_generations.get(key, 0) + 1
+                        )
+                        self._edge_refresh_done.notify_all()
             if time.monotonic() < next_discovery:
                 continue
             try:
@@ -1675,6 +1683,32 @@ class RecordingIndexMixin:
                 min(previous, after_epoch) if previous is not None else after_epoch
             )
         self._index_wake.set()
+
+    def recording_edge_refresh_generation(self, camera_id: str, source: str = "main") -> int:
+        """How many near-live discoveries have finished for this camera and source."""
+        key = (camera_id, "main" if source == "main" else "live")
+        with self._edge_refresh_done:
+            return self._edge_refresh_generations.get(key, 0)
+
+    def wait_for_recording_edge_refresh(
+        self,
+        camera_id: str,
+        generation: int,
+        timeout: float,
+        source: str = "main",
+    ) -> bool:
+        """Wait until a discovery has finished since ``generation`` was read.
+
+        Read the generation before the lookup that may miss: the miss requests
+        the discovery, and this returns as soon as it has run instead of after
+        a fixed sleep. It requests nothing itself. False means it timed out.
+        """
+        key = (camera_id, "main" if source == "main" else "live")
+        with self._edge_refresh_done:
+            return self._edge_refresh_done.wait_for(
+                lambda: self._edge_refresh_generations.get(key, 0) > generation,
+                timeout=max(0.0, float(timeout)),
+            )
 
     def _take_recording_edge_refreshes(self) -> dict[RecorderKey, float]:
         with self._edge_refresh_lock:

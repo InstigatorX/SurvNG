@@ -95,6 +95,10 @@ class Recorder(RecordingIndexMixin):
         self._index_maintenance_thread: threading.Thread | None = None
         self._edge_refresh_lock = threading.Lock()
         self._edge_refresh_requests: dict[RecorderKey, float] = {}
+        # Counts finished near-live discoveries, so a reader that missed a
+        # just-closed segment can wait for the discovery its miss requested.
+        self._edge_refresh_done = threading.Condition()
+        self._edge_refresh_generations: dict[RecorderKey, int] = {}
         self._index_error_log_at: dict[str, float] = {}
         self._prune_cursor = 0
         self._fingerprint_pending: deque[str] = deque()
