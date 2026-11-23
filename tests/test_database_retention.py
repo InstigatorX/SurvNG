@@ -600,30 +600,41 @@ def test_already_missing_file_is_released_once_its_volume_confirms_the_absence(
 
 def test_volume_is_checked_again_immediately_before_each_unlink(tmp_path: Path) -> None:
     # A different volume mounted at the same path after the first check must
-    # not lose its same-named file.
+    # not lose its same-named file. The final check follows the reference
+    # recheck, so nothing but other unlinks sits between it and the unlink.
     store = EventStore(tmp_path)
     samples = tmp_path / "motion_samples" / "gate"
     samples.mkdir(parents=True)
-    for name in ("swapped.jpg", "steady.jpg"):
+    names = ("swapped.jpg", "unsure.jpg", "gone.jpg", "steady.jpg")
+    for name in names:
         (samples / name).write_bytes(b"jpg")
-    _queue_motion_work(store, "motion_samples/gate/swapped.jpg", "motion_samples/gate/steady.jpg")
+    _queue_motion_work(store, *(f"motion_samples/gate/{name}" for name in names))
     retention = _retention(store)
-    verdict = retention._motion_verdict
-    calls: dict[str, int] = {}
+    verdict, lookup = retention._motion_verdict, retention._named_image_paths
+    order: list[str] = []
+    final = {"swapped.jpg": "unavailable", "unsure.jpg": "unknown", "gone.jpg": "confirmed_absent"}
 
-    def swap_after_first_check(path: Path) -> str:
-        calls[path.name] = calls.get(path.name, 0) + 1
-        if path.name == "swapped.jpg" and calls[path.name] > 1:
-            return "unavailable"
+    def changing_volume(path: Path) -> str:
+        order.append(path.name)
+        if order.count(path.name) == 2 and path.name in final:
+            if path.name == "gone.jpg":
+                path.unlink()  # removed elsewhere between the two checks
+            return final[path.name]
         return verdict(path)
 
-    retention._motion_verdict = swap_after_first_check
+    def counted_lookup(values: set[str]) -> set[str]:
+        order.append("lookup")
+        return lookup(values)
+
+    retention._motion_verdict = changing_volume
+    retention._named_image_paths = counted_lookup
 
     result = retention.run_once()
 
-    assert calls == {"swapped.jpg": 2, "steady.jpg": 2}
-    assert (samples / "swapped.jpg").exists()
+    assert order == ["lookup", *names, "lookup", *names]
+    assert (samples / "swapped.jpg").exists() and (samples / "unsure.jpg").exists()
     assert not (samples / "steady.jpg").exists()
     assert result["motion_sample_files_deleted"] == 1
-    assert result["motion_sample_file_failures"] == {"volume_unavailable": 1}
-    assert _queued_motion_work(store) == (1, 1)
+    assert result["motion_sample_files_missing"] == 1  # gone.jpg, released without unlinking
+    assert result["motion_sample_file_failures"] == {"volume_unavailable": 1, "volume_unknown": 1}
+    assert _queued_motion_work(store) == (2, 2)
