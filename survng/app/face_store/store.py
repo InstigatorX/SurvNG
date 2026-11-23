@@ -14,7 +14,7 @@ from ..incident_utils import (
     event_snapshot_path, media_path_aliases, portable_media_path,
 )
 from ..media_storage import MediaStorageRegistry
-from ..main_database import connect_main_database
+from ..main_database import connect_main_database, create_index_logged
 from .benchmarks import FaceStoreBenchmarkMixin
 from .ingest import FaceStoreIngestMixin
 from .people import FaceStorePeopleMixin
@@ -231,6 +231,14 @@ class FaceStore(
             connection.execute(
                 "create index if not exists idx_face_duplicate_of "
                 "on face_observations(duplicate_of_observation_id)"
+            )
+            # Snapshot retention asks which snapshots a pinned reference face
+            # protects; a handful of rows, found without scanning them all.
+            create_index_logged(
+                connection,
+                "idx_face_observations_pinned_snapshot",
+                "create index if not exists idx_face_observations_pinned_snapshot "
+                "on face_observations(snapshot_path) where reference_pinned = 1",
             )
             connection.execute(
                 """

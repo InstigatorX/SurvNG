@@ -107,7 +107,8 @@ jobs:
             tests/test_detection_job_prune_plan.py \
             tests/test_appearance_backfill_reload.py \
             tests/test_async_manager_guard.py \
-            tests/test_calibration_followup_monitor.py
+            tests/test_calibration_followup_monitor.py \
+            tests/test_retention_plan_queries.py
       - name: Run scene and evidence regression tests
         run: |
           scripts/run-tests.sh \

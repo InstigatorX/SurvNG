@@ -1561,7 +1561,7 @@ class EventStore(
         """Build SQL that yields one latest row per snapshot_path.
 
         Event rows are deduplicated first (aligned with
-        ``idx_events_snapshot_retention``), then merged with
+        ``idx_events_snapshot_retention_covering``), then merged with
         ``scene_snapshot_assets`` (already unique by path). A second narrow
         ranking picks the newer of the two sources. This avoids window-sorting
         the full events∪assets bag when many events share a path or when assets

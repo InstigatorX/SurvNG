@@ -40,6 +40,38 @@ def _is_progress_interrupt(error: BaseException) -> bool:
     """The error SQLite raises when a progress handler aborts a statement."""
     return isinstance(error, sqlite3.OperationalError) and "interrupted" in str(error)
 
+# Covering index the retention planner reads its per-group totals from. The
+# recording index creates it; without table statistics SQLite would pick a
+# narrower non-covering index, hence the INDEXED BY hint.
+RETENTION_TOTALS_INDEX = "recordings_retention_totals"
+_TOTALS_INDEX_WARNED = False
+GROUP_TOTALS_SQL = """
+    SELECT r.camera_id, r.source, count(*) AS file_count,
+           coalesce(sum(r.size_bytes), 0) AS bytes,
+           min(r.start_epoch) AS oldest, max(r.end_epoch) AS newest,
+           coalesce(sum(CASE WHEN r.end_epoch < policy.cutoff THEN 1 ELSE 0 END), 0)
+               AS expired_file_count,
+           coalesce(sum(CASE WHEN r.end_epoch < policy.cutoff THEN r.size_bytes ELSE 0 END), 0)
+               AS expired_bytes
+    FROM recordings AS r {hint}
+    JOIN retention_policy AS policy
+      ON policy.camera_id = r.camera_id AND policy.source = r.source
+    GROUP BY r.camera_id, r.source
+    ORDER BY r.camera_id, r.source
+"""
+# CROSS JOIN keeps the protected set as the outer loop: one primary-key
+# lookup per protected path instead of one per segment.
+PROTECTED_EXPIRED_SQL = """
+    SELECT r.camera_id, r.source, count(*) AS file_count,
+           coalesce(sum(r.size_bytes), 0) AS bytes
+    FROM retention_protected AS protected
+    CROSS JOIN recordings AS r ON r.path = protected.path
+    JOIN retention_policy AS policy
+      ON policy.camera_id = r.camera_id AND policy.source = r.source
+    WHERE r.end_epoch < policy.cutoff
+    GROUP BY r.camera_id, r.source
+"""
+
 class RecordingRetentionService:
     """Index-driven continuous-recording retention with bounded NFS work."""
 
@@ -246,6 +278,50 @@ class RecordingRetentionService:
             "batches_completed": self._cleanup_batches_completed,
         }
 
+    def _group_totals(self, connection: sqlite3.Connection) -> list[dict[str, Any]]:
+        """Per camera and source: all segments, and expired ones split by protection.
+
+        Needs the ``retention_policy`` and ``retention_protected`` temp tables.
+        Totals and expiry come from one scan of the covering retention index;
+        protected expired segments are found from the protected paths (usually
+        far fewer than segments) and subtracted. Joining every segment to the
+        protected set and reading its table row cost ~90 s on production.
+        """
+        try:
+            totals = connection.execute(GROUP_TOTALS_SQL.format(hint=f"INDEXED BY {RETENTION_TOTALS_INDEX}")).fetchall()
+        except sqlite3.OperationalError as error:
+            if "no such index" not in str(error):
+                raise
+            global _TOTALS_INDEX_WARNED
+            if not _TOTALS_INDEX_WARNED:
+                _TOTALS_INDEX_WARNED = True
+                LOGGER.warning(
+                    "Recording index lacks %s; retention planning reads table rows",
+                    RETENTION_TOTALS_INDEX,
+                )
+            totals = connection.execute(GROUP_TOTALS_SQL.format(hint="")).fetchall()
+        protected = {
+            (str(row["camera_id"]), str(row["source"])): (int(row["file_count"]), int(row["bytes"]))
+            for row in connection.execute(PROTECTED_EXPIRED_SQL).fetchall()
+        }
+        groups: list[dict[str, Any]] = []
+        for row in totals:
+            key = (str(row["camera_id"]), str(row["source"]))
+            protected_files, protected_bytes = protected.get(key, (0, 0))
+            groups.append({
+                "camera_id": row["camera_id"],
+                "source": row["source"],
+                "file_count": row["file_count"],
+                "bytes": row["bytes"],
+                "oldest": row["oldest"],
+                "newest": row["newest"],
+                "expired_file_count": int(row["expired_file_count"] or 0) - protected_files,
+                "expired_bytes": int(row["expired_bytes"] or 0) - protected_bytes,
+                "protected_file_count": protected_files,
+                "protected_bytes": protected_bytes,
+            })
+        return groups
+
     def plan(self, *, now_epoch: float | None = None) -> dict[str, Any]:
         now = time.time() if now_epoch is None else float(now_epoch)
         with self._state_lock:
@@ -313,35 +389,7 @@ class RecordingRetentionService:
                 lambda: int(self._stop.is_set()),
                 10_000,
             )
-            groups = connection.execute(
-                """
-                SELECT r.camera_id, r.source, count(*) AS file_count,
-                       coalesce(sum(r.size_bytes), 0) AS bytes,
-                       min(r.start_epoch) AS oldest, max(r.end_epoch) AS newest,
-                       coalesce(sum(CASE
-                           WHEN r.end_epoch < policy.cutoff
-                            AND protected.path IS NULL THEN 1 ELSE 0 END), 0)
-                           AS expired_file_count,
-                       coalesce(sum(CASE
-                           WHEN r.end_epoch < policy.cutoff
-                            AND protected.path IS NULL THEN r.size_bytes ELSE 0 END), 0)
-                           AS expired_bytes,
-                       coalesce(sum(CASE
-                           WHEN r.end_epoch < policy.cutoff
-                            AND protected.path IS NOT NULL THEN 1 ELSE 0 END), 0)
-                           AS protected_file_count,
-                       coalesce(sum(CASE
-                           WHEN r.end_epoch < policy.cutoff
-                            AND protected.path IS NOT NULL THEN r.size_bytes ELSE 0 END), 0)
-                           AS protected_bytes
-                FROM recordings AS r
-                JOIN retention_policy AS policy
-                  ON policy.camera_id = r.camera_id AND policy.source = r.source
-                LEFT JOIN retention_protected AS protected ON protected.path = r.path
-                GROUP BY r.camera_id, r.source
-                ORDER BY r.camera_id, r.source
-                """
-            ).fetchall()
+            groups = self._group_totals(connection)
 
             totals: dict[str, int | float | None] = {
                 "file_count": 0,
