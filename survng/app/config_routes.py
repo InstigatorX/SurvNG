@@ -498,10 +498,22 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
         return {"ok": True, "camera_ids": camera_ids}
 
     def merge_camera(
-        next_config: AppConfig, camera_id: str, camera_settings: CameraConfig,
+        next_config: AppConfig,
+        camera_id: str,
+        camera_settings: CameraConfig,
+        *,
+        existing_ids: set[str] | None = None,
     ) -> CameraConfig:
-        """Put one camera's settings into ``next_config``, keeping its identity."""
-        index = next((i for i, item in enumerate(next_config.cameras) if item.id == camera_id), None)
+        """Put one camera's settings into ``next_config``, keeping its identity.
+
+        ``existing_ids`` limits which ids name an existing camera, so a new
+        camera never replaces another new camera from the same batch.
+        """
+        index = (
+            next((i for i, item in enumerate(next_config.cameras) if item.id == camera_id), None)
+            if existing_ids is None or camera_id in existing_ids
+            else None
+        )
         existing = next_config.cameras[index] if index is not None else None
         try:
             camera_settings = _restore_camera_secrets(camera_settings, existing)
@@ -544,8 +556,10 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
             raise HTTPException(status_code=400, detail="each camera may appear only once")
         with deps.lock:
             next_config = deps.get_config().model_copy(deep=True)
+            existing_ids = {camera.id for camera in next_config.cameras}
             saved = [
-                merge_camera(next_config, camera.id, camera) for camera in update.cameras
+                merge_camera(next_config, camera.id, camera, existing_ids=existing_ids)
+                for camera in update.cameras
             ]
             result = apply_camera_config(next_config)
         return {

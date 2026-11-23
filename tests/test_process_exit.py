@@ -99,3 +99,95 @@ def test_reload_mode_still_uses_uvicorn_run(monkeypatch: pytest.MonkeyPatch) -> 
     server_main._run_server(app="survng.app.main:app", reload=True)
     assert captured["reload"] is True
     assert sys.modules["survng.app.process_exit"]._server is None
+
+
+def test_restart_deadline_ends_a_process_that_does_not_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    exited: list[int] = []
+    done = threading.Event()
+    monkeypatch.setattr(process_exit, "RESTART_SHUTDOWN_BUDGET_SECONDS", 0.05)
+    monkeypatch.setattr(process_exit, "_force_exit", lambda status: (exited.append(status), done.set()))
+    process_exit.attach_server(SimpleNamespace(should_exit=False), graceful_shutdown_seconds=0)
+
+    process_exit.request_supervisor_restart("reload aborted")
+
+    assert done.wait(5.0)
+    assert exited == [process_exit.SUPERVISOR_RESTART_EXIT_STATUS]
+
+
+def test_no_deadline_is_armed_without_a_managed_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(process_exit, "_force_exit", lambda status: pytest.fail("forced exit"))
+    process_exit.request_supervisor_restart("reload aborted")
+    assert process_exit._deadline_timer is None
+
+
+_SERVE_SCRIPT = """
+import sys, threading, time
+sys.path.insert(0, sys.argv[1])
+from survng.app import process_exit
+import survng.app.__main__ as server_main
+
+process_exit.RESTART_SHUTDOWN_BUDGET_SECONDS = 1.0
+stuck = sys.argv[2] == "stuck"
+
+async def app(scope, receive, send):
+    if scope["type"] != "lifespan":
+        return
+    while True:
+        message = await receive()
+        if message["type"] == "lifespan.startup":
+            if stuck:
+                threading.Thread(target=time.sleep, args=(60,)).start()  # non-daemon
+            threading.Timer(0.2, process_exit.request_supervisor_restart, args=("test",)).start()
+            await send({"type": "lifespan.startup.complete"})
+        elif message["type"] == "lifespan.shutdown":
+            print("lifespan shutdown ran", flush=True)
+            await send({"type": "lifespan.shutdown.complete"})
+            return
+
+server_main._run_server(
+    app=app, host="127.0.0.1", port=0, timeout_graceful_shutdown=0.5, log_level="warning",
+)
+"""
+
+
+@pytest.mark.parametrize("mode", ["clean", "stuck"])
+def test_real_server_exits_with_the_restart_status(tmp_path, mode: str) -> None:
+    import subprocess
+    import time
+    from pathlib import Path
+
+    script = tmp_path / "serve.py"
+    script.write_text(_SERVE_SCRIPT)
+    started = time.monotonic()
+    completed = subprocess.run(
+        [sys.executable, str(script), str(Path(__file__).resolve().parents[1]), mode],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == process_exit.SUPERVISOR_RESTART_EXIT_STATUS, completed.stderr
+    assert "lifespan shutdown ran" in completed.stdout
+    # The stuck thread sleeps 60 s; the deadline (0.5 s + 1 s) ends the process first.
+    assert time.monotonic() - started < 20
+
+
+def test_reload_manager_wires_the_supervisor_restart_hook(monkeypatch: pytest.MonkeyPatch) -> None:
+    from survng.app import main
+
+    captured: dict[str, Any] = {}
+
+    class Lifecycle:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        def reload(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    monkeypatch.setattr(main, "ManagerGenerationLifecycle", Lifecycle)
+    main.reload_manager(main.config.model_copy(deep=True), persist=False)
+
+    assert captured["hooks"].request_supervisor_restart is process_exit.request_supervisor_restart

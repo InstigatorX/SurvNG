@@ -320,6 +320,21 @@ class ConfigRoutesTest(unittest.TestCase):
         self.assertEqual([camera["id"] for camera in result["cameras"]], ["gate", "yard", "porch"])
         self.assertNotIn("camera-secret", str(result))
 
+    def test_new_cameras_in_one_batch_never_replace_each_other(self) -> None:
+        from survng.app.config_routes import CameraBatchUpdate
+
+        first = CameraConfig(id="camera", name="Camera 2", stream_url="rtsp://one/main")
+        second = CameraConfig(id="camera-2", name="Porch", stream_url="rtsp://two/main")
+
+        result = self.endpoint("/api/config/cameras", "PUT")(
+            CameraBatchUpdate(cameras=[first, second])
+        )
+
+        applied = self.apply.call_args.args[0].cameras
+        self.assertEqual([camera.id for camera in applied], ["gate", "camera-2", "porch"])
+        self.assertEqual([camera.name for camera in applied], ["Gate", "Camera 2", "Porch"])
+        self.assertEqual([camera["id"] for camera in result["cameras"]], ["camera-2", "porch"])
+
     def test_camera_batch_rejects_empty_and_duplicate_lists(self) -> None:
         from survng.app.config_routes import CameraBatchUpdate
 

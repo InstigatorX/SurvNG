@@ -63,7 +63,10 @@ def _run_server(**kwargs: object) -> None:
         uvicorn.run(**kwargs)  # type: ignore[arg-type]
         return
     server = uvicorn.Server(uvicorn.Config(**kwargs))  # type: ignore[arg-type]
-    process_exit.attach_server(server)
+    process_exit.attach_server(
+        server,
+        graceful_shutdown_seconds=float(kwargs.get("timeout_graceful_shutdown") or 30.0),  # type: ignore[arg-type]
+    )
     try:
         server.run()
     except KeyboardInterrupt:
