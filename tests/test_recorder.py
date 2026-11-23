@@ -1527,18 +1527,20 @@ class RecorderTest(unittest.TestCase):
     def test_index_loop_releases_readers_waiting_for_a_requested_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
-            generation = recorder.recording_edge_refresh_generation("gate")
-            self.assertFalse(recorder.wait_for_recording_edge_refresh("gate", generation, 0.01))
+            self.assertEqual(recorder.recording_edge_refresh_ticket("gate"), 0)
+            recorder.request_recording_edge_refresh("gate", "main", time.time())
+            ticket = recorder.recording_edge_refresh_ticket("gate")
+            self.assertEqual(ticket, 1)
+            self.assertFalse(recorder.wait_for_recording_edge_refresh("gate", ticket, 0.01))
             released: list[tuple[bool, float]] = []
 
             def reader() -> None:
                 started = time.monotonic()
-                done = recorder.wait_for_recording_edge_refresh("gate", generation, 5.0)
+                done = recorder.wait_for_recording_edge_refresh("gate", ticket, 5.0)
                 released.append((done, time.monotonic() - started))
 
             waiter = threading.Thread(target=reader)
             waiter.start()
-            recorder.request_recording_edge_refresh("gate", "main", time.time())
 
             def failing_refresh(*_args) -> int:
                 recorder._index_stop.set()
@@ -1556,9 +1558,38 @@ class RecorderTest(unittest.TestCase):
             self.assertEqual(len(released), 1)
             self.assertTrue(released[0][0])
             self.assertLess(released[0][1], 2.0)
-            self.assertEqual(recorder.recording_edge_refresh_generation("gate"), generation + 1)
             # Another camera's discovery does not release this one.
-            self.assertEqual(recorder.recording_edge_refresh_generation("door"), 0)
+            recorder.request_recording_edge_refresh("door", "main", time.time())
+            self.assertFalse(recorder.wait_for_recording_edge_refresh(
+                "door", recorder.recording_edge_refresh_ticket("door"), 0.01,
+            ))
+
+    def test_a_discovery_already_running_does_not_release_a_later_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            key = ("gate", "main")
+            # A timeline page asked first; its discovery is listing the directory.
+            recorder.request_recording_edge_refresh("gate", "main", 100.0)
+            self.assertEqual(recorder._take_recording_edge_refreshes(), {key: 100.0})
+            # Refinement misses a segment that closed after that listing began.
+            recorder.request_recording_edge_refresh("gate", "main", 110.0)
+            ticket = recorder.recording_edge_refresh_ticket("gate")
+
+            recorder._finish_recording_edge_refresh(key)
+            self.assertFalse(recorder.wait_for_recording_edge_refresh("gate", ticket, 0.01))
+
+            self.assertEqual(recorder._take_recording_edge_refreshes(), {key: 110.0})
+            recorder._finish_recording_edge_refresh(key)
+            self.assertTrue(recorder.wait_for_recording_edge_refresh("gate", ticket, 0.01))
+
+    def test_a_reread_after_discovery_does_not_request_another(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            now = time.time()
+            self.assertIsNone(recorder.recording_at("gate", now, request_refresh=False))
+            self.assertEqual(recorder._take_recording_edge_refreshes(), {})
+            self.assertIsNone(recorder.recording_at("gate", now))
+            self.assertEqual(list(recorder._take_recording_edge_refreshes()), [("gate", "main")])
 
     def test_recent_index_discovery_defers_media_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1352,33 +1352,42 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             hardware_acceleration = "none"
 
             def __init__(self) -> None:
-                self.generation = 0
+                self.ticket = 0
+                self.completed = 0
                 self.indexed = False
-                self.misses = 0
+                self.requests: list[float] = []
+                self.rereads = 0
                 self.waits: list[float] = []
                 self.done = _threading.Condition()
 
-            def _discover(self) -> None:
+            def _discover(self, taken: int) -> None:
                 with self.done:
                     self.indexed = indexed_after_refresh
-                    self.generation += 1
+                    self.completed = max(self.completed, taken)
                     self.done.notify_all()
 
-            def recording_at(self, _camera_id: str, epoch: float):
+            def recording_at(self, _camera_id: str, epoch: float, request_refresh: bool = True):
                 if self.indexed:
                     return {"path": "segment.mp4", "start_epoch": epoch}
-                self.misses += 1
+                if not request_refresh:
+                    self.rereads += 1
+                    return None
                 # The real miss wakes the indexer; it finishes shortly after.
-                _threading.Timer(0.05, self._discover).start()
+                with self.done:
+                    self.ticket += 1
+                    taken = self.ticket
+                self.requests.append(time.monotonic())
+                _threading.Timer(0.05, self._discover, args=(taken,)).start()
                 return None
 
-            def recording_edge_refresh_generation(self, _camera_id: str) -> int:
-                return self.generation
+            def recording_edge_refresh_ticket(self, _camera_id: str) -> int:
+                with self.done:
+                    return self.ticket
 
-            def wait_for_recording_edge_refresh(self, _camera_id, generation, timeout):
+            def wait_for_recording_edge_refresh(self, _camera_id, ticket, timeout):
                 self.waits.append(timeout)
                 with self.done:
-                    return self.done.wait_for(lambda: self.generation > generation, timeout)
+                    return self.done.wait_for(lambda: self.completed >= ticket, timeout)
 
         class Detector:
             config = detector_config(
@@ -1400,6 +1409,17 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         )
         return backend, recorder
 
+    @staticmethod
+    def _request_bursts(requests: list[float]) -> int:
+        """Lookups of one pass arrive together; count the passes that requested."""
+        bursts = 0
+        previous = float("-inf")
+        for at in requests:
+            if at - previous > 0.1:
+                bursts += 1
+            previous = at
+        return bursts
+
     def test_index_miss_waits_for_the_requested_discovery_not_a_full_retry_interval(self) -> None:
         event_epoch = 1_800_000_000.0
         backend, recorder = self._index_lag_backend(event_epoch, indexed_after_refresh=True)
@@ -1416,24 +1436,28 @@ class RecordedObjectConsensusTest(unittest.TestCase):
 
         self.assertEqual(result.frame_source, "recorded_main")
         self.assertEqual(len(recorder.waits), 1)
+        self.assertEqual(self._request_bursts(recorder.requests), 1)
         # Without the wait this costs the whole 1 s retry interval.
         self.assertLess(elapsed, 0.6)
 
-    def test_a_segment_that_is_still_open_keeps_the_plain_retry_interval(self) -> None:
+    def test_a_segment_that_is_still_open_is_not_rediscovered_more_often(self) -> None:
         event_epoch = 1_800_000_000.0
         backend, recorder = self._index_lag_backend(event_epoch, indexed_after_refresh=False)
         with (
             patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_SETTLE_SECONDS", 0.0),
-            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_SECONDS", 0.7),
-            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_INTERVAL_SECONDS", 0.2),
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_SECONDS", 1.3),
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_INTERVAL_SECONDS", 0.4),
             patch("survng.app.motion_pipeline.object_detection.time.time", return_value=event_epoch + 20.0),
         ):
             backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
 
-        # Discovery is requested by misses; a fast wait after every miss would
-        # multiply them. Only the first miss of a stage waits on the indexer.
-        self.assertGreater(recorder.misses, 5)
+        # Each requesting pass costs a directory listing on the media store.
+        # A fixed 0.4 s interval over 1.3 s gives four passes (0, 0.4, 0.8,
+        # 1.2). Waiting on the first discovery must not add a fifth: the
+        # re-read that follows it does not request.
         self.assertEqual(len(recorder.waits), 1)
+        self.assertGreater(recorder.rereads, 0)
+        self.assertLessEqual(self._request_bursts(recorder.requests), 4)
 
     def test_detector_retries_missing_offsets_until_confirmation_is_possible(self) -> None:
         event_epoch = 1_800_000_000.0

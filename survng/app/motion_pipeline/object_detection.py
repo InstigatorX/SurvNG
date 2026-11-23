@@ -329,6 +329,9 @@ class _EventRecordedSampler:
             key=lambda row: float(row.get("start_epoch", 0.0)),
         )
         self._frames: dict[tuple[str, float], _DecodedRecordedFrame | None] = {}
+        # Cleared for the one re-read that follows a discovery the caller
+        # waited for, so that re-read does not request another.
+        self.request_index_refresh = True
 
     def recording_at(self, epoch: float) -> dict[str, Any] | None:
         # Match Recorder.recording_at(): at a shared segment boundary the
@@ -341,7 +344,11 @@ class _EventRecordedSampler:
                 end = start + float(duration) if duration is not None else start
             if start <= epoch <= float(end):
                 return row
-        row = self.recorder.recording_at(self.camera_id, epoch)
+        row = (
+            self.recorder.recording_at(self.camera_id, epoch)
+            if self.request_index_refresh
+            else self.recorder.recording_at(self.camera_id, epoch, request_refresh=False)
+        )
         if row is not None and row.get("start_epoch") is not None:
             normalized = dict(row)
             if normalized.get("end_epoch") is None:
@@ -499,14 +506,14 @@ class RecordedMotionObjectDetector:
         )
         return self._predicted_index_epoch(event_at.timestamp() + newest, settle_seconds)
 
-    def _index_refresh_generation(self) -> int | None:
-        """Finished-discovery count to wait against, where the recorder has one."""
-        generation = getattr(self.recorder, "recording_edge_refresh_generation", None)
-        if not callable(generation) or not callable(
+    def _index_refresh_ticket(self) -> int | None:
+        """Newest discovery request for this camera, where the recorder issues them."""
+        ticket = getattr(self.recorder, "recording_edge_refresh_ticket", None)
+        if not callable(ticket) or not callable(
             getattr(self.recorder, "wait_for_recording_edge_refresh", None)
         ):
             return None
-        return int(generation(self.camera.id))
+        return int(ticket(self.camera.id))
 
     def _predicted_index_epoch(self, target: float, settle_seconds: float) -> float:
         ready = target + settle_seconds
@@ -1174,10 +1181,12 @@ class RecordedMotionObjectDetector:
                 ordered_stage_offsets = stage_offsets
                 adaptive_limit = len(stage_offsets)
             # A just-closed segment is usually not indexed yet: the first miss
-            # asks the indexer for it. Wait for that one discovery rather than a
-            # full retry interval. Later misses mean the segment is still open
-            # and keep the plain interval, so discovery is not requested faster.
+            # asks the indexer for it. Wait for that discovery rather than a
+            # full retry interval, then re-read without asking again. If the
+            # row is still absent (segment still open, discovery failed), the
+            # plain interval resumes, so discovery is requested no more often.
             index_refresh_wait_available = True
+            reread_after_discovery = False
             while True:
                 if self.stop_requested():
                     return self._result(
@@ -1188,7 +1197,9 @@ class RecordedMotionObjectDetector:
                         workflow_started,
                         refinement_pending=False,
                     )
-                index_generation = self._index_refresh_generation()
+                index_ticket_before = self._index_refresh_ticket()
+                sampler.request_index_refresh = not reread_after_discovery
+                reread_after_discovery = False
                 stage_deadline = min(
                     deadline,
                     refinement_deadline
@@ -1225,6 +1236,7 @@ class RecordedMotionObjectDetector:
                         (sample_offset, frame_offset, row)
                     )
 
+                sampler.request_index_refresh = True
                 for path, pending in list(pending_by_path.items()):
                     if stage_consensus:
                         timing["refinement_early_exit_skipped"] += float(len(pending))
@@ -1430,16 +1442,22 @@ class RecordedMotionObjectDetector:
                 if remaining <= 0:
                     break
                 slept = min(retry_interval_seconds, remaining)
-                if (
-                    recording_missing
+                index_ticket = (
+                    self._index_refresh_ticket()
+                    if recording_missing
                     and not future_sample
                     and index_refresh_wait_available
-                    and index_generation is not None
-                ):
+                    and index_ticket_before is not None
+                    else None
+                )
+                if index_ticket is not None and index_ticket != index_ticket_before:
+                    # This pass's miss requested a discovery: wait for it.
                     index_refresh_wait_available = False
                     wait_started = time.monotonic()
-                    self.recorder.wait_for_recording_edge_refresh(
-                        self.camera.id, index_generation, slept,
+                    reread_after_discovery = bool(
+                        self.recorder.wait_for_recording_edge_refresh(
+                            self.camera.id, index_ticket, slept,
+                        )
                     )
                     slept = time.monotonic() - wait_started
                 else:

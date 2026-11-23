@@ -443,10 +443,12 @@ indexed segment), plus `event_refinement_settle_seconds` (0.75). It retries
 for up to `event_refinement_retry_seconds` (24) at
 `event_refinement_retry_interval_seconds` (1.0) intervals.
 A segment that has just closed is usually not indexed yet, because the indexer
-polls every 10 s. The first lookup that misses asks the indexer for it, and
-the worker waits for that one discovery to finish instead of a whole retry
-interval. Later misses in the same stage mean the segment is still open and
-use the plain interval.
+polls every 10 s. The first lookup that misses asks the indexer for it. The
+worker then waits, for at most one retry interval, until a discovery that
+started after its request has finished, and re-reads the index without asking
+again. If the row is still absent (the segment is still open, or discovery
+failed) the stage falls back to the plain interval, so discovery is requested
+no more often than with a fixed sleep.
 
 For each available target:
 

@@ -958,12 +958,7 @@ class RecordingIndexMixin:
                     )
                 finally:
                     # A failed discovery also ends the wait: the row is not coming.
-                    with self._edge_refresh_done:
-                        key = (camera_id, source)
-                        self._edge_refresh_generations[key] = (
-                            self._edge_refresh_generations.get(key, 0) + 1
-                        )
-                        self._edge_refresh_done.notify_all()
+                    self._finish_recording_edge_refresh((camera_id, source))
             if time.monotonic() < next_discovery:
                 continue
             try:
@@ -1643,8 +1638,20 @@ class RecordingIndexMixin:
             ).fetchone()
         return dict(row) if row is not None else None
 
-    def recording_at(self, camera_id: str, epoch: float, limit: int = 1000, source: str = "main") -> dict | None:
-        """Return an indexed recording without scanning media storage on the request path."""
+    def recording_at(
+        self,
+        camera_id: str,
+        epoch: float,
+        limit: int = 1000,
+        source: str = "main",
+        *,
+        request_refresh: bool = True,
+    ) -> dict | None:
+        """Return an indexed recording without scanning media storage on the request path.
+
+        A near-live miss asks the indexer to discover the segment, unless the
+        caller has just waited for such a discovery and is only re-reading.
+        """
         del limit  # Retained for API compatibility with older callers.
         source = "main" if source == "main" else "live"
         maximum_duration = max(60.0, self.segment_seconds * 3)
@@ -1670,7 +1677,7 @@ class RecordingIndexMixin:
                 if verdict == "confirmed_absent":
                     self._delete_index_paths([str(payload["path"])])
                 # Unavailable or unknown storage keeps the row and is not playable.
-        if abs(time.time() - epoch) <= max(60.0, self.segment_seconds * 6):
+        if request_refresh and abs(time.time() - epoch) <= max(60.0, self.segment_seconds * 6):
             self.request_recording_edge_refresh(camera_id, source, epoch)
         return None
 
@@ -1682,31 +1689,36 @@ class RecordingIndexMixin:
             self._edge_refresh_requests[key] = (
                 min(previous, after_epoch) if previous is not None else after_epoch
             )
+            self._edge_refresh_tickets[key] = self._edge_refresh_tickets.get(key, 0) + 1
         self._index_wake.set()
 
-    def recording_edge_refresh_generation(self, camera_id: str, source: str = "main") -> int:
-        """How many near-live discoveries have finished for this camera and source."""
+    def recording_edge_refresh_ticket(self, camera_id: str, source: str = "main") -> int:
+        """The newest discovery request for this camera and source.
+
+        It changes exactly when a discovery is requested, so reading it before
+        and after a lookup tells the caller whether its miss requested one.
+        """
         key = (camera_id, "main" if source == "main" else "live")
-        with self._edge_refresh_done:
-            return self._edge_refresh_generations.get(key, 0)
+        with self._edge_refresh_lock:
+            return self._edge_refresh_tickets.get(key, 0)
 
     def wait_for_recording_edge_refresh(
         self,
         camera_id: str,
-        generation: int,
+        ticket: int,
         timeout: float,
         source: str = "main",
     ) -> bool:
-        """Wait until a discovery has finished since ``generation`` was read.
+        """Wait until a discovery that started after ``ticket`` was issued has run.
 
-        Read the generation before the lookup that may miss: the miss requests
-        the discovery, and this returns as soon as it has run instead of after
-        a fixed sleep. It requests nothing itself. False means it timed out.
+        A discovery already in flight when the request was made does not count:
+        it listed the directory before the caller's segment was asked for. This
+        requests nothing itself. False means it timed out.
         """
         key = (camera_id, "main" if source == "main" else "live")
         with self._edge_refresh_done:
             return self._edge_refresh_done.wait_for(
-                lambda: self._edge_refresh_generations.get(key, 0) > generation,
+                lambda: self._edge_refresh_completed.get(key, 0) >= ticket,
                 timeout=max(0.0, float(timeout)),
             )
 
@@ -1714,7 +1726,18 @@ class RecordingIndexMixin:
         with self._edge_refresh_lock:
             requests = self._edge_refresh_requests
             self._edge_refresh_requests = {}
+            for key in requests:
+                self._edge_refresh_taken[key] = self._edge_refresh_tickets.get(key, 0)
         return requests
+
+    def _finish_recording_edge_refresh(self, key: RecorderKey) -> None:
+        """Complete every ticket the discovery that just ran had taken."""
+        with self._edge_refresh_lock:
+            taken = self._edge_refresh_taken.get(key, 0)
+        with self._edge_refresh_done:
+            if taken > self._edge_refresh_completed.get(key, 0):
+                self._edge_refresh_completed[key] = taken
+            self._edge_refresh_done.notify_all()
 
     def recording_start_epoch(self, path: Path) -> float | None:
         try:
