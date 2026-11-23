@@ -169,11 +169,15 @@ def create_index_logged(connection: sqlite3.Connection, name: str, sql: str) -> 
     ).fetchone()
     if exists:
         return
-    LOGGER.warning("Building database index %s once; this reads its whole table", name)
+    LOGGER.info("Building database index %s once; this reads its whole table", name)
     started = time.perf_counter()
     connection.execute(sql)
-    LOGGER.warning(
-        "Built database index %s in %.1f s", name, time.perf_counter() - started,
+    elapsed = time.perf_counter() - started
+    # A build on an empty or small table is instant; only a slow one is worth
+    # a warning (and the journal).
+    LOGGER.log(
+        logging.WARNING if elapsed >= 1.0 else logging.INFO,
+        "Built database index %s in %.1f s", name, elapsed,
     )
 
 _METRICS: dict[str, DatabaseMetrics] = {}

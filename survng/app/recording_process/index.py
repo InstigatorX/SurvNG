@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from ..config import CameraConfig, RecordingRetentionConfig
-from ..main_database import closing_connection_factory
+from ..main_database import closing_connection_factory, create_index_logged
 from ..media_storage import path_presence
 from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
+from ..recording_retention import RETENTION_TOTALS_INDEX
 from ..recording_media import mp4_playback_metadata, mp4_stream_fingerprint
 
 if TYPE_CHECKING:
@@ -85,9 +86,18 @@ class RecordingIndexMixin:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS recordings_range ON recordings(camera_id, source, start_epoch, end_epoch)"
             )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS recordings_retention_expiry ON recordings(camera_id, source, end_epoch)"
+            # Retention planning totals every segment per camera and source.
+            # Carrying start, end and size keeps that scan on index pages; the
+            # table rows (paths, names, fingerprints) made it ~90 s of random
+            # reads on a 2.6 GB index. Its (camera_id, source, end_epoch)
+            # prefix also serves the expiry lookups the index below did.
+            create_index_logged(
+                connection,
+                RETENTION_TOTALS_INDEX,
+                f"CREATE INDEX IF NOT EXISTS {RETENTION_TOTALS_INDEX} "
+                "ON recordings(camera_id, source, end_epoch, start_epoch, size_bytes)",
             )
+            connection.execute("DROP INDEX IF EXISTS recordings_retention_expiry")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS recording_index_metadata (

@@ -350,10 +350,17 @@ class EventStoreJobsMixin:
             conn.execute(
                 "create index if not exists idx_events_camera_created_at on events(camera_id, created_at desc)"
             )
-            conn.execute(
-                "create index if not exists idx_events_snapshot_retention "
-                "on events(snapshot_path, created_at desc, id desc) where snapshot_path != ''"
+            # Snapshot retention ranks every snapshot-bearing event by path; with
+            # camera and size in the index it never reads the event rows (and
+            # their objects_json): 10-25 s became index-page reads.
+            create_index_logged(
+                conn,
+                "idx_events_snapshot_retention_covering",
+                "create index if not exists idx_events_snapshot_retention_covering "
+                "on events(snapshot_path, created_at desc, id desc, camera_id, snapshot_size_bytes) "
+                "where snapshot_path != ''",
             )
+            conn.execute("drop index if exists idx_events_snapshot_retention")
             conn.execute(
                 "create index if not exists idx_events_snapshot_size_pending "
                 "on events(id, snapshot_path) where snapshot_path != '' and snapshot_size_bytes <= 0"
