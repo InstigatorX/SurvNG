@@ -487,6 +487,15 @@ On Linux, the children also set their kernel-visible process names to
 `intel_gpu_top`, `top`, `htop`, and `ps`.
 
 `RecordedMotionObjectDetector` owns frame sampling, decode admission, and retries.
+Every FFmpeg process that reads frames from a recording (refinement single and
+batch reads, the tracking sampler and exact-frame read, and the stream-alignment
+and face-dataset still) is built and run by `recorded_decoder`: one set of
+hardware-then-software plans, one command builder that always applies the
+thread limits, one process runner, and one classification of failures
+(`unfinalized_input`, `missing_input`, `hardware_init`, `bitstream_corruption`,
+`timestamp`, `timeout`, `stalled`, `spawn`). A streaming decode that produces
+nothing for 10 s while its reader waits is killed. Codec errors and failed
+decodes are logged at most once a minute per consumer and recording directory.
 It passes collected samples to `motion_pipeline.recorded_evidence` for temporal
 association, confirmation, and representative frame selection.
 
