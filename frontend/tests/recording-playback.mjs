@@ -164,12 +164,13 @@ assert.equal(recordingEpochAfterSegment(mobileRows[1], [...mobileRows, { start_e
       removeItem: (key) => store.delete(key),
     },
   });
-  assert.equal(recordingLiveEdgeFollow(win("")), false, "off unless asked for");
-  assert.equal(recordingLiveEdgeFollow(win("?camera=foyer&liveedge=1")), true);
-  assert.equal(recordingLiveEdgeFollow(win("?camera=foyer")), true, "remembered without the parameter");
-  assert.equal(recordingLiveEdgeFollow(win("?liveedge=0")), false);
-  assert.equal(recordingLiveEdgeFollow(win("")), false, "cleared");
-  assert.equal(recordingLiveEdgeFollow({ location: { search: "?liveedge=1" }, get localStorage() { throw new Error("blocked"); } }), true);
+  assert.equal(recordingLiveEdgeFollow(win("")), true, "on unless turned off");
+  assert.equal(recordingLiveEdgeFollow(win("?camera=foyer&liveedge=0")), false);
+  assert.equal(recordingLiveEdgeFollow(win("?camera=foyer")), false, "remembered without the parameter");
+  assert.equal(recordingLiveEdgeFollow(win("?liveedge=1")), true);
+  assert.equal(recordingLiveEdgeFollow(win("")), true, "back on");
+  assert.equal(recordingLiveEdgeFollow({ location: { search: "?liveedge=0" }, get localStorage() { throw new Error("blocked"); } }), false);
+  assert.equal(recordingLiveEdgeFollow({ location: { search: "" }, get localStorage() { throw new Error("blocked"); } }), true);
   assert.equal(recordingLiveEdgeFollow(null), false);
 }
 

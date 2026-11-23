@@ -413,9 +413,9 @@ export function recordingEpochAfterSegment(segment, ranges) {
 
 export const RECORDING_LIVE_EDGE_STORAGE_KEY = "survng.recordingLiveEdge";
 
-// Opt-in (?liveedge=1, remembered; ?liveedge=0 clears it): at the live edge
-// native HLS plays a growing playlist, so new recordings follow on without the
-// page loading a new playlist.
+// On unless turned off (?liveedge=0, remembered; ?liveedge=1 turns it back on):
+// at the live edge native HLS plays a growing playlist, so new recordings
+// follow on without the page loading a new playlist.
 export function recordingLiveEdgeFollow(win = typeof window === "undefined" ? null : window) {
   if (!win) return false;
   let requested = null;
@@ -426,17 +426,17 @@ export function recordingLiveEdgeFollow(win = typeof window === "undefined" ? nu
   }
   try {
     if (requested === "0") {
-      win.localStorage?.removeItem(RECORDING_LIVE_EDGE_STORAGE_KEY);
+      win.localStorage?.setItem(RECORDING_LIVE_EDGE_STORAGE_KEY, "0");
       return false;
     }
     if (requested === "1") {
-      win.localStorage?.setItem(RECORDING_LIVE_EDGE_STORAGE_KEY, "1");
+      win.localStorage?.removeItem(RECORDING_LIVE_EDGE_STORAGE_KEY);
       return true;
     }
-    return win.localStorage?.getItem(RECORDING_LIVE_EDGE_STORAGE_KEY) === "1";
+    return win.localStorage?.getItem(RECORDING_LIVE_EDGE_STORAGE_KEY) !== "0";
   } catch {
     // Storage can be unavailable (private mode); the URL still applies.
-    return requested === "1";
+    return requested !== "0";
   }
 }
 
