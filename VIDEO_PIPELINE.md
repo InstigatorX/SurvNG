@@ -452,7 +452,7 @@ files instead of waited for:
   with a 4 s keyframe interval), the sample is read from that file, to its
   measured length (the duration the index has stored, or read from the file
   when it has none yet);
-- otherwise, if the next segment starts within 2 s of where the earlier video
+- otherwise, if the next segment starts within 1.5 s of where the earlier video
   ends (its name landed late), the sample is read from the start of that
   segment. Several samples that land on that one frame count as one
   observation.
@@ -460,12 +460,14 @@ files instead of waited for:
 This applies only with an indexed segment on both sides. At the live edge the
 following segment is still open, and the sample waits for it as before, so the
 same sample always resolves to the same frame. A longer stretch with no video
-is a real recording gap and is still waited for; that answer is asked for
-again at most every 3 s. `recording_index_hole_lookups` in the job timing
+is a real recording gap and is still waited for, as is an instant after a
+file whose video length cannot be measured; that answer is asked for again at
+most every 3 s, and at once after a discovery the job waited for. An outage
+shorter than 1.5 s cannot be told from a late file name and is bridged. `recording_index_hole_lookups` in the job timing
 counts the lookups that found a segment in the refinement stages (the extra
 face-evidence reads use the same lookup but are not counted). The lookup
 follows a normal index miss, so a near-live sample still asks the indexer for
-one discovery first.
+a discovery first.
 
 A segment that has just closed is usually not indexed yet, because the indexer
 polls every 10 s. The first lookup that misses asks the indexer for it. The
