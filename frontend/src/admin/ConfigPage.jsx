@@ -1843,8 +1843,10 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
     }
   }
 
+  // Returns the saved cameras keyed by the id each was sent with (a new
+  // camera's id can change on save), or null when nothing was saved.
   async function saveCameras(cameras) {
-    if (!cameras.length || cameraSaving) return false;
+    if (!cameras.length || cameraSaving) return null;
     setCameraSaving(true);
     setSaveNotice({
       state: "saving",
@@ -1896,10 +1898,10 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
       });
       const statusResponse = await fetch("/api/cameras");
       if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
-      return true;
+      return savedById;
     } catch (error) {
       setSaveNotice({ state: "error", text: error.message || "Unable to save camera settings." });
-      return false;
+      return null;
     } finally {
       setCameraSaving(false);
     }
@@ -1914,9 +1916,16 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
     const dirtyMap = perCameraDirtyState(config?.cameras || [], baselineConfigRef.current?.cameras || []);
     const cameras = config?.cameras || [];
     const changedSettings = cameras.filter((camera) => dirtyMap[camera.id]?.settings);
-    if (changedSettings.length && !await saveCameras(changedSettings)) return;
+    let savedById = new Map();
+    if (changedSettings.length) {
+      savedById = await saveCameras(changedSettings);
+      if (!savedById) return;
+    }
     for (const camera of cameras) {
-      if (dirtyMap[camera.id]?.zones && !await saveZones(camera)) return;
+      if (!dirtyMap[camera.id]?.zones) continue;
+      // Zones go to the camera's saved id, which changes for a new camera.
+      const id = savedById.get(camera.id)?.id ?? camera.id;
+      if (!await saveZones({ ...camera, id })) return;
     }
     if (cameraOrderDirty) await saveCameraOrder();
   }

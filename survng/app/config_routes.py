@@ -519,7 +519,9 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
             camera_settings = _restore_camera_secrets(camera_settings, existing)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-        used = {item.id for item in next_config.cameras if item.id != camera_id}
+        # Every id except the camera being replaced is taken, including new
+        # cameras added earlier in the same batch.
+        used = {item.id for position, item in enumerate(next_config.cameras) if position != index}
         # Existing IDs own recordings, incidents, zones and route references.
         # A display-name edit must not create a new persistent identity.
         base_id = existing.id if existing is not None else slugify_camera_id(camera_settings.name or camera_settings.id)
@@ -535,6 +537,10 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
         return camera_settings
 
     def apply_camera_config(next_config: AppConfig) -> dict:
+        camera_ids = [camera.id for camera in next_config.cameras]
+        if len(set(camera_ids)) != len(camera_ids):
+            # A saved config with duplicate ids would fail to load at startup.
+            raise HTTPException(status_code=422, detail="camera ids must be unique")
         try:
             deps.validate_config(next_config)
         except ValueError as error:

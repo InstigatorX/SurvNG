@@ -98,6 +98,8 @@ assert.equal(cameraConfigDirtyState(homekitAfter.cameras, homekitBefore.cameras)
 const saveAllBlock = configPageSource.match(/async function saveCurrentAdminChanges\(\) \{[\s\S]*?\n  \}\n/);
 assert.ok(saveAllBlock, "saveCurrentAdminChanges is present");
 assert.match(saveAllBlock[0], /saveCameras\(changedSettings\)/);
+// Zones follow the id the batch saved, which changes for a new camera.
+assert.match(saveAllBlock[0], /savedById\.get\(camera\.id\)\?\.id \?\? camera\.id/);
 assert.doesNotMatch(saveAllBlock[0], /for \(const camera[^]*?saveCameras\(/);
 assert.match(configPageSource, /fetch\("\/api\/config\/cameras", \{\s*method: "PUT"/);
 assert.doesNotMatch(
