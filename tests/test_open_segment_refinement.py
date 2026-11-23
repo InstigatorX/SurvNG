@@ -25,6 +25,12 @@ from survng.app.recording_process import index as recording_index
 from survng.app.recording_process.recorder import Recorder
 
 
+def _near(value: float):
+    # Absolute: the default tolerance is relative, which on an epoch is
+    # about half an hour.
+    return pytest.approx(value, abs=0.05)
+
+
 def _segment_path(root: Path, camera: str, start: float) -> Path:
     stamp = datetime.fromtimestamp(start)
     directory = root / "recordings" / camera / "main" / stamp.strftime("%Y-%m-%d") / stamp.strftime("%H")
@@ -98,7 +104,7 @@ def test_open_segment_grows_with_completed_fragments_and_is_never_indexed(tmp_pa
     row = recorder.open_recording("gate", start + 1.5)
     assert row is not None and row["open"] and row["path"] == str(path)
     assert row["start_epoch"] == start
-    assert row["end_epoch"] == pytest.approx(start + 2.0)
+    assert row["end_epoch"] == _near(start + 2.0)
 
     # Before the open segment: not this file's business.
     assert recorder.open_recording("gate", start - 0.5) is None
@@ -107,7 +113,7 @@ def test_open_segment_grows_with_completed_fragments_and_is_never_indexed(tmp_pa
     assert pending is not None and pending["end_epoch"] <= start + 3.5
 
     path.write_bytes(_written_until(fragmented_bytes, 4))
-    assert recorder.open_recording("gate", start + 3.5)["end_epoch"] == pytest.approx(start + 4.0)
+    assert recorder.open_recording("gate", start + 3.5)["end_epoch"] == _near(start + 4.0)
 
     assert recorder.recording_rows("gate", limit=8, source="main") == []
     assert recorder._take_recording_edge_refreshes() == {}
@@ -221,7 +227,7 @@ def test_the_segment_just_closed_stays_readable_until_the_index_has_it(tmp_path,
     closed = recorder.open_recording("gate", start + 7.5)
     assert closed is not None and closed["path"] == str(old)
     assert closed["open"] is False
-    assert closed["end_epoch"] == pytest.approx(start + 8.0)
+    assert closed["end_epoch"] == _near(start + 8.0)
     assert recorder.open_recording("gate", start - 1.0) is None
     assert recorder._take_recording_edge_refreshes() == {}
     # It is forgotten once the index can be expected to have it.
@@ -274,7 +280,7 @@ def test_the_closed_file_is_still_found_late_in_the_open_segments_run(tmp_path, 
     still_open = recorder.open_recording("gate", now - 9.0)
     assert still_open["path"] == str(open_file) and still_open["open"] is True
     # Usable until the index can be expected to have it, and no longer.
-    assert recorder._previous_segments[key][2] == pytest.approx((now - 22) + 10 + 15)
+    assert recorder._previous_segments[key][2] == _near((now - 22) + 10 + 15)
 
 
 def test_the_closed_files_length_is_read_once(tmp_path, fragmented_bytes):
@@ -304,21 +310,21 @@ def test_an_overdue_file_with_no_successor_is_not_taken_as_finished(tmp_path, fr
     overdue.write_bytes(_written_until(fragmented_bytes, 5))
     row = recorder.open_recording("gate", start + 4.0)
     assert row["path"] == str(overdue) and row["open"] is False
-    assert row["end_epoch"] == pytest.approx(start + 5.0)
+    assert row["end_epoch"] == _near(start + 5.0)
 
-    # It grew to 7 s, and then the next file appeared, named 7 s after it.
-    overdue.write_bytes(_written_until(fragmented_bytes, 7)[:-200])
-    assert recorder.open_recording("gate", start + 4.0)["end_epoch"] == pytest.approx(start + 7.0)
-    successor = _segment_path(tmp_path, "gate", start + 7)
+    # It grew to 6 s, and then the next file appeared, named 6 s after it.
+    overdue.write_bytes(_written_until(fragmented_bytes, 6)[:-200])
+    assert recorder.open_recording("gate", start + 4.0)["end_epoch"] == _near(start + 6.0)
+    successor = _segment_path(tmp_path, "gate", start + 6)
     successor.write_bytes(_written_until(fragmented_bytes, 1))
     with recorder._lock:
         path, began, _listed = recorder._open_segments[("gate", "main")]
         recorder._open_segments[("gate", "main")] = (path, began, time.time() - 5.0)
-    # 6.0 s is in the first file. A length remembered from when it was 5 s
-    # long would hand this instant to the successor's first frame, 1 s late.
-    row = recorder.open_recording("gate", start + 6.0)
+    # 5.5 s is in the first file. A length remembered from when it was 5 s
+    # long would hand this instant to the successor's first frame, 0.5 s late.
+    row = recorder.open_recording("gate", start + 5.5)
     assert row["path"] == str(overdue)
-    assert row["end_epoch"] == pytest.approx(start + 7.0)
+    assert row["end_epoch"] == _near(start + 6.0)
 
 
 def test_the_open_file_is_read_only_where_it_has_grown(tmp_path, fragmented_bytes):
@@ -327,7 +333,7 @@ def test_the_open_file_is_read_only_where_it_has_grown(tmp_path, fragmented_byte
     start = float(int(time.time()) - 2)
     open_file = _segment_path(tmp_path, "gate", start)
     open_file.write_bytes(_written_until(fragmented_bytes, 3))
-    assert recorder.open_recording("gate", start)["end_epoch"] == pytest.approx(start + 3.0)
+    assert recorder.open_recording("gate", start)["end_epoch"] == _near(start + 3.0)
 
     positions: list[int] = []
     real_scan = recording_media._scan_fragments
@@ -339,16 +345,35 @@ def test_the_open_file_is_read_only_where_it_has_grown(tmp_path, fragmented_byte
     with patch.object(recording_media, "_scan_fragments", side_effect=scan), patch.object(
         recording_media, "_read_mp4_box", side_effect=AssertionError("header read again"),
     ):
-        assert recorder.open_recording("gate", start)["end_epoch"] == pytest.approx(start + 3.0)
+        assert recorder.open_recording("gate", start)["end_epoch"] == _near(start + 3.0)
         open_file.write_bytes(_written_until(fragmented_bytes, 5))
-        assert recorder.open_recording("gate", start)["end_epoch"] == pytest.approx(start + 5.0)
+        assert recorder.open_recording("gate", start)["end_epoch"] == _near(start + 5.0)
     # Each lookup starts where the last one stopped, past the fragments
     # already counted, and never back at the start of the file.
     assert positions[0] > 0 and positions[1] == positions[0]
 
-    # A restarted recorder writes a new file; nothing is carried over.
-    with recorder._lock:
-        assert ("gate", "main") in recorder._open_segment_scans
+
+def test_a_new_file_under_the_same_name_is_scanned_from_its_start(tmp_path, fragmented_bytes):
+    path = tmp_path / "open.mp4"
+    path.write_bytes(_written_until(fragmented_bytes, 3))
+    seconds, scan = recording_media.fragmented_readable_progress(path)
+    assert seconds == _near(3.0)
+    # A restarted recorder rewrote the name within the same second, and the
+    # new file is already longer than the old one was. Its fragments differ.
+    other = tmp_path / "other.mp4"
+    subprocess.run([
+        shutil.which("ffmpeg"), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+        "mandelbrot=size=160x120:rate=10", "-t", "8", "-c:v", "libx264", "-g", "10", "-bf", "2",
+        "-movflags", "+frag_keyframe+delay_moov+default_base_moof", "-y", str(other),
+    ], check=True, capture_output=True, timeout=60)
+    path.write_bytes(other.read_bytes())
+    assert recording_media.fragmented_readable_progress(path, scan)[0] == _near(8.0)
+    # The same file, grown, is resumed and agrees with a scan from the start.
+    path.write_bytes(_written_until(fragmented_bytes, 3))
+    _seconds, scan = recording_media.fragmented_readable_progress(path)
+    path.write_bytes(_written_until(fragmented_bytes, 6))
+    assert recording_media.fragmented_readable_progress(path, scan)[0] == _near(6.0)
+    assert recording_media.fragmented_readable_seconds(path) == _near(6.0)
 
 
 def test_a_plain_closed_file_does_not_hand_its_time_to_the_open_segment(tmp_path, fragmented_bytes):
@@ -391,7 +416,7 @@ def test_a_late_file_name_on_a_fragmented_camera_is_read_from_the_open_segment(t
     _segment_path(tmp_path, "cam2", start).write_bytes(fragmented_bytes)
     _running(recorder, "cam2", fragmented=True)
     gap = recorder.open_recording("cam2", start + 9.0)
-    assert gap["open"] is False and gap["end_epoch"] == pytest.approx(start + 8.0)
+    assert gap["open"] is False and gap["end_epoch"] == _near(start + 8.0)
 
     sampler = _EventRecordedSampler(
         camera_id="gate", recorder=recorder, frame_reader=lambda *args, **kwargs: None,
@@ -491,7 +516,7 @@ def test_readable_seconds_is_not_cached_as_the_file_grows(tmp_path, fragmented_b
     before = mp4_playback_metadata.__globals__["_cached_playback_metadata"].cache_info().currsize
     for fragments, expected in ((1, 1.0), (3, 3.0), (5, 5.0)):
         path.write_bytes(_written_until(fragmented_bytes, fragments))
-        assert fragmented_readable_seconds(path) == pytest.approx(expected)
+        assert fragmented_readable_seconds(path) == _near(expected)
     after = mp4_playback_metadata.__globals__["_cached_playback_metadata"].cache_info().currsize
     assert after == before
     path.write_bytes(fragmented_bytes[:40])
@@ -768,6 +793,39 @@ def test_quick_retries_of_an_unreadable_open_frame_are_capped(monkeypatch):
     ordinary = object_detection.RECORDED_EVENT_RETRY_INTERVAL_SECONDS
     assert sleeps[quick:quick + 3] == [ordinary] * 3
     assert len(sleeps) <= quick + 7
+
+
+def test_the_open_files_frame_size_is_read_once_per_job(monkeypatch):
+    from survng.app.motion_pipeline.recorded_decode_budget import RecordedDecodeBudget
+
+    event_epoch = 1_800_000_000.0
+    recorder = _OpenRecorder(start=event_epoch - 3.0, readable=30.0)
+    budget = RecordedDecodeBudget(max_processes=2, memory_budget_bytes=512 << 20)
+    clock = [0.0]
+    sized: list[str] = []
+    passes: list[int] = []
+
+    def reader(path, offsets, **kwargs):
+        passes.append(len(offsets))
+        return ({}, 1)
+
+    def dimensions(path):
+        sized.append(str(path))
+        return (3840, 2160)
+
+    backend = _polling_backend(monkeypatch, recorder, reader, budget=budget)
+    monkeypatch.setattr(object_detection, "mp4_video_dimensions", dimensions)
+    monkeypatch.setattr(object_detection.time, "time", lambda: event_epoch + 20.0)
+    monkeypatch.setattr(object_detection.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(object_detection.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(object_detection, "RECORDED_EVENT_RETRY_SECONDS", 4.0)
+    backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+
+    # Several passes over the growing file, one look at its header: the
+    # shared ceiling covers a 4K frame before the first decode, and the
+    # per-size dimension cache does not gain an entry per pass.
+    assert len(passes) > 1 and sized == ["open.mp4"]
+    assert budget._largest_observed_frame_bytes == 3840 * 2160 * 3
 
 
 def test_a_job_with_no_indexed_rows_reserves_memory_at_the_cameras_real_frame_size(monkeypatch):

@@ -402,6 +402,15 @@ def _fragmented_video_duration(path: Path, moov: bytes) -> float | None:
     return _fragment_seconds(track, scanned[1]) if scanned is not None else None
 
 
+def _read_at(path: Path, offset: int, size: int) -> bytes:
+    try:
+        with path.open("rb", buffering=0) as handle:
+            handle.seek(offset)
+            return handle.read(size)
+    except OSError:
+        return b""
+
+
 def _fragment_seconds(track: tuple[int, int, int], ticks: int) -> float | None:
     duration = ticks / track[1] if ticks else None
     if duration is not None and duration > _MAX_FRAGMENTED_DURATION_SECONDS:
@@ -411,14 +420,17 @@ def _fragment_seconds(track: tuple[int, int, int], ticks: int) -> float | None:
 
 def _scan_fragments(
     path: Path, track: tuple[int, int, int], cursor: int, ticks: int,
-) -> tuple[int, int] | None:
-    """Count complete fragments from ``cursor`` on: (where to resume, ticks).
+) -> tuple[int, int, tuple[int, bytes] | None] | None:
+    """Count complete fragments from ``cursor`` on: (where to resume, ticks, mark).
 
     ``cursor`` is a top-level box boundary; the one returned is the first box
     that was not complete (or the end of the file), so a later call on a file
-    that has grown reads only what was added.
+    that has grown reads only what was added. The mark is where the last
+    fragment counted here keeps its media-data header, and that header: its
+    size depends on the video, so finding it again shows the same file.
     """
     track_id, _scale, default_duration = track
+    mark = None
     try:
         file_size = path.stat().st_size
         with path.open("rb", buffering=0) as handle:
@@ -457,14 +469,16 @@ def _scan_fragments(
                     if cursor + size + data_size > file_size:
                         break
                     ticks += _fragment_track_ticks(moof, track_id, default_duration)
+                    mark = (cursor + size, bytes(data_header[:8]))
                 cursor += size
     except OSError:
         return None
-    return cursor, ticks
+    return cursor, ticks, mark
 
 
-# (video track, where the scan stopped, ticks counted so far)
-FragmentScan = tuple[tuple[int, int, int], int, int]
+# (video track, where the scan stopped, ticks counted so far, the mark of
+# the last fragment counted)
+FragmentScan = tuple[tuple[int, int, int], int, int, tuple[int, bytes] | None]
 
 
 def fragmented_readable_progress(
@@ -483,19 +497,19 @@ def fragmented_readable_progress(
         track = _fragmented_video_track(moov) if moov else None
         if track is None:
             return None, None
-        resume = (track, 0, 0)
-    track, cursor, ticks = resume
-    try:
-        if path.stat().st_size < cursor:
-            # Not the file the scan was made on (replaced, or truncated).
-            return fragmented_readable_progress(path)
-    except OSError:
-        return None, None
+        resume = (track, 0, 0, None)
+    track, cursor, ticks, mark = resume
+    if mark is not None and _read_at(path, mark[0], 8) != mark[1]:
+        # Not the file the scan was made on: a restarted recorder can write
+        # a new file under the same name within the same second.
+        return fragmented_readable_progress(path)
     scanned = _scan_fragments(path, track, cursor, ticks)
     if scanned is None:
         # Unknown layout or a failed read: nothing to resume from.
         return None, None
-    return _fragment_seconds(track, scanned[1]), (track, scanned[0], scanned[1])
+    return _fragment_seconds(track, scanned[1]), (
+        track, scanned[0], scanned[1], scanned[2] or mark,
+    )
 
 
 def fragmented_readable_seconds(path: Path) -> float | None:
