@@ -380,6 +380,23 @@ export function recordingSegmentLocalTime(segment, epoch, video = null) {
 // Seeking to the end of the newest footage starts this far before it.
 export const RECORDING_EDGE_SNAP_SECONDS = 1;
 
+// A recording that ended this recently is still being written.
+export const RECORDING_LIVE_EDGE_RECENT_SECONDS = 120;
+// A seek to the end of footage that is still being written starts this far
+// before it. Native HLS needs a few whole segments ahead of the start: started
+// in the last second of a growing playlist it refetches that segment and waits
+// for the next one to be published, which takes a segment length or more.
+export const RECORDING_LIVE_EDGE_HOLDBACK_SECONDS = 30;
+
+// The latest time a seek into `latest`, the newest recorded range, may start at.
+// Playback continuing from footage it has just played passes `continuing`: it
+// must not be moved back, or it would replay what was just shown.
+export function recordingEdgeSeekEpoch(latest, nowEpoch, continuing = false) {
+  const live = !continuing && Number(nowEpoch) - latest.end_epoch < RECORDING_LIVE_EDGE_RECENT_SECONDS;
+  const back = live ? RECORDING_LIVE_EDGE_HOLDBACK_SECONDS : RECORDING_EDGE_SNAP_SECONDS;
+  return Math.max(latest.start_epoch, latest.end_epoch - back);
+}
+
 // Where playback continues after `segment`, or null when nothing follows yet.
 // A range has to reach beyond the edge snap to count. Availability can end a
 // fraction of a second after the segment that was just played: a recording is

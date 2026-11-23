@@ -3,6 +3,7 @@ import {
   recordingSegmentAt,
   recordingSegmentLocalTime,
   recordingEpochAfterSegment,
+  recordingEdgeSeekEpoch,
   recordingLiveEdgeFollow,
   extendedPlaybackRows,
   adjustRecordingExportRange,
@@ -196,3 +197,11 @@ assert.deepEqual(recordingCoverageUnion([
   { camera_id: "a", source: "live", start_epoch: "bad", end_epoch: 210 },
 ]), [{ start_epoch: 100, end_epoch: 170 }, { start_epoch: 200, end_epoch: 210 }], "overlapping and touching ranges merge; real gaps stay");
 assert.deepEqual(recordingCoverageUnion(null), []);
+
+// A seek to the end of footage still being written starts a few segments back,
+// so native HLS has media ahead of it; older footage keeps the one-second snap.
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2010), 1970);
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1990, end_epoch: 2000 }, 2010), 1990);
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2200), 1999);
+// Playback continuing past what it just played is never moved back.
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2010, true), 1999);
