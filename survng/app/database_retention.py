@@ -178,6 +178,9 @@ class DatabaseRetention:
         self._status_lock = threading.Lock()
         self._running = False
         self._status: dict[str, Any] = {"runs": 0, "last_run": None, "next_run_at": None}
+        # Queued motion-sample files that failed in the current run; reset by
+        # each run_once.
+        self._motion_failures: dict[str, tuple[str, str]] = {}
 
     # ------------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -266,7 +269,7 @@ class DatabaseRetention:
         # Files that failed this run, with the reason and error text. Later
         # drains in the same run skip them, so each is checked and counted
         # once; the next run retries them.
-        self._motion_failures: dict[str, tuple[str, str]] = {}
+        self._motion_failures = {}
         steps = result["steps"]
         try:
             self._ensure_deletion_work()
@@ -591,10 +594,7 @@ class DatabaseRetention:
                     "select path from media_deletion_work where role = 'motion_audit'"
                 )
             ]
-        failures = getattr(self, "_motion_failures", None)
-        if failures is None:
-            failures = self._motion_failures = {}
-        queued = [raw for raw in queued if raw not in failures]
+        queued = [raw for raw in queued if raw not in self._motion_failures]
         if not queued:
             return
         storage_dir = Path(self._events.storage_dir)
@@ -647,9 +647,11 @@ class DatabaseRetention:
             # Recheck immediately before unlinking: a row may have named one
             # of these files while the volume checks ran. Unlink the whole
             # group before any release transaction so no database work widens
-            # the gap between this check and each unlink. A crash in between
-            # leaves the unlinked files' work and claims queued, as a crash
-            # between an unlink and its release always did.
+            # the gap between this check and each unlink. Each unlink follows
+            # its own final volume check, which reads only the filesystem and
+            # the identity store, so a volume swapped in since the first check
+            # is never written to. Work left by a crash in between is released
+            # next run once the volume confirms the file is gone.
             named = self._named_image_paths(
                 set().union(*(spellings[raw] for raw, _path, _verdict in removable))
             )
@@ -659,6 +661,15 @@ class DatabaseRetention:
                     settled.append((raw, path, "named"))
                     continue
                 try:
+                    if verdict == "present":
+                        verdict = self._motion_verdict(path)
+                        if verdict not in {"present", "confirmed_absent"}:
+                            self._motion_failed(
+                                result, raw,
+                                "volume_unknown" if verdict == "unknown" else "volume_unavailable",
+                                f"verdict {verdict} for {path} just before unlinking",
+                            )
+                            continue
                     if verdict == "present":
                         path.unlink()
                 except FileNotFoundError:
@@ -693,7 +704,7 @@ class DatabaseRetention:
 
     def _log_motion_failures(self) -> None:
         """Report this run's queued files that could not be removed, once per run."""
-        failures = getattr(self, "_motion_failures", None) or {}
+        failures = self._motion_failures
         if not failures:
             return
         by_reason: dict[str, list[str]] = {}

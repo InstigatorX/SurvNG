@@ -555,8 +555,9 @@ def test_file_that_vanishes_before_unlink_needs_a_confirmed_absence(tmp_path: Pa
 
     def verdict(path: Path) -> str:
         seen[path.name] = seen.get(path.name, 0) + 1
-        if seen[path.name] == 1:
-            path.unlink()  # removed by something else after the volume check
+        if seen[path.name] == 2:
+            path.unlink()  # removed by something else after the final volume check
+        if seen[path.name] <= 2:
             return "present"
         return "confirmed_absent" if path.name == "gone.jpg" else "unknown"
 
@@ -564,7 +565,7 @@ def test_file_that_vanishes_before_unlink_needs_a_confirmed_absence(tmp_path: Pa
 
     result = retention.run_once()
 
-    assert seen == {"gone.jpg": 2, "unsure.jpg": 2}
+    assert seen == {"gone.jpg": 3, "unsure.jpg": 3}
     assert result["motion_sample_files_missing"] == 1
     assert result["motion_sample_files_deleted"] == 0
     assert result["motion_sample_file_failures"] == {"absent_unconfirmed": 1}
@@ -595,3 +596,34 @@ def test_already_missing_file_is_released_once_its_volume_confirms_the_absence(
     assert online["motion_sample_files_missing"] == 1
     assert online["motion_sample_files_failed"] == 0
     assert _queued_motion_work(store) == (0, 0)
+
+
+def test_volume_is_checked_again_immediately_before_each_unlink(tmp_path: Path) -> None:
+    # A different volume mounted at the same path after the first check must
+    # not lose its same-named file.
+    store = EventStore(tmp_path)
+    samples = tmp_path / "motion_samples" / "gate"
+    samples.mkdir(parents=True)
+    for name in ("swapped.jpg", "steady.jpg"):
+        (samples / name).write_bytes(b"jpg")
+    _queue_motion_work(store, "motion_samples/gate/swapped.jpg", "motion_samples/gate/steady.jpg")
+    retention = _retention(store)
+    verdict = retention._motion_verdict
+    calls: dict[str, int] = {}
+
+    def swap_after_first_check(path: Path) -> str:
+        calls[path.name] = calls.get(path.name, 0) + 1
+        if path.name == "swapped.jpg" and calls[path.name] > 1:
+            return "unavailable"
+        return verdict(path)
+
+    retention._motion_verdict = swap_after_first_check
+
+    result = retention.run_once()
+
+    assert calls == {"swapped.jpg": 2, "steady.jpg": 2}
+    assert (samples / "swapped.jpg").exists()
+    assert not (samples / "steady.jpg").exists()
+    assert result["motion_sample_files_deleted"] == 1
+    assert result["motion_sample_file_failures"] == {"volume_unavailable": 1}
+    assert _queued_motion_work(store) == (1, 1)
