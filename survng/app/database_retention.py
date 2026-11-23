@@ -609,18 +609,20 @@ class DatabaseRetention:
                     continue
                 path: Path | None = None
                 try:
-                    path = event_snapshot_path(storage_dir, {"snapshot_path": raw}, media_storage)
+                    # The volume check below decides presence, so a file that
+                    # is already gone still resolves and can be confirmed absent.
+                    path = event_snapshot_path(
+                        storage_dir, {"snapshot_path": raw}, media_storage, require_file=False,
+                    )
                     if not _audit_image_location(storage_dir, path, media_storage):
                         self._motion_failed(result, raw, "outside_audit_location", str(path))
                         continue
                     verdict = self._motion_verdict(path)
                 except FileNotFoundError:
                     if path is None:
-                        # Path resolution requires an existing file, so a file
-                        # that is already gone never reaches the volume check.
                         self._motion_failed(
                             result, raw, "missing_unresolved",
-                            "file is missing; its volume was not asked to confirm the absence",
+                            "the stored path could not be resolved to a file",
                         )
                         continue
                     if self._motion_verdict(path) != "confirmed_absent":

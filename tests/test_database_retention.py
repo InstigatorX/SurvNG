@@ -571,16 +571,27 @@ def test_file_that_vanishes_before_unlink_needs_a_confirmed_absence(tmp_path: Pa
     assert _queued_motion_work(store) == (1, 1)  # only the unconfirmed one stays queued
 
 
-def test_already_missing_file_is_reported_as_unresolved(tmp_path: Path) -> None:
-    # Path resolution requires an existing file, so queued work for a file that
-    # is already gone never reaches the volume check and stays queued.
+def test_already_missing_file_is_released_once_its_volume_confirms_the_absence(
+    tmp_path: Path,
+) -> None:
+    # Work left queued after its file is gone (a crash between unlink and
+    # release, or another remover) is cleared when the volume confirms the
+    # absence, and kept while the volume cannot answer.
     store = EventStore(tmp_path)
     (tmp_path / "motion_samples" / "gate").mkdir(parents=True)
     _queue_motion_work(store, "motion_samples/gate/missing.jpg")
     retention = _retention(store)
-    retention._motion_verdict = lambda path: pytest.fail("volume check reached")
+    verdict = retention._motion_verdict
+    retention._motion_verdict = lambda path: "unavailable"
 
-    result = retention.run_once()
+    offline = retention.run_once()
 
-    assert result["motion_sample_file_failures"] == {"missing_unresolved": 1}
+    assert offline["motion_sample_file_failures"] == {"volume_unavailable": 1}
     assert _queued_motion_work(store) == (1, 1)
+
+    retention._motion_verdict = verdict  # the real volume gate
+    online = retention.run_once()
+
+    assert online["motion_sample_files_missing"] == 1
+    assert online["motion_sample_files_failed"] == 0
+    assert _queued_motion_work(store) == (0, 0)
