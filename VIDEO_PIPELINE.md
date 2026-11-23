@@ -443,12 +443,23 @@ indexed segment), plus `event_refinement_settle_seconds` (0.75). It retries
 for up to `event_refinement_retry_seconds` (24) at
 `event_refinement_retry_interval_seconds` (1.0) intervals.
 Segment starts come from file names, which carry whole seconds, and an index
-row is never longer than the configured segment. When a name lands a second
-late, the last second before it is covered by no row, although the video is
-continuous. A sample that falls in such a hole (at most 2 s between two
-consecutive segments) is read from the start of the following segment; a
-longer uncovered stretch is a real recording gap and is still waited for.
-`recording_index_hole_lookups` in the job timing counts these.
+row that has not been validated is no longer than the configured segment. So a
+row can end before the video does, leaving an instant that no row covers. A
+refinement sample there is resolved from the files instead of waited for:
+
+- if the earlier file is longer than its row (a cut on a late keyframe, as
+  with a 4 s keyframe interval), the sample is read from that file, to its
+  measured length;
+- otherwise, if the next segment starts within 2 s of where the earlier video
+  ends (its name landed late), the sample is read from the start of that
+  segment. Several samples that land on that one frame count as one
+  observation.
+
+A longer stretch with no video is a real recording gap and is still waited
+for. `recording_index_hole_lookups` in the job timing counts these lookups in
+the refinement stages (the extra face-evidence reads use the same lookup but
+are not counted). The lookup follows a normal index miss, so a near-live
+sample still asks the indexer for one discovery first.
 
 A segment that has just closed is usually not indexed yet, because the indexer
 polls every 10 s. The first lookup that misses asks the indexer for it. The
