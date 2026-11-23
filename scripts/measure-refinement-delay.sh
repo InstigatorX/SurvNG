@@ -122,7 +122,7 @@ for camera, payload_json, available_at, created_at, updated_at, state, last_erro
                 "detector_request_ms", "temporal_confirmation_wait_ms", "workflow_ms",
                 "recording_batch_processes", "recording_fallback_samples",
                 "recording_samples_requested", "recording_samples_decoded",
-                "recording_open_segment_lookups"):
+                "recording_open_segment_lookups", "recording_index_hole_lookups"):
         value = phases.get(key)
         if isinstance(value, (int, float)):
             phase.setdefault(key, []).append(float(value))

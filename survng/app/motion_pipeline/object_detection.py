@@ -348,6 +348,8 @@ class _EventRecordedSampler:
         self.open_segment_pending = False
         self.open_segment_lookups = 0
         self._open_row: tuple[float, dict[str, Any]] | None = None
+        # Lookups answered with the segment after an index hole.
+        self.index_hole_lookups = 0
 
     def recording_at(self, epoch: float) -> dict[str, Any] | None:
         # Match Recorder.recording_at(): at a shared segment boundary the
@@ -375,6 +377,14 @@ class _EventRecordedSampler:
             if self.request_index_refresh
             else self.recorder.recording_at(self.camera_id, epoch, request_refresh=False)
         )
+        if row is None:
+            # No row covers this instant. If that is only because a file name
+            # landed a second late, the next segment starts with its frame;
+            # waiting would never produce a row.
+            after_hole = getattr(self.recorder, "recording_after_hole", None)
+            row = after_hole(self.camera_id, epoch) if callable(after_hole) else None
+            if row is not None:
+                self.index_hole_lookups += 1
         if row is not None and row.get("start_epoch") is not None:
             normalized = dict(row)
             if normalized.get("end_epoch") is None:
@@ -926,6 +936,7 @@ class RecordedMotionObjectDetector:
             "refinement_early_exit_skipped": 0.0,
             "refinement_route_dense_plan": float(route_dense),
             "recording_open_segment_lookups": 0.0,
+            "recording_index_hole_lookups": 0.0,
         }
         event_epoch = event_at.timestamp()
         planned_offsets = _flatten_refinement_stages(stages)
@@ -1290,6 +1301,7 @@ class RecordedMotionObjectDetector:
 
                 sampler.request_index_refresh = True
                 timing["recording_open_segment_lookups"] = float(sampler.open_segment_lookups)
+                timing["recording_index_hole_lookups"] = float(sampler.index_hole_lookups)
                 for path, pending in list(pending_by_path.items()):
                     if stage_consensus:
                         timing["refinement_early_exit_skipped"] += float(len(pending))
@@ -1851,7 +1863,8 @@ class RecordedMotionObjectDetector:
                 if row is None or row.get("start_epoch") is None:
                     timing["face_evidence_recording_unavailable"] = timing.get("face_evidence_recording_unavailable", 0) + 1
                     continue
-                relative = round(event_epoch + target - float(row["start_epoch"]), 3)
+                # A row returned for an index hole starts after the target.
+                relative = max(0.0, round(event_epoch + target - float(row["start_epoch"]), 3))
                 decode_started = time.monotonic()
                 frames, processes, fallbacks = sampler.frames_at(
                     Path(str(row["path"])), [relative], deadline=deadline,
