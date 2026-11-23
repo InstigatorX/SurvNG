@@ -390,9 +390,12 @@ export const RECORDING_LIVE_EDGE_HOLDBACK_SECONDS = 30;
 
 // The latest time a seek into `latest`, the newest recorded range, may start at.
 // Playback continuing from footage it has just played passes `continuing`: it
-// must not be moved back, or it would replay what was just shown.
-export function recordingEdgeSeekEpoch(latest, nowEpoch, continuing = false) {
-  const live = !continuing && Number(nowEpoch) - latest.end_epoch < RECORDING_LIVE_EDGE_RECENT_SECONDS;
+// must not be moved back, or it would replay what was just shown. `growing`
+// says the seek will play a growing playlist; any other player loads a
+// finished one and gains nothing from starting further back.
+export function recordingEdgeSeekEpoch(latest, nowEpoch, continuing = false, growing = false) {
+  const live = growing && !continuing
+    && Number(nowEpoch) - latest.end_epoch < RECORDING_LIVE_EDGE_RECENT_SECONDS;
   const back = live ? RECORDING_LIVE_EDGE_HOLDBACK_SECONDS : RECORDING_EDGE_SNAP_SECONDS;
   return Math.max(latest.start_epoch, latest.end_epoch - back);
 }

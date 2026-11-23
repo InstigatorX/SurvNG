@@ -1092,6 +1092,14 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             1,
             math.ceil(max(float(row["duration_seconds"]) for row in rows)),
         )
+        if still_growing:
+            # A playlist's target duration may not change between re-reads.
+            # Segments are cut at the first keyframe after the nominal length,
+            # so one a little longer than those listed so far can still come.
+            target_duration = max(
+                target_duration,
+                math.ceil(_recording_segment_seconds(deps, active_manager)) + 1,
+            )
         query = (
             f"start_epoch={start_epoch:.3f}&end_epoch={end_epoch:.3f}"
             f"&source={selected_source}"

@@ -313,6 +313,15 @@ class RecordingRouteLifecycleTests(TestCase):
             "#EXT-X-START:TIME-OFFSET=0.000,PRECISE=YES",
             playlist(500.0, True),
         )
+        # The target duration may not change between re-reads. With only a
+        # 10.0 s segment listed so far, a 10.04 s one can still follow.
+        self.assertIn("#EXT-X-TARGETDURATION:11", open_window)
+        rows.append({
+            "name": "later.mp4", "start_epoch": 110.0, "end_epoch": 120.04,
+            "duration_seconds": 10.04, "stream_fingerprint": "h264",
+        })
+        self.assertIn("#EXT-X-TARGETDURATION:11", playlist(510.0, True))
+        rows.pop()
         # The last recording of a window is indexed after the window ends.
         self.assertNotIn("#EXT-X-ENDLIST", playlist(929.0, True))
         # Closed window: the playlist ends so playback moves to the next one.
@@ -325,6 +334,8 @@ class RecordingRouteLifecycleTests(TestCase):
         self.assertIn("#EXT-X-PLAYLIST-TYPE:VOD", default)
         self.assertTrue(default.rstrip().endswith("#EXT-X-ENDLIST"))
         self.assertNotIn("#EXT-X-START", default)
+        # A finished playlist is read once and keeps its exact value.
+        self.assertIn("#EXT-X-TARGETDURATION:10", default)
 
     def test_day_and_event_playlists_version_every_fragment_url(self) -> None:
         manager = _Manager("current")
