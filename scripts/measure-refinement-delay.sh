@@ -66,14 +66,21 @@ except sqlite3.Error as error:
     rows = []
     print(f"CHECK cannot read jobs database: {error}")
 states = {}
+errors = {}
 sched, queued, total, after_ready, split = [], [], [], [], 0
 phase = {}
 per_camera = {}
+groups = {}
+final_stage = {}
+attempt_counts = {}
 for camera, payload_json, available_at, created_at, updated_at, state, last_error in rows:
     updated = epoch(updated_at)
     if updated is None or updated < now - hours * 3600:
         continue
     states[state] = states.get(state, 0) + 1
+    if state == "failed":
+        reason = (last_error or "unknown")[:70]
+        errors[reason] = errors.get(reason, 0) + 1
     try:
         payload = json.loads(payload_json)
     except ValueError:
@@ -98,6 +105,19 @@ for camera, payload_json, available_at, created_at, updated_at, state, last_erro
         sched.append(float(available_at) - event)
         after_ready.append(updated - float(available_at))
     phases = find(payload.get("refined_outcome"), "phases_ms") or {}
+    refined = payload.get("refined_outcome") or {}
+    detected = refined.get("object_detected")
+    group = ("resumed" if resumed else "single pass") + (
+        ", object" if detected else ", no object" if detected is False else ", undecided")
+    bucket = groups.setdefault(group, {"total": [], "workflow": [], "wait": [], "tail": []})
+    bucket["total"].append(updated - event)
+    # Time from the last scheduled start to completion: worker queueing plus work.
+    bucket["tail"].append(updated - float(available_at))
+    for name, key in (("workflow", "workflow_ms"), ("wait", "recording_wait_ms")):
+        if isinstance(phases.get(key), (int, float)):
+            bucket[name].append(float(phases[key]) / 1000.0)
+    stage = qualification.get("refinement_resume_stage")
+    final_stage[stage] = final_stage.get(stage, 0) + 1
     for key in ("recording_wait_ms", "frame_decode_ms", "decode_budget_wait_ms",
                 "detector_request_ms", "temporal_confirmation_wait_ms", "workflow_ms",
                 "recording_batch_processes", "recording_fallback_samples",
@@ -111,6 +131,20 @@ line("event -> segment predicted ready", sched)
 line("predicted ready -> job done", after_ready)
 line("event -> refinement done (total)", total)
 print(f"  jobs resumed for a later stage: {split} (excluded from the two 'ready' rows)")
+print("  by path and result (seconds):")
+for group in sorted(groups):
+    bucket = groups[group]
+    print(f"   {group}")
+    line("    event -> done", bucket["total"])
+    line("    last scheduled start -> done", bucket["tail"])
+    line("    workflow of final pass", bucket["workflow"])
+    line("    recording wait in final pass", bucket["wait"])
+print("  stage the final pass resumed at (None = never resumed):",
+      dict(sorted(final_stage.items(), key=lambda item: str(item[0]))))
+if errors:
+    print("  failed jobs by error:")
+    for reason, count in sorted(errors.items(), key=lambda item: -item[1])[:8]:
+        print(f"    {count:5d}  {reason}")
 print("  phases of the final pass:")
 for key in sorted(phase):
     unit = "ms" if key.endswith("_ms") else ""
@@ -134,7 +168,7 @@ try:
             "where camera_id=? and source='main' and start_epoch > ? order by start_epoch",
             (camera, now - 3600)).fetchall()
         if len(segs) < 3:
-            print(f"  {camera:<22} CHECK only {len(segs)} main segments in the last hour")
+            print(f"  {camera:<22} no main recording in the last hour (not recorded, or sub stream only)")
             continue
         steps = [b[1] - a[1] for a, b in zip(segs, segs[1:])]
         # mtime - filename start = how long FFmpeg really held the file open.
@@ -200,8 +234,12 @@ def walk(node, path=""):
 walk(data)
 for camera in data.get("cameras", []) if isinstance(data.get("cameras"), list) else []:
     ref = ((camera.get("motion") or {}).get("refinement") or {})
-    stage = (ref.get("worker_stage_ms") or {}).get("refine") or {}
-    print("  %-22s queue=%s completed=%s resumed=%s failures=%s refine p50=%s p95=%s ms" % (
+    stages = ref.get("worker_stage_ms") or {}
+    print("  %-22s queue=%s completed=%s resumed=%s failures=%s oldest_ms=%s" % (
         camera.get("id"), ref.get("refinement_queue_depth"), ref.get("refinements_completed"),
-        ref.get("refinements_resumed"), ref.get("refinement_failures"), stage.get("p50_ms"), stage.get("p95_ms")))
+        ref.get("refinements_resumed"), ref.get("refinement_failures"), ref.get("oldest_refinement_age_ms")))
+    for name, stage in stages.items():
+        if isinstance(stage, dict) and stage.get("samples"):
+            print("      %-13s n=%-5s p50=%s p95=%s p99=%s ms" % (
+                name, stage.get("samples"), stage.get("p50_ms"), stage.get("p95_ms"), stage.get("p99_ms")))
 '
