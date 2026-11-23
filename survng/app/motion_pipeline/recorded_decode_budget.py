@@ -182,6 +182,11 @@ class RecordedDecodeBudget:
                 self._apply_geometry_limits_locked()
             self._condition.notify_all()
 
+    def largest_observed_frame_bytes(self) -> int:
+        """The largest decoded frame seen on any camera, or 0 before the first."""
+        with self._condition:
+            return int(self._largest_observed_frame_bytes or 0)
+
     def _apply_geometry_limits_locked(self) -> None:
         frame_bytes = self._largest_observed_frame_bytes or self._fallback_frame_bytes
         frame_count = self._geometry_frame_count or 1

@@ -32,12 +32,13 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger("survng.app.recorder")
 RECORDING_FINALIZE_GRACE_SECONDS = 2.0
 OPEN_SEGMENT_RELIST_SECONDS = 1.0
-# The index takes a just-closed segment once it has been stable for a few
-# seconds; until then readers may use the file the recorder just finished.
+# The index takes a closed segment once it has been stable for a few seconds;
+# for this long after a segment's nominal end readers may use the file itself.
 OPEN_SEGMENT_PREVIOUS_SECONDS = 15.0
 # Segment starts come from file names, which carry whole seconds, and a row
-# is never longer than the configured segment. When a name lands a second
-# late, up to this much time between two consecutive segments has no row.
+# that has not been validated is no longer than the configured segment. When
+# a name lands late, up to this much time before it has no row although the
+# video is continuous.
 RECORDING_INDEX_HOLE_SECONDS = 2.0
 RECORDING_PATH_REBASE_BATCH_SIZE = 1000
 
@@ -1738,38 +1739,44 @@ class RecordingIndexMixin:
             )
             and now - cached[2] >= OPEN_SEGMENT_RELIST_SECONDS
         ):
-            found = self._find_open_segment(camera_id, key[1], now, started_at)
+            found, closed = self._find_open_segment(camera_id, key[1], now, started_at)
             listed = (found[0], found[1], now) if found is not None else (None, 0.0, now)
+            if closed is not None:
+                # The file before the open one, taken from this same listing
+                # and not from whatever was cached: on a quiet camera the last
+                # lookup may be hours old. It is complete, and the index takes
+                # it only after it has been stable for a while.
+                previous = (
+                    closed[0],
+                    closed[1],
+                    closed[1] + self.segment_seconds + OPEN_SEGMENT_PREVIOUS_SECONDS,
+                )
             with self._lock:
                 # Not if the recorder restarted or stopped while this listed.
                 if (
                     key in self._fragmented_keys
                     and self._recorder_generation.get(key, 0) == generation
                 ):
-                    if (
-                        cached is not None
-                        and cached[0] is not None
-                        and listed[0] is not None
-                        and listed[0] != cached[0]
-                        and listed[1] > cached[1]
-                    ):
-                        # The recorder moved on: the old file is complete but
-                        # not indexed until it has been stable for a while.
-                        previous = (cached[0], cached[1], now + OPEN_SEGMENT_PREVIOUS_SECONDS)
-                        self._previous_segments[key] = previous
                     self._open_segments[key] = listed
+                    if closed is not None:
+                        self._previous_segments[key] = previous
             cached = listed
         path, start_epoch, _listed_at = cached
         if path is not None and epoch >= start_epoch:
             return self._open_segment_row(path, key[1], start_epoch, is_open=True)
+        if previous is None or now >= previous[2] or epoch < previous[1]:
+            return None
+        closed_row = self._open_segment_row(previous[0], key[1], previous[1], is_open=False)
         if (
-            previous is not None
-            and now < previous[2]
-            and previous[1] <= epoch
-            and (path is None or epoch < start_epoch)
+            path is not None
+            and epoch >= closed_row["end_epoch"]
+            and start_epoch - closed_row["end_epoch"] <= RECORDING_INDEX_HOLE_SECONDS
         ):
-            return self._open_segment_row(previous[0], key[1], previous[1], is_open=False)
-        return None
+            # Past the closed file's video and before the open file's name:
+            # the name landed late, and the open file starts with this frame.
+            # The index cannot say so until that file closes.
+            return self._open_segment_row(path, key[1], start_epoch, is_open=True)
+        return closed_row
 
     @staticmethod
     def _open_segment_row(path: Path, source: str, start_epoch: float, *, is_open: bool) -> dict:
@@ -1793,36 +1800,61 @@ class RecordingIndexMixin:
         source: str,
         now: float,
         process_started_at: float = 0.0,
-    ) -> tuple[Path, float] | None:
-        """Newest segment file by name, if the running FFmpeg can be writing it."""
-        newest: tuple[Path, float] | None = None
+    ) -> tuple[tuple[Path, float] | None, tuple[Path, float] | None]:
+        """(the file the running FFmpeg can be writing, the newest closed one).
+
+        Both come from one listing of the recent hour directories, by name.
+        Either may be None.
+        """
+        named: list[tuple[float, Path]] = []
         for path in self._recent_hour_recording_files(
             camera_id, source, after_epoch=now - 2.0 * self.segment_seconds,
         ):
             start_epoch = self.recording_start_epoch(path)
-            if start_epoch is not None and (newest is None or start_epoch > newest[1]):
-                newest = (path, start_epoch)
-        if newest is None or not self._recording_file_may_be_active(newest[0], now):
-            return None
+            if start_epoch is not None:
+                named.append((start_epoch, path))
+        named.sort(key=lambda item: item[0], reverse=True)
+        if not named:
+            return None, None
+        newest_start, newest_path = named[0]
         # File names carry whole seconds. One named before this process
         # started belongs to the process it replaced and is already closed.
-        if newest[1] < math.floor(process_started_at):
-            return None
-        return newest
-    def recording_after_hole(self, camera_id: str, epoch: float, source: str = "main") -> dict | None:
-        """The segment starting just after ``epoch`` when ``epoch`` is in an index hole.
+        if (
+            self._recording_file_may_be_active(newest_path, now)
+            and newest_start >= math.floor(process_started_at)
+        ):
+            closed = (named[1][1], named[1][0]) if len(named) > 1 else None
+            return (newest_path, newest_start), closed
+        return None, (newest_path, newest_start)
 
-        The video is continuous across such a hole; only the naming drifted,
-        so the next segment's first frame is the nearest one to ``epoch``. A
-        longer uncovered stretch is a real recording gap and returns None, as
-        does an instant that a row covers. The returned row starts after
-        ``epoch``: callers read it from its beginning.
+    def recording_for_index_hole(self, camera_id: str, epoch: float, source: str = "main") -> dict | None:
+        """The segment holding the video for an instant that no index row covers.
+
+        A row that has not been validated runs from its file name's second
+        for at most the configured segment length, so it can end before the
+        file does. Two things then hide video that exists:
+
+        - the earlier file is longer than its row (a cut on a late keyframe).
+          Its real length is read from the file, and the row is returned
+          extended to it;
+        - the earlier file really ends there and the next name landed late.
+          The next segment is returned, when it starts within
+          ``RECORDING_INDEX_HOLE_SECONDS`` of where the earlier video ends;
+          callers read it from its beginning.
+
+        Anything else (a covered instant, a longer stretch with no video, no
+        following segment yet) returns None.
         """
         source = "main" if source == "main" else "live"
+        columns = (
+            "path, name, size_bytes, modified_at, start_epoch, duration_seconds, "
+            "end_epoch, source, playable, health_error, validated, "
+            "stream_fingerprint, fingerprint_checked, playback_duration_seconds"
+        )
         with self._index_connection() as connection:
             previous = connection.execute(
-                """
-                SELECT end_epoch FROM recordings
+                f"""
+                SELECT {columns} FROM recordings
                 WHERE camera_id = ? AND source = ? AND playable = 1
                   AND start_epoch <= ? AND start_epoch > ?
                 ORDER BY start_epoch DESC LIMIT 1
@@ -1830,28 +1862,44 @@ class RecordingIndexMixin:
                 (camera_id, source, epoch, epoch - max(60.0, self.segment_seconds * 3)),
             ).fetchone()
             following = connection.execute(
-                """
-                SELECT path, name, size_bytes, modified_at, start_epoch, duration_seconds,
-                       end_epoch, source, playable, health_error, validated,
-                       stream_fingerprint, fingerprint_checked, playback_duration_seconds
-                FROM recordings
+                f"""
+                SELECT {columns} FROM recordings
                 WHERE camera_id = ? AND source = ? AND playable = 1
                   AND start_epoch > ? AND start_epoch <= ?
                 ORDER BY start_epoch ASC LIMIT 1
                 """,
                 (camera_id, source, epoch, epoch + RECORDING_INDEX_HOLE_SECONDS),
             ).fetchone()
-        if previous is None or following is None:
+        if previous is None:
             return None
-        previous_end = float(previous["end_epoch"])
-        if previous_end > epoch:
+        earlier = self._bound_recording_availability(dict(previous))
+        earlier_start = float(earlier["start_epoch"])
+        if epoch < float(earlier["end_epoch"]):
+            # Covered; a miss here is about the file, not about a hole.
             return None
-        if float(following["start_epoch"]) - previous_end > RECORDING_INDEX_HOLE_SECONDS:
+        video_end = float(earlier["end_epoch"])
+        stored = earlier.get("playback_duration_seconds")
+        if not (isinstance(stored, (int, float)) and math.isfinite(stored) and stored > 0):
+            # Not measured yet: the row's end is only the cap. Ask the file.
+            _fingerprint, measured = mp4_playback_metadata(Path(str(earlier["path"])))
+            if measured is not None and math.isfinite(measured) and measured > 0:
+                video_end = earlier_start + min(
+                    float(measured), max(60.0, self.segment_seconds * 3),
+                )
+        if epoch < video_end:
+            if self._file_verdict(str(earlier["path"])) != "present":
+                return None
+            earlier["end_epoch"] = video_end
+            earlier["duration_seconds"] = video_end - earlier_start
+            return earlier
+        if following is None:
             return None
-        payload = dict(following)
-        if self._file_verdict(str(payload["path"])) != "present":
+        later = self._bound_recording_availability(dict(following))
+        if float(later["start_epoch"]) - video_end > RECORDING_INDEX_HOLE_SECONDS:
             return None
-        return payload
+        if self._file_verdict(str(later["path"])) != "present":
+            return None
+        return later
 
     def request_recording_edge_refresh(self, camera_id: str, source: str, after_epoch: float) -> None:
         """Ask the background indexer to discover a newly finalized near-live segment."""

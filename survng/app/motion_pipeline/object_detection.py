@@ -352,10 +352,11 @@ class _EventRecordedSampler:
         # Reads of the open segment that came back short. The quick retry is
         # for a fragment about to land; a frame that still is not there after
         # a few tries (a very low frame rate, a damaged frame) is not helped
-        # by starting FFmpeg four times a second.
+        # by starting FFmpeg four times a second. Counted over the whole job.
         self.open_read_misses = 0
         self.open_read_failed = False
-        # Lookups answered with the segment after an index hole.
+        # Instants in an index hole and the row found for each.
+        self._hole_rows: dict[float, dict[str, Any]] = {}
         self.index_hole_lookups = 0
 
     def recording_at(self, epoch: float) -> dict[str, Any] | None:
@@ -392,13 +393,20 @@ class _EventRecordedSampler:
             else self.recorder.recording_at(self.camera_id, epoch, request_refresh=False)
         )
         if row is None:
-            # No row covers this instant. If that is only because a file name
-            # landed a second late, the next segment starts with its frame;
-            # waiting would never produce a row.
-            after_hole = getattr(self.recorder, "recording_after_hole", None)
-            row = after_hole(self.camera_id, epoch) if callable(after_hole) else None
+            # No row covers this instant. If that is only how rows are cut
+            # (a file longer than its row, or a file name that landed late),
+            # the video exists and waiting would never produce a row.
+            hole_key = round(epoch, 3)
+            if hole_key in self._hole_rows:
+                return self._hole_rows[hole_key]
+            for_hole = getattr(self.recorder, "recording_for_index_hole", None)
+            row = for_hole(self.camera_id, epoch) if callable(for_hole) else None
             if row is not None:
                 self.index_hole_lookups += 1
+                normalized = dict(row)
+                # Kept by instant, not by range: the row may start after it.
+                self._hole_rows[hole_key] = normalized
+                return normalized
         if row is not None and row.get("start_epoch") is not None:
             normalized = dict(row)
             if normalized.get("end_epoch") is None:
@@ -1008,7 +1016,13 @@ class RecordedMotionObjectDetector:
             # A job reading a segment that is not indexed yet has no rows; without
             # the camera's last decoded size it would reserve the 36 MiB
             # fallback per frame and shut every other job out of the budget.
-            frame_bytes = self._frame_bytes_for_rows(prefetched_rows) or self._last_frame_bytes
+            # A camera's first such job has decoded nothing yet: the largest
+            # frame seen on any camera is the safe stand-in.
+            frame_bytes = (
+                self._frame_bytes_for_rows(prefetched_rows)
+                or self._last_frame_bytes
+                or budget.largest_observed_frame_bytes()
+            )
             if frame_bytes:
                 budget.observe_frame_bytes(frame_bytes)
             budget_wait_started = time.monotonic()
@@ -1141,7 +1155,7 @@ class RecordedMotionObjectDetector:
     ) -> RecordedDetectionResult:
         refinement_deadline: float | None = None
         samples_by_offset: dict[float, _RecordedDetectionSample] = {}
-        samples_by_source_frame: dict[tuple[str, float], _RecordedDetectionSample] = {}
+        samples_by_source_frame: dict[tuple, _RecordedDetectionSample] = {}
 
         def ordered_samples() -> list[_RecordedDetectionSample]:
             # Different requested slots can resolve to one source frame. Keep
@@ -1379,10 +1393,13 @@ class RecordedMotionObjectDetector:
                         decoded = frames.get(frame_offset)
                         if decoded is None:
                             continue
+                        # Samples in an index hole all read the start of the next
+                        # segment. One frame is one observation, whichever
+                        # decode path produced it.
                         source_key = (
                             (str(row["path"]), decoded.actual_offset)
                             if decoded.exact_timestamp
-                            else None
+                            else (str(row["path"]), "requested", round(frame_offset, 3))
                         )
                         sample = (
                             samples_by_source_frame.get(source_key)
