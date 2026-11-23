@@ -656,13 +656,35 @@ class RecorderTest(unittest.TestCase):
             )
 
             self.assertIsNone(recorder.recording_at("gate", base + 10.5))
-            row = recorder.recording_for_index_hole("gate", base + 10.5)
+            with patch("survng.app.recording_process.index.mp4_playback_metadata", return_value=("", 10.0)):
+                row = recorder.recording_for_index_hole("gate", base + 10.5)
+                # The very start of the hole is uncovered too (rows end exclusive).
+                at_start = recorder.recording_for_index_hole("gate", base + 10.0)
 
             self.assertIsNotNone(row)
             self.assertEqual(row["path"], str(second))
             self.assertEqual(row["start_epoch"], base + 11.0)
-            # The very start of the hole is uncovered too (rows end exclusive).
-            self.assertEqual(recorder.recording_for_index_hole("gate", base + 10.0)["path"], str(second))
+            self.assertEqual(at_start["path"], str(second))
+
+    def test_a_short_outage_or_an_unmeasured_file_is_not_bridged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            base = 1_784_000_000.0
+            # The recorder restarted: 4 s of video, then a file named 6 s in.
+            first, _second = self._indexed_segments(recorder, Path(tmpdir), [base, base + 6.0])
+            with recorder._index_connection() as connection:
+                connection.execute(
+                    "UPDATE recordings SET playback_duration_seconds = 4.0 WHERE path = ?", (str(first),),
+                )
+            self.assertIsNone(recorder.recording_at("gate", base + 4.5))
+            # 2 s without video is an outage, not a late file name.
+            self.assertIsNone(recorder.recording_for_index_hole("gate", base + 4.5))
+
+            # A file killed mid-write has no readable length. Its row end is a
+            # guess, so the 2 s after it may be the tail of a long outage.
+            other = Recorder("ffmpeg", Path(tmpdir) / "other", segment_seconds=10)
+            self._indexed_segments(other, Path(tmpdir) / "other", [base, base + 11.0])
+            self.assertIsNone(other.recording_for_index_hole("gate", base + 10.5))
 
     def test_a_file_longer_than_its_row_is_read_to_its_real_length(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -789,11 +811,12 @@ class RecorderTest(unittest.TestCase):
             recorder._store_recording_rows(
                 "gate", "main", [self._row(fourth, start_epoch=base + 39.0)],
             )
-            self.assertEqual(
-                recorder.recording_for_index_hole("gate", base + 38.5)["path"], str(fourth),
-            )
-            fourth.unlink()
-            self.assertIsNone(recorder.recording_for_index_hole("gate", base + 38.5))
+            with patch("survng.app.recording_process.index.mp4_playback_metadata", return_value=("", 10.0)):
+                self.assertEqual(
+                    recorder.recording_for_index_hole("gate", base + 38.5)["path"], str(fourth),
+                )
+                fourth.unlink()
+                self.assertIsNone(recorder.recording_for_index_hole("gate", base + 38.5))
             self.assertTrue(second.exists() and third.exists())
 
     def test_recording_at_removes_stale_index_row_and_requests_edge_refresh(self) -> None:

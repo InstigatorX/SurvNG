@@ -31,7 +31,10 @@ RECORDING_FINALIZE_GRACE_SECONDS = 2.0
 # that has not been validated is no longer than the configured segment. When
 # a name lands late, up to this much time before it has no row although the
 # video is continuous.
-RECORDING_INDEX_HOLE_SECONDS = 2.0
+# A file name carries whole seconds, so with continuous recording the next
+# name lands less than 1 s after the earlier video ends; the rest is allowance
+# for a late segment open. A real outage this short cannot be told apart.
+RECORDING_INDEX_HOLE_SECONDS = 1.5
 RECORDING_PATH_REBASE_BATCH_SIZE = 1000
 
 
@@ -1701,6 +1704,9 @@ class RecordingIndexMixin:
           ``RECORDING_INDEX_HOLE_SECONDS`` of where the earlier video ends;
           callers read it from its beginning.
 
+        Both need the earlier file's measured length; without one the answer
+        is None, because the row end alone cannot tell a hole from an outage.
+
         Only an instant with an indexed segment on both sides qualifies. At
         the live edge the next segment is still to come, and answering from
         the earlier file would give a different frame from the one the same
@@ -1748,9 +1754,12 @@ class RecordingIndexMixin:
         measured = previous["playback_duration_seconds"]
         if not (isinstance(measured, (int, float)) and math.isfinite(measured) and measured > 0):
             _fingerprint, measured = mp4_playback_metadata(Path(str(earlier["path"])))
-        video_end = float(earlier["end_epoch"])
-        if measured is not None and math.isfinite(measured) and measured > 0:
-            video_end = earlier_start + min(float(measured), horizon)
+        if measured is None or not math.isfinite(measured) or measured <= 0:
+            # Where the earlier video ends is unknown (no readable header: a
+            # recorder killed mid-segment, or a read that failed). The row end
+            # is only an estimate, and trusting it could bridge a real outage.
+            return None
+        video_end = earlier_start + min(float(measured), horizon)
         if epoch < video_end:
             earlier["end_epoch"] = video_end
             earlier["duration_seconds"] = video_end - earlier_start
