@@ -453,6 +453,14 @@ layout it waits for the segment to be indexed (predicted from the newest
 indexed segment), plus `event_refinement_settle_seconds` (0.75). It retries
 for up to `event_refinement_retry_seconds` (24) at
 `event_refinement_retry_interval_seconds` (1.0) intervals.
+Segment starts come from file names, which carry whole seconds, and an index
+row is never longer than the configured segment. When a name lands a second
+late, the last second before it is covered by no row, although the video is
+continuous. A sample that falls in such a hole (at most 2 s between two
+consecutive segments) is read from the start of the following segment; a
+longer uncovered stretch is a real recording gap and is still waited for.
+`recording_index_hole_lookups` in the job timing counts these.
+
 A segment that has just closed is usually not indexed yet, because the indexer
 polls every 10 s. The first lookup that misses asks the indexer for it. The
 worker then waits, for at most one retry interval, until a discovery that

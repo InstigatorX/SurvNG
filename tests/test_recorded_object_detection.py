@@ -1459,6 +1459,68 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertGreater(recorder.rereads, 0)
         self.assertLessEqual(self._request_bursts(recorder.requests), 4)
 
+    def test_a_sample_in_an_index_hole_reads_the_next_segment_instead_of_waiting(self) -> None:
+        event_epoch = 1_800_000_000.0
+        hole_start = event_epoch - 0.75   # the -0.5 and 0.0 samples fall in it
+        next_start = event_epoch + 0.25
+        reads: list[tuple[str, float]] = []
+
+        class Recorder:
+            ffmpeg_path = "ffmpeg"
+            hardware_acceleration = "none"
+
+            def recording_at(self, _camera_id: str, epoch: float):
+                if epoch >= next_start:
+                    return {"path": "next.mp4", "start_epoch": next_start, "end_epoch": next_start + 10.0}
+                if epoch < hole_start:
+                    return {"path": "previous.mp4", "start_epoch": hole_start - 10.0, "end_epoch": hole_start}
+                return None
+
+            def recording_after_hole(self, _camera_id: str, epoch: float):
+                if hole_start <= epoch < next_start:
+                    return {"path": "next.mp4", "start_epoch": next_start, "end_epoch": next_start + 10.0}
+                return None
+
+        class Detector:
+            config = detector_config(
+                confidence_threshold=0.5,
+                require_incident_zone=False,
+                event_confirmation_frames=1,
+                event_class_confirmation_frames={},
+            )
+
+            def detect(self, _frame, confidence_threshold=None):
+                return [detected("car", 0.8, (2, 2, 12, 12))]
+
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            Detector(),
+            Recorder(),
+            lambda: None,
+        )
+
+        def read(path, offset, **_kwargs):
+            reads.append((str(path), offset))
+            return np.zeros((20, 20, 3), dtype=np.uint8)
+
+        with (
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_SETTLE_SECONDS", 0.0),
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_SECONDS", 24.0),
+            patch("survng.app.motion_pipeline.object_detection.time.time", return_value=event_epoch + 20.0),
+            patch.object(backend, "_read_recorded_frame", side_effect=read),
+        ):
+            started = time.monotonic()
+            result = backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+            elapsed = time.monotonic() - started
+
+        # Without the bridge this sample is never found and the job spends
+        # its whole 24 s retry budget waiting for a row that cannot appear.
+        self.assertLess(elapsed, 5.0)
+        self.assertEqual(result.frame_source, "recorded_main")
+        # The hole samples were read from the start of the following segment.
+        self.assertIn(("next.mp4", 0.0), reads)
+        self.assertNotIn("previous.mp4", {path for path, _offset in reads if _offset < 0})
+
     def test_detector_retries_missing_offsets_until_confirmation_is_possible(self) -> None:
         event_epoch = 1_800_000_000.0
         calls_by_offset: dict[float, int] = {}
