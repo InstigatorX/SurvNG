@@ -369,3 +369,272 @@ def test_sample_kept_when_a_decision_survives_the_reference_snapshot(tmp_path: P
     retention.run_once()
     assert "late-sample" in _ids(store, "acquired_samples")
     assert "late-decision" in _ids(store, "scene_activity_decisions")
+
+
+def _queue_motion_work(store: EventStore, *raws: str) -> None:
+    with sqlite3.connect(store.db_path) as db:
+        db.execute(
+            "create table if not exists media_deletion_work ("
+            "path text primary key, role text not null, created_at text not null)"
+        )
+        for raw in raws:
+            db.execute("insert into media_deletion_work values (?, 'motion_audit', ?)", (raw, _iso(NOW)))
+            db.execute(
+                "insert into media_deletion_claims (path, role, claimed_at) values (?, 'motion_audit', ?)",
+                (raw, _iso(NOW)),
+            )
+
+
+def _queued_motion_work(store: EventStore) -> tuple[int, int]:
+    with sqlite3.connect(store.db_path) as db:
+        return (
+            db.execute("select count(*) from media_deletion_work where role = 'motion_audit'").fetchone()[0],
+            db.execute("select count(*) from media_deletion_claims where role = 'motion_audit'").fetchone()[0],
+        )
+
+
+def test_reference_checks_cover_a_group_of_queued_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Several owner columns have no index; checking file by file scanned them
+    # twice per queued file. Groups share one check before and one after the
+    # volume checks, and the group is unlinked before any release transaction
+    # so no database work sits between the recheck and an unlink.
+    store = EventStore(tmp_path)
+    samples = tmp_path / "motion_samples" / "gate"
+    samples.mkdir(parents=True)
+    raws = []
+    for index in range(250):
+        (samples / f"{index}.jpg").write_bytes(b"jpg")
+        raws.append(f"motion_samples/gate/{index}.jpg")
+    _queue_motion_work(store, *raws)
+    retention = _retention(store)
+    calls: list[str] = []
+    lookups: list[int] = []
+    lookup, release, unlink = retention._named_image_paths, retention._release_motion_work, Path.unlink
+
+    def counted_lookup(values: set[str]) -> set[str]:
+        calls.append("lookup")
+        lookups.append(len(values))
+        return lookup(values)
+
+    retention._named_image_paths = counted_lookup
+    retention._release_motion_work = lambda raw: calls.append("release") or release(raw)
+    monkeypatch.setattr(Path, "unlink", lambda self, *a, **k: calls.append("unlink") or unlink(self, *a, **k))
+
+    result = retention.run_once()
+
+    assert result["motion_sample_files_deleted"] == 250
+    assert not any(samples.iterdir())
+    assert max(lookups) <= 500  # one IN list per owner table
+    assert calls == [
+        step
+        for size in (100, 100, 50)  # three groups, each checked twice
+        for step in ["lookup", "lookup", *["unlink"] * size, *["release"] * size]
+    ]
+    assert _queued_motion_work(store) == (0, 0)
+
+
+def test_named_file_is_released_without_volume_checks(tmp_path: Path) -> None:
+    store = EventStore(tmp_path)
+    samples = tmp_path / "motion_samples" / "gate"
+    samples.mkdir(parents=True)
+    (samples / "named.jpg").write_bytes(b"jpg")
+    _queue_motion_work(store, "motion_samples/gate/named.jpg")
+    with sqlite3.connect(store.db_path) as db:
+        db.execute("create table if not exists incident_observations (snapshot_path text)")
+        db.execute("insert into incident_observations values (?)", (str(samples / "named.jpg"),))
+    retention = _retention(store)
+    verdicts: list[Path] = []
+    retention._motion_verdict = lambda path: verdicts.append(path) or "present"
+
+    result = retention.run_once()
+
+    assert verdicts == []
+    assert (samples / "named.jpg").exists()
+    assert result["motion_sample_files_deleted"] == 0
+    assert _queued_motion_work(store) == (0, 0)
+
+
+def test_file_named_during_the_volume_checks_is_kept(tmp_path: Path) -> None:
+    store = EventStore(tmp_path)
+    samples = tmp_path / "motion_samples" / "gate"
+    samples.mkdir(parents=True)
+    for name in ("adopted.jpg", "orphan.jpg"):
+        (samples / name).write_bytes(b"jpg")
+    _queue_motion_work(store, "motion_samples/gate/adopted.jpg", "motion_samples/gate/orphan.jpg")
+    retention = _retention(store)
+    verdict = retention._motion_verdict
+
+    def adopt_then_verdict(path: Path) -> str:
+        # EventStore writers honour the deletion claim; this one does not, so
+        # only the recheck before unlinking can keep the file.
+        if path.name == "adopted.jpg":
+            with sqlite3.connect(store.db_path) as db:
+                db.execute("create table if not exists incident_observations (snapshot_path text)")
+                db.execute("insert into incident_observations values (?)", (str(path),))
+        return verdict(path)
+
+    retention._motion_verdict = adopt_then_verdict
+
+    result = retention.run_once()
+
+    assert (samples / "adopted.jpg").exists()
+    assert not (samples / "orphan.jpg").exists()
+    assert result["motion_sample_files_deleted"] == 1
+    assert result["motion_sample_files_failed"] == 0
+    assert _queued_motion_work(store) == (0, 0)  # the adopted file's work is released
+
+
+def test_failed_file_is_counted_and_logged_once_per_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    from survng.app import database_retention
+
+    # One audit per batch, so the queue is drained after each of three batches.
+    monkeypatch.setattr(database_retention, "BATCH_ROWS", 1)
+    store = EventStore(tmp_path)
+    outside = tmp_path / "recordings" / "gate" / "kept.jpg"
+    outside.parent.mkdir(parents=True)
+    outside.write_bytes(b"jpg")
+    raw = "recordings/gate/kept.jpg"
+    _queue_motion_work(store, raw)
+    with sqlite3.connect(store.db_path) as db:
+        for audit_id in (201, 202, 203):
+            db.execute(
+                "insert into motion_audits (id,event_id,camera_id,snapshot_path,created_at,mode,"
+                "sensitivity,score,threshold,reason,object_detected,trigger_count,features_json,"
+                "decision_id,related_event_id,category) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (audit_id, None, "gate", "", _iso(NOW - 40 * DAY), "m",
+                 1.0, 0.1, 0.2, "clear", 0, 1, "{}", "", None, "visual_backup"),
+            )
+    retention = _retention(store)
+
+    with caplog.at_level("WARNING", logger="survng.app.database_retention"):
+        result = retention.run_once()
+
+    assert result["steps"]["motion_audits"]["deleted"] == 3
+    assert result["motion_sample_files_failed"] == 1
+    assert result["motion_sample_file_failures"] == {"outside_audit_location": 1}
+    warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "outside_audit_location=1" in warnings[0] and raw in warnings[0]
+    assert outside.exists()
+    assert _queued_motion_work(store) == (1, 1)  # retried by the next run
+
+    again = retention.run_once()
+    assert again["motion_sample_files_failed"] == 1
+
+
+def test_volume_verdict_failures_are_reported_by_reason(tmp_path: Path) -> None:
+    store = EventStore(tmp_path)
+    samples = tmp_path / "motion_samples" / "gate"
+    samples.mkdir(parents=True)
+    for name in ("offline.jpg", "unsure.jpg"):
+        (samples / name).write_bytes(b"jpg")
+    _queue_motion_work(store, "motion_samples/gate/offline.jpg", "motion_samples/gate/unsure.jpg")
+    retention = _retention(store)
+    retention._motion_verdict = lambda path: "unavailable" if path.name == "offline.jpg" else "unknown"
+
+    result = retention.run_once()
+
+    assert result["motion_sample_file_failures"] == {"volume_unavailable": 1, "volume_unknown": 1}
+    assert (samples / "offline.jpg").exists() and (samples / "unsure.jpg").exists()
+    assert _queued_motion_work(store) == (2, 2)
+
+
+def test_file_that_vanishes_before_unlink_needs_a_confirmed_absence(tmp_path: Path) -> None:
+    store = EventStore(tmp_path)
+    samples = tmp_path / "motion_samples" / "gate"
+    samples.mkdir(parents=True)
+    for name in ("gone.jpg", "unsure.jpg"):
+        (samples / name).write_bytes(b"jpg")
+    _queue_motion_work(store, "motion_samples/gate/gone.jpg", "motion_samples/gate/unsure.jpg")
+    retention = _retention(store)
+    seen: dict[str, int] = {}
+
+    def verdict(path: Path) -> str:
+        seen[path.name] = seen.get(path.name, 0) + 1
+        if seen[path.name] == 2:
+            path.unlink()  # removed by something else after the final volume check
+        if seen[path.name] <= 2:
+            return "present"
+        return "confirmed_absent" if path.name == "gone.jpg" else "unknown"
+
+    retention._motion_verdict = verdict
+
+    result = retention.run_once()
+
+    assert seen == {"gone.jpg": 3, "unsure.jpg": 3}
+    assert result["motion_sample_files_missing"] == 1
+    assert result["motion_sample_files_deleted"] == 0
+    assert result["motion_sample_file_failures"] == {"absent_unconfirmed": 1}
+    assert _queued_motion_work(store) == (1, 1)  # only the unconfirmed one stays queued
+
+
+def test_already_missing_file_is_released_once_its_volume_confirms_the_absence(
+    tmp_path: Path,
+) -> None:
+    # Work left queued after its file is gone (a crash between unlink and
+    # release, or another remover) is cleared when the volume confirms the
+    # absence, and kept while the volume cannot answer.
+    store = EventStore(tmp_path)
+    (tmp_path / "motion_samples" / "gate").mkdir(parents=True)
+    _queue_motion_work(store, "motion_samples/gate/missing.jpg")
+    retention = _retention(store)
+    verdict = retention._motion_verdict
+    retention._motion_verdict = lambda path: "unavailable"
+
+    offline = retention.run_once()
+
+    assert offline["motion_sample_file_failures"] == {"volume_unavailable": 1}
+    assert _queued_motion_work(store) == (1, 1)
+
+    retention._motion_verdict = verdict  # the real volume gate
+    online = retention.run_once()
+
+    assert online["motion_sample_files_missing"] == 1
+    assert online["motion_sample_files_failed"] == 0
+    assert _queued_motion_work(store) == (0, 0)
+
+
+def test_volume_is_checked_again_immediately_before_each_unlink(tmp_path: Path) -> None:
+    # A different volume mounted at the same path after the first check must
+    # not lose its same-named file. The final check follows the reference
+    # recheck, so nothing but other unlinks sits between it and the unlink.
+    store = EventStore(tmp_path)
+    samples = tmp_path / "motion_samples" / "gate"
+    samples.mkdir(parents=True)
+    names = ("swapped.jpg", "unsure.jpg", "gone.jpg", "steady.jpg")
+    for name in names:
+        (samples / name).write_bytes(b"jpg")
+    _queue_motion_work(store, *(f"motion_samples/gate/{name}" for name in names))
+    retention = _retention(store)
+    verdict, lookup = retention._motion_verdict, retention._named_image_paths
+    order: list[str] = []
+    final = {"swapped.jpg": "unavailable", "unsure.jpg": "unknown", "gone.jpg": "confirmed_absent"}
+
+    def changing_volume(path: Path) -> str:
+        order.append(path.name)
+        if order.count(path.name) == 2 and path.name in final:
+            if path.name == "gone.jpg":
+                path.unlink()  # removed elsewhere between the two checks
+            return final[path.name]
+        return verdict(path)
+
+    def counted_lookup(values: set[str]) -> set[str]:
+        order.append("lookup")
+        return lookup(values)
+
+    retention._motion_verdict = changing_volume
+    retention._named_image_paths = counted_lookup
+
+    result = retention.run_once()
+
+    assert order == ["lookup", *names, "lookup", *names]
+    assert (samples / "swapped.jpg").exists() and (samples / "unsure.jpg").exists()
+    assert not (samples / "steady.jpg").exists()
+    assert result["motion_sample_files_deleted"] == 1
+    assert result["motion_sample_files_missing"] == 1  # gone.jpg, released without unlinking
+    assert result["motion_sample_file_failures"] == {"volume_unavailable": 1, "volume_unknown": 1}
+    assert _queued_motion_work(store) == (2, 2)

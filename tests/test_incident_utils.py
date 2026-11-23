@@ -138,6 +138,31 @@ class EventSnapshotPathTest(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 event_snapshot_path(Path(tmpdir), {"snapshot_path": ""})
 
+    def test_missing_file_resolves_only_when_the_caller_confirms_presence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as other_dir:
+            storage = Path(tmpdir)
+            missing = {"snapshot_path": "motion_samples/gate/gone.jpg"}
+
+            with self.assertRaises(FileNotFoundError):
+                event_snapshot_path(storage, missing)
+            self.assertEqual(
+                event_snapshot_path(storage, missing, require_file=False),
+                storage.resolve() / "motion_samples" / "gate" / "gone.jpg",
+            )
+            # The other checks still apply to a path whose file is gone.
+            with self.assertRaises(PermissionError):
+                event_snapshot_path(
+                    storage, {"snapshot_path": str(Path(other_dir) / "gone.jpg")},
+                    require_file=False,
+                )
+            with self.assertRaises(PermissionError):
+                event_snapshot_path(
+                    storage, {"snapshot_path": "motion_samples/gate/gone.txt"},
+                    require_file=False,
+                )
+            with self.assertRaises(FileNotFoundError):
+                event_snapshot_path(storage, {"snapshot_path": ""}, require_file=False)
+
 
 if __name__ == "__main__":
     unittest.main()
