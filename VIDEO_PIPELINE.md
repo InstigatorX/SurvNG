@@ -448,9 +448,25 @@ start offset and shows as a held frame at every segment join on B-frame or
 audio streams. Both layouts share one stream fingerprint and the same
 per-stream start times, and `recording_media` reads a fragmented segment's
 video duration from its fragment headers. Changing the setting reloads all
-cameras, like changing `record`. Refinement does not yet read the open segment: for either
-layout it waits for the segment to be indexed (predicted from the newest
-indexed segment), plus `event_refinement_settle_seconds` (0.75). It retries
+cameras, like changing `record`. The option also sets `flush_packets=1`, so
+each finished fragment reaches the file at once (FFmpeg otherwise holds up to
+256 KiB, several seconds of a low-bitrate stream); the muxer still writes once
+per fragment.
+
+For a fragmented camera, refinement reads the segment being written. The
+recorder finds that file with one directory listing per segment and reports
+how far its completed fragments reach; the row is never stored in the index
+and no index discovery is requested for it. A refinement job is due
+`RECORDED_OPEN_SEGMENT_READY_SECONDS` (1.5) after the frame it needs, not when
+the segment closes. A frame beyond the completed fragments is looked for again
+every 0.25 s, and a read that fails because FFmpeg was part-way through a
+fragment header is retried the same way without the nudged single-frame
+fallback. `recording_open_segment_lookups` in the job timing counts lookups
+served this way. Tracking, playback and export still use indexed segments only.
+
+For a plain camera, refinement waits for the segment to be indexed (predicted
+from the newest indexed segment), plus `event_refinement_settle_seconds`
+(0.75). It retries
 for up to `event_refinement_retry_seconds` (24) at
 `event_refinement_retry_interval_seconds` (1.0) intervals.
 A segment that has just closed is usually not indexed yet, because the indexer

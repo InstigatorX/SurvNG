@@ -95,6 +95,11 @@ class Recorder(RecordingIndexMixin):
         self._index_maintenance_thread: threading.Thread | None = None
         self._edge_refresh_lock = threading.Lock()
         self._edge_refresh_requests: dict[RecorderKey, float] = {}
+        # Cameras whose running recorder writes fragmented segments, and the
+        # segment each is writing (path, filename start epoch), found by one
+        # directory listing per segment and only when a reader asks.
+        self._fragmented_keys: set[RecorderKey] = set()
+        self._open_segments: dict[RecorderKey, tuple[Path, float, float]] = {}
         # Each request gets a ticket; a discovery completes every ticket issued
         # before it started. A reader that missed a just-closed segment waits
         # for its own ticket, not for whichever discovery happens to finish.
@@ -210,6 +215,12 @@ class Recorder(RecordingIndexMixin):
                 if keep_process:
                     self.processes[key] = (process, stop_event, keeper)
                     self._retry_after.pop(key, None)
+                    # A restarted recorder begins a new file mid-segment.
+                    self._open_segments.pop(key, None)
+                    if camera.recording_fragmented:
+                        self._fragmented_keys.add(key)
+                    else:
+                        self._fragmented_keys.discard(key)
             if not keep_process:
                 stop_event.set()
                 if process.poll() is None:
@@ -807,13 +818,16 @@ class Recorder(RecordingIndexMixin):
         fragment rather than before it: only then does FFmpeg know each
         track's start offset, and without that (``empty_moov``) B-frame video
         and audio start late or early in every segment, which shows as a held
-        frame at each join.
+        frame at each join. ``flush_packets`` hands each finished fragment to
+        the file at once: FFmpeg otherwise holds up to 256 KiB, which on a
+        low-bitrate stream keeps the newest seconds unreadable for several
+        seconds. The muxer still writes once per fragment, not per packet.
         """
         if not camera.recording_fragmented:
             return []
         return [
             "-segment_format_options",
-            "movflags=+frag_keyframe+delay_moov+default_base_moof",
+            "movflags=+frag_keyframe+delay_moov+default_base_moof:flush_packets=1",
         ]
 
     def reconfigure_runtime(

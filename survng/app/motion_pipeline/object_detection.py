@@ -74,6 +74,11 @@ RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
 RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS = 6.0
 # Finalization and edge indexing after a segment boundary.
 RECORDED_SEGMENT_INDEX_MARGIN_SECONDS = 1.0
+# A fragmented segment is readable up to its last completed fragment: one
+# keyframe interval (1 s on typical cameras) plus the write reaching storage.
+RECORDED_OPEN_SEGMENT_READY_SECONDS = 1.5
+# The next fragment is at most a keyframe interval away; look again soon.
+RECORDED_OPEN_SEGMENT_RETRY_SECONDS = 0.25
 # FFmpeg's accurate seek discards frames before the seek point, so keep the
 # seek strictly ahead of the first requested sample.
 RECORDED_BATCH_SEEK_MARGIN_SECONDS = 0.25
@@ -332,6 +337,10 @@ class _EventRecordedSampler:
         # Cleared for the one re-read that follows a discovery the caller
         # waited for, so that re-read does not request another.
         self.request_index_refresh = True
+        # Set by a lookup that fell in the segment being written, beyond the
+        # fragments completed so far; and counted when one was served from it.
+        self.open_segment_pending = False
+        self.open_segment_lookups = 0
 
     def recording_at(self, epoch: float) -> dict[str, Any] | None:
         # Match Recorder.recording_at(): at a shared segment boundary the
@@ -344,6 +353,17 @@ class _EventRecordedSampler:
                 end = start + float(duration) if duration is not None else start
             if start <= epoch <= float(end):
                 return row
+        open_recording = getattr(self.recorder, "open_recording", None)
+        open_row = open_recording(self.camera_id, epoch) if callable(open_recording) else None
+        if open_row is not None:
+            # The segment being written is read directly and never indexed
+            # while open, so asking the indexer for it would only list the
+            # directory. Its row grows, so it is not kept.
+            if epoch < float(open_row["end_epoch"]):
+                self.open_segment_lookups += 1
+                return open_row
+            self.open_segment_pending = True
+            return None
         row = (
             self.recorder.recording_at(self.camera_id, epoch)
             if self.request_index_refresh
@@ -391,11 +411,15 @@ class _EventRecordedSampler:
         offsets_seconds: list[float],
         *,
         deadline: float | None,
+        single_frame_fallback: bool = True,
     ) -> tuple[dict[float, _DecodedRecordedFrame], int, int]:
         """Return cached/batched frames and bounded fallback counts.
 
         The tuple contains frames keyed by the caller's original offsets,
-        batch process count, and single-frame fallback count.
+        batch process count, and single-frame fallback count. Without
+        ``single_frame_fallback`` a sample the batch did not return is left
+        missing: for a segment still being written, the nudged retries would
+        only re-read a file caught mid-write.
         """
         requested = list(dict.fromkeys(max(0.0, value) for value in offsets_seconds))
         frames: dict[float, _DecodedRecordedFrame] = {}
@@ -427,7 +451,7 @@ class _EventRecordedSampler:
                 frames[offset] = frame
 
         fallback_count = 0
-        for offset in missing:
+        for offset in missing if single_frame_fallback else ():
             if offset in frames:
                 continue
             fallback_count += 1
@@ -517,6 +541,11 @@ class RecordedMotionObjectDetector:
 
     def _predicted_index_epoch(self, target: float, settle_seconds: float) -> float:
         ready = target + settle_seconds
+        reads_open = getattr(self.recorder, "reads_open_segments", None)
+        if callable(reads_open) and reads_open(self.camera.id):
+            # Readable as soon as its fragment is written; no wait for the
+            # segment to close and be indexed.
+            return max(ready, target + RECORDED_OPEN_SEGMENT_READY_SECONDS)
         segment = float(getattr(self.recorder, "segment_seconds", 0.0) or 0.0)
         rows_between = getattr(self.recorder, "recording_rows_between", None)
         if segment <= 0 or not callable(rows_between):
@@ -875,6 +904,7 @@ class RecordedMotionObjectDetector:
             "decode_budget_wait_ms": 0.0,
             "refinement_early_exit_skipped": 0.0,
             "refinement_route_dense_plan": float(route_dense),
+            "recording_open_segment_lookups": 0.0,
         }
         event_epoch = event_at.timestamp()
         planned_offsets = _flatten_refinement_stages(stages)
@@ -1199,6 +1229,7 @@ class RecordedMotionObjectDetector:
                     )
                 index_ticket_before = self._index_refresh_ticket()
                 sampler.request_index_refresh = not reread_after_discovery
+                sampler.open_segment_pending = False
                 reread_after_discovery = False
                 stage_deadline = min(
                     deadline,
@@ -1237,6 +1268,7 @@ class RecordedMotionObjectDetector:
                     )
 
                 sampler.request_index_refresh = True
+                timing["recording_open_segment_lookups"] = float(sampler.open_segment_lookups)
                 for path, pending in list(pending_by_path.items()):
                     if stage_consensus:
                         timing["refinement_early_exit_skipped"] += float(len(pending))
@@ -1247,11 +1279,18 @@ class RecordedMotionObjectDetector:
                             width, height = dimensions
                             self.decode_budget.observe_frame_bytes(width * height * 3)
                     decode_started = time.monotonic()
+                    open_segment = bool(pending[0][2].get("open"))
                     frames, batch_processes, fallback_count = sampler.frames_at(
                         path,
                         [frame_offset for _, frame_offset, _ in pending],
                         deadline=stage_deadline,
+                        **({"single_frame_fallback": False} if open_segment else {}),
                     )
+                    if open_segment and len(frames) < len(pending):
+                        # Read while FFmpeg was part-way through a fragment
+                        # header: look again shortly rather than nudging.
+                        sampler.open_segment_pending = True
+                        recording_missing = True
                     timing["frame_decode_ms"] += (
                         time.monotonic() - decode_started
                     ) * 1000.0
@@ -1461,6 +1500,8 @@ class RecordedMotionObjectDetector:
                     )
                     slept = time.monotonic() - wait_started
                 else:
+                    if recording_missing and not future_sample and sampler.open_segment_pending:
+                        slept = min(slept, RECORDED_OPEN_SEGMENT_RETRY_SECONDS)
                     time.sleep(slept)
                 wait_key = (
                     "recording_wait_ms"

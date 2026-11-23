@@ -18,7 +18,11 @@ from ..main_database import closing_connection_factory, create_index_logged
 from ..media_storage import path_presence
 from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 from ..recording_retention import RETENTION_TOTALS_INDEX
-from ..recording_media import mp4_playback_metadata, mp4_stream_fingerprint
+from ..recording_media import (
+    fragmented_readable_seconds,
+    mp4_playback_metadata,
+    mp4_stream_fingerprint,
+)
 
 if TYPE_CHECKING:
     # Annotation-only: recorder.py imports this module, so a runtime import would cycle.
@@ -27,6 +31,7 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger("survng.app.recorder")
 RECORDING_FINALIZE_GRACE_SECONDS = 2.0
+OPEN_SEGMENT_RELIST_SECONDS = 1.0
 RECORDING_PATH_REBASE_BATCH_SIZE = 1000
 
 
@@ -1680,6 +1685,78 @@ class RecordingIndexMixin:
         if request_refresh and abs(time.time() - epoch) <= max(60.0, self.segment_seconds * 6):
             self.request_recording_edge_refresh(camera_id, source, epoch)
         return None
+
+    def reads_open_segments(self, camera_id: str, source: str = "main") -> bool:
+        """Whether this camera's running recorder writes segments readable while open."""
+        key = (camera_id, "main" if source == "main" else "live")
+        with self._lock:
+            item = self.processes.get(key)
+            return (
+                key in self._fragmented_keys
+                and item is not None
+                and item[0].poll() is None
+            )
+
+    def open_recording(self, camera_id: str, epoch: float, source: str = "main") -> dict | None:
+        """The segment being written, if ``epoch`` falls at or after its start.
+
+        The row is never stored in the index. ``end_epoch`` is the end of the
+        fragments FFmpeg has completed, so a caller compares it with the time
+        it wants: at or beyond it means "not written yet, ask again", which is
+        different from None ("this is not in the open segment; use the index").
+        The start comes from the file name, as it does for indexed segments.
+        """
+        key = (camera_id, "main" if source == "main" else "live")
+        if not self.reads_open_segments(camera_id, key[1]):
+            return None
+        now = time.time()
+        with self._lock:
+            cached = self._open_segments.get(key)
+        # A segment stays open for at least segment_seconds from its start, and
+        # closes at the next keyframe after that. Until then the listing is not
+        # repeated; around the rollover it is repeated at most once a second.
+        if cached is None or (
+            now >= cached[1] + self.segment_seconds
+            and now - cached[2] >= OPEN_SEGMENT_RELIST_SECONDS
+        ):
+            found = self._find_open_segment(camera_id, key[1], now)
+            with self._lock:
+                if found is None:
+                    self._open_segments.pop(key, None)
+                    cached = None
+                else:
+                    cached = (found[0], found[1], now)
+                    if key in self._fragmented_keys:
+                        self._open_segments[key] = cached
+        if cached is None:
+            return None
+        path, start_epoch, _listed_at = cached
+        if epoch < start_epoch:
+            return None
+        readable = fragmented_readable_seconds(path)
+        duration = float(readable) if readable is not None and math.isfinite(readable) else 0.0
+        return {
+            "path": str(path),
+            "name": path.name,
+            "source": key[1],
+            "start_epoch": start_epoch,
+            "duration_seconds": duration,
+            "end_epoch": start_epoch + duration,
+            "open": True,
+        }
+
+    def _find_open_segment(self, camera_id: str, source: str, now: float) -> tuple[Path, float] | None:
+        """Newest segment file by name, if FFmpeg can still be writing it."""
+        newest: tuple[Path, float] | None = None
+        for path in self._recent_hour_recording_files(
+            camera_id, source, after_epoch=now - 2.0 * self.segment_seconds,
+        ):
+            start_epoch = self.recording_start_epoch(path)
+            if start_epoch is not None and (newest is None or start_epoch > newest[1]):
+                newest = (path, start_epoch)
+        if newest is None or not self._recording_file_may_be_active(newest[0], now):
+            return None
+        return newest
 
     def request_recording_edge_refresh(self, camera_id: str, source: str, after_epoch: float) -> None:
         """Ask the background indexer to discover a newly finalized near-live segment."""

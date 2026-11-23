@@ -33,8 +33,13 @@ def test_plain_mp4_is_the_default_and_adds_no_muxer_options():
 def test_a_fragmented_camera_gets_keyframe_fragments_with_a_delayed_moov():
     args = Recorder._segment_layout_args(_camera(recording_fragmented=True))
     assert args[0] == "-segment_format_options"
-    flags = set(args[1].removeprefix("movflags=").split("+")) - {""}
-    assert flags == {"frag_keyframe", "delay_moov", "default_base_moof"}
+    options = dict(item.split("=", 1) for item in args[1].split(":"))
+    assert set(options["movflags"].split("+")) - {""} == {
+        "frag_keyframe", "delay_moov", "default_base_moof",
+    }
+    # Each finished fragment reaches the file at once instead of waiting in
+    # FFmpeg's write buffer.
+    assert options["flush_packets"] == "1"
 
 
 def test_the_recorder_command_carries_the_layout_per_camera(tmp_path):

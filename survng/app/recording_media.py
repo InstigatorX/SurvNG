@@ -448,6 +448,19 @@ def _fragmented_video_duration(path: Path, moov: bytes) -> float | None:
     return duration
 
 
+def fragmented_readable_seconds(path: Path) -> float | None:
+    """Video seconds completed so far in a fragmented segment that is still open.
+
+    Not cached: the answer changes every time FFmpeg finishes a fragment, and
+    caching each size of a growing file would crowd finished segments out of
+    the metadata cache. None means no index yet, or not a fragmented file.
+    """
+    moov = _read_mp4_box(path, b"moov")
+    if not moov:
+        return None
+    return _fragmented_video_duration(path, moov)
+
+
 _MAX_FRAGMENT_HEADER_BYTES = 4 * 1024 * 1024
 # Three times the longest configurable segment; damaged headers can claim more.
 _MAX_FRAGMENTED_DURATION_SECONDS = 900.0

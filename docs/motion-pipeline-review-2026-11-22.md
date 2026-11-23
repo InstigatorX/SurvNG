@@ -238,8 +238,12 @@ Suggested order: T1 and T2, then T3, T5 and T6, with T4 last.
     fragmented and mixed segments decodes to identical frames. Chromium
     plays and seeks a fragmented segment directly (tested on the earlier
     layout, video only). Not tested: Safari and
-    iOS, HEVC in a browser, and reading while writing over NFS. Phase 2,
-    reading the open segment for refinement, is not started.
+    iOS, HEVC in a browser, and reading while writing over NFS. 
+  - Fragmented segments, phase 2 (branch `claude/t4-open-segment-refinement`):
+    refinement on a fragmented camera reads the open segment and is due 1.5 s
+    after the frame it needs. Verified locally on FFmpeg 8.1.3 against a
+    segment being written with the recorder's options. Not verified: reading
+    while writing over NFS, and the delay on a production host.
   - Segment length: no change made. `scripts/measure-refinement-delay.sh`
     measures the delay on a running host. With 10 s plain MP4 segments the
     first refinement stage is scheduled at event + 1.5 s + time to segment
