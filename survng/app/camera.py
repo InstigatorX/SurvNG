@@ -1101,6 +1101,17 @@ class CameraWorker:
             topic[:200],
             "incident check queued" if queued else "not queued (cooldown or limit)",
         )
+        # Every recognized press is an event for automations (Home Assistant's
+        # doorbell event over MQTT), including one the incident cooldown drops.
+        received_at = datetime.now(timezone.utc)
+        self.motion_state.publish_event("doorbell", {
+            "camera_id": self.camera.id,
+            "event_type": "press",
+            "pressed_at": (event_at or received_at).isoformat(),
+            "received_at": received_at.isoformat(),
+            "source_topic": topic[:1024],
+            "incident_check_queued": queued,
+        })
         return queued
 
     def handle_speech(self, started_at: datetime) -> bool:

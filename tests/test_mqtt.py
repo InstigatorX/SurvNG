@@ -86,6 +86,24 @@ class MqttServiceTest(unittest.TestCase):
         # Disabled cameras clear any sensor left over from earlier discovery.
         self.assertEqual(published["homeassistant/binary_sensor/survng_yard/speech/config"], "")
 
+    def test_discovery_adds_doorbell_event_only_for_doorbell_cameras(self) -> None:
+        service = self.service()
+        service.publish_discovery([
+            {"id": "front-door", "name": "Front door", "zones": [], "doorbell_enabled": True},
+            {"id": "front-side", "name": "Front side", "zones": []},
+        ])
+
+        published = {topic: (payload, retain) for topic, payload, _qos, retain in service.client.published}
+        config, retained = published["homeassistant/event/survng_front_door/doorbell/config"]
+        doorbell = json.loads(config)
+        self.assertTrue(retained)
+        self.assertEqual(doorbell["state_topic"], "survng/camera/front-door/doorbell")
+        self.assertEqual(doorbell["event_types"], ["press"])
+        self.assertEqual(doorbell["device_class"], "doorbell")
+        self.assertEqual(doorbell["unique_id"], "survng_front-door_doorbell")
+        # Cameras that are not doorbells clear any entity left from earlier discovery.
+        self.assertEqual(published["homeassistant/event/survng_front_side/doorbell/config"][0], "")
+
     def test_discovery_includes_server_device_entities(self) -> None:
         service = self.service()
         service.publish_discovery([])

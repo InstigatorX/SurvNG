@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import subprocess
 import threading
@@ -2372,6 +2373,33 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertEqual(worker.motion_state._stats["doorbell_cooldown_dropped"], 1)
             # A press is not camera motion: no motion activity is recorded.
             self.assertFalse(worker.motion_state.last_motion_at())
+
+    def test_every_recognized_press_is_published_as_a_doorbell_event(self) -> None:
+        camera = CameraConfig.model_validate({
+            "id": "front-door", "name": "Front door", "stream_url": "rtsp://example.invalid/main",
+            "doorbell": {"enabled": True, "cooldown_seconds": 30},
+        })
+        published: list[tuple[str, dict]] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(
+                camera, Path(tmpdir),
+                event_callback=lambda event_type, payload: published.append((event_type, payload)),
+            )
+            worker._stop.clear()
+            pressed_at = datetime(2026, 11, 22, 16, 45, 43, tzinfo=timezone.utc)
+            worker.handle_doorbell_press("tns1:RuleEngine/MyRuleDetector/Visitor", "<press/>", pressed_at)
+            # Inside the incident cooldown: no second incident check, but
+            # automations still hear the press.
+            worker.handle_doorbell_press("tns1:RuleEngine/MyRuleDetector/Visitor", "<press/>", pressed_at)
+
+        presses = [payload for event_type, payload in published if event_type == "doorbell"]
+        self.assertEqual(len(presses), 2)
+        self.assertEqual(presses[0]["camera_id"], "front-door")
+        self.assertEqual(presses[0]["event_type"], "press")
+        self.assertEqual(presses[0]["pressed_at"], pressed_at.isoformat())
+        self.assertEqual(presses[0]["source_topic"], "tns1:RuleEngine/MyRuleDetector/Visitor")
+        self.assertEqual([item["incident_check_queued"] for item in presses], [True, False])
+        self.assertNotIn("<press/>", json.dumps(presses))
 
     def test_doorbell_presses_are_capped_per_five_minutes(self) -> None:
         camera = CameraConfig.model_validate({

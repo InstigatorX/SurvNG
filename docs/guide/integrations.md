@@ -50,6 +50,24 @@ survng/server/metrics
 
 When Home Assistant discovery is on, cameras and zones appear as devices/entities automatically.
 
+### Doorbell event
+
+A camera marked as a doorbell (see [Cameras](cameras.md#doorbells)) also gets a
+Home Assistant **Doorbell** event entity (`event` platform, device class
+`doorbell`). Each recognized button press publishes one unretained message to
+`survng/camera/CAMERA_ID/doorbell`:
+
+```json
+{"camera_id": "front-door", "event_type": "press", "pressed_at": "2026-11-22T16:45:43+00:00",
+ "received_at": "2026-11-22T16:45:43.4+00:00", "source_topic": "tns1:RuleEngine/MyRuleDetector/Visitor",
+ "incident_check_queued": true}
+```
+
+Every press is published, including one the incident cooldown does not turn
+into another incident check (`incident_check_queued: false`), so automations
+such as a chime react to every press. The event entity needs Home Assistant
+2023.8 or later.
+
 ### Example: turn a camera off from MQTT
 
 Publish `OFF` to:

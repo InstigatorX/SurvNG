@@ -33,6 +33,25 @@ Many Reolink cameras expose RTSP and ONVIF after you enable them in the cameraâ€
 
 If ONVIF notices are missing or flaky, set that cameraâ€™s motion behavior to **EMA only**.
 
+## Doorbells
+
+Turn on **This camera is a doorbell** in the camera's ONVIF settings for a camera
+with a real button. Many cameras send doorbell events without having one (Reolink
+advertises `Visitor` on most models), so SurvNG never assumes a doorbell from the
+event alone. The default topic is Reolink's `RuleEngine/MyRuleDetector/Visitor`.
+
+A press is the button changing to pressed (`PropertyOperation="Changed"`,
+`State=true`); the state report sent when SurvNG subscribes is never a press.
+Each press:
+
+- opens an incident marked **Doorbell**, even when nobody is detected and
+  whatever the zones cover (a visitor is often hard to see from a doorbell);
+- notifies according to **Doorbell notifications** (default: always);
+- publishes a Home Assistant doorbell event (see [Integrations](integrations.md#doorbell-event)).
+
+A 30-second cooldown and a limit of 5 incident checks per 5 minutes bound a
+stuck button. The ONVIF inspector shows each recognized press as `PRESS`.
+
 ## Main vs live streams
 
 - Record the **main** stream for history.
