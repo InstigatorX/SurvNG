@@ -188,16 +188,19 @@ class _SampledTimestamps:
     showinfo writes a frame line in pieces, and a decoder thread reporting
     bitstream damage can write between them. The head (``n: pts: pts_time:``)
     then ends early and the checksum arrives on a later line of the same tap,
-    or not at all. Every sampled head still yields exactly one timestamp, in
-    order, so images never shift onto a neighbour's timestamp; a frame whose
-    checksum was lost is paired by time and marked inexact.
+    or not at all. Every sampled head that is seen still yields exactly one
+    timestamp, in order, so a torn line no longer shifts later images onto a
+    neighbour's timestamp; a frame whose checksum was lost is paired by time
+    and marked inexact. A head written without its ``showinfo@`` tag cannot
+    be attributed to a tap and is still missed.
     """
 
     def __init__(self, pairing_tolerance_seconds: float) -> None:
         self.queue: queue.Queue[tuple[int, float, bool] | None] = queue.Queue()
         self.inexact = 0
+        self.torn = 0
         self._tolerance = max(0.0, float(pairing_tolerance_seconds))
-        # [pts, pts_time, checksum or None]; removed once referenced.
+        # [pts, pts_time, checksum or None]; removed once matched by checksum.
         self._sources: list[list] = []
         self._open_source: list | None = None
         self._open_sampled: list | None = None
@@ -226,7 +229,12 @@ class _SampledTimestamps:
                 self._open_sampled[2] = checksum
                 self._resolve_sampled()
             return True
-        frame = [int(head.group(1)), float(head.group(2)), checksum]
+        try:
+            frame = [int(head.group(1)), float(head.group(2)), checksum]
+        except ValueError:
+            return True
+        if checksum is None:
+            self.torn += 1
         if source:
             self._sources.append(frame)
             self._open_source = frame if checksum is None else None
@@ -266,9 +274,13 @@ class _SampledTimestamps:
                 return
             chosen = min(nearby, key=lambda item: abs(item[1] - sampled_time))
             self.inexact += 1
+            # A guess must not consume the frame a later image can prove is
+            # its own, nor move the ordering floor past it.
+            self.queue.put((chosen[0], chosen[1], False))
+            return
         self._last_source_time = chosen[1]
         self._sources.remove(chosen)
-        self.queue.put((chosen[0], chosen[1], bool(exact)))
+        self.queue.put((chosen[0], chosen[1], True))
 
     def end(self) -> None:
         if self._ended:
@@ -341,7 +353,10 @@ def _run_sampled_decoder(
                 path,
                 timestamps.inexact,
             )
-        warn_decoder_errors("tracking", path, plan.backend, result.stderr)
+        warn_decoder_errors(
+            "tracking", path, plan.backend, result.stderr,
+            interleaved_lines=timestamps.torn,
+        )
         if not result.ok:
             raise RuntimeError(f"comparison video decoder failed ({result.describe()})")
     finally:

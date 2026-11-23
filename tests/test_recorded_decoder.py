@@ -26,6 +26,7 @@ from survng.app.recorded_decoder import (
     FAILURE_TIMEOUT,
     FAILURE_TIMESTAMP,
     FAILURE_UNFINALIZED_INPUT,
+    FAILURE_UNREADABLE_INPUT,
     DecodePlan,
     StreamingDecode,
     build_decode_command,
@@ -82,6 +83,18 @@ from survng.app.recorded_video_frames import sampled_video_frames, video_frame_a
         b" in stream 0: 9000 >= 9000\n",
         FAILURE_TIMESTAMP,
     ),
+    # FFmpeg 6.0 and older name the file instead of "Error opening input".
+    (b"gone.mp4: No such file or directory\n", FAILURE_MISSING_INPUT),
+    (
+        b"[in#0 @ 0x1] Error opening input: Invalid data found when processing input\n",
+        FAILURE_UNREADABLE_INPUT,
+    ),
+    # A GPU that cannot take the stream is not a damaged stream.
+    (
+        b"[hevc_qsv @ 0x1] Error initializing the MFX video decoder: unsupported (-3)\n",
+        FAILURE_HARDWARE_INIT,
+    ),
+    (b"[h264 @ 0x1] No support for codec h264 profile 244.\n", FAILURE_HARDWARE_INIT),
     (b"Conversion failed!\n", FAILURE_OTHER),
     (b"", FAILURE_OTHER),
 ])
@@ -190,6 +203,41 @@ def test_runner_classifies_a_failed_exit_from_stderr():
     assert "moov atom not found" in result.describe()
 
 
+def test_failure_reason_quotes_the_evidence_not_the_input_banner():
+    code = (
+        "import sys\n"
+        "sys.stderr.write(\"Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'x.mp4':\\n  Metadata:\\n\")\n"
+        "sys.stderr.write('[h264 @ 0x1] error while decoding MB 3 4, bytestream 91\\n')\n"
+        "sys.stderr.write('Conversion failed!\\n'); sys.exit(1)\n"
+    )
+    result = run_decoder(_python(code), backend="cpu", timeout=10)
+    assert result.describe() == (
+        "cpu [bitstream_corruption]: [h264 @ 0x1] error while decoding MB 3 4, bytestream 91"
+    )
+    unknown = run_decoder(
+        _python("import sys; sys.stderr.write('banner\\nfirst\\nlast words\\n'); sys.exit(1)"),
+        backend="cpu", timeout=10,
+    )
+    assert unknown.describe() == "cpu [other]: first last words"
+
+
+def test_a_decoder_still_seeking_to_its_first_frame_is_not_stalled():
+    # Silent for longer than the between-frame limit, as when FFmpeg decodes
+    # from the start of a long segment up to the requested offset.
+    code = (
+        "import sys, time\n"
+        "time.sleep(0.8)\n"
+        "sys.stdout.buffer.write(b'z' * 8); sys.stdout.flush()\n"
+    )
+    with StreamingDecode(
+        _python(code), backend="cpu", stall_timeout=0.2, first_output_timeout=30,
+    ) as decoder:
+        assert decoder.read_exact(8) == b"z" * 8
+        assert decoder.read_exact(8) == b""
+        result = decoder.finish()
+    assert not decoder.stalled and result.ok
+
+
 def test_a_hung_streaming_decoder_is_killed_and_reported_as_stalled():
     code = (
         "import sys, time\n"
@@ -197,7 +245,9 @@ def test_a_hung_streaming_decoder_is_killed_and_reported_as_stalled():
         "time.sleep(30)\n"
     )
     started = time.monotonic()
-    with StreamingDecode(_python(code), backend="cpu", stall_timeout=0.3) as decoder:
+    with StreamingDecode(
+        _python(code), backend="cpu", stall_timeout=0.3, first_output_timeout=30,
+    ) as decoder:
         assert decoder.read_exact(8) == b"x" * 8
         assert decoder.read_exact(8) == b""
         assert decoder.stalled
@@ -371,6 +421,7 @@ def test_tracking_sampler_gives_up_on_a_decoder_that_stops_producing(tmp_path, m
     hung.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
     hung.chmod(0o755)
     monkeypatch.setattr(recorded_decoder, "STREAM_STALL_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(recorded_decoder, "STREAM_FIRST_OUTPUT_TIMEOUT_SECONDS", 0.5)
     monkeypatch.setattr(
         recorded_video_frames, "_ffprobe_video_metadata",
         lambda path, ffmpeg_path: (64, 36, 1, 90000, 0.0),
@@ -384,10 +435,11 @@ def test_tracking_sampler_gives_up_on_a_decoder_that_stops_producing(tmp_path, m
             ffmpeg_path=str(hung),
         ))
     assert time.monotonic() - started < 10
-    survivors = subprocess.run(
-        ["pgrep", "-f", str(hung)], capture_output=True, text=True, check=False,
-    ).stdout.split()
-    assert [pid for pid in survivors if int(pid) != os.getpid()] == []
+    if shutil.which("pgrep"):
+        survivors = subprocess.run(
+            ["pgrep", "-f", str(hung)], capture_output=True, text=True, check=False,
+        ).stdout.split()
+        assert [pid for pid in survivors if int(pid) != os.getpid()] == []
 
 
 # --- Timestamp pairing when decoder errors tear showinfo lines ---------------
@@ -444,6 +496,58 @@ def test_a_source_frame_that_lost_its_checksum_is_paired_by_time_as_inexact():
         _frame("sampled", 0, 0, 0.0, "AAAA0000"),
         _frame("sampled", 1, 1, 0.5, "BBBB0000"),
     ]) == [(0, 0.0, False), (45000, 0.5, True), None]
+
+
+def test_a_guessed_pairing_does_not_take_the_frame_a_later_image_proves_is_its_own():
+    # The torn image truly came from 0.04; time alone prefers 0.14, which the
+    # next image identifies by checksum. Guessing must not consume it.
+    pairs = _pairs([
+        _frame("source", 0, 0, 0.0, "AAAA0000"),
+        _frame("source", 1, 1, 0.04, "BBBB0000"),
+        _frame("source", 2, 2, 0.14, "CCCC0000"),
+        _frame("source", 3, 3, 0.2, "DDDD0000"),
+        _frame("sampled", 0, 0, 0.0, "AAAA0000"),
+        _frame("sampled", 1, 1, 0.1, None),
+        _frame("sampled", 2, 2, 0.2, "CCCC0000"),
+        _frame("sampled", 3, 3, 0.3, "DDDD0000"),
+    ], tolerance=0.1)
+    assert [pair[2] for pair in pairs[:-1]] == [True, False, True, True]
+    assert pairs[2:] == [(2, 0.14, True), (3, 0.2, True), None]
+
+
+def test_a_malformed_timestamp_is_skipped_without_stopping_the_parser():
+    assert _pairs([
+        b"[showinfo@source @ 0x1] n:   0 pts:      0 pts_time:- checksum:AAAA0000\n",
+        _frame("source", 1, 9000, 0.1, "BBBB0000"),
+        _frame("sampled", 0, 0, 0.1, "BBBB0000"),
+    ]) == [(9000, 0.1, True), None]
+
+
+def test_torn_lines_count_as_decoder_errors(tmp_path, caplog, monkeypatch):
+    monkeypatch.setattr(recorded_decoder, "_warning_state", {})
+    caplog.set_level(logging.WARNING, logger="survng.app.recorded_decoder")
+    counts = warn_decoder_errors("tracking", tmp_path / "a.mp4", "cpu", b"", interleaved_lines=3)
+    assert counts == {"interleaved": 3}
+    assert "interleaved=3" in caplog.text
+
+
+def test_batch_with_fewer_timestamps_than_frames_is_discarded(tmp_path, monkeypatch):
+    import cv2
+    from io import BytesIO
+
+    _ok, encoded = cv2.imencode(".bmp", np.full((12, 16, 3), 9, dtype=np.uint8))
+    recording = tmp_path / "sample.mp4"
+    recording.touch()
+    process = SimpleNamespace(
+        returncode=0,
+        stdout=BytesIO(encoded.tobytes() * 2),
+        # The first frame's showinfo line was lost; which one is unknowable.
+        stderr=BytesIO(b"[showinfo@event_sample @ 0x1] n: 1 pts: 94500 pts_time:1.05\n"),
+        wait=lambda timeout=None: 0,
+    )
+    monkeypatch.setattr(recorded_decoder.subprocess, "Popen", lambda *args, **kwargs: process)
+    frames, processes = _detector("ffmpeg")._read_recorded_frames(recording, [0.5, 1.0])
+    assert frames == {} and processes == 1
 
 
 def test_a_sampled_frame_with_no_possible_source_ends_the_pairing():

@@ -492,9 +492,10 @@ batch reads, the tracking sampler and exact-frame read, and the stream-alignment
 and face-dataset still) is built and run by `recorded_decoder`: one set of
 hardware-then-software plans, one command builder that always applies the
 thread limits, one process runner, and one classification of failures
-(`unfinalized_input`, `missing_input`, `hardware_init`, `bitstream_corruption`,
-`timestamp`, `timeout`, `stalled`, `spawn`). A streaming decode that produces
-nothing for 10 s while its reader waits is killed. Codec errors and failed
+(`unfinalized_input`, `missing_input`, `unreadable_input`, `hardware_init`,
+`bitstream_corruption`, `timestamp`, `timeout`, `stalled`, `spawn`). A
+streaming decode that produces nothing for 10 s while its reader waits (60 s
+before its first frame) is killed. Codec errors and failed
 decodes are logged at most once a minute per consumer and recording directory.
 It passes collected samples to `motion_pipeline.recorded_evidence` for temporal
 association, confirmation, and representative frame selection.

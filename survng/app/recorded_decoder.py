@@ -8,7 +8,8 @@ frames they select and how they map FFmpeg's timestamps onto their own.
 Failure classes separate what the caller can act on:
 
 ``unfinalized_input``     the segment has no index yet (recorder lifecycle)
-``missing_input``         the file is gone or unreadable (retention, storage)
+``missing_input``         the file is gone or not permitted (retention, storage)
+``unreadable_input``      the file exists but is not a readable container
 ``hardware_init``         the GPU decoder could not start (host configuration)
 ``bitstream_corruption``  the codec rejected the camera's stream
 ``timestamp``             the demuxer or muxer rejected the timeline
@@ -53,6 +54,7 @@ FAILURE_TIMEOUT = "timeout"
 FAILURE_STALLED = "stalled"
 FAILURE_MISSING_INPUT = "missing_input"
 FAILURE_UNFINALIZED_INPUT = "unfinalized_input"
+FAILURE_UNREADABLE_INPUT = "unreadable_input"
 FAILURE_HARDWARE_INIT = "hardware_init"
 FAILURE_BITSTREAM = "bitstream_corruption"
 FAILURE_TIMESTAMP = "timestamp"
@@ -60,8 +62,11 @@ FAILURE_OUTPUT = "output"
 FAILURE_OTHER = "other"
 
 # A streaming decoder that produces nothing for this long while its consumer
-# is waiting is treated as hung and killed.
+# is waiting is treated as hung and killed. The first frame gets a longer
+# budget: before it, FFmpeg may be decoding silently from the previous
+# keyframe, or from the start of a long segment, up to the requested offset.
 STREAM_STALL_TIMEOUT_SECONDS = 10.0
+STREAM_FIRST_OUTPUT_TIMEOUT_SECONDS = 60.0
 STREAM_EXIT_TIMEOUT_SECONDS = 5.0
 STREAM_STDERR_TAIL_BYTES = 64 * 1024
 RECORDING_STILL_TIMEOUT_SECONDS = 12.0
@@ -75,19 +80,22 @@ _CODEC_ERROR = re.compile(
 # hardware device that never started is not a statement about the stream.
 _FAILURE_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     (FAILURE_MISSING_INPUT, re.compile(
-        rb"Error opening input[^\r\n]*(?:No such file or directory|Permission denied)",
+        rb"No such file or directory|Error opening input[^\r\n]*Permission denied",
         re.IGNORECASE,
     )),
-    (FAILURE_UNFINALIZED_INPUT, re.compile(
-        rb"moov atom not found|Error opening input[^\r\n]*Invalid data found",
+    (FAILURE_UNFINALIZED_INPUT, re.compile(rb"moov atom not found", re.IGNORECASE)),
+    (FAILURE_UNREADABLE_INPUT, re.compile(
+        rb"Error opening input[^\r\n]*Invalid data found",
         re.IGNORECASE,
     )),
     (FAILURE_HARDWARE_INIT, re.compile(
         rb"Device creation failed|No VA display found|Failed to initiali[sz]e VAAPI"
         rb"|Error initializing an? (?:internal )?MFX session"
+        rb"|Error initializing the MFX video decoder"
         rb"|hwaccel initiali[sz]ation returned error|No device available for decoder"
         rb"|Failed to set value '[^']*' for option '(?:vaapi|qsv)_device'"
-        rb"|Impossible to convert between the formats supported by the filter",
+        rb"|Impossible to convert between the formats supported by the filter"
+        rb"|No support for codec|Hardware does not support|Failed setup for format",
         re.IGNORECASE,
     )),
     (FAILURE_BITSTREAM, re.compile(
@@ -110,6 +118,22 @@ def classify_decoder_stderr(stderr: bytes) -> str:
         if pattern.search(stderr):
             return name
     return FAILURE_OTHER
+
+
+def _failure_evidence(stderr: bytes, failure: str) -> str:
+    """The stderr line that explains ``failure``, else FFmpeg's last words.
+
+    Info-level decoders print the input banner first, so the first lines say
+    nothing about why the process failed.
+    """
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    for name, pattern in _FAILURE_PATTERNS:
+        if name != failure:
+            continue
+        for line in lines:
+            if pattern.search(line):
+                return line.decode("utf-8", errors="replace")
+    return " ".join(line.decode("utf-8", errors="replace") for line in lines[-2:])
 
 
 def decoder_error_codecs(stderr: bytes) -> Counter[str]:
@@ -247,9 +271,7 @@ class DecodeResult:
         """Short reason for logs: backend, failure class and FFmpeg's own words."""
         if self.failure == FAILURE_TIMEOUT:
             return f"{self.backend} timed out"
-        detail = self.error or " ".join(
-            self.stderr.decode("utf-8", errors="replace").strip().splitlines()[0:2]
-        )
+        detail = self.error or _failure_evidence(self.stderr, self.failure)
         label = f"{self.backend} [{self.failure}]" if self.failure else self.backend
         return f"{label}: {detail[:180]}"
 
@@ -364,8 +386,8 @@ class StreamingDecode:
 
     The consumer may pause for as long as it likes between reads (FFmpeg just
     blocks on the full pipe). Only a read that itself waits longer than
-    ``stall_timeout`` counts as a stall, and the process is then killed so the
-    read returns. ``on_stderr_line`` sees every stderr line and returns true
+    ``stall_timeout`` (``first_output_timeout`` until the first byte arrives)
+    counts as a stall, and the process is then killed so the read returns. ``on_stderr_line`` sees every stderr line and returns true
     for lines it consumed; the rest are kept (bounded) for classification.
     """
 
@@ -376,15 +398,23 @@ class StreamingDecode:
         backend: str,
         buffer_bytes: int = -1,
         stall_timeout: float | None = None,
+        first_output_timeout: float | None = None,
         on_stderr_line: Callable[[bytes], bool] | None = None,
         on_stderr_end: Callable[[], None] | None = None,
     ) -> None:
         self.command = command
         self.backend = backend
         self.stalled = False
+        self._stalled_after = 0.0
         self._stall_timeout = float(
             STREAM_STALL_TIMEOUT_SECONDS if stall_timeout is None else stall_timeout
         )
+        self._first_output_timeout = max(self._stall_timeout, float(
+            STREAM_FIRST_OUTPUT_TIMEOUT_SECONDS
+            if first_output_timeout is None
+            else first_output_timeout
+        ))
+        self._produced = False
         self._on_stderr_line = on_stderr_line
         self._on_stderr_end = on_stderr_end
         self._tail: deque[bytes] = deque()
@@ -435,9 +465,11 @@ class StreamingDecode:
         interval = max(0.01, min(0.25, self._stall_timeout / 4.0))
         while not self._closed.wait(interval):
             started = self._read_started
-            if started is None or time.monotonic() - started <= self._stall_timeout:
+            limit = self._stall_timeout if self._produced else self._first_output_timeout
+            if started is None or time.monotonic() - started <= limit:
                 continue
             self.stalled = True
+            self._stalled_after = limit
             try:
                 self._process.kill()
             except OSError:
@@ -456,6 +488,7 @@ class StreamingDecode:
                 chunk = stdout.read(size - len(payload))
                 if not chunk:
                     break
+                self._produced = True
                 payload.extend(chunk)
         finally:
             self._read_started = None
@@ -476,7 +509,7 @@ class StreamingDecode:
         if self.stalled:
             result.failure = FAILURE_STALLED
             result.error = (
-                f"no decoder output for {self._stall_timeout:g}s; process killed"
+                f"no decoder output for {self._stalled_after:g}s; process killed"
             )
         elif not result.failure and result.returncode != 0:
             result.failure = classify_decoder_stderr(result.stderr)
@@ -594,6 +627,13 @@ def _rate_limited(key: tuple[str, str]) -> tuple[bool, int]:
         if now - last < DECODER_WARNING_INTERVAL_SECONDS:
             _warning_state[key] = (last, suppressed + 1)
             return False, 0
+        if len(_warning_state) > 1024:
+            # Keys name hourly recording directories; forget the quiet ones.
+            for stale in [
+                item for item, (seen, _count) in _warning_state.items()
+                if now - seen >= DECODER_WARNING_INTERVAL_SECONDS
+            ]:
+                del _warning_state[stale]
         _warning_state[key] = (now, 0)
         return True, suppressed
 
@@ -603,6 +643,8 @@ def warn_decoder_errors(
     path: Path,
     backend: str,
     stderr: bytes,
+    *,
+    interleaved_lines: int = 0,
 ) -> Counter[str]:
     """Report codec errors from consumers that have no decode budget.
 
@@ -611,6 +653,9 @@ def warn_decoder_errors(
     directory, with the number of reports skipped in between.
     """
     codec_lines = decoder_error_codecs(stderr)
+    if interleaved_lines > 0:
+        # Decoder messages that landed inside another line lose their tag.
+        codec_lines["interleaved"] += int(interleaved_lines)
     if not codec_lines:
         return codec_lines
     emit, suppressed = _rate_limited((consumer, str(path.parent)))

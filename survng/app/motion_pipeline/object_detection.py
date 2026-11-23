@@ -2358,16 +2358,17 @@ class RecordedMotionObjectDetector:
                     stderr,
                 )
             ]
-            if len(actual_offsets) != len(decoded_frames):
-                # Frames pair with timestamps by position; an unpaired frame
-                # has no trustworthy capture time and is left to the fallback.
-                LOGGER.debug(
-                    "recorded batch decode for %s camera=%s paired %d frames with %d timestamps",
-                    path,
-                    self.camera.id,
-                    len(decoded_frames),
-                    len(actual_offsets),
+            if len(actual_offsets) < len(decoded_frames):
+                # Frames pair with timestamps by position. With a timestamp
+                # line missing, nothing says which frame lost it, so none of
+                # this batch can be trusted; the single-frame path re-reads.
+                if self.decode_budget is not None:
+                    self.decode_budget.record_ffmpeg(backend, success=False)
+                last_error = (
+                    f"{backend}: {len(decoded_frames)} frames but only "
+                    f"{len(actual_offsets)} timestamps"
                 )
+                continue
             decoded: dict[float, _DecodedRecordedFrame] = {}
             for offset, frame, actual_offset in zip(
                 offsets,
