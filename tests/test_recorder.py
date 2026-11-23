@@ -636,6 +636,66 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(requests, {("gate", "main"): event_epoch})
         self.assertTrue(recorder._index_wake.is_set())
 
+    def _indexed_segments(self, recorder: Recorder, root: Path, starts: list[float]) -> list[Path]:
+        paths = []
+        for index, start in enumerate(starts):
+            clip = root / f"segment-{index}.mp4"
+            clip.write_bytes(b"recording")
+            paths.append(clip)
+            recorder._store_recording_rows("gate", "main", [self._row(clip, start_epoch=start)])
+        return paths
+
+    def test_an_instant_in_an_index_hole_resolves_to_the_segment_that_follows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            base = 1_784_000_000.0
+            # The second file's name landed a second late: 11 s after the
+            # first, whose row is still only 10 s long.
+            _first, second, _third = self._indexed_segments(
+                recorder, Path(tmpdir), [base, base + 11.0, base + 20.0],
+            )
+
+            self.assertIsNone(recorder.recording_at("gate", base + 10.5))
+            row = recorder.recording_after_hole("gate", base + 10.5)
+
+            self.assertIsNotNone(row)
+            self.assertEqual(row["path"], str(second))
+            self.assertEqual(row["start_epoch"], base + 11.0)
+            # The very start of the hole is uncovered too (rows end exclusive).
+            self.assertEqual(recorder.recording_after_hole("gate", base + 10.0)["path"], str(second))
+
+    def test_a_covered_instant_or_a_real_gap_is_not_an_index_hole(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            base = 1_784_000_000.0
+            # A 10 s step, then the recorder was down for 8 s.
+            _first, second, third = self._indexed_segments(
+                recorder, Path(tmpdir), [base, base + 10.0, base + 28.0],
+            )
+
+            self.assertIsNone(recorder.recording_after_hole("gate", base + 5.0))
+            self.assertIsNone(recorder.recording_after_hole("gate", base + 9.99))
+            # 1 s before the segment after the outage: still a gap, not a hole.
+            self.assertIsNone(recorder.recording_after_hole("gate", base + 27.0))
+            # Nothing recorded after it yet.
+            self.assertIsNone(recorder.recording_after_hole("gate", base + 38.5))
+            # Before anything was recorded.
+            self.assertIsNone(recorder.recording_after_hole("gate", base - 0.5))
+            # Another camera's segments do not fill this one's hole.
+            self.assertIsNone(recorder.recording_after_hole("door", base + 10.5))
+            # A following segment whose file has gone is not offered.
+            fourth = Path(tmpdir) / "segment-late.mp4"
+            fourth.write_bytes(b"recording")
+            recorder._store_recording_rows(
+                "gate", "main", [self._row(fourth, start_epoch=base + 39.0)],
+            )
+            self.assertEqual(
+                recorder.recording_after_hole("gate", base + 38.5)["path"], str(fourth),
+            )
+            fourth.unlink()
+            self.assertIsNone(recorder.recording_after_hole("gate", base + 38.5))
+            self.assertTrue(second.exists() and third.exists())
+
     def test_recording_at_removes_stale_index_row_and_requests_edge_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
