@@ -206,6 +206,29 @@ export function perCameraDirtyState(cameras = [], baselineCameras = []) {
   return dirty;
 }
 
+// The saved-state baseline after a batch camera save. ``sentCameras`` are the
+// cameras as sent, ``savedById`` the server's saved cameras keyed by the id each
+// was sent with. Matches are looked up in the baseline from before the save: a
+// new camera's assigned id can equal another sent camera's client id, and must
+// not replace that camera's entry.
+export function baselineCamerasAfterSave(baselineCameras = [], sentCameras = [], savedById = new Map()) {
+  const before = new Map(baselineCameras.map((camera) => [camera.id, camera]));
+  const replaced = new Map();
+  const added = [];
+  for (const camera of sentCameras) {
+    const saved = savedById.get(camera.id);
+    if (!saved) continue;
+    const previous = before.get(camera.id);
+    const entry = {
+      ...structuredClone(saved),
+      zones: structuredClone(previous?.zones || camera.zones || []),
+    };
+    if (previous) replaced.set(camera.id, entry);
+    else added.push(entry);
+  }
+  return [...baselineCameras.map((camera) => replaced.get(camera.id) ?? camera), ...added];
+}
+
 export function dirtyCameraCount(perCameraDirty = {}) {
   return Object.values(perCameraDirty).filter((item) => item?.settings || item?.zones).length;
 }

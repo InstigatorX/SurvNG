@@ -60,7 +60,7 @@ import { logPayloadSignature } from "../pollingPolicy.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { motionAuditRegions } from "../motionAudit.mjs";
 import { clampZoneView, insertZonePointWithIndex, zoomZoneView } from "../zoneGeometry.mjs";
-import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminWorkspaceSearch, cameraConfigDirtyState, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, resolveAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
+import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminWorkspaceSearch, baselineCamerasAfterSave, cameraConfigDirtyState, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, resolveAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
 import { appUrl, mediaUrl, fetch } from "../shared/api.js";
 import { MEDIA_STORAGE_ROLES, CAMERA_ADMIN_SECTIONS, TELEMETRY_ADMIN_SECTIONS, HEALTH_TELEMETRY_SECTIONS, GENERAL_ADMIN_SECTIONS, US_TIME_ZONES, THEMES } from "../shared/constants.js";
 import { CameraScopePicker } from "../shared/CameraScopePicker.jsx";
@@ -1872,19 +1872,9 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
       }));
       setSelectedId((current) => savedById.get(current)?.id ?? current);
       if (baselineConfigRef.current) {
-        let baselineCameras = baselineConfigRef.current.cameras || [];
-        for (const camera of cameras) {
-          const savedCamera = savedById.get(camera.id);
-          const baselineMatch = baselineCameras.find((item) => item.id === camera.id);
-          const savedBaselineCamera = {
-            ...structuredClone(savedCamera),
-            zones: structuredClone(baselineMatch?.zones || camera.zones || []),
-          };
-          baselineCameras = baselineMatch
-            ? baselineCameras.map((item) => item.id === camera.id ? savedBaselineCamera : item)
-            : [...baselineCameras, savedBaselineCamera];
-        }
-        baselineConfigRef.current.cameras = baselineCameras;
+        baselineConfigRef.current.cameras = baselineCamerasAfterSave(
+          baselineConfigRef.current.cameras || [], cameras, savedById,
+        );
         setBaselineRevision((current) => current + 1);
       }
       const saved = cameras.length > 1 ? `${cameras.length} cameras saved` : "Camera settings saved";

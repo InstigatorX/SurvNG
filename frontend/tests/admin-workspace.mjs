@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, ADMIN_NAV_GROUPS, adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, preferredStoredValue, readAdminSubsection, readAdminWorkspace, resolveAdminWorkspace, telemetryLocationOptions } from "../src/adminWorkspace.mjs";
+import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, ADMIN_NAV_GROUPS, adminWorkspaceId, adminWorkspaceSearch, baselineCamerasAfterSave, cameraConfigDirtyState, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, preferredStoredValue, readAdminSubsection, readAdminWorkspace, resolveAdminWorkspace, telemetryLocationOptions } from "../src/adminWorkspace.mjs";
 
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS.map((group) => group.label), ["Configure", "Observe", "Act"]);
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS[0].items.slice(0, 5).map((item) => item.label), ["Cameras", "Detection", "Storage", "Integrations", "Access"]);
@@ -106,3 +106,35 @@ assert.doesNotMatch(
   configPageSource,
   /fetch\(`\/api\/config\/cameras\/\$\{encodeURIComponent\(camera\.id\)\}`, \{\s*method: "PUT"/,
 );
+
+// After a batch save the baseline must hold every saved camera, even when a new
+// camera's assigned id equals another new camera's client id.
+{
+  const zone = { id: "z1" };
+  const baseline = [{ id: "front", name: "Front", zones: [zone] }];
+  const sent = [
+    { id: "front", name: "Front door", zones: [] },
+    { id: "camera", name: "Camera 2", zones: [] },
+    { id: "camera-2", name: "Camera 2", zones: [] },
+  ];
+  const savedById = new Map([
+    ["front", { id: "front", name: "Front door" }],
+    ["camera", { id: "camera-2", name: "Camera 2" }],
+    ["camera-2", { id: "camera-2-2", name: "Camera 2" }],
+  ]);
+  const after = baselineCamerasAfterSave(baseline, sent, savedById);
+  assert.deepEqual(after.map((camera) => camera.id), ["front", "camera-2", "camera-2-2"]);
+  assert.equal(after[0].name, "Front door");
+  assert.deepEqual(after[0].zones, [zone]); // saved zones stay in the baseline
+  assert.notEqual(after[0].zones[0], zone); // and are copies, not shared state
+  assert.deepEqual(baseline.map((camera) => camera.id), ["front"]); // input untouched
+  // Nothing is left looking unsaved.
+  assert.equal(dirtyCameraCount(perCameraDirtyState(
+    [
+      { id: "front", name: "Front door", zones: [zone] },
+      { id: "camera-2", name: "Camera 2", zones: [] },
+      { id: "camera-2-2", name: "Camera 2", zones: [] },
+    ],
+    after,
+  )), 0);
+}
