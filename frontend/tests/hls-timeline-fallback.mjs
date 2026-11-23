@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { clipPreviewReachedEnd } from "../src/recordingClipSelection.mjs";
-import { isChromiumBrowser, supportsNativeRecordingHls, recordingTransportOverride, RECORDING_TRANSPORT_STORAGE_KEY, recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, recordingSegmentLocalTime, playbackRowsCoverEpoch, videoReachedSeekTarget, recordingSeekToleranceSeconds, nativePlaylistStart, nativePlaylistStartStep } from "../src/recordingPlayback.mjs";
+import { extendedPlaybackRows, isChromiumBrowser, supportsNativeRecordingHls, recordingTransportOverride, RECORDING_TRANSPORT_STORAGE_KEY, recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, recordingSegmentLocalTime, playbackRowsCoverEpoch, videoReachedSeekTarget, recordingSeekToleranceSeconds, nativePlaylistStart, nativePlaylistStartStep } from "../src/recordingPlayback.mjs";
 
 for (const error of [{ code: 3 }, { code: 4 }, { code: 4032, category: 4 }, { code: 3014, data: [3] }, { code: 3015, data: [{ name: "NotSupportedError" }] }, { code: 3016, data: [3] }, { code: 3016, data: [4] }, new Error("This browser does not support Shaka Player")]) {
   assert.equal(isRecordingCompatibilityError(error), true, JSON.stringify(error));
@@ -371,6 +371,57 @@ for (const outcome of ["zero", "landed", "corrected", "user-paused", "unmute-pau
   video.currentTime = 6;
   context.handleRecordingTimeUpdate({ currentTarget: video });
   assert.equal(playheads.at(-1), 1006.2, "playhead updates must resume after the gap seek");
+}
+
+// Growing playlist: the player appends recordings itself, so the page extends
+// its rows in place (same revision, so the same src) as playback nears the end.
+{
+  const loaded = [
+    { start_epoch: 1000, duration_seconds: 10 },
+    { start_epoch: 1010, duration_seconds: 10 },
+  ];
+  const clock = (rows) => rows.map((row, index) => ({
+    ...row, end_epoch: row.start_epoch + 10, media_start: index * 10, media_end: index * 10 + 10,
+  }));
+  const run = async ({ served, detail = {}, mediaTime }) => {
+    const video = { currentTime: mediaTime };
+    const requests = [];
+    const reloads = [];
+    let current = { scope: "gate", revision: 4, start: 900, end: 1800, rows: loaded, growing: true, ...detail };
+    const context = vm.createContext({
+      Number, Math, performance: { now: () => 10_000 }, videoRef: { current: video }, useSegmentPlayback: false,
+      transport: "hls", requestedTransport: "hls", originalFallbackRef: {}, transcodeFallbackRef: {}, nativeScope: "gate",
+      pendingSeekEpochRef: { current: null }, pendingSeekModeRef: { current: null }, desiredEpochRef: { current: null },
+      clipPreviewReachedEnd, clipPreviewEndRef: { current: null },
+      loadedPlaybackWindow: current, playbackTimeline: clock(current.rows),
+      playbackDetailRef: { get current() { return current; } }, growingRowsRef: { current: { at: 0, inFlight: false } },
+      activeCameraId: "gate", source: "main", extendedPlaybackRows,
+      recordingWindowUrl: (...args) => args.join("/"),
+      fetch: (url) => { requests.push(url); return Promise.resolve({ ok: true, json: async () => ({ recordings: served }) }); },
+      setPlaybackDetail: (update) => { current = update(current); },
+      requestPlaybackWindow: (window) => reloads.push(window),
+      setPlayhead() {},
+    });
+    const mappings = source.slice(source.indexOf("  function mediaTimeToEpoch("), source.indexOf("  function windowAround("));
+    const timeUpdate = source.slice(source.indexOf("  function handleRecordingTimeUpdate("), source.indexOf("  function handleRecordingSeeked("));
+    vm.runInContext(mappings + timeUpdate, context);
+    context.handleRecordingTimeUpdate({ currentTarget: video });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return { requests, reloads, current };
+  };
+  const longer = [...loaded, { start_epoch: 1020, duration_seconds: 10 }];
+  const early = await run({ served: longer, mediaTime: 5 });
+  assert.equal(early.requests.length, 0, "no re-read while known rows are still ahead");
+  const finished = await run({ served: longer, mediaTime: 19, detail: { growing: false } });
+  assert.equal(finished.requests.length, 0, "a finished playlist is never re-read");
+  const extended = await run({ served: longer, mediaTime: 18 });
+  assert.deepEqual(extended.requests, ["gate/900/1800/main"]);
+  assert.equal(extended.current.rows.length, 3, "new rows extend the loaded window");
+  assert.equal(extended.current.revision, 4, "same load: the playlist URL must not change");
+  assert.equal(extended.reloads.length, 0);
+  const changed = await run({ served: [loaded[0], { start_epoch: 1010, duration_seconds: 9 }, longer[2]], mediaTime: 18 });
+  assert.equal(changed.current.rows.length, 2);
+  assert.equal(JSON.stringify(changed.reloads), JSON.stringify([{ start: 900, end: 1800 }]), "changed earlier rows reload the window once");
 }
 
 // Subsequent scrubs within the current native HLS playlist must also bypass

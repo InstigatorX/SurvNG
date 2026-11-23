@@ -9,8 +9,8 @@ import pytest
 from survng.app.evidence_work import (
     EvidenceWorkPreempted,
     cancellable_evidence_work,
-    run_evidence_process,
 )
+from survng.app.recorded_decoder import FAILURE_TIMEOUT, run_decoder
 
 
 @pytest.mark.parametrize("batch", [False, True])
@@ -51,7 +51,7 @@ def test_cancel_reaps_owned_decoder(monkeypatch, tmp_path, batch):
                     finally:
                         assert budget.status()["active_processes"] == 0
                 else:
-                    run_evidence_process([sys.executable, "-c", "import time; time.sleep(30)"], timeout=20)
+                    run_decoder([sys.executable, "-c", "import time; time.sleep(30)"], backend="cpu", timeout=20)
         except Exception as error:
             errors.append(error)
 
@@ -74,8 +74,9 @@ def test_cancel_reaps_owned_decoder(monkeypatch, tmp_path, batch):
 
 def test_scoped_decoder_preserves_output_and_deadline():
     with cancellable_evidence_work(lambda: False, optional=False):
-        result = run_evidence_process([sys.executable, "-c", "print('frame')"], timeout=2)
-        assert result.returncode == 0
-        assert result.stdout == b"frame\n"
-        with pytest.raises(subprocess.TimeoutExpired):
-            run_evidence_process([sys.executable, "-c", "import time; time.sleep(30)"], timeout=.05)
+        result = run_decoder([sys.executable, "-c", "print('frame')"], backend="cpu", timeout=2)
+        assert result.ok and result.returncode == 0
+        assert result.output == b"frame\n"
+        expired = run_decoder([sys.executable, "-c", "import time; time.sleep(30)"], backend="cpu", timeout=.05)
+        assert expired.failure == FAILURE_TIMEOUT
+        assert expired.returncode not in (None, 0)

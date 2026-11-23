@@ -437,11 +437,107 @@ An accepted batch gets two object checks:
 
 A confirmed route watch uses the denser `event_route_refinement_stages`. Within
 each stage, inference stops early once temporal confirmation is satisfied.
-Recordings are plain MP4 segments that can only be read once closed, so
-refinement waits for the segment to be indexed (predicted from the newest
-indexed segment), plus `event_refinement_settle_seconds` (0.75). It retries
+Recordings are plain MP4 segments by default. A camera with
+`recording_fragmented` writes fragmented MP4 instead
+(`frag_keyframe+delay_moov+default_base_moof`): the same files and segment
+length, with the index written with the first fragment and one fragment per
+keyframe interval, so a segment is readable from about one keyframe interval
+after it starts and after an unclean stop. `delay_moov` is required:
+`empty_moov` writes the index before any packet, which drops each track's
+start offset and shows as a held frame at every segment join on B-frame or
+audio streams. Both layouts share one stream fingerprint and the same
+per-stream start times, and `recording_media` reads a fragmented segment's
+video duration from its fragment headers. Changing the setting reloads all
+cameras, like changing `record`. The option also sets `flush_packets=1`, so
+each finished fragment reaches the file at once (FFmpeg otherwise holds up to
+256 KiB, several seconds of a low-bitrate stream); the muxer still writes once
+per fragment.
+
+For a fragmented camera, refinement reads the segment being written. The
+recorder finds that file by listing the current and previous hour directory:
+once per segment, about once a second around the rollover, and at most once a
+second while no file can be the open one (stalled stream, slow storage, just
+restarted). File names carry whole seconds: a file named before the second in
+which the running recorder process was started is never taken for the open
+segment, and one named in that same second is not trusted for the whole
+segment but looked past once a second. The newest name counts as the file
+being written for up to 5 s beyond the segment length (a late cut after a
+late name); past that it is overdue (a stalled stream, a very long keyframe
+interval) and is read as far as it has got, measured afresh each time, since
+nothing shows it is finished. The open file's fragment headers are read
+incrementally: each lookup reads only what was added since the last one. The
+same listing, which reaches back three segment lengths, also gives the newest
+closed file. Its length is read once, when a newer file exists to show it is
+closed, and it stays directly readable until 15 s after its nominal end,
+by when the 10 s index poll normally has it (a miss after that asks for a
+discovery as usual); this does not depend on anyone having looked the segment
+up while it was open. A sample that falls after that file's video but before
+the open file's name (a name that landed late) is read from the start of the
+open file once it has a fragment; this needs the closed file to be a
+fragmented one whose length is known. Rows for either file report how
+far the completed fragments reach, are kept by a job for at most 0.2 s, are
+never stored in the index, and no index discovery is requested for them.
+
+A refinement job is due `RECORDED_OPEN_SEGMENT_READY_SECONDS` (1.5) after the
+frame it needs, not when the segment closes; that is when the job may start,
+and the frame itself can be a second or so further behind (whole-second file
+names, plus one keyframe interval). A frame beyond the completed fragments, or
+within their last 0.25 s where no later frame exists yet, is looked for again
+after 0.25 s unless another sample in the same pass is waiting on the index or
+is still in the future. A read of the open segment that comes back short
+(a stream slower than 4 fps, or a decode that failed)
+skips the nudged single-frame fallback and gets three quick retries, then the
+ordinary interval; the extra face-evidence reads skip the fallback and simply
+count the frame as missing. A job with no indexed rows sizes its decode-memory
+reservation from the last frame decoded for the camera when the camera reads
+open segments; its first such job, and any such job on a plain camera, takes
+the 36 MiB-a-frame fallback. The open file's frame size is read once per job
+so the shared ceiling covers it before decoding. Near a segment's tail
+an open read and a later indexed read can pick different files, because an
+indexed row is capped at the segment length; the open read is the more exact.
+`recording_open_segment_lookups` in the job timing counts lookups served
+without the index. Tracking, playback and export still use indexed segments
+only, and a camera that records only its sub stream does not use this path.
+
+For a plain camera, refinement waits for the segment to be indexed (predicted
+from the newest indexed segment), plus `event_refinement_settle_seconds`
+(0.75). It retries
 for up to `event_refinement_retry_seconds` (24) at
 `event_refinement_retry_interval_seconds` (1.0) intervals.
+Segment starts come from file names, which carry whole seconds, and an index
+row that has not been validated is no longer than the configured segment. So a
+row can end before the video does, leaving an instant between two indexed
+segments that no row covers. A refinement sample there is resolved from the
+files instead of waited for:
+
+- if the earlier file is longer than its row (a cut on a late keyframe, as
+  with a 4 s keyframe interval), the sample is read from that file, to its
+  measured length (the duration the index has stored, or read from the file
+  when it has none yet);
+- otherwise, if the next segment starts within 1.5 s of where the earlier video
+  ends (its name landed late), the sample is read from the start of that
+  segment. Several samples that land on that one frame count as one
+  observation.
+
+This applies only with an indexed segment on both sides. At the live edge the
+following segment is still open, and the sample waits for it as before, so the
+same sample always resolves to the same frame. A longer stretch with no video
+is a real recording gap and is still waited for, as is an instant after a
+file whose video length cannot be measured; that answer is asked for again at
+most every 3 s, and at once after a discovery the job waited for. An outage
+shorter than 1.5 s cannot be told from a late file name and is bridged. `recording_index_hole_lookups` in the job timing
+counts the lookups that found a segment in the refinement stages (the extra
+face-evidence reads use the same lookup but are not counted). The lookup
+follows a normal index miss, so a near-live sample still asks the indexer for
+a discovery first.
+
+A segment that has just closed is usually not indexed yet, because the indexer
+polls every 10 s. The first lookup that misses asks the indexer for it. The
+worker then waits, for at most one retry interval, until a discovery that
+started after its request has finished, and re-reads the index without asking
+again. If the row is still absent (the segment is still open, or discovery
+failed) the stage falls back to the plain interval, so discovery is requested
+no more often than with a fixed sleep.
 
 For each available target:
 
@@ -487,6 +583,16 @@ On Linux, the children also set their kernel-visible process names to
 `intel_gpu_top`, `top`, `htop`, and `ps`.
 
 `RecordedMotionObjectDetector` owns frame sampling, decode admission, and retries.
+Every FFmpeg process that reads frames from a recording (refinement single and
+batch reads, the tracking sampler and exact-frame read, and the stream-alignment
+and face-dataset still) is built and run by `recorded_decoder`: one set of
+hardware-then-software plans, one command builder that always applies the
+thread limits, one process runner, and one classification of failures
+(`unfinalized_input`, `missing_input`, `unreadable_input`, `hardware_init`,
+`bitstream_corruption`, `timestamp`, `timeout`, `stalled`, `spawn`). A
+streaming decode that produces nothing for 10 s while its reader waits (60 s
+before its first frame) is killed. Codec errors and failed
+decodes are logged at most once a minute per consumer and recording directory.
 It passes collected samples to `motion_pipeline.recorded_evidence` for temporal
 association, confirmation, and representative frame selection.
 

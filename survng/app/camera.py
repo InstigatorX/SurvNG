@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import subprocess
 import threading
 import time
 from collections import deque
@@ -41,6 +40,7 @@ from .motion_events import MotionEventCoordinator
 from .motion_decisions import MotionDecisionOrchestrator
 from .motion_incidents import MotionIncidentService
 from .motion_ingress import MotionEventIngressService
+from .recorded_decoder import decode_recording_still
 from .security import redact_secret_text
 from .motion_runtime import CameraMotionState, MotionRuntimeService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
@@ -68,43 +68,6 @@ SPATIAL_ALIGNMENT_FAILURE_LIMIT = 3
 SPATIAL_ALIGNMENT_ATTEMPT_INTERVAL_SECONDS = 3.0
 SPATIAL_ALIGNMENT_RECORDING_FINALIZE_GRACE_SECONDS = 2.0
 LOGGER = logging.getLogger(__name__)
-
-
-def _decode_recording_still(
-    path: Path,
-    *,
-    ffmpeg_path: str,
-    seek_seconds: float = 1.0,
-) -> np.ndarray | None:
-    """Decode one JPEG still from a closed recording segment via FFmpeg."""
-    if not ffmpeg_path or not path.is_file():
-        return None
-    command = [
-        ffmpeg_path,
-        "-nostdin",
-        "-v", "error",
-        "-ss", f"{max(0.0, float(seek_seconds)):.3f}",
-        "-i", str(path),
-        "-frames:v", "1",
-        "-f", "image2pipe",
-        "-vcodec", "mjpeg",
-        "pipe:1",
-    ]
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            timeout=12.0,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0 or not result.stdout:
-        return None
-    image = cv2.imdecode(np.frombuffer(result.stdout, dtype=np.uint8), cv2.IMREAD_COLOR)
-    if image is None or getattr(image, "size", 0) <= 0:
-        return None
-    return image
 
 
 class _AutoStreamAlignment:
@@ -808,10 +771,11 @@ class CameraWorker:
         for path, seek in self._stable_recording_candidates():
             if not self.motion_state.detection_enabled():
                 return None
-            still = _decode_recording_still(
+            still = decode_recording_still(
                 path,
                 ffmpeg_path=ffmpeg_path,
                 seek_seconds=seek,
+                consumer="stream-alignment",
             )
             if still is not None:
                 return still

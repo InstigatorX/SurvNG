@@ -95,6 +95,32 @@ class Recorder(RecordingIndexMixin):
         self._index_maintenance_thread: threading.Thread | None = None
         self._edge_refresh_lock = threading.Lock()
         self._edge_refresh_requests: dict[RecorderKey, float] = {}
+        # Cameras whose running recorder writes fragmented segments, and the
+        # segment each is writing (path, filename start epoch), found by one
+        # directory listing per segment and only when a reader asks.
+        self._fragmented_keys: set[RecorderKey] = set()
+        # A listing that found nothing is remembered too (path None), so a
+        # stalled recorder or slow storage is not listed on every lookup.
+        self._open_segments: dict[RecorderKey, tuple[Path | None, float, float]] = {}
+        # When each running recorder process started, and a counter that
+        # changes on every start, so a listing begun before a restart cannot
+        # put the previous process's last file back.
+        self._recorder_started_at: dict[RecorderKey, float] = {}
+        self._recorder_generation: dict[RecorderKey, int] = {}
+        # The segment a recorder closed when it moved to the current one
+        # (path, filename start epoch, forget-after epoch, a newer file
+        # exists): readable, but not in the index for a few more seconds.
+        self._previous_segments: dict[RecorderKey, tuple[Path, float, float, bool]] = {}
+        # How far the open file's fragment headers have been read.
+        self._open_segment_scans: dict[RecorderKey, tuple[Path, Any]] = {}
+        self._closed_segment_lengths: dict[RecorderKey, tuple[Path, float]] = {}
+        # Each request gets a ticket; a discovery completes every ticket issued
+        # before it started. A reader that missed a just-closed segment waits
+        # for its own ticket, not for whichever discovery happens to finish.
+        self._edge_refresh_tickets: dict[RecorderKey, int] = {}
+        self._edge_refresh_taken: dict[RecorderKey, int] = {}
+        self._edge_refresh_done = threading.Condition()
+        self._edge_refresh_completed: dict[RecorderKey, int] = {}
         self._index_error_log_at: dict[str, float] = {}
         self._prune_cursor = 0
         self._fingerprint_pending: deque[str] = deque()
@@ -180,12 +206,16 @@ class Recorder(RecordingIndexMixin):
                 "1",
                 "-segment_format",
                 "mp4",
+                *self._segment_layout_args(camera),
                 output,
             ]
             executable = named_ffmpeg_executable(
                 self.ffmpeg_path,
                 "survng-recorder",
             )
+            # Taken before the process exists: its first file cannot be named
+            # earlier than this.
+            spawned_at = time.time()
             process = subprocess.Popen(
                 [executable, *command[1:]],
                 stderr=subprocess.PIPE,
@@ -202,6 +232,17 @@ class Recorder(RecordingIndexMixin):
                 if keep_process:
                     self.processes[key] = (process, stop_event, keeper)
                     self._retry_after.pop(key, None)
+                    # A restarted recorder begins a new file mid-segment.
+                    self._open_segments.pop(key, None)
+                    self._previous_segments.pop(key, None)
+                    self._closed_segment_lengths.pop(key, None)
+                    self._open_segment_scans.pop(key, None)
+                    self._recorder_started_at[key] = spawned_at
+                    self._recorder_generation[key] = self._recorder_generation.get(key, 0) + 1
+                    if camera.recording_fragmented:
+                        self._fragmented_keys.add(key)
+                    else:
+                        self._fragmented_keys.discard(key)
             if not keep_process:
                 stop_event.set()
                 if process.poll() is None:
@@ -788,6 +829,28 @@ class Recorder(RecordingIndexMixin):
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+    @staticmethod
+    def _segment_layout_args(camera: CameraConfig) -> list[str]:
+        """Muxer options for the camera's segment layout; plain MP4 needs none.
+
+        A fragment starts at each keyframe and offsets are relative to each
+        fragment, so every completed fragment is readable while FFmpeg is still
+        writing the segment. ``delay_moov`` writes the index with the first
+        fragment rather than before it: only then does FFmpeg know each
+        track's start offset, and without that (``empty_moov``) B-frame video
+        and audio start late or early in every segment, which shows as a held
+        frame at each join. ``flush_packets`` hands each finished fragment to
+        the file at once: FFmpeg otherwise holds up to 256 KiB, which on a
+        low-bitrate stream keeps the newest seconds unreadable for several
+        seconds. The muxer still writes once per fragment, not per packet.
+        """
+        if not camera.recording_fragmented:
+            return []
+        return [
+            "-segment_format_options",
+            "movflags=+frag_keyframe+delay_moov+default_base_moof:flush_packets=1",
+        ]
 
     def reconfigure_runtime(
         self,

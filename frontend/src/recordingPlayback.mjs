@@ -377,9 +377,80 @@ export function recordingSegmentLocalTime(segment, epoch, video = null) {
   return Math.max(0, Math.min(Math.max(0, duration - 0.01), epoch - segment.start_epoch));
 }
 
+// Seeking to the end of the newest footage starts this far before it.
+export const RECORDING_EDGE_SNAP_SECONDS = 1;
+
+// A recording that ended this recently is still being written.
+export const RECORDING_LIVE_EDGE_RECENT_SECONDS = 120;
+// A seek to the end of footage that is still being written starts this far
+// before it. Native HLS needs a few whole segments ahead of the start: started
+// in the last second of a growing playlist it refetches that segment and waits
+// for the next one to be published, which takes a segment length or more.
+export const RECORDING_LIVE_EDGE_HOLDBACK_SECONDS = 30;
+
+// The latest time a seek into `latest`, the newest recorded range, may start at.
+// Playback continuing from footage it has just played passes `continuing`: it
+// must not be moved back, or it would replay what was just shown. `growing`
+// says the seek will play a growing playlist; any other player loads a
+// finished one and gains nothing from starting further back.
+export function recordingEdgeSeekEpoch(latest, nowEpoch, continuing = false, growing = false) {
+  const live = growing && !continuing
+    && Number(nowEpoch) - latest.end_epoch < RECORDING_LIVE_EDGE_RECENT_SECONDS;
+  const back = live ? RECORDING_LIVE_EDGE_HOLDBACK_SECONDS : RECORDING_EDGE_SNAP_SECONDS;
+  return Math.max(latest.start_epoch, latest.end_epoch - back);
+}
+
+// Where playback continues after `segment`, or null when nothing follows yet.
+// A range has to reach beyond the edge snap to count. Availability can end a
+// fraction of a second after the segment that was just played: a recording is
+// listed with its nominal length until its exact length is read. Seeking to
+// that sliver snaps back into the played segment and repeats its last second.
 export function recordingEpochAfterSegment(segment, ranges) {
   if (!segment) return null;
   const end = Number(segment.end_epoch) + 0.01;
-  const next = (ranges || []).find((item) => item.end_epoch > end);
+  const next = (ranges || []).find((item) => (
+    item.end_epoch - Math.max(end, item.start_epoch) > RECORDING_EDGE_SNAP_SECONDS
+  ));
   return next ? Math.max(end, next.start_epoch) : null;
+}
+
+export const RECORDING_LIVE_EDGE_STORAGE_KEY = "survng.recordingLiveEdge";
+
+// On unless turned off (?liveedge=0, remembered; ?liveedge=1 turns it back on):
+// at the live edge native HLS plays a growing playlist, so new recordings
+// follow on without the page loading a new playlist.
+export function recordingLiveEdgeFollow(win = typeof window === "undefined" ? null : window) {
+  if (!win) return false;
+  let requested = null;
+  try {
+    requested = new URLSearchParams(win.location?.search || "").get("liveedge");
+  } catch {
+    requested = null;
+  }
+  try {
+    if (requested === "0") {
+      win.localStorage?.setItem(RECORDING_LIVE_EDGE_STORAGE_KEY, "0");
+      return false;
+    }
+    if (requested === "1") {
+      win.localStorage?.removeItem(RECORDING_LIVE_EDGE_STORAGE_KEY);
+      return true;
+    }
+    return win.localStorage?.getItem(RECORDING_LIVE_EDGE_STORAGE_KEY) !== "0";
+  } catch {
+    // Storage can be unavailable (private mode); the URL still applies.
+    return requested !== "0";
+  }
+}
+
+// Rows re-read for a growing playlist replace the loaded ones only when they
+// extend them: the player's clock is the rows it was started with, so a
+// changed or missing earlier row would move every later media time.
+export function extendedPlaybackRows(current, next) {
+  if (!Array.isArray(current) || !Array.isArray(next) || next.length <= current.length) return null;
+  const unchanged = current.every((row, index) => (
+    Number(row.start_epoch) === Number(next[index].start_epoch)
+    && Number(row.duration_seconds) === Number(next[index].duration_seconds)
+  ));
+  return unchanged ? next : null;
 }

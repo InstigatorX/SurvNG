@@ -21,6 +21,7 @@ build/
 
 # Runtime config and secrets
 config.json
+config-changes.jsonl
 secrets.json
 secrets.key
 *.local.json

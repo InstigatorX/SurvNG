@@ -86,7 +86,7 @@ export function recordingUpdatesUrl(cameraId, startEpoch, endEpoch, afterEpoch, 
   return appUrl(`/api/cameras/${cameraId}/recordings/updates?${params.toString()}`);
 }
 
-export function recordingDayHlsUrl(cameraId, startEpoch, endEpoch, source, startMedia = null) {
+export function recordingDayHlsUrl(cameraId, startEpoch, endEpoch, source, startMedia = null, growing = false) {
   const params = new URLSearchParams({
     start_epoch: startEpoch.toFixed(3),
     end_epoch: endEpoch.toFixed(3),
@@ -95,6 +95,7 @@ export function recordingDayHlsUrl(cameraId, startEpoch, endEpoch, source, start
   if (Number.isFinite(startMedia) && startMedia > 0) {
     params.set("start", Number(startMedia).toFixed(3));
   }
+  if (growing) params.set("growing", "true");
   return appUrl(`/api/cameras/${cameraId}/recordings/day.m3u8?${params.toString()}`);
 }
 

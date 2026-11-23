@@ -210,4 +210,43 @@ Suggested order: T1 and T2, then T3, T5 and T6, with T4 last.
   7–11 were not re-verified and are marked as such. `README.tracking.md`,
   `docs/adaptive-motion.md`, `THIRD_PARTY.md` and the Sparse Identity
   docstrings were corrected too.
-- **T4:** not started.
+- **T4 (decoders done; segment format awaiting a decision):**
+  - The recorded-video decoders are consolidated in
+    `survng/app/recorded_decoder.py`. There were five command builders, not
+    four: `recorded_video_frames.py` held two. They now share decode plans, a
+    command builder, a process runner and a failure classification.
+  - Behaviour changes: the tracking sampler kills a decoder that stops
+    producing (10 s between frames, 60 s before the first); the still,
+    sampler and exact-frame paths log codec errors and failed decodes,
+    rate-limited; the alignment and face-dataset still is lossless BMP with
+    the thread limits.
+  - Found on a damaged stream: decoder errors can cut a `showinfo` line in
+    two, and the sampler then gave later images a neighbour's timestamp
+    before failing the segment. Each sampled frame now gets one timestamp in
+    order, and one whose checksum was lost is paired by time and marked
+    inexact. A refinement batch with fewer timestamps than frames is
+    discarded instead of paired by position.
+  - Not changed: the five-nudge single-frame retry, the 8/10/12 s timeouts,
+    and the exact-frame read decoding from the start of its segment.
+  - Fragmented segments, phase 1 (branch `claude/t4-fragmented-recordings`):
+    a per-camera `recording_fragmented` setting, default off, and a fragment
+    duration reader. The layout is `frag_keyframe+delay_moov`; the first
+    attempt used `empty_moov`, which an independent review showed drops track
+    start offsets (80-120 ms held frame at each join on B-frame streams,
+    audio offset zeroed). Measured on FFmpeg 8.1.3 with B-frames and audio:
+    per-stream start times match plain MP4, and a concat across plain,
+    fragmented and mixed segments decodes to identical frames. Chromium
+    plays and seeks a fragmented segment directly (tested on the earlier
+    layout, video only). Not tested: Safari and
+    iOS, HEVC in a browser, and reading while writing over NFS. 
+  - Fragmented segments, phase 2 (branch `claude/t4-open-segment-refinement`):
+    refinement on a fragmented camera reads the open segment and is due 1.5 s
+    after the frame it needs. Verified locally on FFmpeg 8.1.3 against a
+    segment being written with the recorder's options. Not verified: reading
+    while writing over NFS, and the delay on a production host.
+  - Segment length: no change made. `scripts/measure-refinement-delay.sh`
+    measures the delay on a running host. With 10 s plain MP4 segments the
+    first refinement stage is scheduled at event + 1.5 s + time to segment
+    close, so 1.5 to 11.5 s and 6.5 s on average. A fragmented segment is
+    decodable while open (verified on FFmpeg 8.1.3), but the index, the
+    `stts`-based duration parser and playback all assume closed plain MP4.

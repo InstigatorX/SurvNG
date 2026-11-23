@@ -20,6 +20,7 @@ export function defaultCamera(cameras, seed = {}) {
     }),
     record: seed.record ?? true,
     record_sub: seed.record_sub ?? false,
+    recording_fragmented: seed.recording_fragmented ?? false,
     retention: {
       main_days: seed.retention?.main_days ?? null,
       live_days: seed.retention?.live_days ?? null,
@@ -73,6 +74,9 @@ export function CameraStreamsEditor({ camera, onChange }) {
           <label className="stream-record-toggle"><input type="checkbox" checked={camera.record_sub || false} onChange={(event) => onChange(["record_sub"], event.target.checked)} /> Record</label>
         </div>
         <input id={`sub-stream-${camera.id}`} value={camera.live_stream_url || ""} onChange={(event) => onChange(["live_stream_url"], event.target.value)} />
+      </div>
+      <div className="stream-field">
+        <label className="stream-record-toggle" title="Same files and segment length; each segment stays readable while it is being written and after an unclean stop. Applies to new segments. Saving this reloads all cameras, like changing Record."><input type="checkbox" checked={camera.recording_fragmented || false} onChange={(event) => onChange(["recording_fragmented"], event.target.checked)} /> Fragmented recording segments</label>
       </div>
     </div>
   </section>;

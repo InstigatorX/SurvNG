@@ -3,6 +3,9 @@ import {
   recordingSegmentAt,
   recordingSegmentLocalTime,
   recordingEpochAfterSegment,
+  recordingEdgeSeekEpoch,
+  recordingLiveEdgeFollow,
+  extendedPlaybackRows,
   adjustRecordingExportRange,
   describePlaybackError,
   gridPlaybackNeedsSeek,
@@ -133,6 +136,58 @@ assert.equal(recordingEpochAfterSegment(mobileSegment, mobileRows), 200);
 assert.equal(recordingEpochAfterSegment(mobileRows[1], mobileRows), null);
 assert.equal(recordingEpochAfterSegment(mobileRows[1], [...mobileRows, { start_epoch: 210, end_epoch: 220 }]), 210.01);
 
+// Live edge: a new recording is listed with its nominal 10 s until its exact
+// length (9.964 s here) is read, so availability ends a sliver after the
+// segment that just finished. That sliver is not footage to continue into:
+// seeking to it snaps back and replays the last second, over and over.
+{
+  const played = { start_epoch: 1000, end_epoch: 1009.964 };
+  assert.equal(recordingEpochAfterSegment(played, [{ start_epoch: 400, end_epoch: 1010 }]), null,
+    "a nominal end just past the played segment is not a next recording");
+  assert.equal(recordingEpochAfterSegment(played, [{ start_epoch: 400, end_epoch: 1020 }]), 1009.974,
+    "the next recording continues right after the played one");
+  assert.equal(
+    recordingEpochAfterSegment(played, [{ start_epoch: 400, end_epoch: 1010 }, { start_epoch: 1300, end_epoch: 1310 }]),
+    1300,
+    "a sliver at the end of a range is skipped for the next range",
+  );
+}
+
+// Growing playlist opt-in, remembered like the transport override.
+{
+  const store = new Map();
+  const win = (search) => ({
+    location: { search },
+    localStorage: {
+      getItem: (key) => (store.has(key) ? store.get(key) : null),
+      setItem: (key, value) => store.set(key, String(value)),
+      removeItem: (key) => store.delete(key),
+    },
+  });
+  assert.equal(recordingLiveEdgeFollow(win("")), true, "on unless turned off");
+  assert.equal(recordingLiveEdgeFollow(win("?camera=foyer&liveedge=0")), false);
+  assert.equal(recordingLiveEdgeFollow(win("?camera=foyer")), false, "remembered without the parameter");
+  assert.equal(recordingLiveEdgeFollow(win("?liveedge=1")), true);
+  assert.equal(recordingLiveEdgeFollow(win("")), true, "back on");
+  assert.equal(recordingLiveEdgeFollow({ location: { search: "?liveedge=0" }, get localStorage() { throw new Error("blocked"); } }), false);
+  assert.equal(recordingLiveEdgeFollow({ location: { search: "" }, get localStorage() { throw new Error("blocked"); } }), true);
+  assert.equal(recordingLiveEdgeFollow(null), false);
+}
+
+// A growing playlist's rows are only ever extended in place.
+{
+  const loaded = [{ start_epoch: 100, duration_seconds: 9.964 }, { start_epoch: 110, duration_seconds: 9.964 }];
+  const longer = [...loaded.map((row) => ({ ...row })), { start_epoch: 120, duration_seconds: 9.964 }];
+  assert.equal(extendedPlaybackRows(loaded, longer), longer);
+  assert.equal(extendedPlaybackRows(loaded, loaded.map((row) => ({ ...row }))), null, "nothing new");
+  assert.equal(
+    extendedPlaybackRows(loaded, [loaded[0], { start_epoch: 110, duration_seconds: 10 }, longer[2]]),
+    null,
+    "an earlier row changed: media times would move",
+  );
+  assert.equal(extendedPlaybackRows(null, longer), null);
+}
+
 // All cameras: the rail draws the union of every camera's (and source's) ranges.
 assert.deepEqual(recordingCoverageUnion([
   { camera_id: "b", source: "main", start_epoch: 100, end_epoch: 160 },
@@ -143,3 +198,15 @@ assert.deepEqual(recordingCoverageUnion([
   { camera_id: "a", source: "live", start_epoch: "bad", end_epoch: 210 },
 ]), [{ start_epoch: 100, end_epoch: 170 }, { start_epoch: 200, end_epoch: 210 }], "overlapping and touching ranges merge; real gaps stay");
 assert.deepEqual(recordingCoverageUnion(null), []);
+
+// A seek to the end of footage still being written starts a few segments back,
+// so native HLS has media ahead of it; older footage keeps the one-second snap.
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2010, false, true), 1970);
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1990, end_epoch: 2000 }, 2010, false, true), 1990);
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2200, false, true), 1999);
+// Playback continuing past what it just played is never moved back.
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2010, true, true), 1999);
+// A player that loads a finished playlist (Shaka, per-file MP4, live edge
+// turned off) keeps the one-second snap: starting 30 s back buys it nothing.
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2010), 1999);
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2010, false, false), 1999);

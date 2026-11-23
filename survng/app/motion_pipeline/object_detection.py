@@ -3,10 +3,9 @@ from __future__ import annotations
 import logging
 import math
 import re
-import subprocess
 import threading
 import time
-from collections import Counter, deque
+from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,20 +15,22 @@ import cv2
 import numpy as np
 
 from ..evidence_work import (
-    EvidenceWorkPreempted, check_evidence_cancellation, evidence_cancelled,
-    evidence_wait_timeout, report_evidence_stage, run_evidence_process,
+    check_evidence_cancellation, evidence_cancelled,
+    report_evidence_stage,
 )
 from ..config import CameraConfig, DetectorConfig
 from ..scene_activity_evidence import scene_sample_records as _scene_sample_records
 from ..evidence_gallery import GalleryBatch, encode_gallery
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..face_detection_geometry import upper_body_window
-from ..ffmpeg_hw import (
-    RECORDED_FRAME_INPUT_THREAD_ARGS,
-    RECORDED_FRAME_OUTPUT_THREAD_ARGS,
-    recorded_frame_hw_args,
-)
 from ..object_activity import ObjectActivityAttributor
+from ..recorded_decoder import (
+    build_decode_command,
+    decoder_error_codecs,
+    read_bmp_frames,
+    recorded_decode_plans,
+    run_decoder,
+)
 from ..recording_media import mp4_video_dimensions
 from ..zones import apply_depth_zone_filters, apply_detection_zones
 from .context import Frame
@@ -73,6 +74,21 @@ RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
 RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS = 6.0
 # Finalization and edge indexing after a segment boundary.
 RECORDED_SEGMENT_INDEX_MARGIN_SECONDS = 1.0
+# A fragmented segment is readable up to its last completed fragment: one
+# keyframe interval (1 s on typical cameras) plus the write reaching storage.
+RECORDED_OPEN_SEGMENT_READY_SECONDS = 1.5
+# The next fragment is at most a keyframe interval away; look again soon.
+RECORDED_OPEN_SEGMENT_RETRY_SECONDS = 0.25
+# The completed fragments end one frame interval after their last frame, and
+# a sample needs a frame at or after its time. Leave that last interval (and
+# the same again for slow streams) to the next fragment.
+RECORDED_OPEN_SEGMENT_TAIL_SECONDS = 0.25
+# Offsets of one pass share a single read of the open segment's extent.
+RECORDED_OPEN_SEGMENT_MEMO_SECONDS = 0.2
+RECORDED_OPEN_SEGMENT_QUICK_RETRIES = 3
+# How long "no segment bridges this instant" is believed before asking again.
+# The following segment of a near-live sample appears within a segment length.
+RECORDED_INDEX_HOLE_RECHECK_SECONDS = 3.0
 # FFmpeg's accurate seek discards frames before the seek point, so keep the
 # seek strictly ahead of the first requested sample.
 RECORDED_BATCH_SEEK_MARGIN_SECONDS = 0.25
@@ -81,10 +97,8 @@ RECORDED_SPLIT_MINIMUM_WAIT_SECONDS = 1.0
 FAST_LIVE_FRAME_MAX_AGE_SECONDS = 1.0
 FAST_LIVE_FRAME_FUTURE_TOLERANCE_SECONDS = 0.5
 RECORDED_LIVE_FALLBACK_EVENT_TOLERANCE_SECONDS = 1.5
-_DECODER_ERROR_CODEC = re.compile(
-    rb"\[(hevc|h264)(?:_[A-Za-z0-9]+)? @",
-    re.IGNORECASE,
-)
+# One decoder process may not outlive this, whatever the stage deadline allows.
+RECORDED_DECODE_TIMEOUT_SECONDS = 8.0
 
 
 def _flatten_refinement_stages(
@@ -330,19 +344,95 @@ class _EventRecordedSampler:
             key=lambda row: float(row.get("start_epoch", 0.0)),
         )
         self._frames: dict[tuple[str, float], _DecodedRecordedFrame | None] = {}
+        # Cleared for the one re-read that follows a discovery the caller
+        # waited for, so that re-read does not request another.
+        self.request_index_refresh = True
+        # Set by a lookup that fell in the segment being written, beyond the
+        # fragments completed so far; and counted when one was served from it.
+        self.open_segment_pending = False
+        self.open_segment_lookups = 0
+        self._open_row: tuple[float, dict[str, Any]] | None = None
+        # Reads of the open segment that came back short. The quick retry is
+        # for a fragment about to land; a frame that still is not there after
+        # a few tries (a very low frame rate, a damaged frame) is not helped
+        # by starting FFmpeg four times a second. Counted over the whole job.
+        self.open_read_misses = 0
+        self.open_read_failed = False
+        self._open_paths_read: set[str] = set()
+        # Instants in an index hole and the row found for each.
+        self._hole_rows: dict[float, tuple[float, dict[str, Any] | None]] = {}
+        self.index_hole_lookups = 0
 
     def recording_at(self, epoch: float) -> dict[str, Any] | None:
         # Match Recorder.recording_at(): at a shared segment boundary the
         # newest segment is preferred, avoiding an EOF decode from its predecessor.
+        ends_here = None
         for row in reversed(self._rows):
             start = float(row.get("start_epoch", 0.0))
             end = row.get("end_epoch")
             if end is None:
                 duration = row.get("duration_seconds")
                 end = start + float(duration) if duration is not None else start
-            if start <= epoch <= float(end):
+            if start <= epoch < float(end):
                 return row
-        row = self.recorder.recording_at(self.camera_id, epoch)
+            if ends_here is None and start <= epoch == float(end):
+                # A read at a row's very end is past its last frame. Used only
+                # when nothing else holds this instant (see the end).
+                ends_here = row
+        open_row = self._open_recording(epoch)
+        if open_row is not None and not open_row.get("open", True):
+            # The segment the recorder just closed: complete, readable, and
+            # not indexed for a few more seconds. Past its end is a matter
+            # for the index (the next segment, or a hole before it).
+            if epoch < float(open_row["end_epoch"]):
+                self.open_segment_lookups += 1
+                return open_row
+        elif open_row is not None:
+            # The segment being written is read directly and never indexed
+            # while open, so asking the indexer for it would only list the
+            # directory. Its row grows, so it is kept only for one pass.
+            # A sample handed to this file from the hole before its name
+            # reads its first frame, which exists once a fragment does.
+            needed = max(epoch, float(open_row["start_epoch"]))
+            if needed + RECORDED_OPEN_SEGMENT_TAIL_SECONDS <= float(open_row["end_epoch"]):
+                self.open_segment_lookups += 1
+                return open_row
+            self.open_segment_pending = True
+            return None
+        row = (
+            self.recorder.recording_at(self.camera_id, epoch)
+            if self.request_index_refresh
+            else self.recorder.recording_at(self.camera_id, epoch, request_refresh=False)
+        )
+        if row is None:
+            # No row covers this instant. If that is only how rows are cut
+            # (a file longer than its row, or a file name that landed late),
+            # the video exists and waiting would never produce a row.
+            hole_key = round(epoch, 3)
+            known = self._hole_rows.get(hole_key)
+            if known is not None and (
+                known[1] is not None
+                or (
+                    self.request_index_refresh
+                    and time.monotonic() - known[0] < RECORDED_INDEX_HOLE_RECHECK_SECONDS
+                )
+            ):
+                # A row found stays found. "Nothing there" is asked again only
+                # now and then: a real gap would otherwise cost three queries
+                # and a file check for every missing sample on every pass.
+                # The re-read after a waited discovery always asks: the
+                # segment that closes the hole may be what was just indexed.
+                return known[1] if known[1] is not None else ends_here
+            for_hole = getattr(self.recorder, "recording_for_index_hole", None)
+            row = for_hole(self.camera_id, epoch) if callable(for_hole) else None
+            # Kept by instant, not by range: the row may start after it.
+            self._hole_rows[hole_key] = (
+                time.monotonic(), dict(row) if row is not None else None,
+            )
+            if row is not None:
+                self.index_hole_lookups += 1
+                return self._hole_rows[hole_key][1]
+            return ends_here
         if row is not None and row.get("start_epoch") is not None:
             normalized = dict(row)
             if normalized.get("end_epoch") is None:
@@ -354,6 +444,36 @@ class _EventRecordedSampler:
                 key=lambda item: float(item.get("start_epoch", 0.0))
             )
             return normalized
+        return row
+
+    def first_read_of_open(self, path: Path) -> bool:
+        """True the first time this job reads ``path`` while it is open."""
+        if str(path) in self._open_paths_read:
+            return False
+        self._open_paths_read.add(str(path))
+        return True
+
+    def _open_recording(self, epoch: float) -> dict[str, Any] | None:
+        """The recorder's open segment for ``epoch``, read once per pass."""
+        open_recording = getattr(self.recorder, "open_recording", None)
+        if not callable(open_recording):
+            return None
+        memo = self._open_row
+        if (
+            memo is not None
+            and time.monotonic() - memo[0] < RECORDED_OPEN_SEGMENT_MEMO_SECONDS
+        ):
+            kept = memo[1]
+            start = float(kept["start_epoch"])
+            # The open segment answers for everything from its start on; the
+            # one just closed only for its own extent. Anything else is asked
+            # again: it may belong to the other of the two.
+            if kept.get("open", True) and epoch >= float(kept.get("covers_from", start)):
+                return kept
+            if not kept.get("open", True) and start <= epoch < float(kept["end_epoch"]):
+                return kept
+        row = open_recording(self.camera_id, epoch)
+        self._open_row = (time.monotonic(), row) if row is not None else None
         return row
 
     def frame_at(
@@ -385,11 +505,15 @@ class _EventRecordedSampler:
         offsets_seconds: list[float],
         *,
         deadline: float | None,
+        single_frame_fallback: bool = True,
     ) -> tuple[dict[float, _DecodedRecordedFrame], int, int]:
         """Return cached/batched frames and bounded fallback counts.
 
         The tuple contains frames keyed by the caller's original offsets,
-        batch process count, and single-frame fallback count.
+        batch process count, and single-frame fallback count. Without
+        ``single_frame_fallback`` a sample the batch did not return is left
+        missing: for a segment still being written, the nudged retries would
+        only re-read a file caught mid-write.
         """
         requested = list(dict.fromkeys(max(0.0, value) for value in offsets_seconds))
         frames: dict[float, _DecodedRecordedFrame] = {}
@@ -421,7 +545,7 @@ class _EventRecordedSampler:
                 frames[offset] = frame
 
         fallback_count = 0
-        for offset in missing:
+        for offset in missing if single_frame_fallback else ():
             if offset in frames:
                 continue
             fallback_count += 1
@@ -457,6 +581,8 @@ class RecordedMotionObjectDetector:
         self.decode_budget = decode_budget
         self._scene_frames: deque[TimestampedLiveFrame] = deque(maxlen=4)
         self._scene_frames_lock = threading.Lock()
+        # Bytes of the last frame decoded for this camera (width x height x 3).
+        self._last_frame_bytes = 0
 
     def stop_requested(self) -> bool:
         return self._camera_stop_requested() or evidence_cancelled()
@@ -500,8 +626,25 @@ class RecordedMotionObjectDetector:
         )
         return self._predicted_index_epoch(event_at.timestamp() + newest, settle_seconds)
 
+    def _index_refresh_ticket(self) -> int | None:
+        """Newest discovery request for this camera, where the recorder issues them."""
+        ticket = getattr(self.recorder, "recording_edge_refresh_ticket", None)
+        if not callable(ticket) or not callable(
+            getattr(self.recorder, "wait_for_recording_edge_refresh", None)
+        ):
+            return None
+        return int(ticket(self.camera.id))
+
+    def _reads_open_segments(self) -> bool:
+        reads_open = getattr(self.recorder, "reads_open_segments", None)
+        return bool(callable(reads_open) and reads_open(self.camera.id))
+
     def _predicted_index_epoch(self, target: float, settle_seconds: float) -> float:
         ready = target + settle_seconds
+        if self._reads_open_segments():
+            # Readable as soon as its fragment is written; no wait for the
+            # segment to close and be indexed.
+            return max(ready, target + RECORDED_OPEN_SEGMENT_READY_SECONDS)
         segment = float(getattr(self.recorder, "segment_seconds", 0.0) or 0.0)
         rows_between = getattr(self.recorder, "recording_rows_between", None)
         if segment <= 0 or not callable(rows_between):
@@ -860,6 +1003,8 @@ class RecordedMotionObjectDetector:
             "decode_budget_wait_ms": 0.0,
             "refinement_early_exit_skipped": 0.0,
             "refinement_route_dense_plan": float(route_dense),
+            "recording_open_segment_lookups": 0.0,
+            "recording_index_hole_lookups": 0.0,
         }
         event_epoch = event_at.timestamp()
         planned_offsets = _flatten_refinement_stages(stages)
@@ -904,7 +1049,15 @@ class RecordedMotionObjectDetector:
             if (self.detector.config.face_recognition_enabled
                     and self.detector.config.face_evidence_enabled):
                 maximum_frames += self.detector.config.face_evidence_max_extra_frames
-            frame_bytes = self._frame_bytes_for_rows(prefetched_rows)
+            # A job reading a segment that is not indexed yet has no rows; without
+            # the camera's last decoded size it would reserve the 36 MiB
+            # fallback per frame, every time, and shut every other job out of
+            # the budget. Only the camera's first such job does (another
+            # camera's frame size would be a guess), and cameras that do not
+            # read open segments keep the fallback as before.
+            frame_bytes = self._frame_bytes_for_rows(prefetched_rows) or (
+                self._last_frame_bytes if self._reads_open_segments() else 0
+            )
             if frame_bytes:
                 budget.observe_frame_bytes(frame_bytes)
             budget_wait_started = time.monotonic()
@@ -1037,7 +1190,7 @@ class RecordedMotionObjectDetector:
     ) -> RecordedDetectionResult:
         refinement_deadline: float | None = None
         samples_by_offset: dict[float, _RecordedDetectionSample] = {}
-        samples_by_source_frame: dict[tuple[str, float], _RecordedDetectionSample] = {}
+        samples_by_source_frame: dict[tuple, _RecordedDetectionSample] = {}
 
         def ordered_samples() -> list[_RecordedDetectionSample]:
             # Different requested slots can resolve to one source frame. Keep
@@ -1165,6 +1318,13 @@ class RecordedMotionObjectDetector:
             else:
                 ordered_stage_offsets = stage_offsets
                 adaptive_limit = len(stage_offsets)
+            # A just-closed segment is usually not indexed yet: the first miss
+            # asks the indexer for it. Wait for that discovery rather than a
+            # full retry interval, then re-read without asking again. If the
+            # row is still absent (segment still open, discovery failed), the
+            # plain interval resumes, so discovery is requested no more often.
+            index_refresh_wait_available = True
+            reread_after_discovery = False
             while True:
                 if self.stop_requested():
                     return self._result(
@@ -1175,6 +1335,11 @@ class RecordedMotionObjectDetector:
                         workflow_started,
                         refinement_pending=False,
                     )
+                index_ticket_before = self._index_refresh_ticket()
+                sampler.request_index_refresh = not reread_after_discovery
+                sampler.open_segment_pending = False
+                sampler.open_read_failed = False
+                reread_after_discovery = False
                 stage_deadline = min(
                     deadline,
                     refinement_deadline
@@ -1182,6 +1347,7 @@ class RecordedMotionObjectDetector:
                     else deadline,
                 )
                 recording_missing = False
+                index_missing = False
                 future_sample = False
                 stage_consensus = False
                 pending_by_path: dict[Path, list[tuple[float, float, dict[str, Any]]]] = {}
@@ -1196,12 +1362,19 @@ class RecordedMotionObjectDetector:
                         future_sample = True
                         continue
                     lookup_started = time.monotonic()
+                    open_pending_before = sampler.open_segment_pending
+                    sampler.open_segment_pending = False
                     row = sampler.recording_at(target_epoch)
+                    waits_on_open_segment = sampler.open_segment_pending
+                    sampler.open_segment_pending = open_pending_before or waits_on_open_segment
                     timing["recording_wait_ms"] += (
                         time.monotonic() - lookup_started
                     ) * 1000.0
                     if row is None:
                         recording_missing = True
+                        # A miss in the index asked for a discovery. Looking
+                        # again every 0.25 s would ask for four a second.
+                        index_missing = index_missing or not waits_on_open_segment
                         continue
                     start_epoch = row.get("start_epoch")
                     if start_epoch is None:
@@ -1211,11 +1384,19 @@ class RecordedMotionObjectDetector:
                         (sample_offset, frame_offset, row)
                     )
 
+                sampler.request_index_refresh = True
+                timing["recording_open_segment_lookups"] = float(sampler.open_segment_lookups)
+                timing["recording_index_hole_lookups"] = float(sampler.index_hole_lookups)
                 for path, pending in list(pending_by_path.items()):
                     if stage_consensus:
                         timing["refinement_early_exit_skipped"] += float(len(pending))
                         continue
-                    if self.decode_budget is not None:
+                    open_segment = bool(pending[0][2].get("open"))
+                    # Dimensions are cached per file size, so a growing file is
+                    # asked once per job, not once per pass.
+                    if self.decode_budget is not None and (
+                        not open_segment or sampler.first_read_of_open(path)
+                    ):
                         dimensions = mp4_video_dimensions(path)
                         if dimensions is not None:
                             width, height = dimensions
@@ -1225,7 +1406,23 @@ class RecordedMotionObjectDetector:
                         path,
                         [frame_offset for _, frame_offset, _ in pending],
                         deadline=stage_deadline,
+                        **({"single_frame_fallback": False} if open_segment else {}),
                     )
+                    if open_segment and len(frames) < len(
+                        {round(frame_offset, 3) for _, frame_offset, _ in pending}
+                    ):
+                        # A frame inside the completed fragments did not come
+                        # back (a stream slower than 4 fps, or a failed
+                        # decode): look again shortly rather than nudging, a
+                        # few times, then at the ordinary interval.
+                        sampler.open_segment_pending = True
+                        sampler.open_read_failed = True
+                        recording_missing = True
+                    for decoded_frame in frames.values():
+                        # Jobs on a segment that is not indexed yet have no
+                        # row to size their memory reservation from.
+                        self._last_frame_bytes = int(decoded_frame.frame.nbytes)
+                        break
                     timing["frame_decode_ms"] += (
                         time.monotonic() - decode_started
                     ) * 1000.0
@@ -1244,10 +1441,13 @@ class RecordedMotionObjectDetector:
                         decoded = frames.get(frame_offset)
                         if decoded is None:
                             continue
+                        # Samples in an index hole all read the start of the next
+                        # segment: one frame is one observation. A frame without
+                        # an exact timestamp is keyed by the offset asked for.
                         source_key = (
                             (str(row["path"]), decoded.actual_offset)
                             if decoded.exact_timestamp
-                            else None
+                            else (str(row["path"]), "requested", round(frame_offset, 3))
                         )
                         sample = (
                             samples_by_source_frame.get(source_key)
@@ -1416,7 +1616,38 @@ class RecordedMotionObjectDetector:
                 if remaining <= 0:
                     break
                 slept = min(retry_interval_seconds, remaining)
-                time.sleep(slept)
+                index_ticket = (
+                    self._index_refresh_ticket()
+                    if recording_missing
+                    and not future_sample
+                    and index_refresh_wait_available
+                    and index_ticket_before is not None
+                    else None
+                )
+                if index_ticket is not None and index_ticket != index_ticket_before:
+                    # This pass's miss requested a discovery: wait for it.
+                    index_refresh_wait_available = False
+                    wait_started = time.monotonic()
+                    reread_after_discovery = bool(
+                        self.recorder.wait_for_recording_edge_refresh(
+                            self.camera.id, index_ticket, slept,
+                        )
+                    )
+                    slept = time.monotonic() - wait_started
+                else:
+                    if (
+                        recording_missing and not future_sample
+                        and sampler.open_segment_pending and not index_missing
+                    ):
+                        # A fragment not written yet is at most a keyframe
+                        # interval away. A read that came back short gets a
+                        # few quick tries, counted where the wait happens.
+                        if not sampler.open_read_failed:
+                            slept = min(slept, RECORDED_OPEN_SEGMENT_RETRY_SECONDS)
+                        elif sampler.open_read_misses < RECORDED_OPEN_SEGMENT_QUICK_RETRIES:
+                            sampler.open_read_misses += 1
+                            slept = min(slept, RECORDED_OPEN_SEGMENT_RETRY_SECONDS)
+                    time.sleep(slept)
                 wait_key = (
                     "recording_wait_ms"
                     if recording_missing and not future_sample
@@ -1742,10 +1973,12 @@ class RecordedMotionObjectDetector:
                 if row is None or row.get("start_epoch") is None:
                     timing["face_evidence_recording_unavailable"] = timing.get("face_evidence_recording_unavailable", 0) + 1
                     continue
-                relative = round(event_epoch + target - float(row["start_epoch"]), 3)
+                # A row returned for an index hole starts after the target.
+                relative = max(0.0, round(event_epoch + target - float(row["start_epoch"]), 3))
                 decode_started = time.monotonic()
                 frames, processes, fallbacks = sampler.frames_at(
                     Path(str(row["path"])), [relative], deadline=deadline,
+                    **({"single_frame_fallback": False} if row.get("open") else {}),
                 )
                 timing["frame_decode_ms"] += (time.monotonic() - decode_started) * 1000
                 timing["recording_batch_processes"] += processes
@@ -2202,51 +2435,30 @@ class RecordedMotionObjectDetector:
             return None
         attempts = [0.0, -0.25, 0.25, -0.75, 0.75]
         last_error = ""
-        hw_input_args, hw_filter_args = recorded_frame_hw_args(self.recorder.hardware_acceleration)
-        decode_plans = [("hardware", hw_input_args, hw_filter_args)] if hw_input_args else []
-        decode_plans.append(("cpu", [], []))
+        decode_plans = recorded_decode_plans(self.recorder.hardware_acceleration)
         for nudge in attempts:
             sample_at = max(0.0, offset_seconds + nudge)
-            for backend, input_args, filter_args in decode_plans:
-                timeout = 8.0
+            for plan in decode_plans:
+                backend = plan.backend
+                timeout = RECORDED_DECODE_TIMEOUT_SECONDS
                 if deadline is not None:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         last_error = "recorded-frame deadline expired"
                         break
                     timeout = min(timeout, remaining)
-                command = [
+                command = build_decode_command(
                     self.recorder.ffmpeg_path,
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-fflags",
-                    "+discardcorrupt",
-                    "-err_detect",
-                    "ignore_err",
-                    *RECORDED_FRAME_INPUT_THREAD_ARGS,
-                    *input_args,
-                    "-ss",
-                    f"{sample_at:.3f}",
-                    "-copyts",
-                    "-start_at_zero",
-                    "-i",
-                    str(path),
-                    "-map",
-                    "0:v:0",
-                    "-an",
-                    "-frames:v",
-                    "1",
-                    *filter_args,
-                    "-pix_fmt",
-                    "bgr24",
-                    "-f",
-                    "image2pipe",
-                    "-vcodec",
-                    "bmp",
-                    *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
-                    "pipe:1",
-                ]
+                    path,
+                    plan=plan,
+                    tolerate_corruption=True,
+                    seek=f"{sample_at:.3f}",
+                    copyts=True,
+                    start_at_zero=True,
+                    first_video_stream=True,
+                    video_filter=plan.download_filter,
+                    frames=1,
+                )
                 process_lease = self._acquire_decode_process(
                     incident_epoch=incident_epoch,
                     deadline=deadline,
@@ -2255,28 +2467,22 @@ class RecordedMotionObjectDetector:
                 if self.decode_budget is not None and process_lease is None:
                     last_error = "decode process budget unavailable"
                     break
-                result = None
                 try:
-                    result = run_evidence_process(command, timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    last_error = f"{backend} timed out"
+                    result = run_decoder(command, backend=backend, timeout=timeout)
                 finally:
                     if process_lease is not None:
                         process_lease.release()
-                if result is not None:
-                    self._record_decoder_errors(
-                        stderr=result.stderr or b"",
-                        path=path,
-                        backend=backend,
-                    )
-                if result is None or result.returncode != 0 or not result.stdout:
+                self._record_decoder_errors(
+                    stderr=result.stderr,
+                    path=path,
+                    backend=backend,
+                )
+                if not result.ok or not result.output:
                     if self.decode_budget is not None:
                         self.decode_budget.record_ffmpeg(backend, success=False)
-                    if result is not None:
-                        detail = result.stderr.decode("utf-8", errors="replace").strip().splitlines()[0:2]
-                        last_error = f"{backend}: {' '.join(detail)[:180]}"
+                    last_error = result.describe()
                     continue
-                array = np.frombuffer(result.stdout, dtype=np.uint8)
+                array = np.frombuffer(result.output, dtype=np.uint8)
                 frame = cv2.imdecode(array, cv2.IMREAD_COLOR)
                 if frame is not None:
                     if self.decode_budget is not None:
@@ -2326,62 +2532,32 @@ class RecordedMotionObjectDetector:
             expression = (
                 f"if(eq(selected_n\\,{index})\\,gte(t\\,{offset:.3f})\\,{expression})"
             )
-        seek_args = ["-ss", str(seek_seconds)] if seek_seconds else []
-        hw_input_args, hw_filter_args = recorded_frame_hw_args(
-            self.recorder.hardware_acceleration
-        )
-        decode_plans = [("hardware", hw_input_args, hw_filter_args)] if hw_input_args else []
-        decode_plans.append(("cpu", [], []))
         last_error = ""
         process_count = 0
-        for backend, input_args, filter_args in decode_plans:
-            timeout = 8.0
+        for plan in recorded_decode_plans(self.recorder.hardware_acceleration):
+            backend = plan.backend
+            timeout = RECORDED_DECODE_TIMEOUT_SECONDS
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 timeout = min(timeout, remaining)
             # Download only the selected surfaces from the hardware decoder.
-            download_filter = ""
-            if filter_args:
-                try:
-                    download_filter = f"{filter_args[filter_args.index('-vf') + 1]},"
-                except (ValueError, IndexError):
-                    download_filter = ""
-            command = [
+            download_filter = f"{plan.download_filter}," if plan.download_filter else ""
+            command = build_decode_command(
                 self.recorder.ffmpeg_path,
-                "-hide_banner",
-                "-loglevel",
-                "info",
-                "-fflags",
-                "+discardcorrupt",
-                "-err_detect",
-                "ignore_err",
-                *RECORDED_FRAME_INPUT_THREAD_ARGS,
-                *input_args,
-                *seek_args,
-                "-copyts",
-                "-start_at_zero",
-                "-i",
-                str(path),
-                "-map",
-                "0:v:0",
-                "-an",
-                "-vf",
-                f"select={expression},{download_filter}showinfo@event_sample",
-                "-fps_mode",
-                "passthrough",
-                "-frames:v",
-                str(len(offsets)),
-                "-pix_fmt",
-                "bgr24",
-                "-f",
-                "image2pipe",
-                "-vcodec",
-                "bmp",
-                *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
-                "pipe:1",
-            ]
+                path,
+                plan=plan,
+                loglevel="info",
+                tolerate_corruption=True,
+                seek=str(seek_seconds) if seek_seconds else None,
+                copyts=True,
+                start_at_zero=True,
+                first_video_stream=True,
+                video_filter=f"select={expression},{download_filter}showinfo@event_sample",
+                passthrough_timestamps=True,
+                frames=len(offsets),
+            )
             process_lease = self._acquire_decode_process(
                 incident_epoch=incident_epoch,
                 deadline=deadline,
@@ -2390,92 +2566,24 @@ class RecordedMotionObjectDetector:
             if self.decode_budget is not None and process_lease is None:
                 last_error = "decode process budget unavailable"
                 break
-            process: subprocess.Popen[bytes] | None = None
-            decoded_frames: list[Frame] = []
-            stderr_chunks: list[bytes] = []
-            stream_errors: list[Exception] = []
-            stdout_thread: threading.Thread | None = None
-            stderr_thread: threading.Thread | None = None
             try:
-                check_evidence_cancellation()
-                report_evidence_stage("frame_decode")
                 process_count += 1
-                process = subprocess.Popen(
+                result = run_decoder(
                     command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    backend=backend,
+                    timeout=timeout,
+                    stdout_reader=read_bmp_frames,
                 )
-                assert process.stdout is not None and process.stderr is not None
-
-                def read_stdout() -> None:
-                    try:
-                        decoded_frames.extend(
-                            self._decode_bmp_stream(process.stdout)
-                        )
-                    except Exception as exc:
-                        stream_errors.append(exc)
-
-                def read_stderr() -> None:
-                    try:
-                        stderr_chunks.append(process.stderr.read())
-                    except Exception as exc:
-                        stream_errors.append(exc)
-
-                stdout_thread = threading.Thread(target=read_stdout, daemon=True)
-                stderr_thread = threading.Thread(target=read_stderr, daemon=True)
-                stdout_thread.start()
-                stderr_thread.start()
-                decode_deadline = time.monotonic() + timeout
-                while True:
-                    check_evidence_cancellation()
-                    remaining = decode_deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise subprocess.TimeoutExpired(command, timeout)
-                    try:
-                        process.wait(timeout=evidence_wait_timeout(remaining))
-                        break
-                    except subprocess.TimeoutExpired:
-                        continue
-            except EvidenceWorkPreempted:
-                if process is not None:
-                    process.kill()
-                    process.wait()
-                raise
-            except subprocess.TimeoutExpired:
-                last_error = f"{backend} timed out"
-                if process is not None:
-                    process.kill()
-                    process.wait()
-            except OSError as exc:
-                last_error = f"{backend}: {exc}"
             finally:
-                if stdout_thread is not None:
-                    stdout_thread.join()
-                if stderr_thread is not None:
-                    stderr_thread.join()
-                if process is not None:
-                    if process.stdout is not None:
-                        process.stdout.close()
-                    if process.stderr is not None:
-                        process.stderr.close()
                 if process_lease is not None:
                     process_lease.release()
-            stderr = b"".join(stderr_chunks)
+            stderr = result.stderr
+            decoded_frames: list[Frame] = result.output or []
             self._record_decoder_errors(stderr=stderr, path=path, backend=backend)
-            if (
-                process is None
-                or process.returncode != 0
-                or not decoded_frames
-                or stream_errors
-            ):
+            if not result.ok or not decoded_frames:
                 if self.decode_budget is not None:
                     self.decode_budget.record_ffmpeg(backend, success=False)
-                if process is not None:
-                    detail = stderr.decode(
-                        "utf-8",
-                        errors="replace",
-                    ).strip().splitlines()[0:2]
-                    last_error = f"{backend}: {' '.join(detail)[:180]}"
+                last_error = result.describe()
                 continue
             actual_offsets = [
                 round(float(match.group(1)), 6)
@@ -2484,6 +2592,17 @@ class RecordedMotionObjectDetector:
                     stderr,
                 )
             ]
+            if len(actual_offsets) < len(decoded_frames):
+                # Frames pair with timestamps by position. With a timestamp
+                # line missing, nothing says which frame lost it, so none of
+                # this batch can be trusted; the single-frame path re-reads.
+                if self.decode_budget is not None:
+                    self.decode_budget.record_ffmpeg(backend, success=False)
+                last_error = (
+                    f"{backend}: {len(decoded_frames)} frames but only "
+                    f"{len(actual_offsets)} timestamps"
+                )
+                continue
             decoded: dict[float, _DecodedRecordedFrame] = {}
             for offset, frame, actual_offset in zip(
                 offsets,
@@ -2514,10 +2633,7 @@ class RecordedMotionObjectDetector:
 
     def _record_decoder_errors(self, *, stderr: bytes, path: Path, backend: str) -> None:
         """Summarize controlled recorded-decoder stderr with camera context."""
-        codec_lines = Counter(
-            match.group(1).decode("ascii").lower()
-            for match in _DECODER_ERROR_CODEC.finditer(stderr)
-        )
+        codec_lines = decoder_error_codecs(stderr)
         if not codec_lines:
             return
         source = next((part for part in path.parts if part in {"main", "live"}), "")
@@ -2541,41 +2657,6 @@ class RecordedMotionObjectDetector:
                 codec_lines=dict(codec_lines),
             )
 
-    @staticmethod
-    def _decode_bmp_stream(stream: Any) -> list[Frame]:
-        """Read and decode concatenated BMP records without buffering stdout."""
-        frames: list[Frame] = []
-
-        def read_exact(size: int) -> bytes:
-            chunks: list[bytes] = []
-            remaining = size
-            while remaining > 0:
-                chunk = stream.read(remaining)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            return b"".join(chunks)
-
-        while True:
-            header = read_exact(6)
-            if not header:
-                break
-            if len(header) != 6 or header[:2] != b"BM":
-                break
-            frame_size = int.from_bytes(header[2:6], "little")
-            if frame_size < 54:
-                break
-            encoded = header + read_exact(frame_size - len(header))
-            if len(encoded) != frame_size:
-                break
-            frame = cv2.imdecode(
-                np.frombuffer(encoded, dtype=np.uint8),
-                cv2.IMREAD_COLOR,
-            )
-            if frame is not None:
-                frames.append(frame)
-        return frames
 
 
 class RecordedMotionObjectDetectorFactory:

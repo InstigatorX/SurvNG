@@ -760,9 +760,14 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             recording = Path(tmpdir) / "sample.mp4"
             recording.touch()
-            completed = SimpleNamespace(returncode=0, stdout=encoded.tobytes(), stderr=b"")
+            completed = SimpleNamespace(
+                returncode=0,
+                stdout=BytesIO(encoded.tobytes()),
+                stderr=BytesIO(b""),
+                wait=lambda timeout=None: 0,
+            )
             with patch(
-                "survng.app.motion_pipeline.object_detection.subprocess.run",
+                "survng.app.recorded_decoder.subprocess.Popen",
                 return_value=completed,
             ) as run:
                 actual = backend._read_recorded_frame(recording, 1.25)
@@ -809,7 +814,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                     self.returncode = -9
 
             with patch(
-                "survng.app.motion_pipeline.object_detection.subprocess.Popen",
+                "survng.app.recorded_decoder.subprocess.Popen",
                 return_value=Process(),
             ) as popen:
                 frames, process_count = backend._read_recorded_frames(
@@ -858,7 +863,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                     self.returncode = -9
 
             with patch(
-                "survng.app.motion_pipeline.object_detection.subprocess.Popen",
+                "survng.app.recorded_decoder.subprocess.Popen",
                 return_value=Process(),
             ) as popen:
                 frames, _count = backend._read_recorded_frames(recording, [7.0, 7.5])
@@ -882,7 +887,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             recording = Path(tmpdir) / "sample.mp4"
             recording.touch()
             with patch(
-                "survng.app.motion_pipeline.object_detection.subprocess.Popen",
+                "survng.app.recorded_decoder.subprocess.Popen",
                 side_effect=OSError("not run"),
             ) as popen:
                 backend._read_recorded_frames(recording, [7.0, 7.5])
@@ -1006,7 +1011,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                     )
                     real_popen = subprocess.Popen
                     with patch(
-                        "survng.app.motion_pipeline.object_detection.subprocess.Popen",
+                        "survng.app.recorded_decoder.subprocess.Popen",
                         side_effect=real_popen,
                     ) as popen:
                         frames, _count = backend._read_recorded_frames(recording, [2.0, 7.0])
@@ -1337,6 +1342,312 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertFalse(objects[0]["incident_eligible"])
         self.assertEqual(objects[0]["temporal_observations"], 2)
         self.assertEqual(objects[0]["temporal_required_observations"], 3)
+
+    def _index_lag_backend(self, event_epoch: float, *, indexed_after_refresh: bool):
+        """A recorder whose just-closed segment appears only once discovery has run."""
+        import threading as _threading
+
+        class Recorder:
+            ffmpeg_path = "ffmpeg"
+            hardware_acceleration = "none"
+
+            def __init__(self) -> None:
+                self.ticket = 0
+                self.completed = 0
+                self.indexed = False
+                self.requests: list[float] = []
+                self.rereads = 0
+                self.waits: list[float] = []
+                self.done = _threading.Condition()
+
+            def _discover(self, taken: int) -> None:
+                with self.done:
+                    self.indexed = indexed_after_refresh
+                    self.completed = max(self.completed, taken)
+                    self.done.notify_all()
+
+            def recording_at(self, _camera_id: str, epoch: float, request_refresh: bool = True):
+                if self.indexed:
+                    return {"path": "segment.mp4", "start_epoch": epoch}
+                if not request_refresh:
+                    self.rereads += 1
+                    return None
+                # The real miss wakes the indexer; it finishes shortly after.
+                with self.done:
+                    self.ticket += 1
+                    taken = self.ticket
+                self.requests.append(time.monotonic())
+                _threading.Timer(0.05, self._discover, args=(taken,)).start()
+                return None
+
+            def recording_edge_refresh_ticket(self, _camera_id: str) -> int:
+                with self.done:
+                    return self.ticket
+
+            def wait_for_recording_edge_refresh(self, _camera_id, ticket, timeout):
+                self.waits.append(timeout)
+                with self.done:
+                    return self.done.wait_for(lambda: self.completed >= ticket, timeout)
+
+        class Detector:
+            config = detector_config(
+                confidence_threshold=0.5,
+                require_incident_zone=False,
+                event_confirmation_frames=1,
+                event_class_confirmation_frames={},
+            )
+
+            def detect(self, _frame, confidence_threshold=None):
+                return [detected("car", 0.8, (2, 2, 12, 12))]
+
+        recorder = Recorder()
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            Detector(),
+            recorder,
+            lambda: None,
+        )
+        return backend, recorder
+
+    @staticmethod
+    def _request_bursts(requests: list[float]) -> int:
+        """Lookups of one pass arrive together; count the passes that requested."""
+        bursts = 0
+        previous = float("-inf")
+        for at in requests:
+            if at - previous > 0.1:
+                bursts += 1
+            previous = at
+        return bursts
+
+    def test_index_miss_waits_for_the_requested_discovery_not_a_full_retry_interval(self) -> None:
+        event_epoch = 1_800_000_000.0
+        backend, recorder = self._index_lag_backend(event_epoch, indexed_after_refresh=True)
+        with (
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_SETTLE_SECONDS", 0.0),
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_SECONDS", 5.0),
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_INTERVAL_SECONDS", 1.0),
+            patch("survng.app.motion_pipeline.object_detection.time.time", return_value=event_epoch + 20.0),
+            patch.object(backend, "_read_recorded_frame", return_value=np.zeros((20, 20, 3), dtype=np.uint8)),
+        ):
+            started = time.monotonic()
+            result = backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+            elapsed = time.monotonic() - started
+
+        self.assertEqual(result.frame_source, "recorded_main")
+        self.assertEqual(len(recorder.waits), 1)
+        self.assertEqual(self._request_bursts(recorder.requests), 1)
+        # Without the wait this costs the whole 1 s retry interval.
+        self.assertLess(elapsed, 0.6)
+
+    def test_a_segment_that_is_still_open_is_not_rediscovered_more_often(self) -> None:
+        event_epoch = 1_800_000_000.0
+        backend, recorder = self._index_lag_backend(event_epoch, indexed_after_refresh=False)
+        with (
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_SETTLE_SECONDS", 0.0),
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_SECONDS", 1.3),
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_INTERVAL_SECONDS", 0.4),
+            patch("survng.app.motion_pipeline.object_detection.time.time", return_value=event_epoch + 20.0),
+        ):
+            backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+
+        # Each requesting pass costs a directory listing on the media store.
+        # A fixed 0.4 s interval over 1.3 s gives four passes (0, 0.4, 0.8,
+        # 1.2). Waiting on the first discovery must not add a fifth: the
+        # re-read that follows it does not request.
+        self.assertEqual(len(recorder.waits), 1)
+        self.assertGreater(recorder.rereads, 0)
+        self.assertLessEqual(self._request_bursts(recorder.requests), 4)
+
+    def _hole_backend(self, event_epoch: float, *, confirmations: int, see_car):
+        """Every sample of the first stage falls in an index hole before next.mp4."""
+        next_start = event_epoch + 0.75
+
+        class Recorder:
+            ffmpeg_path = "ffmpeg"
+            hardware_acceleration = "none"
+            bridge = True
+
+            def recording_at(self, _camera_id: str, epoch: float):
+                return None
+
+            def recording_for_index_hole(self, _camera_id: str, epoch: float):
+                if self.bridge and epoch < next_start:
+                    return {"path": "next.mp4", "start_epoch": next_start, "end_epoch": next_start + 10.0}
+                return None
+
+        class Detector:
+            config = detector_config(
+                confidence_threshold=0.5,
+                require_incident_zone=False,
+                event_confirmation_frames=confirmations,
+                event_class_confirmation_frames={},
+            )
+
+            def detect(self, frame, confidence_threshold=None):
+                return see_car(frame)
+
+        recorder = Recorder()
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            Detector(),
+            recorder,
+            lambda: None,
+        )
+        return backend, recorder
+
+    def test_a_sample_in_an_index_hole_reads_the_next_segment_instead_of_waiting(self) -> None:
+        event_epoch = 1_800_000_000.0
+        reads: list[tuple[str, float]] = []
+
+        def read(path, offset, **_kwargs):
+            reads.append((str(path), offset))
+            return np.zeros((20, 20, 3), dtype=np.uint8)
+
+        def run(bridge: bool):
+            backend, recorder = self._hole_backend(
+                event_epoch, confirmations=1,
+                see_car=lambda _frame: [detected("car", 0.8, (2, 2, 12, 12))],
+            )
+            recorder.bridge = bridge
+            with (
+                patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_SETTLE_SECONDS", 0.0),
+                patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_SECONDS", 1.5),
+                patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_INTERVAL_SECONDS", 0.25),
+                patch("survng.app.motion_pipeline.object_detection.time.time", return_value=event_epoch + 20.0),
+                patch.object(backend, "_read_recorded_frame", side_effect=read),
+            ):
+                started = time.monotonic()
+                result = backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+                return result, time.monotonic() - started
+
+        # No row can ever appear for these samples: without the bridge the
+        # job waits out its whole retry budget and ends with no recorded frame.
+        waited, waited_for = run(bridge=False)
+        self.assertGreaterEqual(waited_for, 1.4)
+        self.assertNotEqual(waited.frame_source, "recorded_main")
+        self.assertEqual(reads, [])
+
+        bridged, bridged_for = run(bridge=True)
+        self.assertLess(bridged_for, 1.0)
+        self.assertEqual(bridged.frame_source, "recorded_main")
+        # Read from the very start of the segment that follows the hole.
+        self.assertEqual({read for read in reads}, {("next.mp4", 0.0)})
+
+    def test_hole_answers_are_kept_and_a_miss_is_not_asked_again_at_once(self) -> None:
+        calls: list[float] = []
+        answers: dict[float, dict | None] = {
+            100.5: {"path": "next.mp4", "start_epoch": 101.0, "end_epoch": 111.0},
+            200.5: None,
+        }
+
+        class Recorder:
+            def recording_at(self, _camera_id: str, _epoch: float):
+                return None
+
+            def recording_for_index_hole(self, _camera_id: str, epoch: float):
+                calls.append(epoch)
+                return answers[epoch]
+
+        sampler = _EventRecordedSampler(
+            camera_id="gate", recorder=Recorder(), frame_reader=lambda *args, **kwargs: None,
+        )
+        clock = [1000.0]
+        with patch("survng.app.motion_pipeline.object_detection.time.monotonic", side_effect=lambda: clock[0]):
+            for _ in range(4):
+                self.assertEqual(sampler.recording_at(100.5)["path"], "next.mp4")
+                self.assertIsNone(sampler.recording_at(200.5))
+                clock[0] += 0.5
+            # Four passes: one question each.
+            self.assertEqual(calls, [100.5, 200.5])
+            self.assertEqual(sampler.index_hole_lookups, 1)
+            # A real gap is asked about again later, in case a segment came.
+            clock[0] += 5.0
+            answers[200.5] = {"path": "late.mp4", "start_epoch": 201.0, "end_epoch": 211.0}
+            self.assertEqual(sampler.recording_at(200.5)["path"], "late.mp4")
+            self.assertEqual(calls, [100.5, 200.5, 200.5])
+
+    def test_a_reread_after_a_waited_discovery_asks_about_the_hole_again(self) -> None:
+        answers: list[dict | None] = [None, {"path": "next.mp4", "start_epoch": 101.0, "end_epoch": 111.0}]
+
+        class Recorder:
+            def recording_at(self, _camera_id: str, _epoch: float, request_refresh: bool = True):
+                return None
+
+            def recording_for_index_hole(self, _camera_id: str, _epoch: float):
+                return answers.pop(0)
+
+        sampler = _EventRecordedSampler(
+            camera_id="gate", recorder=Recorder(), frame_reader=lambda *args, **kwargs: None,
+        )
+        with patch("survng.app.motion_pipeline.object_detection.time.monotonic", return_value=1000.0):
+            self.assertIsNone(sampler.recording_at(100.5))
+            self.assertIsNone(sampler.recording_at(100.5))   # remembered
+            # The stage loop waited for a discovery; the segment after the
+            # hole may be exactly what it indexed.
+            sampler.request_index_refresh = False
+            self.assertEqual(sampler.recording_at(100.5)["path"], "next.mp4")
+
+    def test_an_instant_at_a_rows_very_end_prefers_the_segment_that_holds_it(self) -> None:
+        first = {"path": "first.mp4", "start_epoch": 90.0, "end_epoch": 100.0}
+        found: list[dict | None] = [None]
+
+        class Recorder:
+            def recording_at(self, _camera_id: str, _epoch: float, request_refresh: bool = True):
+                return None
+
+            def recording_for_index_hole(self, _camera_id: str, _epoch: float):
+                return found[0]
+
+        def sampler():
+            return _EventRecordedSampler(
+                camera_id="gate", recorder=Recorder(), rows=[first, {"path": "third.mp4", "start_epoch": 111.0, "end_epoch": 121.0}],
+                frame_reader=lambda *args, **kwargs: None,
+            )
+
+        # Nothing else holds 100.0: the earlier row is still the answer.
+        self.assertEqual(sampler().recording_at(100.0)["path"], "first.mp4")
+        # A read at first.mp4's offset 10.0 is past its last frame; the hole
+        # lookup knows the segment whose first frame this is.
+        found[0] = {"path": "next.mp4", "start_epoch": 101.0, "end_epoch": 111.0}
+        self.assertEqual(sampler().recording_at(100.0)["path"], "next.mp4")
+        # A row that starts there wins outright.
+        adjoining = _EventRecordedSampler(
+            camera_id="gate", recorder=Recorder(),
+            rows=[first, {"path": "second.mp4", "start_epoch": 100.0, "end_epoch": 110.0}],
+            frame_reader=lambda *args, **kwargs: None,
+        )
+        self.assertEqual(adjoining.recording_at(100.0)["path"], "second.mp4")
+
+    def test_one_frame_shared_by_several_hole_samples_is_one_observation(self) -> None:
+        event_epoch = 1_800_000_000.0
+        backend, _recorder = self._hole_backend(
+            event_epoch, confirmations=2,
+            see_car=lambda _frame: [detected("car", 0.8, (2, 2, 12, 12))],
+        )
+        reads: list[float] = []
+
+        def read(_path, offset, **_kwargs):
+            reads.append(offset)
+            return np.zeros((20, 20, 3), dtype=np.uint8)
+
+        with (
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_SETTLE_SECONDS", 0.0),
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_SECONDS", 0.5),
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_INTERVAL_SECONDS", 0.1),
+            patch("survng.app.motion_pipeline.object_detection.time.time", return_value=event_epoch + 20.0),
+            # The single-frame path: its frames carry no exact timestamp.
+            patch.object(backend, "_read_recorded_frame", side_effect=read),
+        ):
+            _frame, objects, _path = backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+
+        # Three requested offsets (-0.5, 0, +0.5) all landed on frame 0 of
+        # the next segment. That is one sighting of the car, not three, and
+        # two are required.
+        self.assertEqual(set(reads), {0.0})
+        cars = [item for item in objects if item.get("label") == "car"]
+        self.assertTrue(all(item.get("temporal_observations", 1) == 1 for item in cars))
+        self.assertFalse(any(item.get("incident_eligible") for item in cars))
 
     def test_detector_retries_missing_offsets_until_confirmation_is_possible(self) -> None:
         event_epoch = 1_800_000_000.0
