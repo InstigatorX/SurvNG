@@ -126,6 +126,63 @@ def test_the_open_segment_is_found_with_one_directory_listing(tmp_path, fragment
     assert listing.call_count == 1
 
 
+def test_no_open_file_is_remembered_instead_of_listed_on_every_lookup(tmp_path, fragmented_bytes):
+    recorder = Recorder("ffmpeg", tmp_path, segment_seconds=10)
+    _running(recorder, "gate", fragmented=True)
+    # The camera stalled: FFmpeg is alive but its newest file is long closed.
+    stale = float(int(time.time()) - 40)
+    _segment_path(tmp_path, "gate", stale).write_bytes(fragmented_bytes)
+    with patch.object(
+        recorder, "_recent_hour_recording_files", wraps=recorder._recent_hour_recording_files,
+    ) as listing:
+        for _ in range(6):
+            assert recorder.open_recording("gate", time.time() - 1.0) is None
+        assert listing.call_count == 1
+        # Looked for again later, not never.
+        with recorder._lock:
+            path, start, listed = recorder._open_segments[("gate", "main")]
+            recorder._open_segments[("gate", "main")] = (path, start, listed - 5.0)
+        recorder.open_recording("gate", time.time() - 1.0)
+        assert listing.call_count == 2
+
+
+def test_the_previous_process_last_file_is_not_taken_for_the_open_segment(tmp_path, fragmented_bytes):
+    recorder = Recorder("ffmpeg", tmp_path, segment_seconds=10)
+    _running(recorder, "gate", fragmented=True)
+    now = time.time()
+    # Killed 2 s ago; its file is recent enough to look active by age alone.
+    old = _segment_path(tmp_path, "gate", float(int(now) - 6))
+    old.write_bytes(_written_until(fragmented_bytes, 3))
+    with recorder._lock:
+        recorder._recorder_started_at[("gate", "main")] = now - 0.5
+    # The new process has not created its file yet.
+    assert recorder.open_recording("gate", now - 0.2) is None
+    new = _segment_path(tmp_path, "gate", float(int(now)))
+    new.write_bytes(_written_until(fragmented_bytes, 1))
+    with recorder._lock:
+        recorder._open_segments.pop(("gate", "main"))
+    row = recorder.open_recording("gate", float(int(now)) + 0.5)
+    assert row is not None and row["path"] == str(new)
+
+
+def test_a_listing_that_spans_a_restart_does_not_restore_the_old_file(tmp_path, fragmented_bytes):
+    recorder = Recorder("ffmpeg", tmp_path, segment_seconds=10)
+    _running(recorder, "gate", fragmented=True)
+    start = float(int(time.time()) - 3)
+    _segment_path(tmp_path, "gate", start).write_bytes(_written_until(fragmented_bytes, 2))
+    listed = recorder._recent_hour_recording_files
+
+    def restart_during_listing(*args, **kwargs):
+        files = listed(*args, **kwargs)
+        with recorder._lock:
+            recorder._recorder_generation[("gate", "main")] = 7
+        return files
+
+    with patch.object(recorder, "_recent_hour_recording_files", side_effect=restart_during_listing):
+        recorder.open_recording("gate", start + 1.0)
+    assert ("gate", "main") not in recorder._open_segments
+
+
 def test_a_restarted_recorder_forgets_the_segment_it_was_writing(tmp_path, fragmented_bytes):
     recorder = Recorder("ffmpeg", tmp_path, segment_seconds=10)
     _running(recorder, "gate", fragmented=True)
@@ -150,9 +207,9 @@ def test_a_restarted_recorder_forgets_the_segment_it_was_writing(tmp_path, fragm
     ):
         try:
             recorder.start(camera, "main")
-            new = _segment_path(tmp_path, "gate", start + 3)
+            new = _segment_path(tmp_path, "gate", float(int(time.time())))
             new.write_bytes(_written_until(fragmented_bytes, 1))
-            assert recorder.open_recording("gate", start + 3.5)["path"] == str(new)
+            assert recorder.open_recording("gate", time.time() + 0.5)["path"] == str(new)
         finally:
             recorder.stop("gate", "main")
     assert not recorder.reads_open_segments("gate")
@@ -217,9 +274,37 @@ def test_sampler_serves_the_open_segment_without_asking_the_indexer():
     # Older than the open segment: the index answers, as before.
     assert sampler.recording_at(999.0) is None
     assert recorder.index_lookups == 1
-    # The readable end moved on; a row kept from earlier would hide that.
+    # The readable end moved on; a row kept beyond one pass would hide that.
     recorder.readable = 5.0
+    sampler._open_row = None
     assert sampler.recording_at(1004.5) is not None
+
+
+def test_offsets_of_one_pass_share_one_read_of_the_open_segment():
+    recorder = _OpenRecorder(start=1000.0, readable=4.0)
+    calls: list[float] = []
+    original = recorder.open_recording
+    recorder.open_recording = lambda camera, epoch: calls.append(epoch) or original(camera, epoch)
+    sampler = _EventRecordedSampler(
+        camera_id="gate", recorder=recorder, frame_reader=lambda *args, **kwargs: None,
+    )
+    for epoch in (1001.0, 1001.5, 1002.0, 1003.0):
+        assert sampler.recording_at(epoch) is not None
+    assert calls == [1001.0]
+    # Still routed correctly from the kept row: older goes to the index.
+    assert sampler.recording_at(999.0) is None and recorder.index_lookups == 1
+
+
+def test_the_last_frame_interval_of_the_written_data_waits_for_the_next_fragment():
+    # Completed fragments end at 4.0 s; their last frame is one interval
+    # earlier, so nothing can be decoded "at or after" 3.95 s yet.
+    sampler = _EventRecordedSampler(
+        camera_id="gate", recorder=_OpenRecorder(start=1000.0, readable=4.0),
+        frame_reader=lambda *args, **kwargs: None,
+    )
+    assert sampler.recording_at(1003.95) is None and sampler.open_segment_pending
+    assert sampler.open_segment_lookups == 0
+    assert sampler.recording_at(1003.7) is not None
 
 
 def test_a_failed_read_of_the_open_segment_is_not_followed_by_nudged_retries():

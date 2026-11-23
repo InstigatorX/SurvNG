@@ -79,6 +79,12 @@ RECORDED_SEGMENT_INDEX_MARGIN_SECONDS = 1.0
 RECORDED_OPEN_SEGMENT_READY_SECONDS = 1.5
 # The next fragment is at most a keyframe interval away; look again soon.
 RECORDED_OPEN_SEGMENT_RETRY_SECONDS = 0.25
+# The completed fragments end one frame interval after their last frame, and
+# a sample needs a frame at or after its time. Leave that last interval (and
+# the same again for slow streams) to the next fragment.
+RECORDED_OPEN_SEGMENT_TAIL_SECONDS = 0.25
+# Offsets of one pass share a single read of the open segment's extent.
+RECORDED_OPEN_SEGMENT_MEMO_SECONDS = 0.2
 # FFmpeg's accurate seek discards frames before the seek point, so keep the
 # seek strictly ahead of the first requested sample.
 RECORDED_BATCH_SEEK_MARGIN_SECONDS = 0.25
@@ -341,6 +347,7 @@ class _EventRecordedSampler:
         # fragments completed so far; and counted when one was served from it.
         self.open_segment_pending = False
         self.open_segment_lookups = 0
+        self._open_row: tuple[float, dict[str, Any]] | None = None
 
     def recording_at(self, epoch: float) -> dict[str, Any] | None:
         # Match Recorder.recording_at(): at a shared segment boundary the
@@ -353,13 +360,12 @@ class _EventRecordedSampler:
                 end = start + float(duration) if duration is not None else start
             if start <= epoch <= float(end):
                 return row
-        open_recording = getattr(self.recorder, "open_recording", None)
-        open_row = open_recording(self.camera_id, epoch) if callable(open_recording) else None
+        open_row = self._open_recording(epoch)
         if open_row is not None:
             # The segment being written is read directly and never indexed
             # while open, so asking the indexer for it would only list the
-            # directory. Its row grows, so it is not kept.
-            if epoch < float(open_row["end_epoch"]):
+            # directory. Its row grows, so it is kept only for one pass.
+            if epoch + RECORDED_OPEN_SEGMENT_TAIL_SECONDS <= float(open_row["end_epoch"]):
                 self.open_segment_lookups += 1
                 return open_row
             self.open_segment_pending = True
@@ -380,6 +386,21 @@ class _EventRecordedSampler:
                 key=lambda item: float(item.get("start_epoch", 0.0))
             )
             return normalized
+        return row
+
+    def _open_recording(self, epoch: float) -> dict[str, Any] | None:
+        """The recorder's open segment for ``epoch``, read once per pass."""
+        open_recording = getattr(self.recorder, "open_recording", None)
+        if not callable(open_recording):
+            return None
+        memo = self._open_row
+        if (
+            memo is not None
+            and time.monotonic() - memo[0] < RECORDED_OPEN_SEGMENT_MEMO_SECONDS
+        ):
+            return memo[1] if epoch >= float(memo[1]["start_epoch"]) else None
+        row = open_recording(self.camera_id, epoch)
+        self._open_row = (time.monotonic(), row) if row is not None else None
         return row
 
     def frame_at(
@@ -1273,13 +1294,15 @@ class RecordedMotionObjectDetector:
                     if stage_consensus:
                         timing["refinement_early_exit_skipped"] += float(len(pending))
                         continue
-                    if self.decode_budget is not None:
+                    open_segment = bool(pending[0][2].get("open"))
+                    # Dimensions are cached per file size; a growing file would
+                    # add an entry per pass. The budget keeps its last size.
+                    if self.decode_budget is not None and not open_segment:
                         dimensions = mp4_video_dimensions(path)
                         if dimensions is not None:
                             width, height = dimensions
                             self.decode_budget.observe_frame_bytes(width * height * 3)
                     decode_started = time.monotonic()
-                    open_segment = bool(pending[0][2].get("open"))
                     frames, batch_processes, fallback_count = sampler.frames_at(
                         path,
                         [frame_offset for _, frame_offset, _ in pending],
@@ -1832,6 +1855,7 @@ class RecordedMotionObjectDetector:
                 decode_started = time.monotonic()
                 frames, processes, fallbacks = sampler.frames_at(
                     Path(str(row["path"])), [relative], deadline=deadline,
+                    **({"single_frame_fallback": False} if row.get("open") else {}),
                 )
                 timing["frame_decode_ms"] += (time.monotonic() - decode_started) * 1000
                 timing["recording_batch_processes"] += processes

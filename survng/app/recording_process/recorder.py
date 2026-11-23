@@ -99,7 +99,14 @@ class Recorder(RecordingIndexMixin):
         # segment each is writing (path, filename start epoch), found by one
         # directory listing per segment and only when a reader asks.
         self._fragmented_keys: set[RecorderKey] = set()
-        self._open_segments: dict[RecorderKey, tuple[Path, float, float]] = {}
+        # A listing that found nothing is remembered too (path None), so a
+        # stalled recorder or slow storage is not listed on every lookup.
+        self._open_segments: dict[RecorderKey, tuple[Path | None, float, float]] = {}
+        # When each running recorder process started, and a counter that
+        # changes on every start, so a listing begun before a restart cannot
+        # put the previous process's last file back.
+        self._recorder_started_at: dict[RecorderKey, float] = {}
+        self._recorder_generation: dict[RecorderKey, int] = {}
         # Each request gets a ticket; a discovery completes every ticket issued
         # before it started. A reader that missed a just-closed segment waits
         # for its own ticket, not for whichever discovery happens to finish.
@@ -217,6 +224,8 @@ class Recorder(RecordingIndexMixin):
                     self._retry_after.pop(key, None)
                     # A restarted recorder begins a new file mid-segment.
                     self._open_segments.pop(key, None)
+                    self._recorder_started_at[key] = time.time()
+                    self._recorder_generation[key] = self._recorder_generation.get(key, 0) + 1
                     if camera.recording_fragmented:
                         self._fragmented_keys.add(key)
                     else:

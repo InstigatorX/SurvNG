@@ -1712,26 +1712,28 @@ class RecordingIndexMixin:
         now = time.time()
         with self._lock:
             cached = self._open_segments.get(key)
+            generation = self._recorder_generation.get(key, 0)
+            started_at = self._recorder_started_at.get(key, 0.0)
         # A segment stays open for at least segment_seconds from its start, and
         # closes at the next keyframe after that. Until then the listing is not
-        # repeated; around the rollover it is repeated at most once a second.
+        # repeated. Around the rollover, and while no file can be the open one
+        # (stalled stream, slow storage, just restarted), it is repeated at
+        # most once a second, whatever the number of lookups.
         if cached is None or (
-            now >= cached[1] + self.segment_seconds
+            (cached[0] is None or now >= cached[1] + self.segment_seconds)
             and now - cached[2] >= OPEN_SEGMENT_RELIST_SECONDS
         ):
-            found = self._find_open_segment(camera_id, key[1], now)
+            found = self._find_open_segment(camera_id, key[1], now, started_at)
+            cached = (found[0], found[1], now) if found is not None else (None, 0.0, now)
             with self._lock:
-                if found is None:
-                    self._open_segments.pop(key, None)
-                    cached = None
-                else:
-                    cached = (found[0], found[1], now)
-                    if key in self._fragmented_keys:
-                        self._open_segments[key] = cached
-        if cached is None:
-            return None
+                # Not if the recorder restarted or stopped while this listed.
+                if (
+                    key in self._fragmented_keys
+                    and self._recorder_generation.get(key, 0) == generation
+                ):
+                    self._open_segments[key] = cached
         path, start_epoch, _listed_at = cached
-        if epoch < start_epoch:
+        if path is None or epoch < start_epoch:
             return None
         readable = fragmented_readable_seconds(path)
         duration = float(readable) if readable is not None and math.isfinite(readable) else 0.0
@@ -1745,8 +1747,14 @@ class RecordingIndexMixin:
             "open": True,
         }
 
-    def _find_open_segment(self, camera_id: str, source: str, now: float) -> tuple[Path, float] | None:
-        """Newest segment file by name, if FFmpeg can still be writing it."""
+    def _find_open_segment(
+        self,
+        camera_id: str,
+        source: str,
+        now: float,
+        process_started_at: float = 0.0,
+    ) -> tuple[Path, float] | None:
+        """Newest segment file by name, if the running FFmpeg can be writing it."""
         newest: tuple[Path, float] | None = None
         for path in self._recent_hour_recording_files(
             camera_id, source, after_epoch=now - 2.0 * self.segment_seconds,
@@ -1755,6 +1763,10 @@ class RecordingIndexMixin:
             if start_epoch is not None and (newest is None or start_epoch > newest[1]):
                 newest = (path, start_epoch)
         if newest is None or not self._recording_file_may_be_active(newest[0], now):
+            return None
+        # File names carry whole seconds. One named before this process
+        # started belongs to the process it replaced and is already closed.
+        if newest[1] < math.floor(process_started_at):
             return None
         return newest
 

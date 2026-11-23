@@ -454,15 +454,26 @@ each finished fragment reaches the file at once (FFmpeg otherwise holds up to
 per fragment.
 
 For a fragmented camera, refinement reads the segment being written. The
-recorder finds that file with one directory listing per segment and reports
-how far its completed fragments reach; the row is never stored in the index
-and no index discovery is requested for it. A refinement job is due
+recorder finds that file by listing the current and previous hour directory:
+once per segment, about once a second around the rollover, and at most once a
+second while no file can be the open one (stalled stream, slow storage, just
+restarted). A file named before the running recorder process started is never
+taken for the open segment. The row reports how far the completed fragments
+reach, is read once per pass, is never stored in the index, and no index
+discovery is requested for it. A refinement job is due
 `RECORDED_OPEN_SEGMENT_READY_SECONDS` (1.5) after the frame it needs, not when
-the segment closes. A frame beyond the completed fragments is looked for again
-every 0.25 s, and a read that fails because FFmpeg was part-way through a
-fragment header is retried the same way without the nudged single-frame
-fallback. `recording_open_segment_lookups` in the job timing counts lookups
-served this way. Tracking, playback and export still use indexed segments only.
+the segment closes; that is when the job may start, and the frame itself can
+be a second or so further behind (file names carry whole seconds, plus one
+keyframe interval). A frame beyond the completed fragments, or within their
+last 0.25 s where no later frame exists yet, is looked for again every 0.25 s.
+A read that fails because FFmpeg was part-way through a fragment header is
+retried the same way without the nudged single-frame fallback, in refinement
+and in the extra face-evidence reads. `recording_open_segment_lookups` in the
+job timing counts lookups served this way. Near a segment's tail an open read
+and a later indexed read can pick different files, because an indexed row is
+capped at the segment length; the open read is the more exact. Tracking,
+playback and export still use indexed segments only, and a camera that records
+only its sub stream does not use this path.
 
 For a plain camera, refinement waits for the segment to be indexed (predicted
 from the newest indexed segment), plus `event_refinement_settle_seconds`
