@@ -444,22 +444,28 @@ for up to `event_refinement_retry_seconds` (24) at
 `event_refinement_retry_interval_seconds` (1.0) intervals.
 Segment starts come from file names, which carry whole seconds, and an index
 row that has not been validated is no longer than the configured segment. So a
-row can end before the video does, leaving an instant that no row covers. A
-refinement sample there is resolved from the files instead of waited for:
+row can end before the video does, leaving an instant between two indexed
+segments that no row covers. A refinement sample there is resolved from the
+files instead of waited for:
 
 - if the earlier file is longer than its row (a cut on a late keyframe, as
   with a 4 s keyframe interval), the sample is read from that file, to its
-  measured length;
+  measured length (the duration the index has stored, or read from the file
+  when it has none yet);
 - otherwise, if the next segment starts within 2 s of where the earlier video
   ends (its name landed late), the sample is read from the start of that
   segment. Several samples that land on that one frame count as one
   observation.
 
-A longer stretch with no video is a real recording gap and is still waited
-for. `recording_index_hole_lookups` in the job timing counts these lookups in
-the refinement stages (the extra face-evidence reads use the same lookup but
-are not counted). The lookup follows a normal index miss, so a near-live
-sample still asks the indexer for one discovery first.
+This applies only with an indexed segment on both sides. At the live edge the
+following segment is still open, and the sample waits for it as before, so the
+same sample always resolves to the same frame. A longer stretch with no video
+is a real recording gap and is still waited for; that answer is asked for
+again at most every 3 s. `recording_index_hole_lookups` in the job timing
+counts the lookups that found a segment in the refinement stages (the extra
+face-evidence reads use the same lookup but are not counted). The lookup
+follows a normal index miss, so a near-live sample still asks the indexer for
+one discovery first.
 
 A segment that has just closed is usually not indexed yet, because the indexer
 polls every 10 s. The first lookup that misses asks the indexer for it. The

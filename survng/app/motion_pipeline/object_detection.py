@@ -74,6 +74,9 @@ RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
 RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS = 6.0
 # Finalization and edge indexing after a segment boundary.
 RECORDED_SEGMENT_INDEX_MARGIN_SECONDS = 1.0
+# How long "no segment bridges this instant" is believed before asking again.
+# The following segment of a near-live sample appears within a segment length.
+RECORDED_INDEX_HOLE_RECHECK_SECONDS = 3.0
 # FFmpeg's accurate seek discards frames before the seek point, so keep the
 # seek strictly ahead of the first requested sample.
 RECORDED_BATCH_SEEK_MARGIN_SECONDS = 0.25
@@ -333,7 +336,7 @@ class _EventRecordedSampler:
         # waited for, so that re-read does not request another.
         self.request_index_refresh = True
         # Instants in an index hole and the row found for each.
-        self._hole_rows: dict[float, dict[str, Any]] = {}
+        self._hole_rows: dict[float, tuple[float, dict[str, Any] | None]] = {}
         self.index_hole_lookups = 0
 
     def recording_at(self, epoch: float) -> dict[str, Any] | None:
@@ -357,16 +360,24 @@ class _EventRecordedSampler:
             # (a file longer than its row, or a file name that landed late),
             # the video exists and waiting would never produce a row.
             hole_key = round(epoch, 3)
-            if hole_key in self._hole_rows:
-                return self._hole_rows[hole_key]
+            known = self._hole_rows.get(hole_key)
+            if known is not None and (
+                known[1] is not None
+                or time.monotonic() - known[0] < RECORDED_INDEX_HOLE_RECHECK_SECONDS
+            ):
+                # A row found stays found. "Nothing there" is asked again only
+                # now and then: a real gap would otherwise cost three queries
+                # and a file check for every missing sample on every pass.
+                return known[1]
             for_hole = getattr(self.recorder, "recording_for_index_hole", None)
             row = for_hole(self.camera_id, epoch) if callable(for_hole) else None
+            # Kept by instant, not by range: the row may start after it.
+            self._hole_rows[hole_key] = (
+                time.monotonic(), dict(row) if row is not None else None,
+            )
             if row is not None:
                 self.index_hole_lookups += 1
-                normalized = dict(row)
-                # Kept by instant, not by range: the row may start after it.
-                self._hole_rows[hole_key] = normalized
-                return normalized
+                return self._hole_rows[hole_key][1]
         if row is not None and row.get("start_epoch") is not None:
             normalized = dict(row)
             if normalized.get("end_epoch") is None:
