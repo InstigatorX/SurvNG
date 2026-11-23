@@ -201,8 +201,12 @@ assert.deepEqual(recordingCoverageUnion(null), []);
 
 // A seek to the end of footage still being written starts a few segments back,
 // so native HLS has media ahead of it; older footage keeps the one-second snap.
-assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2010), 1970);
-assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1990, end_epoch: 2000 }, 2010), 1990);
-assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2200), 1999);
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2010, false, true), 1970);
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1990, end_epoch: 2000 }, 2010, false, true), 1990);
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2200, false, true), 1999);
 // Playback continuing past what it just played is never moved back.
-assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2010, true), 1999);
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2010, true, true), 1999);
+// A player that loads a finished playlist (Shaka, per-file MP4, live edge
+// turned off) keeps the one-second snap: starting 30 s back buys it nothing.
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2010), 1999);
+assert.equal(recordingEdgeSeekEpoch({ start_epoch: 1000, end_epoch: 2000 }, 2010, false, false), 1999);

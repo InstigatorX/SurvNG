@@ -1303,7 +1303,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (!timeline.length) return null;
     const bounded = Math.max(dayStart, Math.min(dayEnd - 0.01, epoch));
     const latest = timeline[timeline.length - 1];
-    const edge = recordingEdgeSeekEpoch(latest, Date.now() / 1000, continuing);
+    const edge = recordingEdgeSeekEpoch(
+      latest, Date.now() / 1000, continuing, liveEdgeFollow && nativeHls && !useSegmentPlayback,
+    );
     if (bounded >= edge) return edge;
     const containing = timeline.find((item) => item.start_epoch <= bounded && bounded < item.end_epoch);
     if (containing) return bounded;
