@@ -437,8 +437,15 @@ An accepted batch gets two object checks:
 
 A confirmed route watch uses the denser `event_route_refinement_stages`. Within
 each stage, inference stops early once temporal confirmation is satisfied.
-Recordings are plain MP4 segments that can only be read once closed, so
-refinement waits for the segment to be indexed (predicted from the newest
+Recordings are plain MP4 segments by default. A camera with
+`recording_fragmented` writes fragmented MP4 instead
+(`frag_keyframe+empty_moov+default_base_moof`): the same files and segment
+length, with the index at the front and one fragment per keyframe interval, so
+a segment is readable while open and after an unclean stop. Both layouts share
+one stream fingerprint, and `recording_media` reads a fragmented segment's
+video duration from its fragment headers, so the index, playback and export
+treat them alike. Refinement does not yet read the open segment: for either
+layout it waits for the segment to be indexed (predicted from the newest
 indexed segment), plus `event_refinement_settle_seconds` (0.75). It retries
 for up to `event_refinement_retry_seconds` (24) at
 `event_refinement_retry_interval_seconds` (1.0) intervals.

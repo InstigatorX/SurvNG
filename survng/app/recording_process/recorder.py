@@ -187,6 +187,7 @@ class Recorder(RecordingIndexMixin):
                 "1",
                 "-segment_format",
                 "mp4",
+                *self._segment_layout_args(camera),
                 output,
             ]
             executable = named_ffmpeg_executable(
@@ -795,6 +796,21 @@ class Recorder(RecordingIndexMixin):
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+    @staticmethod
+    def _segment_layout_args(camera: CameraConfig) -> list[str]:
+        """Muxer options for the camera's segment layout; plain MP4 needs none.
+
+        A fragment starts at each keyframe, the initial ``moov`` carries no
+        samples, and offsets are relative to each fragment, so every completed
+        fragment is readable while FFmpeg is still writing the segment.
+        """
+        if not camera.recording_fragmented:
+            return []
+        return [
+            "-segment_format_options",
+            "movflags=+frag_keyframe+empty_moov+default_base_moof",
+        ]
 
     def reconfigure_runtime(
         self,

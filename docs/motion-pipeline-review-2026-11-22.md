@@ -228,7 +228,14 @@ Suggested order: T1 and T2, then T3, T5 and T6, with T4 last.
     discarded instead of paired by position.
   - Not changed: the five-nudge single-frame retry, the 8/10/12 s timeouts,
     and the exact-frame read decoding from the start of its segment.
-  - Segment format: no change made. `scripts/measure-refinement-delay.sh`
+  - Fragmented segments, phase 1 (branch `claude/t4-fragmented-recordings`):
+    a per-camera `recording_fragmented` setting, default off, and a fragment
+    duration reader. Measured on FFmpeg 8.1.3: the playback remux output is
+    byte-identical, concat export decodes to identical frames, and Chromium
+    plays and seeks a fragmented segment directly. Not tested: Safari and
+    iOS, HEVC in a browser, and reading while writing over NFS. Phase 2,
+    reading the open segment for refinement, is not started.
+  - Segment length: no change made. `scripts/measure-refinement-delay.sh`
     measures the delay on a running host. With 10 s plain MP4 segments the
     first refinement stage is scheduled at event + 1.5 s + time to segment
     close, so 1.5 to 11.5 s and 6.5 s on average. A fragmented segment is

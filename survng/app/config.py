@@ -782,6 +782,9 @@ class CameraConfig(BaseModel):
     live_view: CameraLiveViewConfig = Field(default_factory=CameraLiveViewConfig)
     record: bool = True
     record_sub: bool = False
+    # Write this camera's segments as fragmented MP4: same files and length,
+    # but readable while still open and after an unclean stop.
+    recording_fragmented: bool = False
     retention: CameraRetentionConfig = Field(default_factory=CameraRetentionConfig)
     require_incident_zone: bool | None = None
     object_activity_attribution: Literal["inherit", "off", "shadow", "enforce"] = "inherit"

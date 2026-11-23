@@ -283,6 +283,151 @@ def _track_video_duration(data: bytes, payload: int, box_end: int) -> float | No
     return ticks / scale if handler == b"vide" and scale and ticks else None
 
 
+def _fragmented_video_track(moov: bytes) -> tuple[int, int, int] | None:
+    """(track id, timescale, default sample duration) of the video track.
+
+    Only a fragmented file declares ``mvex``; its sample tables are empty and
+    the samples are described by the ``moof`` boxes that follow ``moov``.
+    """
+    tracks: dict[int, tuple[bytes, int]] = {}
+    defaults: dict[int, int] = {}
+    for box_type, _, payload, box_end in iter_mp4_boxes(moov):
+        if box_type != b"moov":
+            continue
+        for child, _, child_payload, child_end in iter_mp4_boxes(moov, payload, box_end):
+            if child == b"mvex":
+                for item, _, start, end in iter_mp4_boxes(moov, child_payload, child_end):
+                    if item == b"trex" and start + 16 <= end:
+                        track_id, _index, duration = struct.unpack_from(">III", moov, start + 4)
+                        defaults[track_id] = duration
+            elif child == b"trak":
+                track_id = 0
+                handler = b""
+                scale = 0
+                for item, _, start, end in iter_mp4_boxes(moov, child_payload, child_end):
+                    if item == b"tkhd" and start + 4 <= end:
+                        offset = start + (20 if moov[start] == 1 else 12)
+                        if offset + 4 <= end:
+                            track_id = struct.unpack_from(">I", moov, offset)[0]
+                    elif item == b"mdia":
+                        for media, _, media_start, media_end in iter_mp4_boxes(moov, start, end):
+                            if media == b"hdlr" and media_start + 12 <= media_end:
+                                handler = moov[media_start + 8:media_start + 12]
+                            elif media == b"mdhd" and media_start + 4 <= media_end:
+                                offset = media_start + (20 if moov[media_start] == 1 else 12)
+                                if moov[media_start] in (0, 1) and offset + 4 <= media_end:
+                                    scale = struct.unpack_from(">I", moov, offset)[0]
+                if track_id:
+                    tracks[track_id] = (handler, scale)
+    if not defaults:
+        return None
+    for track_id, (handler, scale) in tracks.items():
+        if handler == b"vide" and scale:
+            return track_id, scale, defaults.get(track_id, 0)
+    return None
+
+
+def _fragment_track_ticks(moof: bytes, track_id: int, default_duration: int) -> int:
+    """Sum the sample durations one ``moof`` carries for ``track_id``."""
+    ticks = 0
+    for box_type, _, payload, box_end in iter_mp4_boxes(moof):
+        if box_type != b"moof":
+            continue
+        for child, _, child_payload, child_end in iter_mp4_boxes(moof, payload, box_end):
+            if child != b"traf":
+                continue
+            fragment_default = default_duration
+            selected = False
+            for item, _, start, end in iter_mp4_boxes(moof, child_payload, child_end):
+                if item == b"tfhd" and start + 8 <= end:
+                    flags = struct.unpack_from(">I", moof, start)[0] & 0xFFFFFF
+                    selected = struct.unpack_from(">I", moof, start + 4)[0] == track_id
+                    offset = start + 8
+                    if flags & 0x1:
+                        offset += 8
+                    if flags & 0x2:
+                        offset += 4
+                    if flags & 0x8 and offset + 4 <= end:
+                        fragment_default = struct.unpack_from(">I", moof, offset)[0]
+                elif item == b"trun" and selected and start + 8 <= end:
+                    flags = struct.unpack_from(">I", moof, start)[0] & 0xFFFFFF
+                    count = struct.unpack_from(">I", moof, start + 4)[0]
+                    offset = start + 8
+                    if flags & 0x1:
+                        offset += 4
+                    if flags & 0x4:
+                        offset += 4
+                    if not flags & 0x100:
+                        ticks += count * fragment_default
+                        continue
+                    stride = 4 * sum(1 for bit in (0x100, 0x200, 0x400, 0x800) if flags & bit)
+                    if offset + count * stride > end:
+                        # A run that overruns its box is not counted at all.
+                        continue
+                    ticks += sum(
+                        struct.unpack_from(">I", moof, offset + index * stride)[0]
+                        for index in range(count)
+                    )
+    return ticks
+
+
+def _fragmented_video_duration(path: Path, moov: bytes) -> float | None:
+    """Video duration of a fragmented MP4, from the fragments written so far.
+
+    Each fragment header is small, so this reads a few kilobytes per fragment
+    and never the media data. A fragment FFmpeg has not finished writing is
+    not counted, which makes the result the readable length of an open file.
+    """
+    track = _fragmented_video_track(moov)
+    if track is None:
+        return None
+    track_id, scale, default_duration = track
+    ticks = 0
+    try:
+        file_size = path.stat().st_size
+        with path.open("rb") as handle:
+            cursor = 0
+            while cursor + 8 <= file_size:
+                handle.seek(cursor)
+                header = handle.read(16)
+                if len(header) < 8:
+                    break
+                size = struct.unpack_from(">I", header, 0)[0]
+                header_size = 8
+                if size == 1:
+                    if len(header) < 16:
+                        break
+                    size = struct.unpack_from(">Q", header, 8)[0]
+                    header_size = 16
+                elif size == 0:
+                    size = file_size - cursor
+                if size < header_size or cursor + size > file_size:
+                    break
+                if header[4:8] == b"moof":
+                    if size > _MAX_FRAGMENT_HEADER_BYTES:
+                        return None
+                    handle.seek(cursor)
+                    moof = handle.read(size)
+                    # Its media data must be complete too.
+                    handle.seek(cursor + size)
+                    data_header = handle.read(16)
+                    if len(data_header) < 8:
+                        break
+                    data_size = struct.unpack_from(">I", data_header, 0)[0]
+                    if data_size == 1 and len(data_header) >= 16:
+                        data_size = struct.unpack_from(">Q", data_header, 8)[0]
+                    if data_header[4:8] != b"mdat" or cursor + size + data_size > file_size:
+                        break
+                    ticks += _fragment_track_ticks(moof, track_id, default_duration)
+                cursor += size
+    except OSError:
+        return None
+    return ticks / scale if ticks else None
+
+
+_MAX_FRAGMENT_HEADER_BYTES = 4 * 1024 * 1024
+
+
 @lru_cache(maxsize=4096)
 def _cached_playback_metadata(path_value: str, modified_ns: int, size: int) -> tuple[str, float | None]:
     del modified_ns, size
@@ -305,6 +450,8 @@ def _cached_playback_metadata(path_value: str, modified_ns: int, size: int) -> t
                 descriptor = _track_stream_descriptor(moov, trak_payload, trak_end)
                 if descriptor:
                     descriptors.append(descriptor)
+    if video_duration is None:
+        video_duration = _fragmented_video_duration(Path(path_value), moov)
     if not descriptors:
         return "", video_duration
     digest = hashlib.sha256()
