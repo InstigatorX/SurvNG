@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import pytest
 
+from survng.app import recorded_decoder
 from survng.app.config import CameraConfig
 from survng.app.motion_pipeline import object_detection
 
@@ -32,9 +33,6 @@ def test_recorded_decode_limits_survive_hardware_fallback(tmp_path, monkeypatch,
             stderr=b"" if failed else b"[showinfo@event_sample] n: 0 pts: 500 pts_time:0.5\n",
         )
 
-    def run(command, **kwargs):
-        return result_for(command)
-
     def popen(command, **kwargs):
         result = result_for(command)
         return SimpleNamespace(
@@ -44,8 +42,7 @@ def test_recorded_decode_limits_survive_hardware_fallback(tmp_path, monkeypatch,
             wait=lambda timeout: result.returncode,
         )
 
-    monkeypatch.setattr(object_detection, "run_evidence_process", run)
-    monkeypatch.setattr(object_detection.subprocess, "Popen", popen)
+    monkeypatch.setattr(recorded_decoder.subprocess, "Popen", popen)
     backend = object_detection.RecordedMotionObjectDetector(
         CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
         SimpleNamespace(config=SimpleNamespace()),

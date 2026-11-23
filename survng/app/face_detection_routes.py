@@ -14,7 +14,6 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from .camera import _decode_recording_still
 from .config import AppConfig, DetectorConfig
 from .face_detection import OpenVinoFaceDetector
 from .face_detection_dataset import (
@@ -25,6 +24,7 @@ from .face_detection_dataset import (
 )
 from .face_detection_evaluation import evaluate_samples, validate_ir_contract
 from .manager import AppManager
+from .recorded_decoder import decode_recording_still
 
 
 class DetectionBox(BaseModel):
@@ -130,10 +130,11 @@ def create_face_detection_router(dependencies: FaceDetectionRouteDependencies) -
         ffmpeg_path = dependencies.get_config().ffmpeg_path
 
         def read(path: str, seek_seconds: float) -> np.ndarray | None:
-            return _decode_recording_still(
+            return decode_recording_still(
                 Path(path),
                 ffmpeg_path=ffmpeg_path,
                 seek_seconds=seek_seconds,
+                consumer="face-dataset",
             )
 
         return read

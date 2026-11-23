@@ -7,8 +7,8 @@ import unittest
 from survng.app.config import DetectorConfig
 from survng.app.motion_pipeline.object_detection import (
     RecordedMotionObjectDetectorFactory,
-    _DECODER_ERROR_CODEC,
 )
+from survng.app.recorded_decoder import decoder_error_codecs
 from survng.app.motion_pipeline.recorded_decode_budget import (
     RecordedDecodeBudget,
     refinement_frame_count,
@@ -579,12 +579,7 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
             b"[hevc @ 0x2] invalid NAL unit\n"
         )
 
-        codecs = [
-            match.group(1).decode("ascii").lower()
-            for match in _DECODER_ERROR_CODEC.finditer(stderr)
-        ]
-
-        self.assertEqual(codecs, ["h264", "hevc"])
+        self.assertEqual(decoder_error_codecs(stderr), {"h264": 1, "hevc": 1})
 
 
 if __name__ == "__main__":

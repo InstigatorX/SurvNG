@@ -7,8 +7,6 @@ mutating those adapters or putting process-local callbacks in durable payloads.
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Callable
-import subprocess
-import time
 
 
 class EvidenceWorkPreempted(Exception):
@@ -90,29 +88,3 @@ def cancellable_evidence_work(
         _optional.reset(optional_token)
         _stage_reporter.reset(stage_token)
         _inference_source.reset(source_token)
-
-
-def run_evidence_process(command: list[str], *, timeout: float) -> subprocess.CompletedProcess:
-    """Drain or reap this attempt's decoder before releasing its capacity lease."""
-    if not evidence_work_active():
-        return subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              timeout=timeout, check=False)
-    check_evidence_cancellation()
-    report_evidence_stage("frame_decode")
-    deadline = time.monotonic() + timeout
-    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
-        try:
-            while True:
-                check_evidence_cancellation()
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired(command, timeout)
-                try:
-                    stdout, stderr = process.communicate(timeout=evidence_wait_timeout(remaining))
-                    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-                except subprocess.TimeoutExpired:
-                    continue
-        finally:
-            if process.poll() is None:
-                process.kill()
-            process.communicate()

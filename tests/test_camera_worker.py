@@ -3454,7 +3454,7 @@ class CameraWorkerTest(unittest.TestCase):
                 patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_SETTLE_SECONDS", 0.0),
                 patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_SECONDS", 0.04),
                 patch(
-                    "survng.app.motion_pipeline.object_detection.subprocess.Popen",
+                    "survng.app.recorded_decoder.subprocess.Popen",
                     side_effect=lambda command, **kwargs: _TimeoutPopen(command, **kwargs),
                 ),
                 patch.object(worker, "_get_latest_frame", return_value=fallback.copy()),

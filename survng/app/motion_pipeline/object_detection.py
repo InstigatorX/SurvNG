@@ -3,10 +3,9 @@ from __future__ import annotations
 import logging
 import math
 import re
-import subprocess
 import threading
 import time
-from collections import Counter, deque
+from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,20 +15,22 @@ import cv2
 import numpy as np
 
 from ..evidence_work import (
-    EvidenceWorkPreempted, check_evidence_cancellation, evidence_cancelled,
-    evidence_wait_timeout, report_evidence_stage, run_evidence_process,
+    check_evidence_cancellation, evidence_cancelled,
+    report_evidence_stage,
 )
 from ..config import CameraConfig, DetectorConfig
 from ..scene_activity_evidence import scene_sample_records as _scene_sample_records
 from ..evidence_gallery import GalleryBatch, encode_gallery
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..face_detection_geometry import upper_body_window
-from ..ffmpeg_hw import (
-    RECORDED_FRAME_INPUT_THREAD_ARGS,
-    RECORDED_FRAME_OUTPUT_THREAD_ARGS,
-    recorded_frame_hw_args,
-)
 from ..object_activity import ObjectActivityAttributor
+from ..recorded_decoder import (
+    build_decode_command,
+    decoder_error_codecs,
+    read_bmp_frames,
+    recorded_decode_plans,
+    run_decoder,
+)
 from ..recording_media import mp4_video_dimensions
 from ..zones import apply_depth_zone_filters, apply_detection_zones
 from .context import Frame
@@ -81,10 +82,8 @@ RECORDED_SPLIT_MINIMUM_WAIT_SECONDS = 1.0
 FAST_LIVE_FRAME_MAX_AGE_SECONDS = 1.0
 FAST_LIVE_FRAME_FUTURE_TOLERANCE_SECONDS = 0.5
 RECORDED_LIVE_FALLBACK_EVENT_TOLERANCE_SECONDS = 1.5
-_DECODER_ERROR_CODEC = re.compile(
-    rb"\[(hevc|h264)(?:_[A-Za-z0-9]+)? @",
-    re.IGNORECASE,
-)
+# One decoder process may not outlive this, whatever the stage deadline allows.
+RECORDED_DECODE_TIMEOUT_SECONDS = 8.0
 
 
 def _flatten_refinement_stages(
@@ -2202,51 +2201,30 @@ class RecordedMotionObjectDetector:
             return None
         attempts = [0.0, -0.25, 0.25, -0.75, 0.75]
         last_error = ""
-        hw_input_args, hw_filter_args = recorded_frame_hw_args(self.recorder.hardware_acceleration)
-        decode_plans = [("hardware", hw_input_args, hw_filter_args)] if hw_input_args else []
-        decode_plans.append(("cpu", [], []))
+        decode_plans = recorded_decode_plans(self.recorder.hardware_acceleration)
         for nudge in attempts:
             sample_at = max(0.0, offset_seconds + nudge)
-            for backend, input_args, filter_args in decode_plans:
-                timeout = 8.0
+            for plan in decode_plans:
+                backend = plan.backend
+                timeout = RECORDED_DECODE_TIMEOUT_SECONDS
                 if deadline is not None:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         last_error = "recorded-frame deadline expired"
                         break
                     timeout = min(timeout, remaining)
-                command = [
+                command = build_decode_command(
                     self.recorder.ffmpeg_path,
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-fflags",
-                    "+discardcorrupt",
-                    "-err_detect",
-                    "ignore_err",
-                    *RECORDED_FRAME_INPUT_THREAD_ARGS,
-                    *input_args,
-                    "-ss",
-                    f"{sample_at:.3f}",
-                    "-copyts",
-                    "-start_at_zero",
-                    "-i",
-                    str(path),
-                    "-map",
-                    "0:v:0",
-                    "-an",
-                    "-frames:v",
-                    "1",
-                    *filter_args,
-                    "-pix_fmt",
-                    "bgr24",
-                    "-f",
-                    "image2pipe",
-                    "-vcodec",
-                    "bmp",
-                    *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
-                    "pipe:1",
-                ]
+                    path,
+                    plan=plan,
+                    tolerate_corruption=True,
+                    seek=f"{sample_at:.3f}",
+                    copyts=True,
+                    start_at_zero=True,
+                    first_video_stream=True,
+                    video_filter=plan.download_filter,
+                    frames=1,
+                )
                 process_lease = self._acquire_decode_process(
                     incident_epoch=incident_epoch,
                     deadline=deadline,
@@ -2255,28 +2233,22 @@ class RecordedMotionObjectDetector:
                 if self.decode_budget is not None and process_lease is None:
                     last_error = "decode process budget unavailable"
                     break
-                result = None
                 try:
-                    result = run_evidence_process(command, timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    last_error = f"{backend} timed out"
+                    result = run_decoder(command, backend=backend, timeout=timeout)
                 finally:
                     if process_lease is not None:
                         process_lease.release()
-                if result is not None:
-                    self._record_decoder_errors(
-                        stderr=result.stderr or b"",
-                        path=path,
-                        backend=backend,
-                    )
-                if result is None or result.returncode != 0 or not result.stdout:
+                self._record_decoder_errors(
+                    stderr=result.stderr,
+                    path=path,
+                    backend=backend,
+                )
+                if not result.ok or not result.output:
                     if self.decode_budget is not None:
                         self.decode_budget.record_ffmpeg(backend, success=False)
-                    if result is not None:
-                        detail = result.stderr.decode("utf-8", errors="replace").strip().splitlines()[0:2]
-                        last_error = f"{backend}: {' '.join(detail)[:180]}"
+                    last_error = result.describe()
                     continue
-                array = np.frombuffer(result.stdout, dtype=np.uint8)
+                array = np.frombuffer(result.output, dtype=np.uint8)
                 frame = cv2.imdecode(array, cv2.IMREAD_COLOR)
                 if frame is not None:
                     if self.decode_budget is not None:
@@ -2326,62 +2298,32 @@ class RecordedMotionObjectDetector:
             expression = (
                 f"if(eq(selected_n\\,{index})\\,gte(t\\,{offset:.3f})\\,{expression})"
             )
-        seek_args = ["-ss", str(seek_seconds)] if seek_seconds else []
-        hw_input_args, hw_filter_args = recorded_frame_hw_args(
-            self.recorder.hardware_acceleration
-        )
-        decode_plans = [("hardware", hw_input_args, hw_filter_args)] if hw_input_args else []
-        decode_plans.append(("cpu", [], []))
         last_error = ""
         process_count = 0
-        for backend, input_args, filter_args in decode_plans:
-            timeout = 8.0
+        for plan in recorded_decode_plans(self.recorder.hardware_acceleration):
+            backend = plan.backend
+            timeout = RECORDED_DECODE_TIMEOUT_SECONDS
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 timeout = min(timeout, remaining)
             # Download only the selected surfaces from the hardware decoder.
-            download_filter = ""
-            if filter_args:
-                try:
-                    download_filter = f"{filter_args[filter_args.index('-vf') + 1]},"
-                except (ValueError, IndexError):
-                    download_filter = ""
-            command = [
+            download_filter = f"{plan.download_filter}," if plan.download_filter else ""
+            command = build_decode_command(
                 self.recorder.ffmpeg_path,
-                "-hide_banner",
-                "-loglevel",
-                "info",
-                "-fflags",
-                "+discardcorrupt",
-                "-err_detect",
-                "ignore_err",
-                *RECORDED_FRAME_INPUT_THREAD_ARGS,
-                *input_args,
-                *seek_args,
-                "-copyts",
-                "-start_at_zero",
-                "-i",
-                str(path),
-                "-map",
-                "0:v:0",
-                "-an",
-                "-vf",
-                f"select={expression},{download_filter}showinfo@event_sample",
-                "-fps_mode",
-                "passthrough",
-                "-frames:v",
-                str(len(offsets)),
-                "-pix_fmt",
-                "bgr24",
-                "-f",
-                "image2pipe",
-                "-vcodec",
-                "bmp",
-                *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
-                "pipe:1",
-            ]
+                path,
+                plan=plan,
+                loglevel="info",
+                tolerate_corruption=True,
+                seek=str(seek_seconds) if seek_seconds else None,
+                copyts=True,
+                start_at_zero=True,
+                first_video_stream=True,
+                video_filter=f"select={expression},{download_filter}showinfo@event_sample",
+                passthrough_timestamps=True,
+                frames=len(offsets),
+            )
             process_lease = self._acquire_decode_process(
                 incident_epoch=incident_epoch,
                 deadline=deadline,
@@ -2390,92 +2332,24 @@ class RecordedMotionObjectDetector:
             if self.decode_budget is not None and process_lease is None:
                 last_error = "decode process budget unavailable"
                 break
-            process: subprocess.Popen[bytes] | None = None
-            decoded_frames: list[Frame] = []
-            stderr_chunks: list[bytes] = []
-            stream_errors: list[Exception] = []
-            stdout_thread: threading.Thread | None = None
-            stderr_thread: threading.Thread | None = None
             try:
-                check_evidence_cancellation()
-                report_evidence_stage("frame_decode")
                 process_count += 1
-                process = subprocess.Popen(
+                result = run_decoder(
                     command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    backend=backend,
+                    timeout=timeout,
+                    stdout_reader=read_bmp_frames,
                 )
-                assert process.stdout is not None and process.stderr is not None
-
-                def read_stdout() -> None:
-                    try:
-                        decoded_frames.extend(
-                            self._decode_bmp_stream(process.stdout)
-                        )
-                    except Exception as exc:
-                        stream_errors.append(exc)
-
-                def read_stderr() -> None:
-                    try:
-                        stderr_chunks.append(process.stderr.read())
-                    except Exception as exc:
-                        stream_errors.append(exc)
-
-                stdout_thread = threading.Thread(target=read_stdout, daemon=True)
-                stderr_thread = threading.Thread(target=read_stderr, daemon=True)
-                stdout_thread.start()
-                stderr_thread.start()
-                decode_deadline = time.monotonic() + timeout
-                while True:
-                    check_evidence_cancellation()
-                    remaining = decode_deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise subprocess.TimeoutExpired(command, timeout)
-                    try:
-                        process.wait(timeout=evidence_wait_timeout(remaining))
-                        break
-                    except subprocess.TimeoutExpired:
-                        continue
-            except EvidenceWorkPreempted:
-                if process is not None:
-                    process.kill()
-                    process.wait()
-                raise
-            except subprocess.TimeoutExpired:
-                last_error = f"{backend} timed out"
-                if process is not None:
-                    process.kill()
-                    process.wait()
-            except OSError as exc:
-                last_error = f"{backend}: {exc}"
             finally:
-                if stdout_thread is not None:
-                    stdout_thread.join()
-                if stderr_thread is not None:
-                    stderr_thread.join()
-                if process is not None:
-                    if process.stdout is not None:
-                        process.stdout.close()
-                    if process.stderr is not None:
-                        process.stderr.close()
                 if process_lease is not None:
                     process_lease.release()
-            stderr = b"".join(stderr_chunks)
+            stderr = result.stderr
+            decoded_frames: list[Frame] = result.output or []
             self._record_decoder_errors(stderr=stderr, path=path, backend=backend)
-            if (
-                process is None
-                or process.returncode != 0
-                or not decoded_frames
-                or stream_errors
-            ):
+            if not result.ok or not decoded_frames:
                 if self.decode_budget is not None:
                     self.decode_budget.record_ffmpeg(backend, success=False)
-                if process is not None:
-                    detail = stderr.decode(
-                        "utf-8",
-                        errors="replace",
-                    ).strip().splitlines()[0:2]
-                    last_error = f"{backend}: {' '.join(detail)[:180]}"
+                last_error = result.describe()
                 continue
             actual_offsets = [
                 round(float(match.group(1)), 6)
@@ -2484,6 +2358,16 @@ class RecordedMotionObjectDetector:
                     stderr,
                 )
             ]
+            if len(actual_offsets) != len(decoded_frames):
+                # Frames pair with timestamps by position; an unpaired frame
+                # has no trustworthy capture time and is left to the fallback.
+                LOGGER.debug(
+                    "recorded batch decode for %s camera=%s paired %d frames with %d timestamps",
+                    path,
+                    self.camera.id,
+                    len(decoded_frames),
+                    len(actual_offsets),
+                )
             decoded: dict[float, _DecodedRecordedFrame] = {}
             for offset, frame, actual_offset in zip(
                 offsets,
@@ -2514,10 +2398,7 @@ class RecordedMotionObjectDetector:
 
     def _record_decoder_errors(self, *, stderr: bytes, path: Path, backend: str) -> None:
         """Summarize controlled recorded-decoder stderr with camera context."""
-        codec_lines = Counter(
-            match.group(1).decode("ascii").lower()
-            for match in _DECODER_ERROR_CODEC.finditer(stderr)
-        )
+        codec_lines = decoder_error_codecs(stderr)
         if not codec_lines:
             return
         source = next((part for part in path.parts if part in {"main", "live"}), "")
@@ -2541,41 +2422,6 @@ class RecordedMotionObjectDetector:
                 codec_lines=dict(codec_lines),
             )
 
-    @staticmethod
-    def _decode_bmp_stream(stream: Any) -> list[Frame]:
-        """Read and decode concatenated BMP records without buffering stdout."""
-        frames: list[Frame] = []
-
-        def read_exact(size: int) -> bytes:
-            chunks: list[bytes] = []
-            remaining = size
-            while remaining > 0:
-                chunk = stream.read(remaining)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            return b"".join(chunks)
-
-        while True:
-            header = read_exact(6)
-            if not header:
-                break
-            if len(header) != 6 or header[:2] != b"BM":
-                break
-            frame_size = int.from_bytes(header[2:6], "little")
-            if frame_size < 54:
-                break
-            encoded = header + read_exact(frame_size - len(header))
-            if len(encoded) != frame_size:
-                break
-            frame = cv2.imdecode(
-                np.frombuffer(encoded, dtype=np.uint8),
-                cv2.IMREAD_COLOR,
-            )
-            if frame is not None:
-                frames.append(frame)
-        return frames
 
 
 class RecordedMotionObjectDetectorFactory:

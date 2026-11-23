@@ -12,12 +12,14 @@ from pathlib import Path
 
 import numpy as np
 
-from .ffmpeg_hw import (
-    RECORDED_FRAME_INPUT_THREAD_ARGS,
-    RECORDED_FRAME_OUTPUT_THREAD_ARGS,
-    dri_render_device,
-    qsv_enabled,
-    vaapi_enabled,
+from .recorded_decoder import (
+    DecodePlan,
+    StreamingDecode,
+    build_decode_command,
+    recorded_decode_plans,
+    run_decoder,
+    warn_decoder_errors,
+    warn_decoder_failure,
 )
 from .video_frames import DecodedVideoFrame, VideoFrameReference
 
@@ -66,30 +68,6 @@ def sampled_video_frames(
     )
 
 
-def _sampled_decode_plans(
-    hardware_acceleration: str | None,
-    output_width: int,
-    output_height: int,
-) -> list[tuple[str, list[str], str]]:
-    """Return (backend, input args, pre-sampling scale filter) attempts.
-
-    Explicit QSV also uses VAAPI here: scale_qsv re-times frames onto a
-    1/fps time base, which would break exact source-PTS frame references.
-    """
-    plans: list[tuple[str, list[str], str]] = []
-    if qsv_enabled(hardware_acceleration) or vaapi_enabled(hardware_acceleration):
-        plans.append((
-            "vaapi",
-            [
-                "-vaapi_device", dri_render_device(),
-                "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi",
-            ],
-            f"scale_vaapi=w={output_width}:h={output_height}:format=nv12,hwdownload,format=nv12",
-        ))
-    plans.append(("cpu", [], ""))
-    return plans
-
-
 def _ffmpeg_sampled_video_frames(
     path: Path,
     *,
@@ -116,49 +94,49 @@ def _ffmpeg_sampled_video_frames(
     output_height = max(2, int(round(source_height * output_width / source_width)))
     output_width -= output_width % 2
     output_height -= output_height % 2
-    input_options = ["-f", "concat", "-safe", "0"] if concat_input else []
     duration = max(0.1, float(duration_seconds))
     offset = max(0.0, float(start_offset_seconds))
+    seek: str | None = None
     if not concat_input and (probe_path or path) == path and source_start == 0.0 and offset > INPUT_SEEK_MARGIN_SECONDS:
         # The demuxer starts at the preceding keyframe instead of decoding the
         # segment from its beginning. -copyts keeps the source timeline, so
         # trim, showinfo PTS and frame references are unchanged; a container
         # start offset would shift that timeline, so only zero-start files seek.
-        input_options = ["-ss", f"{offset - INPUT_SEEK_MARGIN_SECONDS:.6f}", "-copyts"]
+        seek = f"{offset - INPUT_SEEK_MARGIN_SECONDS:.6f}"
     trim = f"trim=start={offset:.6f}:end={offset + duration:.6f}"
     sampling = (
         f"showinfo@source,fps={max(0.1, float(sample_fps)):.6f},showinfo@sampled"
     )
-    plans = _sampled_decode_plans(hardware_acceleration, output_width, output_height)
-    for index, (backend, decode_args, hardware_scale) in enumerate(plans):
+    plans = recorded_decode_plans(
+        hardware_acceleration,
+        scale=(output_width, output_height),
+    )
+    for index, plan in enumerate(plans):
         # Source and sampled checksums must see system-memory frames. Hardware
         # scales before download; software scales only the sampled frames.
         video_filter = (
-            f"{trim},{hardware_scale},{sampling},setpts=PTS-STARTPTS"
-            if hardware_scale
+            f"{trim},{plan.download_filter},{sampling},setpts=PTS-STARTPTS"
+            if plan.download_filter
             else f"{trim},{sampling},scale={output_width}:{output_height},setpts=PTS-STARTPTS"
         )
-        command = [
+        command = build_decode_command(
             ffmpeg_path,
-            "-nostdin",
-            "-v", "info",
-            *RECORDED_FRAME_INPUT_THREAD_ARGS,
-            *decode_args,
-            *input_options,
-            "-i", str(path),
-            "-vf", video_filter,
-            "-t", f"{duration:.6f}",
-            "-fps_mode", "passthrough",
-            "-an", "-sn", "-dn",
-            "-f", "rawvideo",
-            "-pix_fmt", "bgr24",
-            *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
-            "pipe:1",
-        ]
+            path,
+            plan=plan,
+            loglevel="info",
+            concat_input=concat_input,
+            seek=seek,
+            copyts=seek is not None,
+            video_filter=video_filter,
+            duration=f"{duration:.6f}",
+            passthrough_timestamps=True,
+            transport="raw",
+        )
         yielded = False
         try:
             for sample in _run_sampled_decoder(
                 command,
+                plan=plan,
                 path=path,
                 start_epoch=start_epoch,
                 offset=offset,
@@ -167,6 +145,7 @@ def _ffmpeg_sampled_video_frames(
                 output_height=output_height,
                 time_base_num=time_base_num,
                 time_base_den=time_base_den,
+                sample_interval_seconds=1.0 / max(0.1, float(sample_fps)),
             ):
                 yielded = True
                 yield sample
@@ -174,7 +153,7 @@ def _ffmpeg_sampled_video_frames(
         except (OSError, RuntimeError) as error:
             if yielded or index == len(plans) - 1:
                 raise
-            _warn_sampled_hardware_fallback(backend, error)
+            _warn_sampled_hardware_fallback(plan.backend, error)
 
 
 _hardware_fallback_warned: set[str] = set()
@@ -193,9 +172,117 @@ def _warn_sampled_hardware_fallback(backend: str, error: BaseException) -> None:
     )
 
 
+_FRAME_HEAD_PATTERN = re.compile(
+    rb"\bn:\s*\d+\s+pts:\s*(-?\d+)\s+pts_time:([-+0-9.eE]+)"
+)
+_FRAME_CHECKSUM_PATTERN = re.compile(rb"\bchecksum:([0-9A-Fa-f]+)")
+
+
+class _SampledTimestamps:
+    """Pair each sampled frame with the source frame it was copied from.
+
+    The fps filter re-times frames, so the sampled PTS is not the source PTS.
+    Both showinfo taps report a checksum of the same pixels; the nearest
+    not-yet-used source frame with that checksum is the exact reference.
+
+    showinfo writes a frame line in pieces, and a decoder thread reporting
+    bitstream damage can write between them. The head (``n: pts: pts_time:``)
+    then ends early and the checksum arrives on a later line of the same tap,
+    or not at all. Every sampled head still yields exactly one timestamp, in
+    order, so images never shift onto a neighbour's timestamp; a frame whose
+    checksum was lost is paired by time and marked inexact.
+    """
+
+    def __init__(self, pairing_tolerance_seconds: float) -> None:
+        self.queue: queue.Queue[tuple[int, float, bool] | None] = queue.Queue()
+        self.inexact = 0
+        self._tolerance = max(0.0, float(pairing_tolerance_seconds))
+        # [pts, pts_time, checksum or None]; removed once referenced.
+        self._sources: list[list] = []
+        self._open_source: list | None = None
+        self._open_sampled: list | None = None
+        self._last_source_time = float("-inf")
+        self._ended = False
+
+    def line(self, raw_line: bytes) -> bool:
+        if b"showinfo@" not in raw_line:
+            return False
+        if self._ended:
+            return True
+        source = b"showinfo@source" in raw_line
+        if not source and b"showinfo@sampled" not in raw_line:
+            return True
+        head = _FRAME_HEAD_PATTERN.search(raw_line)
+        checksum_match = _FRAME_CHECKSUM_PATTERN.search(raw_line)
+        checksum = checksum_match.group(1).upper() if checksum_match else None
+        if head is None:
+            # The tail of a torn line completes the head still waiting for it.
+            if checksum is None:
+                return True
+            if source and self._open_source is not None:
+                self._open_source[2] = checksum
+                self._open_source = None
+            elif not source and self._open_sampled is not None:
+                self._open_sampled[2] = checksum
+                self._resolve_sampled()
+            return True
+        frame = [int(head.group(1)), float(head.group(2)), checksum]
+        if source:
+            self._sources.append(frame)
+            self._open_source = frame if checksum is None else None
+            return True
+        self._resolve_sampled()
+        self._open_sampled = frame
+        if checksum is not None:
+            self._resolve_sampled()
+        return True
+
+    def _resolve_sampled(self) -> None:
+        sampled, self._open_sampled = self._open_sampled, None
+        if sampled is None or self._ended:
+            return
+        _pts, sampled_time, checksum = sampled
+        eligible = [
+            item for item in self._sources
+            if item[1] >= self._last_source_time - 1e-9
+        ]
+        exact = [
+            item for item in eligible
+            if checksum is not None and item[2] == checksum
+        ]
+        if exact:
+            chosen = min(exact, key=lambda item: abs(item[1] - sampled_time))
+        else:
+            # The checksum on one side was lost. Only source frames that could
+            # still be this image qualify: unidentified ones when the sampled
+            # checksum is known, any when it is not.
+            nearby = [
+                item for item in eligible
+                if (checksum is None or item[2] is None)
+                and abs(item[1] - sampled_time) <= self._tolerance
+            ]
+            if not nearby:
+                self.end()
+                return
+            chosen = min(nearby, key=lambda item: abs(item[1] - sampled_time))
+            self.inexact += 1
+        self._last_source_time = chosen[1]
+        self._sources.remove(chosen)
+        self.queue.put((chosen[0], chosen[1], bool(exact)))
+
+    def end(self) -> None:
+        if self._ended:
+            return
+        self._resolve_sampled()
+        if not self._ended:
+            self._ended = True
+            self.queue.put(None)
+
+
 def _run_sampled_decoder(
     command: list[str],
     *,
+    plan: DecodePlan,
     path: Path,
     start_epoch: float,
     offset: float,
@@ -204,88 +291,34 @@ def _run_sampled_decoder(
     output_height: int,
     time_base_num: int,
     time_base_den: int,
+    sample_interval_seconds: float,
 ) -> Iterator[DecodedVideoFrame]:
     frame_bytes = output_width * output_height * 3
-    process = subprocess.Popen(
+    timestamps = _SampledTimestamps(sample_interval_seconds)
+    decoder = StreamingDecode(
         command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=frame_bytes * 2,
+        backend=plan.backend,
+        buffer_bytes=frame_bytes * 2,
+        on_stderr_line=timestamps.line,
+        on_stderr_end=timestamps.end,
     )
-    timestamps: queue.Queue[tuple[int, float] | None] = queue.Queue()
-    frame_pattern = re.compile(
-        r"\bn:\s*\d+\s+pts:\s*(-?\d+)\s+pts_time:([-+0-9.eE]+).*"
-        r"\bchecksum:([0-9A-Fa-f]+)"
-    )
-
-    def read_timestamps() -> None:
-        stderr = process.stderr
-        if stderr is None:
-            timestamps.put(None)
-            return
-        try:
-            source_by_checksum: dict[str, list[tuple[int, float]]] = {}
-            last_source_time = float("-inf")
-            for raw_line in iter(stderr.readline, b""):
-                line = raw_line.decode("utf-8", errors="replace")
-                match = frame_pattern.search(line)
-                if not match:
-                    continue
-                pts = int(match.group(1))
-                pts_seconds = float(match.group(2))
-                checksum = match.group(3).upper()
-                if "showinfo@source" in line:
-                    source_by_checksum.setdefault(checksum, []).append(
-                        (pts, pts_seconds)
-                    )
-                    continue
-                if "showinfo@sampled" not in line:
-                    continue
-                candidates = source_by_checksum.get(checksum, [])
-                eligible = [
-                    item for item in candidates if item[1] >= last_source_time - 1e-9
-                ]
-                if not eligible:
-                    timestamps.put(None)
-                    return
-                source_pts, source_time = min(
-                    eligible,
-                    key=lambda item: abs(item[1] - pts_seconds),
-                )
-                last_source_time = source_time
-                candidates.remove((source_pts, source_time))
-                timestamps.put((source_pts, source_time))
-        finally:
-            timestamps.put(None)
-
-    timestamp_thread = threading.Thread(
-        target=read_timestamps,
-        name="survng-frame-pts",
-        daemon=True,
-    )
-    timestamp_thread.start()
     try:
-        if process.stdout is None:
-            raise RuntimeError("comparison decoder output is unavailable")
         while True:
-            payload = bytearray()
-            while len(payload) < frame_bytes:
-                chunk = process.stdout.read(frame_bytes - len(payload))
-                if not chunk:
-                    break
-                payload.extend(chunk)
+            payload = decoder.read_exact(frame_bytes)
+            if decoder.stalled:
+                break
             if not payload:
                 break
             if len(payload) != frame_bytes:
                 raise RuntimeError("comparison decoder returned a partial frame")
             frame = np.frombuffer(payload, dtype=np.uint8).reshape((output_height, output_width, 3)).copy()
             try:
-                timestamp = timestamps.get(timeout=5.0)
+                timestamp = timestamps.queue.get(timeout=5.0)
             except queue.Empty as exc:
                 raise RuntimeError("comparison decoder frame timestamp timed out") from exc
             if timestamp is None:
                 raise RuntimeError("comparison decoder frame timestamp is unavailable")
-            pts, pts_seconds = timestamp
+            pts, pts_seconds, exact = timestamp
             captured_at = start_epoch + pts_seconds - offset
             yield DecodedVideoFrame(
                 captured_at,
@@ -298,30 +331,27 @@ def _run_sampled_decoder(
                     time_base_num=time_base_num,
                     time_base_den=time_base_den,
                     captured_at=captured_at,
+                    exact=exact,
                 ),
             )
-        return_code = process.wait(timeout=5.0)
-        if return_code != 0:
-            raise RuntimeError("comparison video decoder failed")
+        result = decoder.finish()
+        if timestamps.inexact:
+            LOGGER.debug(
+                "sampled decode of %s paired %d frames by time after torn showinfo lines",
+                path,
+                timestamps.inexact,
+            )
+        warn_decoder_errors("tracking", path, plan.backend, result.stderr)
+        if not result.ok:
+            raise RuntimeError(f"comparison video decoder failed ({result.describe()})")
     finally:
-        if process.stdout is not None:
-            process.stdout.close()
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=2.0)
-        timestamp_thread.join(timeout=1.0)
-        if process.stderr is not None:
-            process.stderr.close()
+        decoder.close()
 
 
 def _ffprobe_video_metadata(
     path: Path,
     ffmpeg_path: str,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int, int, float | None]:
     ffprobe_path = str(Path(ffmpeg_path).with_name("ffprobe"))
     try:
         result = subprocess.run(
@@ -375,36 +405,27 @@ def video_frame_at_reference(
     output_height = max(2, int(round(source_height * output_width / source_width)))
     output_width -= output_width % 2
     output_height -= output_height % 2
-    command = [
+    plan = DecodePlan("cpu")
+    command = build_decode_command(
         ffmpeg_path,
-        "-nostdin",
-        "-v", "error",
-        *RECORDED_FRAME_INPUT_THREAD_ARGS,
-        "-i", str(reference.source_path),
-        "-vf", (
+        reference.source_path,
+        plan=plan,
+        video_filter=(
             f"select='eq(pts\\,{reference.pts})',"
             f"scale={output_width}:{output_height}"
         ),
-        "-frames:v", "1",
-        "-an", "-sn", "-dn",
-        "-f", "rawvideo",
-        "-pix_fmt", "bgr24",
-        *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
-        "pipe:1",
-    ]
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            timeout=10.0,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        frames=1,
+        transport="raw",
+    )
+    result = run_decoder(command, backend=plan.backend, timeout=10.0)
+    warn_decoder_errors("tracking-exact-frame", reference.source_path, plan.backend, result.stderr)
+    if not result.ok:
+        warn_decoder_failure("tracking-exact-frame", reference.source_path, result)
         return None
     expected_bytes = output_width * output_height * 3
-    if result.returncode != 0 or len(result.stdout) != expected_bytes:
+    if len(result.output or b"") != expected_bytes:
         return None
-    frame = np.frombuffer(result.stdout, dtype=np.uint8).reshape(
+    frame = np.frombuffer(result.output, dtype=np.uint8).reshape(
         (output_height, output_width, 3)
     ).copy()
     return DecodedVideoFrame(reference.captured_at, frame, reference)

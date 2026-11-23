@@ -760,9 +760,14 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             recording = Path(tmpdir) / "sample.mp4"
             recording.touch()
-            completed = SimpleNamespace(returncode=0, stdout=encoded.tobytes(), stderr=b"")
+            completed = SimpleNamespace(
+                returncode=0,
+                stdout=BytesIO(encoded.tobytes()),
+                stderr=BytesIO(b""),
+                wait=lambda timeout=None: 0,
+            )
             with patch(
-                "survng.app.motion_pipeline.object_detection.subprocess.run",
+                "survng.app.recorded_decoder.subprocess.Popen",
                 return_value=completed,
             ) as run:
                 actual = backend._read_recorded_frame(recording, 1.25)
@@ -809,7 +814,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                     self.returncode = -9
 
             with patch(
-                "survng.app.motion_pipeline.object_detection.subprocess.Popen",
+                "survng.app.recorded_decoder.subprocess.Popen",
                 return_value=Process(),
             ) as popen:
                 frames, process_count = backend._read_recorded_frames(
@@ -858,7 +863,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                     self.returncode = -9
 
             with patch(
-                "survng.app.motion_pipeline.object_detection.subprocess.Popen",
+                "survng.app.recorded_decoder.subprocess.Popen",
                 return_value=Process(),
             ) as popen:
                 frames, _count = backend._read_recorded_frames(recording, [7.0, 7.5])
@@ -882,7 +887,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             recording = Path(tmpdir) / "sample.mp4"
             recording.touch()
             with patch(
-                "survng.app.motion_pipeline.object_detection.subprocess.Popen",
+                "survng.app.recorded_decoder.subprocess.Popen",
                 side_effect=OSError("not run"),
             ) as popen:
                 backend._read_recorded_frames(recording, [7.0, 7.5])
@@ -1006,7 +1011,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                     )
                     real_popen = subprocess.Popen
                     with patch(
-                        "survng.app.motion_pipeline.object_detection.subprocess.Popen",
+                        "survng.app.recorded_decoder.subprocess.Popen",
                         side_effect=real_popen,
                     ) as popen:
                         frames, _count = backend._read_recorded_frames(recording, [2.0, 7.0])

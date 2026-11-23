@@ -142,6 +142,7 @@ jobs:
             tests/test_tracking_evaluation.py \
             tests/test_tracking_candidate.py \
             tests/test_recorded_video_frames.py \
+            tests/test_recorded_decoder.py \
             tests/test_object_tracking_lifecycle.py \
             tests/test_tracking_frames.py \
             tests/test_tracking_limiter.py

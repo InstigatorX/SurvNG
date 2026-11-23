@@ -45,7 +45,7 @@ class RecordedVideoFramesTest(unittest.TestCase):
                     stdout='{"streams":[{"width":8,"height":4,"time_base":"1/90000"}]}',
                 ),
             ) as ffprobe,
-            patch("survng.app.recorded_video_frames.subprocess.Popen", return_value=process) as popen,
+            patch("survng.app.recorded_decoder.subprocess.Popen", return_value=process) as popen,
         ):
             frames = list(sampled_video_frames(
                 Path("comparison.ffconcat"),
@@ -97,7 +97,7 @@ class RecordedVideoFramesTest(unittest.TestCase):
         )
         with (
             patch("survng.app.recorded_video_frames.subprocess.run", return_value=probe),
-            patch("survng.app.recorded_video_frames.subprocess.Popen", return_value=process) as popen,
+            patch("survng.app.recorded_decoder.subprocess.Popen", return_value=process) as popen,
         ):
             frames = list(sampled_video_frames(
                 Path("segment.mp4"), start_epoch=50.0, sample_fps=2.0, duration_seconds=1.0,
@@ -138,7 +138,7 @@ class RecordedVideoFramesTest(unittest.TestCase):
         with (
             patch("survng.app.recorded_video_frames.subprocess.run", return_value=probe),
             patch(
-                "survng.app.recorded_video_frames.subprocess.Popen",
+                "survng.app.recorded_decoder.subprocess.Popen",
                 side_effect=[failed, decoded],
             ) as popen,
             self.assertLogs("survng.app.recorded_video_frames", level="DEBUG"),
@@ -164,7 +164,7 @@ class RecordedVideoFramesTest(unittest.TestCase):
             with (
                 patch("survng.app.recorded_video_frames.subprocess.run",
                       return_value=SimpleNamespace(returncode=0, stdout=probe_stdout)),
-                patch("survng.app.recorded_video_frames.subprocess.Popen", return_value=process) as popen,
+                patch("survng.app.recorded_decoder.subprocess.Popen", return_value=process) as popen,
             ):
                 list(sampled_video_frames(
                     Path("segment.mp4"), start_epoch=50.0, sample_fps=2.0, duration_seconds=1.0,
@@ -197,12 +197,17 @@ class RecordedVideoFramesTest(unittest.TestCase):
             returncode=0,
             stdout='{"streams":[{"width":8,"height":4,"time_base":"1/90000"}]}',
         )
-        decoded = SimpleNamespace(returncode=0, stdout=raw)
+        decoded = SimpleNamespace(
+            returncode=0,
+            stdout=BytesIO(raw),
+            stderr=BytesIO(b""),
+            wait=Mock(return_value=0),
+        )
 
-        with patch(
-            "survng.app.recorded_video_frames.subprocess.run",
-            side_effect=[probe, decoded],
-        ) as run:
+        with (
+            patch("survng.app.recorded_video_frames.subprocess.run", return_value=probe),
+            patch("survng.app.recorded_decoder.subprocess.Popen", return_value=decoded) as popen,
+        ):
             sample = video_frame_at_reference(
                 reference,
                 ffmpeg_path="ffmpeg",
@@ -213,7 +218,7 @@ class RecordedVideoFramesTest(unittest.TestCase):
         self.assertEqual(sample.captured_at, reference.captured_at)
         self.assertIs(sample.reference, reference)
         self.assertEqual(sample.frame.shape, (4, 8, 3))
-        command = run.call_args_list[1].args[0]
+        command = popen.call_args.args[0]
         before_input = command[:command.index("-i")]
         after_input = command[command.index("-i") + 2:]
         self.assertEqual(before_input[before_input.index("-threads:v") + 1], "2")
