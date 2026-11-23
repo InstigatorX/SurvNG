@@ -1534,6 +1534,39 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         # Read from the very start of the segment that follows the hole.
         self.assertEqual({read for read in reads}, {("next.mp4", 0.0)})
 
+    def test_hole_answers_are_kept_and_a_miss_is_not_asked_again_at_once(self) -> None:
+        calls: list[float] = []
+        answers: dict[float, dict | None] = {
+            100.5: {"path": "next.mp4", "start_epoch": 101.0, "end_epoch": 111.0},
+            200.5: None,
+        }
+
+        class Recorder:
+            def recording_at(self, _camera_id: str, _epoch: float):
+                return None
+
+            def recording_for_index_hole(self, _camera_id: str, epoch: float):
+                calls.append(epoch)
+                return answers[epoch]
+
+        sampler = _EventRecordedSampler(
+            camera_id="gate", recorder=Recorder(), frame_reader=lambda *args, **kwargs: None,
+        )
+        clock = [1000.0]
+        with patch("survng.app.motion_pipeline.object_detection.time.monotonic", side_effect=lambda: clock[0]):
+            for _ in range(4):
+                self.assertEqual(sampler.recording_at(100.5)["path"], "next.mp4")
+                self.assertIsNone(sampler.recording_at(200.5))
+                clock[0] += 0.5
+            # Four passes: one question each.
+            self.assertEqual(calls, [100.5, 200.5])
+            self.assertEqual(sampler.index_hole_lookups, 1)
+            # A real gap is asked about again later, in case a segment came.
+            clock[0] += 5.0
+            answers[200.5] = {"path": "late.mp4", "start_epoch": 201.0, "end_epoch": 211.0}
+            self.assertEqual(sampler.recording_at(200.5)["path"], "late.mp4")
+            self.assertEqual(calls, [100.5, 200.5, 200.5])
+
     def test_one_frame_shared_by_several_hole_samples_is_one_observation(self) -> None:
         event_epoch = 1_800_000_000.0
         backend, _recorder = self._hole_backend(

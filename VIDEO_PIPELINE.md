@@ -460,12 +460,17 @@ second while no file can be the open one (stalled stream, slow storage, just
 restarted). File names carry whole seconds: a file named before the second in
 which the running recorder process was started is never taken for the open
 segment, and one named in that same second is not trusted for the whole
-segment but looked past once a second. The same listing also gives the newest
-closed file. It stays directly readable, to its full length, until 15 s after
-its nominal end, by which time the index has it; this does not depend on
-anyone having looked the segment up while it was open. A sample that falls
-after that file's video but before the open file's name (a name that landed
-late) is read from the start of the open file. Rows for either file report how
+segment but looked past once a second. The newest name counts as the file
+being written for up to 5 s beyond the segment length (a late cut after a
+late name); past that the stream has stalled. The same listing, which reaches
+back three segment lengths, also gives the newest closed file. Its length is
+read once, and it stays directly readable until 15 s after its nominal end,
+by when the 10 s index poll normally has it (a miss after that asks for a
+discovery as usual); this does not depend on anyone having looked the segment
+up while it was open. A sample that falls after that file's video but before
+the open file's name (a name that landed late) is read from the start of the
+open file once it has a fragment; this needs the closed file to be a
+fragmented one whose length is known. Rows for either file report how
 far the completed fragments reach, are kept by a job for at most 0.2 s, are
 never stored in the index, and no index discovery is requested for them.
 
@@ -481,8 +486,8 @@ skips the nudged single-frame fallback and gets three quick retries, then the
 ordinary interval; the extra face-evidence reads skip the fallback and simply
 count the frame as missing. A job with no indexed rows sizes its decode-memory
 reservation from the last frame decoded for the camera, or for a camera's
-first job from the largest frame seen on any camera; only the very first job
-after start takes the 36 MiB-a-frame fallback and runs alone. Near a segment's tail
+first job from the largest frame seen on any camera; before any frame has
+been seen at all, jobs take the 36 MiB-a-frame fallback. Near a segment's tail
 an open read and a later indexed read can pick different files, because an
 indexed row is capped at the segment length; the open read is the more exact.
 `recording_open_segment_lookups` in the job timing counts lookups served
@@ -496,22 +501,28 @@ for up to `event_refinement_retry_seconds` (24) at
 `event_refinement_retry_interval_seconds` (1.0) intervals.
 Segment starts come from file names, which carry whole seconds, and an index
 row that has not been validated is no longer than the configured segment. So a
-row can end before the video does, leaving an instant that no row covers. A
-refinement sample there is resolved from the files instead of waited for:
+row can end before the video does, leaving an instant between two indexed
+segments that no row covers. A refinement sample there is resolved from the
+files instead of waited for:
 
 - if the earlier file is longer than its row (a cut on a late keyframe, as
   with a 4 s keyframe interval), the sample is read from that file, to its
-  measured length;
+  measured length (the duration the index has stored, or read from the file
+  when it has none yet);
 - otherwise, if the next segment starts within 2 s of where the earlier video
   ends (its name landed late), the sample is read from the start of that
   segment. Several samples that land on that one frame count as one
   observation.
 
-A longer stretch with no video is a real recording gap and is still waited
-for. `recording_index_hole_lookups` in the job timing counts these lookups in
-the refinement stages (the extra face-evidence reads use the same lookup but
-are not counted). The lookup follows a normal index miss, so a near-live
-sample still asks the indexer for one discovery first.
+This applies only with an indexed segment on both sides. At the live edge the
+following segment is still open, and the sample waits for it as before, so the
+same sample always resolves to the same frame. A longer stretch with no video
+is a real recording gap and is still waited for; that answer is asked for
+again at most every 3 s. `recording_index_hole_lookups` in the job timing
+counts the lookups that found a segment in the refinement stages (the extra
+face-evidence reads use the same lookup but are not counted). The lookup
+follows a normal index miss, so a near-live sample still asks the indexer for
+one discovery first.
 
 A segment that has just closed is usually not indexed yet, because the indexer
 polls every 10 s. The first lookup that misses asks the indexer for it. The

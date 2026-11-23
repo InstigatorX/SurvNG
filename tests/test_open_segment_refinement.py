@@ -256,6 +256,58 @@ def test_the_just_closed_segment_is_found_without_any_earlier_lookup(tmp_path, f
     assert recorder._take_recording_edge_refreshes() == {}
 
 
+def test_the_closed_file_is_still_found_late_in_the_open_segments_run(tmp_path, fragmented_bytes):
+    # A job delayed by ten seconds, on a camera nothing else asked about.
+    recorder = Recorder("ffmpeg", tmp_path, segment_seconds=10)
+    _running(recorder, "gate", fragmented=True)
+    key = ("gate", "main")
+    now = float(int(time.time()))
+    closed_file = _segment_path(tmp_path, "gate", now - 22)
+    closed_file.write_bytes(fragmented_bytes)
+    # Named 11 s ago and still being written: a late cut after a late name.
+    open_file = _segment_path(tmp_path, "gate", now - 11)
+    open_file.write_bytes(_written_until(fragmented_bytes, 4))
+
+    row = recorder.open_recording("gate", now - 15.0)
+    assert row is not None and row["path"] == str(closed_file) and row["open"] is False
+    still_open = recorder.open_recording("gate", now - 9.0)
+    assert still_open["path"] == str(open_file) and still_open["open"] is True
+    # Usable until the index can be expected to have it, and no longer.
+    assert recorder._previous_segments[key][2] == pytest.approx((now - 22) + 10 + 15)
+
+
+def test_the_closed_files_length_is_read_once(tmp_path, fragmented_bytes):
+    recorder = Recorder("ffmpeg", tmp_path, segment_seconds=10)
+    _running(recorder, "gate", fragmented=True)
+    start = float(int(time.time()) - 11)
+    closed_file = _segment_path(tmp_path, "gate", start)
+    closed_file.write_bytes(fragmented_bytes)
+    _segment_path(tmp_path, "gate", start + 10).write_bytes(_written_until(fragmented_bytes, 1))
+    with patch.object(
+        recording_index, "fragmented_readable_seconds", wraps=recording_index.fragmented_readable_seconds,
+    ) as measure:
+        for offset in (5.0, 6.0, 7.0, 7.5):
+            assert recorder.open_recording("gate", start + offset)["path"] == str(closed_file)
+    # A closed file does not grow; walking its fragment headers on storage
+    # for every sample of every pass buys nothing.
+    assert [call.args[0] for call in measure.call_args_list] == [closed_file]
+
+
+def test_a_plain_closed_file_does_not_hand_its_time_to_the_open_segment(tmp_path, fragmented_bytes):
+    recorder = Recorder("ffmpeg", tmp_path, segment_seconds=10)
+    _running(recorder, "gate", fragmented=True)
+    start = float(int(time.time()) - 3)
+    # The camera was just switched to fragmented: the file before is a
+    # plain MP4, whose length cannot be told from fragment headers.
+    plain = _segment_path(tmp_path, "gate", start)
+    plain.write_bytes(b"not a fragmented file")
+    _segment_path(tmp_path, "gate", start + 2).write_bytes(_written_until(fragmented_bytes, 1))
+    row = recorder.open_recording("gate", start + 0.5)
+    # Inside the plain file by name: for the index, not the open segment.
+    assert row is not None and row["path"] == str(plain) and row["open"] is False
+    assert row["end_epoch"] == start
+
+
 def test_a_late_file_name_on_a_fragmented_camera_is_read_from_the_open_segment(tmp_path, fragmented_bytes):
     recorder = Recorder("ffmpeg", tmp_path, segment_seconds=10)
     _running(recorder, "gate", fragmented=True)
@@ -286,9 +338,23 @@ def test_a_late_file_name_on_a_fragmented_camera_is_read_from_the_open_segment(t
     sampler = _EventRecordedSampler(
         camera_id="gate", recorder=recorder, frame_reader=lambda *args, **kwargs: None,
     )
-    row = sampler.recording_at(start + 8.5)
-    assert row is not None and row["path"] == str(open_file)
+    with patch.object(recorder, "open_recording", wraps=recorder.open_recording) as asked:
+        for offset in (8.1, 8.5, 8.9):
+            row = sampler.recording_at(start + offset)
+            assert row is not None and row["path"] == str(open_file)
+    # The samples in one hole share one answer.
+    assert asked.call_count == 1
     assert recorder._take_recording_edge_refreshes() == {}
+
+    # The open file exists but has no fragment yet: its first frame, which
+    # is what a hole sample reads, is not there. That is "look again soon",
+    # not a read of an empty file.
+    open_file.write_bytes(fragmented_bytes[:40])
+    waiting = _EventRecordedSampler(
+        camera_id="gate", recorder=recorder, frame_reader=lambda *args, **kwargs: None,
+    )
+    assert waiting.recording_at(start + 8.5) is None
+    assert waiting.open_segment_pending and waiting.open_segment_lookups == 0
 
 
 def test_a_listing_that_spans_a_restart_does_not_restore_the_old_file(tmp_path, fragmented_bytes):
@@ -304,9 +370,12 @@ def test_a_listing_that_spans_a_restart_does_not_restore_the_old_file(tmp_path, 
             recorder._recorder_generation[("gate", "main")] = 7
         return files
 
+    _segment_path(tmp_path, "gate", start - 10).write_bytes(fragmented_bytes)
     with patch.object(recorder, "_recent_hour_recording_files", side_effect=restart_during_listing):
         recorder.open_recording("gate", start + 1.0)
     assert ("gate", "main") not in recorder._open_segments
+    # Nor the closed file it saw: that belonged to the process now replaced.
+    assert ("gate", "main") not in recorder._previous_segments
 
 
 def test_a_restarted_recorder_forgets_the_segment_it_was_writing(tmp_path, fragmented_bytes):

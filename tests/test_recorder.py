@@ -687,6 +687,61 @@ class RecorderTest(unittest.TestCase):
             self.assertIsNone(later)   # base + 12.0 is covered by the second row
             self.assertEqual(recorder.recording_at("gate", base + 12.0)["path"], str(second))
 
+    def test_a_measured_duration_already_in_the_index_extends_the_row_too(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            base = 1_784_000_000.0
+            first, _second = self._indexed_segments(recorder, Path(tmpdir), [base, base + 12.0])
+            # The index measures a file's video shortly after it closes and
+            # stores that without lengthening the row; this is the usual state.
+            with recorder._index_connection() as connection:
+                connection.execute(
+                    "UPDATE recordings SET playback_duration_seconds = 12.0 WHERE path = ?", (str(first),),
+                )
+
+            with patch("survng.app.recording_process.index.mp4_playback_metadata") as measure:
+                row = recorder.recording_for_index_hole("gate", base + 11.5)
+
+            self.assertEqual(row["path"], str(first))
+            self.assertEqual(row["end_epoch"], base + 12.0)
+            measure.assert_not_called()
+
+    def test_the_live_edge_is_not_an_index_hole(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            base = 1_784_000_000.0
+            (first,) = self._indexed_segments(recorder, Path(tmpdir), [base])
+            # The file ran to 10.9 s; the segment that owns base+10.5 by name
+            # is still being written and has no row. Reading the earlier file
+            # now would pick a different frame from the one found once the
+            # next segment is indexed.
+            with patch(
+                "survng.app.recording_process.index.mp4_playback_metadata", return_value=("", 10.9),
+            ) as measure:
+                self.assertIsNone(recorder.recording_for_index_hole("gate", base + 10.5))
+            measure.assert_not_called()
+            self.assertTrue(first.exists())
+
+    def test_an_implausible_measured_length_is_capped_and_an_offline_file_is_not_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            base = 1_784_000_000.0
+            first, second = self._indexed_segments(recorder, Path(tmpdir), [base, base + 100.0])
+            with patch(
+                "survng.app.recording_process.index.mp4_playback_metadata", return_value=("", 5000.0),
+            ) as measure:
+                row = recorder.recording_for_index_hole("gate", base + 50.0)
+                # Damaged headers can claim hours; a row is never stretched
+                # beyond what one segment could plausibly hold.
+                self.assertEqual(row["end_epoch"], base + 60.0)
+                self.assertIsNone(recorder.recording_for_index_hole("gate", base + 61.0))
+                measure.reset_mock()
+                with patch.object(recorder, "_file_verdict", return_value="unavailable"):
+                    self.assertIsNone(recorder.recording_for_index_hole("gate", base + 50.0))
+                # Storage that is not answering is not read to find out.
+                measure.assert_not_called()
+            self.assertTrue(second.exists())
+
     def test_a_row_cut_short_by_its_measured_duration_leaves_a_bridged_hole(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)

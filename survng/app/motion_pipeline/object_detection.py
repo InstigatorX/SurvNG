@@ -86,6 +86,9 @@ RECORDED_OPEN_SEGMENT_TAIL_SECONDS = 0.25
 # Offsets of one pass share a single read of the open segment's extent.
 RECORDED_OPEN_SEGMENT_MEMO_SECONDS = 0.2
 RECORDED_OPEN_SEGMENT_QUICK_RETRIES = 3
+# How long "no segment bridges this instant" is believed before asking again.
+# The following segment of a near-live sample appears within a segment length.
+RECORDED_INDEX_HOLE_RECHECK_SECONDS = 3.0
 # FFmpeg's accurate seek discards frames before the seek point, so keep the
 # seek strictly ahead of the first requested sample.
 RECORDED_BATCH_SEEK_MARGIN_SECONDS = 0.25
@@ -356,7 +359,7 @@ class _EventRecordedSampler:
         self.open_read_misses = 0
         self.open_read_failed = False
         # Instants in an index hole and the row found for each.
-        self._hole_rows: dict[float, dict[str, Any]] = {}
+        self._hole_rows: dict[float, tuple[float, dict[str, Any] | None]] = {}
         self.index_hole_lookups = 0
 
     def recording_at(self, epoch: float) -> dict[str, Any] | None:
@@ -382,7 +385,10 @@ class _EventRecordedSampler:
             # The segment being written is read directly and never indexed
             # while open, so asking the indexer for it would only list the
             # directory. Its row grows, so it is kept only for one pass.
-            if epoch + RECORDED_OPEN_SEGMENT_TAIL_SECONDS <= float(open_row["end_epoch"]):
+            # A sample handed to this file from the hole before its name
+            # reads its first frame, which exists once a fragment does.
+            needed = max(epoch, float(open_row["start_epoch"]))
+            if needed + RECORDED_OPEN_SEGMENT_TAIL_SECONDS <= float(open_row["end_epoch"]):
                 self.open_segment_lookups += 1
                 return open_row
             self.open_segment_pending = True
@@ -397,16 +403,24 @@ class _EventRecordedSampler:
             # (a file longer than its row, or a file name that landed late),
             # the video exists and waiting would never produce a row.
             hole_key = round(epoch, 3)
-            if hole_key in self._hole_rows:
-                return self._hole_rows[hole_key]
+            known = self._hole_rows.get(hole_key)
+            if known is not None and (
+                known[1] is not None
+                or time.monotonic() - known[0] < RECORDED_INDEX_HOLE_RECHECK_SECONDS
+            ):
+                # A row found stays found. "Nothing there" is asked again only
+                # now and then: a real gap would otherwise cost three queries
+                # and a file check for every missing sample on every pass.
+                return known[1]
             for_hole = getattr(self.recorder, "recording_for_index_hole", None)
             row = for_hole(self.camera_id, epoch) if callable(for_hole) else None
+            # Kept by instant, not by range: the row may start after it.
+            self._hole_rows[hole_key] = (
+                time.monotonic(), dict(row) if row is not None else None,
+            )
             if row is not None:
                 self.index_hole_lookups += 1
-                normalized = dict(row)
-                # Kept by instant, not by range: the row may start after it.
-                self._hole_rows[hole_key] = normalized
-                return normalized
+                return self._hole_rows[hole_key][1]
         if row is not None and row.get("start_epoch") is not None:
             normalized = dict(row)
             if normalized.get("end_epoch") is None:
@@ -435,7 +449,7 @@ class _EventRecordedSampler:
             # The open segment answers for everything from its start on; the
             # one just closed only for its own extent. Anything else is asked
             # again: it may belong to the other of the two.
-            if kept.get("open", True) and epoch >= start:
+            if kept.get("open", True) and epoch >= float(kept.get("covers_from", start)):
                 return kept
             if not kept.get("open", True) and start <= epoch < float(kept["end_epoch"]):
                 return kept
