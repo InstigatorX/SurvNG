@@ -65,6 +65,7 @@ from .homekit_routes import HomeKitRouteDependencies, create_homekit_router
 from .manager_access import ManagerAccessCoordinator
 from .config_changes import ConfigChangeActorMiddleware, ConfigChangeLog
 from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
+from . import process_exit
 from .local_observability import LocalObservabilityServer, build_runtime_status
 from .perf_samples import SlowSiteTable, TimedLock
 from .media_exports import MediaExportManager
@@ -826,6 +827,7 @@ def reload_manager(
                 active,
                 MANAGER_ACCESS_DRAIN_SECONDS,
             ),
+            request_supervisor_restart=process_exit.request_supervisor_restart,
         ),
     )
     # Capture the active generation only after entering the generation lock.

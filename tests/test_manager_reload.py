@@ -166,6 +166,80 @@ class ManagerGenerationLifecycleTest(unittest.TestCase):
         hooks.publish_runtime.assert_called_once_with(original, recovery)
         self.assertTrue(lifecycle._stopping.is_set())
 
+    def _dead_end(self, kind: str) -> tuple[Mock, Mock, AppConfig]:
+        """A reload that cannot recover in-process; returns (previous, factory, config)."""
+        previous = Mock()
+        previous.runtime_preferences.return_value = {}
+        candidate = Mock()
+        recovery = Mock()
+        if kind == "previous_shutdown":
+            previous.stop_all_with_runtime_preferences.side_effect = RuntimeError("alive")
+            return previous, Mock(return_value=candidate), AppConfig()
+        if kind == "candidate_cleanup":
+            candidate.start_all.side_effect = RuntimeError("candidate failed")
+            candidate.stop_all.side_effect = RuntimeError("worker still alive")
+            return previous, Mock(side_effect=[candidate, recovery]), AppConfig()
+        candidate.start_all.side_effect = RuntimeError("candidate failed")
+        recovery.start_all.side_effect = RuntimeError("recovery failed")
+        return previous, Mock(side_effect=[candidate, recovery]), AppConfig()
+
+    def test_unrecoverable_reload_requests_a_supervisor_restart_after_publishing(self) -> None:
+        for kind, message in (
+            ("previous_shutdown", "previous manager shutdown is still active"),
+            ("candidate_cleanup", "replacement manager cleanup is incomplete"),
+            ("recovery", "previous manager could not be restored"),
+        ):
+            with self.subTest(kind=kind):
+                order: list[str] = []
+                hooks = replace(
+                    self.hooks(),
+                    publish_runtime=Mock(side_effect=lambda *_args: order.append("publish")),
+                    request_supervisor_restart=Mock(
+                        side_effect=lambda reason: order.append("restart") or True
+                    ),
+                )
+                previous, factory, original = self._dead_end(kind)
+                lifecycle = self.lifecycle(factory, hooks)
+
+                with self.assertRaisesRegex(
+                    RuntimeError, f"{message}; SurvNG is restarting through its supervisor"
+                ):
+                    lifecycle.reload(original, previous, AppConfig(base_path="/new"), persist=False)
+
+                hooks.request_supervisor_restart.assert_called_once()
+                self.assertIn(message, hooks.request_supervisor_restart.call_args.args[0])
+                self.assertTrue(lifecycle._stopping.is_set())
+                if "publish" in order:
+                    self.assertLess(order.index("publish"), order.index("restart"))
+
+    def test_without_a_managed_server_the_error_asks_for_a_manual_restart(self) -> None:
+        hooks = replace(self.hooks(), request_supervisor_restart=Mock(return_value=False))
+        previous, factory, original = self._dead_end("previous_shutdown")
+        with self.assertRaisesRegex(RuntimeError, "; restart SurvNG through its supervisor"):
+            self.lifecycle(factory, hooks).reload(original, previous, AppConfig(), persist=False)
+
+    def test_a_failing_restart_request_does_not_hide_the_reload_failure(self) -> None:
+        hooks = replace(
+            self.hooks(), request_supervisor_restart=Mock(side_effect=RuntimeError("no server")),
+        )
+        previous, factory, original = self._dead_end("previous_shutdown")
+        with self.assertRaisesRegex(RuntimeError, "previous manager shutdown is still active"):
+            self.lifecycle(factory, hooks).reload(original, previous, AppConfig(), persist=False)
+
+    def test_recoverable_reload_failures_do_not_restart_the_process(self) -> None:
+        previous = Mock()
+        previous.runtime_preferences.return_value = {}
+        candidate = Mock()
+        candidate.start_all.side_effect = RuntimeError("candidate failed")
+        hooks = replace(self.hooks(), request_supervisor_restart=Mock(return_value=True))
+        lifecycle = self.lifecycle(Mock(side_effect=[candidate, Mock()]), hooks)
+
+        with self.assertRaisesRegex(RuntimeError, "previous configuration was restored"):
+            lifecycle.reload(AppConfig(), previous, AppConfig(base_path="/new"), persist=False)
+
+        hooks.request_supervisor_restart.assert_not_called()
+        self.assertFalse(lifecycle._stopping.is_set())
+
 
 if __name__ == "__main__":
     unittest.main()

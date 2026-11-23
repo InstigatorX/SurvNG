@@ -89,6 +89,7 @@ jobs:
         run: |
           scripts/run-tests.sh \
             tests/test_bind_policy.py \
+            tests/test_process_exit.py \
             tests/test_api_security.py \
             tests/test_config_changes.py \
             tests/test_proxy.py \
