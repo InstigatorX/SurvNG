@@ -114,7 +114,7 @@ assert.doesNotMatch(
   const baseline = [{ id: "front", name: "Front", zones: [zone] }];
   const sent = [
     { id: "front", name: "Front door", zones: [] },
-    { id: "camera", name: "Camera 2", zones: [] },
+    { id: "camera", name: "Camera 2", zones: [{ id: "drawn" }] },
     { id: "camera-2", name: "Camera 2", zones: [] },
   ];
   const savedById = new Map([
@@ -128,6 +128,7 @@ assert.doesNotMatch(
   assert.deepEqual(after[0].zones, [zone]); // saved zones stay in the baseline
   assert.notEqual(after[0].zones[0], zone); // and are copies, not shared state
   assert.deepEqual(baseline.map((camera) => camera.id), ["front"]); // input untouched
+  assert.deepEqual(after[1].zones, []); // a new camera's zones are saved separately
   // Nothing is left looking unsaved.
   assert.equal(dirtyCameraCount(perCameraDirtyState(
     [
@@ -137,4 +138,15 @@ assert.doesNotMatch(
     ],
     after,
   )), 0);
+  // Its drawn zones still need their own save.
+  assert.equal(dirtyCameraCount(perCameraDirtyState(
+    [{ id: "camera-2", name: "Camera 2", zones: [{ id: "drawn" }] }],
+    after,
+  )), 1);
 }
+
+// Camera order after a batch save uses the saved ids and is saved only when it
+// still differs from the saved baseline.
+assert.match(saveAllBlock[0], /const orderIds = cameras\.map\(\(camera\) => savedById\.get\(camera\.id\)\?\.id \?\? camera\.id\)/);
+assert.match(saveAllBlock[0], /if \(!configValuesEqual\(orderIds, savedOrder\)\) await saveCameraOrder\(orderIds\)/);
+assert.doesNotMatch(saveAllBlock[0], /if \(cameraOrderDirty\)/);

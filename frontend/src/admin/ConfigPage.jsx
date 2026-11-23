@@ -1718,7 +1718,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
     setSaveNotice({ state: "pending", text: `${selectedCamera.name || selectedCamera.id} moved to position ${targetIndex + 1}. Save order to apply.` });
   }
 
-  async function saveCameraOrder() {
+  async function saveCameraOrder(orderIds = cameras.map((camera) => camera.id)) {
     if (cameraOrderSaving) return false;
     setCameraOrderSaving(true);
     setSaveNotice({ state: "saving", text: "Saving default camera order..." });
@@ -1726,13 +1726,13 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
       const response = await fetch("/api/config/cameras/order", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(cameras.map((camera) => camera.id)),
+        body: JSON.stringify(orderIds),
       });
       if (!response.ok) throw new Error(await response.text());
-      cameraOrderOriginalRef.current = cameras.map((camera) => camera.id);
+      cameraOrderOriginalRef.current = [...orderIds];
       if (baselineConfigRef.current) {
         const byId = new Map((baselineConfigRef.current.cameras || []).map((camera) => [camera.id, camera]));
-        baselineConfigRef.current.cameras = cameras.map((camera) => structuredClone(byId.get(camera.id) || camera));
+        baselineConfigRef.current.cameras = orderIds.map((id, index) => structuredClone(byId.get(id) || cameras[index]));
         setBaselineRevision((current) => current + 1);
       }
       setCameraOrderEditing(false);
@@ -1917,7 +1917,11 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
       const id = savedById.get(camera.id)?.id ?? camera.id;
       if (!await saveZones({ ...camera, id })) return;
     }
-    if (cameraOrderDirty) await saveCameraOrder();
+    // Order uses the saved ids (a new camera's id changes on save), and only
+    // when it still differs from the baseline the camera save left behind.
+    const orderIds = cameras.map((camera) => savedById.get(camera.id)?.id ?? camera.id);
+    const savedOrder = (baselineConfigRef.current?.cameras || []).map((camera) => camera.id);
+    if (!configValuesEqual(orderIds, savedOrder)) await saveCameraOrder(orderIds);
   }
 
   async function deleteCamera(camera) {

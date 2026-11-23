@@ -219,9 +219,11 @@ export function baselineCamerasAfterSave(baselineCameras = [], sentCameras = [],
     const saved = savedById.get(camera.id);
     if (!saved) continue;
     const previous = before.get(camera.id);
+    // A new camera is stored without zones; its zones count as saved only
+    // once the zones request that follows succeeds.
     const entry = {
       ...structuredClone(saved),
-      zones: structuredClone(previous?.zones || camera.zones || []),
+      zones: structuredClone(previous ? previous.zones || [] : []),
     };
     if (previous) replaced.set(camera.id, entry);
     else added.push(entry);
