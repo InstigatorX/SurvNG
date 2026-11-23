@@ -41,7 +41,7 @@ import { browserStorage } from "../storage.mjs";
 import { canSetClipBoundaryAtPlayhead, clipPreviewReachedEnd, clipRangeIsValid, setClipBoundaryAtPlayhead } from "../recordingClipSelection.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
-import { nativePlaylistStart, nativePlaylistStartStep, recordingCoverageUnion, recordingPlaybackTimeline, recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
+import { nativePlaylistStart, nativePlaylistStartStep, recordingCoverageUnion, recordingPlaybackTimeline, recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, recordingLiveEdgeFollow, extendedPlaybackRows, adjustRecordingExportRange, describePlaybackError, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
 import { ALL_CAMERAS_LIVE_DELAY_SECONDS, allCamerasCustomIds, allCamerasGridSelection, allCamerasWindowStart, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { CameraDensityControl, CameraLayoutModeControl } from "../shared/CameraLayoutControls.jsx";
 import { useStoredState, useViewportQuery } from "../shared/hooks.js";
@@ -695,6 +695,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [transcodeScope, setTranscodeScope] = useState(null);
   const [nativeHls] = useState(supportsNativeRecordingHls);
   const [transportOverride] = useState(recordingTransportOverride);
+  const [liveEdgeFollow] = useState(recordingLiveEdgeFollow);
+  const manifestStartRef = useRef(null);
+  const playbackDetailRef = useRef(null);
+  const growingRowsRef = useRef({ at: 0, inFlight: false });
   const [showPlaybackDiagnostics] = useState(() => playbackDiagnosticsEnabled(transportOverride));
   const heroMediaRef = useRef(null);
   const [playbackTransport, setPlaybackTransport] = useState(null);
@@ -865,6 +869,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     return recordingPlaybackTimeline(playbackDetail.rows);
   }, [playbackDetail, nativeScope]);
   const loadedPlaybackWindow = playbackDetail?.scope === nativeScope ? playbackDetail : null;
+  playbackDetailRef.current = playbackDetail;
   const requestedTransport = recordingPlaybackTransport({
     nativeHls, rate: playbackRate, incompatible: transcodeScope === nativeScope, preferOriginal: originalScope === nativeScope,
     override: transportOverride,
@@ -878,14 +883,21 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   // during playback and makes native HLS discard its buffer every poll.
   const manifestStartTime = useMemo(() => {
     if (!playbackTimeline.length) return null;
+    // A growing playlist gains rows while it plays. Its start offset belongs
+    // to the load, not to the rows: recomputing it would change src too.
+    const loadKey = playbackDetail.growing
+      ? `${nativeScope}:${playbackDetail.revision}:${manifestRetryToken}:${transport}` : null;
+    if (loadKey && manifestStartRef.current?.key === loadKey) return manifestStartRef.current.value;
     const retainedEpoch = desiredEpochRef.current;
     const initialEpoch = Number.isFinite(retainedEpoch) && retainedEpoch >= dayStart && retainedEpoch < dayEnd
       ? retainedEpoch
       : playbackTimeline[0].start_epoch;
-    return epochToPlaybackMediaTime(initialEpoch);
+    const value = epochToPlaybackMediaTime(initialEpoch);
+    if (loadKey) manifestStartRef.current = { key: loadKey, value };
+    return value;
   }, [playbackTimeline, dayStart, dayEnd, manifestRetryToken, transport]);
   const manifestUrl = !useSegmentPlayback && !isAllCameras && activeCameraId && playbackDetail && playbackTimeline.length
-    ? `${recordingDayHlsUrl(activeCameraId, playbackDetail.start, playbackDetail.end, source, manifestStartTime)}&reload=${playbackDetail.revision || 0}-${manifestRetryToken}`
+    ? `${recordingDayHlsUrl(activeCameraId, playbackDetail.start, playbackDetail.end, source, manifestStartTime, Boolean(playbackDetail.growing))}&reload=${playbackDetail.revision || 0}-${manifestRetryToken}`
     : "";
   const nativeSegmentUrl = useSegmentPlayback && !isAllCameras && activeCameraId && loadedPlaybackWindow && nativeSegment
     ? `${recordingSegmentUrl(activeCameraId, nativeSegment.start_epoch, source, useTranscodedPlayback)}&reload=${nativeSegmentRetryToken}`
@@ -1891,6 +1903,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           end: Number(payload.end_epoch),
           rows,
           revision: requestId,
+          // Opt-in: a window that is still being recorded plays as a growing
+          // playlist, so native HLS follows it without loading a new one.
+          growing: liveEdgeFollow && nativeHls && Number(payload.end_epoch) > Date.now() / 1000,
         });
         if (playbackTransportRef.current?.scope === nativeScope && playbackTransportRef.current.mode !== "hls") {
           const target = Number.isFinite(pendingSeekEpochRef.current)
@@ -1933,9 +1948,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
 
   useEffect(() => {
     if (!Number.isFinite(followTarget) || !timeline.length) return;
-    const nextRange = timeline.find((item) => item.end_epoch > followTarget);
-    if (!nextRange) return;
-    const nextEpoch = Math.max(followTarget, nextRange.start_epoch);
+    const nextEpoch = recordingEpochAfterSegment({ end_epoch: followTarget - 0.01 }, timeline);
+    if (nextEpoch === null) return;
     playAt(nextEpoch, true);
   }, [followTarget, timeline]);
 
@@ -2160,11 +2174,43 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       }
       return;
     }
+    extendGrowingPlaybackRows(event.currentTarget.currentTime);
     const epoch = mediaTimeToEpoch(event.currentTarget.currentTime);
     if (!Number.isFinite(epoch)) return;
     desiredEpochRef.current = epoch;
     setPlayhead(epoch);
     finishClipPreviewAtEnd(event.currentTarget, epoch);
+  }
+
+  // The player appends recordings to a growing playlist by itself. The page's
+  // clock is the loaded rows, so re-read them as playback nears the last one.
+  function extendGrowingPlaybackRows(mediaTime) {
+    const detail = loadedPlaybackWindow;
+    const lastRow = playbackTimeline[playbackTimeline.length - 1];
+    if (!detail?.growing || !lastRow || mediaTime < lastRow.media_end - 3) return;
+    const state = growingRowsRef.current;
+    if (state.inFlight || performance.now() - state.at < 3000) return;
+    state.inFlight = true;
+    state.at = performance.now();
+    fetch(recordingWindowUrl(activeCameraId, detail.start, detail.end, source))
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload) => {
+        const rows = payload?.recordings || [];
+        if (rows.length <= detail.rows.length) return;
+        const extended = extendedPlaybackRows(detail.rows, rows);
+        const stillLoaded = (current) => current?.scope === detail.scope && current.revision === detail.revision;
+        if (extended) {
+          setPlaybackDetail((current) => (
+            stillLoaded(current) && extended.length > current.rows.length ? { ...current, rows: extended } : current
+          ));
+        } else if (stillLoaded(playbackDetailRef.current)) {
+          // An earlier row changed, so the playing media times no longer
+          // match any row list: load the window again from the playhead.
+          requestPlaybackWindow({ start: detail.start, end: detail.end });
+        }
+      })
+      .catch(() => { /* The next time update retries. */ })
+      .finally(() => { state.inFlight = false; });
   }
 
   function finishClipPreviewAtEnd(video, epoch) {

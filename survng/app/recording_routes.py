@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import logging
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -184,6 +185,19 @@ def _public_recording_row(row: dict) -> dict:
     payload = dict(row)
     payload.pop("path", None)
     return payload
+
+
+def _recording_segment_seconds(
+    deps: RecordingRouteDependencies,
+    active_manager: Any,
+) -> float:
+    return float(
+        getattr(
+            getattr(active_manager, "config", None) or deps.get_config(),
+            "recording_segment_seconds",
+            10.0,
+        )
+    )
 
 
 def _recording_playback_window(epoch: float) -> tuple[float, float]:
@@ -978,13 +992,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         selected_source = recording_source(source)
         overlap_seconds = max(
             5.0,
-            float(
-                getattr(
-                    getattr(active_manager, "config", None) or deps.get_config(),
-                    "recording_segment_seconds",
-                    10.0,
-                )
-            ) * 2,
+            _recording_segment_seconds(deps, active_manager) * 2,
             float(DEFAULT_INCIDENT_GAP_SECONDS) * 2,
         )
         update_start = max(start_epoch, min(end_epoch, after_epoch) - overlap_seconds)
@@ -1043,6 +1051,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         end_epoch: float,
         source: str = "main",
         start: float | None = None,
+        growing: bool = False,
     ) -> Response:
         active_manager = _require_recording_camera(deps, camera_id)
         _validate_recording_range(
@@ -1050,6 +1059,14 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             end_epoch,
             90000,
             "invalid recording day range",
+        )
+        # A window that can still receive recordings is served, on request, as
+        # an append-only playlist: the player re-reads it and plays new
+        # recordings as they are indexed. A finished playlist can only grow by
+        # being loaded again, which restarts the player at the live edge.
+        still_growing = growing and time.time() < end_epoch + max(
+            30.0,
+            3.0 * _recording_segment_seconds(deps, active_manager),
         )
         selected_source = recording_source(source)
         rows = fragment_rows(
@@ -1089,7 +1106,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             "#EXT-X-INDEPENDENT-SEGMENTS",
             f"#EXT-X-TARGETDURATION:{target_duration}",
             "#EXT-X-MEDIA-SEQUENCE:0",
-            "#EXT-X-PLAYLIST-TYPE:VOD",
+            f"#EXT-X-PLAYLIST-TYPE:{'EVENT' if still_growing else 'VOD'}",
         ]
         header_lines = len(lines)
         media_offset = 0.0
@@ -1126,18 +1143,21 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             media_offset += float(row["duration_seconds"])
         # Native Safari applies EXT-X-START while building seekable ranges.
         # Post-metadata currentTime seeks are raced and intermittent on iPhone.
-        if (
-            start is not None
-            and math.isfinite(start)
-            and start > 0
-            and media_offset > 0
-        ):
-            start_offset = min(float(start), max(0.0, media_offset - 0.01))
+        requested_start = (
+            float(start)
+            if start is not None and math.isfinite(start) and start > 0
+            else 0.0
+        )
+        # Without a start tag a player opens an unfinished playlist near its
+        # end, so a growing playlist always names its start, even at zero.
+        if media_offset > 0 and (requested_start > 0 or still_growing):
+            start_offset = min(requested_start, max(0.0, media_offset - 0.01))
             lines.insert(
                 header_lines,
                 f"#EXT-X-START:TIME-OFFSET={start_offset:.3f},PRECISE=YES",
             )
-        lines.append("#EXT-X-ENDLIST")
+        if not still_growing:
+            lines.append("#EXT-X-ENDLIST")
         return Response(
             "\n".join(lines) + "\n",
             media_type="application/vnd.apple.mpegurl",

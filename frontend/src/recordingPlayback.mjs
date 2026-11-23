@@ -377,9 +377,60 @@ export function recordingSegmentLocalTime(segment, epoch, video = null) {
   return Math.max(0, Math.min(Math.max(0, duration - 0.01), epoch - segment.start_epoch));
 }
 
+// Seeking to the end of the newest footage starts this far before it.
+export const RECORDING_EDGE_SNAP_SECONDS = 1;
+
+// Where playback continues after `segment`, or null when nothing follows yet.
+// A range has to reach beyond the edge snap to count. Availability can end a
+// fraction of a second after the segment that was just played: a recording is
+// listed with its nominal length until its exact length is read. Seeking to
+// that sliver snaps back into the played segment and repeats its last second.
 export function recordingEpochAfterSegment(segment, ranges) {
   if (!segment) return null;
   const end = Number(segment.end_epoch) + 0.01;
-  const next = (ranges || []).find((item) => item.end_epoch > end);
+  const next = (ranges || []).find((item) => (
+    item.end_epoch - Math.max(end, item.start_epoch) > RECORDING_EDGE_SNAP_SECONDS
+  ));
   return next ? Math.max(end, next.start_epoch) : null;
+}
+
+export const RECORDING_LIVE_EDGE_STORAGE_KEY = "survng.recordingLiveEdge";
+
+// Opt-in (?liveedge=1, remembered; ?liveedge=0 clears it): at the live edge
+// native HLS plays a growing playlist, so new recordings follow on without the
+// page loading a new playlist.
+export function recordingLiveEdgeFollow(win = typeof window === "undefined" ? null : window) {
+  if (!win) return false;
+  let requested = null;
+  try {
+    requested = new URLSearchParams(win.location?.search || "").get("liveedge");
+  } catch {
+    requested = null;
+  }
+  try {
+    if (requested === "0") {
+      win.localStorage?.removeItem(RECORDING_LIVE_EDGE_STORAGE_KEY);
+      return false;
+    }
+    if (requested === "1") {
+      win.localStorage?.setItem(RECORDING_LIVE_EDGE_STORAGE_KEY, "1");
+      return true;
+    }
+    return win.localStorage?.getItem(RECORDING_LIVE_EDGE_STORAGE_KEY) === "1";
+  } catch {
+    // Storage can be unavailable (private mode); the URL still applies.
+    return requested === "1";
+  }
+}
+
+// Rows re-read for a growing playlist replace the loaded ones only when they
+// extend them: the player's clock is the rows it was started with, so a
+// changed or missing earlier row would move every later media time.
+export function extendedPlaybackRows(current, next) {
+  if (!Array.isArray(current) || !Array.isArray(next) || next.length <= current.length) return null;
+  const unchanged = current.every((row, index) => (
+    Number(row.start_epoch) === Number(next[index].start_epoch)
+    && Number(row.duration_seconds) === Number(next[index].duration_seconds)
+  ));
+  return unchanged ? next : null;
 }

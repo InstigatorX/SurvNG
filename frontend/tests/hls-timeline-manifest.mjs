@@ -75,4 +75,23 @@ context.desiredEpochRef.current = null;
 context.playbackTimeline = context.recordingPlaybackTimeline([{ start_epoch: 1000, end_epoch: 1900 }]);
 assert.equal(start(render()), 0, "without a retained position, start at the loaded window's first recording");
 
+// Growing playlist: the player appends recordings and the page extends its
+// rows. Neither that nor the moving playhead may change the playlist URL.
+context.nativeScope = "yard:main";
+context.manifestStartRef = { current: null };
+context.desiredEpochRef.current = 1009;
+const growingRows = [{ start_epoch: 1000, end_epoch: 1010 }];
+context.playbackDetail = { start: 1000, end: 1900, revision: 3, growing: true };
+context.playbackTimeline = context.recordingPlaybackTimeline(growingRows);
+const growing = render();
+assert.equal(new URL(growing, "http://fixture").searchParams.get("growing"), "true");
+assert.equal(start(growing), 9);
+context.desiredEpochRef.current = 1018;
+context.playbackDetail = { ...context.playbackDetail };
+context.playbackTimeline = context.recordingPlaybackTimeline([...growingRows, { start_epoch: 1010, end_epoch: 1020 }]);
+assert.equal(render(), growing, "extending a growing playlist's rows must not reload it");
+context.playbackDetail = { ...context.playbackDetail, revision: 4 };
+context.playbackTimeline = context.recordingPlaybackTimeline([...growingRows, { start_epoch: 1010, end_epoch: 1020 }]);
+assert.equal(start(render()), 18, "a new load starts at the retained position");
+
 console.log("Timeline playlist stability, retry, transport, and window transition tests passed");

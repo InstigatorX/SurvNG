@@ -6,6 +6,7 @@ from pathlib import Path
 import threading
 from types import SimpleNamespace
 from unittest import TestCase
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import HTTPException, Response
@@ -276,6 +277,54 @@ class RecordingRouteLifecycleTests(TestCase):
             99.0,
         ).body.decode()
         self.assertIn("#EXT-X-START:TIME-OFFSET=9.990,PRECISE=YES", clipped)
+
+    def test_day_playlist_grows_only_while_its_window_can_receive_recordings(
+        self,
+    ) -> None:
+        manager = _Manager("current")
+        rows = [{
+            "name": "segment.mp4",
+            "start_epoch": 100.0,
+            "end_epoch": 110.0,
+            "duration_seconds": 10.0,
+            "stream_fingerprint": "h264",
+        }]
+        handlers = create_recording_router(
+            replace(
+                _dependencies(lambda: manager),
+                recording_day_rows=lambda *_args, **_kwargs: rows,
+            )
+        ).handlers
+
+        def playlist(now: float, growing: bool, start: float | None = None) -> str:
+            with patch("survng.app.recording_routes.time.time", return_value=now):
+                return handlers["recording_day_hls_playlist"](
+                    "gate", 0, 900, "main", start, growing,
+                ).body.decode()
+
+        # Open window: append-only, no end marker, so the player re-reads it
+        # instead of the page loading a new playlist at the live edge.
+        open_window = playlist(500.0, True, 9.0)
+        self.assertIn("#EXT-X-PLAYLIST-TYPE:EVENT", open_window)
+        self.assertNotIn("#EXT-X-ENDLIST", open_window)
+        self.assertIn("#EXT-X-START:TIME-OFFSET=9.000,PRECISE=YES", open_window)
+        # An unfinished playlist with no start tag opens near its end.
+        self.assertIn(
+            "#EXT-X-START:TIME-OFFSET=0.000,PRECISE=YES",
+            playlist(500.0, True),
+        )
+        # The last recording of a window is indexed after the window ends.
+        self.assertNotIn("#EXT-X-ENDLIST", playlist(929.0, True))
+        # Closed window: the playlist ends so playback moves to the next one.
+        closed = playlist(931.0, True)
+        self.assertIn("#EXT-X-PLAYLIST-TYPE:VOD", closed)
+        self.assertTrue(closed.rstrip().endswith("#EXT-X-ENDLIST"))
+        self.assertNotIn("#EXT-X-START", closed)
+        # Not requested: unchanged finished playlist, even for an open window.
+        default = playlist(500.0, False)
+        self.assertIn("#EXT-X-PLAYLIST-TYPE:VOD", default)
+        self.assertTrue(default.rstrip().endswith("#EXT-X-ENDLIST"))
+        self.assertNotIn("#EXT-X-START", default)
 
     def test_day_and_event_playlists_version_every_fragment_url(self) -> None:
         manager = _Manager("current")

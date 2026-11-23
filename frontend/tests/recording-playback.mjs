@@ -3,6 +3,8 @@ import {
   recordingSegmentAt,
   recordingSegmentLocalTime,
   recordingEpochAfterSegment,
+  recordingLiveEdgeFollow,
+  extendedPlaybackRows,
   adjustRecordingExportRange,
   describePlaybackError,
   gridPlaybackNeedsSeek,
@@ -132,6 +134,57 @@ assert.equal(recordingSegmentAt(mobileRows, 190), null);
 assert.equal(recordingEpochAfterSegment(mobileSegment, mobileRows), 200);
 assert.equal(recordingEpochAfterSegment(mobileRows[1], mobileRows), null);
 assert.equal(recordingEpochAfterSegment(mobileRows[1], [...mobileRows, { start_epoch: 210, end_epoch: 220 }]), 210.01);
+
+// Live edge: a new recording is listed with its nominal 10 s until its exact
+// length (9.964 s here) is read, so availability ends a sliver after the
+// segment that just finished. That sliver is not footage to continue into:
+// seeking to it snaps back and replays the last second, over and over.
+{
+  const played = { start_epoch: 1000, end_epoch: 1009.964 };
+  assert.equal(recordingEpochAfterSegment(played, [{ start_epoch: 400, end_epoch: 1010 }]), null,
+    "a nominal end just past the played segment is not a next recording");
+  assert.equal(recordingEpochAfterSegment(played, [{ start_epoch: 400, end_epoch: 1020 }]), 1009.974,
+    "the next recording continues right after the played one");
+  assert.equal(
+    recordingEpochAfterSegment(played, [{ start_epoch: 400, end_epoch: 1010 }, { start_epoch: 1300, end_epoch: 1310 }]),
+    1300,
+    "a sliver at the end of a range is skipped for the next range",
+  );
+}
+
+// Growing playlist opt-in, remembered like the transport override.
+{
+  const store = new Map();
+  const win = (search) => ({
+    location: { search },
+    localStorage: {
+      getItem: (key) => (store.has(key) ? store.get(key) : null),
+      setItem: (key, value) => store.set(key, String(value)),
+      removeItem: (key) => store.delete(key),
+    },
+  });
+  assert.equal(recordingLiveEdgeFollow(win("")), false, "off unless asked for");
+  assert.equal(recordingLiveEdgeFollow(win("?camera=foyer&liveedge=1")), true);
+  assert.equal(recordingLiveEdgeFollow(win("?camera=foyer")), true, "remembered without the parameter");
+  assert.equal(recordingLiveEdgeFollow(win("?liveedge=0")), false);
+  assert.equal(recordingLiveEdgeFollow(win("")), false, "cleared");
+  assert.equal(recordingLiveEdgeFollow({ location: { search: "?liveedge=1" }, get localStorage() { throw new Error("blocked"); } }), true);
+  assert.equal(recordingLiveEdgeFollow(null), false);
+}
+
+// A growing playlist's rows are only ever extended in place.
+{
+  const loaded = [{ start_epoch: 100, duration_seconds: 9.964 }, { start_epoch: 110, duration_seconds: 9.964 }];
+  const longer = [...loaded.map((row) => ({ ...row })), { start_epoch: 120, duration_seconds: 9.964 }];
+  assert.equal(extendedPlaybackRows(loaded, longer), longer);
+  assert.equal(extendedPlaybackRows(loaded, loaded.map((row) => ({ ...row }))), null, "nothing new");
+  assert.equal(
+    extendedPlaybackRows(loaded, [loaded[0], { start_epoch: 110, duration_seconds: 10 }, longer[2]]),
+    null,
+    "an earlier row changed: media times would move",
+  );
+  assert.equal(extendedPlaybackRows(null, longer), null);
+}
 
 // All cameras: the rail draws the union of every camera's (and source's) ranges.
 assert.deepEqual(recordingCoverageUnion([

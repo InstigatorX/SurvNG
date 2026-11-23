@@ -27,6 +27,10 @@ assert.equal(
   recordingDayHlsUrl("gate", 100, 200, "main", 42.5),
   "/survng/api/cameras/gate/recordings/day.m3u8?start_epoch=100.000&end_epoch=200.000&source=main&start=42.500",
 );
+assert.equal(
+  recordingDayHlsUrl("gate", 100, 200, "main", 42.5, true),
+  "/survng/api/cameras/gate/recordings/day.m3u8?start_epoch=100.000&end_epoch=200.000&source=main&start=42.500&growing=true",
+);
 
 const observedCover = { snapshot_url: "/api/incidents/observations/obs-1/snapshot", snapshot_observation_id: "obs-1" };
 assert.equal(eventThumbnailUrl(observedCover, 720), "/survng/api/incidents/observations/obs-1/snapshot?width=720&quality=82");
