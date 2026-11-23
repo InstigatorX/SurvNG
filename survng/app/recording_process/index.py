@@ -19,6 +19,7 @@ from ..media_storage import path_presence
 from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 from ..recording_retention import RETENTION_TOTALS_INDEX
 from ..recording_media import (
+    fragmented_readable_progress,
     fragmented_readable_seconds,
     mp4_playback_metadata,
     mp4_stream_fingerprint,
@@ -1756,6 +1757,7 @@ class RecordingIndexMixin:
                     closed[0],
                     closed[1],
                     closed[1] + self.segment_seconds + OPEN_SEGMENT_PREVIOUS_SECONDS,
+                    closed[2],
                 )
             with self._lock:
                 # Not if the recorder restarted or stopped while this listed.
@@ -1769,10 +1771,10 @@ class RecordingIndexMixin:
             cached = listed
         path, start_epoch, _listed_at = cached
         if path is not None and epoch >= start_epoch:
-            return self._open_segment_row(path, key[1], start_epoch, is_open=True)
+            return self._open_segment_row(key, path, start_epoch)
         if previous is None or now >= previous[2] or epoch < previous[1]:
             return None
-        closed_row = self._closed_segment_row(key, previous[0], previous[1])
+        closed_row = self._closed_segment_row(key, previous[0], previous[1], previous[3])
         if (
             path is not None
             # A file with no fragments to count (a plain MP4 from before the
@@ -1785,15 +1787,22 @@ class RecordingIndexMixin:
             # Past the closed file's video and before the open file's name:
             # the name landed late, and the open file starts with this frame.
             # The index cannot say so until that file closes.
-            row = self._open_segment_row(path, key[1], start_epoch, is_open=True)
+            row = self._open_segment_row(key, path, start_epoch)
             # Lets a caller that keeps this row answer its other samples in
             # the same hole without asking again.
             row["covers_from"] = closed_row["end_epoch"]
             return row
         return closed_row
 
-    def _closed_segment_row(self, key: RecorderKey, path: Path, start_epoch: float) -> dict:
-        """Row for the newest closed file; its length is read once, not per lookup."""
+    def _closed_segment_row(
+        self, key: RecorderKey, path: Path, start_epoch: float, has_successor: bool,
+    ) -> dict:
+        """Row for the newest file that is not the open one.
+
+        Its length is read once, not per lookup, when a newer file shows it
+        is closed. Without one it is only overdue (a stalled stream, a very
+        long keyframe interval) and may still grow, so it is measured each time.
+        """
         with self._lock:
             known = self._closed_segment_lengths.get(key)
         if known is not None and known[0] == path:
@@ -1801,7 +1810,7 @@ class RecordingIndexMixin:
         else:
             readable = fragmented_readable_seconds(path)
             duration = float(readable) if readable is not None and math.isfinite(readable) else 0.0
-            if duration > 0:
+            if duration > 0 and has_successor:
                 # A closed file does not grow. One that could not be read is
                 # asked again next time.
                 with self._lock:
@@ -1817,19 +1826,31 @@ class RecordingIndexMixin:
             "unindexed": True,
         }
 
-    @staticmethod
-    def _open_segment_row(path: Path, source: str, start_epoch: float, *, is_open: bool) -> dict:
-        readable = fragmented_readable_seconds(path)
+    def _open_segment_row(self, key: RecorderKey, path: Path, start_epoch: float) -> dict:
+        # Every job on the camera asks several times a second. The scan is
+        # kept per recorder so each lookup reads only the fragments added
+        # since the last one, not the whole file's headers again.
+        with self._lock:
+            kept = self._open_segment_scans.get(key)
+            generation = self._recorder_generation.get(key, 0)
+        readable, scan = fragmented_readable_progress(
+            path, kept[1] if kept is not None and kept[0] == path else None,
+        )
+        with self._lock:
+            if self._recorder_generation.get(key, 0) == generation:
+                if scan is not None:
+                    self._open_segment_scans[key] = (path, scan)
+                else:
+                    self._open_segment_scans.pop(key, None)
         duration = float(readable) if readable is not None and math.isfinite(readable) else 0.0
         return {
             "path": str(path),
             "name": path.name,
-            "source": source,
+            "source": key[1],
             "start_epoch": start_epoch,
             "duration_seconds": duration,
             "end_epoch": start_epoch + duration,
-            # False for the segment just closed: complete, only not indexed yet.
-            "open": is_open,
+            "open": True,
             "unindexed": True,
         }
 
@@ -1839,11 +1860,12 @@ class RecordingIndexMixin:
         source: str,
         now: float,
         process_started_at: float = 0.0,
-    ) -> tuple[tuple[Path, float] | None, tuple[Path, float] | None]:
-        """(the file the running FFmpeg can be writing, the newest closed one).
+    ) -> tuple[tuple[Path, float] | None, tuple[Path, float, bool] | None]:
+        """(the file the running FFmpeg can be writing, the newest other one).
 
         Both come from one listing of the recent hour directories, by name.
-        Either may be None.
+        Either may be None. The second carries whether a newer file exists,
+        which is what shows it is closed.
         """
         named: list[tuple[float, Path]] = []
         # Wide enough to still see the closed file when the open one is at the
@@ -1869,9 +1891,9 @@ class RecordingIndexMixin:
             now < newest_start + self.segment_seconds + OPEN_SEGMENT_OVERRUN_SECONDS
             and newest_start >= math.floor(process_started_at)
         ):
-            closed = (named[1][1], named[1][0]) if len(named) > 1 else None
+            closed = (named[1][1], named[1][0], True) if len(named) > 1 else None
             return (newest_path, newest_start), closed
-        return None, (newest_path, newest_start)
+        return None, (newest_path, newest_start, False)
 
     def recording_for_index_hole(self, camera_id: str, epoch: float, source: str = "main") -> dict | None:
         """The segment holding the video for an instant between two index rows.

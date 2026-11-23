@@ -19,6 +19,7 @@ from survng.app.motion_pipeline.object_detection import (
     RecordedMotionObjectDetector,
     _EventRecordedSampler,
 )
+from survng.app import recording_media
 from survng.app.recording_media import fragmented_readable_seconds, mp4_playback_metadata
 from survng.app.recording_process import index as recording_index
 from survng.app.recording_process.recorder import Recorder
@@ -225,8 +226,8 @@ def test_the_segment_just_closed_stays_readable_until_the_index_has_it(tmp_path,
     assert recorder._take_recording_edge_refreshes() == {}
     # It is forgotten once the index can be expected to have it.
     with recorder._lock:
-        path, began, _expires = recorder._previous_segments[key]
-        recorder._previous_segments[key] = (path, began, time.time() - 1.0)
+        path, began, _expires, successor = recorder._previous_segments[key]
+        recorder._previous_segments[key] = (path, began, time.time() - 1.0, successor)
     assert recorder.open_recording("gate", start + 7.5) is None
 
 
@@ -291,6 +292,63 @@ def test_the_closed_files_length_is_read_once(tmp_path, fragmented_bytes):
     # A closed file does not grow; walking its fragment headers on storage
     # for every sample of every pass buys nothing.
     assert [call.args[0] for call in measure.call_args_list] == [closed_file]
+
+
+def test_an_overdue_file_with_no_successor_is_not_taken_as_finished(tmp_path, fragmented_bytes):
+    recorder = Recorder("ffmpeg", tmp_path, segment_seconds=10)
+    _running(recorder, "gate", fragmented=True)
+    # A long keyframe interval: the segment is 16 s in and still being
+    # written. It is too old to be called open, but nothing follows it yet.
+    start = float(int(time.time()) - 16)
+    overdue = _segment_path(tmp_path, "gate", start)
+    overdue.write_bytes(_written_until(fragmented_bytes, 5))
+    row = recorder.open_recording("gate", start + 4.0)
+    assert row["path"] == str(overdue) and row["open"] is False
+    assert row["end_epoch"] == pytest.approx(start + 5.0)
+
+    # It grew to 7 s, and then the next file appeared, named 7 s after it.
+    overdue.write_bytes(_written_until(fragmented_bytes, 7)[:-200])
+    assert recorder.open_recording("gate", start + 4.0)["end_epoch"] == pytest.approx(start + 7.0)
+    successor = _segment_path(tmp_path, "gate", start + 7)
+    successor.write_bytes(_written_until(fragmented_bytes, 1))
+    with recorder._lock:
+        path, began, _listed = recorder._open_segments[("gate", "main")]
+        recorder._open_segments[("gate", "main")] = (path, began, time.time() - 5.0)
+    # 6.0 s is in the first file. A length remembered from when it was 5 s
+    # long would hand this instant to the successor's first frame, 1 s late.
+    row = recorder.open_recording("gate", start + 6.0)
+    assert row["path"] == str(overdue)
+    assert row["end_epoch"] == pytest.approx(start + 7.0)
+
+
+def test_the_open_file_is_read_only_where_it_has_grown(tmp_path, fragmented_bytes):
+    recorder = Recorder("ffmpeg", tmp_path, segment_seconds=10)
+    _running(recorder, "gate", fragmented=True)
+    start = float(int(time.time()) - 2)
+    open_file = _segment_path(tmp_path, "gate", start)
+    open_file.write_bytes(_written_until(fragmented_bytes, 3))
+    assert recorder.open_recording("gate", start)["end_epoch"] == pytest.approx(start + 3.0)
+
+    positions: list[int] = []
+    real_scan = recording_media._scan_fragments
+
+    def scan(path, track, cursor, ticks):
+        positions.append(cursor)
+        return real_scan(path, track, cursor, ticks)
+
+    with patch.object(recording_media, "_scan_fragments", side_effect=scan), patch.object(
+        recording_media, "_read_mp4_box", side_effect=AssertionError("header read again"),
+    ):
+        assert recorder.open_recording("gate", start)["end_epoch"] == pytest.approx(start + 3.0)
+        open_file.write_bytes(_written_until(fragmented_bytes, 5))
+        assert recorder.open_recording("gate", start)["end_epoch"] == pytest.approx(start + 5.0)
+    # Each lookup starts where the last one stopped, past the fragments
+    # already counted, and never back at the start of the file.
+    assert positions[0] > 0 and positions[1] == positions[0]
+
+    # A restarted recorder writes a new file; nothing is carried over.
+    with recorder._lock:
+        assert ("gate", "main") in recorder._open_segment_scans
 
 
 def test_a_plain_closed_file_does_not_hand_its_time_to_the_open_segment(tmp_path, fragmented_bytes):
@@ -400,7 +458,7 @@ def test_a_restarted_recorder_forgets_the_segment_it_was_writing(tmp_path, fragm
 
     with recorder._lock:
         recorder.processes.clear()
-        recorder._previous_segments[("gate", "main")] = (old, start, time.time() + 60)
+        recorder._previous_segments[("gate", "main")] = (old, start, time.time() + 60, True)
     with (
         patch("survng.app.recording_process.recorder.subprocess.Popen", side_effect=spawn),
         patch.object(recorder, "_audio_output_args", return_value=[]),
@@ -745,8 +803,8 @@ def test_a_job_with_no_indexed_rows_reserves_memory_at_the_cameras_real_frame_si
     assert reservations == [None, frame.nbytes]
     assert budget.status()["active_workflows"] == 0
 
-    # Another camera's first job, with nothing decoded of its own yet, takes
-    # the largest frame any camera has shown instead of the fallback.
+    # Another camera's first job has decoded nothing of its own. A frame
+    # size borrowed from a smaller camera would under-reserve: the fallback.
     other = _polling_backend(
         monkeypatch, recorder,
         lambda path, offsets, **kwargs: ({}, 1),
@@ -754,7 +812,39 @@ def test_a_job_with_no_indexed_rows_reserves_memory_at_the_cameras_real_frame_si
     )
     monkeypatch.setattr(object_detection, "RECORDED_EVENT_RETRY_SECONDS", 0.2)
     other.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
-    assert reservations[-1] == frame.nbytes
+    assert reservations[-1] is None
+
+    # A camera that does not read open segments is sized as it always was.
+    recorder.open_reads = False
+    backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+    assert reservations[-1] is None
+
+
+def test_a_sample_waiting_on_the_index_keeps_the_ordinary_retry_interval(monkeypatch):
+    event_epoch = 1_800_000_000.0
+    # The open file starts just after the event: the earliest samples are
+    # before it and miss in the index (a restart gap), the later ones are in
+    # it but not written yet.
+    recorder = _OpenRecorder(start=event_epoch + 0.2, readable=0.0)
+    sleeps: list[float] = []
+    clock = [0.0]
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    backend = _polling_backend(monkeypatch, recorder, lambda path, offsets, **kwargs: ({}, 1))
+    monkeypatch.setattr(object_detection.time, "time", lambda: event_epoch + 20.0)
+    monkeypatch.setattr(object_detection.time, "sleep", sleep)
+    monkeypatch.setattr(object_detection.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(object_detection, "RECORDED_EVENT_RETRY_SECONDS", 6.0)
+    backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+
+    # Every index miss asks the indexer for a discovery (a directory listing
+    # on the recording storage). Four passes a second would ask for four.
+    assert recorder.index_lookups > 0
+    assert sleeps and object_detection.RECORDED_OPEN_SEGMENT_RETRY_SECONDS not in sleeps
+    assert len(sleeps) <= 7
 
 
 def test_two_open_segment_jobs_fit_the_decode_budget_together():

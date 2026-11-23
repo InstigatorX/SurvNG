@@ -108,9 +108,11 @@ class Recorder(RecordingIndexMixin):
         self._recorder_started_at: dict[RecorderKey, float] = {}
         self._recorder_generation: dict[RecorderKey, int] = {}
         # The segment a recorder closed when it moved to the current one
-        # (path, filename start epoch, forget-after epoch): complete and
-        # readable, but not in the index for a few more seconds.
-        self._previous_segments: dict[RecorderKey, tuple[Path, float, float]] = {}
+        # (path, filename start epoch, forget-after epoch, a newer file
+        # exists): readable, but not in the index for a few more seconds.
+        self._previous_segments: dict[RecorderKey, tuple[Path, float, float, bool]] = {}
+        # How far the open file's fragment headers have been read.
+        self._open_segment_scans: dict[RecorderKey, tuple[Path, Any]] = {}
         self._closed_segment_lengths: dict[RecorderKey, tuple[Path, float]] = {}
         # Each request gets a ticket; a discovery completes every ticket issued
         # before it started. A reader that missed a just-closed segment waits
@@ -234,6 +236,7 @@ class Recorder(RecordingIndexMixin):
                     self._open_segments.pop(key, None)
                     self._previous_segments.pop(key, None)
                     self._closed_segment_lengths.pop(key, None)
+                    self._open_segment_scans.pop(key, None)
                     self._recorder_started_at[key] = spawned_at
                     self._recorder_generation[key] = self._recorder_generation.get(key, 0) + 1
                     if camera.recording_fragmented:

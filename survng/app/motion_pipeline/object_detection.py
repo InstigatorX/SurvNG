@@ -358,6 +358,7 @@ class _EventRecordedSampler:
         # by starting FFmpeg four times a second. Counted over the whole job.
         self.open_read_misses = 0
         self.open_read_failed = False
+        self._open_paths_read: set[str] = set()
         # Instants in an index hole and the row found for each.
         self._hole_rows: dict[float, tuple[float, dict[str, Any] | None]] = {}
         self.index_hole_lookups = 0
@@ -444,6 +445,13 @@ class _EventRecordedSampler:
             )
             return normalized
         return row
+
+    def first_read_of_open(self, path: Path) -> bool:
+        """True the first time this job reads ``path`` while it is open."""
+        if str(path) in self._open_paths_read:
+            return False
+        self._open_paths_read.add(str(path))
+        return True
 
     def _open_recording(self, epoch: float) -> dict[str, Any] | None:
         """The recorder's open segment for ``epoch``, read once per pass."""
@@ -627,10 +635,13 @@ class RecordedMotionObjectDetector:
             return None
         return int(ticket(self.camera.id))
 
+    def _reads_open_segments(self) -> bool:
+        reads_open = getattr(self.recorder, "reads_open_segments", None)
+        return bool(callable(reads_open) and reads_open(self.camera.id))
+
     def _predicted_index_epoch(self, target: float, settle_seconds: float) -> float:
         ready = target + settle_seconds
-        reads_open = getattr(self.recorder, "reads_open_segments", None)
-        if callable(reads_open) and reads_open(self.camera.id):
+        if self._reads_open_segments():
             # Readable as soon as its fragment is written; no wait for the
             # segment to close and be indexed.
             return max(ready, target + RECORDED_OPEN_SEGMENT_READY_SECONDS)
@@ -1040,13 +1051,12 @@ class RecordedMotionObjectDetector:
                 maximum_frames += self.detector.config.face_evidence_max_extra_frames
             # A job reading a segment that is not indexed yet has no rows; without
             # the camera's last decoded size it would reserve the 36 MiB
-            # fallback per frame and shut every other job out of the budget.
-            # A camera's first such job has decoded nothing yet: the largest
-            # frame seen on any camera is the safe stand-in.
-            frame_bytes = (
-                self._frame_bytes_for_rows(prefetched_rows)
-                or self._last_frame_bytes
-                or budget.largest_observed_frame_bytes()
+            # fallback per frame, every time, and shut every other job out of
+            # the budget. Only the camera's first such job does (another
+            # camera's frame size would be a guess), and cameras that do not
+            # read open segments keep the fallback as before.
+            frame_bytes = self._frame_bytes_for_rows(prefetched_rows) or (
+                self._last_frame_bytes if self._reads_open_segments() else 0
             )
             if frame_bytes:
                 budget.observe_frame_bytes(frame_bytes)
@@ -1337,6 +1347,7 @@ class RecordedMotionObjectDetector:
                     else deadline,
                 )
                 recording_missing = False
+                index_missing = False
                 future_sample = False
                 stage_consensus = False
                 pending_by_path: dict[Path, list[tuple[float, float, dict[str, Any]]]] = {}
@@ -1351,12 +1362,19 @@ class RecordedMotionObjectDetector:
                         future_sample = True
                         continue
                     lookup_started = time.monotonic()
+                    open_pending_before = sampler.open_segment_pending
+                    sampler.open_segment_pending = False
                     row = sampler.recording_at(target_epoch)
+                    waits_on_open_segment = sampler.open_segment_pending
+                    sampler.open_segment_pending = open_pending_before or waits_on_open_segment
                     timing["recording_wait_ms"] += (
                         time.monotonic() - lookup_started
                     ) * 1000.0
                     if row is None:
                         recording_missing = True
+                        # A miss in the index asked for a discovery. Looking
+                        # again every 0.25 s would ask for four a second.
+                        index_missing = index_missing or not waits_on_open_segment
                         continue
                     start_epoch = row.get("start_epoch")
                     if start_epoch is None:
@@ -1374,9 +1392,11 @@ class RecordedMotionObjectDetector:
                         timing["refinement_early_exit_skipped"] += float(len(pending))
                         continue
                     open_segment = bool(pending[0][2].get("open"))
-                    # Dimensions are cached per file size; a growing file would
-                    # add an entry per pass. The budget keeps its last size.
-                    if self.decode_budget is not None and not open_segment:
+                    # Dimensions are cached per file size, so a growing file is
+                    # asked once per job, not once per pass.
+                    if self.decode_budget is not None and (
+                        not open_segment or sampler.first_read_of_open(path)
+                    ):
                         dimensions = mp4_video_dimensions(path)
                         if dimensions is not None:
                             width, height = dimensions
@@ -1388,9 +1408,12 @@ class RecordedMotionObjectDetector:
                         deadline=stage_deadline,
                         **({"single_frame_fallback": False} if open_segment else {}),
                     )
-                    if open_segment and len(frames) < len(pending):
-                        # Read while FFmpeg was part-way through a fragment
-                        # header: look again shortly rather than nudging, a
+                    if open_segment and len(frames) < len(
+                        {round(frame_offset, 3) for _, frame_offset, _ in pending}
+                    ):
+                        # A frame inside the completed fragments did not come
+                        # back (a stream slower than 4 fps, or a failed
+                        # decode): look again shortly rather than nudging, a
                         # few times, then at the ordinary interval.
                         sampler.open_segment_pending = True
                         sampler.open_read_failed = True
@@ -1612,7 +1635,10 @@ class RecordedMotionObjectDetector:
                     )
                     slept = time.monotonic() - wait_started
                 else:
-                    if recording_missing and not future_sample and sampler.open_segment_pending:
+                    if (
+                        recording_missing and not future_sample
+                        and sampler.open_segment_pending and not index_missing
+                    ):
                         # A fragment not written yet is at most a keyframe
                         # interval away. A read that came back short gets a
                         # few quick tries, counted where the wait happens.

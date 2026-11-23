@@ -462,9 +462,13 @@ which the running recorder process was started is never taken for the open
 segment, and one named in that same second is not trusted for the whole
 segment but looked past once a second. The newest name counts as the file
 being written for up to 5 s beyond the segment length (a late cut after a
-late name); past that the stream has stalled. The same listing, which reaches
-back three segment lengths, also gives the newest closed file. Its length is
-read once, and it stays directly readable until 15 s after its nominal end,
+late name); past that it is overdue (a stalled stream, a very long keyframe
+interval) and is read as far as it has got, measured afresh each time, since
+nothing shows it is finished. The open file's fragment headers are read
+incrementally: each lookup reads only what was added since the last one. The
+same listing, which reaches back three segment lengths, also gives the newest
+closed file. Its length is read once, when a newer file exists to show it is
+closed, and it stays directly readable until 15 s after its nominal end,
 by when the 10 s index poll normally has it (a miss after that asks for a
 discovery as usual); this does not depend on anyone having looked the segment
 up while it was open. A sample that falls after that file's video but before
@@ -481,13 +485,14 @@ names, plus one keyframe interval). A frame beyond the completed fragments, or
 within their last 0.25 s where no later frame exists yet, is looked for again
 after 0.25 s unless another sample in the same pass is waiting on the index or
 is still in the future. A read of the open segment that comes back short
-(FFmpeg part-way through a fragment header, or a stream slower than 4 fps)
+(a stream slower than 4 fps, or a decode that failed)
 skips the nudged single-frame fallback and gets three quick retries, then the
 ordinary interval; the extra face-evidence reads skip the fallback and simply
 count the frame as missing. A job with no indexed rows sizes its decode-memory
-reservation from the last frame decoded for the camera, or for a camera's
-first job from the largest frame seen on any camera; before any frame has
-been seen at all, jobs take the 36 MiB-a-frame fallback. Near a segment's tail
+reservation from the last frame decoded for the camera when the camera reads
+open segments; its first such job, and any such job on a plain camera, takes
+the 36 MiB-a-frame fallback. The open file's frame size is read once per job
+so the shared ceiling covers it before decoding. Near a segment's tail
 an open read and a later indexed read can pick different files, because an
 indexed row is capped at the segment length; the open read is the more exact.
 `recording_open_segment_lookups` in the job timing counts lookups served

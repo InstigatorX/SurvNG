@@ -398,12 +398,30 @@ def _fragmented_video_duration(path: Path, moov: bytes) -> float | None:
     track = _fragmented_video_track(moov)
     if track is None:
         return None
-    track_id, scale, default_duration = track
-    ticks = 0
+    scanned = _scan_fragments(path, track, 0, 0)
+    return _fragment_seconds(track, scanned[1]) if scanned is not None else None
+
+
+def _fragment_seconds(track: tuple[int, int, int], ticks: int) -> float | None:
+    duration = ticks / track[1] if ticks else None
+    if duration is not None and duration > _MAX_FRAGMENTED_DURATION_SECONDS:
+        return None
+    return duration
+
+
+def _scan_fragments(
+    path: Path, track: tuple[int, int, int], cursor: int, ticks: int,
+) -> tuple[int, int] | None:
+    """Count complete fragments from ``cursor`` on: (where to resume, ticks).
+
+    ``cursor`` is a top-level box boundary; the one returned is the first box
+    that was not complete (or the end of the file), so a later call on a file
+    that has grown reads only what was added.
+    """
+    track_id, _scale, default_duration = track
     try:
         file_size = path.stat().st_size
         with path.open("rb", buffering=0) as handle:
-            cursor = 0
             while cursor + 8 <= file_size:
                 handle.seek(cursor)
                 header = handle.read(16)
@@ -442,23 +460,47 @@ def _fragmented_video_duration(path: Path, moov: bytes) -> float | None:
                 cursor += size
     except OSError:
         return None
-    duration = ticks / scale if ticks else None
-    if duration is not None and duration > _MAX_FRAGMENTED_DURATION_SECONDS:
-        return None
-    return duration
+    return cursor, ticks
+
+
+# (video track, where the scan stopped, ticks counted so far)
+FragmentScan = tuple[tuple[int, int, int], int, int]
+
+
+def fragmented_readable_progress(
+    path: Path, resume: FragmentScan | None = None,
+) -> tuple[float | None, FragmentScan | None]:
+    """Video seconds completed so far in a fragmented segment, resumably.
+
+    Not cached by file size: the answer changes every time FFmpeg finishes a
+    fragment, and caching each size of a growing file would crowd finished
+    segments out of the metadata cache. Instead the caller keeps the returned
+    scan for this path and hands it back, and only the fragments added since
+    are read. None seconds means no index yet, or not a fragmented file.
+    """
+    if resume is None:
+        moov = _read_mp4_box(path, b"moov")
+        track = _fragmented_video_track(moov) if moov else None
+        if track is None:
+            return None, None
+        resume = (track, 0, 0)
+    track, cursor, ticks = resume
+    try:
+        if path.stat().st_size < cursor:
+            # Not the file the scan was made on (replaced, or truncated).
+            return fragmented_readable_progress(path)
+    except OSError:
+        return None, None
+    scanned = _scan_fragments(path, track, cursor, ticks)
+    if scanned is None:
+        # Unknown layout or a failed read: nothing to resume from.
+        return None, None
+    return _fragment_seconds(track, scanned[1]), (track, scanned[0], scanned[1])
 
 
 def fragmented_readable_seconds(path: Path) -> float | None:
-    """Video seconds completed so far in a fragmented segment that is still open.
-
-    Not cached: the answer changes every time FFmpeg finishes a fragment, and
-    caching each size of a growing file would crowd finished segments out of
-    the metadata cache. None means no index yet, or not a fragmented file.
-    """
-    moov = _read_mp4_box(path, b"moov")
-    if not moov:
-        return None
-    return _fragmented_video_duration(path, moov)
+    """``fragmented_readable_progress`` from the start of the file."""
+    return fragmented_readable_progress(path)[0]
 
 
 _MAX_FRAGMENT_HEADER_BYTES = 4 * 1024 * 1024
