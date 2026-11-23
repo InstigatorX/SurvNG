@@ -291,6 +291,58 @@ class ConfigRoutesTest(unittest.TestCase):
         self.assertEqual(result["camera"]["id"], "gate")
         self.assertEqual(self.apply.call_args.args[0].cameras[0].id, "gate")
 
+    def test_camera_batch_applies_every_camera_in_one_configuration_change(self) -> None:
+        self.config.cameras.append(
+            CameraConfig(id="yard", name="Yard", stream_url="rtsp://admin:yard-secret@yard/main")
+        )
+        payload = self.endpoint("/api/config", "GET")()
+        gate, yard = (CameraConfig.model_validate(camera) for camera in payload["cameras"])
+        gate.recording_fragmented = True
+        yard.recording_fragmented = True
+        yard.name = "Back Yard"
+        added = CameraConfig(id="new-camera", name="Porch", stream_url="rtsp://porch/main")
+
+        from survng.app.config_routes import CameraBatchUpdate
+
+        result = self.endpoint("/api/config/cameras", "PUT")(
+            CameraBatchUpdate(cameras=[gate, yard, added])
+        )
+
+        self.apply.assert_called_once()
+        applied = {camera.id: camera for camera in self.apply.call_args.args[0].cameras}
+        self.assertEqual(list(applied), ["gate", "yard", "porch"])
+        self.assertTrue(applied["gate"].recording_fragmented)
+        self.assertTrue(applied["yard"].recording_fragmented)
+        self.assertEqual(applied["yard"].name, "Back Yard")
+        # Redacted credentials come back as the stored ones.
+        self.assertEqual(applied["gate"].stream_url, "rtsp://admin:camera-secret@gate/main")
+        self.assertEqual(applied["yard"].stream_url, "rtsp://admin:yard-secret@yard/main")
+        self.assertEqual([camera["id"] for camera in result["cameras"]], ["gate", "yard", "porch"])
+        self.assertNotIn("camera-secret", str(result))
+
+    def test_camera_batch_rejects_empty_and_duplicate_lists(self) -> None:
+        from survng.app.config_routes import CameraBatchUpdate
+
+        endpoint = self.endpoint("/api/config/cameras", "PUT")
+        gate = self.config.cameras[0].model_copy(deep=True)
+        for cameras in ([], [gate, gate.model_copy(deep=True)]):
+            with self.subTest(count=len(cameras)):
+                with self.assertRaises(HTTPException) as raised:
+                    endpoint(CameraBatchUpdate(cameras=cameras))
+                self.assertEqual(raised.exception.status_code, 400)
+        self.apply.assert_not_called()
+
+    def test_camera_batch_validation_failure_applies_nothing(self) -> None:
+        from survng.app.config_routes import CameraBatchUpdate
+
+        body = CameraConfig(id="new", name="New", stream_url=f"http://new/live?password={SECRET_PLACEHOLDER}")
+        with self.assertRaises(HTTPException) as raised:
+            self.endpoint("/api/config/cameras", "PUT")(
+                CameraBatchUpdate(cameras=[self.config.cameras[0].model_copy(deep=True), body])
+            )
+        self.assertEqual(raised.exception.status_code, 422)
+        self.apply.assert_not_called()
+
     def test_full_config_save_preserves_existing_camera_ids(self) -> None:
         edited = self.config.model_copy(deep=True)
         edited.cameras[0].name = "Front Gate"

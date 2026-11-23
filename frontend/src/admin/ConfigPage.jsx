@@ -1843,43 +1843,56 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
     }
   }
 
-  async function saveCamera(camera) {
-    if (!camera || cameraSaving) return false;
+  async function saveCameras(cameras) {
+    if (!cameras.length || cameraSaving) return false;
     setCameraSaving(true);
-    setSaveNotice({ state: "saving", text: "Saving camera settings..." });
+    setSaveNotice({
+      state: "saving",
+      text: cameras.length > 1 ? `Saving ${cameras.length} cameras...` : "Saving camera settings...",
+    });
     try {
-      const response = await fetch(`/api/config/cameras/${encodeURIComponent(camera.id)}`, {
+      // One request for every changed camera: a change that reloads the
+      // manager restarts all cameras, so per-camera saves restarted them
+      // once per camera.
+      const response = await fetch("/api/config/cameras", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(camera),
+        body: JSON.stringify({ cameras }),
       });
       if (!response.ok) throw new Error(await response.text());
       const payload = await response.json();
-      const savedCamera = payload.camera;
+      const savedById = new Map(cameras.map((camera, index) => [camera.id, payload.cameras[index]]));
       setConfig((current) => ({
         ...current,
-        cameras: current.cameras.map((item) => item.id === camera.id
-          ? { ...savedCamera, zones: item.zones || [] }
+        cameras: current.cameras.map((item) => savedById.has(item.id)
+          ? { ...savedById.get(item.id), zones: item.zones || [] }
           : item),
       }));
-      setSelectedId(savedCamera.id);
+      setSelectedId((current) => savedById.get(current)?.id ?? current);
       if (baselineConfigRef.current) {
-        const baselineCameras = baselineConfigRef.current.cameras || [];
-        const baselineMatch = baselineCameras.find((item) => item.id === camera.id);
-        const savedBaselineCamera = {
-          ...structuredClone(savedCamera),
-          zones: structuredClone(baselineMatch?.zones || camera.zones || []),
-        };
-        baselineConfigRef.current.cameras = baselineMatch
-          ? baselineCameras.map((item) => item.id === camera.id ? savedBaselineCamera : item)
-          : [...baselineCameras, savedBaselineCamera];
+        let baselineCameras = baselineConfigRef.current.cameras || [];
+        for (const camera of cameras) {
+          const savedCamera = savedById.get(camera.id);
+          const baselineMatch = baselineCameras.find((item) => item.id === camera.id);
+          const savedBaselineCamera = {
+            ...structuredClone(savedCamera),
+            zones: structuredClone(baselineMatch?.zones || camera.zones || []),
+          };
+          baselineCameras = baselineMatch
+            ? baselineCameras.map((item) => item.id === camera.id ? savedBaselineCamera : item)
+            : [...baselineCameras, savedBaselineCamera];
+        }
+        baselineConfigRef.current.cameras = baselineCameras;
         setBaselineRevision((current) => current + 1);
       }
+      const saved = cameras.length > 1 ? `${cameras.length} cameras saved` : "Camera settings saved";
       setSaveNotice({
         state: "saved",
-        text: payload.camera_workers_restarted
-          ? `${savedCamera.name || savedCamera.id} motion runtime reloaded; other cameras kept running.`
-          : "Camera settings saved without interrupting camera streams.",
+        text: payload.apply_mode === "manager_reload"
+          ? `${saved}; all cameras restarted once to apply them.`
+          : payload.camera_workers_restarted
+            ? `${saved}; affected camera runtimes reloaded.`
+            : `${saved} without interrupting camera streams.`,
       });
       const statusResponse = await fetch("/api/cameras");
       if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
@@ -1899,11 +1912,11 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
     }
     if (settingsTab !== "cameras") return;
     const dirtyMap = perCameraDirtyState(config?.cameras || [], baselineConfigRef.current?.cameras || []);
-    for (const camera of config?.cameras || []) {
-      const dirty = dirtyMap[camera.id];
-      if (!dirty) continue;
-      if (dirty.settings && !await saveCamera(camera)) return;
-      if (dirty.zones && !await saveZones(camera)) return;
+    const cameras = config?.cameras || [];
+    const changedSettings = cameras.filter((camera) => dirtyMap[camera.id]?.settings);
+    if (changedSettings.length && !await saveCameras(changedSettings)) return;
+    for (const camera of cameras) {
+      if (dirtyMap[camera.id]?.zones && !await saveZones(camera)) return;
     }
     if (cameraOrderDirty) await saveCameraOrder();
   }

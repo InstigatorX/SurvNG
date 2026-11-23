@@ -57,6 +57,11 @@ class ApiTokenCreateRequest(BaseModel):
     scopes: list[ApiScope] = Field(default_factory=lambda: ["read"], min_length=1)
 
 
+class CameraBatchUpdate(BaseModel):
+    # Each camera's ``id`` names the camera it replaces; an unknown id adds one.
+    cameras: list[CameraConfig] = Field(max_length=256)
+
+
 class CameraNotificationRequest(BaseModel):
     enabled: bool
 
@@ -492,34 +497,69 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
             deps.publish_config(next_config)
         return {"ok": True, "camera_ids": camera_ids}
 
+    def merge_camera(
+        next_config: AppConfig, camera_id: str, camera_settings: CameraConfig,
+    ) -> CameraConfig:
+        """Put one camera's settings into ``next_config``, keeping its identity."""
+        index = next((i for i, item in enumerate(next_config.cameras) if item.id == camera_id), None)
+        existing = next_config.cameras[index] if index is not None else None
+        try:
+            camera_settings = _restore_camera_secrets(camera_settings, existing)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        used = {item.id for item in next_config.cameras if item.id != camera_id}
+        # Existing IDs own recordings, incidents, zones and route references.
+        # A display-name edit must not create a new persistent identity.
+        base_id = existing.id if existing is not None else slugify_camera_id(camera_settings.name or camera_settings.id)
+        next_id, suffix = base_id, 2
+        while next_id in used:
+            next_id, suffix = f"{base_id}-{suffix}", suffix + 1
+        camera_settings.id = next_id
+        camera_settings.zones = existing.zones if existing is not None else []
+        if index is None:
+            next_config.cameras.append(camera_settings)
+        else:
+            next_config.cameras[index] = camera_settings
+        return camera_settings
+
+    def apply_camera_config(next_config: AppConfig) -> dict:
+        try:
+            deps.validate_config(next_config)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        _effective, result = deps.apply_config(next_config)
+        return result
+
+    @router.put("/api/config/cameras")
+    def put_cameras(update: CameraBatchUpdate) -> dict:
+        """Save several cameras as one configuration change.
+
+        A change that needs a manager reload restarts every camera, so saving
+        cameras one request at a time restarted them all once per camera.
+        """
+        if not update.cameras:
+            raise HTTPException(status_code=400, detail="no cameras to save")
+        camera_ids = [camera.id for camera in update.cameras]
+        if len(set(camera_ids)) != len(camera_ids):
+            raise HTTPException(status_code=400, detail="each camera may appear only once")
+        with deps.lock:
+            next_config = deps.get_config().model_copy(deep=True)
+            saved = [
+                merge_camera(next_config, camera.id, camera) for camera in update.cameras
+            ]
+            result = apply_camera_config(next_config)
+        return {
+            "ok": True,
+            "cameras": [redacted_camera_payload(camera) for camera in saved],
+            **result,
+        }
+
     @router.put("/api/config/cameras/{camera_id}")
     def put_camera(camera_id: str, camera_settings: CameraConfig) -> dict:
         with deps.lock:
             next_config = deps.get_config().model_copy(deep=True)
-            index = next((i for i, item in enumerate(next_config.cameras) if item.id == camera_id), None)
-            existing = next_config.cameras[index] if index is not None else None
-            try:
-                camera_settings = _restore_camera_secrets(camera_settings, existing)
-            except ValueError as error:
-                raise HTTPException(status_code=422, detail=str(error)) from error
-            used = {item.id for item in next_config.cameras if item.id != camera_id}
-            # Existing IDs own recordings, incidents, zones and route references.
-            # A display-name edit must not create a new persistent identity.
-            base_id = existing.id if existing is not None else slugify_camera_id(camera_settings.name or camera_settings.id)
-            next_id, suffix = base_id, 2
-            while next_id in used:
-                next_id, suffix = f"{base_id}-{suffix}", suffix + 1
-            camera_settings.id = next_id
-            camera_settings.zones = existing.zones if existing is not None else []
-            if index is None:
-                next_config.cameras.append(camera_settings)
-            else:
-                next_config.cameras[index] = camera_settings
-            try:
-                deps.validate_config(next_config)
-            except ValueError as error:
-                raise HTTPException(status_code=422, detail=str(error)) from error
-            _effective, result = deps.apply_config(next_config)
+            camera_settings = merge_camera(next_config, camera_id, camera_settings)
+            result = apply_camera_config(next_config)
         return {"ok": True, "camera": redacted_camera_payload(camera_settings), **result}
 
     @router.delete("/api/config/cameras/{camera_id}")

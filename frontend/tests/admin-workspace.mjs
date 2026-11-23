@@ -91,3 +91,16 @@ const homekitBefore = { cameras: [{ id: "gate", homekit: { enabled: false } }] }
 const homekitAfter = { cameras: [{ id: "gate", homekit: { enabled: true } }] };
 assert.equal(configValuesEqual(comparableSystemConfig(homekitBefore), comparableSystemConfig(homekitAfter)), true);
 assert.equal(cameraConfigDirtyState(homekitAfter.cameras, homekitBefore.cameras).settings, true);
+
+// One Save sends every changed camera in one request. A change that reloads
+// the manager restarts all cameras, so per-camera requests restarted them all
+// once per camera (and a reload landing on the previous one could fail).
+const saveAllBlock = configPageSource.match(/async function saveCurrentAdminChanges\(\) \{[\s\S]*?\n  \}\n/);
+assert.ok(saveAllBlock, "saveCurrentAdminChanges is present");
+assert.match(saveAllBlock[0], /saveCameras\(changedSettings\)/);
+assert.doesNotMatch(saveAllBlock[0], /for \(const camera[^]*?saveCameras\(/);
+assert.match(configPageSource, /fetch\("\/api\/config\/cameras", \{\s*method: "PUT"/);
+assert.doesNotMatch(
+  configPageSource,
+  /fetch\(`\/api\/config\/cameras\/\$\{encodeURIComponent\(camera\.id\)\}`, \{\s*method: "PUT"/,
+);
