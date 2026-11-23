@@ -15,6 +15,7 @@ import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Iterable, Iterator, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
@@ -794,6 +795,8 @@ class SemanticIndex:
         self,
         connection: sqlite3.Connection,
         identity: SemanticModelIdentity,
+        *,
+        should_stop: Callable[[], bool] | None = None,
     ) -> _SemanticVectorCache | None:
         now = time.monotonic()
         if now < self._vector_cache_disabled_until:
@@ -819,6 +822,13 @@ class SemanticIndex:
                 if len(cache.overrides) > self.VECTOR_CACHE_MAX_DELTA_ROWS:
                     cache = self._build_vector_cache_locked(connection, identity, signature)
         except (MemoryError, sqlite3.Error) as exc:
+            if (
+                isinstance(exc, sqlite3.OperationalError)
+                and should_stop is not None
+                and should_stop()
+            ):
+                # A requested stop aborted the load; it is not a cache failure.
+                raise
             message = str(exc)
             repeat = message == self._vector_cache_error
             self._vector_cache = None
@@ -834,11 +844,32 @@ class SemanticIndex:
             return None
         return cache
 
-    def warm_search_cache(self, identity: SemanticModelIdentity) -> None:
-        """Load the complete active generation without delaying application startup."""
+    def warm_search_cache(
+        self,
+        identity: SemanticModelIdentity,
+        *,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> None:
+        """Load the complete active generation without delaying application startup.
+
+        ``should_stop`` aborts the load between SQLite steps. The generation
+        signature alone can take seconds on a large install, and shutdown
+        allows the backfill thread only a few seconds to stop.
+        """
         with self._cache_lock, self._connect() as connection:
-            connection.execute("begin")
-            self._vector_cache_locked(connection, identity)
+            if should_stop is not None:
+                if should_stop():
+                    return
+                connection.set_progress_handler(lambda: int(should_stop()), 10_000)
+            try:
+                connection.execute("begin")
+                self._vector_cache_locked(connection, identity, should_stop=should_stop)
+            except sqlite3.OperationalError:
+                if should_stop is None or not should_stop():
+                    raise
+            finally:
+                if should_stop is not None:
+                    connection.set_progress_handler(None, 0)
 
     def search_cache_status(
         self, identity: SemanticModelIdentity | None = None
@@ -3145,7 +3176,9 @@ class SemanticSearchService(DisabledSemanticSearch):
                     self._set_backfill_running(False)
                 encoder = self.encoder
                 if encoder is not None:
-                    self.index.warm_search_cache(encoder.identity)
+                    self.index.warm_search_cache(
+                        encoder.identity, should_stop=self._stop.is_set,
+                    )
                 if encoder is None or not self.index.has_media_failures(encoder.identity):
                     return
                 if self._stop.wait(SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS):
