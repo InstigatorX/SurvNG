@@ -79,7 +79,9 @@ for path, start, duration, playback, playable, validated, error, fingerprint in 
         problems += 1
         continue
     kind = layout(boxes(path))
-    fingerprints.add(fingerprint or "(none yet)")
+    # A row not fingerprinted yet says nothing about identity.
+    if fingerprint:
+        fingerprints.add(fingerprint)
     flag = ""
     if not playable or error:
         flag = "  CHECK not playable: " + (error or "")
@@ -87,8 +89,10 @@ for path, start, duration, playback, playable, validated, error, fingerprint in 
     print(f"  {Path(path).name}  {kind:<44} index={duration:.2f}s exact={playback} "
           f"validated={validated} | {probe(path)}{flag}")
 print("  ('exact' is filled in by index validation or first playback; None before that is normal)")
+if len(fingerprints) > 1:
+    problems += 1
 print(f"  stream fingerprints across these rows: {len(fingerprints)} "
-      f"({'same stream identity' if len(fingerprints) == 1 else 'CHECK identity differs between segments'})")
+      f"({'CHECK identity differs between segments' if len(fingerprints) > 1 else 'same stream identity' if fingerprints else 'none computed yet'})")
 
 print("\n== segment being written right now (not in the index)")
 newest_dir = Path(rows[0][0]).parent

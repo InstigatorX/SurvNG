@@ -365,14 +365,19 @@ class _EventRecordedSampler:
     def recording_at(self, epoch: float) -> dict[str, Any] | None:
         # Match Recorder.recording_at(): at a shared segment boundary the
         # newest segment is preferred, avoiding an EOF decode from its predecessor.
+        ends_here = None
         for row in reversed(self._rows):
             start = float(row.get("start_epoch", 0.0))
             end = row.get("end_epoch")
             if end is None:
                 duration = row.get("duration_seconds")
                 end = start + float(duration) if duration is not None else start
-            if start <= epoch <= float(end):
+            if start <= epoch < float(end):
                 return row
+            if ends_here is None and start <= epoch == float(end):
+                # A read at a row's very end is past its last frame. Used only
+                # when nothing else holds this instant (see the end).
+                ends_here = row
         open_row = self._open_recording(epoch)
         if open_row is not None and not open_row.get("open", True):
             # The segment the recorder just closed: complete, readable, and
@@ -406,12 +411,17 @@ class _EventRecordedSampler:
             known = self._hole_rows.get(hole_key)
             if known is not None and (
                 known[1] is not None
-                or time.monotonic() - known[0] < RECORDED_INDEX_HOLE_RECHECK_SECONDS
+                or (
+                    self.request_index_refresh
+                    and time.monotonic() - known[0] < RECORDED_INDEX_HOLE_RECHECK_SECONDS
+                )
             ):
                 # A row found stays found. "Nothing there" is asked again only
                 # now and then: a real gap would otherwise cost three queries
                 # and a file check for every missing sample on every pass.
-                return known[1]
+                # The re-read after a waited discovery always asks: the
+                # segment that closes the hole may be what was just indexed.
+                return known[1] if known[1] is not None else ends_here
             for_hole = getattr(self.recorder, "recording_for_index_hole", None)
             row = for_hole(self.camera_id, epoch) if callable(for_hole) else None
             # Kept by instant, not by range: the row may start after it.
@@ -421,6 +431,7 @@ class _EventRecordedSampler:
             if row is not None:
                 self.index_hole_lookups += 1
                 return self._hole_rows[hole_key][1]
+            return ends_here
         if row is not None and row.get("start_epoch") is not None:
             normalized = dict(row)
             if normalized.get("end_epoch") is None:
@@ -1408,8 +1419,8 @@ class RecordedMotionObjectDetector:
                         if decoded is None:
                             continue
                         # Samples in an index hole all read the start of the next
-                        # segment. One frame is one observation, whichever
-                        # decode path produced it.
+                        # segment: one frame is one observation. A frame without
+                        # an exact timestamp is keyed by the offset asked for.
                         source_key = (
                             (str(row["path"]), decoded.actual_offset)
                             if decoded.exact_timestamp

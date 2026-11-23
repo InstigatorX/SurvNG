@@ -1567,6 +1567,58 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             self.assertEqual(sampler.recording_at(200.5)["path"], "late.mp4")
             self.assertEqual(calls, [100.5, 200.5, 200.5])
 
+    def test_a_reread_after_a_waited_discovery_asks_about_the_hole_again(self) -> None:
+        answers: list[dict | None] = [None, {"path": "next.mp4", "start_epoch": 101.0, "end_epoch": 111.0}]
+
+        class Recorder:
+            def recording_at(self, _camera_id: str, _epoch: float, request_refresh: bool = True):
+                return None
+
+            def recording_for_index_hole(self, _camera_id: str, _epoch: float):
+                return answers.pop(0)
+
+        sampler = _EventRecordedSampler(
+            camera_id="gate", recorder=Recorder(), frame_reader=lambda *args, **kwargs: None,
+        )
+        with patch("survng.app.motion_pipeline.object_detection.time.monotonic", return_value=1000.0):
+            self.assertIsNone(sampler.recording_at(100.5))
+            self.assertIsNone(sampler.recording_at(100.5))   # remembered
+            # The stage loop waited for a discovery; the segment after the
+            # hole may be exactly what it indexed.
+            sampler.request_index_refresh = False
+            self.assertEqual(sampler.recording_at(100.5)["path"], "next.mp4")
+
+    def test_an_instant_at_a_rows_very_end_prefers_the_segment_that_holds_it(self) -> None:
+        first = {"path": "first.mp4", "start_epoch": 90.0, "end_epoch": 100.0}
+        found: list[dict | None] = [None]
+
+        class Recorder:
+            def recording_at(self, _camera_id: str, _epoch: float, request_refresh: bool = True):
+                return None
+
+            def recording_for_index_hole(self, _camera_id: str, _epoch: float):
+                return found[0]
+
+        def sampler():
+            return _EventRecordedSampler(
+                camera_id="gate", recorder=Recorder(), rows=[first, {"path": "third.mp4", "start_epoch": 111.0, "end_epoch": 121.0}],
+                frame_reader=lambda *args, **kwargs: None,
+            )
+
+        # Nothing else holds 100.0: the earlier row is still the answer.
+        self.assertEqual(sampler().recording_at(100.0)["path"], "first.mp4")
+        # A read at first.mp4's offset 10.0 is past its last frame; the hole
+        # lookup knows the segment whose first frame this is.
+        found[0] = {"path": "next.mp4", "start_epoch": 101.0, "end_epoch": 111.0}
+        self.assertEqual(sampler().recording_at(100.0)["path"], "next.mp4")
+        # A row that starts there wins outright.
+        adjoining = _EventRecordedSampler(
+            camera_id="gate", recorder=Recorder(),
+            rows=[first, {"path": "second.mp4", "start_epoch": 100.0, "end_epoch": 110.0}],
+            frame_reader=lambda *args, **kwargs: None,
+        )
+        self.assertEqual(adjoining.recording_at(100.0)["path"], "second.mp4")
+
     def test_one_frame_shared_by_several_hole_samples_is_one_observation(self) -> None:
         event_epoch = 1_800_000_000.0
         backend, _recorder = self._hole_backend(
