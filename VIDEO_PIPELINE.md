@@ -457,23 +457,32 @@ For a fragmented camera, refinement reads the segment being written. The
 recorder finds that file by listing the current and previous hour directory:
 once per segment, about once a second around the rollover, and at most once a
 second while no file can be the open one (stalled stream, slow storage, just
-restarted). A file named before the running recorder process started is never
-taken for the open segment. The row reports how far the completed fragments
-reach, is read once per pass, is never stored in the index, and no index
-discovery is requested for it. A refinement job is due
-`RECORDED_OPEN_SEGMENT_READY_SECONDS` (1.5) after the frame it needs, not when
-the segment closes; that is when the job may start, and the frame itself can
-be a second or so further behind (file names carry whole seconds, plus one
-keyframe interval). A frame beyond the completed fragments, or within their
-last 0.25 s where no later frame exists yet, is looked for again every 0.25 s.
-A read that fails because FFmpeg was part-way through a fragment header is
-retried the same way without the nudged single-frame fallback, in refinement
-and in the extra face-evidence reads. `recording_open_segment_lookups` in the
-job timing counts lookups served this way. Near a segment's tail an open read
-and a later indexed read can pick different files, because an indexed row is
-capped at the segment length; the open read is the more exact. Tracking,
-playback and export still use indexed segments only, and a camera that records
-only its sub stream does not use this path.
+restarted). File names carry whole seconds: a file named before the second in
+which the running recorder process was started is never taken for the open
+segment, and one named in that same second is not trusted for the whole
+segment but looked past once a second. When the recorder moves to a new file,
+the one it just closed stays readable to its full length for 15 s, until the
+index has it. Rows for either file report how far the completed fragments
+reach, are kept by a job for at most 0.2 s, are never stored in the index, and
+no index discovery is requested for them.
+
+A refinement job is due `RECORDED_OPEN_SEGMENT_READY_SECONDS` (1.5) after the
+frame it needs, not when the segment closes; that is when the job may start,
+and the frame itself can be a second or so further behind (whole-second file
+names, plus one keyframe interval). A frame beyond the completed fragments, or
+within their last 0.25 s where no later frame exists yet, is looked for again
+after 0.25 s unless another sample in the same pass is waiting on the index or
+is still in the future. A read of the open segment that comes back short
+(FFmpeg part-way through a fragment header, or a stream slower than 4 fps)
+skips the nudged single-frame fallback and gets three quick retries, then the
+ordinary interval; the extra face-evidence reads skip the fallback and simply
+count the frame as missing. A job with no indexed rows sizes its decode-memory
+reservation from the last frame decoded for the camera. Near a segment's tail
+an open read and a later indexed read can pick different files, because an
+indexed row is capped at the segment length; the open read is the more exact.
+`recording_open_segment_lookups` in the job timing counts lookups served
+without the index. Tracking, playback and export still use indexed segments
+only, and a camera that records only its sub stream does not use this path.
 
 For a plain camera, refinement waits for the segment to be indexed (predicted
 from the newest indexed segment), plus `event_refinement_settle_seconds`

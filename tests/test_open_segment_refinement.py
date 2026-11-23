@@ -165,6 +165,61 @@ def test_the_previous_process_last_file_is_not_taken_for_the_open_segment(tmp_pa
     assert row is not None and row["path"] == str(new)
 
 
+def test_a_file_named_in_the_second_of_the_restart_is_looked_past(tmp_path, fragmented_bytes):
+    recorder = Recorder("ffmpeg", tmp_path, segment_seconds=10)
+    _running(recorder, "gate", fragmented=True)
+    key = ("gate", "main")
+    second = float(int(time.time()) - 2)
+    # The old process opened this file and was replaced within the same
+    # second; by name alone it could be the new process's first file.
+    old = _segment_path(tmp_path, "gate", second)
+    old.write_bytes(_written_until(fragmented_bytes, 1))
+    with recorder._lock:
+        recorder._recorder_started_at[key] = second + 0.6
+    assert recorder.open_recording("gate", second + 0.5)["path"] == str(old)
+    new = _segment_path(tmp_path, "gate", second + 1)
+    new.write_bytes(_written_until(fragmented_bytes, 1))
+    # Within a second nothing is listed again ...
+    assert recorder.open_recording("gate", second + 1.5)["path"] == str(old)
+    # ... but it is not trusted for the rest of the segment either.
+    with recorder._lock:
+        path, start, listed = recorder._open_segments[key]
+        recorder._open_segments[key] = (path, start, listed - 1.5)
+    assert recorder.open_recording("gate", second + 1.5)["path"] == str(new)
+
+
+def test_the_segment_just_closed_stays_readable_until_the_index_has_it(tmp_path, fragmented_bytes):
+    recorder = Recorder("ffmpeg", tmp_path, segment_seconds=10)
+    _running(recorder, "gate", fragmented=True)
+    key = ("gate", "main")
+    start = float(int(time.time()) - 11)
+    old = _segment_path(tmp_path, "gate", start)
+    old.write_bytes(_written_until(fragmented_bytes, 3))
+    with recorder._lock:
+        # Found while it was open, some seconds ago.
+        recorder._open_segments[key] = (old, start, time.time() - 5.0)
+    # The recorder rolled over: the old file is complete, a new one is open.
+    old.write_bytes(fragmented_bytes)
+    new = _segment_path(tmp_path, "gate", start + 10)
+    new.write_bytes(_written_until(fragmented_bytes, 1))
+
+    current = recorder.open_recording("gate", start + 10.5)
+    assert current["path"] == str(new) and current["open"]
+    # A target in the last second of the closed segment: not indexed yet,
+    # but readable to its full length without waiting for the indexer.
+    closed = recorder.open_recording("gate", start + 7.5)
+    assert closed is not None and closed["path"] == str(old)
+    assert closed["open"] is False
+    assert closed["end_epoch"] == pytest.approx(start + 8.0)
+    assert recorder.open_recording("gate", start - 1.0) is None
+    assert recorder._take_recording_edge_refreshes() == {}
+    # It is forgotten once the index can be expected to have it.
+    with recorder._lock:
+        path, began, _expires = recorder._previous_segments[key]
+        recorder._previous_segments[key] = (path, began, time.time() - 1.0)
+    assert recorder.open_recording("gate", start + 7.5) is None
+
+
 def test_a_listing_that_spans_a_restart_does_not_restore_the_old_file(tmp_path, fragmented_bytes):
     recorder = Recorder("ffmpeg", tmp_path, segment_seconds=10)
     _running(recorder, "gate", fragmented=True)
@@ -206,7 +261,14 @@ def test_a_restarted_recorder_forgets_the_segment_it_was_writing(tmp_path, fragm
         patch("survng.app.recording_process.recorder.os.killpg"),
     ):
         try:
+            before = time.time()
             recorder.start(camera, "main")
+            key = ("gate", "main")
+            # Start time is taken before the process exists, and every start
+            # is a new generation.
+            assert before <= recorder._recorder_started_at[key] <= time.time()
+            assert recorder._recorder_generation[key] == 1
+            assert key not in recorder._open_segments
             new = _segment_path(tmp_path, "gate", float(int(time.time())))
             new.write_bytes(_written_until(fragmented_bytes, 1))
             assert recorder.open_recording("gate", time.time() + 0.5)["path"] == str(new)
@@ -280,7 +342,9 @@ def test_sampler_serves_the_open_segment_without_asking_the_indexer():
     assert sampler.recording_at(1004.5) is not None
 
 
-def test_offsets_of_one_pass_share_one_read_of_the_open_segment():
+def test_offsets_of_one_pass_share_one_read_of_the_open_segment(monkeypatch):
+    # Not a timing test: a stalled runner must not expire the memo mid-pass.
+    monkeypatch.setattr(object_detection, "RECORDED_OPEN_SEGMENT_MEMO_SECONDS", 3600.0)
     recorder = _OpenRecorder(start=1000.0, readable=4.0)
     calls: list[float] = []
     original = recorder.open_recording
@@ -305,6 +369,28 @@ def test_the_last_frame_interval_of_the_written_data_waits_for_the_next_fragment
     assert sampler.recording_at(1003.95) is None and sampler.open_segment_pending
     assert sampler.open_segment_lookups == 0
     assert sampler.recording_at(1003.7) is not None
+
+
+def test_sampler_reads_the_just_closed_segment_whole_and_leaves_its_end_to_the_index():
+    class Recorder(_OpenRecorder):
+        def open_recording(self, _camera_id: str, epoch: float):
+            if 990.0 <= epoch < 1000.0:
+                return {"path": "closed.mp4", "start_epoch": 990.0, "end_epoch": 999.9, "open": False}
+            return super().open_recording(_camera_id, epoch)
+
+    recorder = Recorder(start=1000.0, readable=1.0)
+    sampler = _EventRecordedSampler(
+        camera_id="gate", recorder=recorder, frame_reader=lambda *args, **kwargs: None,
+    )
+    # No tail margin: the file is complete, its last frames are all there.
+    row = sampler.recording_at(999.85)
+    assert row is not None and row["path"] == "closed.mp4" and not sampler.open_segment_pending
+    # Past its end is a hole or the next segment: the index decides, and
+    # this is not "wait for the next fragment".
+    assert sampler.recording_at(999.95) is None
+    assert recorder.index_lookups == 1 and not sampler.open_segment_pending
+    # The kept closed row must not answer for the segment now open.
+    assert sampler.recording_at(1000.5)["path"] == "open.mp4"
 
 
 def test_a_failed_read_of_the_open_segment_is_not_followed_by_nudged_retries():
@@ -424,3 +510,86 @@ def test_a_frame_not_yet_written_is_polled_quickly_and_then_found(monkeypatch):
     assert result.frame_source == "recorded_main"
     assert sleeps and sleeps[0] == object_detection.RECORDED_OPEN_SEGMENT_RETRY_SECONDS
     assert recorder.index_lookups == 0
+
+
+def _polling_backend(monkeypatch, recorder, frames_reader, *, budget=None):
+    from tests.test_recorded_object_detection import detector_config, detected
+
+    class Detector:
+        config = detector_config(
+            confidence_threshold=0.5, require_incident_zone=False,
+            event_confirmation_frames=1, event_class_confirmation_frames={},
+        )
+
+        def detect(self, _frame, confidence_threshold=None):
+            return [detected("car", 0.8, (2, 2, 12, 12))]
+
+    backend = RecordedMotionObjectDetector(
+        CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+        Detector(), recorder, lambda: None, decode_budget=budget,
+    )
+    monkeypatch.setattr(object_detection, "RECORDED_EVENT_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(backend, "_read_recorded_frames", frames_reader)
+    return backend
+
+
+def test_quick_retries_of_an_unreadable_open_frame_are_capped(monkeypatch):
+    event_epoch = 1_800_000_000.0
+    # Everything is "written", but the decoder keeps returning nothing: a
+    # stream with seconds between frames, or a frame that will not decode.
+    recorder = _OpenRecorder(start=event_epoch - 3.0, readable=30.0)
+    sleeps: list[float] = []
+    clock = [0.0]
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    backend = _polling_backend(monkeypatch, recorder, lambda path, offsets, **kwargs: ({}, 1))
+    monkeypatch.setattr(object_detection.time, "time", lambda: event_epoch + 20.0)
+    monkeypatch.setattr(object_detection.time, "sleep", sleep)
+    monkeypatch.setattr(object_detection.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(object_detection, "RECORDED_EVENT_RETRY_SECONDS", 6.0)
+    backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+
+    quick = object_detection.RECORDED_OPEN_SEGMENT_QUICK_RETRIES
+    assert sleeps[:quick] == [object_detection.RECORDED_OPEN_SEGMENT_RETRY_SECONDS] * quick
+    # After that the ordinary interval: no FFmpeg four times a second for
+    # the rest of the retry budget.
+    ordinary = object_detection.RECORDED_EVENT_RETRY_INTERVAL_SECONDS
+    assert sleeps[quick:quick + 3] == [ordinary] * 3
+    assert len(sleeps) <= quick + 7
+
+
+def test_a_job_with_no_indexed_rows_reserves_memory_at_the_cameras_real_frame_size(monkeypatch):
+    from survng.app.motion_pipeline.recorded_decode_budget import RecordedDecodeBudget
+
+    event_epoch = 1_800_000_000.0
+    recorder = _OpenRecorder(start=event_epoch - 3.0, readable=30.0)
+    budget = RecordedDecodeBudget(max_processes=2, memory_budget_bytes=512 << 20)
+    reservations: list[int | None] = []
+    reserve = budget.reserve_workflow
+
+    def record(**kwargs):
+        reservations.append(kwargs.get("frame_bytes"))
+        return reserve(**kwargs)
+
+    monkeypatch.setattr(budget, "reserve_workflow", record)
+    frame = np.zeros((20, 30, 3), dtype=np.uint8)
+    backend = _polling_backend(
+        monkeypatch, recorder,
+        lambda path, offsets, **kwargs: ({
+            offset: object_detection._DecodedRecordedFrame(frame=frame, actual_offset=offset, exact_timestamp=True)
+            for offset in offsets
+        }, 1),
+        budget=budget,
+    )
+    monkeypatch.setattr(object_detection.time, "time", lambda: event_epoch + 20.0)
+    backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+    backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+
+    # The first job of a camera has nothing to go on and takes the fallback;
+    # every later one is sized from what was actually decoded. Without this
+    # each open-segment job reserved 36 MiB a frame and shut the others out.
+    assert reservations == [None, frame.nbytes]
+    assert budget.status()["active_workflows"] == 0

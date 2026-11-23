@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger("survng.app.recorder")
 RECORDING_FINALIZE_GRACE_SECONDS = 2.0
 OPEN_SEGMENT_RELIST_SECONDS = 1.0
+# The index takes a just-closed segment once it has been stable for a few
+# seconds; until then readers may use the file the recorder just finished.
+OPEN_SEGMENT_PREVIOUS_SECONDS = 15.0
 # Segment starts come from file names, which carry whole seconds, and a row
 # is never longer than the configured segment. When a name lands a second
 # late, up to this much time between two consecutive segments has no row.
@@ -1716,39 +1719,72 @@ class RecordingIndexMixin:
         now = time.time()
         with self._lock:
             cached = self._open_segments.get(key)
+            previous = self._previous_segments.get(key)
             generation = self._recorder_generation.get(key, 0)
             started_at = self._recorder_started_at.get(key, 0.0)
         # A segment stays open for at least segment_seconds from its start, and
         # closes at the next keyframe after that. Until then the listing is not
         # repeated. Around the rollover, and while no file can be the open one
         # (stalled stream, slow storage, just restarted), it is repeated at
-        # most once a second, whatever the number of lookups.
+        # most once a second, whatever the number of lookups. File names carry
+        # whole seconds, so a file named in the second the process started may
+        # be the previous process's last one: keep looking until a later name
+        # appears or the segment has run its length.
         if cached is None or (
-            (cached[0] is None or now >= cached[1] + self.segment_seconds)
+            (
+                cached[0] is None
+                or now >= cached[1] + self.segment_seconds
+                or cached[1] <= math.floor(started_at)
+            )
             and now - cached[2] >= OPEN_SEGMENT_RELIST_SECONDS
         ):
             found = self._find_open_segment(camera_id, key[1], now, started_at)
-            cached = (found[0], found[1], now) if found is not None else (None, 0.0, now)
+            listed = (found[0], found[1], now) if found is not None else (None, 0.0, now)
             with self._lock:
                 # Not if the recorder restarted or stopped while this listed.
                 if (
                     key in self._fragmented_keys
                     and self._recorder_generation.get(key, 0) == generation
                 ):
-                    self._open_segments[key] = cached
+                    if (
+                        cached is not None
+                        and cached[0] is not None
+                        and listed[0] is not None
+                        and listed[0] != cached[0]
+                        and listed[1] > cached[1]
+                    ):
+                        # The recorder moved on: the old file is complete but
+                        # not indexed until it has been stable for a while.
+                        previous = (cached[0], cached[1], now + OPEN_SEGMENT_PREVIOUS_SECONDS)
+                        self._previous_segments[key] = previous
+                    self._open_segments[key] = listed
+            cached = listed
         path, start_epoch, _listed_at = cached
-        if path is None or epoch < start_epoch:
-            return None
+        if path is not None and epoch >= start_epoch:
+            return self._open_segment_row(path, key[1], start_epoch, is_open=True)
+        if (
+            previous is not None
+            and now < previous[2]
+            and previous[1] <= epoch
+            and (path is None or epoch < start_epoch)
+        ):
+            return self._open_segment_row(previous[0], key[1], previous[1], is_open=False)
+        return None
+
+    @staticmethod
+    def _open_segment_row(path: Path, source: str, start_epoch: float, *, is_open: bool) -> dict:
         readable = fragmented_readable_seconds(path)
         duration = float(readable) if readable is not None and math.isfinite(readable) else 0.0
         return {
             "path": str(path),
             "name": path.name,
-            "source": key[1],
+            "source": source,
             "start_epoch": start_epoch,
             "duration_seconds": duration,
             "end_epoch": start_epoch + duration,
-            "open": True,
+            # False for the segment just closed: complete, only not indexed yet.
+            "open": is_open,
+            "unindexed": True,
         }
 
     def _find_open_segment(

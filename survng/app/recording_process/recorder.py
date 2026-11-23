@@ -107,6 +107,10 @@ class Recorder(RecordingIndexMixin):
         # put the previous process's last file back.
         self._recorder_started_at: dict[RecorderKey, float] = {}
         self._recorder_generation: dict[RecorderKey, int] = {}
+        # The segment a recorder closed when it moved to the current one
+        # (path, filename start epoch, forget-after epoch): complete and
+        # readable, but not in the index for a few more seconds.
+        self._previous_segments: dict[RecorderKey, tuple[Path, float, float]] = {}
         # Each request gets a ticket; a discovery completes every ticket issued
         # before it started. A reader that missed a just-closed segment waits
         # for its own ticket, not for whichever discovery happens to finish.
@@ -206,6 +210,9 @@ class Recorder(RecordingIndexMixin):
                 self.ffmpeg_path,
                 "survng-recorder",
             )
+            # Taken before the process exists: its first file cannot be named
+            # earlier than this.
+            spawned_at = time.time()
             process = subprocess.Popen(
                 [executable, *command[1:]],
                 stderr=subprocess.PIPE,
@@ -224,7 +231,8 @@ class Recorder(RecordingIndexMixin):
                     self._retry_after.pop(key, None)
                     # A restarted recorder begins a new file mid-segment.
                     self._open_segments.pop(key, None)
-                    self._recorder_started_at[key] = time.time()
+                    self._previous_segments.pop(key, None)
+                    self._recorder_started_at[key] = spawned_at
                     self._recorder_generation[key] = self._recorder_generation.get(key, 0) + 1
                     if camera.recording_fragmented:
                         self._fragmented_keys.add(key)

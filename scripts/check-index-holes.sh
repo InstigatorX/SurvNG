@@ -36,8 +36,11 @@ def find(node, key):
     return None
 
 index = ro(index_path)
+# One index seek per camera; "select distinct" would scan the whole index.
 cameras = [row[0] for row in index.execute(
-    "select distinct camera_id from recordings where source='main' and start_epoch > ?", (now - 3600,))]
+    "with recursive c(id) as (select min(camera_id) from recordings union all "
+    "select (select min(camera_id) from recordings where camera_id > c.id) from c where c.id is not null) "
+    "select id from c where id is not null")]
 print(f"== instants not covered by any main index row, last {hours:g} h")
 print("   hole = uncovered stretch of up to 2 s between consecutive segments; gap = longer")
 for camera in sorted(cameras):
@@ -76,8 +79,13 @@ for camera in sorted(cameras):
 print(f"\n== refinement passes that waited 9 s or more for a recording, last {hours:g} h")
 print(f"   sample offsets assumed: {offsets} (set STAGES=... to change)")
 try:
+    from datetime import timezone
+    # updated_at is a UTC ISO string, so it compares as text; the lower bound
+    # keeps the read to the window instead of the whole retention period.
     jobs = ro(jobs_path).execute(
-        "select camera_id, payload_json, updated_at from detection_jobs where state='completed'").fetchall()
+        "select camera_id, payload_json, updated_at from detection_jobs "
+        "where state='completed' and updated_at >= ?",
+        (datetime.fromtimestamp(since, timezone.utc).isoformat(),))
 except sqlite3.Error as error:
     jobs = []
     print("CHECK cannot read jobs database:", error)

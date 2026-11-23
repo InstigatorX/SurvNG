@@ -85,6 +85,7 @@ RECORDED_OPEN_SEGMENT_RETRY_SECONDS = 0.25
 RECORDED_OPEN_SEGMENT_TAIL_SECONDS = 0.25
 # Offsets of one pass share a single read of the open segment's extent.
 RECORDED_OPEN_SEGMENT_MEMO_SECONDS = 0.2
+RECORDED_OPEN_SEGMENT_QUICK_RETRIES = 3
 # FFmpeg's accurate seek discards frames before the seek point, so keep the
 # seek strictly ahead of the first requested sample.
 RECORDED_BATCH_SEEK_MARGIN_SECONDS = 0.25
@@ -348,6 +349,12 @@ class _EventRecordedSampler:
         self.open_segment_pending = False
         self.open_segment_lookups = 0
         self._open_row: tuple[float, dict[str, Any]] | None = None
+        # Reads of the open segment that came back short. The quick retry is
+        # for a fragment about to land; a frame that still is not there after
+        # a few tries (a very low frame rate, a damaged frame) is not helped
+        # by starting FFmpeg four times a second.
+        self.open_read_misses = 0
+        self.open_read_failed = False
         # Lookups answered with the segment after an index hole.
         self.index_hole_lookups = 0
 
@@ -363,7 +370,14 @@ class _EventRecordedSampler:
             if start <= epoch <= float(end):
                 return row
         open_row = self._open_recording(epoch)
-        if open_row is not None:
+        if open_row is not None and not open_row.get("open", True):
+            # The segment the recorder just closed: complete, readable, and
+            # not indexed for a few more seconds. Past its end is a matter
+            # for the index (the next segment, or a hole before it).
+            if epoch < float(open_row["end_epoch"]):
+                self.open_segment_lookups += 1
+                return open_row
+        elif open_row is not None:
             # The segment being written is read directly and never indexed
             # while open, so asking the indexer for it would only list the
             # directory. Its row grows, so it is kept only for one pass.
@@ -408,7 +422,15 @@ class _EventRecordedSampler:
             memo is not None
             and time.monotonic() - memo[0] < RECORDED_OPEN_SEGMENT_MEMO_SECONDS
         ):
-            return memo[1] if epoch >= float(memo[1]["start_epoch"]) else None
+            kept = memo[1]
+            start = float(kept["start_epoch"])
+            # The open segment answers for everything from its start on; the
+            # one just closed only for its own extent. Anything else is asked
+            # again: it may belong to the other of the two.
+            if kept.get("open", True) and epoch >= start:
+                return kept
+            if not kept.get("open", True) and start <= epoch < float(kept["end_epoch"]):
+                return kept
         row = open_recording(self.camera_id, epoch)
         self._open_row = (time.monotonic(), row) if row is not None else None
         return row
@@ -518,6 +540,8 @@ class RecordedMotionObjectDetector:
         self.decode_budget = decode_budget
         self._scene_frames: deque[TimestampedLiveFrame] = deque(maxlen=4)
         self._scene_frames_lock = threading.Lock()
+        # Bytes of the last frame decoded for this camera (width x height x 3).
+        self._last_frame_bytes = 0
 
     def stop_requested(self) -> bool:
         return self._camera_stop_requested() or evidence_cancelled()
@@ -981,7 +1005,10 @@ class RecordedMotionObjectDetector:
             if (self.detector.config.face_recognition_enabled
                     and self.detector.config.face_evidence_enabled):
                 maximum_frames += self.detector.config.face_evidence_max_extra_frames
-            frame_bytes = self._frame_bytes_for_rows(prefetched_rows)
+            # A job reading a segment that is not indexed yet has no rows; without
+            # the camera's last decoded size it would reserve the 36 MiB
+            # fallback per frame and shut every other job out of the budget.
+            frame_bytes = self._frame_bytes_for_rows(prefetched_rows) or self._last_frame_bytes
             if frame_bytes:
                 budget.observe_frame_bytes(frame_bytes)
             budget_wait_started = time.monotonic()
@@ -1262,6 +1289,7 @@ class RecordedMotionObjectDetector:
                 index_ticket_before = self._index_refresh_ticket()
                 sampler.request_index_refresh = not reread_after_discovery
                 sampler.open_segment_pending = False
+                sampler.open_read_failed = False
                 reread_after_discovery = False
                 stage_deadline = min(
                     deadline,
@@ -1323,9 +1351,16 @@ class RecordedMotionObjectDetector:
                     )
                     if open_segment and len(frames) < len(pending):
                         # Read while FFmpeg was part-way through a fragment
-                        # header: look again shortly rather than nudging.
+                        # header: look again shortly rather than nudging, a
+                        # few times, then at the ordinary interval.
                         sampler.open_segment_pending = True
+                        sampler.open_read_failed = True
                         recording_missing = True
+                    for decoded_frame in frames.values():
+                        # Jobs on a segment that is not indexed yet have no
+                        # row to size their memory reservation from.
+                        self._last_frame_bytes = int(decoded_frame.frame.nbytes)
+                        break
                     timing["frame_decode_ms"] += (
                         time.monotonic() - decode_started
                     ) * 1000.0
@@ -1536,7 +1571,14 @@ class RecordedMotionObjectDetector:
                     slept = time.monotonic() - wait_started
                 else:
                     if recording_missing and not future_sample and sampler.open_segment_pending:
-                        slept = min(slept, RECORDED_OPEN_SEGMENT_RETRY_SECONDS)
+                        # A fragment not written yet is at most a keyframe
+                        # interval away. A read that came back short gets a
+                        # few quick tries, counted where the wait happens.
+                        if not sampler.open_read_failed:
+                            slept = min(slept, RECORDED_OPEN_SEGMENT_RETRY_SECONDS)
+                        elif sampler.open_read_misses < RECORDED_OPEN_SEGMENT_QUICK_RETRIES:
+                            sampler.open_read_misses += 1
+                            slept = min(slept, RECORDED_OPEN_SEGMENT_RETRY_SECONDS)
                     time.sleep(slept)
                 wait_key = (
                     "recording_wait_ms"
