@@ -41,6 +41,8 @@ def boxes(path):
 
 def layout(found):
     if "moof" in found:
+        if "moov" not in found:
+            return f"fragmented ({found.count('moof')} fragments, NO index)"
         return f"fragmented ({found.count('moof')} fragments, moov {'first' if found.index('moov') < found.index('moof') else 'late'})"
     if "moov" in found:
         return "plain mp4"
@@ -84,7 +86,7 @@ for path, start, duration, playback, playable, validated, error, fingerprint in 
         problems += 1
     print(f"  {Path(path).name}  {kind:<44} index={duration:.2f}s exact={playback} "
           f"validated={validated} | {probe(path)}{flag}")
-print("  ('exact' is filled in when a segment is first played or exported; None before that is normal)")
+print("  ('exact' is filled in by index validation or first playback; None before that is normal)")
 print(f"  stream fingerprints across these rows: {len(fingerprints)} "
       f"({'same stream identity' if len(fingerprints) == 1 else 'CHECK identity differs between segments'})")
 
@@ -109,4 +111,5 @@ else:
     print("  A fragmented camera should show the fragment count and packet count rising between lines.")
     print("  A plain camera shows 'no index yet' and a failed probe until the segment closes.")
 print(f"\n{'PASS' if not problems else 'CHECK'}: {problems} problem(s) in indexed segments")
+raise SystemExit(1 if problems else 0)
 PY

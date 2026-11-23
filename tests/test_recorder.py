@@ -254,7 +254,7 @@ class RecorderTest(unittest.TestCase):
     def test_disabled_camera_is_excluded_from_watchdog_wanted_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
-            camera = Mock(id="front-door", record=True, record_sub=True, live_stream_url="rtsp://camera/sub")
+            camera = Mock(id="front-door", record=True, record_sub=True, live_stream_url="rtsp://camera/sub", recording_fragmented=False)
             recorder.set_camera_enabled(camera.id, False)
 
             self.assertEqual(recorder._wanted_keys({camera.id: camera}), {})
@@ -1602,7 +1602,7 @@ class RecorderTest(unittest.TestCase):
             hour_dir.mkdir(parents=True)
             clip = hour_dir / now.strftime("%Y%m%d-%H%M%S.mp4")
             clip.write_bytes(b"x" * 2048)
-            camera = Mock(id="front-door", record=True, record_sub=False, live_stream_url="")
+            camera = Mock(id="front-door", record=True, record_sub=False, live_stream_url="", recording_fragmented=False)
 
             with patch.object(recorder, "_probe_recording") as probe:
                 recorder.refresh_recording_index(
@@ -1636,7 +1636,7 @@ class RecorderTest(unittest.TestCase):
                 ).strftime("%Y%m%d-%H%M%S.mp4")
                 clip.write_bytes(b"x" * 2048)
                 clips.append(clip)
-            camera = Mock(id="front-door", record=True, record_sub=False, live_stream_url="")
+            camera = Mock(id="front-door", record=True, record_sub=False, live_stream_url="", recording_fragmented=False)
 
             with (
                 patch.object(recorder, "queue_recording_validation") as queue_validation,

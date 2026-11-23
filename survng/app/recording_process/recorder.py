@@ -801,15 +801,19 @@ class Recorder(RecordingIndexMixin):
     def _segment_layout_args(camera: CameraConfig) -> list[str]:
         """Muxer options for the camera's segment layout; plain MP4 needs none.
 
-        A fragment starts at each keyframe, the initial ``moov`` carries no
-        samples, and offsets are relative to each fragment, so every completed
-        fragment is readable while FFmpeg is still writing the segment.
+        A fragment starts at each keyframe and offsets are relative to each
+        fragment, so every completed fragment is readable while FFmpeg is still
+        writing the segment. ``delay_moov`` writes the index with the first
+        fragment rather than before it: only then does FFmpeg know each
+        track's start offset, and without that (``empty_moov``) B-frame video
+        and audio start late or early in every segment, which shows as a held
+        frame at each join.
         """
         if not camera.recording_fragmented:
             return []
         return [
             "-segment_format_options",
-            "movflags=+frag_keyframe+empty_moov+default_base_moof",
+            "movflags=+frag_keyframe+delay_moov+default_base_moof",
         ]
 
     def reconfigure_runtime(

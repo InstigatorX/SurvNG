@@ -60,10 +60,25 @@ def playback_segment_duration(
     return max(0.1, min(duration, float(window_end) - float(row_start)))
 
 
+def _read_exact(handle: Any, size: int) -> bytes:
+    """Read ``size`` bytes from an unbuffered handle, which may return fewer per call."""
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining > 0:
+        chunk = handle.read(remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 def _read_mp4_box(path: Path, wanted: bytes, max_size: int = 32 * 1024 * 1024) -> bytes:
     try:
         file_size = path.stat().st_size
-        with path.open("rb") as handle:
+        # Unbuffered: a buffered handle reads a whole block (up to the NFS
+        # read size) for each 16-byte box header.
+        with path.open("rb", buffering=0) as handle:
             cursor = 0
             while cursor + 8 <= file_size:
                 handle.seek(cursor)
@@ -86,7 +101,7 @@ def _read_mp4_box(path: Path, wanted: bytes, max_size: int = 32 * 1024 * 1024) -
                     if size > max_size:
                         return b""
                     handle.seek(cursor)
-                    return handle.read(size)
+                    return _read_exact(handle, size)
                 cursor += size
     except OSError:
         return b""
@@ -374,9 +389,11 @@ def _fragment_track_ticks(moof: bytes, track_id: int, default_duration: int) -> 
 def _fragmented_video_duration(path: Path, moov: bytes) -> float | None:
     """Video duration of a fragmented MP4, from the fragments written so far.
 
-    Each fragment header is small, so this reads a few kilobytes per fragment
-    and never the media data. A fragment FFmpeg has not finished writing is
-    not counted, which makes the result the readable length of an open file.
+    Reads are unbuffered: a 16-byte header per top-level box and each small
+    fragment header, never the media data. A fragment FFmpeg has not finished
+    writing is not counted, which makes the result the readable length of an
+    open file. A layout this does not recognise, or an implausible total from
+    damaged headers, yields None rather than a wrong duration.
     """
     track = _fragmented_video_track(moov)
     if track is None:
@@ -385,7 +402,7 @@ def _fragmented_video_duration(path: Path, moov: bytes) -> float | None:
     ticks = 0
     try:
         file_size = path.stat().st_size
-        with path.open("rb") as handle:
+        with path.open("rb", buffering=0) as handle:
             cursor = 0
             while cursor + 8 <= file_size:
                 handle.seek(cursor)
@@ -407,7 +424,7 @@ def _fragmented_video_duration(path: Path, moov: bytes) -> float | None:
                     if size > _MAX_FRAGMENT_HEADER_BYTES:
                         return None
                     handle.seek(cursor)
-                    moof = handle.read(size)
+                    moof = _read_exact(handle, size)
                     # Its media data must be complete too.
                     handle.seek(cursor + size)
                     data_header = handle.read(16)
@@ -416,16 +433,24 @@ def _fragmented_video_duration(path: Path, moov: bytes) -> float | None:
                     data_size = struct.unpack_from(">I", data_header, 0)[0]
                     if data_size == 1 and len(data_header) >= 16:
                         data_size = struct.unpack_from(">Q", data_header, 8)[0]
-                    if data_header[4:8] != b"mdat" or cursor + size + data_size > file_size:
+                    if data_header[4:8] != b"mdat":
+                        # Not the moof-then-mdat layout FFmpeg writes here.
+                        return None
+                    if cursor + size + data_size > file_size:
                         break
                     ticks += _fragment_track_ticks(moof, track_id, default_duration)
                 cursor += size
     except OSError:
         return None
-    return ticks / scale if ticks else None
+    duration = ticks / scale if ticks else None
+    if duration is not None and duration > _MAX_FRAGMENTED_DURATION_SECONDS:
+        return None
+    return duration
 
 
 _MAX_FRAGMENT_HEADER_BYTES = 4 * 1024 * 1024
+# Three times the longest configurable segment; damaged headers can claim more.
+_MAX_FRAGMENTED_DURATION_SECONDS = 900.0
 
 
 @lru_cache(maxsize=4096)

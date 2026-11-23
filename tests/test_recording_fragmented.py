@@ -30,11 +30,11 @@ def test_plain_mp4_is_the_default_and_adds_no_muxer_options():
     assert Recorder._segment_layout_args(camera) == []
 
 
-def test_a_fragmented_camera_gets_keyframe_fragments_with_an_empty_moov():
+def test_a_fragmented_camera_gets_keyframe_fragments_with_a_delayed_moov():
     args = Recorder._segment_layout_args(_camera(recording_fragmented=True))
     assert args[0] == "-segment_format_options"
     flags = set(args[1].removeprefix("movflags=").split("+")) - {""}
-    assert flags == {"frag_keyframe", "empty_moov", "default_base_moof"}
+    assert flags == {"frag_keyframe", "delay_moov", "default_base_moof"}
 
 
 def test_the_recorder_command_carries_the_layout_per_camera(tmp_path):
@@ -53,6 +53,8 @@ def test_the_recorder_command_carries_the_layout_per_camera(tmp_path):
         patch.object(recorder, "_audio_output_args", return_value=[]),
         patch.object(recorder, "_owned_ffmpeg_recorders", return_value={}),
         patch.object(recorder, "_kill_pid"),
+        # stop() signals the process group; these pids are not ours.
+        patch("survng.app.recording_process.recorder.os.killpg"),
     ):
         try:
             for camera in cameras:
@@ -134,6 +136,49 @@ def test_plain_and_fragmented_segments_of_one_stream_share_identity(segments):
         assert mp4_stream_fingerprint(plain)
         assert mp4_stream_fingerprint(fragmented) == mp4_stream_fingerprint(plain)
         assert mp4_video_dimensions(fragmented) == mp4_video_dimensions(plain) == (160, 120)
+
+
+def _stream_starts(path: Path) -> list[str]:
+    result = subprocess.run([
+        "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,start_time",
+        "-of", "csv=p=0", str(path),
+    ], check=True, capture_output=True, text=True, timeout=30)
+    return sorted(result.stdout.split())
+
+
+def _joined_frames(ffmpeg: str, paths: list[Path], listing: Path) -> list[str]:
+    listing.write_text("".join(f"file '{path}'\n" for path in paths))
+    result = subprocess.run([
+        ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
+        "-i", str(listing), "-ss", "1", "-t", "7", "-an", "-f", "framemd5", "-",
+    ], check=True, capture_output=True, text=True, timeout=60)
+    return [line for line in result.stdout.splitlines() if not line.startswith("#")]
+
+
+def test_fragmented_segments_keep_each_tracks_start_offset(segments):
+    # With empty_moov FFmpeg writes the index before it has seen a packet, so
+    # B-frame video and audio lose their start offsets in every segment.
+    offsets = set()
+    for plain, fragmented in zip(segments.plain, segments.fragmented, strict=True):
+        assert _stream_starts(fragmented) == _stream_starts(plain)
+        offsets.update(_stream_starts(plain))
+    # The source really has non-zero offsets, or this would prove nothing.
+    assert any(float(item.split(",")[1]) > 0 for item in offsets)
+
+
+def test_joined_playback_is_frame_identical_across_layouts(segments, tmp_path):
+    plain = _joined_frames(segments.ffmpeg, segments.plain, tmp_path / "plain.ffconcat")
+    fragmented = _joined_frames(segments.ffmpeg, segments.fragmented, tmp_path / "fragmented.ffconcat")
+    # A camera switched part-way through: plain, then fragmented, then plain.
+    mixed = _joined_frames(
+        segments.ffmpeg,
+        [segments.plain[0], segments.fragmented[1], segments.plain[2]],
+        tmp_path / "mixed.ffconcat",
+    )
+    assert len(plain) == 70
+    # Same frames at the same timestamps: no held frame at a segment join.
+    assert fragmented == plain
+    assert mixed == plain
 
 
 def test_fragmented_layout_is_what_was_written(segments):

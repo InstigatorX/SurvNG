@@ -439,12 +439,16 @@ A confirmed route watch uses the denser `event_route_refinement_stages`. Within
 each stage, inference stops early once temporal confirmation is satisfied.
 Recordings are plain MP4 segments by default. A camera with
 `recording_fragmented` writes fragmented MP4 instead
-(`frag_keyframe+empty_moov+default_base_moof`): the same files and segment
-length, with the index at the front and one fragment per keyframe interval, so
-a segment is readable while open and after an unclean stop. Both layouts share
-one stream fingerprint, and `recording_media` reads a fragmented segment's
-video duration from its fragment headers, so the index, playback and export
-treat them alike. Refinement does not yet read the open segment: for either
+(`frag_keyframe+delay_moov+default_base_moof`): the same files and segment
+length, with the index written with the first fragment and one fragment per
+keyframe interval, so a segment is readable from about one keyframe interval
+after it starts and after an unclean stop. `delay_moov` is required:
+`empty_moov` writes the index before any packet, which drops each track's
+start offset and shows as a held frame at every segment join on B-frame or
+audio streams. Both layouts share one stream fingerprint and the same
+per-stream start times, and `recording_media` reads a fragmented segment's
+video duration from its fragment headers. Changing the setting reloads all
+cameras, like changing `record`. Refinement does not yet read the open segment: for either
 layout it waits for the segment to be indexed (predicted from the newest
 indexed segment), plus `event_refinement_settle_seconds` (0.75). It retries
 for up to `event_refinement_retry_seconds` (24) at

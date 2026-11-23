@@ -230,9 +230,14 @@ Suggested order: T1 and T2, then T3, T5 and T6, with T4 last.
     and the exact-frame read decoding from the start of its segment.
   - Fragmented segments, phase 1 (branch `claude/t4-fragmented-recordings`):
     a per-camera `recording_fragmented` setting, default off, and a fragment
-    duration reader. Measured on FFmpeg 8.1.3: the playback remux output is
-    byte-identical, concat export decodes to identical frames, and Chromium
-    plays and seeks a fragmented segment directly. Not tested: Safari and
+    duration reader. The layout is `frag_keyframe+delay_moov`; the first
+    attempt used `empty_moov`, which an independent review showed drops track
+    start offsets (80-120 ms held frame at each join on B-frame streams,
+    audio offset zeroed). Measured on FFmpeg 8.1.3 with B-frames and audio:
+    per-stream start times match plain MP4, and a concat across plain,
+    fragmented and mixed segments decodes to identical frames. Chromium
+    plays and seeks a fragmented segment directly (tested on the earlier
+    layout, video only). Not tested: Safari and
     iOS, HEVC in a browser, and reading while writing over NFS. Phase 2,
     reading the open segment for refinement, is not started.
   - Segment length: no change made. `scripts/measure-refinement-delay.sh`

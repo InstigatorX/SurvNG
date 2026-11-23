@@ -76,7 +76,7 @@ export function CameraStreamsEditor({ camera, onChange }) {
         <input id={`sub-stream-${camera.id}`} value={camera.live_stream_url || ""} onChange={(event) => onChange(["live_stream_url"], event.target.value)} />
       </div>
       <div className="stream-field">
-        <label className="stream-record-toggle" title="Same files and segment length; each segment stays readable while it is being written and after an unclean stop. Applies to new segments."><input type="checkbox" checked={camera.recording_fragmented || false} onChange={(event) => onChange(["recording_fragmented"], event.target.checked)} /> Fragmented recording segments</label>
+        <label className="stream-record-toggle" title="Same files and segment length; each segment stays readable while it is being written and after an unclean stop. Applies to new segments. Saving this reloads all cameras, like changing Record."><input type="checkbox" checked={camera.recording_fragmented || false} onChange={(event) => onChange(["recording_fragmented"], event.target.checked)} /> Fragmented recording segments</label>
       </div>
     </div>
   </section>;
