@@ -77,6 +77,33 @@ IMAGE_OWNERS = (
 # Directories an audit image may be removed from.
 AUDIT_IMAGE_ROLES = ("motion_audits", "snapshots")
 AUDIT_IMAGE_DIRECTORIES = ("motion_samples", "snapshots")
+# Queued files whose references are checked together. A path has at most five
+# spellings, so one group fits one ``IN`` list per owner table; several owner
+# columns have no index, and a per-file check scanned them once per file.
+DRAIN_BATCH_FILES = BATCH_ROWS // 5
+# Why a queued motion-sample file could not be removed. The file and its claim
+# stay queued for the next run.
+MOTION_FILE_FAILURE_REASONS = (
+    "outside_audit_location",
+    "missing_unresolved",
+    "volume_unavailable",
+    "volume_unknown",
+    "absent_unconfirmed",
+    "permission_denied",
+    "invalid_path",
+    "os_error",
+    "runtime_error",
+)
+
+
+def _failure_reason(error: Exception) -> str:
+    if isinstance(error, PermissionError):
+        return "permission_denied"
+    if isinstance(error, ValueError):
+        return "invalid_path"
+    if isinstance(error, OSError):
+        return "os_error"
+    return "runtime_error"
 
 
 def _iso(epoch: float) -> str:
@@ -234,7 +261,12 @@ class DatabaseRetention:
             "motion_sample_files_deleted": 0,
             "motion_sample_files_missing": 0,
             "motion_sample_files_failed": 0,
+            "motion_sample_file_failures": {},
         }
+        # Files that failed this run, with the reason and error text. Later
+        # drains in the same run skip them, so each is checked and counted
+        # once; the next run retries them.
+        self._motion_failures: dict[str, tuple[str, str]] = {}
         steps = result["steps"]
         try:
             self._ensure_deletion_work()
@@ -255,6 +287,7 @@ class DatabaseRetention:
                 self._status["runs"] = int(self._status.get("runs") or 0) + 1
                 self._status["last_run"] = result
                 self._status.pop("last_error", None)
+            self._log_motion_failures()
         LOGGER.info(
             "database retention %s: %s", "dry run" if dry else "run", result["steps"],
         )
@@ -544,6 +577,11 @@ class DatabaseRetention:
         The claim is inserted in the same transaction as the row delete. Writers
         that consult media_deletion_claims cannot adopt the path between the
         owner check and unlink. Unavailable storage leaves both rows in place.
+
+        References are checked for a group of files at a time, once before the
+        volume checks and again just before unlinking; a file named by any row
+        at either check is released without being removed. A file that fails
+        is skipped by later drains in the same run.
         """
         self._ensure_deletion_work()
         with self._events._connect() as conn:
@@ -553,43 +591,121 @@ class DatabaseRetention:
                     "select path from media_deletion_work where role = 'motion_audit'"
                 )
             ]
+        failures = getattr(self, "_motion_failures", None)
+        if failures is None:
+            failures = self._motion_failures = {}
+        queued = [raw for raw in queued if raw not in failures]
         if not queued:
             return
         storage_dir = Path(self._events.storage_dir)
         media_storage = getattr(self._events, "media_storage", None)
-        for raw in queued:
-            spellings = _path_spellings(storage_dir, raw)
-            if self._named_image_paths(spellings):
-                self._release_motion_work(raw)
-                continue
-            path: Path | None = None
-            try:
-                path = event_snapshot_path(storage_dir, {"snapshot_path": raw}, media_storage)
-                if not _audit_image_location(storage_dir, path, media_storage):
-                    result["motion_sample_files_failed"] += 1
+        for group in _chunks(queued, DRAIN_BATCH_FILES):
+            spellings = {raw: _path_spellings(storage_dir, raw) for raw in group}
+            named = self._named_image_paths(set().union(*spellings.values()))
+            removable: list[tuple[str, Path, str]] = []
+            for raw in group:
+                if spellings[raw] & named:
+                    self._release_motion_work(raw)
                     continue
-                verdict = self._motion_verdict(path)
+                path: Path | None = None
+                try:
+                    path = event_snapshot_path(storage_dir, {"snapshot_path": raw}, media_storage)
+                    if not _audit_image_location(storage_dir, path, media_storage):
+                        self._motion_failed(result, raw, "outside_audit_location", str(path))
+                        continue
+                    verdict = self._motion_verdict(path)
+                except FileNotFoundError:
+                    if path is None:
+                        # Path resolution requires an existing file, so a file
+                        # that is already gone never reaches the volume check.
+                        self._motion_failed(
+                            result, raw, "missing_unresolved",
+                            "file is missing; its volume was not asked to confirm the absence",
+                        )
+                        continue
+                    if self._motion_verdict(path) != "confirmed_absent":
+                        self._motion_failed(
+                            result, raw, "absent_unconfirmed",
+                            f"{path} vanished but its volume could not confirm the absence",
+                        )
+                        continue
+                    verdict = "confirmed_absent"
+                except (OSError, RuntimeError, ValueError) as error:
+                    self._motion_failed(
+                        result, raw, _failure_reason(error), f"{type(error).__name__}: {error}",
+                    )
+                    continue
                 if verdict not in {"present", "confirmed_absent"}:
-                    result["motion_sample_files_failed"] += 1
+                    reason = "volume_unknown" if verdict == "unknown" else "volume_unavailable"
+                    self._motion_failed(result, raw, reason, f"verdict {verdict} for {path}")
                     continue
-                if self._named_image_paths(spellings):
-                    self._release_motion_work(raw)
+                removable.append((raw, path, verdict))
+            if not removable:
+                continue
+            # Recheck immediately before unlinking: a row may have named one
+            # of these files while the volume checks ran. Unlink the whole
+            # group before any release transaction so no database work widens
+            # the gap between this check and each unlink. A crash in between
+            # leaves the unlinked files' work and claims queued, as a crash
+            # between an unlink and its release always did.
+            named = self._named_image_paths(
+                set().union(*(spellings[raw] for raw, _path, _verdict in removable))
+            )
+            settled: list[tuple[str, Path, str]] = []
+            for raw, path, verdict in removable:
+                if spellings[raw] & named:
+                    settled.append((raw, path, "named"))
                     continue
-                if verdict == "present":
-                    path.unlink()
+                try:
+                    if verdict == "present":
+                        path.unlink()
+                except FileNotFoundError:
+                    verdict = "vanished"
+                except (OSError, RuntimeError, ValueError) as error:
+                    self._motion_failed(
+                        result, raw, _failure_reason(error), f"{type(error).__name__}: {error}",
+                    )
+                    continue
+                settled.append((raw, path, verdict))
+            for raw, path, outcome in settled:
+                if outcome == "vanished":
+                    if self._motion_verdict(path) != "confirmed_absent":
+                        self._motion_failed(
+                            result, raw, "absent_unconfirmed",
+                            f"{path} vanished but its volume could not confirm the absence",
+                        )
+                        continue
+                    outcome = "confirmed_absent"
                 self._release_motion_work(raw)
-                if verdict == "present":
+                if outcome == "present":
                     result["motion_sample_files_deleted"] += 1
-                else:
+                elif outcome == "confirmed_absent":
                     result["motion_sample_files_missing"] += 1
-            except FileNotFoundError:
-                if path is not None and self._motion_verdict(path) == "confirmed_absent":
-                    self._release_motion_work(raw)
-                    result["motion_sample_files_missing"] += 1
-                else:
-                    result["motion_sample_files_failed"] += 1
-            except (PermissionError, OSError, RuntimeError, ValueError):
-                result["motion_sample_files_failed"] += 1
+
+    def _motion_failed(self, result: dict[str, Any], raw: str, reason: str, detail: str) -> None:
+        """Count a file that stays queued, once per run, and keep why for the log."""
+        self._motion_failures[raw] = (reason, detail)
+        result["motion_sample_files_failed"] += 1
+        reasons = result.setdefault("motion_sample_file_failures", {})
+        reasons[reason] = int(reasons.get(reason, 0)) + 1
+
+    def _log_motion_failures(self) -> None:
+        """Report this run's queued files that could not be removed, once per run."""
+        failures = getattr(self, "_motion_failures", None) or {}
+        if not failures:
+            return
+        by_reason: dict[str, list[str]] = {}
+        for raw, (reason, detail) in failures.items():
+            by_reason.setdefault(reason, []).append(f"{raw} ({detail})")
+        LOGGER.warning(
+            "database retention could not remove %d queued motion-sample files; "
+            "they stay queued for the next run: %s",
+            len(failures),
+            "; ".join(
+                f"{reason}={len(items)}, e.g. {items[0]}"
+                for reason, items in sorted(by_reason.items())
+            ),
+        )
 
     def _named_image_paths(self, values: set[str]) -> set[str]:
         """The subset of ``values`` that any image-owning row still names."""

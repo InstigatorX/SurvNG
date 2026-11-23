@@ -851,6 +851,19 @@ _RETENTION_FILE_COUNTS = (
     "motion_sample_files_missing",
     "motion_sample_files_failed",
 )
+# Mirrors ``database_retention.MOTION_FILE_FAILURE_REASONS``; kept local so the
+# status client does not import the retention module.
+_RETENTION_FILE_FAILURE_REASONS = (
+    "outside_audit_location",
+    "missing_unresolved",
+    "volume_unavailable",
+    "volume_unknown",
+    "absent_unconfirmed",
+    "permission_denied",
+    "invalid_path",
+    "os_error",
+    "runtime_error",
+)
 
 
 def _database_retention_snapshot(service: Any) -> dict[str, Any]:
@@ -882,6 +895,8 @@ def _database_retention_snapshot(service: Any) -> dict[str, Any]:
         snapshot["last_error"] = _motion_identifier(raw.get("last_error")) or "error"
     if last is not None:
         steps = last.get("steps") if isinstance(last.get("steps"), dict) else {}
+        raw_failures = last.get("motion_sample_file_failures")
+        failures = raw_failures if isinstance(raw_failures, dict) else {}
         snapshot["last_run"] = {
             "started_at": str(last.get("started_at") or "")[:40],
             "dry_run": bool(last.get("dry_run")),
@@ -892,6 +907,10 @@ def _database_retention_snapshot(service: Any) -> dict[str, Any]:
                 for name in _RETENTION_STEPS
             },
             **{name: int(_number(last.get(name))) for name in _RETENTION_FILE_COUNTS},
+            "motion_sample_file_failures": {
+                reason: int(_number(failures.get(reason)))
+                for reason in _RETENTION_FILE_FAILURE_REASONS
+            },
         }
     return snapshot
 

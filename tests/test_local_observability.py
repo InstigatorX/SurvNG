@@ -574,6 +574,7 @@ def test_database_retention_status_is_allowlisted() -> None:
             "duration_seconds": 42.5, "error": secret,
             "steps": {"motion_audits": {"eligible": 7, "deleted": 0, "sql": secret}},
             "motion_sample_files_deleted": 0,
+            "motion_sample_file_failures": {"volume_unknown": 3, secret: 1, "os_error": secret},
         },
     }))
 
@@ -581,6 +582,10 @@ def test_database_retention_status_is_allowlisted() -> None:
         AppConfig(), manager, instance_id="one", uptime_seconds=1.0, stopping=False,
     )["database_retention"]
 
+    failures = status["last_run"]["motion_sample_file_failures"]
+    assert failures["volume_unknown"] == 3
+    assert failures["os_error"] == 0
+    assert sum(failures.values()) == 3
     assert status["dry_run"] is True
     assert status["runs"] == 2
     assert status["policy"]["motion_audit_days"] == 30
@@ -591,3 +596,12 @@ def test_database_retention_status_is_allowlisted() -> None:
         "eligible": None, "deleted": None, "skipped_batches": None,
     }
     assert secret not in json.dumps(status)
+
+
+def test_database_retention_failure_reasons_match_the_retention_module() -> None:
+    from survng.app import database_retention, local_observability
+
+    assert (
+        local_observability._RETENTION_FILE_FAILURE_REASONS
+        == database_retention.MOTION_FILE_FAILURE_REASONS
+    )
