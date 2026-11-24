@@ -57,12 +57,20 @@ playhead is dragged, so moving within a loaded segment needs no request.
   on a camera with a keyframe interval longer than a second, a tile can show
   the keyframe before its second. Smaller streams are decoded in full.
 - `width` is the tile width, 160 to 640.
-- A strip is built on first request and kept in the preview cache. Builds run
-  one at a time and share the preview's media-session admission; a busy
-  generator answers `429` with `Retry-After`. A time with no recording is
-  `404`.
+- Such a large frame is decoded and scaled on the GPU through VAAPI where
+  hardware acceleration is not `off` and VAAPI works (measured at about 0.2 s
+  against 0.5 s on the CPU for 2560x1920). If that fails the CPU builds the
+  strip, and the GPU is not tried again for five minutes.
+- A strip is built on first request and kept in the preview cache. Two builds
+  run at once and each holds a transcode media session; a busy generator
+  answers `429` with `Retry-After`. A time with no recording is `404`.
 
-The page asks for one strip at a time, always for where the playhead is now,
-and fetches one segment ahead in the direction of the drag when idle. It keeps
-at most 24 strips in memory. On release the player seeks to the released time
-and shows the exact full-resolution frame.
+The page runs two requests at a time with no queue: when one finishes, the
+next is for where the playhead is then, and after that for up to two segments
+ahead in the direction of the scrub. While the playhead's own segment loads,
+the nearest loaded strip within ten minutes stands in. It keeps at most 24
+strips in memory. Every Timeline layout reports its scrub position: the rail,
+the camera columns, the day strip's loupe and the classic scrubber. After a
+scrub that ends in a seek, the released time keeps loading and its frame stays
+up until the player has seeked there and shows the exact full-resolution
+frame.

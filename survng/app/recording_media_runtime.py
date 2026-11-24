@@ -1,6 +1,7 @@
 """Recording media runtime ownership: caching, remux, previews, clips, exports, and hardware probes."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -45,6 +46,8 @@ LOGGER = logging.getLogger(__name__)
 RECORDING_STRIP_COLUMNS = 6
 RECORDING_STRIP_MAX_TILES = 60
 RECORDING_STRIP_FULL_DECODE_PIXELS = 1_024_000
+# After a failed GPU strip, how long strips are made on the CPU.
+RECORDING_STRIP_HARDWARE_RETRY_SECONDS = 300.0
 
 
 class RecordingPrewarmCancelled(RuntimeError):
@@ -86,6 +89,11 @@ class RecordingMediaRuntime:
         self.recording_preview_max_age_seconds = 7 * 24 * 60 * 60
         self.recording_preview_max_bytes = 256 * 1024 * 1024
         self.recording_preview_build_limiter = threading.BoundedSemaphore(1)
+        # Strips are asked for in pairs (where the playhead is, and the
+        # segment it is heading into). Each build also holds a transcode
+        # media session, of which there are two.
+        self.recording_strip_build_limiter = threading.BoundedSemaphore(2)
+        self.recording_strip_hardware_retry_at = 0.0
         self.recording_preview_locks: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
         self.recording_preview_locks_guard = threading.Lock()
         self.recording_preview_maintenance_lock = threading.Lock()
@@ -905,7 +913,7 @@ class RecordingMediaRuntime:
             layout = cached()
             if layout is not None:
                 return strip_path, layout
-            if not self.recording_preview_build_limiter.acquire(timeout=3.0):
+            if not self.recording_strip_build_limiter.acquire(timeout=3.0):
                 raise HTTPException(status_code=429, detail='recording preview generator is busy', headers={'Retry-After': '1'})
             temporary = cache_dir / f'.{cache_key}.{os.getpid()}.{threading.get_ident()}.tmp.jpg'
             try:
@@ -941,37 +949,80 @@ class RecordingMediaRuntime:
                     dimensions is None
                     or dimensions[0] * dimensions[1] > RECORDING_STRIP_FULL_DECODE_PIXELS
                 )
-                command = [
-                    selected_config.ffmpeg_path, '-hide_banner', '-loglevel', 'info', '-nostdin',
-                    *RECORDED_FRAME_INPUT_THREAD_ARGS,
-                    *(['-skip_frame', 'nokey'] if keyframes_only else []),
-                    '-i', str(source_path),
-                    '-map', '0:v:0', '-an', '-frames:v', '1',
-                    *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
+
+                def command(hardware: bool) -> list[str]:
                     # round=up: tile i is the last frame at or before
                     # i * step, not one from the second that follows it.
-                    '-vf', (
-                        f'fps=1/{step}:round=up,showinfo@strip,'
-                        f"scale='min({tile_width},iw)':-2,tile={columns}x{rows}"
-                    ),
-                    '-q:v', '6', '-y', str(temporary),
-                ]
-                try:
-                    if session is None:
-                        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15)
+                    select = f'fps=1/{step}:round=up'
+                    grid = f'showinfo@strip,tile={columns}x{rows}'
+                    if hardware:
+                        device = str(self._ffmpeg_vaapi_info().get('device') or '/dev/dri/renderD128')
+                        decode = [
+                            '-vaapi_device', device,
+                            '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi',
+                        ]
+                        filters = (
+                            f'{select},scale_vaapi=w={tile_width}:h=-2:format=nv12,'
+                            f'hwdownload,format=nv12,{grid}'
+                        )
                     else:
-                        with session:
-                            result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15)
+                        decode = [*RECORDED_FRAME_INPUT_THREAD_ARGS]
+                        filters = f"{select},scale='min({tile_width},iw)':-2,{grid}"
+                    return [
+                        selected_config.ffmpeg_path, '-hide_banner', '-loglevel', 'info', '-nostdin',
+                        *decode,
+                        *(['-skip_frame', 'nokey'] if keyframes_only else []),
+                        '-i', str(source_path),
+                        '-map', '0:v:0', '-an', '-frames:v', '1',
+                        *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
+                        '-vf', filters,
+                        '-q:v', '6', '-y', str(temporary),
+                    ]
+
+                def build(hardware: bool) -> tuple[subprocess.CompletedProcess, int]:
+                    temporary.unlink(missing_ok=True)
+                    built = subprocess.run(
+                        command(hardware), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15,
+                    )
+                    # The grid is padded with blank tiles; only these hold a frame.
+                    frames = min(
+                        columns * rows,
+                        len(re.findall(rb'showinfo@strip[^\r\n]*\bpts_time:', built.stderr or b'')),
+                    )
+                    usable = (
+                        built.returncode == 0 and frames > 0
+                        and temporary.is_file() and temporary.stat().st_size > 0
+                    )
+                    return built, frames if usable else 0
+
+                # A large frame decodes and scales about twice as fast on the
+                # GPU. It is tried where hardware is allowed and VAAPI works;
+                # after a failure the CPU does the work for a while.
+                hardware = (
+                    keyframes_only
+                    and self._hardware_acceleration_mode() != 'off'
+                    and time.monotonic() >= self.recording_strip_hardware_retry_at
+                    and bool(self._ffmpeg_vaapi_info().get('available'))
+                )
+                try:
+                    with session if session is not None else contextlib.nullcontext():
+                        result, count = build(hardware) if hardware else build(False)
+                        if hardware and count <= 0:
+                            self.recording_strip_hardware_retry_at = (
+                                time.monotonic() + RECORDING_STRIP_HARDWARE_RETRY_SECONDS
+                            )
+                            error = (result.stderr or b'').decode('utf-8', errors='replace').strip()
+                            LOGGER.warning(
+                                'recording preview strip: hardware decode failed for %s, using the CPU: %s',
+                                source_path.name, redact_secret_text(error[-300:]),
+                            )
+                            hardware = False
+                            result, count = build(False)
                 except subprocess.TimeoutExpired as exc:
                     raise HTTPException(status_code=504, detail='recording preview timed out') from exc
                 except OSError as exc:
                     raise HTTPException(status_code=500, detail='recording preview failed') from exc
-                # The grid is padded with blank tiles; only these hold a frame.
-                count = min(
-                    columns * rows,
-                    len(re.findall(rb'showinfo@strip[^\r\n]*\bpts_time:', result.stderr or b'')),
-                )
-                if result.returncode != 0 or count <= 0 or not temporary.is_file() or temporary.stat().st_size <= 0:
+                if count <= 0:
                     error = (result.stderr or b'').decode('utf-8', errors='replace').strip()
                     LOGGER.warning('recording preview strip failed for %s: %s', source_path.name, redact_secret_text(error[-300:]))
                     raise HTTPException(status_code=500, detail='recording preview failed')
@@ -981,13 +1032,14 @@ class RecordingMediaRuntime:
                     'rows': rows,
                     'step_seconds': step,
                     'keyframes_only': keyframes_only,
+                    'hardware': hardware,
                 }
                 # The layout first: an image without one is never served.
                 metadata_path.write_text(json.dumps(layout, separators=(',', ':')), encoding='utf-8')
                 os.replace(temporary, strip_path)
             finally:
                 temporary.unlink(missing_ok=True)
-                self.recording_preview_build_limiter.release()
+                self.recording_strip_build_limiter.release()
             self._maintain_recording_preview_cache(strip_path)
             return strip_path, layout
 

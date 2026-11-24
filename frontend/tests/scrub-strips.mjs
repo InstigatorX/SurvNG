@@ -67,16 +67,19 @@ function harness(options = {}) {
 }
 const segment = (start) => ({ start, end: start + 10, step: 1, count: 10, columns: 6, rows: 2 });
 
-// One request at a time, and always for where the playhead is now: the
-// places it passed while the first strip was being made are never asked for.
+// Two requests at a time and no queue: when one finishes, the next is for
+// where the playhead is then. The places it passed in between are never
+// asked for.
 {
   const t = harness();
   assert.deepEqual(t.store.frameAt(105), { strip: null, gap: false, loading: true });
   t.store.want(105);
+  t.store.want(106);   // the same segment: not asked for twice
   t.store.want(125);
+  t.store.want(145);
   t.store.want(165);
   await t.settle();
-  assert.deepEqual(t.pending.map((item) => item.epoch), [105]);
+  assert.deepEqual(t.pending.map((item) => item.epoch), [105, 125]);
   t.pending[0].resolve(segment(100));
   await t.settle();
   assert.equal(t.changes(), 1);
@@ -88,25 +91,52 @@ const segment = (start) => ({ start, end: start + 10, step: 1, count: 10, column
   assert.equal(scrubStripTile(t.store.frameAt(95).strip, 95, 1920, 480).index, 0);
   // Not from further away than that: it would be a different scene.
   assert.equal(t.store.frameAt(110 + SCRUB_STRIP_NEAR_SECONDS + 1).strip, null);
-  assert.deepEqual(t.pending.map((item) => item.epoch), [105, 165]);
-  t.pending[1].resolve(segment(160));
+  // 145 was passed while both requests were busy; 165 is where it is now.
+  assert.deepEqual(t.pending.map((item) => item.epoch), [105, 125, 165]);
+  t.pending[1].resolve(segment(120));
   await t.settle();
-  // Idle at a loaded segment: the one the drag is heading into is fetched.
-  assert.deepEqual(t.pending.map((item) => item.epoch), [105, 165, 170.5]);
-  t.pending[2].resolve(segment(170));
-  await t.settle();
-  // One segment ahead, not a run of them.
+  // Its own segment is still loading, so the one after it cannot be named.
   assert.equal(t.pending.length, 3);
-  // Moving within what is loaded asks for nothing, even at the far edge of
-  // the segment already fetched ahead.
+  t.pending[2].resolve(segment(160));
+  await t.settle();
+  // At a loaded segment: the one the drag is heading into is fetched, and
+  // once that shows where it ends, the one after it.
+  assert.deepEqual(t.pending.map((item) => item.epoch).slice(3), [170.5]);
+  t.pending[3].resolve(segment(170));
+  await t.settle();
+  assert.deepEqual(t.pending.map((item) => item.epoch).slice(4), [180.5]);
+  t.pending[4].resolve(segment(180));
+  await t.settle();
+  // Two segments ahead, not a run of them.
+  assert.equal(t.pending.length, 5);
+  // Moving within what is loaded asks only for what keeps it two ahead.
   t.store.want(168);
   t.store.want(169);
   await t.settle();
-  assert.equal(t.pending.length, 3);
+  assert.equal(t.pending.length, 5);
+  t.store.want(171);
+  await t.settle();
+  assert.deepEqual(t.pending.map((item) => item.epoch).slice(5), [190.5]);
   // Turning back fetches the segment behind.
   t.store.want(161);
   await t.settle();
-  assert.deepEqual(t.pending.map((item) => item.epoch).slice(3), [159.5]);
+  assert.deepEqual(t.pending.map((item) => item.epoch).slice(6), [159.5]);
+}
+
+// The playhead's own segment and the next load together once the first shows
+// which way the drag is going and where the segment ends.
+{
+  const t = harness();
+  t.store.want(105);
+  t.store.want(107);
+  await t.settle();
+  t.pending[0].resolve(segment(100));
+  await t.settle();
+  assert.deepEqual(t.pending.map((item) => item.epoch), [105, 110.5]);
+  t.store.want(112);
+  await t.settle();
+  // 112 is in the segment already being fetched ahead: no second request.
+  assert.equal(t.pending.length, 2);
 }
 
 // A time with no recording is remembered for a while, then asked about again.

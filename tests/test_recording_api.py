@@ -603,6 +603,8 @@ class RecordingApiTest(unittest.TestCase):
                 patch.object(main, "manager", manager),
                 patch("survng.app.recording_media_runtime.subprocess.run", side_effect=real_run) as run,
                 patch.object(runtime, "_maintain_recording_preview_cache"),
+                # The CPU path; the GPU has its own test.
+                patch.object(runtime, "_hardware_acceleration_mode", return_value="off"),
             ):
                 strip, layout = runtime._recording_preview_strip(row, width=160)
                 again, cached_layout = runtime._recording_preview_strip(row, width=160)
@@ -620,7 +622,10 @@ class RecordingApiTest(unittest.TestCase):
             self.assertEqual((again, cached_layout), (strip, layout))
             self.assertEqual(
                 layout,
-                {"count": 5, "columns": 6, "rows": 2, "step_seconds": 1, "keyframes_only": False},
+                {
+                    "count": 5, "columns": 6, "rows": 2, "step_seconds": 1,
+                    "keyframes_only": False, "hardware": False,
+                },
             )
             self.assertNotIn("-skip_frame", small_command)
             self.assertEqual(large_command[large_command.index("-skip_frame") + 1], "nokey")
@@ -641,6 +646,83 @@ class RecordingApiTest(unittest.TestCase):
             # testsrc2 moves: consecutive seconds are different pictures.
             self.assertGreater(float(cv2.absdiff(tiles[0], tiles[1]).mean()), 1.0)
             self.assertIn(str(manager.database_dir / "recording-preview-cache"), str(strip))
+
+    def test_recording_preview_strip_uses_the_gpu_for_large_frames_and_falls_back(self) -> None:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            self.skipTest("ffmpeg unavailable")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            recordings_dir = root / "recordings"
+            recordings_dir.mkdir()
+            source_path = recordings_dir / "segment.mp4"
+            subprocess.run([
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                "testsrc2=size=160x120:rate=10:duration=3", "-c:v", "libx264", "-g", "10",
+                "-bf", "0", "-y", str(source_path),
+            ], check=True, capture_output=True, timeout=60)
+            manager = SimpleNamespace(
+                database_dir=root / "database",
+                recorder=SimpleNamespace(recordings_dir=recordings_dir),
+                config=SimpleNamespace(ffmpeg_path=ffmpeg),
+            )
+            row = {"path": str(source_path), "start_epoch": 100.0, "end_epoch": 103.0}
+            runtime = main._recording_media_runtime
+            real_run = subprocess.run
+            commands: list[list[str]] = []
+
+            def run(command, **kwargs):
+                commands.append(list(command))
+                if "-hwaccel" in command:
+                    # No such device here: what a GPU that cannot be opened does.
+                    return SimpleNamespace(returncode=1, stderr=b"Failed to initialise VAAPI connection")
+                return real_run(command, **kwargs)
+
+            def strip(width: int, mode: str = "auto") -> dict:
+                with (
+                    patch.object(main, "manager", manager),
+                    patch("survng.app.recording_media_runtime.subprocess.run", side_effect=run),
+                    patch.object(runtime, "_maintain_recording_preview_cache"),
+                    patch.object(runtime, "_hardware_acceleration_mode", return_value=mode),
+                    patch.object(
+                        runtime, "_ffmpeg_vaapi_info",
+                        return_value={"available": True, "device": "/dev/dri/renderD128"},
+                    ),
+                    patch(
+                        "survng.app.recording_media_runtime.mp4_video_dimensions",
+                        return_value=(2560, 1920),
+                    ),
+                ):
+                    return runtime._recording_preview_strip(row, width=width)[1]
+
+            self.addCleanup(setattr, runtime, "recording_strip_hardware_retry_at", 0.0)
+            runtime.recording_strip_hardware_retry_at = 0.0
+            with self.assertLogs("survng.app.recording_media_runtime", level="WARNING"):
+                first = strip(160)
+            # The GPU was tried, with the frames scaled there, then the CPU.
+            self.assertEqual(len(commands), 2)
+            hardware_command, cpu_command = commands
+            self.assertEqual(hardware_command[hardware_command.index("-hwaccel") + 1], "vaapi")
+            self.assertEqual(hardware_command[hardware_command.index("-vaapi_device") + 1], "/dev/dri/renderD128")
+            self.assertLess(hardware_command.index("-hwaccel"), hardware_command.index("-i"))
+            self.assertIn("-skip_frame", hardware_command)
+            hardware_filter = hardware_command[hardware_command.index("-vf") + 1]
+            self.assertIn("scale_vaapi=w=160:h=-2", hardware_filter)
+            self.assertLess(hardware_filter.index("hwdownload"), hardware_filter.index("showinfo@strip"))
+            self.assertNotIn("-hwaccel", cpu_command)
+            self.assertEqual(first["count"], 3)
+            self.assertFalse(first["hardware"])
+            # A GPU that just failed is not tried again for every strip.
+            commands.clear()
+            self.assertFalse(strip(200)["hardware"])
+            self.assertEqual(len(commands), 1)
+            self.assertNotIn("-hwaccel", commands[0])
+            # Hardware turned off in the configuration is never tried.
+            runtime.recording_strip_hardware_retry_at = 0.0
+            commands.clear()
+            strip(240, mode="off")
+            self.assertEqual(len(commands), 1)
+            self.assertNotIn("-hwaccel", commands[0])
 
     def test_recording_preview_can_extract_an_exact_display_frame(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
