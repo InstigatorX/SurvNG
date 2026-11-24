@@ -7,6 +7,10 @@ export const SCRUB_STRIP_LIMIT = 24;
 // A time with no recording is not asked about again for this long.
 export const SCRUB_STRIP_GAP_SECONDS = 30;
 export const SCRUB_STRIP_GAP_BUCKET_SECONDS = 5;
+// While the strip for the playhead's own time is loading, the nearest loaded
+// one within this distance stands in for it. A rail scrolls through minutes a
+// second; a frame from just behind the playhead says more than none.
+export const SCRUB_STRIP_NEAR_SECONDS = 600;
 // After a failed request (busy generator, storage error) wait before another.
 export const SCRUB_STRIP_RETRY_MS = 1000;
 
@@ -167,7 +171,16 @@ export function createScrubStripStore({
         return { strip, gap: false, loading: false };
       }
       if (isGap(epoch)) return { strip: null, gap: true, loading: false };
-      return { strip: null, gap: false, loading: true };
+      let nearest = null;
+      let nearestDistance = SCRUB_STRIP_NEAR_SECONDS;
+      for (const item of strips) {
+        const distance = epoch < item.start ? item.start - epoch : epoch - item.end;
+        if (distance <= nearestDistance) {
+          nearest = item;
+          nearestDistance = distance;
+        }
+      }
+      return { strip: nearest, gap: false, loading: true };
     },
     // The playhead is at `epoch`: load its segment unless it is already here.
     want(epoch) {

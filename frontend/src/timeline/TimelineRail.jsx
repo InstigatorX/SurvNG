@@ -48,7 +48,7 @@ const TOUCH_STALE_MS = 4000;
  * on touch, wheel on desktop) moves time under it. A scroll that settles for
  * 180 ms commits a seek.
  */
-export function useVerticalScrub({ topEpoch, bottomEpoch, spanSeconds, playhead, onSeek, lineRatio = 0.42 }) {
+export function useVerticalScrub({ topEpoch, bottomEpoch, spanSeconds, playhead, onSeek, onScrub = null, lineRatio = 0.42 }) {
   const scrollerRef = useRef(null);
   const height = useElementHeight(scrollerRef);
   const pps = height > 0 ? height / Math.max(60, spanSeconds) : 0;
@@ -76,6 +76,11 @@ export function useVerticalScrub({ topEpoch, bottomEpoch, spanSeconds, playhead,
   const [heldEpoch, setHeldEpoch] = useState(null);
   const onSeekRef = useRef(onSeek);
   onSeekRef.current = onSeek;
+  // Told the time under the line as it is scrubbed, then null when the
+  // scrub ends, so the player can show that frame meanwhile.
+  const onScrubRef = useRef(onScrub);
+  onScrubRef.current = onScrub;
+  const scrubReportedRef = useRef(false);
   const y = useCallback((epoch) => lineY + (topEpoch - epoch) * pps, [lineY, pps, topEpoch]);
   const epochAtScroll = useCallback((top) => clamp(topEpoch - top / Math.max(pps, 1e-9), bottomEpoch, topEpoch), [bottomEpoch, pps, topEpoch]);
 
@@ -95,7 +100,12 @@ export function useVerticalScrub({ topEpoch, bottomEpoch, spanSeconds, playhead,
     setScrollTop(element.scrollTop);
   }, [bottomEpoch, holdReleased, playhead, pps, scrubEpoch, topEpoch, touchActive]);
 
-  useEffect(() => () => { window.clearTimeout(commitTimerRef.current); window.clearTimeout(holdTimerRef.current); }, []);
+  useEffect(() => () => {
+    window.clearTimeout(commitTimerRef.current);
+    window.clearTimeout(holdTimerRef.current);
+    if (scrubReportedRef.current) onScrubRef.current?.(null, { committed: false });
+    scrubReportedRef.current = false;
+  }, []);
 
   const onScroll = useCallback((event) => {
     const top = event.currentTarget.scrollTop;
@@ -107,11 +117,15 @@ export function useVerticalScrub({ topEpoch, bottomEpoch, spanSeconds, playhead,
     markIntent(400); // momentum keeps scrubbing until it settles
     const epoch = epochAtScroll(top);
     setScrubEpoch(epoch);
+    scrubReportedRef.current = true;
+    onScrubRef.current?.(epoch);
     window.clearTimeout(commitTimerRef.current);
     commitTimerRef.current = window.setTimeout(() => {
       pendingRef.current = { epoch, at: Date.now() };
       setHeldEpoch(epoch);
       setScrubEpoch(null);
+      scrubReportedRef.current = false;
+      onScrubRef.current?.(null, { committed: true });
       onSeekRef.current?.(epoch);
       window.clearTimeout(holdTimerRef.current);
       holdTimerRef.current = window.setTimeout(() => setHoldReleased((count) => count + 1), SCRUB_HOLD_MS + 50);
@@ -188,10 +202,10 @@ function scrubKeyHandler(lineEpoch, spanSeconds, bottomEpoch, topEpoch, scrollTo
 export function EventRail({
   cameraId, source, dayStart, dayEnd, topEpoch, playhead, recordings, events, densityEvents,
   spanMinutes, onSpanChange, filter, onFilterChange, selectedEventId, onEventSelect, onSeek, timeZone,
-  onPreviousDay = null, onNextDay = null, cameraNames = null,
+  onPreviousDay = null, onNextDay = null, cameraNames = null, onScrub = null,
 }) {
   const spanSeconds = spanMinutes * 60;
-  const scrub = useVerticalScrub({ topEpoch, bottomEpoch: dayStart, spanSeconds, playhead, onSeek });
+  const scrub = useVerticalScrub({ topEpoch, bottomEpoch: dayStart, spanSeconds, playhead, onSeek, onScrub });
   const { y, visible, pps, lineY, contentHeight, lineEpoch } = scrub;
   const tickLabel = useTickLabel(timeZone);
   const bubble = useMemo(() => clockFormatter(timeZone, true), [timeZone]);
@@ -306,6 +320,7 @@ export function EventRail({
         <EdgeRail
           cameraId={cameraId}
           source={source}
+          onScrub={onScrub}
           dayStart={dayStart}
           dayEnd={dayEnd}
           topEpoch={topEpoch}
@@ -326,7 +341,7 @@ export function EventRail({
 }
 
 /** Option B: the 24 h activity strip with a scrubbing loupe. */
-export function EdgeRail({ cameraId, source, dayStart, dayEnd, topEpoch, events, recordings, windowStart, windowEnd, playhead, onSeek, timeZone, onPreviousDay = null, onNextDay = null }) {
+export function EdgeRail({ cameraId, source, dayStart, dayEnd, topEpoch, events, recordings, windowStart, windowEnd, playhead, onSeek, timeZone, onPreviousDay = null, onNextDay = null, onScrub = null }) {
   const railRef = useRef(null);
   const [loupe, setLoupe] = useState(null);
   const [previewEpoch, setPreviewEpoch] = useState(null);
@@ -339,11 +354,14 @@ export function EdgeRail({ cameraId, source, dayStart, dayEnd, topEpoch, events,
     const rect = railRef.current.getBoundingClientRect();
     return clamp(dayEnd - ((clientY - rect.top) / rect.height) * span, dayStart, Math.min(dayEnd, topEpoch));
   };
+  // With a scrub callback the player shows the frame under the loupe, so
+  // the loupe itself carries only the time.
+  const playerPreview = Boolean(onScrub && cameraId);
   useEffect(() => {
-    if (!loupe) return undefined;
+    if (!loupe || playerPreview) return undefined;
     const timer = window.setTimeout(() => setPreviewEpoch(Math.round(loupe.epoch / 5) * 5), 140);
     return () => window.clearTimeout(timer);
-  }, [loupe]);
+  }, [loupe, playerPreview]);
   const update = (event) => {
     const gesture = gestureRef.current;
     if (!gesture) return;
@@ -356,6 +374,7 @@ export function EdgeRail({ cameraId, source, dayStart, dayEnd, topEpoch, events,
       ? clamp(gesture.anchorEpoch - (event.clientY - gesture.anchorY) * 2, dayStart, Math.min(dayEnd, topEpoch))
       : epochAt(event.clientY);
     gesture.epoch = epoch;
+    onScrub?.(epoch);
     // The loupe is placed in the edge rail, whose track starts below the next-day button.
     setLoupe({ epoch, y: railRef.current.offsetTop + clamp(event.clientY - rect.top, 0, rect.height), fine: gesture.fine });
   };
@@ -370,6 +389,7 @@ export function EdgeRail({ cameraId, source, dayStart, dayEnd, topEpoch, events,
     gestureRef.current = null;
     setLoupe(null);
     setPreviewEpoch(null);
+    if (gesture) onScrub?.(null, { committed: true });
     if (gesture) onSeek(gesture.epoch);
   };
   const onKeyDown = (event) => {
@@ -413,7 +433,7 @@ export function EdgeRail({ cameraId, source, dayStart, dayEnd, topEpoch, events,
       <button type="button" className="edge-rail-day previous" onClick={onPreviousDay || undefined} disabled={!onPreviousDay} aria-label="Previous day"><ChevronDown size={16} aria-hidden="true" /></button>
       {loupe ? (
         <div className="edge-rail-loupe" style={{ top: loupe.y }} role="status">
-          {cameraId && Number.isFinite(previewEpoch) ? <img src={recordingPreviewUrl(cameraId, previewEpoch, source, { width: 320 })} alt="" /> : <span className="edge-rail-loupe-blank" />}
+          {playerPreview ? null : cameraId && Number.isFinite(previewEpoch) ? <img src={recordingPreviewUrl(cameraId, previewEpoch, source, { width: 320 })} alt="" /> : <span className="edge-rail-loupe-blank" />}
           <strong>{new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", minute: "2-digit", second: loupe.fine ? "2-digit" : undefined }).format(new Date(loupe.epoch * 1000))}</strong>
           <small>{loupe.fine ? "Fine scrub · 2 s per pixel" : "Slide left for fine steps"}</small>
         </div>
@@ -425,7 +445,7 @@ export function EdgeRail({ cameraId, source, dayStart, dayEnd, topEpoch, events,
 /** Option C: every camera on one clock. Rows on desktop, columns on a phone. */
 export function CameraLanes({
   cameras, recordings, events, source, startEpoch, endEpoch, topEpoch, dayStart, playhead, onSeek, onSelectCamera, timeZone,
-  spanMinutes, onSpanChange, windowHours, onWindowHoursChange,
+  spanMinutes, onSpanChange, windowHours, onWindowHoursChange, onScrub = null,
 }) {
   const compact = useViewportQuery("(max-width: 760px)");
   const [activeOnly, setActiveOnly] = useState(false);
@@ -439,7 +459,7 @@ export function CameraLanes({
   const lanes = cameras.filter((camera) => !activeOnly || byCamera.get(camera.id)?.events.length);
   const links = useMemo(() => crossCameraLinks(events), [events]);
   if (compact) {
-    return <CameraColumns lanes={lanes} byCamera={byCamera} links={links} dayStart={dayStart} topEpoch={topEpoch} playhead={playhead} onSeek={onSeek} onSelectCamera={onSelectCamera} timeZone={timeZone} spanMinutes={spanMinutes} onSpanChange={onSpanChange} />;
+    return <CameraColumns lanes={lanes} byCamera={byCamera} links={links} dayStart={dayStart} topEpoch={topEpoch} playhead={playhead} onSeek={onSeek} onScrub={onScrub} onSelectCamera={onSelectCamera} timeZone={timeZone} spanMinutes={spanMinutes} onSpanChange={onSpanChange} />;
   }
   return <CameraRows lanes={lanes} byCamera={byCamera} links={links} startEpoch={startEpoch} endEpoch={endEpoch} playhead={playhead} onSeek={onSeek} onSelectCamera={onSelectCamera} timeZone={timeZone} activeOnly={activeOnly} onActiveOnlyChange={setActiveOnly} windowHours={windowHours} onWindowHoursChange={onWindowHoursChange} />;
 }
@@ -514,8 +534,8 @@ function CameraRows({ lanes, byCamera, links, startEpoch, endEpoch, playhead, on
   );
 }
 
-function CameraColumns({ lanes, byCamera, dayStart, topEpoch, playhead, onSeek, onSelectCamera, timeZone, spanMinutes, onSpanChange }) {
-  const scrub = useVerticalScrub({ topEpoch, bottomEpoch: dayStart, spanSeconds: spanMinutes * 60, playhead, onSeek, lineRatio: 0.45 });
+function CameraColumns({ lanes, byCamera, dayStart, topEpoch, playhead, onSeek, onScrub = null, onSelectCamera, timeZone, spanMinutes, onSpanChange }) {
+  const scrub = useVerticalScrub({ topEpoch, bottomEpoch: dayStart, spanSeconds: spanMinutes * 60, playhead, onSeek, onScrub, lineRatio: 0.45 });
   const { y, visible, pps, lineY, contentHeight, lineEpoch } = scrub;
   const tickLabel = useTickLabel(timeZone);
   const bubble = useMemo(() => clockFormatter(timeZone, false), [timeZone]);

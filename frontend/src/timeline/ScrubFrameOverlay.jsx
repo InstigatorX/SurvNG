@@ -19,13 +19,16 @@ export function ScrubFrameOverlay({ frame }) {
     if (!context) return;
     context.drawImage(strip.image, tile.sx, tile.sy, tile.sw, tile.sh, 0, 0, width, height);
   }, [strip, tile?.sx, tile?.sy, tile?.sw, tile?.sh]);
+  // Until something has been drawn the player's own picture stays visible.
+  // After that the last frame drawn stays up while the next one loads.
+  const drawnRef = useRef(false);
+  if (!frame) drawnRef.current = false;
+  else if (strip && tile) drawnRef.current = true;
   if (!frame) return null;
-  // While the first strip of a drag loads there is nothing to draw yet: the
-  // player's own picture stays visible. Later the last frame drawn stays up.
   return (
     <div
       className={`recording-scrub-frame${frame.loading ? " loading" : ""}${frame.gap ? " gap" : ""}`}
-      data-drawn={strip ? "true" : "false"}
+      data-drawn={drawnRef.current ? "true" : "false"}
       aria-hidden="true"
     >
       <canvas ref={canvasRef} />

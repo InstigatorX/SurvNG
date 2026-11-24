@@ -42,7 +42,7 @@ import { canSetClipBoundaryAtPlayhead, clipPreviewReachedEnd, clipRangeIsValid, 
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
 import { nativePlaylistStart, nativePlaylistStartStep, recordingCoverageUnion, recordingPlaybackTimeline, recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, recordingEdgeSeekEpoch, recordingLiveEdgeFollow, extendedPlaybackRows, adjustRecordingExportRange, describePlaybackError, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
-import { createScrubStripStore, loadScrubStrip, scrubStripTile, scrubStripTileWidth } from "../scrubStrips.mjs";
+import { useScrubStrips } from "./useScrubStrips.js";
 import { ScrubFrameOverlay } from "./ScrubFrameOverlay.jsx";
 import { ALL_CAMERAS_LIVE_DELAY_SECONDS, allCamerasCustomIds, allCamerasGridSelection, allCamerasWindowStart, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { CameraDensityControl, CameraLayoutModeControl } from "../shared/CameraLayoutControls.jsx";
@@ -73,7 +73,7 @@ import { formatDateTime, formatTimeOnly, formatExportHandleTime, formatBytes, fo
 import { dateKeyForTimeZone, addDaysToDateKey, zonedDateSecondToEpoch } from "../shared/datetime.js";
 import { preferredStreamSource } from "../shared/cameras.js";
 import { IdentityChip } from "../shared/identity.jsx";
-import { eventThumbnailUrl, recordingDayUrl, recordingWindowUrl, recordingUpdatesUrl, recordingDayHlsUrl, recordingGridDayUrl, recordingGridUpdatesUrl, recordingPreviewUrl, recordingPreviewStripUrl, recordingSegmentUrl } from "../shared/mediaUrls.js";
+import { eventThumbnailUrl, recordingDayUrl, recordingWindowUrl, recordingUpdatesUrl, recordingDayHlsUrl, recordingGridDayUrl, recordingGridUpdatesUrl, recordingPreviewUrl, recordingSegmentUrl } from "../shared/mediaUrls.js";
 import { CameraLanes, CatchUpStory, EventRail } from "./TimelineRail.jsx";
 import { condenseStory, nextStoryEvent, storyEventAt } from "../timelineRail.mjs";
 import { RecordingHlsVideo } from "../shared/RecordingHlsVideo.jsx";
@@ -1307,6 +1307,12 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   // the drag ends. After a release the last frame stays up until the player
   // has seeked there, so the picture does not jump back to where it was.
   function handleScrubFrame(frame, { committed = false } = {}) {
+    if (frame?.held) {
+      // The released time's own frame, arriving after the release. It
+      // replaces the picture only while that is still up.
+      setScrubFrame((current) => (current ? frame : current));
+      return;
+    }
     if (scrubClearTimerRef.current) window.clearTimeout(scrubClearTimerRef.current);
     scrubClearTimerRef.current = null;
     if (frame) {
@@ -1319,12 +1325,17 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       setScrubFrame(null);
       return;
     }
-    setScrubReleased(true);
+    // Not released at once: the seek that follows starts a moment later
+    // (the rail commits after its scroll settles), and until it has started
+    // "not seeking" would be taken for "arrived".
     scrubClearTimerRef.current = window.setTimeout(() => {
-      scrubClearTimerRef.current = null;
-      setScrubReleased(false);
-      setScrubFrame(null);
-    }, 4000);
+      setScrubReleased(true);
+      scrubClearTimerRef.current = window.setTimeout(() => {
+        scrubClearTimerRef.current = null;
+        setScrubReleased(false);
+        setScrubFrame(null);
+      }, 4000);
+    }, 300);
   }
 
   useEffect(() => {
@@ -1338,6 +1349,13 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   useEffect(() => () => {
     if (scrubClearTimerRef.current) window.clearTimeout(scrubClearTimerRef.current);
   }, []);
+
+  // Every timeline layout reports its scrub position here.
+  const scrubPlayer = useScrubStrips({
+    cameraId: isAllCameras ? "" : activeCameraId,
+    source,
+    onFrame: handleScrubFrame,
+  });
 
   function snapToRecording(epoch, continuing = false) {
     if (!timeline.length) return null;
@@ -2946,6 +2964,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           dayStart={dayStart}
           playhead={railPlayhead}
           onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
+          onScrub={isAllCameras ? null : scrubPlayer}
           onSelectCamera={(nextCameraId) => {
             if (isAllCameras) focusGridCamera(nextCameraId);
             else if (nextCameraId !== activeCameraId) selectPlaybackCamera(nextCameraId);
@@ -2978,6 +2997,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       selectedEventId={selectedEvent?.id}
       onEventSelect={selectRailEvent}
       onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
+      onScrub={isAllCameras ? null : scrubPlayer}
       timeZone={timeZone}
       onPreviousDay={() => changeDate(addDaysToDateKey(date, -1))}
       onNextDay={date < today ? () => changeDate(addDaysToDateKey(date, 1)) : null}
@@ -3335,7 +3355,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             timeZone={timeZone}
             windowHours={incidentRangeHours}
             onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
-            onScrubFrame={isAllCameras ? null : handleScrubFrame}
+            onScrub={isAllCameras ? null : scrubPlayer}
             onPanViewport={panTimelineViewport}
             exportRange={isAllCameras ? null : exportRange}
             onExportRangeChange={isAllCameras || exportJob ? null : (nextRange) => { cancelClipPreview(); setExportRange(nextRange); }}
@@ -3755,7 +3775,7 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
   );
 }
 
-export function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings, events, evidenceFilter, laneVisibility, selectedEventId, onEventSelect, playhead, timeZone, onSeek, onScrubFrame = null, onPanViewport, windowHours = 1, exportRange, onExportRangeChange }) {
+export function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings, events, evidenceFilter, laneVisibility, selectedEventId, onEventSelect, playhead, timeZone, onSeek, onScrub = null, onPanViewport, windowHours = 1, exportRange, onExportRangeChange }) {
   const duration = Math.max(1, endEpoch - startEpoch);
   const offset = Math.max(0, Math.min(duration, playhead - startEpoch));
   const trackRef = useRef(null);
@@ -3774,35 +3794,10 @@ export function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, reco
   const previewHideTimerRef = useRef(null);
   const previewGenerationRef = useRef(0);
   const exportDragRef = useRef(null);
-  // With a frame callback the dragged playhead's picture comes from preview
+  // With a scrub callback the dragged playhead's picture comes from preview
   // strips and is shown in the player; the tile above it carries the time.
-  const stripsEnabled = Boolean(onScrubFrame && cameraId);
-  const scrubStoreRef = useRef(null);
-  const scrubEpochRef = useRef(null);
-  const onScrubFrameRef = useRef(onScrubFrame);
-  onScrubFrameRef.current = onScrubFrame;
-  useEffect(() => {
-    if (!stripsEnabled) return undefined;
-    const width = scrubStripTileWidth({
-      coarsePointer: Boolean(window.matchMedia?.("(pointer: coarse)").matches),
-      playerWidth: window.innerWidth,
-      pixelRatio: window.devicePixelRatio,
-    });
-    const store = createScrubStripStore({
-      load: (epoch, signal) => loadScrubStrip(recordingPreviewStripUrl(cameraId, epoch, source, width), signal),
-      onChange: publishScrubFrame,
-      release: (strip) => { if (strip.url) URL.revokeObjectURL(strip.url); },
-    });
-    scrubStoreRef.current = store;
-    return () => {
-      store.close();
-      scrubStoreRef.current = null;
-      if (Number.isFinite(scrubEpochRef.current)) onScrubFrameRef.current?.(null);
-      scrubEpochRef.current = null;
-    };
-    // publishScrubFrame reads refs only.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameraId, source, stripsEnabled]);
+  const stripsEnabled = Boolean(onScrub && cameraId);
+  const scrubActiveRef = useRef(false);
   const ticks = useMemo(() => {
     const tickInterval = timelineTickIntervalSeconds(windowHours);
     const formatter = new Intl.DateTimeFormat("en-US", {
@@ -3885,30 +3880,15 @@ export function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, reco
   }, [cameraId, source, startEpoch]);
   const percent = ((scrubbing ? draft : offset) / duration) * 100;
 
-  function publishScrubFrame() {
-    const store = scrubStoreRef.current;
-    const epoch = scrubEpochRef.current;
-    if (!store || !Number.isFinite(epoch)) return;
-    const found = store.frameAt(epoch);
-    const tile = found.strip
-      ? scrubStripTile(found.strip, epoch, found.strip.image.naturalWidth, found.strip.image.naturalHeight)
-      : null;
-    onScrubFrameRef.current?.({ epoch, strip: found.strip, tile, gap: found.gap, loading: found.loading });
-  }
-
   function scrubTo(epoch) {
-    const store = scrubStoreRef.current;
-    if (!store) return;
-    scrubEpochRef.current = epoch;
-    store.want(epoch);
-    publishScrubFrame();
+    scrubActiveRef.current = true;
+    onScrub?.(epoch);
   }
 
   function endScrub(committed) {
-    if (!Number.isFinite(scrubEpochRef.current)) return;
-    scrubEpochRef.current = null;
-    scrubStoreRef.current?.idle();
-    onScrubFrameRef.current?.(null, { committed });
+    if (!scrubActiveRef.current) return;
+    scrubActiveRef.current = false;
+    onScrub?.(null, { committed });
   }
 
   function hidePreviewAfterDelay() {

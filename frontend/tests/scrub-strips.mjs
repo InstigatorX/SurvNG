@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   SCRUB_STRIP_GAP_SECONDS,
+  SCRUB_STRIP_NEAR_SECONDS,
   SCRUB_STRIP_RETRY_MS,
   createScrubStripStore,
   scrubStripLayout,
@@ -80,6 +81,13 @@ const segment = (start) => ({ start, end: start + 10, step: 1, count: 10, column
   await t.settle();
   assert.equal(t.changes(), 1);
   assert.equal(t.store.frameAt(105).strip.start, 100);
+  // The playhead has moved on while that strip was made. Until its own
+  // segment arrives, the nearest loaded one stands in, marked as loading.
+  assert.deepEqual(t.store.frameAt(165), { strip: t.store.frameAt(105).strip, gap: false, loading: true });
+  assert.equal(scrubStripTile(t.store.frameAt(165).strip, 165, 1920, 480).index, 9);
+  assert.equal(scrubStripTile(t.store.frameAt(95).strip, 95, 1920, 480).index, 0);
+  // Not from further away than that: it would be a different scene.
+  assert.equal(t.store.frameAt(110 + SCRUB_STRIP_NEAR_SECONDS + 1).strip, null);
   assert.deepEqual(t.pending.map((item) => item.epoch), [105, 165]);
   t.pending[1].resolve(segment(160));
   await t.settle();
@@ -151,6 +159,7 @@ const segment = (start) => ({ start, end: start + 10, step: 1, count: 10, column
   assert.equal(t.store.size, 2);
   assert.deepEqual(t.released, [400]);
   assert.equal(t.store.frameAt(405).loading, true);
+  assert.notEqual(t.store.frameAt(405).strip?.start, 400);
   t.store.idle();
   t.store.want(612);
   await t.settle();
