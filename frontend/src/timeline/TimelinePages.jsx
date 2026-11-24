@@ -743,9 +743,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
   const [heroPlaying, setHeroPlaying] = useState(false);
   const [heroSeeking, setHeroSeeking] = useState(false);
-  const [scrubFrame, setScrubFrame] = useState(null);
-  const [scrubReleased, setScrubReleased] = useState(false);
-  const scrubClearTimerRef = useRef(null);
+  const scrubOverlayRef = useRef(null);
   const [playbackWindow, setPlaybackWindow] = useState(null);
   const [playbackWindowRevision, setPlaybackWindowRevision] = useState(0);
   const [manifestRetryToken, setManifestRetryToken] = useState(0);
@@ -1303,58 +1301,13 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     return () => controller.abort();
   }, [activeCameraId, date, source]);
 
-  // The timeline reports the frame under the dragged playhead, then null when
-  // the drag ends. After a release the last frame stays up until the player
-  // has seeked there, so the picture does not jump back to where it was.
-  function handleScrubFrame(frame, { committed = false } = {}) {
-    if (frame?.held) {
-      // The released time's own frame, arriving after the release. It
-      // replaces the picture only while that is still up.
-      setScrubFrame((current) => (current ? frame : current));
-      return;
-    }
-    if (scrubClearTimerRef.current) window.clearTimeout(scrubClearTimerRef.current);
-    scrubClearTimerRef.current = null;
-    if (frame) {
-      setScrubReleased(false);
-      setScrubFrame(frame);
-      return;
-    }
-    if (!committed) {
-      setScrubReleased(false);
-      setScrubFrame(null);
-      return;
-    }
-    // Not released at once: the seek that follows starts a moment later
-    // (the rail commits after its scroll settles), and until it has started
-    // "not seeking" would be taken for "arrived".
-    scrubClearTimerRef.current = window.setTimeout(() => {
-      setScrubReleased(true);
-      scrubClearTimerRef.current = window.setTimeout(() => {
-        scrubClearTimerRef.current = null;
-        setScrubReleased(false);
-        setScrubFrame(null);
-      }, 4000);
-    }, 300);
-  }
-
-  useEffect(() => {
-    if (!scrubReleased || heroSeeking) return;
-    if (scrubClearTimerRef.current) window.clearTimeout(scrubClearTimerRef.current);
-    scrubClearTimerRef.current = null;
-    setScrubReleased(false);
-    setScrubFrame(null);
-  }, [scrubReleased, heroSeeking]);
-
-  useEffect(() => () => {
-    if (scrubClearTimerRef.current) window.clearTimeout(scrubClearTimerRef.current);
-  }, []);
-
-  // Every timeline layout reports its scrub position here.
+  // Every timeline layout reports its scrub position here. The frames go
+  // straight to the overlay: a scrub reports on every scroll event, and this
+  // page must not render for each one.
   const scrubPlayer = useScrubStrips({
     cameraId: isAllCameras ? "" : activeCameraId,
     source,
-    onFrame: handleScrubFrame,
+    onFrame: (frame, options) => scrubOverlayRef.current?.show(frame, options),
   });
 
   function snapToRecording(epoch, continuing = false) {
@@ -3143,7 +3096,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             />
           ) : null}
           {coveringNativeStartup ? <div className="recording-hero-startup-cover" aria-hidden="true" /> : null}
-          <ScrubFrameOverlay frame={scrubFrame} />
+          <ScrubFrameOverlay ref={scrubOverlayRef} seeking={heroSeeking} />
           <DebugDetectionOverlay
             key={aiOverlayKey}
             videoRef={videoRef}
