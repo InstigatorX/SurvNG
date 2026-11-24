@@ -2,10 +2,12 @@
 
 ## Unreleased
 
-- Databases must have been opened by the `v1.2.0` release or later. Startup
-  stops, before changing anything, with an error naming the first older table
-  it finds; start `v1.2.0` once against the same data, with a configuration it
-  accepts such as your pre-upgrade backup, then upgrade. See `docs/current-only.md`.
+- Only data written by `v1.2.0` or later is supported. Startup no longer
+  upgrades older databases, `secrets.json` must be the encrypted format, and
+  completed exports are always served as MP4. Startup drops retired tables that
+  no build reads (`scene_changes`, `tracking_comparisons`, `scene_migrations`,
+  `scene_acquisition_migrations`, `scene_discovery_baselines`) and unused
+  indexes. See `docs/current-only.md`.
 - Removed endpoints with no caller and no documentation: the
   `/api/faces/` diagnostics, benchmark (`/production`, `/camera-pairs`,
   `/by-identity`), `gallery-optimization`, `camera-suitability`,

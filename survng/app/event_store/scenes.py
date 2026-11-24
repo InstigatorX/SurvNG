@@ -254,7 +254,6 @@ class EventStoreSceneMixin:
                     on scene_observation_zones(episode_id, displayable);
                 create index if not exists scene_observation_zones_zone
                     on scene_observation_zones(zone, episode_id);
-                drop index if exists scene_observation_event;
                 create index if not exists scene_observation_media on scene_observations(snapshot_path);
                 create index if not exists scene_observation_recording
                     on scene_observations(recording_path) where recording_path != '';
@@ -352,7 +351,13 @@ class EventStoreSceneMixin:
                     incident_id text not null, revision integer not null, payload_json text not null,
                     primary key(incident_id,revision)
                 );
+                -- Retired tables no build reads: an incident-revision log, the tracking
+                -- comparison results and the prior generation's migration markers.
                 drop table if exists scene_discovery_baselines;
+                drop table if exists scene_changes;
+                drop table if exists tracking_comparisons;
+                drop table if exists scene_migrations;
+                drop table if exists scene_acquisition_migrations;
                 create table if not exists scene_identities (
                     event_id integer primary key references events(id) on delete cascade, payload_json text not null
                 );

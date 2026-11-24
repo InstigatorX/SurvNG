@@ -196,29 +196,6 @@ def test_initializer_rejects_redacted_template_before_writing(tmp_path):
     assert not secrets_key_path(secrets_path(destination)).exists()
 
 
-def _schema(path):
-    with sqlite3.connect(path) as conn:
-        return sorted(conn.execute('select type, name, sql from sqlite_master'))
-
-
-def test_event_database_older_than_1_2_0_stops_before_changing_it(tmp_path):
-    from survng.app.main_database import UnsupportedDatabaseError
-
-    # A current database whose scene_objects table lacks the column v1.2.0 added,
-    # plus a table startup would otherwise drop.
-    EventStore(tmp_path)
-    database = tmp_path / 'survng.sqlite3'
-    with sqlite3.connect(database) as conn:
-        conn.execute('pragma foreign_keys=off')
-        conn.execute('drop index scene_object_facet_label')
-        conn.execute('alter table scene_objects drop column facet_label')
-        conn.execute('create table scene_discovery_baselines(camera_id text primary key)')
-    before = _schema(database)
-    with pytest.raises(UnsupportedDatabaseError, match='scene_objects predates SurvNG 1.2.0'):
-        EventStore(tmp_path)
-    assert _schema(database) == before
-
-
 def test_v1_2_0_event_index_leftover_is_dropped(tmp_path):
     EventStore(tmp_path)
     with sqlite3.connect(tmp_path / 'survng.sqlite3') as conn:
@@ -229,85 +206,13 @@ def test_v1_2_0_event_index_leftover_is_dropped(tmp_path):
     assert 'idx_event_camera_epoch' not in names
 
 
-def test_recording_index_older_than_1_2_0_stops_before_changing_it(tmp_path):
-    from survng.app.main_database import UnsupportedDatabaseError
-    from survng.app.recording_process.recorder import Recorder
-
-    with sqlite3.connect(tmp_path / 'recordings.sqlite3') as conn:
-        conn.execute('create table recordings(path text primary key, camera_id text not null, source text not null, '
-                     'name text not null, size_bytes integer not null, modified_at real not null, '
-                     'start_epoch real not null, duration_seconds real not null, end_epoch real not null)')
-    before = _schema(tmp_path / 'recordings.sqlite3')
-    with pytest.raises(UnsupportedDatabaseError, match='recordings predates SurvNG 1.2.0'):
-        Recorder('ffmpeg', tmp_path)
-    assert _schema(tmp_path / 'recordings.sqlite3') == before
-
-
-def test_manager_precheck_rejects_a_later_store_table_before_any_change(tmp_path):
-    from survng.app.main_database import UnsupportedDatabaseError
-    from survng.app.schema_minimum import require_minimum_databases
-    from survng.app.semantic_search import SemanticIndex
-
-    EventStore(tmp_path)
-    database = tmp_path / 'survng.sqlite3'
-    SemanticIndex(database)
-    with sqlite3.connect(database) as conn:
-        dependent = [name for (name,) in conn.execute(
-            "select name from sqlite_master where type='index' and tbl_name='semantic_embeddings' "
-            "and sql like '%evidence_revision%'")]
-        for name in dependent:
-            conn.execute(f'drop index {name}')
-        conn.execute('alter table semantic_embeddings drop column evidence_revision')
-        conn.execute('create table scene_discovery_baselines(camera_id text primary key)')
-    before = _schema(database)
-    with pytest.raises(UnsupportedDatabaseError, match='semantic_embeddings predates SurvNG 1.2.0'):
-        require_minimum_databases(tmp_path, tmp_path)
-    assert _schema(database) == before
-    # The event store shares the file, so it refuses the same database itself.
-    with pytest.raises(UnsupportedDatabaseError, match='semantic_embeddings predates SurvNG 1.2.0'):
-        EventStore(tmp_path)
-    assert _schema(database) == before
-    require_minimum_databases(tmp_path / 'new', tmp_path / 'new')  # nothing yet: passes, creates nothing
-    assert not (tmp_path / 'new').exists()
-
-
-def test_manager_checks_databases_before_building_any_store(tmp_path):
-    from unittest.mock import patch
-
-    from survng.app.main_database import UnsupportedDatabaseError
-    from survng.app.manager import AppManager
-
-    stop = UnsupportedDatabaseError('old database')
-    with (
-        patch('survng.app.manager.require_minimum_databases', side_effect=stop) as precheck,
-        patch('survng.app.manager.EventStore', side_effect=AssertionError('store built first')),
-        pytest.raises(UnsupportedDatabaseError),
-    ):
-        AppManager(AppConfig(storage_dir=str(tmp_path)))
-    precheck.assert_called_once_with(tmp_path, tmp_path)
-
-
-def test_retired_scene_changes_history_is_kept_but_no_longer_written(tmp_path):
-    EventStore(tmp_path)
-    with sqlite3.connect(tmp_path / 'survng.sqlite3') as conn:
-        conn.execute('create table scene_changes(id integer primary key autoincrement, incident_id text not null, '
-                     'revision integer not null, created_at real not null)')
-        conn.execute("insert into scene_changes(incident_id, revision, created_at) values ('old', 1, 0)")
-    store = EventStore(tmp_path)
-    event = store.add_event(camera_id='gate', kind='motion', topic='motion', message='motion', snapshot_path='', recording_path='')
-    assert store.scene_incident(event_id=event['id'])
-    with sqlite3.connect(tmp_path / 'survng.sqlite3') as conn:
-        assert conn.execute('select incident_id from scene_changes').fetchall() == [('old',)]
-
-
 def test_startup_reports_a_manager_failure_instead_of_a_telemetry_failure():
     from types import SimpleNamespace
     from unittest.mock import Mock, patch
 
     from survng.app import main
-    from survng.app.main_database import UnsupportedDatabaseError
 
-    for failure in (UnsupportedDatabaseError('old database'), sqlite3.OperationalError('unreadable')):
+    for failure in (ValueError('invalid configuration'), sqlite3.OperationalError('unreadable')):
         with patch.object(main, 'get_manager', side_effect=failure):
             with pytest.raises(type(failure)):
                 main._record_process_lifecycle('startup_started')
@@ -316,24 +221,6 @@ def test_startup_reports_a_manager_failure_instead_of_a_telemetry_failure():
     telemetry.record_lifecycle_event.side_effect = sqlite3.OperationalError('locked')
     with patch.object(main, 'get_manager', return_value=SimpleNamespace(telemetry=telemetry)):
         main._record_process_lifecycle('startup_started')
-
-
-def test_event_store_refusing_an_old_jobs_database_creates_no_database(tmp_path):
-    from survng.app.main_database import UnsupportedDatabaseError
-
-    conn = sqlite3.connect(tmp_path / 'detection-jobs.sqlite3')
-    conn.execute('pragma journal_mode=wal')
-    conn.execute('create table detection_jobs(id text primary key, camera_id text not null)')
-    conn.commit()
-    conn.close()
-    before = _schema(tmp_path / 'detection-jobs.sqlite3')
-    with pytest.raises(UnsupportedDatabaseError, match='detection_jobs predates SurvNG 1.2.0'):
-        EventStore(tmp_path)
-    # SQLite may add WAL side files to the refused database; no new database appears.
-    assert {path.name for path in tmp_path.iterdir()} <= {
-        'detection-jobs.sqlite3', 'detection-jobs.sqlite3-wal', 'detection-jobs.sqlite3-shm',
-    }
-    assert _schema(tmp_path / 'detection-jobs.sqlite3') == before
 
 
 def test_shutdown_lifecycle_events_never_build_a_manager():
@@ -347,3 +234,18 @@ def test_shutdown_lifecycle_events_never_build_a_manager():
     ):
         main._record_process_lifecycle('shutdown_requested')
         main._record_process_lifecycle('shutdown_completed')
+
+
+def test_retired_tables_are_dropped_and_scene_changes_is_not_written(tmp_path):
+    EventStore(tmp_path)
+    with sqlite3.connect(tmp_path / 'survng.sqlite3') as conn:
+        conn.execute('create table scene_changes(id integer primary key, incident_id text, revision integer, created_at real)')
+        conn.execute('create table tracking_comparisons(id integer primary key)')
+        conn.execute('create table scene_migrations(name text primary key)')
+        conn.execute('create table scene_acquisition_migrations(name text primary key)')
+    store = EventStore(tmp_path)
+    event = store.add_event(camera_id='gate', kind='motion', topic='motion', message='motion', snapshot_path='', recording_path='')
+    assert store.scene_incident(event_id=event['id'])
+    with sqlite3.connect(tmp_path / 'survng.sqlite3') as conn:
+        tables = {row[0] for row in conn.execute("select name from sqlite_master where type='table'")}
+    assert not tables & {'scene_changes', 'tracking_comparisons', 'scene_migrations', 'scene_acquisition_migrations'}

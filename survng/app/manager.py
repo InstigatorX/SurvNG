@@ -51,7 +51,6 @@ from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
 from .identity_projection import apply_event_identity
 from .media_storage import MediaStorageRegistry
-from .schema_minimum import require_minimum_databases
 from .media_sessions import (
     MediaSessionKind,
     MediaSessionManager,
@@ -189,37 +188,6 @@ def validate_media_storage_configuration(config: AppConfig) -> None:
 
 
 def validate_motion_pipeline_configuration(config: AppConfig) -> None:
-    def selected_sources(value: object) -> set[str]:
-        if isinstance(value, str):
-            values = (value,)
-        elif isinstance(value, (list, tuple)):
-            values = value
-        else:
-            return set()
-        return {
-            str(source).strip().lower()
-            for source in values
-            if str(source).strip()
-        }
-
-    def reject_retired_mog2(scope: str, motion_config: object) -> None:
-        pipeline = getattr(motion_config, "pipeline", None)
-        for graph_name in ("qualification", "observation", "fusion"):
-            stages = getattr(pipeline, graph_name, None) if pipeline is not None else None
-            for stage in stages or ():
-                implementation = str(stage.implementation).strip().lower()
-                sources = selected_sources(stage.options.get("sources"))
-                if implementation in {"opencv_mog2", "opencv_mog2_evidence"} or "mog2" in sources:
-                    raise ValueError(
-                        f"invalid motion pipeline for {scope}: MOG2 stage/source "
-                        f"in {graph_name} has been retired; use Enhanced Motion "
-                        "Analysis (EMA) validation"
-                    )
-
-    reject_retired_mog2("global configuration", config.motion_qualification)
-    for camera in config.cameras:
-        reject_retired_mog2(f"camera {camera.id!r}", camera.motion_qualification)
-
     registry = build_builtin_motion_registry()
     targets = [("global", CameraMotionQualificationConfig())] + [
         (camera.id, camera.motion_qualification)
@@ -300,11 +268,6 @@ class AppManager:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.database_dir = Path(config.database_dir) if config.database_dir else self.storage_dir
         self.database_dir.mkdir(parents=True, exist_ok=True)
-        # Refuse a database v1.2.0 never opened before any store changes one.
-        require_minimum_databases(
-            self.database_dir,
-            Path(config.recording_index_dir) if config.recording_index_dir else self.storage_dir,
-        )
         self.database_write_lock = database_write_lock or threading.RLock()
         self.image_cache = LocalImageCache(self.database_dir / "image-cache")
         self.image_writer = DurableImageWriter(config.image_storage)

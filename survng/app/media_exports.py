@@ -18,8 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
-from .main_database import closing_connection_factory, require_minimum_schema
-from .schema_minimum import EXPORTS_SCHEMA_MINIMUM
+from .main_database import closing_connection_factory
 from .recording_media import concatenated_clip_timing
 from .recorder import Recorder
 from .media_storage import MediaStorageRegistry
@@ -62,7 +61,6 @@ class MediaExportStore:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
-            require_minimum_schema(connection, EXPORTS_SCHEMA_MINIMUM)
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute(
                 """

@@ -14,12 +14,7 @@ from ..incident_utils import (
     event_snapshot_path, media_path_aliases, portable_media_path,
 )
 from ..media_storage import MediaStorageRegistry
-from ..main_database import (
-    connect_main_database,
-    create_index_logged,
-    require_minimum_schema,
-)
-from ..schema_minimum import FACE_SCHEMA_MINIMUM
+from ..main_database import connect_main_database, create_index_logged
 from .benchmarks import FaceStoreBenchmarkMixin
 from .ingest import FaceStoreIngestMixin
 from .people import FaceStorePeopleMixin
@@ -132,7 +127,6 @@ class FaceStore(
     def _init_db(self) -> None:
         pruned_paths: list[Path] = []
         with self._connect() as connection:
-            require_minimum_schema(connection, FACE_SCHEMA_MINIMUM)
             connection.execute("pragma journal_mode = wal")
             connection.execute("pragma synchronous = normal")
             connection.execute(

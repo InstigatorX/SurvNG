@@ -64,20 +64,6 @@ def test_admission_rolls_back_event_if_obligation_outbox_fails(tmp_path, monkeyp
         assert conn.execute("select count(*) from event_cover_requirements").fetchone()[0] == 0
 
 
-def test_legacy_migration_does_not_schedule_historical_evidence(tmp_path):
-    # A v1.2.0-era events table without revisions keeps old provisional evidence historical.
-    with sqlite3.connect(tmp_path / "survng.sqlite3") as conn:
-        conn.execute("create table events(id integer primary key, camera_id text, kind text, topic text, message text, "
-                     "snapshot_path text, snapshot_size_bytes integer not null default 0, recording_path text, "
-                     "objects_json text, created_at text)")
-        conn.execute("insert into events values(1,'gate','motion','','','old.webp',0,'',?,'2026-09-01T00:00:00+00:00')",
-                     (json.dumps([provisional()]),))
-    store = EventStore(tmp_path)
-    assert store.get(1)["evidence_revision"] == 0
-    assert store.cover_requirement(1) is None
-    assert store.pending_evidence_updates() == []
-
-
 def test_new_scene_observation_keeps_semantic_projection_durable(tmp_path):
     store = EventStore(tmp_path)
     event = add(store)

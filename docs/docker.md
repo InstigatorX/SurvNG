@@ -45,8 +45,7 @@ container creates `/config/config.json` with mode `0600`. After the first
 admin save, SurvNG also writes AES-GCM-encrypted `/config/secrets.json`
 (`0600`) plus a colocated `/config/secrets.key` (`0600`) for camera, MQTT, AI,
 API-token, and web-auth secret material; `config.json` keeps placeholders
-instead. Legacy single-file installs and plaintext sidecars still load until
-the next save. Override paths with `SURVNG_SECRETS_PATH` /
+instead. Override paths with `SURVNG_SECRETS_PATH` /
 `SURVNG_SECRETS_KEY_PATH` when needed.
 
 SurvNG decrypts credentials in process memory to connect to cameras, MQTT, and

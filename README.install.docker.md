@@ -283,8 +283,7 @@ curl -fsS http://127.0.0.1:8088/api/health
 ```
 
 Config, databases, models, and media stay on the host. Back them up before an
-upgrade that changes schema or storage. Upgrades require a database that the `v1.2.0` release or later has already
-opened; see `docs/current-only.md`.
+upgrade that changes schema or storage.
 
 ## 10. Backup
 

@@ -830,9 +830,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         return FileResponse(
             path,
             filename=name,
-            # New recording exports are always MP4. Keep the legacy ZIP media type
-            # until any already-completed archive jobs expire from the export store.
-            media_type="application/zip" if path.suffix.lower() == ".zip" else "video/mp4",
+            media_type="video/mp4",
             headers={"Cache-Control": "private, no-store"},
         )
 
@@ -845,7 +843,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             raise HTTPException(status_code=404, detail="completed export not found") from None
         return FileResponse(
             path,
-            media_type="application/zip" if path.suffix.lower() == ".zip" else "video/mp4",
+            media_type="video/mp4",
             headers={"Cache-Control": "private, max-age=3600"},
         )
 

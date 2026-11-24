@@ -8,7 +8,6 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Mapping
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Literal
@@ -155,33 +154,6 @@ def forget_startup_recovery() -> None:
         _STARTUP_RECOVERED.clear()
         _PROCESS_RECOVERY_TOKEN = uuid.uuid4().hex
 
-
-
-class UnsupportedDatabaseError(RuntimeError):
-    """A database older than the minimum this build opens (docs/current-only.md)."""
-
-
-def require_minimum_schema(
-    connection: sqlite3.Connection, minimum: Mapping[str, tuple[str, ...]]
-) -> None:
-    """Refuse a database v1.2.0 never opened, before any statement changes it.
-
-    ``minimum`` maps each table the caller owns to the columns v1.2.0 added to
-    older databases; later builds no longer add them. Tables that do not exist
-    yet belong to a new database and pass. Callers run this before their first
-    CREATE, DROP or ALTER, so a rejected database is left exactly as it was.
-    """
-    for table, columns in minimum.items():
-        present = {str(row[1]) for row in connection.execute(f"pragma table_info({table})")}
-        if not present:
-            continue
-        missing = [column for column in columns if column not in present]
-        if missing:
-            raise UnsupportedDatabaseError(
-                f"Database table {table} predates SurvNG 1.2.0 (missing {', '.join(missing)}). "
-                "Start the SurvNG v1.2.0 release (tag v1.2.0) once on this data, with the "
-                "configuration it accepts such as your pre-upgrade backup; see docs/current-only.md."
-            )
 
 
 def create_index_logged(connection: sqlite3.Connection, name: str, sql: str) -> None:

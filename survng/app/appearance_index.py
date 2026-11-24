@@ -7,12 +7,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from .main_database import (
-    connect_main_database,
-    create_index_logged,
-    require_minimum_schema,
-)
-from .schema_minimum import APPEARANCE_SCHEMA_MINIMUM
+from .main_database import connect_main_database, create_index_logged
 
 
 class AppearanceIndex:
@@ -42,7 +37,6 @@ class AppearanceIndex:
 
     def _init_db(self) -> None:
         with self._connect() as connection:
-            require_minimum_schema(connection, APPEARANCE_SCHEMA_MINIMUM)
             connection.execute("pragma journal_mode = wal")
             connection.execute("pragma synchronous = normal")
             connection.execute(

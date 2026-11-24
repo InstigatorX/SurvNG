@@ -911,7 +911,7 @@ def _record_process_lifecycle(kind: str) -> None:
     """Record restart evidence without making telemetry a lifecycle dependency.
 
     Building the manager is not telemetry: a startup that cannot build it
-    (an old database, an unreadable file) reports that error itself. Later
+    (invalid configuration, an unreadable database) reports that error itself. Later
     events only use a manager that exists, so shutdown never stops here.
     """
     if kind == "startup_started":

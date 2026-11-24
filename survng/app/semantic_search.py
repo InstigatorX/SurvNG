@@ -24,15 +24,9 @@ import cv2
 
 from .config import SemanticSearchConfig
 from .incident_utils import event_snapshot_path
-from .main_database import (
-    connect_main_database,
-    create_index_logged,
-    require_minimum_schema,
-)
-from .schema_minimum import SEMANTIC_SCHEMA_MINIMUM
+from .main_database import connect_main_database, create_index_logged
 from .media_storage import MediaStorageRegistry
 from .openclip_tokenizer import OpenClipBpeTokenizer
-
 
 LOGGER = logging.getLogger("uvicorn.error")
 SEMANTIC_WORKER_START_TIMEOUT_SECONDS = 60.0
@@ -392,7 +386,6 @@ class SemanticIndex:
 
     def _init_db(self) -> None:
         with self._connect() as connection:
-            require_minimum_schema(connection, SEMANTIC_SCHEMA_MINIMUM)
             connection.execute("pragma journal_mode = wal")
             connection.execute("pragma synchronous = normal")
             connection.execute(
@@ -434,7 +427,6 @@ class SemanticIndex:
                 )
                 """
             )
-            connection.execute("drop index if exists idx_semantic_generation_time")
             connection.execute(
                 """
                 create index if not exists idx_semantic_event

@@ -18,25 +18,16 @@ Each change was made on a stacked branch so the steps can be tested together:
 | t2 | 11 undocumented face diagnostic, benchmark and dedupe endpoints and the face-store code only they reached. The `scene_discovery_baselines` table and three redundant indexes (dropped at startup). The `detector.depth.motion_evidence_enabled` and `cameras[].video_backend` config fields. |
 | t3 | `tracking_evaluation.py`, the `HybridCandidateObjectTracker` alias and `ObjectTrackingLifecycle.bind_for_compatibility`; the uncalled `GET /api/cameras/{id}/recordings/mobile-window.mp4`. |
 | t4 | 102 route-handler aliases in `main.py` (tests use the router bundles); the derived "legacy" retention budget and the tuple live-frame fallback, both reachable only from tests. |
-| t5 | Upgrades that 1.2.0 already applied (see below). Incident revisions no longer write the never-read `scene_changes` table; existing installs keep it and its rows. |
+| t5 | Upgrades that 1.2.0 already applied (see below). Incident revisions no longer write the never-read `scene_changes` table. |
+| t6 | With a single install on 1.2 data, the remaining pre-1.2.0 support: the startup schema check added during review, the three drop-index cleanups for pre-1.2.0 indexes, the plaintext `secrets.json` read path, the retired-MOG2 guard (unsupported fusion sources and stages are still rejected) and the ZIP export media type. Startup drops the retired `scene_changes`, `tracking_comparisons`, `scene_migrations` and `scene_acquisition_migrations` tables. |
 
 ## Decisions
 
 - **Minimum database:** one that SurvNG 1.2.0 or later has opened. Each removed
   upgrade was present in 1.2.0 and its column was already in that table's
-  CREATE statement. `survng/app/schema_minimum.py` lists those columns per
-  table. `AppManager` checks every existing database read-only before it builds
-  any store, so an older table stops startup with `UnsupportedDatabaseError`
-  naming it and leaves every database unchanged. Stores also check before their
-  first DDL when built on their own: the event store checks all of
-  `survng.sqlite3` and its jobs database, read-only; the face, semantic,
-  appearance, export and recording-index stores check their own tables. A database created by the
-  `v1.2` branch head and then opened by `t5` matches a fresh one except for the
-  retired `scene_changes` table. One created by the `v1.2.0` tag also keeps the
-  retired `tracking_comparisons`, `scene_migrations` and
-  `scene_acquisition_migrations` tables and the comparison index. These hold
-  data and nothing writes them any more, so they stay. Its unused
-  `idx_event_camera_epoch`, which taxed every event insert, is dropped.
+  CREATE statement. There is no startup check: the only install runs on 1.2
+  data. Startup drops retired tables no build reads and v1.2.0's unused
+  `idx_event_camera_epoch`, which taxed every event insert.
 - **Face rows linked by the retired dedupe** (`duplicate_of_observation_id`)
   can remain on installs; pruning of those trees is unchanged.
 - **Documented API stays** even without an in-repo caller, including
@@ -45,11 +36,7 @@ Each change was made on a stacked branch so the steps can be tested together:
 ## Retained on purpose
 
 - Column additions that fresh databases still need (columns not in their
-  CREATE), and every `drop index if exists` cleanup: they cost nothing, and a
-  column check cannot tell whether an older build left those indexes behind.
-- The plaintext secrets sidecar read path: removing it saves two lines and
-  could stop an install that has not saved its config since encryption.
-- The retired-MOG2 configuration guard: a clear error beats a generic one.
+  CREATE), and drop-index cleanups added since 1.2.0.
 - `config_init` and `face_evaluation` (command-line tools), the operator shell
   scripts, and framework or protocol callbacks.
 
