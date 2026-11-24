@@ -621,7 +621,7 @@ class AppConfigTest(unittest.TestCase):
                 stream_url=f"rtsp://{oversized_username}:secret@camera.local/main",
             )
 
-    def test_legacy_baichuan_config_keys_are_ignored_and_backend_is_url(self) -> None:
+    def test_legacy_baichuan_and_video_backend_keys_are_ignored(self) -> None:
         camera = CameraConfig.model_validate(
             {
                 "id": "gate",
@@ -632,17 +632,8 @@ class AppConfigTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(camera.video_backend, "url")
+        self.assertNotIn("video_backend", camera.model_dump())
         self.assertNotIn("baichuan", camera.model_dump())
-
-    def test_non_reolink_urls_keep_default_url_backend(self) -> None:
-        camera = CameraConfig(
-            id="gate",
-            name="Gate",
-            stream_url="rtsps://camera.local/main",
-        )
-
-        self.assertEqual(camera.video_backend, "url")
 
     def test_failed_config_serialization_preserves_previous_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

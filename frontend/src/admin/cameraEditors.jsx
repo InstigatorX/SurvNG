@@ -11,7 +11,6 @@ export function defaultCamera(cameras, seed = {}) {
   return {
     id,
     name: seed.name ? `${seed.name} Copy` : "New Camera",
-    video_backend: "url",
     stream_url: clearMaskedUrlPassword(seed.stream_url),
     live_stream_url: clearMaskedUrlPassword(seed.live_stream_url),
     live_view: structuredClone(seed.live_view || {

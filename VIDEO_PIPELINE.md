@@ -114,8 +114,7 @@ Each camera can expose two logical sources:
   available source.
 
 RTSP streams are normally provided through the configured go2rtc restream. Camera
-URLs are normalized by configuration before workers start (`video_backend` is
-always URL-backed).
+URLs are normalized by configuration before workers start.
 
 Process startup uses a camera-level admission coordinator instead of launching
 every FFmpeg capture, ONVIF listener, and recorder at once. By default, two

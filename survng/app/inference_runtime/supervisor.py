@@ -722,7 +722,6 @@ class InferenceSupervisor:
             "max_distance_m": depth.max_distance_m,
             "max_incident_distance_m": depth.max_incident_distance_m,
             "store_heatmap": depth.store_heatmap,
-            "motion_evidence_enabled": depth.motion_evidence_enabled,
         }
 
     def start(self) -> bool:

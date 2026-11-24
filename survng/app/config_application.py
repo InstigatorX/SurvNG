@@ -26,7 +26,7 @@ DETECTOR_OBJECT_TRACKING_RESET_FIELDS = frozenset({"enabled", "backend", "model_
 DETECTOR_FACE_ENGINE_FIELDS = frozenset({"face_recognition_enabled", "face_embedding_model_path", "face_landmark_model_path", "face_detection_model_path", "face_recognition_device", "face_embedding_profile"})
 DETECTOR_SHARED_ENGINE_FIELDS = frozenset({"cache_enabled", "cache_dir"})
 DEPTH_ENGINE_FIELDS = frozenset({"enabled", "model_path", "device", "input_size"})
-DEPTH_HOT_POLICY_FIELDS = frozenset({"min_distance_m", "max_distance_m", "max_incident_distance_m", "store_heatmap", "heatmap_max_width", "motion_evidence_enabled"})
+DEPTH_HOT_POLICY_FIELDS = frozenset({"min_distance_m", "max_distance_m", "max_incident_distance_m", "store_heatmap", "heatmap_max_width"})
 # Vehicle label routing lives in the inference child as well as the tracker.
 # Replace that child when labels change so newly enabled classes reach it.
 TRACKING_REID_ENGINE_FIELDS = frozenset({"reid_enabled", "reid_model_path", "reid_device", "vehicle_reid_enabled", "vehicle_reid_model_path", "vehicle_reid_device", "vehicle_reid_labels"})
