@@ -8,6 +8,7 @@ assert.equal(normalizedRailMinutes("15"), 15);
 assert.equal(normalizedRailMinutes(45), 60, "unknown spans fall back to one hour");
 assert.equal(normalizedTimelineView("cameras"), "cameras");
 assert.equal(normalizedTimelineView("nope"), "rail");
+assert.equal(normalizedTimelineView("classic"), "rail", "the retired classic view falls back to the rail");
 
 assert.equal(railEventKind({ has_objects: true, labels: ["person"] }), "person");
 assert.equal(railEventKind({ has_objects: true, labels: ["Truck"] }), "vehicle");

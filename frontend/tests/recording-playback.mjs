@@ -6,7 +6,6 @@ import {
   recordingEdgeSeekEpoch,
   recordingLiveEdgeFollow,
   extendedPlaybackRows,
-  adjustRecordingExportRange,
   describePlaybackError,
   gridPlaybackNeedsSeek,
   isUnsupportedPlaybackError,
@@ -16,21 +15,12 @@ import {
   playbackRowsCoverEpoch,
   prefersJpegScrubPreview,
   recordingSeekToleranceSeconds,
-  scrubPreviewBucketSeconds,
-  scrubPreviewDelayMs,
   seekVideoToTime,
   seekWatchdogDelayMs,
   shouldResumePlaybackAfterSeek,
   shouldUseFastSeek,
   videoReachedSeekTarget,
 } from "../src/recordingPlayback.mjs";
-
-const exportRange = { start: 100, end: 200 };
-assert.deepEqual(adjustRecordingExportRange({ range: exportRange, kind: "start", key: "ArrowRight", startEpoch: 0, endEpoch: 300 }), { start: 101, end: 200 });
-assert.deepEqual(adjustRecordingExportRange({ range: exportRange, kind: "end", key: "ArrowLeft", shiftKey: true, startEpoch: 0, endEpoch: 300 }), { start: 100, end: 140 });
-assert.deepEqual(adjustRecordingExportRange({ range: exportRange, kind: "start", key: "End", startEpoch: 0, endEpoch: 300 }), { start: 199, end: 200 });
-assert.deepEqual(adjustRecordingExportRange({ range: exportRange, kind: "end", key: "Home", startEpoch: 0, endEpoch: 300 }), { start: 100, end: 101 });
-assert.equal(adjustRecordingExportRange({ range: exportRange, kind: "start", key: "Enter", startEpoch: 0, endEpoch: 300 }), null);
 
 const rows = [
   { start_epoch: 100, end_epoch: 110 },
@@ -73,10 +63,6 @@ assert.equal(shouldResumePlaybackAfterSeek({ pendingSeekMode: null, autoplay: tr
 assert.equal(prefersJpegScrubPreview({ preferNativeHls: true, coarsePointer: false }), true);
 assert.equal(prefersJpegScrubPreview({ preferNativeHls: false, coarsePointer: true }), true);
 assert.equal(prefersJpegScrubPreview({ preferNativeHls: false, coarsePointer: false }), false);
-assert.equal(scrubPreviewDelayMs({ coarsePointer: true }), 450);
-assert.equal(scrubPreviewDelayMs({ coarsePointer: false }), 250);
-assert.equal(scrubPreviewBucketSeconds({ coarsePointer: true }), 10);
-assert.equal(scrubPreviewBucketSeconds({ coarsePointer: false }), 5);
 assert.equal(shouldUseFastSeek({ coarsePointer: true }), false);
 assert.equal(shouldUseFastSeek({ preferNativeHls: true }), false);
 assert.equal(shouldUseFastSeek({ coarsePointer: false, preferNativeHls: false }), true);

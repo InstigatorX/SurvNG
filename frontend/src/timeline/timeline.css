@@ -45,10 +45,6 @@
   display: none;
 }
 
-.recordings-toolbar-day-controls {
-  display: contents;
-}
-
 .export-center-page .export-center-workspace {
   grid-column: 1;
   grid-row: 1;
@@ -174,71 +170,6 @@
   padding: 14px;
 }
 
-.recordings-v2-scale {
-  display: inline-flex;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-}
-
-.recordings-v2-scale button {
-  min-height: 32px;
-  min-width: 36px;
-  border: 0;
-  border-left: 1px solid var(--line);
-  border-radius: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  padding: 0 8px;
-}
-
-.recordings-v2-scale button:first-child {
-  border-left: 0;
-}
-
-.recordings-v2-scale button.active {
-  background: color-mix(in srgb, var(--accent) 18%, var(--control));
-  color: var(--active-ink);
-}
-
-.recordings-return-playhead {
-  position: absolute;
-  z-index: 3;
-  right: 12px;
-  top: calc(100% + 8px);
-  min-height: 32px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--accent) 18%, var(--panel-solid));
-  color: var(--ink);
-  font-size: var(--text-xs);
-  font-weight: 620;
-  padding: 0 10px;
-  white-space: nowrap;
-}
-
-.recordings-investigation-toggle {
-  display: inline-flex;
-  min-height: 32px;
-  align-items: center;
-  gap: 5px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--muted);
-  font-size: var(--text-xs);
-  font-weight: 620;
-  padding: 0 10px;
-  white-space: nowrap;
-}
-
-.recordings-investigation-toggle.active {
-  background: color-mix(in srgb, var(--accent) 16%, var(--control));
-  color: var(--active-ink);
-}
-
 .recordings-commandbar-live {
   display: inline-flex;
   align-items: center;
@@ -256,7 +187,6 @@
   box-shadow: none;
 }
 
-.recordings-v2-timeline-toolbar .recordings-v2-date,
 .recordings-commandbar-day-controls .recordings-v2-date {
   display: inline-flex;
   width: max-content;
@@ -269,8 +199,6 @@
   border-radius: 4px;
 }
 
-.recordings-v2-timeline-toolbar .recordings-v2-date > button,
-.recordings-v2-timeline-toolbar .recordings-v2-date-toggle,
 .recordings-commandbar-day-controls .recordings-v2-date > button,
 .recordings-commandbar-day-controls .recordings-v2-date-toggle {
   display: inline-flex;
@@ -289,12 +217,10 @@
   padding: 0 7px;
 }
 
-.recordings-v2-timeline-toolbar .recordings-v2-date > button:first-child,
 .recordings-commandbar-day-controls .recordings-v2-date > button:first-child {
   border-left: 0;
 }
 
-.recordings-v2-timeline-toolbar .recordings-v2-date > button[aria-label],
 .recordings-commandbar-day-controls .recordings-v2-date > button[aria-label] {
   width: 28px;
   padding: 0;
@@ -306,7 +232,6 @@
   height: 32px;
 }
 
-.recordings-v2-timeline-toolbar .recordings-v2-date-toggle,
 .recordings-commandbar-day-controls .recordings-v2-date-toggle {
   width: auto;
   min-width: 0;
@@ -393,7 +318,6 @@
   opacity: .4;
 }
 
-.recordings-v2-timeline-toolbar .recordings-v2-player-source,
 .recordings-commandbar-day-controls .recordings-v2-player-source {
   position: static;
   z-index: auto;
@@ -408,7 +332,6 @@
   backdrop-filter: none;
 }
 
-.recordings-v2-timeline-toolbar .recordings-v2-player-source button,
 .recordings-commandbar-day-controls .recordings-v2-player-source button {
   display: inline-flex;
   min-width: 0;
@@ -426,24 +349,20 @@
   padding: 0 8px;
 }
 
-.recordings-v2-timeline-toolbar .recordings-v2-player-source button:first-child,
 .recordings-commandbar-day-controls .recordings-v2-player-source button:first-child {
   border-left: 0;
 }
 
-.recordings-v2-timeline-toolbar .recordings-v2-player-source button.active,
 .recordings-commandbar-day-controls .recordings-v2-player-source button.active {
   background: color-mix(in srgb, var(--accent) 20%, var(--control));
   color: var(--active-ink);
 }
 
-.recordings-v2-timeline-toolbar .recordings-playback-rate,
 .recordings-commandbar-day-controls .recordings-playback-rate {
   display: inline-flex;
   flex: 0 0 auto;
 }
 
-.recordings-v2-timeline-toolbar .recordings-playback-rate select,
 .recordings-commandbar-day-controls .recordings-playback-rate select {
   width: auto;
   min-width: 0;
@@ -644,118 +563,6 @@
   flex: 0 0 auto;
   width: 100%;
   aspect-ratio: 16 / 9;
-}
-
-.recordings-v2-controls {
-  gap: 0;
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel-solid);
-  padding: 0;
-}
-
-.recordings-v2-timeline-toolbar {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
-  min-height: 42px;
-  align-items: center;
-  gap: 12px;
-  border-bottom: 1px solid var(--line);
-  padding: 4px 10px;
-}
-
-.recordings-v2-timeline-toolbar>span {
-  color: var(--muted);
-  font-size: var(--text-xs);
-  white-space: nowrap;
-}
-
-.recordings-v2-incidents-tools {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  overflow-x: auto;
-  flex-wrap: nowrap;
-}
-
-.recordings-v2-filter-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-right: 8px;
-  font-size: var(--text-xs);
-  font-weight: 580;
-}
-
-.recordings-v2-event-filter {
-  gap: 0;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-}
-
-.recordings-v2-event-filter button {
-  min-height: 32px;
-  border: 0;
-  border-left: 1px solid var(--line);
-  border-radius: 0;
-  background: transparent;
-  font-size: var(--text-xs);
-  font-weight: 540;
-}
-
-.recordings-v2-event-filter button:first-child {
-  border-left: 0;
-}
-
-.recordings-v2-event-filter button.active {
-  border-color: var(--line);
-  background: color-mix(in srgb, var(--accent) 18%, var(--control));
-}
-
-.recordings-v2-export-toggle {
-  min-height: 32px;
-  border-radius: 4px;
-}
-
-.recordings-v2-timeline {
-  height: auto;
-  min-height: 84px;
-  padding: 4px 10px 8px;
-}
-
-.recordings-v2-track {
-  height: 76px;
-  border-color: var(--line);
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--canvas) 78%, transparent);
-  touch-action: pan-y;
-  overscroll-behavior-x: contain;
-}
-
-.recordings-v2-event-lane b {
-  min-width: 3px;
-}
-
-.recordings-v2-ticks small {
-  color: color-mix(in srgb, var(--muted) 86%, var(--ink));
-  font-size: var(--text-2xs);
-  font-weight: 520;
-}
-
-.recordings-v2-track>i {
-  background: var(--accent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
-}
-
-.recordings-v2-track output {
-  top: 6px;
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
-  background: #087f7c;
-  color: #fff;
-  font-weight: 620;
 }
 
 .recordings-v2-incidents {
@@ -1140,22 +947,6 @@
   }
 }
 
-@media (max-width: 1279px) and (min-width: 761px) {
-  .recordings-v2-event-filter button,
-  .recordings-v2-export-toggle {
-    min-height: 44px;
-  }
-
-  .recordings-v2-timeline-toolbar .recordings-v2-date > button,
-  .recordings-v2-timeline-toolbar .recordings-v2-date-toggle,
-  .recordings-v2-timeline-toolbar .recordings-v2-date-picker,
-  .recordings-v2-timeline-toolbar .recordings-v2-player-source button,
-  .recordings-v2-timeline-toolbar .recordings-playback-rate select {
-    min-height: 44px;
-    height: 44px;
-  }
-}
-
 @media (max-width: 760px) {
   .app-shell {
     background: var(--bg);
@@ -1227,10 +1018,6 @@
     display: contents;
   }
 
-  .recordings-toolbar-day-controls {
-    display: none;
-  }
-
   .timeline-camera-picker {
     flex: 1 1 160px;
     min-width: 120px;
@@ -1282,12 +1069,6 @@
     aspect-ratio: 16 / 9;
   }
 
-  .recordings-v2-timeline-toolbar {
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 6px;
-    overflow-x: auto;
-  }
-
   .recordings-v2-clip-composer-heading {
     align-items: flex-start;
     flex-direction: column;
@@ -1296,31 +1077,6 @@
 
   .recordings-v2-clip-composer-heading small {
     text-align: left;
-  }
-  .recordings-v2-timeline-toolbar>span,
-  .recordings-v2-filter-label {
-    display: none;
-  }
-
-  .recordings-v2-incidents-tools {
-    min-width: max-content;
-  }
-
-  .recordings-v2-timeline {
-    height: 184px;
-    padding-inline: 8px;
-  }
-
-  .recordings-v2-track {
-    height: 78px;
-  }
-
-  .recordings-v2-event-lane.object {
-    top: 34px;
-  }
-
-  .recordings-v2-event-lane.motion {
-    top: 52px;
   }
 
   .recordings-v2-investigation {
@@ -1338,10 +1094,6 @@
 
   .recordings-v2-events {
     min-height: 146px;
-  }
-
-  .recordings-v2-event-filter button {
-    min-height: 44px;
   }
 }
 
@@ -1587,15 +1339,6 @@
   gap: 8px;
   align-items: center;
   font-size: var(--text-sm);
-}
-
-/* With frames shown in the player, the small tile carries only the time. */
-.recordings-v2-scrub-preview.strips {
-  width: auto;
-}
-
-.recordings-v2-scrub-preview.strips>div {
-  display: none;
 }
 
 /* Detection boxes are computed from the player's own picture, not from the

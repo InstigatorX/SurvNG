@@ -1,9 +1,5 @@
 /* Timeline investigation completion */
 
-.recordings-v2-event-filter button:first-child.active {
-  background: color-mix(in srgb, var(--accent) 24%, var(--control));
-}
-
 .recordings-v2-events::before {
   content: "Nearby evidence";
   position: sticky;

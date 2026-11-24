@@ -7,12 +7,24 @@
 ## Scrub recorded video
 
 1. Open **Timeline**.
-2. Pick a camera (or an all-camera grid view when available).
-3. Choose the day.
-4. Drag the scrubber to the time you care about.
-5. Switch between **main** and **live/sub** recordings when both exist.
+2. Pick a camera (or **All cameras** for a grid on larger screens).
+3. Choose the day with the date under the video (on a phone, the date at the top).
+4. Scroll or drag the rail beside the video until the time you care about is
+   under the playhead line. Newest time is at the top. The arrow, Page and
+   Home/End keys work too, and the narrow day strip at the rail's edge jumps
+   across the whole day.
+5. Switch between **Main** and **Sub** recordings when both exist.
 
-Fine scrubbing may show preview frames while you drag. Playback then resumes from the selected moment.
+While you scrub, the player shows the frame under the line. When you let go,
+playback resumes from that moment. The **15m / 1h / 6h / 24h** buttons zoom the
+rail.
+
+## Views
+
+- **Timeline**: the rail of events and time described above.
+- **Catch up**: the day's events as a short story, with quiet stretches
+  collapsed. Pick an event to play it, or show it on the rail.
+- **Cameras**: one lane per camera, so you can follow activity across cameras.
 
 ## Exact time links
 
@@ -20,7 +32,10 @@ You can share or bookmark a Timeline moment. SurvNG carries the requested time i
 
 ## Filters
 
-Object and motion markers on the timeline help you jump between interesting points instead of watching hours of empty driveway.
+**All**, **People**, **Vehicles** and **Motion** above the rail choose which events
+it shows. Event cards and markers help you jump between interesting points
+instead of watching hours of empty driveway, and **Previous** / **Next** under the
+video step from one event to the next.
 
 ## Find similar from a frame
 

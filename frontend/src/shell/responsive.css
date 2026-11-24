@@ -140,9 +140,6 @@
     min-height: 44px;
   }
 
-  .recordings-v2-timeline-toolbar .recordings-v2-date > button,
-  .recordings-v2-timeline-toolbar .recordings-v2-date-toggle,
-  .recordings-v2-timeline-toolbar .recordings-v2-player-source button,
   .search-camera-list button,
   .settings-section-tree .tree-list button {
     min-height: 44px;

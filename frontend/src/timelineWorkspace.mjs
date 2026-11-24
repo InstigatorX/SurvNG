@@ -131,17 +131,6 @@ export function timelineViewport(startEpoch, endEpoch, anchorEpoch, windowHours)
   return { startEpoch: viewportStart, endEpoch: viewportStart + span };
 }
 
-export function timelinePanViewport(dayStartEpoch, dayEndEpoch, viewport, deltaSeconds) {
-  const start = Number(dayStartEpoch);
-  const end = Number(dayEndEpoch);
-  const currentStart = Number(viewport?.startEpoch);
-  const currentEnd = Number(viewport?.endEpoch);
-  const span = Math.max(1, currentEnd - currentStart);
-  const maximumStart = Math.max(start, end - span);
-  const nextStart = Math.max(start, Math.min(maximumStart, currentStart + (Number(deltaSeconds) || 0)));
-  return { startEpoch: nextStart, endEpoch: nextStart + span };
-}
-
 export function timelinePlayheadInComfortZone(viewport, playhead, edgeRatio = 0.2) {
   const start = Number(viewport?.startEpoch);
   const end = Number(viewport?.endEpoch);
@@ -156,14 +145,6 @@ export function resolveTimelineHeroCameraId(cameras, requestedId) {
   const requested = String(requestedId || "");
   if (requested && requested !== "all" && available.some((camera) => camera?.id === requested)) return requested;
   return available[0]?.id || "";
-}
-
-export function timelineTickIntervalSeconds(windowHours) {
-  const hours = Number(windowHours);
-  if (hours >= 24) return 3600;
-  if (hours >= 8) return 30 * 60;
-  if (hours >= 4) return 15 * 60;
-  return 5 * 60;
 }
 
 export function parseTimelineView(search, today = "") {
