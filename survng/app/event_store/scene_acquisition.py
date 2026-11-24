@@ -48,7 +48,6 @@ class EventStoreSceneAcquisitionMixin:
                     created_at real not null
                 );
                 create index if not exists acquired_sample_camera_id on acquired_samples(camera_id,captured_epoch,id);
-                drop index if exists acquired_sample_camera;
                 create index if not exists acquired_sample_snapshot on acquired_samples(snapshot_path);
                 create table if not exists scene_activity_measurements (
                     id text primary key, sample_id text not null references acquired_samples(id),

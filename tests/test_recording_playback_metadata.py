@@ -56,14 +56,6 @@ def test_legacy_read_persists_exact_duration_and_survives_restart(indexed):
     assert rows[0]["end_epoch"] == 109.73
 
 
-def test_nullable_column_migrates_without_inventing_legacy_metadata(indexed):
-    recorder, path = indexed
-    with recorder._index_connection() as connection:
-        connection.execute("ALTER TABLE recordings DROP COLUMN playback_duration_seconds")
-    reopened = Recorder("ffmpeg", path.parent)
-    assert stored(reopened, path)["playback_duration_seconds"] is None
-
-
 @pytest.mark.parametrize("change", ["size", "mtime"])
 def test_same_path_replacement_invalidates_metadata(indexed, change):
     recorder, path = indexed

@@ -240,15 +240,6 @@ class EventStoreJobsMixin:
             create_index_logged(
                 conn, "idx_detection_jobs_discovery_terminal", _DISCOVERY_TERMINAL_INDEX_SQL,
             )
-            detection_columns = {
-                str(row["name"])
-                for row in conn.execute("pragma table_info(detection_jobs)").fetchall()
-            }
-            if "lease_owner" not in detection_columns:
-                conn.execute(
-                    "alter table detection_jobs "
-                    "add column lease_owner text not null default ''"
-                )
             conn.execute(
                 """
                 create table if not exists motion_trigger_jobs (
@@ -266,17 +257,6 @@ class EventStoreJobsMixin:
                 )
                 """
             )
-            columns = {
-                str(row["name"])
-                for row in conn.execute(
-                    "pragma table_info(motion_trigger_jobs)"
-                ).fetchall()
-            }
-            if "lease_owner" not in columns:
-                conn.execute(
-                    "alter table motion_trigger_jobs "
-                    "add column lease_owner text not null default ''"
-                )
             conn.execute(
                 "create index if not exists idx_motion_trigger_jobs_claim "
                 "on motion_trigger_jobs(camera_id, state, available_at, created_at)"
@@ -317,10 +297,6 @@ class EventStoreJobsMixin:
                 str(row["name"])
                 for row in conn.execute("pragma table_info(events)").fetchall()
             }
-            if "snapshot_size_bytes" not in event_columns:
-                conn.execute(
-                    "alter table events add column snapshot_size_bytes integer not null default 0"
-                )
             if "detection_intent_id" not in event_columns:
                 conn.execute("alter table events add column detection_intent_id text")
             conn.execute(
@@ -402,18 +378,6 @@ class EventStoreJobsMixin:
                 )
                 """
             )
-            columns = {
-                str(row["name"])
-                for row in conn.execute("pragma table_info(motion_audits)").fetchall()
-            }
-            if "decision_id" not in columns:
-                conn.execute("alter table motion_audits add column decision_id text")
-            if "related_event_id" not in columns:
-                conn.execute("alter table motion_audits add column related_event_id integer")
-            if "category" not in columns:
-                conn.execute(
-                    "alter table motion_audits add column category text not null default 'qualification'"
-                )
             conn.execute(
                 "create index if not exists idx_motion_audits_created_at on motion_audits(created_at desc, id desc)"
             )

@@ -126,30 +126,6 @@ class RecordingIndexMixin:
                 )
                 """
             )
-            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(recordings)")}
-            if "playable" not in columns:
-                connection.execute("ALTER TABLE recordings ADD COLUMN playable INTEGER NOT NULL DEFAULT 1")
-            if "health_error" not in columns:
-                connection.execute("ALTER TABLE recordings ADD COLUMN health_error TEXT NOT NULL DEFAULT ''")
-            if "validated" not in columns:
-                connection.execute("ALTER TABLE recordings ADD COLUMN validated INTEGER NOT NULL DEFAULT 0")
-            if "stream_fingerprint" not in columns:
-                connection.execute("ALTER TABLE recordings ADD COLUMN stream_fingerprint TEXT NOT NULL DEFAULT ''")
-            if "fingerprint_checked" not in columns:
-                connection.execute("ALTER TABLE recordings ADD COLUMN fingerprint_checked INTEGER NOT NULL DEFAULT 0")
-                connection.execute(
-                    """
-                    UPDATE recordings
-                    SET fingerprint_checked = 1
-                    WHERE stream_fingerprint != ''
-                    """
-                )
-            if "playback_duration_seconds" not in columns:
-                connection.execute("ALTER TABLE recordings ADD COLUMN playback_duration_seconds REAL")
-            if "location_id" not in columns:
-                connection.execute(
-                    "ALTER TABLE recordings ADD COLUMN location_id TEXT NOT NULL DEFAULT 'default'"
-                )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS recordings_fingerprint_pending

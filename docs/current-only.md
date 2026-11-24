@@ -5,6 +5,11 @@ databases, recording layouts, and semantic index identities. It does not migrate
 reset, or delete existing data. Do not use it as an automatic upgrade path for
 older persisted generations. Keep application and data backups together.
 
+The minimum supported database is one that SurvNG 1.2.0 or later has already
+opened. Startup no longer carries the column additions and index cleanups that
+1.2.0 itself applied to older event, face, scene, semantic, appearance, export
+and recording-index databases. Migrations for columns added after 1.2.0 remain.
+
 Fresh installations initialize their configuration explicitly:
 
 ```sh

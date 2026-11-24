@@ -416,10 +416,6 @@ class SemanticIndex:
                 """
             )
             columns = {row[1] for row in connection.execute("pragma table_info(semantic_embeddings)")}
-            if "evidence_revision" not in columns:
-                connection.execute(
-                    "alter table semantic_embeddings add column evidence_revision integer not null default 0"
-                )
             if "observation_id" not in columns:
                 connection.execute("alter table semantic_embeddings add column observation_id text not null default ''")
             connection.execute(
@@ -431,7 +427,6 @@ class SemanticIndex:
                 )
                 """
             )
-            connection.execute("drop index if exists idx_semantic_generation_time")
             connection.execute(
                 """
                 create index if not exists idx_semantic_event
