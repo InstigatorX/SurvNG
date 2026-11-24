@@ -124,7 +124,8 @@ Lists every frame of the recording segment that holds `epoch`:
   into: a neighbour counts only when its index times are within one second
   of this segment's. A `next` of `null` on the newest segment can change once
   the following segment is indexed; the response is not cached.
-- A time with no recording is `404`.
+- A time with no recording is `404`. Two lists are read at a time; a busy
+  server answers `429` with `Retry-After`.
 
 ```text
 GET /api/cameras/{camera_id}/recordings/frame.jpg?epoch={unix_seconds}&source=main&width=1280
@@ -136,6 +137,8 @@ the first frame if `epoch` precedes it), normally a time taken from
 `X-SurvNG-Requested-Timestamp`, `X-SurvNG-Actual-Timestamp` (the decoded
 frame's own time) and `X-SurvNG-Timestamp-Source: source_pts`. `width` is 320
 to 1920 and never enlarges the recording. A time with no recording is `404`.
+If the decoder does not produce that frame (a damaged stream), the answer is
+`500`: another frame is never served in its place.
 
 - Frames are decoded a run at a time: the GOP holding the frame (from its
   keyframe to the next, at most 30 frames; a longer GOP is cut into slices of
@@ -149,4 +152,5 @@ to 1920 and never enlarges the recording. A time with no recording is `404`.
   clips, exports and HomeKit use. A busy generator answers `429` with
   `Retry-After`.
 - Runs count against the preview cache's size and age limits like any other
-  preview image.
+  preview image; every 32 MB of new runs brings the cache's maintenance pass
+  forward. A run's files are kept or dropped together.

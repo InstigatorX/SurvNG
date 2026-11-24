@@ -7,12 +7,15 @@ import {
   frameStepKey,
   frameStepWidth,
 } from "../frameStepping.mjs";
+import { fetch } from "../shared/api.js";
 import { recordingFrameUrl, recordingFramesUrl } from "../shared/mediaUrls.js";
 
 // A frame that takes longer than this is given up and asked for again.
 const FRAME_REQUEST_TIMEOUT_MS = 20_000;
 
 async function fetchWithTimeout(url, signal) {
+  // Withdrawn before it started: never sent.
+  if (signal.aborted) throw Object.assign(new Error("Frame request withdrawn"), { name: "AbortError" });
   const controller = new AbortController();
   let timedOut = false;
   const timer = window.setTimeout(() => { timedOut = true; controller.abort(); }, FRAME_REQUEST_TIMEOUT_MS);
@@ -34,6 +37,7 @@ async function fetchWithTimeout(url, signal) {
 //   step(direction)     one frame back (-1) or forward (+1)
 //   press / release     a step control held down (repeats)
 //   leave()             stop stepping and take the frame down
+//   resume()            about to play from the stepped frame: its epoch, or null
 //   epoch()             the stepped frame's time, or null
 //   subscribe / getSnapshot   for useSyncExternalStore (FrameStepOverlay)
 // The page does not render per step: only the overlay and the time readout
@@ -132,6 +136,15 @@ export function useFrameStepper({ cameraId, source, enabled, currentEpoch, onSet
     });
   }
 
+  // Play from the stepped frame: no seek-when-paused may follow it (that
+  // would pause the playback just asked for). The frame stays up until
+  // the page sees playback start and calls leave().
+  const resume = useCallback(() => {
+    holdRef.current.release();
+    clearSettle();
+    return snapshotRef.current.active && snapshotRef.current.known ? snapshotRef.current.epoch : null;
+  }, [clearSettle]);
+
   const leave = useCallback(() => {
     holdRef.current.release();
     clearSettle();
@@ -160,6 +173,7 @@ export function useFrameStepper({ cameraId, source, enabled, currentEpoch, onSet
   return useMemo(() => ({
     step,
     leave,
+    resume,
     press: (direction) => holdRef.current.press(direction),
     release: () => holdRef.current.release(),
     epoch: () => (snapshotRef.current.active && snapshotRef.current.known ? snapshotRef.current.epoch : null),
@@ -168,5 +182,5 @@ export function useFrameStepper({ cameraId, source, enabled, currentEpoch, onSet
       return () => listenersRef.current.delete(listener);
     },
     getSnapshot: () => snapshotRef.current,
-  }), [leave, step]);
+  }), [leave, resume, step]);
 }

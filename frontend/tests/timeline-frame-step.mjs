@@ -179,6 +179,19 @@ async function open(at, { viewport = { width: 1440, height: 1000 }, ...options }
   return page;
 }
 
+// Wait for a seek to finish, then pause the player if it is playing.
+async function pauseWhenSettled(page) {
+  await page.waitForTimeout(400);
+  await page.waitForFunction(() => {
+    const state = window.timelineFixture.snapshot();
+    return state.readyState >= 2 && !state.seeking;
+  });
+  if (!(await page.evaluate(() => window.timelineFixture.snapshot().paused))) {
+    await page.hud.getByRole("button", { name: "Pause", exact: true }).click();
+  }
+  await page.waitForFunction(() => window.timelineFixture.snapshot().paused);
+}
+
 // Step forward one frame at a time until `epoch` is shown.
 async function stepTo(page, epoch, message) {
   for (let tries = 0; tries < 12; tries += 1) {
@@ -319,6 +332,57 @@ async function run() {
     await page.close();
   }
 
+  // Play pressed before stepping has settled: playback is not paused again
+  // by the seek that would have followed.
+  {
+    const page = await open(noon + 5);
+    await page.keyboard.press(".");
+    await page.waitForSelector(".recording-frame-step[data-drawn=true]");
+    await page.waitForTimeout(800); // settled: the player has been seeked
+    // Playback that takes a second to start, as a native HLS reload can.
+    // A pause() meanwhile cancels it, as a pause during a pending play does.
+    await page.evaluate(() => {
+      const { play, pause } = HTMLMediaElement.prototype;
+      const pending = new WeakMap();
+      HTMLMediaElement.prototype.play = function slowPlay() {
+        const token = {};
+        pending.set(this, token);
+        return new Promise((done) => setTimeout(done, 1000)).then(() => {
+          if (pending.get(this) !== token) throw new DOMException("The play() request was interrupted by a call to pause().", "AbortError");
+          return play.call(this);
+        });
+      };
+      HTMLMediaElement.prototype.pause = function cancellingPause() {
+        pending.delete(this);
+        return pause.call(this);
+      };
+    });
+    // A step and Play within the settle delay.
+    await page.keyboard.press(".");
+    await page.hud.getByRole("button", { name: "Play", exact: true }).click();
+    await page.waitForTimeout(2000);
+    const state = await page.read();
+    assert.equal(state.paused, false, "still playing after the settle delay has passed");
+    assert.equal(await page.overlay(), null);
+    assert.deepEqual(page.errors, []);
+    await page.close();
+  }
+
+  // A step right after a seek into another 15-minute window starts from the
+  // time asked for, not from the new window's start.
+  {
+    const page = await open(noon + 5);
+    const before = frameLog.length;
+    await page.hud.getByRole("button", { name: "Back 10 seconds", exact: true }).click();
+    await page.keyboard.press(".");
+    await page.waitForSelector(".recording-frame-step[data-drawn=true]", { timeout: 5000 });
+    const first = frameLog.slice(before).find((entry) => entry.kind === "list");
+    assert.ok(Math.abs(first.epoch - (noon - 5)) < 1, `steps from the time sought (${first.epoch - noon} s from noon)`);
+    assert.ok(Math.abs((await page.overlay()).epoch - (noon - 5)) < 1);
+    assert.deepEqual(page.errors, []);
+    await page.close();
+  }
+
   // A scrub, a seek, another camera: the stepped frame comes down.
   {
     const page = await open(noon + 5);
@@ -329,11 +393,14 @@ async function run() {
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.wheel(0, -40);
     await page.waitForFunction(() => !document.querySelector(".recording-frame-step"), null, { timeout: 3000 });
+    // The rail commits its scrub as a seek that plays; pause once it has.
+    await pauseWhenSettled(page);
 
     await page.keyboard.press(".");
     await page.waitForSelector(".recording-frame-step[data-drawn=true]");
     await page.hud.getByRole("button", { name: "Back 10 seconds", exact: true }).click();
     await page.waitForFunction(() => !document.querySelector(".recording-frame-step"), null, { timeout: 3000 });
+    await pauseWhenSettled(page);
 
     await page.keyboard.press(".");
     await page.waitForSelector(".recording-frame-step[data-drawn=true]");

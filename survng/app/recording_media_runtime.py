@@ -79,6 +79,10 @@ RECORDING_STRIP_HARDWARE_TIMEOUT_SECONDS = 5.0
 RECORDING_FRAME_LIST_CACHE_ENTRIES = 64
 RECORDING_FRAME_RUN_TIMEOUT_SECONDS = 10.0
 RECORDING_FRAME_JPEG_QUALITY = 88
+# New frame-run bytes that bring the preview cache's maintenance forward.
+RECORDING_FRAME_MAINTENANCE_BYTES = 32 * 1024 * 1024
+# Frame lists probed at once (a demux each, on request threads).
+RECORDING_FRAME_LIST_PROBES = 2
 
 
 def raw_bgr_frames(stream, size: tuple[int, int]) -> list[np.ndarray]:
@@ -149,6 +153,8 @@ class RecordingMediaRuntime:
         self.recording_frame_run_build_limiter = threading.BoundedSemaphore(1)
         self.recording_frame_lists: OrderedDict[tuple[str, int, int], SegmentFrames] = OrderedDict()
         self.recording_frame_list_lock = threading.Lock()
+        self.recording_frame_list_limiter = threading.BoundedSemaphore(RECORDING_FRAME_LIST_PROBES)
+        self.recording_frame_bytes_since_maintenance = 0
         self.recording_preview_locks: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
         self.recording_preview_locks_guard = threading.Lock()
         self.recording_preview_maintenance_lock = threading.Lock()
@@ -1168,12 +1174,16 @@ class RecordingMediaRuntime:
             '-show_entries', 'packet=pts_time,flags:format=start_time',
             '-of', 'json', str(source_path),
         ]
+        if not self.recording_frame_list_limiter.acquire(timeout=3.0):
+            raise HTTPException(status_code=429, detail='recording frame list is busy', headers={'Retry-After': '1'})
         try:
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
         except subprocess.TimeoutExpired as exc:
             raise HTTPException(status_code=504, detail='recording frame list timed out') from exc
         except OSError as exc:
             raise HTTPException(status_code=500, detail='recording frame list failed') from exc
+        finally:
+            self.recording_frame_list_limiter.release()
         frames = parse_packet_listing((result.stdout or b'').decode('utf-8', errors='replace'))
         if result.returncode != 0 or not frames.times:
             error = (result.stderr or b'').decode('utf-8', errors='replace').strip()
@@ -1218,7 +1228,7 @@ class RecordingMediaRuntime:
         except OSError as exc:
             raise HTTPException(status_code=404, detail='recording file not found') from exc
         fingerprint = (
-            f'frame-run-v1:{source_path}:{stat.st_mtime_ns}:{stat.st_size}:'
+            f'frame-run-v2:{source_path}:{stat.st_mtime_ns}:{stat.st_size}:'
             f'{frames.times[run_start]:.6f}:{run_stop - run_start}:{output_width}'
         )
         cache_key = hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:32]
@@ -1242,6 +1252,12 @@ class RecordingMediaRuntime:
             path = frame_path(number)
             if not self._recording_preview_ready(path, touch=True):
                 return None
+            # The run's first frame and times live as long as any frame of it.
+            self._recording_preview_ready(frame_path(0), touch=True)
+            if abs(times[number] - target) > FRAME_TIME_TOLERANCE_SECONDS:
+                # The decoder did not produce this frame (a damaged or
+                # truncated stream): never stand another frame in for it.
+                raise HTTPException(status_code=500, detail='recording frame could not be decoded')
             return path, start_epoch + times[number]
 
         found = cached()
@@ -1288,6 +1304,7 @@ class RecordingMediaRuntime:
                         selected_config.ffmpeg_path, source_path, frames, run_start, run_stop, output_width,
                     )
                 times = []
+                written = 0
                 for number, (pts, image) in enumerate(decoded):
                     temporary = cache_dir / f'.{cache_key}-{number:02d}.{os.getpid()}.{threading.get_ident()}.tmp.jpg'
                     try:
@@ -1295,11 +1312,30 @@ class RecordingMediaRuntime:
                         os.replace(temporary, frame_path(number))
                     finally:
                         temporary.unlink(missing_ok=True)
-                    times.append(round(pts - frames.start_time, 6))
+                    # FFmpeg prints a frame's time rounded; the frame list
+                    # has it exactly. The decoded time names the frame.
+                    nearest = frames.times[frame_index_at(frames.times, pts)]
+                    times.append(nearest if abs(nearest - pts) <= FRAME_TIME_TOLERANCE_SECONDS else round(pts, 6))
+                    written += len(image)
                 # The times last: a run without them is never served.
                 metadata_path.write_text(json.dumps({'times': times}, separators=(',', ':')), encoding='utf-8')
+                if len(times) != run_stop - run_start:
+                    LOGGER.warning(
+                        'recording frame run for %s decoded %d of %d frames',
+                        source_path.name, len(times), run_stop - run_start,
+                    )
             finally:
                 self.recording_frame_run_build_limiter.release()
+            # Runs are large (up to 30 frames): held-down stepping can write
+            # tens of megabytes a minute, more than the ten-minute
+            # maintenance pace allows for. Enough new bytes force a pass.
+            with self.recording_frame_list_lock:
+                self.recording_frame_bytes_since_maintenance += written
+                force = self.recording_frame_bytes_since_maintenance >= RECORDING_FRAME_MAINTENANCE_BYTES
+                if force:
+                    self.recording_frame_bytes_since_maintenance = 0
+            if force:
+                self.recording_preview_last_maintenance = 0.0
             self._maintain_recording_preview_cache(frame_path(0))
             found = cached()
             if found is None:
@@ -1325,8 +1361,10 @@ class RecordingMediaRuntime:
         plans = recorded_decode_plans(self._hardware_acceleration_mode(), scale=size) if size else (DecodePlan('cpu'),)
         count = run_stop - run_start
         # Accurate seek: decoding starts at the keyframe before this time and
-        # frames before it are dropped. Copied timestamps keep the source PTS.
-        seek = f'{max(0.0, frames.start_time + frames.times[run_start] - FRAME_TIME_TOLERANCE_SECONDS):.6f}'
+        # frames before it are dropped. FFmpeg seeks from the file's start
+        # time, and -copyts -start_at_zero reports each frame's PTS from it
+        # too: the same origin as the frame list (and preview.jpg).
+        seek = f'{max(0.0, frames.times[run_start] - FRAME_TIME_TOLERANCE_SECONDS):.6f}'
         result = None
         for plan in plans:
             if plan.backend == 'cpu':
@@ -1336,7 +1374,7 @@ class RecordingMediaRuntime:
                 video_filter = f'{plan.download_filter},showinfo'
             command = build_decode_command(
                 ffmpeg_path, source_path, plan=plan, loglevel='info', seek=seek, copyts=True,
-                first_video_stream=True, video_filter=video_filter,
+                start_at_zero=True, first_video_stream=True, video_filter=video_filter,
                 passthrough_timestamps=True, frames=count,
                 # Raw frames of a known size skip a BMP encode and decode each.
                 transport='raw' if size else 'bmp',

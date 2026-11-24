@@ -198,6 +198,70 @@ class FrameStepDecodeTest(unittest.TestCase):
             self.assertAlmostEqual(actual, 1000.0 + frames.times[index], places=5)
             self.assertEqual(self.shown_frame(image), index)
 
+    def test_a_file_whose_start_time_is_not_zero(self) -> None:
+        # AAC priming puts the container's start time before the first
+        # video frame; an offset moves both. Frame times count from the
+        # start time, as preview.jpg's do, and every frame is still itself.
+        for name, extra in (
+            ("offset.mp4", ("-output_ts_offset", "0.5")),
+            ("primed.mp4", ()),
+        ):
+            with self.subTest(name):
+                self.runtime.recording_frame_lists.clear()
+                path = self.root / "recordings" / name
+                subprocess.run([
+                    self.ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                    f"color=c=black:size=320x240:rate={CLOCK_FPS}:duration=1.5,format=gray,geq=lum='30+3*N'",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=1.5",
+                    "-c:v", "libx264", "-qp", "0", "-g", "10", "-bf", "2", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", *extra, "-y", str(path),
+                ], check=True, capture_output=True, timeout=120)
+                row = {"path": str(path), "start_epoch": 1000.0, "end_epoch": 1001.6}
+                frames = self.segment_frames(row)
+                if extra:
+                    self.assertNotEqual(frames.start_time, 0.0)
+                for index in range(len(frames.times)):
+                    image, actual = self.step_frame(row, 1000.0 + frames.times[index])
+                    self.assertAlmostEqual(actual, 1000.0 + frames.times[index], places=5)
+                    self.assertEqual(self.shown_frame(image), index)
+
+    def test_the_segment_muxer_recipe_the_recorder_uses(self) -> None:
+        # -f segment with reset timestamps, as the recorder cuts files, from
+        # H.264 with B-frames and AAC.
+        pattern = self.root / "recordings" / "cut%02d.mp4"
+        subprocess.run([
+            self.ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+            f"color=c=black:size=320x240:rate={CLOCK_FPS}:duration=2,format=gray,geq=lum='30+3*N'",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+            "-c:v", "libx264", "-qp", "0", "-g", "10", "-bf", "2", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-f", "segment", "-segment_time", "1", "-reset_timestamps", "1",
+            "-segment_format", "mp4", "-y", str(pattern),
+        ], check=True, capture_output=True, timeout=120)
+        path = self.root / "recordings" / "cut00.mp4"
+        row = {"path": str(path), "start_epoch": 1000.0, "end_epoch": 1001.2}
+        frames = self.segment_frames(row)
+        for index in range(len(frames.times)):
+            image, actual = self.step_frame(row, 1000.0 + frames.times[index])
+            self.assertAlmostEqual(actual, 1000.0 + frames.times[index], places=5)
+            self.assertEqual(self.shown_frame(image), index)
+
+    def test_a_frame_the_decoder_did_not_produce_is_an_error_not_another_frame(self) -> None:
+        path = self.clip("short.mp4", seconds=1.0)
+        row = {"path": str(path), "start_epoch": 1000.0, "end_epoch": 1001.0}
+        frames = self.segment_frames(row)
+        real_decode = self.runtime._decode_frame_run
+
+        def dropping_the_first(*args, **kwargs):
+            return real_decode(*args, **kwargs)[1:]
+
+        with patch.object(self.runtime, "_decode_frame_run", side_effect=dropping_the_first):
+            with self.assertRaises(HTTPException) as missing:
+                self.step_frame(row, 1000.0 + frames.times[0])
+        self.assertEqual(missing.exception.status_code, 500)
+        # The frames it did decode are still themselves.
+        image, actual = self.step_frame(row, 1000.0 + frames.times[1])
+        self.assertEqual(self.shown_frame(image), 1)
+
     def test_a_large_frame_is_scaled_to_the_width_asked_for(self) -> None:
         import cv2
 

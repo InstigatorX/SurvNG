@@ -266,6 +266,11 @@ export function createFrameStepper({
   function wantImage() {
     const epoch = wantedEpoch();
     if (epoch === null) { publish(); return; }
+    // A wait to retry a frame no longer wanted does not hold up this one.
+    if (retryTimer !== null) {
+      cancel(retryTimer);
+      retryTimer = null;
+    }
     const cached = images.get(keyOf(epoch));
     if (cached) {
       shown = cached;

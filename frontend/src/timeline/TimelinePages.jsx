@@ -1295,12 +1295,15 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
   // player is seeked there too, so play resumes from it. Anything else that
   // moves playback ends stepping (playAt, a scrub, another camera or day).
   const frameStepSeekRef = useRef(false);
+  const frameStepEnabled = !isAllCameras && !heroPlaying && hasPlaybackMedia && !playbackError
+    && Number.isFinite(playhead) && !Number.isFinite(frameSearchEpoch);
   const frameStep = useFrameStepper({
     cameraId: isAllCameras ? "" : activeCameraId,
     source,
-    enabled: !isAllCameras && !heroPlaying && hasPlaybackMedia && !playbackError
-      && Number.isFinite(playhead) && !Number.isFinite(frameSearchEpoch),
-    currentEpoch: currentPlaybackEpoch,
+    enabled: frameStepEnabled,
+    // While a seek or a window load is under way the player's own time is
+    // not yet the time asked for (a new window starts at 0): step from that.
+    currentEpoch: () => (Number.isFinite(pendingSeekEpochRef.current) ? pendingSeekEpochRef.current : currentPlaybackEpoch()),
     onSettle: (epoch) => seekToSteppedFrame(epoch, false),
     measure: () => heroMediaRef.current?.clientWidth,
   });
@@ -2295,8 +2298,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
   function toggleHeroPlayback() {
     const video = videoRef.current;
     if (!video) return;
-    const stepped = frameStep.epoch();
-    if (Number.isFinite(stepped) && video.paused) {
+    const stepped = video.paused ? frameStep.resume() : null;
+    if (Number.isFinite(stepped)) {
       // Resume from the stepped frame; its picture stays up until playing.
       seekToSteppedFrame(stepped, true);
       return;
@@ -3181,7 +3184,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
                 {heroPlaying ? "Pause" : "Play"}
               </button>
               <button type="button" onClick={() => skipPlayback(10)} aria-label="Forward 10 seconds"><SkipForward size={16} /></button>
-              <FrameStepButtons stepper={frameStep} disabled={heroPlaying} />
+              <FrameStepButtons stepper={frameStep} disabled={!frameStepEnabled} />
               <button
                 type="button"
                 onClick={() => setHeroMuted((current) => !current)}

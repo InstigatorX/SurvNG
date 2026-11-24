@@ -43,7 +43,7 @@ for (const autoplay of [true, false]) {
 // The Pause button must cancel that intent rather than issue another play().
 const paused = [];
 const toggle = vm.createContext({
-  frameStep: { epoch: () => null },
+  frameStep: { resume: () => null },
   videoRef: { current: { paused: true, pause: () => paused.push("pause") } },
   useSegmentPlayback: true, heroSeeking: true, autoplayRef: { current: true },
   setHeroPlaying: (value) => paused.push(value), requestRecordingPlay: () => paused.push("play"),
