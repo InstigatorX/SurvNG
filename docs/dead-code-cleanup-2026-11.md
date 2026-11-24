@@ -42,8 +42,9 @@ Each change was made on a stacked branch so the steps can be tested together:
 
 ## Deferred
 
-- Export, timelapse and VAAPI code in `media_exports.py` and
-  `recording_media_runtime.py` until #364 merges.
+- No dead code was found in `media_exports.py` or
+  `recording_media_runtime.py`; re-check them after #364 merges, since it
+  rewrites much of both.
 - Write-only columns that need a table rebuild to drop
   (`face_detection_samples` crop geometry, `route_incident_admissions.admitted_at`,
   `scene_alert_entries.last_decision`, `appearance_backfill_jobs.scene_backfill_version`).
