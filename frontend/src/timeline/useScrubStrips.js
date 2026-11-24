@@ -45,6 +45,16 @@ export function useScrubStrips({ cameraId, source, onFrame }) {
     storeRef.current?.idle();
   }
 
+  // A frame still up from the camera being left is taken down. A change of
+  // stream alone leaves it: the frame shows the same camera, and a seek can
+  // switch streams by itself (a codec the browser cannot play, a day recorded
+  // on the other stream only).
+  const shownCameraRef = useRef(cameraId);
+  useEffect(() => {
+    if (shownCameraRef.current !== cameraId) onFrameRef.current?.(null, { committed: false });
+    shownCameraRef.current = cameraId;
+  }, [cameraId]);
+
   useEffect(() => {
     if (!cameraId) return undefined;
     const width = scrubStripTileWidth({
@@ -59,12 +69,13 @@ export function useScrubStrips({ cameraId, source, onFrame }) {
     });
     storeRef.current = store;
     return () => {
+      const scrubbing = Number.isFinite(epochRef.current) && !heldRef.current;
       release();
       store.close();
       storeRef.current = null;
-      // Whatever is up belongs to the camera or stream being left, also
-      // when the scrub itself ended and only its last frame is still shown.
-      onFrameRef.current?.(null, { committed: false });
+      // A scrub in progress has lost its frames. One that already ended in
+      // a seek keeps its last frame until the player gets there.
+      if (scrubbing) onFrameRef.current?.(null, { committed: false });
     };
   }, [cameraId, publish, source]);
 

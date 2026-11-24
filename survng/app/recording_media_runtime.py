@@ -995,13 +995,14 @@ class RecordingMediaRuntime:
                 if media_sessions is not None:
                     try:
                         # A strip is a short decode that ends in one small
-                        # JPEG, like a snapshot. It does not take one of the
-                        # two transcode slots that event clips, exports and
-                        # HomeKit share: two strips at once would take both.
+                        # JPEG. It has a resource of its own: two strips at
+                        # once would take both transcode slots that event
+                        # clips, exports and HomeKit share, and the JPEG
+                        # encoders can all be held by live MJPEG streams.
                         session = media_sessions.acquire(
                             MediaSessionRequest(
                                 MediaSessionKind.RECORDING_PREVIEW,
-                                resources={MediaResourceClass.JPEG_ENCODER: 1},
+                                resources={MediaResourceClass.PREVIEW_PROCESS: 1},
                                 owner_generation=getattr(
                                     selected_manager,
                                     'media_session_generation',

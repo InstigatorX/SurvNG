@@ -1914,6 +1914,6 @@
 
 /* Detection boxes are computed from the player's own picture, not from the
    scrubbed frame drawn over it. */
-.recording-hero-media:has(.recording-scrub-frame[data-drawn="true"]) .event-detection-canvas {
+.recording-hero-media:has(.recording-scrub-frame[data-drawn="true"], .recording-scrub-frame.gap) .event-detection-canvas {
   visibility: hidden;
 }

@@ -782,9 +782,10 @@ class RecordingApiTest(unittest.TestCase):
                     return runtime._recording_preview_strip(row, width=width)
 
             strip(160)
-            # Not a transcode slot: two strips at once would take both, and
-            # event clips, exports and HomeKit share those.
-            self.assertEqual(dict(requests[0].resources), {MediaResourceClass.JPEG_ENCODER: 1})
+            # A resource of its own: not a transcode slot (two strips at once
+            # would take both, and event clips, exports and HomeKit share
+            # those), and not a JPEG encoder, which live MJPEG streams hold.
+            self.assertEqual(dict(requests[0].resources), {MediaResourceClass.PREVIEW_PROCESS: 1})
             self.assertEqual(entered, ["enter", "exit"])
             # A build that fails still gives the session and the build slot back.
             entered.clear()
@@ -795,11 +796,14 @@ class RecordingApiTest(unittest.TestCase):
                 strip(200)
             self.assertEqual(failed.exception.status_code, 500)
             self.assertEqual(entered, ["enter", "exit"])
-            # A failure before the session is taken leaves none behind.
+            # A failure before the session is taken leaves none behind: a
+            # session that is taken and never entered is never released.
             entered.clear()
+            taken = len(requests)
             with patch.object(Path, "mkdir", side_effect=OSError("read-only")), self.assertRaises(OSError):
                 strip(240)
             self.assertEqual(entered, [])
+            self.assertEqual(len(requests), taken)
             self.assertTrue(runtime.recording_strip_build_limiter.acquire(blocking=False))
             self.assertTrue(runtime.recording_strip_build_limiter.acquire(blocking=False))
             runtime.recording_strip_build_limiter.release()
@@ -881,6 +885,43 @@ class RecordingApiTest(unittest.TestCase):
             strip(240, mode="off")
             self.assertEqual(len(commands), 1)
             self.assertNotIn("-hwaccel", commands[0])
+
+            # A GPU build that cannot even start falls back the same way.
+            def unstartable(command, **kwargs):
+                commands.append(list(command))
+                if "-hwaccel" in command:
+                    raise OSError("cannot allocate memory")
+                return real_run(command, **kwargs)
+
+            def gpu_strip(width: int, side_effect, dimensions=(2560, 1920)) -> dict:
+                with (
+                    patch.object(main, "manager", manager),
+                    patch("survng.app.recording_media_runtime.subprocess.run", side_effect=side_effect),
+                    patch.object(runtime, "_maintain_recording_preview_cache"),
+                    patch.object(runtime, "_hardware_acceleration_mode", return_value="auto"),
+                    patch.object(
+                        runtime, "_ffmpeg_vaapi_info",
+                        return_value={"available": True, "device": "/dev/dri/renderD128"},
+                    ),
+                    patch("survng.app.recording_media_runtime.mp4_video_dimensions", return_value=dimensions),
+                ):
+                    return runtime._recording_preview_strip(row, width=width)[1]
+
+            runtime.recording_strip_hardware_retry_at = 0.0
+            commands.clear()
+            with self.assertLogs("survng.app.recording_media_runtime", level="WARNING"):
+                layout = gpu_strip(260, unstartable)
+            self.assertEqual(len(commands), 2)
+            self.assertEqual(layout["count"], 3)
+            self.assertFalse(layout["hardware"])
+            # A frame of unknown size is not sent to the GPU: its scaler
+            # would be told a width with nothing to compare it to.
+            runtime.recording_strip_hardware_retry_at = 0.0
+            commands.clear()
+            layout = gpu_strip(300, run, dimensions=None)
+            self.assertEqual(len(commands), 1)
+            self.assertNotIn("-hwaccel", commands[0])
+            self.assertTrue(layout["keyframes_only"])
 
             # A GPU that hangs is cut short, and the CPU still makes the strip.
             def hung(command, **kwargs):

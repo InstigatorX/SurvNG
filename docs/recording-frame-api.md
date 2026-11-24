@@ -66,17 +66,21 @@ playhead is dragged, so moving within a loaded segment needs no request.
   5 s, the CPU builds the strip and the GPU is not tried again, for any
   camera, for five minutes.
 - A strip is built on first request and kept in the preview cache. Two builds
-  run at once. Each holds a JPEG-encoder media session, not one of the two
-  transcode slots that event clips, exports and HomeKit share. A busy
-  generator answers `429` with `Retry-After`. A time with no recording is
-  `404`.
+  run at once. Each holds a preview-process media session, a resource of its
+  own: not one of the two transcode slots that event clips, exports and
+  HomeKit share, and not a JPEG encoder, which live MJPEG streams hold. A busy
+  generator answers `429` with `Retry-After`.
+- A time with no recording is `404`, with `X-SurvNG-Gap-Start` and
+  `X-SurvNG-Gap-End` saying how far the gap reaches on both streams, looking
+  up to five minutes either side.
 
 The page runs two requests at a time with no queue: when one finishes, the
 next is for where the playhead is then, and after that for up to two segments
 ahead in the direction of the scrub. While the playhead's own segment loads,
 the nearest loaded strip within ten minutes stands in. A failed request is
-tried again after a second, one with no answer is given up after ten, and a
-time with no recording is remembered, for that second only, for ten seconds.
+tried again after a second, then two, four and eight; one with no answer is
+given up after ten. A gap is remembered for ten seconds, over the range the
+server stated, or for that one second if it stated none.
 It keeps at most 24 strips in memory; strips from the sub and main streams,
 which are cut at different times, are kept side by side. Every Timeline layout reports its scrub position: the rail,
 the camera columns, the day strip's loupe and the classic scrubber. After a

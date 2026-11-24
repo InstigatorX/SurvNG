@@ -503,23 +503,43 @@ class RecordingRouteLifecycleTests(TestCase):
         self.assertEqual(built, [("/recordings/gate.mp4", 320)])
         self.assertEqual(response.headers["x-survng-strip-source"], "main")
         # With no other stream to turn to, the reason is reported as it was.
-        with self.assertRaises(HTTPException) as gone:
-            fallback("gate", 107.9, "live", 320)
-        self.assertEqual(gone.exception.status_code, 404)
-        # A busy generator is not a reason to try the other stream.
-        def busy(_manager, _row, *, width):
-            raise HTTPException(status_code=429, detail="busy")
+        def strip_forbidden(_manager, row, *, width):
+            raise HTTPException(status_code=403, detail="outside media storage")
 
+        with self.assertRaises(HTTPException) as gone:
+            create_recording_router(
+                replace(_dependencies(lambda: manager), recording_preview_strip=strip_forbidden)
+            ).handlers["recording_preview_strip"]("gate", 107.9, "live", 320)
+        self.assertEqual(gone.exception.status_code, 403)
+        # A busy generator is not a reason to try the other stream, which
+        # would only add to the load.
+        def busy_sub(_manager, row, *, width):
+            if "sub" in row["path"]:
+                raise HTTPException(status_code=429, detail="busy")
+            return strip(_manager, row, width=width)
+
+        built.clear()
         with self.assertRaises(HTTPException) as refused:
             create_recording_router(
-                replace(_dependencies(lambda: manager), recording_preview_strip=busy)
+                replace(_dependencies(lambda: manager), recording_preview_strip=busy_sub)
             ).handlers["recording_preview_strip"]("gate", 107.9, "main", 320)
         self.assertEqual(refused.exception.status_code, 429)
+        self.assertEqual(built, [])
 
         # Nothing recorded there, or a row that ends before it: a gap.
         with self.assertRaises(HTTPException) as gap:
             handler("gate", 150.0, "main", 320)
         self.assertEqual(gap.exception.status_code, 404)
+        # The answer says how far the gap reaches: from the end of the last
+        # recording on either stream (the sub stream's, at 113) to the next
+        # one, or to the edge of the window looked at.
+        self.assertEqual(gap.exception.headers["X-SurvNG-Gap-Start"], "113.000")
+        self.assertEqual(gap.exception.headers["X-SurvNG-Gap-End"], "450.000")
+        recorded["main"].append({"path": "/recordings/later.mp4", "start_epoch": 160.0, "end_epoch": 170.0})
+        with self.assertRaises(HTTPException) as bounded:
+            handler("gate", 150.0, "main", 320)
+        self.assertEqual(bounded.exception.headers["X-SurvNG-Gap-End"], "160.000")
+        recorded["main"].pop()
         asked.clear()
         handler("gate", 107.9, "live", 320)
         self.assertEqual(asked, ["live"])

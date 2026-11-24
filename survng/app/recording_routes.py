@@ -201,6 +201,11 @@ def _recording_segment_seconds(
     )
 
 
+# How far either side of a time with no recording a preview-strip request
+# looks for where the recording stops and starts again.
+RECORDING_STRIP_GAP_WINDOW_SECONDS = 300.0
+
+
 def _recording_playback_window(epoch: float) -> tuple[float, float]:
     start = (
         math.floor(epoch / RECORDING_PLAYBACK_WINDOW_SECONDS)
@@ -1035,7 +1040,32 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         if built is None:
             if unavailable is not None:
                 raise unavailable
-            raise HTTPException(status_code=404, detail="no recording exists at this time")
+            # Say how far the gap reaches, so the page need not ask about
+            # every second of it. Bounded: beyond the window it asks again.
+            gap_start = epoch - RECORDING_STRIP_GAP_WINDOW_SECONDS
+            gap_end = epoch + RECORDING_STRIP_GAP_WINDOW_SECONDS
+            for candidate_source in dict.fromkeys(("live", selected_source)):
+                for nearby in active_manager.recorder.recording_rows_between(
+                    camera_id,
+                    gap_start,
+                    gap_end,
+                    candidate_source,
+                    discover_missing=False,
+                ):
+                    start = float(nearby.get("start_epoch") or 0)
+                    end = float(nearby.get("end_epoch") or 0)
+                    if end <= epoch:
+                        gap_start = max(gap_start, end)
+                    elif start > epoch:
+                        gap_end = min(gap_end, start)
+            raise HTTPException(
+                status_code=404,
+                detail="no recording exists at this time",
+                headers={
+                    "X-SurvNG-Gap-Start": f"{gap_start:.3f}",
+                    "X-SurvNG-Gap-End": f"{gap_end:.3f}",
+                },
+            )
         row, row_source, strip_path, layout = built
         return FileResponse(
             strip_path,

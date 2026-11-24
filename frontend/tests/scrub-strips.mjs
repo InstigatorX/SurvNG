@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   SCRUB_STRIP_GAP_SECONDS,
   SCRUB_STRIP_NEAR_SECONDS,
+  SCRUB_STRIP_RETRY_MAX_MS,
   SCRUB_STRIP_RETRY_MS,
   SCRUB_STRIP_TIMEOUT_MS,
   createScrubStripStore,
@@ -190,6 +191,99 @@ const segment = (start) => ({ start, end: start + 10, step: 1, count: 10, column
   t.store.want(208.4);
   await t.settle();
   assert.deepEqual(t.pending.map((item) => item.epoch), [208, 208.4]);
+}
+
+// When the server says how far the gap reaches, the whole of it is known at
+// once: crossing it asks nothing more and shows no stand-in in between.
+{
+  const t = harness();
+  t.store.want(995);
+  await t.settle();
+  t.pending[0].resolve(segment(990));
+  await t.settle();
+  t.store.idle();
+  t.store.want(1001);
+  await t.settle();
+  t.pending[1].resolve({ gap: { start: 1000, end: 1060 } });
+  await t.settle();
+  for (const epoch of [1002, 1010.5, 1030, 1059.9]) {
+    assert.deepEqual(t.store.frameAt(epoch), { strip: null, gap: true, loading: false });
+    t.store.want(epoch);
+  }
+  await t.settle();
+  // Only the fetch ahead of the gap's far side could be asked for; nothing
+  // inside it is.
+  assert.ok(t.pending.slice(2).every((item) => item.epoch >= 1060 || item.epoch < 1000));
+  // Outside it nothing is assumed.
+  assert.equal(t.store.frameAt(1060).gap, false);
+  assert.equal(t.store.frameAt(999).strip.start, 990);
+  // A stated range that does not hold the time asked about is not trusted.
+  t.store.idle();
+  t.store.want(2000);
+  await t.settle();
+  t.pending.at(-1).resolve({ gap: { start: 2100, end: 2200 } });
+  await t.settle();
+  assert.equal(t.store.frameAt(2000.5).gap, true);
+  assert.equal(t.store.frameAt(2150).gap, false);
+  assert.equal(t.store.frameAt(2001.5).gap, false);
+}
+
+// A segment that keeps failing is asked for less and less often, and a
+// success puts the wait back.
+{
+  const t = harness();
+  t.store.want(3005);
+  await t.settle();
+  const waits = [];
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    t.pending.at(-1).reject(new Error("500"));
+    await t.settle();
+    const before = t.pending.length;
+    let waited = 0;
+    while (t.pending.length === before && waited < 60_000) {
+      t.advance(500);
+      waited += 500;
+      await t.settle();
+    }
+    waits.push(waited);
+  }
+  assert.deepEqual(waits, [1500, 2500, 4500, 8500, 8500]);
+  assert.ok(waits.at(-1) <= SCRUB_STRIP_RETRY_MAX_MS + 500);
+  t.pending.at(-1).resolve(segment(3000));
+  await t.settle();
+  t.store.idle();
+  t.store.want(3105);
+  await t.settle();
+  t.pending.at(-1).reject(new Error("500"));
+  await t.settle();
+  const before = t.pending.length;
+  t.advance(SCRUB_STRIP_RETRY_MS + 1);
+  await t.settle();
+  assert.equal(t.pending.length, before + 1);
+}
+
+// How long a segment is, is judged from the strip nearest the time in
+// question: a long one far away does not hold back a request here.
+{
+  const t = harness();
+  t.store.want(5005);
+  await t.settle();
+  t.pending[0].resolve({ ...segment(5000), end: 5300, step: 5, count: 60, rows: 10 });
+  await t.settle();
+  t.store.idle();
+  t.store.want(9000);
+  t.store.want(9200);
+  await t.settle();
+  assert.deepEqual(t.pending.map((item) => item.epoch), [5005, 9000, 9200]);
+  // Next to that long segment, a time 200 s on is still the same segment.
+  t.pending[1].resolve(segment(9000));
+  t.pending[2].resolve(segment(9200));
+  await t.settle();
+  t.store.idle();
+  t.store.want(5301);
+  t.store.want(5500);
+  await t.settle();
+  assert.deepEqual(t.pending.map((item) => item.epoch).filter((epoch) => epoch < 6000), [5005, 5301]);
 }
 
 // A failed request (the generator is busy) is not repeated at once, and is

@@ -37,6 +37,10 @@ class MediaResourceClass(StrEnum):
     CAPTURE_PROCESS = "capture_process"
     REMUX_PROCESS = "remux_process"
     TRANSCODE_PROCESS = "transcode_process"
+    # Short decodes that end in one small image (scrub-preview strips). Kept
+    # apart from transcodes and from the JPEG encoders live MJPEG streams
+    # hold for as long as they are watched.
+    PREVIEW_PROCESS = "preview_process"
     EXPORT_WORKER = "export_worker"
 
 
@@ -80,6 +84,7 @@ class MediaAdmissionPolicy:
                 MediaResourceClass.CAPTURE_OPEN: 2,
                 MediaResourceClass.REMUX_PROCESS: 2,
                 MediaResourceClass.TRANSCODE_PROCESS: 2,
+                MediaResourceClass.PREVIEW_PROCESS: 2,
                 MediaResourceClass.EXPORT_WORKER: 1,
             },
             per_camera_limits={
