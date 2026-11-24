@@ -82,6 +82,9 @@ def _clip_attempts(tmp_path, monkeypatch, pix_fmt):
 
     def run(command, **kwargs):
         attempts.append(command)
+        # A 20 s clip: hardware decode gets real time with a 30 s floor,
+        # the established commands keep their 60 s floor.
+        assert kwargs["timeout"] == (30.0 if "-hwaccel" in command else 60.0)
         if "-hwaccel" in command:
             raise subprocess.TimeoutExpired(command, kwargs["timeout"])
         Path(command[-1]).write_bytes(b"clip")

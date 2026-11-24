@@ -586,6 +586,93 @@ class MediaExportTest(unittest.TestCase):
             self.assertEqual(["-skip_frame" in command for command in ran], [True, False])
             self.assertGreaterEqual(manager._video_frame_count(output), 8)
 
+    def _fake_encoding_manager(self, root: Path, frame_counts: dict[str, int]):
+        """A VAAPI manager whose attempts all "succeed" with the given frames."""
+        manager = self._command_manager(root, "vaapi")
+        manager._probe_source = lambda _path: {  # type: ignore[method-assign]
+            "width": 3840, "height": 2160, "fps": 20.0, "has_audio": False, "codec": "h264",
+        }
+        manager._valid_video_output = lambda _path: True  # type: ignore[method-assign]
+        ran: list[str] = []
+
+        def attempt_name(command: list[str]) -> str:
+            name = "vaapi" if "-vaapi_device" in command else "cpu"
+            if "-hwaccel" in command:
+                name += "-gpu"
+            return name + (" keyframes" if "-skip_frame" in command else "")
+
+        def run(command: list[str], *_args, **_kwargs) -> None:
+            ran.append(attempt_name(command))
+            Path(command[-1]).write_bytes(b"video")
+
+        manager._run_process = run  # type: ignore[method-assign]
+        manager._video_frame_count = (  # type: ignore[method-assign]
+            lambda _path: frame_counts.get(ran[-1], 10_000)
+        )
+        work = root / "work"
+        work.mkdir()
+        return manager, ran, work
+
+    def test_full_gpu_export_that_lost_frames_is_replaced_by_the_previous_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            # 30 s at 20 fps is 600 frames.
+            manager, ran, work = self._fake_encoding_manager(Path(temporary), {"vaapi-gpu": 300})
+            manager._recorder = lambda: FakeRecorder([])  # type: ignore[method-assign]
+            rows = [{"path": "a.mp4", "start_epoch": 100.0, "end_epoch": 130.0,
+                     "duration_seconds": 30.0, "stream_fingerprint": "4k"}]
+            job = manager.store.create({
+                "kind": "recording", "camera_id": "gate", "source": "main",
+                "start_epoch": 100.0, "end_epoch": 130.0, "options": {"height": 1080},
+            })
+
+            manager._build_recording(job, rows, work, threading.Event())
+
+            self.assertEqual(ran, ["vaapi-gpu", "vaapi"])
+
+    def test_full_gpu_timelapse_that_lost_frames_is_replaced_by_the_previous_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            # 600 s every 30 s is 20 frames.
+            manager, ran, work = self._fake_encoding_manager(Path(temporary), {"vaapi-gpu": 5})
+            manager._keyframe_interval = lambda _path: None  # type: ignore[method-assign]
+            rows = [{"path": "a.mp4", "start_epoch": 0.0, "end_epoch": 600.0,
+                     "duration_seconds": 600.0, "stream_fingerprint": "4k"}]
+            job = manager.store.create({
+                "kind": "timelapse", "camera_id": "gate", "source": "main",
+                "start_epoch": 0.0, "end_epoch": 600.0, "options": {"height": 1080},
+            })
+
+            manager._build_timelapse(job, rows, work, threading.Event())
+
+            self.assertEqual(ran, ["vaapi-gpu", "vaapi"])
+
+    def test_rejected_keyframe_timelapse_skips_the_other_keyframe_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manager, ran, work = self._fake_encoding_manager(
+                Path(temporary), {"vaapi keyframes": 3, "cpu keyframes": 3},
+            )
+            manager._keyframe_interval = lambda _path: 2.0  # type: ignore[method-assign]
+            rows = [{"path": "a.mp4", "start_epoch": 0.0, "end_epoch": 600.0,
+                     "duration_seconds": 600.0, "stream_fingerprint": "4k"}]
+            job = manager.store.create({
+                "kind": "timelapse", "camera_id": "gate", "source": "main",
+                "start_epoch": 0.0, "end_epoch": 600.0, "options": {"height": 1080},
+            })
+
+            manager._build_timelapse(job, rows, work, threading.Event())
+
+            # The software keyframe attempt would be short for the same reason.
+            self.assertEqual(ran, ["vaapi keyframes", "vaapi-gpu"])
+
+    def test_keyframe_sample_count_excludes_repeated_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            progress = Path(temporary) / "progress"
+            progress.write_text("frame=2\ndup_frames=0\nprogress=continue\nframe=6\ndup_frames=2\nprogress=end\n")
+
+            self.assertEqual(MediaExportManager._encoded_samples(progress), 4)
+            progress.write_text("frame=6\nprogress=end\n")
+            self.assertIsNone(MediaExportManager._encoded_samples(progress))
+            self.assertIsNone(MediaExportManager._encoded_samples(Path(temporary) / "missing"))
+
     def test_header_only_video_is_not_accepted_as_completed_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -1288,6 +1288,11 @@ class MediaExportManager:
             # Only the last attempt, software decoding every frame, may fail the job.
             final = position == len(attempts) - 1
             output.unlink(missing_ok=True)
+            progress = work / "timelapse.progress"
+            progress.unlink(missing_ok=True)
+            if keyframe_attempt:
+                # FFmpeg's own count of frames it repeated to fill the output.
+                command = [command[0], "-progress", str(progress), *command[1:]]
             try:
                 self.store.update(str(job["id"]), phase=f"Encoding timelapse ({backend_name})", progress=12)
                 self._run_process(
@@ -1304,9 +1309,14 @@ class MediaExportManager:
                 raise
             if self._valid_video_output(output):
                 if keyframe_attempt:
-                    # Decoding every frame yields at least this many, so a
-                    # keyframe result may not have fewer samples.
-                    if self._has_frames(output, estimated_frames):
+                    # Decoding every frame yields at least this many samples,
+                    # so a keyframe result may not have fewer. The container
+                    # count also holds repeats of the last sample, so prefer
+                    # FFmpeg's report, which separates them.
+                    samples = self._encoded_samples(progress)
+                    if samples is None:
+                        samples = self._video_frame_count(output)
+                    if samples is not None and samples >= estimated_frames:
                         return output, gaps
                     keyframes_rejected = True
                     LOGGER.warning(
@@ -1326,6 +1336,23 @@ class MediaExportManager:
                 continue
             raise RuntimeError(last_error)
         raise RuntimeError(last_error)
+
+    @staticmethod
+    def _encoded_samples(progress: Path) -> int | None:
+        """Distinct frames in a finished ``-progress`` report, without repeats."""
+        try:
+            lines = progress.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return None
+        values: dict[str, str] = {}
+        for line in lines:
+            key, separator, value = line.partition("=")
+            if separator:
+                values[key.strip()] = value.strip()
+        try:
+            return int(values["frame"]) - int(values["dup_frames"])
+        except (KeyError, ValueError):
+            return None
 
     def _has_frames(self, path: Path, minimum: float) -> bool:
         """True when ``path`` is known to hold at least ``minimum`` frames."""

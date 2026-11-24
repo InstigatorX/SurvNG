@@ -140,6 +140,13 @@ def _measure(
             print("    " + " ".join(command))
         rows.append(row)
         output.unlink(missing_ok=True)
+    # SurvNG discards a full-GPU result that lost more than a tenth of its frames.
+    reference = next((int(row["frames"]) for row in rows if row["ok"] and str(row["attempt"]).startswith("cpu")), 0)
+    for row in rows:
+        if row["ok"] and str(row["attempt"]).endswith("-gpu") and int(row["frames"]) < reference * 0.9:
+            row["ok"] = False
+            print(f"{row['attempt']}: FAILED, {row['frames']} frames against {reference} from cpu; "
+                  "SurvNG would discard this output")
     return rows
 
 

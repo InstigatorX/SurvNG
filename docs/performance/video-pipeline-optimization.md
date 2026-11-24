@@ -176,7 +176,7 @@ A timelapse whose sample interval is at least ten keyframe spacings decodes keyf
 
 - The full-GPU attempts were written without a render node. A failure normally costs one failed FFmpeg start before the previous command runs; an attempt that stalls costs its time limit first. The hardware-decode event clip is limited to real time, with a 30 s floor.
 - A keyframe timelapse samples the first keyframe in each interval, so samples sit up to one keyframe spacing late: at most a tenth of the interval. Decoding every frame samples exactly on the interval.
-- Keyframe spacing is measured on the first minute of the first recording only, and a camera can lengthen it later. A keyframe timelapse with fewer frames than decoding every frame would give is discarded and every frame is decoded instead, at the cost of one extra cheap pass.
+- Keyframe spacing is measured on the first minute of the first recording only, and a camera can lengthen it later. A keyframe timelapse with fewer samples than decoding every frame would give is discarded; samples are counted from FFmpeg's progress report, without the frames it repeats to fill the output and every frame is decoded instead, at the cost of one extra cheap pass.
 
 ### Tests
 
