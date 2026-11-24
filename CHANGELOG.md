@@ -4,7 +4,8 @@
 
 - Databases must have been opened by the `v1.2.0` release or later. Startup
   stops, before changing anything, with an error naming the first older table
-  it finds; start `v1.2.0` once against the same data, then upgrade. See `docs/current-only.md`.
+  it finds; start `v1.2.0` once against the same data, with a configuration it
+  accepts such as your pre-upgrade backup, then upgrade. See `docs/current-only.md`.
 - Removed endpoints with no caller and no documentation: the
   `/api/faces/` diagnostics, benchmark (`/production`, `/camera-pairs`,
   `/by-identity`), `gallery-optimization`, `camera-suitability`,
