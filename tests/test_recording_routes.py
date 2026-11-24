@@ -414,7 +414,6 @@ class RecordingRouteLifecycleTests(TestCase):
         self.assertEqual(calls[0][1]["before"], 0)
         self.assertEqual(response.path, Path("mobile.mp4"))
 
-
     def test_native_segment_rejects_invalid_epoch_before_lookup(self) -> None:
         dependencies = _dependencies(lambda: _Manager("current"))
         with self.assertRaises(HTTPException) as invalid:

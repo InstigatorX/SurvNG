@@ -76,7 +76,6 @@ class ObjectTrackingLifecycle:
     def current(self) -> ObjectTrackingSession:
         return self._session
 
-
     def create(
         self,
         factory: ObjectTrackingSessionFactory,
