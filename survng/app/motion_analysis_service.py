@@ -262,7 +262,7 @@ class MotionAnalysisService:
             Callable[[str, float, float], list[tuple[float, dict[str, Any]]]] | None
         ) = None
         self._last_submitted_ema_candidate_at = 0.0
-        self._last_ema_candidate_failure_log_monotonic = 0.0
+        self._last_ema_candidate_failure_log_monotonic = -math.inf
         self._stop_event: threading.Event | None = None
         self._stop_requested = threading.Event()
         self._admission_lock = threading.Lock()
