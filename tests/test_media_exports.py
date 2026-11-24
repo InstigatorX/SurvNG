@@ -586,7 +586,9 @@ class MediaExportTest(unittest.TestCase):
             self.assertEqual(["-skip_frame" in command for command in ran], [True, False])
             self.assertGreaterEqual(manager._video_frame_count(output), 8)
 
-    def _fake_encoding_manager(self, root: Path, frame_counts: dict[str, int]):
+    def _fake_encoding_manager(
+        self, root: Path, frame_counts: dict[str, int], progress_report: str = ""
+    ):
         """A VAAPI manager whose attempts all "succeed" with the given frames."""
         manager = self._command_manager(root, "vaapi")
         manager._probe_source = lambda _path: {  # type: ignore[method-assign]
@@ -604,6 +606,10 @@ class MediaExportTest(unittest.TestCase):
         def run(command: list[str], *_args, **_kwargs) -> None:
             ran.append(attempt_name(command))
             Path(command[-1]).write_bytes(b"video")
+            # Only keyframe attempts ask FFmpeg for a progress report.
+            self.assertEqual("-progress" in command, "-skip_frame" in command)
+            if "-progress" in command and progress_report:
+                Path(command[command.index("-progress") + 1]).write_text(progress_report)
 
         manager._run_process = run  # type: ignore[method-assign]
         manager._video_frame_count = (  # type: ignore[method-assign]
@@ -661,6 +667,26 @@ class MediaExportTest(unittest.TestCase):
             manager._build_timelapse(job, rows, work, threading.Event())
 
             # The software keyframe attempt would be short for the same reason.
+            self.assertEqual(ran, ["vaapi keyframes", "vaapi-gpu"])
+
+    def test_keyframe_timelapse_padded_with_repeats_is_still_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            # 20 samples are expected. The file holds 25 frames, but FFmpeg
+            # reports that 10 of them repeat an earlier one.
+            manager, ran, work = self._fake_encoding_manager(
+                Path(temporary), {"vaapi keyframes": 25},
+                progress_report="frame=25\ndup_frames=10\nprogress=end\n",
+            )
+            manager._keyframe_interval = lambda _path: 2.0  # type: ignore[method-assign]
+            rows = [{"path": "a.mp4", "start_epoch": 0.0, "end_epoch": 600.0,
+                     "duration_seconds": 600.0, "stream_fingerprint": "4k"}]
+            job = manager.store.create({
+                "kind": "timelapse", "camera_id": "gate", "source": "main",
+                "start_epoch": 0.0, "end_epoch": 600.0, "options": {"height": 1080},
+            })
+
+            manager._build_timelapse(job, rows, work, threading.Event())
+
             self.assertEqual(ran, ["vaapi keyframes", "vaapi-gpu"])
 
     def test_keyframe_sample_count_excludes_repeated_frames(self) -> None:

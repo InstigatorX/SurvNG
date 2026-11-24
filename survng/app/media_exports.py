@@ -1311,7 +1311,7 @@ class MediaExportManager:
                 if keyframe_attempt:
                     # Decoding every frame yields at least this many samples,
                     # so a keyframe result may not have fewer. The container
-                    # count also holds repeats of the last sample, so prefer
+                    # count also holds repeated frames, so prefer
                     # FFmpeg's report, which separates them.
                     samples = self._encoded_samples(progress)
                     if samples is None:

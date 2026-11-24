@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import resource
 import subprocess
 import sys
@@ -105,6 +106,7 @@ def _measure(
     *,
     ffprobe: str,
     source_seconds: float,
+    expected_frames: float | None = None,
     timeout: float,
     show_commands: bool,
 ) -> list[dict[str, object]]:
@@ -140,13 +142,17 @@ def _measure(
             print("    " + " ".join(command))
         rows.append(row)
         output.unlink(missing_ok=True)
-    # SurvNG discards a full-GPU result that lost more than a tenth of its frames.
-    reference = next((int(row["frames"]) for row in rows if row["ok"] and str(row["attempt"]).startswith("cpu")), 0)
+    # SurvNG discards a full-GPU result that lost more than a tenth of its
+    # frames. Without a stated expectation, the software row is the reference.
+    if expected_frames is None:
+        expected_frames = next(
+            (float(row["frames"]) for row in rows if row["ok"] and str(row["attempt"]).startswith("cpu")), 0.0,
+        )
     for row in rows:
-        if row["ok"] and str(row["attempt"]).endswith("-gpu") and int(row["frames"]) < reference * 0.9:
+        if row["ok"] and str(row["attempt"]).endswith("-gpu") and int(row["frames"]) < expected_frames * 0.9:
             row["ok"] = False
-            print(f"{row['attempt']}: FAILED, {row['frames']} frames against {reference} from cpu; "
-                  "SurvNG would discard this output")
+            print(f"{row['attempt']}: FAILED, {row['frames']} frames against about {expected_frames:.0f} "
+                  "expected; SurvNG would discard this output")
     return rows
 
 
@@ -294,7 +300,8 @@ def main() -> int:
         commands, _ = merged("timelapse", options, epoch, keyframes=False)
         results += _measure(
             f"timelapse, every frame decoded, 1 frame per {args.interval:g} s",
-            commands, source_seconds=total, **measure,
+            commands, source_seconds=total,
+            expected_frames=math.ceil(total / max(1.0, args.interval)), **measure,
         )
         commands, spacing = merged("timelapse", options, epoch)
         if any("-skip_frame" in command for _name, command in commands):
