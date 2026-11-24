@@ -5,16 +5,18 @@ from pathlib import Path
 from tests._isolated_runtime import _ROOT
 
 from survng.app.main import (
+    _frontend_route_bundle,
     app,
     manager,
-    recording_exports_page,
-    recording_search_page,
-    recordings_page,
-    search_page,
-    timeline_exports_page,
-    timeline_page,
-    exports_page,
 )
+
+recording_exports_page = _frontend_route_bundle.handlers["recording_exports_page"]
+recording_search_page = _frontend_route_bundle.handlers["recording_search_page"]
+recordings_page = _frontend_route_bundle.handlers["recordings_page"]
+search_page = _frontend_route_bundle.handlers["search_page"]
+timeline_exports_page = _frontend_route_bundle.handlers["timeline_exports_page"]
+timeline_page = _frontend_route_bundle.handlers["timeline_page"]
+exports_page = _frontend_route_bundle.handlers["exports_page"]
 
 
 class FrontendRouteTest(unittest.TestCase):
@@ -61,7 +63,8 @@ class FrontendRouteTest(unittest.TestCase):
             self.assertEqual(paths[path]["get"].get("parameters", []), [])
 
     def test_progressive_web_app_routes_are_registered(self) -> None:
-        from survng.app.main import progressive_web_manifest, progressive_web_service_worker
+        progressive_web_manifest = _frontend_route_bundle.handlers["progressive_web_manifest"]
+        progressive_web_service_worker = _frontend_route_bundle.handlers["progressive_web_service_worker"]
 
         manifest = progressive_web_manifest()
         self.assertEqual(manifest.status_code, 200)

@@ -59,7 +59,7 @@ def camera(camera_id: str = "gate", name: str = "Gate") -> CameraConfig:
 
 class ApiSecretBoundaryTest(unittest.TestCase):
     def test_health_response_is_minimal_and_does_not_probe_runtime(self) -> None:
-        self.assertEqual(main.health(), {"status": "ok"})
+        self.assertEqual(main._frontend_route_bundle.handlers["health"](), {"status": "ok"})
 
     def test_config_payload_masks_and_round_trips_every_secret(self) -> None:
         current = AppConfig(

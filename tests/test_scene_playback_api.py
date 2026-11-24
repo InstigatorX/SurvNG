@@ -51,7 +51,7 @@ class ScenePlaybackApiTest(unittest.TestCase):
         with patch.dict(main.__dict__, {"manager": self.manager}), patch.object(
             main._recording_media_runtime, "_ensure_event_clip", return_value=self.clip,
         ) as ensure:
-            response = main.event_clip(
+            response = main._recording_route_bundle.handlers["event_clip"](
                 self.event["id"], episode_id=self.episode["id"], start_epoch=start, end_epoch=end,
                 before=100, after=100,
             )
@@ -75,7 +75,7 @@ class ScenePlaybackApiTest(unittest.TestCase):
         with patch.dict(main.__dict__, {"manager": self.manager}), patch(
             "survng.app.recording_media_runtime.IndexedMp4FragmentSource", return_value=source,
         ):
-            response = main.event_stream(
+            response = main._recording_route_bundle.handlers["event_stream"](
                 self.event["id"], episode_id=self.episode["id"], start_epoch=start, end_epoch=end,
             )
         window = source.fragments.call_args.args[0]
@@ -87,7 +87,7 @@ class ScenePlaybackApiTest(unittest.TestCase):
         self.assertNotIn("/cameras/driveway/", playlist)
 
     def test_wrong_episode_or_missing_event_rejects_before_media_work(self):
-        for endpoint in (main.event_clip, main.event_stream):
+        for endpoint in (main._recording_route_bundle.handlers["event_clip"], main._recording_route_bundle.handlers["event_stream"]):
             for event_id, episode_id in ((self.event["id"], self.other_episode["id"]),
                                          (self.other["id"], self.episode["id"]), (999999, self.episode["id"])):
                 with self.subTest(endpoint=endpoint.__name__, event=event_id, episode=episode_id), patch.dict(main.__dict__, {"manager": self.manager}), patch.object(main._recording_media_runtime, "_ensure_event_clip") as ensure, patch(
@@ -106,7 +106,7 @@ class ScenePlaybackApiTest(unittest.TestCase):
             (self.start + 10, self.start), (float("nan"), self.start + 1),
             (self.start, float("inf")), (float("-inf"), self.start),
         ]
-        for endpoint in (main.event_clip, main.event_stream):
+        for endpoint in (main._recording_route_bundle.handlers["event_clip"], main._recording_route_bundle.handlers["event_stream"]):
             for start, end in cases:
                 with self.subTest(endpoint=endpoint.__name__, start=start, end=end), patch.dict(main.__dict__, {"manager": self.manager}), patch.object(main._recording_media_runtime, "_ensure_event_clip") as ensure, patch(
                     "survng.app.recording_media_runtime.IndexedMp4FragmentSource",
@@ -123,9 +123,9 @@ class ScenePlaybackApiTest(unittest.TestCase):
         ) as ensure:
             for kwargs in ({"episode_id": self.episode["id"]}, {"start_epoch": self.start, "end_epoch": self.start + 1}):
                 with self.subTest(kwargs=kwargs), self.assertRaises(HTTPException) as error:
-                    main.event_clip(self.event["id"], **kwargs)
+                    main._recording_route_bundle.handlers["event_clip"](self.event["id"], **kwargs)
                 self.assertEqual(error.exception.status_code, 400)
-            main.event_clip(self.other["id"], episode_id=self.other_episode["id"], start_epoch=self.start, end_epoch=self.start + 1)
+            main._recording_route_bundle.handlers["event_clip"](self.other["id"], episode_id=self.other_episode["id"], start_epoch=self.start, end_epoch=self.start + 1)
         self.assertEqual(ensure.call_args.kwargs["after"], 1)
 
     def test_cache_paths_separate_chunk_origins_and_preserve_legacy_key(self):

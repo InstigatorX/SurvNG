@@ -1268,27 +1268,6 @@ app.include_router(
 )
 app.include_router(create_onvif_inspector_router())
 app.include_router(create_speech_router(SpeechRouteDependencies(get_manager=get_manager)))
-health = _frontend_route_bundle.handlers["health"]
-favicon = _frontend_route_bundle.handlers["favicon"]
-apple_touch_icon = _frontend_route_bundle.handlers["apple_touch_icon"]
-progressive_web_manifest = _frontend_route_bundle.handlers["progressive_web_manifest"]
-progressive_web_service_worker = _frontend_route_bundle.handlers["progressive_web_service_worker"]
-index = _frontend_route_bundle.handlers["index"]
-recordings_page = _frontend_route_bundle.handlers["recordings_page"]
-recording_search_page = _frontend_route_bundle.handlers["recording_search_page"]
-recording_exports_page = _frontend_route_bundle.handlers["recording_exports_page"]
-timeline_page = _frontend_route_bundle.handlers["timeline_page"]
-timeline_exports_page = _frontend_route_bundle.handlers["timeline_exports_page"]
-exports_page = _frontend_route_bundle.handlers["exports_page"]
-search_page = _frontend_route_bundle.handlers["search_page"]
-config_page = _frontend_route_bundle.handlers["config_page"]
-admin_page = _frontend_route_bundle.handlers["admin_page"]
-incidents_page = _frontend_route_bundle.handlers["incidents_page"]
-faces_page = _frontend_route_bundle.handlers["faces_page"]
-people_page = _frontend_route_bundle.handlers["people_page"]
-property_page = _frontend_route_bundle.handlers["property_page"]
-live_page = _frontend_route_bundle.handlers["live_page"]
-onvif_page = _frontend_route_bundle.handlers["onvif_page"]
 
 _semantic_route_bundle = create_semantic_router(
     SemanticRouteDependencies(
@@ -1305,12 +1284,6 @@ _semantic_route_bundle = create_semantic_router(
     )
 )
 app.include_router(_semantic_route_bundle.router)
-semantic_search_status = _semantic_route_bundle.handlers["semantic_search_status"]
-semantic_search = _semantic_route_bundle.handlers["semantic_search"]
-semantic_visual_search = _semantic_route_bundle.handlers["semantic_visual_search"]
-semantic_visual_frame_search = _semantic_route_bundle.handlers[
-    "semantic_visual_frame_search"
-]
 
 _system_route_bundle = create_system_router(
     SystemRouteDependencies(
@@ -1333,17 +1306,6 @@ _system_route_bundle = create_system_router(
     )
 )
 app.include_router(_system_route_bundle.router)
-cameras = _system_route_bundle.handlers["cameras"]
-application_event_stream = _system_route_bundle.handlers["application_event_stream"]
-get_motion_pipeline_catalog = _system_route_bundle.handlers[
-    "get_motion_pipeline_catalog"
-]
-accelerator = _system_route_bundle.handlers["accelerator"]
-detector_status = _system_route_bundle.handlers["detector_status"]
-object_tracking_catalog = _system_route_bundle.handlers["object_tracking_catalog"]
-detector_models = _system_route_bundle.handlers["detector_models"]
-event_clip_settings = _system_route_bundle.handlers["event_clip_settings"]
-recording_cache_status = _system_route_bundle.handlers["recording_cache_status"]
 
 
 # Assemble incident/event queries after all assistant consumers are defined.
@@ -1356,13 +1318,6 @@ _incident_query_bundle = create_incident_query_router(
     INCIDENT_QUERIES,
 )
 app.include_router(_incident_query_bundle.router)
-
-events = _incident_query_bundle.handlers["events"]
-incidents = _incident_query_bundle.handlers["incidents"]
-incident_feed = _incident_query_bundle.handlers["incident_feed"]
-incident_detail = _incident_query_bundle.handlers["incident_detail"]
-incident_search = _incident_query_bundle.handlers["incident_search"]
-incident_for_event = _incident_query_bundle.handlers["incident_for_event"]
 
 
 _intelligence_route_bundle = create_intelligence_router(
@@ -1406,27 +1361,6 @@ _camera_api_route_bundle = create_camera_api_router(
 )
 app.include_router(_camera_api_route_bundle.router)
 
-snapshot = _camera_api_route_bundle.handlers["snapshot"]
-zone_snapshot = _camera_api_route_bundle.handlers["zone_snapshot"]
-live_info = _camera_api_route_bundle.handlers["live_info"]
-stream_source = _camera_api_route_bundle.handlers["stream_source"]
-stream = _camera_api_route_bundle.handlers["stream"]
-relay_go2rtc_websocket = _camera_api_route_bundle.handlers[
-    "relay_go2rtc_websocket"
-]
-webrtc_signaling = _camera_api_route_bundle.handlers["webrtc_signaling"]
-mse_stream = _camera_api_route_bundle.handlers["mse_stream"]
-start_camera = _camera_api_route_bundle.handlers["start_camera"]
-stop_camera = _camera_api_route_bundle.handlers["stop_camera"]
-motion_test = _camera_api_route_bundle.handlers["motion_test"]
-motion_debug_status = _camera_api_route_bundle.handlers["motion_debug_status"]
-set_motion_debug = _camera_api_route_bundle.handlers["set_motion_debug"]
-motion_debug_image = _camera_api_route_bundle.handlers["motion_debug_image"]
-start_recording = _camera_api_route_bundle.handlers["start_recording"]
-stop_recording = _camera_api_route_bundle.handlers["stop_recording"]
-set_camera_recording = _camera_api_route_bundle.handlers["set_camera_recording"]
-set_camera_detection = _camera_api_route_bundle.handlers["set_camera_detection"]
-
 
 _detection_route_bundle = create_detection_router(
     DetectionRouteDependencies(
@@ -1437,9 +1371,6 @@ _detection_route_bundle = create_detection_router(
     )
 )
 app.include_router(_detection_route_bundle.router)
-
-detect_event_snapshot = _detection_route_bundle.handlers["detect_event_snapshot"]
-detect_debug_frame = _detection_route_bundle.handlers["detect_debug_frame"]
 
 
 _appearance_route_bundle = create_appearance_router(
@@ -1453,13 +1384,6 @@ _appearance_route_bundle = create_appearance_router(
     )
 )
 app.include_router(_appearance_route_bundle.router)
-
-event_snapshot = _appearance_route_bundle.handlers["event_snapshot"]
-event_thumbnail = _appearance_route_bundle.handlers["event_thumbnail"]
-event_appearance_matches = _appearance_route_bundle.handlers["event_appearance_matches"]
-event_related_incidents = _appearance_route_bundle.handlers["event_related_incidents"]
-appearance_index_status = _appearance_route_bundle.handlers["appearance_index_status"]
-queue_appearance_backfill = _appearance_route_bundle.handlers["queue_appearance_backfill"]
 
 
 app.include_router(
@@ -1497,16 +1421,6 @@ app.include_router(
         )
     )
 )
-
-face_status = _face_route_bundle.handlers["face_status"]
-face_people = _face_route_bundle.handlers["face_people"]
-create_face_person = _face_route_bundle.handlers["create_face_person"]
-delete_face_person = _face_route_bundle.handlers["delete_face_person"]
-face_observations = _face_route_bundle.handlers["face_observations"]
-face_observation_count = _face_route_bundle.handlers["face_observation_count"]
-face_observation = _face_route_bundle.handlers["face_observation"]
-assign_face_observation = _face_route_bundle.handlers["assign_face_observation"]
-face_crop = _face_route_bundle.handlers["face_crop"]
 
 
 # Assemble the recording HTTP boundary after its legacy media helpers exist.
@@ -1581,39 +1495,3 @@ _recording_route_bundle = create_recording_router(
     )
 )
 app.include_router(_recording_route_bundle.router)
-
-recordings = _recording_route_bundle.handlers["recordings"]
-recording_events = _recording_route_bundle.handlers["recording_events"]
-recording_day = _recording_route_bundle.handlers["recording_day"]
-recording_grid_day = _recording_route_bundle.handlers["recording_grid_day"]
-recording_grid_updates = _recording_route_bundle.handlers["recording_grid_updates"]
-_public_media_export = _recording_route_bundle.handlers["_public_media_export"]
-create_media_export = _recording_route_bundle.handlers["create_media_export"]
-list_media_exports = _recording_route_bundle.handlers["list_media_exports"]
-media_export_summary = _recording_route_bundle.handlers["media_export_summary"]
-batch_media_exports = _recording_route_bundle.handlers["batch_media_exports"]
-_public_media_export_batch = _recording_route_bundle.handlers[
-    "_public_media_export_batch"
-]
-get_media_export = _recording_route_bundle.handlers["get_media_export"]
-download_media_export = _recording_route_bundle.handlers["download_media_export"]
-play_media_export = _recording_route_bundle.handlers["play_media_export"]
-protect_media_export = _recording_route_bundle.handlers["protect_media_export"]
-update_media_export_metadata = _recording_route_bundle.handlers[
-    "update_media_export_metadata"
-]
-delete_media_export = _recording_route_bundle.handlers["delete_media_export"]
-recording_segment = _recording_route_bundle.handlers["recording_segment"]
-recording_window = _recording_route_bundle.handlers["recording_window"]
-recording_preview = _recording_route_bundle.handlers["recording_preview"]
-recording_preview_strip = _recording_route_bundle.handlers["recording_preview_strip"]
-recording_updates = _recording_route_bundle.handlers["recording_updates"]
-recording_day_hls_playlist = _recording_route_bundle.handlers[
-    "recording_day_hls_playlist"
-]
-recording_day_hls_init = _recording_route_bundle.handlers["recording_day_hls_init"]
-recording_day_hls_segment = _recording_route_bundle.handlers[
-    "recording_day_hls_segment"
-]
-event_clip = _recording_route_bundle.handlers["event_clip"]
-event_stream = _recording_route_bundle.handlers["event_stream"]
