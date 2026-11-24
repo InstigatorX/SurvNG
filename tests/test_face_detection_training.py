@@ -23,7 +23,6 @@ from survng.app.face_detection_dataset import (
 from survng.app.face_detection_evaluation import (
     evaluate_predictions,
     latency_gate,
-    parse_ssd_face_detections as evaluation_parser,
 )
 from survng.app.face_detection_geometry import upper_body_window
 from survng.app.face_detection_routes import (
@@ -78,7 +77,6 @@ def test_ssd_parser_reads_seven_float_rows() -> None:
     assert detections[0]["box"]["y1"] == pytest.approx(10.0)
     assert detections[0]["box"]["x2"] == pytest.approx(50.0)
     assert detections[0]["box"]["y2"] == pytest.approx(30.0)
-    assert evaluation_parser(raw, 100, 50, 0.60) == detections
     with pytest.raises(ValueError):
         parse_ssd_face_detections(np.array([0.5, 0.2], dtype=np.float32), 10, 10, 0.60)
 

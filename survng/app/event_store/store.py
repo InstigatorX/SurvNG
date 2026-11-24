@@ -72,9 +72,6 @@ class EventStore(
 ):
     SNAPSHOT_SIZE_WRITE_BATCH = 50
     SNAPSHOT_REFERENCE_WRITE_BATCH = 50
-    # Match storage repair: low-space, full, and read-only locations can still
-    # prove a file is gone. Offline, unmounted, or unavailable locations cannot.
-    _HEALTHY_SNAPSHOT_LOCATION_STATES = frozenset({"online", "low_space", "full", "read_only"})
     SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY = "snapshot_size_backfill_cursor"
     SNAPSHOT_SIZE_BACKFILL_WORK_KEY = "snapshot_size_backfill_sweep_work"
     SNAPSHOT_SIZE_IDLE_SCAN_SECONDS = 3600.0
@@ -1751,24 +1748,6 @@ class EventStore(
 
     def _snapshot_verdict(self, path: Path) -> str:
         return self._snapshot_gate().verdict(path, presence=path_presence)
-
-    def _snapshot_location_unreliable(self, path: Path) -> bool:
-        """Return whether this snapshot location can prove a file is gone.
-
-        A missing path on an unmounted or unreachable disk is not evidence the
-        image was deleted. Clearing the incident link in that state orphans a
-        file that reappears when the location returns.
-        """
-        if self.media_storage is None:
-            return False
-        location_id = self.media_storage.location_id_for(path, role="snapshots")
-        if location_id is None:
-            return True
-        try:
-            status = self.media_storage.status(location_id)
-        except (KeyError, OSError):
-            return True
-        return status.state not in self._HEALTHY_SNAPSHOT_LOCATION_STATES
 
     def _recover_snapshot_deletion_claims(self) -> None:
         """Finish or release snapshot deletion claims left by a process crash.

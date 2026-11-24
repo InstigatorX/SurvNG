@@ -5,7 +5,6 @@ No recording, detector, encoder or live incident mutations are needed for replay
 """
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import math
@@ -32,14 +31,6 @@ def canonical_json(value: Any) -> str:
 def replay_digest(replay: dict[str, Any]) -> str:
     content = {key: value for key, value in replay.items() if key != "replay_id"}
     return hashlib.sha256(canonical_json(content).encode()).hexdigest()
-
-
-def portable_detection(item: dict[str, Any]) -> dict[str, Any]:
-    result = {key: copy.deepcopy(item[key]) for key in DETECTION_FIELDS if key in item}
-    embedding = result.get("_tracking_embedding")
-    if embedding is not None:
-        result["_tracking_embedding"] = embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
-    return result
 
 
 def validate_replay(replay: dict[str, Any]) -> None:

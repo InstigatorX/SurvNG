@@ -32,7 +32,6 @@ _DURABLE_SNAPSHOT_TABLES = (
     "acquired_samples",
     "scene_snapshot_assets",
 )
-HEALTHY_MEDIA_LOCATION_STATES = frozenset({"online", "full", "read_only"})
 
 
 def _utc_now() -> str:

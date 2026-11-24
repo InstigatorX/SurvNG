@@ -825,17 +825,6 @@ class InferenceSupervisor:
     ) -> list[dict[str, Any]]:
         return self.detect(frame, confidence_threshold)
 
-    def detect_offline(
-        self,
-        frame: np.ndarray,
-        confidence_threshold: float | None = None,
-    ) -> list[dict[str, Any]]:
-        return self._detect_for_workload(
-            frame,
-            confidence_threshold,
-            InferenceWorkload.OFFLINE,
-        )
-
     def detect_tracking(
         self,
         frame: np.ndarray,

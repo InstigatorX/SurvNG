@@ -460,10 +460,6 @@ class Recorder(RecordingIndexMixin):
                 return location_root
         return recordings_root
 
-    def reconcile_volume(self, root: Path, *, require_mount: bool = False) -> bool:
-        """Write the established token onto this root. Never called by deletion."""
-        return self._volume_gate().store.reconcile(root, require_mount=require_mount)
-
     def _camera_dir(self, camera_id: str, source: str = "main") -> Path:
         source = "main" if source == "main" else "live"
         if self.media_storage is None:
