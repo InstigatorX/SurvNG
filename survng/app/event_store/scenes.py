@@ -254,6 +254,7 @@ class EventStoreSceneMixin:
                     on scene_observation_zones(episode_id, displayable);
                 create index if not exists scene_observation_zones_zone
                     on scene_observation_zones(zone, episode_id);
+                drop index if exists scene_observation_event;
                 create index if not exists scene_observation_media on scene_observations(snapshot_path);
                 create index if not exists scene_observation_recording
                     on scene_observations(recording_path) where recording_path != '';

@@ -580,6 +580,7 @@ class RecordedMotionObjectDetector:
         self._scene_frames: deque[TimestampedLiveFrame] = deque(maxlen=4)
         self._scene_frames_lock = threading.Lock()
         self._unexpected_frame_types: set[str] = set()
+        self._unexpected_frame_types_lock = threading.Lock()
         # Bytes of the last frame decoded for this camera (width x height x 3).
         self._last_frame_bytes = 0
 
@@ -1683,8 +1684,10 @@ class RecordedMotionObjectDetector:
         if sample is None or isinstance(sample, TimestampedLiveFrame):
             return sample
         kind = type(sample).__name__
-        if kind not in self._unexpected_frame_types:
+        with self._unexpected_frame_types_lock:
+            first = kind not in self._unexpected_frame_types
             self._unexpected_frame_types.add(kind)
+        if first:
             LOGGER.warning(
                 "Frame provider for %s returned %s instead of TimestampedLiveFrame; "
                 "treating it as no frame",

@@ -434,6 +434,7 @@ class SemanticIndex:
                 )
                 """
             )
+            connection.execute("drop index if exists idx_semantic_generation_time")
             connection.execute(
                 """
                 create index if not exists idx_semantic_event
