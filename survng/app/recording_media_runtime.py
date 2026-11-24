@@ -33,12 +33,18 @@ from .media_sessions import (
     MediaSessionLease,
     MediaSessionRequest,
 )
-from .recording_media import RECORDING_FMP4_VERSION, concatenated_clip_timing, event_clip_window, playback_segment_duration
+from .recording_media import RECORDING_FMP4_VERSION, concatenated_clip_timing, event_clip_window, mp4_video_dimensions, playback_segment_duration
 from .recording_mp4 import offset_fmp4_timestamps
 from .recording_routes import recording_source
 from .security import redact_secret_text
 
 LOGGER = logging.getLogger(__name__)
+
+# Scrub-preview strips: tiles per row, the most tiles one segment gets, and
+# the frame size (about 1280x800) up to which every frame is decoded.
+RECORDING_STRIP_COLUMNS = 6
+RECORDING_STRIP_MAX_TILES = 60
+RECORDING_STRIP_FULL_DECODE_PIXELS = 1_024_000
 
 
 class RecordingPrewarmCancelled(RuntimeError):
@@ -842,6 +848,148 @@ class RecordingMediaRuntime:
                 self.recording_preview_build_limiter.release()
             self._maintain_recording_preview_cache(preview_path)
             return preview_path
+
+    def _recording_preview_strip(
+        self,
+        row: dict,
+        *,
+        width: int = 320,
+        active_manager: AppManager | None = None,
+    ) -> tuple[Path, dict]:
+        """A cached JPEG grid of one segment's frames at a fixed step, and its layout.
+
+        The timeline shows these while the playhead is dragged: one request
+        covers a whole segment, so moving within it needs no further decode.
+        Tile ``i`` is the frame ``i * step_seconds`` into the segment.
+        """
+        selected_manager = active_manager or self.manager
+        selected_config = getattr(selected_manager, 'config', self.config)
+        source_path = self._recording_storage_path(row.get('path'), active_manager=selected_manager)
+        start_epoch = float(row.get('start_epoch') or 0)
+        end_epoch = float(row.get('end_epoch') or start_epoch)
+        duration = max(0.05, end_epoch - start_epoch)
+        tile_width = max(160, min(640, int(width)))
+        # One frame a second; a long segment is thinned to at most 60 tiles.
+        step = max(1, math.ceil(duration / RECORDING_STRIP_MAX_TILES))
+        expected = math.ceil(duration / step) + 2
+        columns = min(RECORDING_STRIP_COLUMNS, expected)
+        rows = math.ceil(expected / columns)
+        try:
+            stat = source_path.stat()
+        except OSError as exc:
+            raise HTTPException(status_code=404, detail='recording file not found') from exc
+        fingerprint = (
+            f'strip-v1:{source_path}:{stat.st_mtime_ns}:{stat.st_size}:'
+            f'{duration:.3f}:{tile_width}:{step}:{columns}x{rows}'
+        )
+        cache_key = hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:32]
+        cache_dir = selected_manager.database_dir / 'recording-preview-cache'
+        strip_path = cache_dir / f'{cache_key}.jpg'
+        metadata_path = strip_path.with_suffix('.json')
+
+        def cached() -> dict | None:
+            if not self._recording_preview_ready(strip_path, touch=True):
+                return None
+            try:
+                layout = json.loads(metadata_path.read_text(encoding='utf-8'))
+                return layout if int(layout['count']) > 0 else None
+            except (json.JSONDecodeError, KeyError, OSError, TypeError, ValueError):
+                return None
+
+        layout = cached()
+        if layout is not None:
+            return strip_path, layout
+        with self.recording_preview_locks_guard:
+            lock = self.recording_preview_locks.setdefault(cache_key, threading.Lock())
+        with lock:
+            layout = cached()
+            if layout is not None:
+                return strip_path, layout
+            if not self.recording_preview_build_limiter.acquire(timeout=3.0):
+                raise HTTPException(status_code=429, detail='recording preview generator is busy', headers={'Retry-After': '1'})
+            temporary = cache_dir / f'.{cache_key}.{os.getpid()}.{threading.get_ident()}.tmp.jpg'
+            try:
+                session = None
+                media_sessions = getattr(selected_manager, 'media_sessions', None)
+                if media_sessions is not None:
+                    try:
+                        session = media_sessions.acquire(
+                            MediaSessionRequest(
+                                MediaSessionKind.RECORDING_PREVIEW,
+                                resources={MediaResourceClass.TRANSCODE_PROCESS: 1},
+                                owner_generation=getattr(
+                                    selected_manager,
+                                    'media_session_generation',
+                                    None,
+                                ),
+                            ),
+                            timeout=3.0,
+                        )
+                    except MediaSessionAdmissionError as exc:
+                        raise HTTPException(
+                            status_code=429,
+                            detail=str(exc),
+                            headers={'Retry-After': '1'},
+                        ) from exc
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                # A large frame costs most of its time in the decoder, so only
+                # its keyframes are decoded: the frame for a second with no
+                # keyframe is then the keyframe before it. Small streams (a
+                # camera's sub stream) are cheap enough to decode in full.
+                dimensions = mp4_video_dimensions(source_path)
+                keyframes_only = (
+                    dimensions is None
+                    or dimensions[0] * dimensions[1] > RECORDING_STRIP_FULL_DECODE_PIXELS
+                )
+                command = [
+                    selected_config.ffmpeg_path, '-hide_banner', '-loglevel', 'info', '-nostdin',
+                    *RECORDED_FRAME_INPUT_THREAD_ARGS,
+                    *(['-skip_frame', 'nokey'] if keyframes_only else []),
+                    '-i', str(source_path),
+                    '-map', '0:v:0', '-an', '-frames:v', '1',
+                    *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
+                    # round=up: tile i is the last frame at or before
+                    # i * step, not one from the second that follows it.
+                    '-vf', (
+                        f'fps=1/{step}:round=up,showinfo@strip,'
+                        f"scale='min({tile_width},iw)':-2,tile={columns}x{rows}"
+                    ),
+                    '-q:v', '6', '-y', str(temporary),
+                ]
+                try:
+                    if session is None:
+                        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15)
+                    else:
+                        with session:
+                            result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15)
+                except subprocess.TimeoutExpired as exc:
+                    raise HTTPException(status_code=504, detail='recording preview timed out') from exc
+                except OSError as exc:
+                    raise HTTPException(status_code=500, detail='recording preview failed') from exc
+                # The grid is padded with blank tiles; only these hold a frame.
+                count = min(
+                    columns * rows,
+                    len(re.findall(rb'showinfo@strip[^\r\n]*\bpts_time:', result.stderr or b'')),
+                )
+                if result.returncode != 0 or count <= 0 or not temporary.is_file() or temporary.stat().st_size <= 0:
+                    error = (result.stderr or b'').decode('utf-8', errors='replace').strip()
+                    LOGGER.warning('recording preview strip failed for %s: %s', source_path.name, redact_secret_text(error[-300:]))
+                    raise HTTPException(status_code=500, detail='recording preview failed')
+                layout = {
+                    'count': count,
+                    'columns': columns,
+                    'rows': rows,
+                    'step_seconds': step,
+                    'keyframes_only': keyframes_only,
+                }
+                # The layout first: an image without one is never served.
+                metadata_path.write_text(json.dumps(layout, separators=(',', ':')), encoding='utf-8')
+                os.replace(temporary, strip_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+                self.recording_preview_build_limiter.release()
+            self._maintain_recording_preview_cache(strip_path)
+            return strip_path, layout
 
     @staticmethod
     def _recording_preview_timestamp(path: Path) -> tuple[float | None, str]:

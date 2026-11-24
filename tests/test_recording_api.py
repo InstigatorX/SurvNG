@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 import tempfile
 import struct
 import unittest
@@ -573,6 +575,72 @@ class RecordingApiTest(unittest.TestCase):
             self.assertEqual(before_input[before_input.index("-filter_threads") + 1], "1")
             self.assertEqual(after_input[after_input.index("-threads:v") + 1], "1")
             self.assertIn(str(manager.database_dir / "recording-preview-cache"), str(first))
+
+    def test_recording_preview_strip_holds_one_frame_a_second_and_is_built_once(self) -> None:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            self.skipTest("ffmpeg unavailable")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            recordings_dir = root / "recordings"
+            recordings_dir.mkdir()
+            source_path = recordings_dir / "segment.mp4"
+            # 4.5 s, a keyframe every 2 s: frames exist for seconds 0 to 4.
+            subprocess.run([
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                "testsrc2=size=160x120:rate=10:duration=4.5", "-c:v", "libx264", "-g", "20",
+                "-bf", "0", "-y", str(source_path),
+            ], check=True, capture_output=True, timeout=60)
+            manager = SimpleNamespace(
+                database_dir=root / "database",
+                recorder=SimpleNamespace(recordings_dir=recordings_dir),
+                config=SimpleNamespace(ffmpeg_path=ffmpeg),
+            )
+            row = {"path": str(source_path), "start_epoch": 100.0, "end_epoch": 104.5}
+            runtime = main._recording_media_runtime
+            real_run = subprocess.run
+            with (
+                patch.object(main, "manager", manager),
+                patch("survng.app.recording_media_runtime.subprocess.run", side_effect=real_run) as run,
+                patch.object(runtime, "_maintain_recording_preview_cache"),
+            ):
+                strip, layout = runtime._recording_preview_strip(row, width=160)
+                again, cached_layout = runtime._recording_preview_strip(row, width=160)
+                small_command = run.call_args_list[0].args[0]
+                # A large frame costs most of its time in the decoder: only
+                # its keyframes are decoded, and the grid has the same tiles.
+                with patch(
+                    "survng.app.recording_media_runtime.mp4_video_dimensions",
+                    return_value=(2560, 1920),
+                ):
+                    _wide, wide_layout = runtime._recording_preview_strip(row, width=200)
+                large_command = run.call_args_list[-1].args[0]
+
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual((again, cached_layout), (strip, layout))
+            self.assertEqual(
+                layout,
+                {"count": 5, "columns": 6, "rows": 2, "step_seconds": 1, "keyframes_only": False},
+            )
+            self.assertNotIn("-skip_frame", small_command)
+            self.assertEqual(large_command[large_command.index("-skip_frame") + 1], "nokey")
+            self.assertLess(large_command.index("-skip_frame"), large_command.index("-i"))
+            self.assertEqual(wide_layout["count"], 5)
+            self.assertTrue(wide_layout["keyframes_only"])
+            # Bounded decoder threads, as for every other recorded-frame read.
+            before_input = small_command[:small_command.index("-i")]
+            self.assertEqual(before_input[before_input.index("-threads:v") + 1], "2")
+            import cv2
+
+            image = cv2.imread(str(strip))
+            # Six tiles of 160x120 across, two rows; unused tiles are blank.
+            self.assertEqual(image.shape[:2], (240, 960))
+            tiles = [image[0:120, index * 160:(index + 1) * 160] for index in range(6)]
+            self.assertTrue(all(float(tile.mean()) > 20 for tile in tiles[:5]))
+            self.assertLess(float(tiles[5].mean()), 5)
+            # testsrc2 moves: consecutive seconds are different pictures.
+            self.assertGreater(float(cv2.absdiff(tiles[0], tiles[1]).mean()), 1.0)
+            self.assertIn(str(manager.database_dir / "recording-preview-cache"), str(strip))
 
     def test_recording_preview_can_extract_an_exact_display_frame(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

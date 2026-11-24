@@ -443,6 +443,62 @@ class RecordingRouteLifecycleTests(TestCase):
         self.assertEqual(response.headers["x-survng-actual-timestamp"], "107.909000")
         self.assertEqual(response.headers["x-survng-timestamp-source"], "source_pts")
 
+    def test_preview_strip_prefers_the_sub_stream_and_describes_its_tiles(self) -> None:
+        recorded = {
+            "live": [{"path": "/recordings/gate-sub.mp4", "start_epoch": 103.0, "end_epoch": 113.0}],
+            "main": [{"path": "/recordings/gate.mp4", "start_epoch": 100.0, "end_epoch": 110.0}],
+        }
+        asked: list[str] = []
+
+        def rows_between(_camera_id, _start, _end, source, **_kwargs):
+            asked.append(source)
+            return recorded[source]
+
+        manager = SimpleNamespace(
+            camera=lambda camera_id: object() if camera_id == "gate" else None,
+            recorder=SimpleNamespace(recording_rows_between=rows_between),
+        )
+        built: list[tuple[str, int]] = []
+
+        def strip(_manager, row, *, width):
+            built.append((row["path"], width))
+            return Path("strip.jpg"), {"count": 10, "columns": 6, "rows": 2, "step_seconds": 1}
+
+        handler = create_recording_router(
+            replace(_dependencies(lambda: manager), recording_preview_strip=strip)
+        ).handlers["recording_preview_strip"]
+
+        response = handler("gate", 107.9, "main", 320)
+
+        # The sub stream shows the same scene and decodes several times faster.
+        self.assertEqual(built, [("/recordings/gate-sub.mp4", 320)])
+        self.assertEqual(response.headers["x-survng-strip-source"], "live")
+        # The tiles are placed by this segment's own start, not the main one's.
+        self.assertEqual(response.headers["x-survng-strip-start"], "103.000")
+        self.assertEqual(response.headers["x-survng-strip-end"], "113.000")
+        self.assertEqual(response.headers["x-survng-strip-step"], "1")
+        self.assertEqual(response.headers["x-survng-strip-count"], "10")
+        self.assertEqual(response.headers["x-survng-strip-columns"], "6")
+        self.assertEqual(response.headers["x-survng-strip-rows"], "2")
+
+        # No sub recording at that time: the stream being played is used.
+        built.clear()
+        response = handler("gate", 101.0, "main", 320)
+        self.assertEqual(built, [("/recordings/gate.mp4", 320)])
+        self.assertEqual(response.headers["x-survng-strip-source"], "main")
+        self.assertEqual(response.headers["x-survng-strip-start"], "100.000")
+
+        # Nothing recorded there, or a row that ends before it: a gap.
+        with self.assertRaises(HTTPException) as gap:
+            handler("gate", 150.0, "main", 320)
+        self.assertEqual(gap.exception.status_code, 404)
+        asked.clear()
+        handler("gate", 107.9, "live", 320)
+        self.assertEqual(asked, ["live"])
+        with self.assertRaises(HTTPException) as bad_width:
+            handler("gate", 107.9, "main", 4000)
+        self.assertEqual(bad_width.exception.status_code, 400)
+
     def test_request_holds_manager_lease_while_query_runs(self) -> None:
         active_manager = _Manager("current")
         access = ManagerAccessCoordinator()

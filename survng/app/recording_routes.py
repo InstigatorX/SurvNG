@@ -90,6 +90,7 @@ class RecordingRouteDependencies:
     event_clip_window: Callable[..., tuple[float, float]]
     ensure_event_clip: Callable[..., Path]
     manager_lock: threading.RLock | None = None
+    recording_preview_strip: Callable[..., tuple[Path, dict]] | None = None
     manager_access: ManagerAccessCoordinator | None = None
     encoded_fragment_source: (
         Callable[[Any], EncodedFragmentSource] | None
@@ -974,6 +975,70 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             headers=headers,
         )
 
+    @router.get("/api/cameras/{camera_id}/recordings/preview-strip.jpg")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
+    def recording_preview_strip(
+        camera_id: str,
+        epoch: float,
+        source: str = "main",
+        width: int = 320,
+    ) -> FileResponse:
+        """One segment's frames as a grid, for scrubbing without a request per move.
+
+        The segment is the one holding ``epoch``. A camera's sub stream is
+        used when it was recorded then: it shows the same scene and decodes
+        several times faster. The headers say which seconds the tiles cover.
+        """
+        active_manager = _require_recording_camera(deps, camera_id)
+        if deps.recording_preview_strip is None:
+            raise HTTPException(status_code=404, detail="recording preview strips are unavailable")
+        if not math.isfinite(epoch) or epoch <= 0:
+            raise HTTPException(status_code=400, detail="invalid recording preview time")
+        if width < 160 or width > 640:
+            raise HTTPException(status_code=400, detail="invalid recording preview width")
+        selected_source = recording_source(source)
+        row = None
+        row_source = selected_source
+        for candidate_source in dict.fromkeys(("live", selected_source)):
+            rows = active_manager.recorder.recording_rows_between(
+                camera_id,
+                epoch - 0.001,
+                epoch + 0.001,
+                candidate_source,
+                discover_missing=False,
+            )
+            row = next(
+                (
+                    candidate for candidate in rows
+                    if float(candidate.get("start_epoch") or 0) <= epoch
+                    < float(candidate.get("end_epoch") or 0)
+                ),
+                None,
+            )
+            if row is not None:
+                row_source = candidate_source
+                break
+        if row is None:
+            raise HTTPException(status_code=404, detail="no recording exists at this time")
+        strip_path, layout = deps.recording_preview_strip(
+            active_manager,
+            row,
+            width=width,
+        )
+        return FileResponse(
+            strip_path,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "private, max-age=3600",
+                "X-SurvNG-Strip-Start": f"{float(row['start_epoch']):.3f}",
+                "X-SurvNG-Strip-End": f"{float(row['end_epoch']):.3f}",
+                "X-SurvNG-Strip-Step": f"{float(layout['step_seconds']):g}",
+                "X-SurvNG-Strip-Count": str(int(layout["count"])),
+                "X-SurvNG-Strip-Columns": str(int(layout["columns"])),
+                "X-SurvNG-Strip-Rows": str(int(layout["rows"])),
+                "X-SurvNG-Strip-Source": row_source,
+            },
+        )
 
     @router.get("/api/cameras/{camera_id}/recordings/updates")
     @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
@@ -1475,6 +1540,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                 recording_mobile_window,
                 recording_window,
                 recording_preview,
+                recording_preview_strip,
                 recording_updates,
                 recording_day_hls_playlist,
                 recording_day_hls_init,
