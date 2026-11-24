@@ -117,7 +117,7 @@ def test_server_disables_uvicorn_proxy_header_processing(monkeypatch: pytest.Mon
         "uvicorn_tls_kwargs",
         lambda config, port: {"port": port},
     )
-    monkeypatch.setattr(server_main.uvicorn, "run", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(server_main, "_run_server", lambda **kwargs: captured.update(kwargs))
 
     server_main.main()
 

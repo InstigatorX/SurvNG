@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 
 import uvicorn
+from uvicorn.main import STARTUP_FAILURE
 
+from . import process_exit
 from .bind_policy import assert_network_bind_allowed
 from .config import load_config
 from .local_observability import SOCKET_ENVIRONMENT_VARIABLE, default_socket_path
@@ -47,7 +50,32 @@ def main() -> None:
     if tls.get("ssl_certfile") and tls.get("ssl_keyfile"):
         kwargs["ssl_certfile"] = tls["ssl_certfile"]
         kwargs["ssl_keyfile"] = tls["ssl_keyfile"]
-    uvicorn.run(**kwargs)
+    _run_server(**kwargs)
+
+
+def _run_server(**kwargs: object) -> None:
+    """Run Uvicorn, exiting non-zero when the application asked for a restart.
+
+    Equivalent to ``uvicorn.run`` for one worker, but keeps the ``Server`` so
+    ``process_exit.request_supervisor_restart`` can stop it gracefully.
+    """
+    if kwargs.get("reload"):
+        uvicorn.run(**kwargs)  # type: ignore[arg-type]
+        return
+    server = uvicorn.Server(uvicorn.Config(**kwargs))  # type: ignore[arg-type]
+    process_exit.attach_server(
+        server,
+        graceful_shutdown_seconds=float(kwargs.get("timeout_graceful_shutdown") or 30.0),  # type: ignore[arg-type]
+    )
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        pass
+    if not server.started:
+        sys.exit(STARTUP_FAILURE)
+    status = process_exit.requested_exit_status()
+    if status is not None:
+        sys.exit(status)
 
 
 if __name__ == "__main__":

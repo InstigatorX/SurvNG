@@ -15,6 +15,7 @@ import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Iterable, Iterator, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
@@ -365,6 +366,9 @@ class SemanticIndex:
         self._vector_cache: _SemanticVectorCache | None = None
         self._vector_cache_disabled_until = 0.0
         self._vector_cache_error = ""
+        # The calling thread's stop check, set by the service's own threads so
+        # a stop can abort the index's long reads on them (and nowhere else).
+        self._thread_stop = threading.local()
         self._coverage_lock = threading.Lock()
         self._coverage_cache: dict[
             tuple[str, str] | None, tuple[float, int, dict[str, int]]
@@ -670,6 +674,10 @@ class SemanticIndex:
             str(row["newest_write"] if row else ""),
         )
 
+    def bind_thread_stop(self, should_stop: Callable[[], bool] | None) -> None:
+        """Let ``should_stop`` abort long index reads made on the calling thread."""
+        self._thread_stop.check = should_stop
+
     def _record_cache_mutation(
         self,
         identity: SemanticModelIdentity | None,
@@ -687,8 +695,25 @@ class SemanticIndex:
                 if self._vector_cache is cache:
                     cache.force_rebuild = True
             return
-        with self._connect() as connection:
-            signature = self._generation_signature(connection, identity)
+        # The signature is one statement that takes seconds on a large
+        # install; a stop must not wait for it. The write itself is committed.
+        should_stop: Callable[[], bool] | None = getattr(self._thread_stop, "check", None)
+        try:
+            with self._connect() as connection:
+                if should_stop is not None:
+                    connection.set_progress_handler(lambda: int(should_stop()), 10_000)
+                try:
+                    signature = self._generation_signature(connection, identity)
+                finally:
+                    if should_stop is not None:
+                        connection.set_progress_handler(None, 0)
+        except sqlite3.OperationalError:
+            if should_stop is None or not should_stop():
+                raise
+            with self._cache_lock:
+                if self._vector_cache is cache:
+                    cache.force_rebuild = True
+            return
         with self._cache_lock:
             if self._vector_cache is not cache:
                 return
@@ -794,6 +819,8 @@ class SemanticIndex:
         self,
         connection: sqlite3.Connection,
         identity: SemanticModelIdentity,
+        *,
+        should_stop: Callable[[], bool] | None = None,
     ) -> _SemanticVectorCache | None:
         now = time.monotonic()
         if now < self._vector_cache_disabled_until:
@@ -819,6 +846,17 @@ class SemanticIndex:
                 if len(cache.overrides) > self.VECTOR_CACHE_MAX_DELTA_ROWS:
                     cache = self._build_vector_cache_locked(connection, identity, signature)
         except (MemoryError, sqlite3.Error) as exc:
+            if (
+                isinstance(exc, sqlite3.OperationalError)
+                and should_stop is not None
+                and should_stop()
+            ):
+                # A requested stop aborted the load; it is not a cache failure.
+                # An interrupted in-place refresh may have consumed its dirty
+                # events, so the next load must rebuild rather than trust it.
+                if self._vector_cache is not None:
+                    self._vector_cache.force_rebuild = True
+                raise
             message = str(exc)
             repeat = message == self._vector_cache_error
             self._vector_cache = None
@@ -834,11 +872,32 @@ class SemanticIndex:
             return None
         return cache
 
-    def warm_search_cache(self, identity: SemanticModelIdentity) -> None:
-        """Load the complete active generation without delaying application startup."""
+    def warm_search_cache(
+        self,
+        identity: SemanticModelIdentity,
+        *,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> None:
+        """Load the complete active generation without delaying application startup.
+
+        ``should_stop`` aborts the load between SQLite steps. The generation
+        signature alone can take seconds on a large install, and shutdown
+        allows the backfill thread only a few seconds to stop.
+        """
         with self._cache_lock, self._connect() as connection:
-            connection.execute("begin")
-            self._vector_cache_locked(connection, identity)
+            if should_stop is not None:
+                if should_stop():
+                    return
+                connection.set_progress_handler(lambda: int(should_stop()), 10_000)
+            try:
+                connection.execute("begin")
+                self._vector_cache_locked(connection, identity, should_stop=should_stop)
+            except sqlite3.OperationalError:
+                if should_stop is None or not should_stop():
+                    raise
+            finally:
+                if should_stop is not None:
+                    connection.set_progress_handler(None, 0)
 
     def search_cache_status(
         self, identity: SemanticModelIdentity | None = None
@@ -2971,6 +3030,7 @@ class SemanticSearchService(DisabledSemanticSearch):
             self._bootstrap_thread.start()
 
     def _initialize(self, event_store: Any) -> None:
+        self.index.bind_thread_stop(self._stop.is_set)
         retry_seconds = SEMANTIC_WORKER_RETRY_INITIAL_SECONDS
         configured_device = str(self.config.device)
         target_device = configured_device
@@ -3135,6 +3195,7 @@ class SemanticSearchService(DisabledSemanticSearch):
 
     def _run_backfill(self, event_store: Any) -> None:
         """Retry transient failures and periodically revisit quarantined media."""
+        self.index.bind_thread_stop(self._stop.is_set)
         while not self._stop.is_set():
             try:
                 self._set_backfill_running(True)
@@ -3145,7 +3206,9 @@ class SemanticSearchService(DisabledSemanticSearch):
                     self._set_backfill_running(False)
                 encoder = self.encoder
                 if encoder is not None:
-                    self.index.warm_search_cache(encoder.identity)
+                    self.index.warm_search_cache(
+                        encoder.identity, should_stop=self._stop.is_set,
+                    )
                 if encoder is None or not self.index.has_media_failures(encoder.identity):
                     return
                 if self._stop.wait(SEMANTIC_MEDIA_QUARANTINE_RETRY_SECONDS):
@@ -3501,6 +3564,7 @@ class SemanticSearchService(DisabledSemanticSearch):
         )
 
     def _run(self) -> None:
+        self.index.bind_thread_stop(self._stop.is_set)
         while not self._stop.is_set():
             try:
                 priority, _sequence, event = self._queue.get(timeout=0.5)
