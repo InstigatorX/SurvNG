@@ -473,6 +473,11 @@ class DatabaseRetentionConfig(BaseModel):
     enabled: bool = True
     # Report what would be removed without deleting anything.
     dry_run: bool = True
+    # Daily run at this host-local time (HH:MM), when camera activity is low.
+    run_at: str = Field(default="03:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    # Catch-up threshold: when the last completed run started longer ago than
+    # this (the service was down at ``run_at``), startup runs the job after a
+    # short delay instead of waiting for the next ``run_at``.
     interval_hours: float = Field(default=24.0, ge=1.0, le=168.0)
     # Empty live-discovery frames serve only as a 40-second confirmation baseline.
     empty_discovery_hours: float = Field(default=24.0, ge=1.0, le=720.0)

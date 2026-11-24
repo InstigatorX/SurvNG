@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Database cleanup runs daily at `database_retention.run_at` (host local time,
+  default `03:00`) instead of 10 minutes after every restart. A restart only
+  starts a catch-up run when the last completed run began more than
+  `interval_hours` ago. See `docs/guide/admin.md`.
 - Only data written by `v1.2.0` or later is supported. Startup no longer
   upgrades older databases, `secrets.json` must be the encrypted format, and
   completed exports are always served as MP4. Startup drops retired tables that
