@@ -67,9 +67,16 @@ def require_minimum_databases(database_dir: Path, recording_index_dir: Path) -> 
 
 
 def require_minimum_file(path: Path, minimum: SchemaMinimum) -> None:
-    """Check one database file read-only; a missing file is new and passes."""
+    """Check one database file read-only; a missing file is new and passes.
+
+    A cleanly closed WAL database is opened immutable, so SQLite creates no
+    -wal or -shm file beside it. After a crash the -wal file holds committed
+    pages, so the file is opened read-only instead, which can add -shm.
+    """
     if not path.is_file():
         return
-    uri = f"{path.resolve().as_uri()}?mode=ro"
+    wal = path.with_name(path.name + "-wal")
+    mode = "mode=ro" if wal.exists() else "immutable=1"
+    uri = f"{path.resolve().as_uri()}?{mode}"
     with closing(sqlite3.connect(uri, uri=True, timeout=10.0)) as connection:
         require_minimum_schema(connection, minimum)
