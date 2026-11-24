@@ -997,8 +997,8 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         if width < 160 or width > 640:
             raise HTTPException(status_code=400, detail="invalid recording preview width")
         selected_source = recording_source(source)
-        row = None
-        row_source = selected_source
+        built = None
+        unavailable: HTTPException | None = None
         for candidate_source in dict.fromkeys(("live", selected_source)):
             rows = active_manager.recorder.recording_rows_between(
                 camera_id,
@@ -1015,16 +1015,28 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                 ),
                 None,
             )
-            if row is not None:
-                row_source = candidate_source
-                break
-        if row is None:
+            if row is None:
+                continue
+            try:
+                strip_path, layout = deps.recording_preview_strip(
+                    active_manager,
+                    row,
+                    width=width,
+                )
+            except HTTPException as exc:
+                # An indexed file that has gone (or cannot be served) is not
+                # the end of it: the other stream may still hold this time.
+                if exc.status_code not in {403, 404}:
+                    raise
+                unavailable = exc
+                continue
+            built = (row, candidate_source, strip_path, layout)
+            break
+        if built is None:
+            if unavailable is not None:
+                raise unavailable
             raise HTTPException(status_code=404, detail="no recording exists at this time")
-        strip_path, layout = deps.recording_preview_strip(
-            active_manager,
-            row,
-            width=width,
-        )
+        row, row_source, strip_path, layout = built
         return FileResponse(
             strip_path,
             media_type="image/jpeg",

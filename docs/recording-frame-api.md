@@ -41,29 +41,35 @@ GET /api/cameras/{camera_id}/recordings/preview-strip.jpg?epoch={unix_seconds}&s
 
 Returns one JPEG holding a grid of frames from the recording segment that
 contains `epoch`: one frame for each second (a segment longer than 60 s is
-thinned to at most 60 tiles). The Timeline shows these in the player while the
+thinned to a tile every few seconds, about 60 in all). The Timeline shows these in the player while the
 playhead is dragged, so moving within a loaded segment needs no request.
 
 - The camera's sub stream is used when it was recorded at that time, whatever
   `source` says: it shows the same scene and decodes several times faster.
-  Otherwise the requested source is used. `X-SurvNG-Strip-Source` reports
-  which.
+  Otherwise, or when that file can no longer be served, the requested source
+  is used. `X-SurvNG-Strip-Source` reports which.
 - `X-SurvNG-Strip-Start` and `X-SurvNG-Strip-End` are the wall-clock bounds of
   that segment. Tile `i` (row-major, `X-SurvNG-Strip-Columns` by
   `X-SurvNG-Strip-Rows`) is the last frame at or before
-  `start + i * X-SurvNG-Strip-Step`. Only the first `X-SurvNG-Strip-Count`
-  tiles hold a frame; the rest of the grid is blank.
+  `start + i * X-SurvNG-Strip-Step`; if the video starts a little into the
+  file, tile 0 is its first frame. Only the first `X-SurvNG-Strip-Count` tiles
+  hold a frame; the rest of the grid is blank, and a time past the last tile
+  is shown by the last tile.
 - A frame larger than about one megapixel is decoded at its keyframes only, so
   on a camera with a keyframe interval longer than a second, a tile can show
-  the keyframe before its second. Smaller streams are decoded in full.
+  the keyframe before its second, and the tiles end at the last keyframe.
+  Smaller streams are decoded in full.
 - `width` is the tile width, 160 to 640.
 - Such a large frame is decoded and scaled on the GPU through VAAPI where
   hardware acceleration is not `off` and VAAPI works (measured at about 0.2 s
-  against 0.5 s on the CPU for 2560x1920). If that fails the CPU builds the
-  strip, and the GPU is not tried again for five minutes.
+  against 0.5 s on the CPU for 2560x1920). If that fails or takes more than
+  5 s, the CPU builds the strip and the GPU is not tried again, for any
+  camera, for five minutes.
 - A strip is built on first request and kept in the preview cache. Two builds
-  run at once and each holds a transcode media session; a busy generator
-  answers `429` with `Retry-After`. A time with no recording is `404`.
+  run at once. Each holds a JPEG-encoder media session, not one of the two
+  transcode slots that event clips, exports and HomeKit share. A busy
+  generator answers `429` with `Retry-After`. A time with no recording is
+  `404`.
 
 The page runs two requests at a time with no queue: when one finishes, the
 next is for where the playhead is then, and after that for up to two segments

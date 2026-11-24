@@ -488,6 +488,34 @@ class RecordingRouteLifecycleTests(TestCase):
         self.assertEqual(response.headers["x-survng-strip-source"], "main")
         self.assertEqual(response.headers["x-survng-strip-start"], "100.000")
 
+        # The sub stream is indexed but its file has gone: the stream being
+        # played still has this time.
+        def strip_without_sub(_manager, row, *, width):
+            if "sub" in row["path"]:
+                raise HTTPException(status_code=404, detail="recording file not found")
+            return strip(_manager, row, width=width)
+
+        fallback = create_recording_router(
+            replace(_dependencies(lambda: manager), recording_preview_strip=strip_without_sub)
+        ).handlers["recording_preview_strip"]
+        built.clear()
+        response = fallback("gate", 107.9, "main", 320)
+        self.assertEqual(built, [("/recordings/gate.mp4", 320)])
+        self.assertEqual(response.headers["x-survng-strip-source"], "main")
+        # With no other stream to turn to, the reason is reported as it was.
+        with self.assertRaises(HTTPException) as gone:
+            fallback("gate", 107.9, "live", 320)
+        self.assertEqual(gone.exception.status_code, 404)
+        # A busy generator is not a reason to try the other stream.
+        def busy(_manager, _row, *, width):
+            raise HTTPException(status_code=429, detail="busy")
+
+        with self.assertRaises(HTTPException) as refused:
+            create_recording_router(
+                replace(_dependencies(lambda: manager), recording_preview_strip=busy)
+            ).handlers["recording_preview_strip"]("gate", 107.9, "main", 320)
+        self.assertEqual(refused.exception.status_code, 429)
+
         # Nothing recorded there, or a row that ends before it: a gap.
         with self.assertRaises(HTTPException) as gap:
             handler("gate", 150.0, "main", 320)
