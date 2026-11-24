@@ -54,8 +54,8 @@ RECORDINGS_SCHEMA_MINIMUM: SchemaMinimum = {
 def require_minimum_databases(database_dir: Path, recording_index_dir: Path) -> None:
     """Check every existing database, read-only, before any store opens one.
 
-    A missing file is a new installation and passes. Nothing is created or
-    changed here, so a rejected installation is left exactly as it was.
+    A missing file is a new installation and passes. No database is created or
+    changed here, so a rejected installation keeps its data and schema.
     """
     for path, minimum in (
         (database_dir / "survng.sqlite3", MAIN_SCHEMA_MINIMUM),
@@ -69,14 +69,12 @@ def require_minimum_databases(database_dir: Path, recording_index_dir: Path) -> 
 def require_minimum_file(path: Path, minimum: SchemaMinimum) -> None:
     """Check one database file read-only; a missing file is new and passes.
 
-    A cleanly closed WAL database is opened immutable, so SQLite creates no
-    -wal or -shm file beside it. After a crash the -wal file holds committed
-    pages, so the file is opened read-only instead, which can add -shm.
+    Read-only is safe while another manager generation writes the file during
+    a reload. SQLite may still add its -wal and -shm side files to a WAL
+    database; the database itself is not changed.
     """
     if not path.is_file():
         return
-    wal = path.with_name(path.name + "-wal")
-    mode = "mode=ro" if wal.exists() else "immutable=1"
-    uri = f"{path.resolve().as_uri()}?{mode}"
+    uri = f"{path.resolve().as_uri()}?mode=ro"
     with closing(sqlite3.connect(uri, uri=True, timeout=10.0)) as connection:
         require_minimum_schema(connection, minimum)

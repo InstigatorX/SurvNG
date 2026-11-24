@@ -300,18 +300,25 @@ def test_retired_scene_changes_history_is_kept_but_no_longer_written(tmp_path):
         assert conn.execute('select incident_id from scene_changes').fetchall() == [('old',)]
 
 
-def test_startup_reports_an_old_database_instead_of_a_telemetry_failure():
-    from unittest.mock import patch
+def test_startup_reports_a_manager_failure_instead_of_a_telemetry_failure():
+    from types import SimpleNamespace
+    from unittest.mock import Mock, patch
 
     from survng.app import main
     from survng.app.main_database import UnsupportedDatabaseError
 
-    with patch.object(main, 'get_manager', side_effect=UnsupportedDatabaseError('old database')):
-        with pytest.raises(UnsupportedDatabaseError):
-            main._record_process_lifecycle('startup_started')
+    for failure in (UnsupportedDatabaseError('old database'), sqlite3.OperationalError('unreadable')):
+        with patch.object(main, 'get_manager', side_effect=failure):
+            with pytest.raises(type(failure)):
+                main._record_process_lifecycle('startup_started')
+    # A failed telemetry write alone stays non-fatal.
+    telemetry = Mock()
+    telemetry.record_lifecycle_event.side_effect = sqlite3.OperationalError('locked')
+    with patch.object(main, 'get_manager', return_value=SimpleNamespace(telemetry=telemetry)):
+        main._record_process_lifecycle('startup_started')
 
 
-def test_event_store_refusing_an_old_jobs_database_creates_no_files(tmp_path):
+def test_event_store_refusing_an_old_jobs_database_creates_no_database(tmp_path):
     from survng.app.main_database import UnsupportedDatabaseError
 
     conn = sqlite3.connect(tmp_path / 'detection-jobs.sqlite3')
@@ -319,7 +326,11 @@ def test_event_store_refusing_an_old_jobs_database_creates_no_files(tmp_path):
     conn.execute('create table detection_jobs(id text primary key, camera_id text not null)')
     conn.commit()
     conn.close()
-    assert sorted(path.name for path in tmp_path.iterdir()) == ['detection-jobs.sqlite3']
+    before = _schema(tmp_path / 'detection-jobs.sqlite3')
     with pytest.raises(UnsupportedDatabaseError, match='detection_jobs predates SurvNG 1.2.0'):
         EventStore(tmp_path)
-    assert sorted(path.name for path in tmp_path.iterdir()) == ['detection-jobs.sqlite3']
+    # SQLite may add WAL side files to the refused database; no new database appears.
+    assert {path.name for path in tmp_path.iterdir()} <= {
+        'detection-jobs.sqlite3', 'detection-jobs.sqlite3-wal', 'detection-jobs.sqlite3-shm',
+    }
+    assert _schema(tmp_path / 'detection-jobs.sqlite3') == before

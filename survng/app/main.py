@@ -60,7 +60,6 @@ from .frontend_routes import FrontendRouteDependencies, create_frontend_router
 from .help_docs import HelpRouteDependencies, create_help_router
 from .onvif_inspector_routes import create_onvif_inspector_router
 from .manager import AppManager, validate_manager_configuration
-from .main_database import UnsupportedDatabaseError
 from .media_sessions import MediaSessionManager
 from .homekit_routes import HomeKitRouteDependencies, create_homekit_router
 from .manager_access import ManagerAccessCoordinator
@@ -909,12 +908,14 @@ def apply_config_update(
 
 
 def _record_process_lifecycle(kind: str) -> None:
-    """Record restart evidence without making telemetry a lifecycle dependency."""
+    """Record restart evidence without making telemetry a lifecycle dependency.
+
+    Building the manager is not telemetry: a startup that cannot build it
+    (an old database, an unreadable file) reports that error itself.
+    """
+    active = get_manager()
     try:
-        get_manager().telemetry.record_lifecycle_event(PROCESS_INSTANCE_ID, kind)
-    except UnsupportedDatabaseError:
-        # Building the manager refused an old database; report that, not telemetry.
-        raise
+        active.telemetry.record_lifecycle_event(PROCESS_INSTANCE_ID, kind)
     except Exception:
         logging.getLogger(__name__).exception(
             "could not persist process lifecycle event %s",
