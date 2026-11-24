@@ -145,6 +145,7 @@ jobs:
             tests/test_recorded_video_frames.py \
             tests/test_recorded_decoder.py \
             tests/test_recording_fragmented.py \
+            tests/test_recording_frame_steps.py \
             tests/test_open_segment_refinement.py \
             tests/test_object_tracking_lifecycle.py \
             tests/test_tracking_frames.py \

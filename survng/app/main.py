@@ -1470,6 +1470,20 @@ _recording_route_bundle = create_recording_router(
                 **kwargs,
             )
         ),
+        recording_segment_frames=lambda active_manager, *args, **kwargs: (
+            _recording_media_runtime._recording_segment_frames(
+                *args,
+                active_manager=active_manager,
+                **kwargs,
+            )
+        ),
+        recording_step_frame=lambda active_manager, *args, **kwargs: (
+            _recording_media_runtime._recording_step_frame(
+                *args,
+                active_manager=active_manager,
+                **kwargs,
+            )
+        ),
         recording_segment_path=lambda active_manager, *args, **kwargs: (
             _recording_media_runtime._recording_segment_path(
                 *args,
