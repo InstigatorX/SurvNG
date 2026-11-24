@@ -26,6 +26,9 @@ class ManagerReloadHooks:
     storage_error: Callable[[list[str]], Exception]
     ai_error: Callable[[dict[str, int]], Exception]
     wait_for_manager_idle: Callable[[AppManager], bool] = lambda _manager: True
+    # Asked to stop the process when this generation cannot recover in-process;
+    # returns True when the supervisor will restart SurvNG.
+    request_supervisor_restart: Callable[[str], bool] = lambda _reason: False
 
 
 class ManagerGenerationLifecycle:
@@ -43,6 +46,24 @@ class ManagerGenerationLifecycle:
         self._stopping = stopping
         self._manager_factory = manager_factory
         self._hooks = hooks
+
+    def _unrecoverable(self, problem: str) -> RuntimeError:
+        """Ask the supervisor to restart SurvNG and describe the failure.
+
+        Called after the stopping flag is set and the surviving generation is
+        published, so the final shutdown cleans up the right manager.
+        """
+        try:
+            restarting = bool(self._hooks.request_supervisor_restart(problem))
+        except Exception:
+            LOGGER.exception("could not request a supervisor restart")
+            restarting = False
+        action = (
+            "SurvNG is restarting through its supervisor"
+            if restarting
+            else "restart SurvNG through its supervisor"
+        )
+        return RuntimeError(f"{problem}; {action}")
 
     def reload(
         self,
@@ -93,9 +114,9 @@ class ManagerGenerationLifecycle:
                 if previous_stop_attempted and not previous_stopped:
                     self._stopping.set()
                     self._hooks.publish_runtime(previous_config, previous_manager)
-                    raise RuntimeError(
+                    raise self._unrecoverable(
                         "configuration reload aborted because previous manager shutdown is "
-                        "still active; restart SurvNG through its supervisor"
+                        "still active"
                     ) from None
                 if cleanup_error is not None:
                     self._stopping.set()
@@ -103,8 +124,8 @@ class ManagerGenerationLifecycle:
                         # Keep the surviving generation reachable by final
                         # shutdown; never open the same cameras a second time.
                         self._hooks.publish_runtime(effective_config, candidate)
-                    raise RuntimeError(
-                        "replacement manager cleanup is incomplete; restart SurvNG through its supervisor"
+                    raise self._unrecoverable(
+                        "replacement manager cleanup is incomplete"
                     ) from cleanup_error
                 if not previous_stop_attempted:
                     if prewarmer_was_running:
@@ -125,7 +146,7 @@ class ManagerGenerationLifecycle:
                         except Exception:
                             LOGGER.exception("failed to clean up recovery manager")
                             self._hooks.publish_runtime(previous_config, recovery)
-                    raise RuntimeError(
+                    raise self._unrecoverable(
                         "configuration reload failed and the previous manager could not be restored"
                     ) from recovery_error
                 self._hooks.publish_runtime(previous_config, recovery)

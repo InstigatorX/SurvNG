@@ -1208,10 +1208,13 @@ class SemanticIndexTest(unittest.TestCase):
             patch.object(service, "_retry_quarantined_media"),
             patch.object(service, "_backfill", side_effect=backfill),
             patch.object(service.index, "has_media_failures", return_value=False),
-            patch.object(service.index, "warm_search_cache"),
+            patch.object(service.index, "warm_search_cache") as warm,
         ):
             service._run_backfill(object())
 
+        warm.assert_called_once_with(self.identity, should_stop=service._stop.is_set)
+        # The backfill thread's long index reads stop with the service.
+        self.assertEqual(service.index._thread_stop.check, service._stop.is_set)
         self.assertEqual(observed, [True])
         self.assertFalse(service.status()["backfill_active"])
 
@@ -1400,6 +1403,135 @@ class SemanticIndexTest(unittest.TestCase):
 
         with patch.object(self.index, "indexed_event_ids", side_effect=AssertionError("full scan")):
             service._backfill(Store())
+
+    def test_stop_aborts_a_slow_cache_warm_without_disabling_the_cache(self) -> None:
+        # On a large install the generation signature alone takes seconds,
+        # longer than shutdown waits for the backfill thread.
+        stop = threading.Event()
+        started = threading.Event()
+
+        def slow_signature(connection: sqlite3.Connection, _identity: object) -> object:
+            started.set()
+            connection.execute(
+                "with recursive n(x) as (select 1 union all select x + 1 from n "
+                "where x < 30000000) select count(*) from n"
+            ).fetchone()  # seconds of work unless interrupted
+            raise AssertionError("the signature query was not interrupted")
+
+        with patch.object(SemanticIndex, "_generation_signature", side_effect=slow_signature):
+            warm = threading.Thread(
+                target=self.index.warm_search_cache,
+                args=(self.identity,),
+                kwargs={"should_stop": stop.is_set},
+                daemon=True,
+            )
+            warm.start()
+            self.assertTrue(started.wait(5.0))
+            stopped_at = time.monotonic()
+            stop.set()
+            warm.join(timeout=5.0)
+
+        self.assertFalse(warm.is_alive())
+        self.assertLess(time.monotonic() - stopped_at, 1.0)
+        self.assertEqual(self.index._vector_cache_disabled_until, 0.0)
+        self.assertEqual(self.index._vector_cache_error, "")
+
+    def _loaded_cache(self) -> object:
+        from types import SimpleNamespace
+
+        cache = SimpleNamespace(
+            generation=self.identity.generation,
+            force_rebuild=False,
+            expected_signature=(0, 0, ""),
+            dirty_event_ids=set(),
+        )
+        self.index._vector_cache = cache
+        return cache
+
+    def test_stop_aborts_the_signature_read_after_a_semantic_write(self) -> None:
+        # The worker records each write in the loaded cache by re-reading the
+        # generation signature, the same multi-second statement as the warm-up.
+        cache = self._loaded_cache()
+        stop = threading.Event()
+
+        def slow_signature(connection: sqlite3.Connection, _identity: object) -> object:
+            stop.set()
+            connection.execute(
+                "with recursive n(x) as (select 1 union all select x + 1 from n "
+                "where x < 30000000) select count(*) from n"
+            ).fetchone()
+            raise AssertionError("the signature query was not interrupted")
+
+        self.index.bind_thread_stop(stop.is_set)
+        try:
+            with patch.object(SemanticIndex, "_generation_signature", side_effect=slow_signature):
+                started = time.monotonic()
+                self.index._record_cache_mutation(self.identity, [1])
+        finally:
+            self.index.bind_thread_stop(None)
+
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertTrue(cache.force_rebuild)  # the committed write is picked up by a rebuild
+
+    def test_signature_read_after_a_write_is_unchanged_without_a_bound_stop(self) -> None:
+        cache = self._loaded_cache()
+        with patch.object(SemanticIndex, "_generation_signature", return_value=(3, 9, "now")):
+            self.index._record_cache_mutation(self.identity, [1, 2])
+        self.assertEqual(cache.expected_signature, (3, 9, "now"))
+        self.assertEqual(cache.dirty_event_ids, {1, 2})
+        self.assertFalse(cache.force_rebuild)
+
+    def test_stop_during_an_in_place_refresh_forces_the_next_load_to_rebuild(self) -> None:
+        import time as clock
+
+        cache = self._loaded_cache()
+        cache.dirty_event_ids = {1}
+        cache.dimensions = self.identity.dimensions
+        cache.built_monotonic = clock.monotonic()
+        cache.overrides = {}
+        stop = threading.Event()
+
+        def interrupted(_connection: object, refreshed: object, _identity: object) -> None:
+            refreshed.dirty_event_ids.clear()  # consumed before the interrupt, as the real refresh does
+            stop.set()
+            raise sqlite3.OperationalError("interrupted")
+
+        with (
+            patch.object(SemanticIndex, "_generation_signature", return_value=(0, 0, "")),
+            patch.object(self.index, "_refresh_cache_events_locked", side_effect=interrupted),
+        ):
+            self.index.warm_search_cache(self.identity, should_stop=stop.is_set)
+
+        self.assertIs(self.index._vector_cache, cache)
+        self.assertTrue(cache.force_rebuild)
+        self.assertEqual(self.index._vector_cache_error, "")
+
+    def test_stop_during_cache_build_is_not_recorded_as_a_cache_failure(self) -> None:
+        stop = threading.Event()
+
+        def interrupted(*_args: object) -> None:
+            stop.set()
+            raise sqlite3.OperationalError("interrupted")
+
+        with patch.object(self.index, "_build_vector_cache_locked", side_effect=interrupted):
+            self.index.warm_search_cache(self.identity, should_stop=stop.is_set)
+
+        self.assertEqual(self.index._vector_cache_disabled_until, 0.0)
+        self.assertEqual(self.index._vector_cache_error, "")
+
+    def test_database_error_without_a_stop_still_disables_the_cache(self) -> None:
+        with (
+            self.assertLogs("uvicorn.error", level="WARNING"),
+            patch.object(
+                self.index,
+                "_build_vector_cache_locked",
+                side_effect=sqlite3.OperationalError("disk I/O error"),
+            ),
+        ):
+            self.index.warm_search_cache(self.identity, should_stop=lambda: False)
+
+        self.assertGreater(self.index._vector_cache_disabled_until, 0.0)
+        self.assertEqual(self.index._vector_cache_error, "disk I/O error")
 
     def test_vector_cache_budget_failure_is_logged_once(self) -> None:
         from survng.app.config import SemanticSearchConfig

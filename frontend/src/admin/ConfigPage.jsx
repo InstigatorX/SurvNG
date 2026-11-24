@@ -60,7 +60,7 @@ import { logPayloadSignature } from "../pollingPolicy.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { motionAuditRegions } from "../motionAudit.mjs";
 import { clampZoneView, insertZonePointWithIndex, zoomZoneView } from "../zoneGeometry.mjs";
-import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminWorkspaceSearch, cameraConfigDirtyState, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, resolveAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
+import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminWorkspaceSearch, baselineCamerasAfterSave, cameraConfigDirtyState, cameraSpeechDirty, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, resolveAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
 import { appUrl, mediaUrl, fetch } from "../shared/api.js";
 import { MEDIA_STORAGE_ROLES, CAMERA_ADMIN_SECTIONS, TELEMETRY_ADMIN_SECTIONS, HEALTH_TELEMETRY_SECTIONS, GENERAL_ADMIN_SECTIONS, US_TIME_ZONES, THEMES } from "../shared/constants.js";
 import { CameraScopePicker } from "../shared/CameraScopePicker.jsx";
@@ -1718,7 +1718,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
     setSaveNotice({ state: "pending", text: `${selectedCamera.name || selectedCamera.id} moved to position ${targetIndex + 1}. Save order to apply.` });
   }
 
-  async function saveCameraOrder() {
+  async function saveCameraOrder(orderIds = cameras.map((camera) => camera.id)) {
     if (cameraOrderSaving) return false;
     setCameraOrderSaving(true);
     setSaveNotice({ state: "saving", text: "Saving default camera order..." });
@@ -1726,13 +1726,13 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
       const response = await fetch("/api/config/cameras/order", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(cameras.map((camera) => camera.id)),
+        body: JSON.stringify(orderIds),
       });
       if (!response.ok) throw new Error(await response.text());
-      cameraOrderOriginalRef.current = cameras.map((camera) => camera.id);
+      cameraOrderOriginalRef.current = [...orderIds];
       if (baselineConfigRef.current) {
         const byId = new Map((baselineConfigRef.current.cameras || []).map((camera) => [camera.id, camera]));
-        baselineConfigRef.current.cameras = cameras.map((camera) => structuredClone(byId.get(camera.id) || camera));
+        baselineConfigRef.current.cameras = orderIds.map((id, index) => structuredClone(byId.get(id) || cameras[index]));
         setBaselineRevision((current) => current + 1);
       }
       setCameraOrderEditing(false);
@@ -1843,50 +1843,55 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
     }
   }
 
-  async function saveCamera(camera) {
-    if (!camera || cameraSaving) return false;
+  // Returns the saved cameras keyed by the id each was sent with (a new
+  // camera's id can change on save), or null when nothing was saved.
+  async function saveCameras(cameras) {
+    if (!cameras.length || cameraSaving) return null;
     setCameraSaving(true);
-    setSaveNotice({ state: "saving", text: "Saving camera settings..." });
+    setSaveNotice({
+      state: "saving",
+      text: cameras.length > 1 ? `Saving ${cameras.length} cameras...` : "Saving camera settings...",
+    });
     try {
-      const response = await fetch(`/api/config/cameras/${encodeURIComponent(camera.id)}`, {
+      // One request for every changed camera: a change that reloads the
+      // manager restarts all cameras, so per-camera saves restarted them
+      // once per camera.
+      const response = await fetch("/api/config/cameras", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(camera),
+        body: JSON.stringify({ cameras }),
       });
       if (!response.ok) throw new Error(await response.text());
       const payload = await response.json();
-      const savedCamera = payload.camera;
+      const savedById = new Map(cameras.map((camera, index) => [camera.id, payload.cameras[index]]));
       setConfig((current) => ({
         ...current,
-        cameras: current.cameras.map((item) => item.id === camera.id
-          ? { ...savedCamera, zones: item.zones || [] }
+        cameras: current.cameras.map((item) => savedById.has(item.id)
+          ? { ...savedById.get(item.id), zones: item.zones || [] }
           : item),
       }));
-      setSelectedId(savedCamera.id);
+      setSelectedId((current) => savedById.get(current)?.id ?? current);
       if (baselineConfigRef.current) {
-        const baselineCameras = baselineConfigRef.current.cameras || [];
-        const baselineMatch = baselineCameras.find((item) => item.id === camera.id);
-        const savedBaselineCamera = {
-          ...structuredClone(savedCamera),
-          zones: structuredClone(baselineMatch?.zones || camera.zones || []),
-        };
-        baselineConfigRef.current.cameras = baselineMatch
-          ? baselineCameras.map((item) => item.id === camera.id ? savedBaselineCamera : item)
-          : [...baselineCameras, savedBaselineCamera];
+        baselineConfigRef.current.cameras = baselineCamerasAfterSave(
+          baselineConfigRef.current.cameras || [], cameras, savedById,
+        );
         setBaselineRevision((current) => current + 1);
       }
+      const saved = cameras.length > 1 ? `${cameras.length} cameras saved` : "Camera settings saved";
       setSaveNotice({
         state: "saved",
-        text: payload.camera_workers_restarted
-          ? `${savedCamera.name || savedCamera.id} motion runtime reloaded; other cameras kept running.`
-          : "Camera settings saved without interrupting camera streams.",
+        text: payload.apply_mode === "manager_reload"
+          ? `${saved}; all cameras restarted once to apply them.`
+          : payload.camera_workers_restarted
+            ? `${saved}; affected camera runtimes reloaded.`
+            : `${saved} without interrupting camera streams.`,
       });
       const statusResponse = await fetch("/api/cameras");
       if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
-      return true;
+      return savedById;
     } catch (error) {
       setSaveNotice({ state: "error", text: error.message || "Unable to save camera settings." });
-      return false;
+      return null;
     } finally {
       setCameraSaving(false);
     }
@@ -1899,13 +1904,24 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
     }
     if (settingsTab !== "cameras") return;
     const dirtyMap = perCameraDirtyState(config?.cameras || [], baselineConfigRef.current?.cameras || []);
-    for (const camera of config?.cameras || []) {
-      const dirty = dirtyMap[camera.id];
-      if (!dirty) continue;
-      if (dirty.settings && !await saveCamera(camera)) return;
-      if (dirty.zones && !await saveZones(camera)) return;
+    const cameras = config?.cameras || [];
+    const changedSettings = cameras.filter((camera) => dirtyMap[camera.id]?.settings);
+    let savedById = new Map();
+    if (changedSettings.length) {
+      savedById = await saveCameras(changedSettings);
+      if (!savedById) return;
     }
-    if (cameraOrderDirty) await saveCameraOrder();
+    for (const camera of cameras) {
+      if (!dirtyMap[camera.id]?.zones) continue;
+      // Zones go to the camera's saved id, which changes for a new camera.
+      const id = savedById.get(camera.id)?.id ?? camera.id;
+      if (!await saveZones({ ...camera, id })) return;
+    }
+    // Order uses the saved ids (a new camera's id changes on save), and only
+    // when it still differs from the baseline the camera save left behind.
+    const orderIds = cameras.map((camera) => savedById.get(camera.id)?.id ?? camera.id);
+    const savedOrder = (baselineConfigRef.current?.cameras || []).map((camera) => camera.id);
+    if (!configValuesEqual(orderIds, savedOrder)) await saveCameraOrder(orderIds);
   }
 
   async function deleteCamera(camera) {

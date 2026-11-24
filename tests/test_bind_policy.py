@@ -81,7 +81,7 @@ def test_server_main_enforces_bind_policy(monkeypatch: pytest.MonkeyPatch) -> No
         "uvicorn_tls_kwargs",
         lambda config, port: {"port": port},
     )
-    monkeypatch.setattr(server_main.uvicorn, "run", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(server_main, "_run_server", lambda **kwargs: captured.update(kwargs))
 
     with pytest.raises(SystemExit, match="Refusing to bind"):
         server_main.main()
