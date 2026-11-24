@@ -12,7 +12,6 @@
   }
 
   .mobile-camera-picker,
-  .recordings-v2-cameras,
   .timeline-camera-picker,
   .search-camera-list {
     display: none !important;
@@ -277,8 +276,7 @@
   }
 
   .recordings-tabs.recordings-commandbar .recordings-commandbar-live,
-  .recordings-commandbar-day-controls .recordings-playback-rate,
-  .recordings-commandbar-export {
+  .recordings-commandbar-day-controls .recordings-playback-rate {
     display: none !important;
   }
 
@@ -348,10 +346,7 @@
   .recordings-v2-incidents,
   .recordings-v2-investigation,
   .recordings-related-events,
-  .recordings-v2-events,
-  .recordings-event-inspector,
-  .recordings-inspector-toggle,
-  .recording-stage-pagination {
+  .recordings-v2-events {
     display: none !important;
   }
 
@@ -535,17 +530,8 @@
   }
 }
 
-/* SurvNG mobile final v1.0.1: hide Timeline evidence thumbnails */
+/* SurvNG mobile final v1.0.1: compact Timeline track */
 @media (max-width: 760px) {
-
-  /*
-   * RecordingTimeline renders its own event/evidence filmstrip inside the
-   * scrubber when showThumbnails is true. This is the "Objects / Motion only"
-   * legend plus thumbnail row visible at the bottom of mobile Timeline.
-   */
-  .recordings-timeline-evidence {
-    display: none !important;
-  }
 
   /*
    * Reclaim the space that evidence thumbnails previously occupied.

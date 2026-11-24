@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
 
 assert.deepEqual(TIMELINE_PLAYBACK_RATES, [0.5, 1, 2, 4]);
 assert.equal(normalizedTimelinePlaybackRate("2"), 2);
@@ -14,8 +14,6 @@ assert.deepEqual(filteredTimelineCameras(cameras, "front"), [cameras[0]]);
 assert.deepEqual(filteredTimelineCameras(cameras, "GARAGE"), [cameras[1]]);
 assert.equal(filteredTimelineCameras(cameras, "missing").length, 0);
 assert.equal(filteredTimelineCameras(cameras, "").length, 2);
-assert.deepEqual(timelineStageCameras(cameras, "garage", 2).map((camera) => camera.id), ["garage", "front-door"]);
-assert.equal(timelineStageCameras(Array.from({ length: 12 }, (_, index) => ({ id: `camera-${index}` })), "camera-9").length, 7);
 const routeCameras = [
   { id: "gate", name: "Gate" },
   { id: "lower-garage", name: "Lower Garage" },
@@ -34,7 +32,6 @@ assert.deepEqual(expectedTimelineCameras(routeCameras, routes, "gate").map((came
 assert.deepEqual(expectedTimelineCameras(routeCameras, routes, "front-door").map((camera) => camera.id), ["gate"]);
 assert.deepEqual(expectedTimelineCameras(routeCameras, routes, "lower-garage").map((camera) => camera.id), []);
 
-assert.deepEqual(timelineStagePage(Array.from({ length: 15 }, (_, index) => ({ id: index })), 2), { cameras: [{ id: 14 }], page: 2, pages: 3 });
 assert.equal(timelineEventMatchesFilter({ has_objects: true, labels: ["person"] }, "people"), true);
 assert.equal(timelineEventMatchesFilter({ has_objects: true, labels: ["car"] }, "vehicles"), true);
 assert.equal(timelineEventMatchesFilter({ has_objects: false, labels: [] }, "motion"), true);
@@ -121,16 +118,13 @@ const filteredEvidence = [
 assert.deepEqual(timelineEvidenceWindow(filteredEvidence, 10, 12).map((event) => event.id), [1]);
 assert.deepEqual(parseTimelineView("?camera=gate&date=2026-08-15&source=main&at=123.5&event=44101&filter=vehicles&inspector=ai&window=4&objects=0&thumbs=0&speed=2", "2026-08-16"), {
   cameraId: "gate", date: "2026-08-15", source: "main", at: 123.5, eventFilter: "vehicles", eventId: 44101,
-  trailEventIds: [], trailQueryMode: null,
-  inspector: "ai", windowHours: 4, lanes: { object: false, motion: true }, thumbnails: false, speed: 2, view: "rail", railMinutes: 60,
+  trailEventIds: [], windowHours: 4, lanes: { object: false, motion: true }, speed: 2, view: "rail", railMinutes: 60,
 });
 assert.deepEqual(parseTimelineView("?camera=all&date=2026-08-15&at=123.5&window=1", "2026-08-16"), {
   cameraId: "all", date: "2026-08-15", source: null, at: 123.5, eventFilter: "all", eventId: null,
-  trailEventIds: [], trailQueryMode: null,
-  inspector: "details", windowHours: 1, lanes: { object: true, motion: true }, thumbnails: true, speed: 1, view: "rail", railMinutes: 60,
+  trailEventIds: [], windowHours: 1, lanes: { object: true, motion: true }, speed: 1, view: "rail", railMinutes: 60,
 });
 assert.deepEqual(parseTimelineView("?camera=gate&event=84&trail=12,84,91&query_mode=visual", "2026-08-16").trailEventIds, [12, 84, 91]);
-assert.equal(parseTimelineView("?camera=gate&event=84&trail=12,84,91&query_mode=visual", "2026-08-16").trailQueryMode, "visual");
 assert.equal(resolveTimelineHeroCameraId(routeCameras, parseTimelineView("?camera=all", "2026-08-16").cameraId), "gate");
 // Only an explicit camera=all opens the All cameras grid; no camera means the first camera.
 assert.equal(parseTimelineView("?date=2026-08-15", "2026-08-16").cameraId, "");

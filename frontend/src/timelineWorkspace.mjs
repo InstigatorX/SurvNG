@@ -15,13 +15,6 @@ export function filteredTimelineCameras(cameras, query) {
   });
 }
 
-export function timelineStageCameras(cameras, primaryCameraId, limit = 7) {
-  const available = Array.isArray(cameras) ? cameras : [];
-  const primary = available.find((camera) => camera?.id === primaryCameraId) || available[0];
-  if (!primary) return [];
-  return [primary, ...available.filter((camera) => camera?.id !== primary.id)].slice(0, Math.max(1, limit));
-}
-
 export function expectedTimelineCameras(cameras, routes, activeCameraId, limit = 6) {
   const available = Array.isArray(cameras) ? cameras : [];
   const availableById = new Map(available.map((camera) => [String(camera?.id || ""), camera]));
@@ -41,14 +34,6 @@ export function expectedTimelineCameras(cameras, routes, activeCameraId, limit =
     if (expected.length >= Math.max(1, Number(limit) || 6)) break;
   }
   return expected;
-}
-
-export function timelineStagePage(cameras, page = 0, pageSize = 7) {
-  const available = Array.isArray(cameras) ? cameras : [];
-  const size = Math.max(1, Number(pageSize) || 7);
-  const pages = Math.max(1, Math.ceil(available.length / size));
-  const normalizedPage = Math.min(pages - 1, Math.max(0, Number(page) || 0));
-  return { cameras: available.slice(normalizedPage * size, (normalizedPage + 1) * size), page: normalizedPage, pages };
 }
 
 export function timelineEventMatchesFilter(event, filter) {
@@ -192,7 +177,6 @@ export function parseTimelineView(search, today = "") {
     .map((value) => Number(value))
     .filter((value, index, all) => Number.isInteger(value) && value > 0 && all.indexOf(value) === index)
     .slice(0, 24);
-  const queryMode = params.get("query_mode");
   return {
     // No camera means the first camera; only an explicit camera=all selects
     // the All cameras grid.
@@ -203,11 +187,8 @@ export function parseTimelineView(search, today = "") {
     eventFilter: ["all", "object", "motion", "people", "vehicles"].includes(params.get("filter")) ? params.get("filter") : "all",
     eventId: rawEvent && Number.isFinite(Number(rawEvent)) ? Number(rawEvent) : rawEvent || null,
     trailEventIds,
-    trailQueryMode: queryMode === "appearance" || queryMode === "visual" ? queryMode : null,
-    inspector: ["details", "ai", "related"].includes(params.get("inspector")) ? params.get("inspector") : "details",
     windowHours: [1, 2, 4, 8, 12, 24].includes(Number(params.get("window"))) ? Number(params.get("window")) : 1,
     lanes: { object: params.get("objects") !== "0", motion: params.get("motion") !== "0" },
-    thumbnails: params.get("thumbs") !== "0",
     speed: normalizedTimelinePlaybackRate(params.get("speed")),
     view: normalizedTimelineView(params.get("view")),
     railMinutes: normalizedRailMinutes(params.get("rail")),

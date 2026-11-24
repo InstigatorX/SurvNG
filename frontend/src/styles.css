@@ -10116,14 +10116,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   display: grid;
 }
 
-.recordings-v2-cameras {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-}
-
 .search-page {
   display: grid;
   gap: 10px 12px;
@@ -10993,36 +10985,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   text-transform: uppercase;
 }
 
-.recording-stage-pagination {
-  position: absolute;
-  z-index: 8;
-  right: 8px;
-  bottom: 8px;
-  display: flex;
-  align-items: center;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, .2);
-  border-radius: 3px;
-  background: rgba(2, 6, 8, .84);
-}
-
-.recording-stage-pagination button {
-  width: 32px;
-  min-height: 32px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: #fff;
-  padding: 0;
-}
-
-.recording-stage-pagination span {
-  min-width: 40px;
-  color: #fff;
-  font-size: var(--text-2xs);
-  text-align: center;
-}
-
 .recording-grid-controls {
   position: absolute;
   z-index: 7;
@@ -11727,10 +11689,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
   .recordings-commandbar {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .recordings-v2-cameras {
-    grid-template-rows: auto;
   }
 
   .recordings-v2-workspace {
@@ -14443,7 +14401,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 
-.recordings-ask-assistant,
 .incident-ask-assistant {
   display: inline-flex;
   align-items: center;

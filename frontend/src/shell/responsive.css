@@ -143,7 +143,6 @@
   .recordings-v2-timeline-toolbar .recordings-v2-date > button,
   .recordings-v2-timeline-toolbar .recordings-v2-date-toggle,
   .recordings-v2-timeline-toolbar .recordings-v2-player-source button,
-  .recordings-event-inspector-tabs button,
   .search-camera-list button,
   .settings-section-tree .tree-list button {
     min-height: 44px;
@@ -158,10 +157,6 @@
   .recordings-v2-incidents {
     min-height: 510px;
     overflow: visible;
-  }
-
-  .recordings-v2-incidents.collapsed {
-    min-height: 0;
   }
 
   .recordings-v2-investigation {

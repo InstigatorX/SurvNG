@@ -42,7 +42,6 @@ assert.equal(
 
 const view = parseTimelineView("?camera=gate&at=100&event=84&trail=12,84,91&query_mode=appearance", "2026-08-27");
 assert.deepEqual(view.trailEventIds, [12, 84, 91]);
-assert.equal(view.trailQueryMode, "appearance");
 assert.equal(view.eventId, 84);
 
 console.log("visual search trail tests passed");

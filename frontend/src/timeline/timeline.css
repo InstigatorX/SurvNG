@@ -455,45 +455,6 @@
   padding: 0 6px;
 }
 
-.recordings-commandbar-export {
-  display: flex;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-}
-
-.recordings-commandbar-export button,
-.recordings-commandbar-export a {
-  display: inline-flex;
-  min-height: 38px;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: 0;
-  background: color-mix(in srgb, var(--accent) 22%, var(--control));
-  color: var(--active-ink);
-}
-
-.recordings-commandbar-export button {
-  min-width: 76px;
-  font-weight: 620;
-}
-
-.recordings-commandbar-export a {
-  width: 36px;
-  border-left: 1px solid var(--line);
-}
-
-.recordings-v2-cameras {
-  grid-column: 1;
-  grid-row: 1 / 3;
-  border: 0;
-  border-right: 1px solid var(--line);
-  border-radius: 0;
-  background: var(--panel-solid);
-  box-shadow: none;
-}
-
 .recordings-v2-workspace {
   grid-column: 1;
   grid-row: 2;
@@ -815,73 +776,6 @@
   min-width: 3px;
 }
 
-.recordings-timeline-evidence {
-  display: flex;
-  height: 76px;
-  align-items: stretch;
-  gap: 8px;
-  overflow-x: auto;
-  padding: 8px 2px 0;
-  scrollbar-width: thin;
-}
-
-.recordings-timeline-evidence button {
-  position: relative;
-  display: grid;
-  grid-template-columns: 78px;
-  grid-template-rows: minmax(0, 1fr) 18px;
-  flex: 0 0 78px;
-  min-height: 0;
-  overflow: visible;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  background: var(--control);
-  padding: 0;
-}
-
-.recordings-timeline-evidence button>i {
-  position: absolute;
-  z-index: 2;
-  top: -7px;
-  left: 50%;
-  display: grid;
-  width: 18px;
-  height: 18px;
-  place-items: center;
-  transform: translateX(-50%);
-  border-radius: 50%;
-  background: #326ada;
-  color: white;
-}
-
-.recordings-timeline-evidence button.motion>i {
-  background: #d77b07;
-}
-
-.recordings-timeline-evidence button.selected {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
-}
-
-.recordings-timeline-evidence button>span {
-  display: grid;
-  min-height: 0;
-  overflow: hidden;
-  place-items: center;
-}
-
-.recordings-timeline-evidence img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.recordings-timeline-evidence time {
-  color: var(--muted);
-  font-size: var(--text-2xs);
-  line-height: 18px;
-}
-
 .recordings-v2-ticks small {
   color: color-mix(in srgb, var(--muted) 86%, var(--ink));
   font-size: var(--text-2xs);
@@ -907,21 +801,6 @@
   grid-template-rows: minmax(0, 1fr);
   border: 0;
   background: var(--panel-solid);
-}
-
-.recordings-v2-incidents.collapsed {
-  min-height: 0;
-  height: auto;
-}
-
-.recordings-v2-incidents.collapsed .recordings-related-events,
-.recordings-v2-incidents.collapsed .recordings-event-inspector,
-.recordings-v2-incidents.collapsed .recordings-inspector-toggle {
-  display: none;
-}
-
-.recordings-v2-incidents.collapsed .recordings-v2-investigation {
-  grid-template-columns: minmax(0, 1fr);
 }
 
 .recordings-v2-investigation {
@@ -1085,11 +964,6 @@
   text-transform: uppercase;
 }
 
-.recordings-inspector-toggle,
-.recordings-inspector-close {
-  display: none;
-}
-
 .recordings-v2-events {
   gap: 10px;
   align-items: stretch;
@@ -1163,86 +1037,6 @@
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.recordings-event-inspector {
-  display: grid;
-  min-width: 0;
-  grid-template-rows: 34px minmax(0, 1fr);
-  background: color-mix(in srgb, var(--panel-soft) 72%, transparent);
-  padding: 0 10px 10px;
-}
-
-.recordings-event-inspector-tabs {
-  position: relative;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  border-bottom: 1px solid var(--line);
-}
-
-.recordings-event-inspector-tabs button {
-  min-height: 34px;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: var(--text-xs);
-}
-
-.recordings-event-inspector-tabs button.active {
-  border-bottom-color: var(--accent);
-  color: var(--active-ink);
-}
-
-.recordings-event-inspector>[role="tabpanel"] {
-  min-height: 0;
-  overflow: auto;
-}
-
-.recordings-event-inspector dl {
-  display: grid;
-  align-content: start;
-  gap: 5px;
-  margin: 10px 0;
-}
-
-.recordings-event-inspector dl>div {
-  display: grid;
-  grid-template-columns: 74px minmax(0, 1fr);
-  gap: 6px;
-  font-size: var(--text-xs);
-}
-
-.recordings-event-inspector dt {
-  color: var(--muted);
-}
-
-.recordings-event-inspector dd {
-  overflow: hidden;
-  margin: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.recordings-event-inspector>a {
-  min-height: 34px;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-}
-
-.recordings-inspector-message {
-  display: grid;
-  align-content: start;
-  gap: 7px;
-  padding: 14px 4px;
-  color: var(--muted);
-  font-size: var(--text-xs);
-}
-
-.recordings-inspector-message strong {
-  color: var(--ink);
-  font-size: var(--text-sm);
 }
 
 .recordings-v2-clip-composer {
@@ -1378,46 +1172,8 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .recordings-event-inspector {
-    position: absolute;
-    z-index: 10;
-    inset: 0 0 0 auto;
-    display: none;
-    width: min(360px, 56vw);
-    min-height: 0;
-    border-left: 1px solid var(--line);
-    box-shadow: -12px 0 30px rgba(0, 0, 0, .4);
-  }
-
-  .recordings-event-inspector.open {
-    display: grid;
-  }
-
-  .recordings-inspector-toggle {
-    display: inline-flex;
-    min-height: 44px;
-    align-items: center;
-    margin-left: auto;
-  }
-
   .recordings-related-events>header>span {
     display: none;
-  }
-
-  .recordings-inspector-close {
-    position: absolute;
-    top: 0;
-    right: 0;
-    display: grid;
-    width: 44px;
-    min-height: 44px;
-    place-items: center;
-    border: 0;
-    background: transparent;
-  }
-
-  .recordings-event-inspector-tabs {
-    padding-right: 44px;
   }
 }
 
@@ -1436,10 +1192,7 @@
     height: 44px;
   }
 
-  .recordings-commandbar-export button,
-  .recordings-commandbar-export a,
-  .recordings-timeline-display-controls button,
-  .recordings-event-inspector-tabs button {
+  .recordings-timeline-display-controls button {
     min-height: 44px;
   }
 }
@@ -1473,11 +1226,6 @@
   .recordings-tabs {
     grid-column: 1;
     grid-row: 1;
-  }
-
-  .recordings-v2-cameras {
-    grid-column: 1;
-    grid-row: 2;
   }
 
   .recordings-v2-workspace {
@@ -1542,12 +1290,6 @@
   .recordings-commandbar-day-controls .recordings-v2-player-source button {
     min-width: 62px;
     padding-inline: 8px;
-  }
-
-  .recordings-v2-cameras {
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-    background: var(--panel-solid);
   }
 
   .recordings-v2-workspace {
@@ -1639,22 +1381,8 @@
     min-height: 146px;
   }
 
-  .recordings-event-inspector {
-    order: 3;
-    min-height: 190px;
-    grid-template-rows: 44px minmax(100px, 1fr);
-    border-top: 1px solid var(--line);
-  }
-
-  .recordings-inspector-toggle {
-    display: none;
-  }
-
-  .recordings-event-inspector-tabs button,
   .recordings-timeline-display-controls button,
-  .recordings-v2-event-filter button,
-  .recordings-commandbar-export button,
-  .recordings-commandbar-export a {
+  .recordings-v2-event-filter button {
     min-height: 44px;
   }
 }
