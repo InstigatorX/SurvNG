@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Databases must have been opened by the `v1.2.0` release or later. Startup
+  stops with an error naming any older table; start `v1.2.0` once against the
+  same data, then upgrade. See `docs/current-only.md`.
+- Removed endpoints with no caller and no documentation: the
+  `/api/faces/` diagnostics, benchmark (`/production`, `/camera-pairs`,
+  `/by-identity`), `gallery-optimization`, `camera-suitability`,
+  `unknown-cluster-health`, `representation-health`, `gallery-candidates` and
+  `maintenance/dedupe` routes, and
+  `/api/cameras/{id}/recordings/mobile-window.mp4`.
+- Removed config fields `detector.depth.motion_evidence_enabled` and
+  `cameras[].video_backend`; files that still contain them load unchanged.
+  See `docs/dead-code-cleanup-2026-11.md`.
+
 ## SurvNG v1.2
 
 Released as `v1.2.0`.

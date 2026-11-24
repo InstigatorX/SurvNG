@@ -230,6 +230,7 @@ class EventStoreJobsMixin:
                 )
                 """
             )
+            require_schema_columns(conn, "detection_jobs", ("lease_owner",))
             conn.execute(
                 "create index if not exists idx_detection_jobs_claim "
                 "on detection_jobs(camera_id, state, available_at, created_at)"
@@ -241,7 +242,6 @@ class EventStoreJobsMixin:
             create_index_logged(
                 conn, "idx_detection_jobs_discovery_terminal", _DISCOVERY_TERMINAL_INDEX_SQL,
             )
-            require_schema_columns(conn, "detection_jobs", ("lease_owner",))
             conn.execute(
                 """
                 create table if not exists motion_trigger_jobs (

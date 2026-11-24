@@ -358,6 +358,9 @@ ONVIF, MQTT, and each media location online and writable.
 
 ## 12. Upgrade
 
+Upgrades require a database that the `v1.2.0` release or later has already
+opened; see `docs/current-only.md`.
+
 In-app **Admin → General → Check for Updates / Update** fast-forwards Git
 (optionally after selecting a remote branch), reinstalls Python deps, rebuilds the
 frontend when `npm` is on `PATH`, and restarts `survng.service`. The checkout must

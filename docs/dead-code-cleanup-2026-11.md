@@ -35,8 +35,8 @@ Each change was made on a stacked branch so the steps can be tested together:
 
 ## Retained on purpose
 
-- Migrations that fresh databases still need (columns not in their CREATE),
-  and every migration added after 1.2.0.
+- Column additions that fresh databases still need (columns not in their
+  CREATE), and index cleanups added after 1.2.0.
 - The plaintext secrets sidecar read path: removing it saves two lines and
   could stop an install that has not saved its config since encryption.
 - The retired-MOG2 configuration guard: a clear error beats a generic one.

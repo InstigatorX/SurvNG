@@ -1,5 +1,7 @@
 # Dead-code cleanup campaign
 
+> Superseded in part by [the 2026-11 cleanup](dead-code-cleanup-2026-11.md), which removed several items retained here.
+
 This implements the five-phase campaign following [the original audit](dead-code-audit.md). The audit's line numbers and inventories describe the pre-cleanup source. Application changes were made sequentially, with focused tests and a service restart after each phase.
 
 ## Changes and phase validation

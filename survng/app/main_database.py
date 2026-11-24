@@ -173,7 +173,7 @@ def require_schema_columns(
     if missing:
         raise UnsupportedDatabaseError(
             f"Database table {table} predates SurvNG 1.2.0 (missing {', '.join(missing)}). "
-            "Open it with SurvNG 1.2.x first; see docs/current-only.md."
+            "Open it once with the SurvNG v1.2.0 release (tag v1.2.0) first; see docs/current-only.md."
         )
 
 

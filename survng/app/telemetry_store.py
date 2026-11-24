@@ -346,13 +346,6 @@ class TelemetryStore:
                     camera_values,
                 )
 
-    def metadata_value(self, key: str) -> str | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "select value from telemetry_metadata where key=?", (key,)
-            ).fetchone()
-        return str(row["value"]) if row is not None else None
-
     @staticmethod
     def _bucket_start(value: datetime, resolution_minutes: int) -> datetime:
         seconds = max(1, int(resolution_minutes)) * 60

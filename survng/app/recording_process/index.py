@@ -103,6 +103,14 @@ class RecordingIndexMixin:
                 )
                 """
             )
+            require_schema_columns(
+                connection,
+                "recordings",
+                (
+                    "playable", "health_error", "validated", "stream_fingerprint",
+                    "fingerprint_checked", "playback_duration_seconds", "location_id",
+                ),
+            )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS recordings_range ON recordings(camera_id, source, start_epoch, end_epoch)"
             )
@@ -125,14 +133,6 @@ class RecordingIndexMixin:
                     value TEXT NOT NULL
                 )
                 """
-            )
-            require_schema_columns(
-                connection,
-                "recordings",
-                (
-                    "playable", "health_error", "validated", "stream_fingerprint",
-                    "fingerprint_checked", "playback_duration_seconds", "location_id",
-                ),
             )
             connection.execute(
                 """
