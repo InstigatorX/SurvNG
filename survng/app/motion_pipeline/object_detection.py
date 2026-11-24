@@ -2119,6 +2119,7 @@ class RecordedMotionObjectDetector:
                 objects,
                 detect_faces,
                 max_people=8,
+                timing=timing,
             )
             objects = self._merge_dedicated_faces(objects, dedicated_faces)
         for detected in objects:
@@ -2199,6 +2200,7 @@ class RecordedMotionObjectDetector:
                 1,
                 self.detector.config.face_enrich_max_people,
             ),
+            timing=timing,
         )
         merged = self._merge_dedicated_faces(objects, dedicated_faces)
         frame_height, frame_width = frame.shape[:2]
@@ -2299,8 +2301,17 @@ class RecordedMotionObjectDetector:
         detect_faces: Callable[[Frame], list[dict[str, Any]]],
         *,
         max_people: int,
+        timing: dict[str, float] | None = None,
     ) -> list[dict[str, Any]]:
         """Run the 300px face model where CCTV faces retain useful resolution."""
+
+        def count(stage: str, amount: int = 1) -> None:
+            # Funnel counters, stored with the event's detection phases and
+            # read by survng.app.face_funnel.
+            if timing is not None and amount:
+                key = f"face_search_{stage}"
+                timing[key] = timing.get(key, 0.0) + amount
+
         frame_height, frame_width = frame.shape[:2]
         detected_faces: list[dict[str, Any]] = []
         people = [
@@ -2310,21 +2321,27 @@ class RecordedMotionObjectDetector:
             and str(item.get("label") or "").strip().lower() == "person"
             and _box(item) is not None
         ]
+        count("people_over_cap", max(0, len(people) - max_people))
         for person in sorted(people, key=_confidence, reverse=True)[:max_people]:
             check_evidence_cancellation()
             box = _box(person)
             if box is None:
                 continue
+            count("people")
             window = upper_body_window(box, frame_width, frame_height)
             if window is None:
+                count("windows_too_small")
                 continue
             left, top, right, bottom = window
+            count("crops")
+            found = 0
             for detected in detect_faces(frame[top:bottom, left:right]):
                 if not isinstance(detected, dict):
                     continue
                 face_box = _box(detected)
                 if face_box is None:
                     continue
+                found += 1
                 fx1, fy1, fx2, fy2 = face_box
                 detected_faces.append(
                     {
@@ -2338,6 +2355,9 @@ class RecordedMotionObjectDetector:
                         "parent_person_box": person.get("box"),
                     }
                 )
+            count("faces", found)
+            if not found:
+                count("crops_empty")
         return detected_faces
 
     @staticmethod
