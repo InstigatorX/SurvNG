@@ -1043,7 +1043,13 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             # Say how far the gap reaches, so the page need not ask about
             # every second of it. Bounded: beyond the window it asks again.
             gap_start = epoch - RECORDING_STRIP_GAP_WINDOW_SECONDS
-            gap_end = epoch + RECORDING_STRIP_GAP_WINDOW_SECONDS
+            # Not into the future: what is being recorded now is "not there"
+            # only until it is indexed.
+            gap_end = min(
+                epoch + RECORDING_STRIP_GAP_WINDOW_SECONDS,
+                max(epoch + 1.0, time.time()),
+            )
+            known = True
             for candidate_source in dict.fromkeys(("live", selected_source)):
                 for nearby in active_manager.recorder.recording_rows_between(
                     camera_id,
@@ -1058,13 +1064,17 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                         gap_start = max(gap_start, end)
                     elif start > epoch:
                         gap_end = min(gap_end, start)
+                    else:
+                        # Indexed since the lookup above: no gap after all,
+                        # and nothing is claimed about how far one reaches.
+                        known = False
             raise HTTPException(
                 status_code=404,
                 detail="no recording exists at this time",
                 headers={
                     "X-SurvNG-Gap-Start": f"{gap_start:.3f}",
                     "X-SurvNG-Gap-End": f"{gap_end:.3f}",
-                },
+                } if known else None,
             )
         row, row_source, strip_path, layout = built
         return FileResponse(

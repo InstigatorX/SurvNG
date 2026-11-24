@@ -89,15 +89,21 @@ export const ScrubFrameOverlay = forwardRef(function ScrubFrameOverlay({ seeking
   // After that the last frame drawn stays up while the next one loads.
   if (!frame) drawnRef.current = false;
   else if (strip && tile) drawnRef.current = true;
-  if (!frame) return null;
   return (
-    <div
-      className={`recording-scrub-frame${frame.loading ? " loading" : ""}${frame.gap ? " gap" : ""}`}
-      data-drawn={drawnRef.current ? "true" : "false"}
-    >
-      <canvas ref={canvasRef} aria-hidden="true" />
-      {/* Always present, so that its text appearing is announced. */}
-      <span role="status">{frame.gap ? <><Film size={22} aria-hidden="true" />No recording</> : null}</span>
-    </div>
+    <>
+      {/* Present whether or not a frame is up, so that its text appearing is
+          announced: a live region that arrives already filled is not. */}
+      <span className="visually-hidden" role="status">{frame?.gap ? "No recording" : ""}</span>
+      {frame ? (
+        <div
+          className={`recording-scrub-frame${frame.loading ? " loading" : ""}${frame.gap ? " gap" : ""}`}
+          data-drawn={drawnRef.current ? "true" : "false"}
+          aria-hidden="true"
+        >
+          <canvas ref={canvasRef} />
+          {frame.gap ? <span><Film size={22} />No recording</span> : null}
+        </div>
+      ) : null}
+    </>
   );
 });

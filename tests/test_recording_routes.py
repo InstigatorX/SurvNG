@@ -535,6 +535,32 @@ class RecordingRouteLifecycleTests(TestCase):
         # one, or to the edge of the window looked at.
         self.assertEqual(gap.exception.headers["X-SurvNG-Gap-Start"], "113.000")
         self.assertEqual(gap.exception.headers["X-SurvNG-Gap-End"], "450.000")
+        # At the live edge the gap is not said to reach into the future:
+        # what is being recorded now is only not indexed yet.
+        with patch("survng.app.recording_routes.time.time", return_value=152.5):
+            with self.assertRaises(HTTPException) as live_edge:
+                handler("gate", 150.0, "main", 320)
+        self.assertEqual(live_edge.exception.headers["X-SurvNG-Gap-End"], "152.500")
+        # A segment indexed between the two lookups: no gap after all, and
+        # nothing is claimed about one.
+        lookups = {"count": 0}
+
+        def rows_then_indexed(_camera_id, start, end, source, **_kwargs):
+            lookups["count"] += 1
+            if end - start < 1:
+                return []
+            return [{"path": "/recordings/new.mp4", "start_epoch": 145.0, "end_epoch": 155.0}]
+
+        racing = SimpleNamespace(
+            camera=lambda camera_id: object() if camera_id == "gate" else None,
+            recorder=SimpleNamespace(recording_rows_between=rows_then_indexed),
+        )
+        with self.assertRaises(HTTPException) as raced:
+            create_recording_router(
+                replace(_dependencies(lambda: racing), recording_preview_strip=strip)
+            ).handlers["recording_preview_strip"]("gate", 150.0, "main", 320)
+        self.assertEqual(raced.exception.status_code, 404)
+        self.assertIsNone(raced.exception.headers)
         recorded["main"].append({"path": "/recordings/later.mp4", "start_epoch": 160.0, "end_epoch": 170.0})
         with self.assertRaises(HTTPException) as bounded:
             handler("gate", 150.0, "main", 320)

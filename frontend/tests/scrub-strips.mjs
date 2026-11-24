@@ -6,6 +6,7 @@ import {
   SCRUB_STRIP_RETRY_MS,
   SCRUB_STRIP_TIMEOUT_MS,
   createScrubStripStore,
+  loadScrubStrip,
   scrubStripLayout,
   scrubStripTile,
   scrubStripTileWidth,
@@ -46,6 +47,25 @@ assert.equal(scrubStripTile({ ...layout, end: 403, step: 5, count: 60, columns: 
 assert.equal(scrubStripTileWidth({ coarsePointer: true, playerWidth: 2000, pixelRatio: 3 }), 320);
 assert.equal(scrubStripTileWidth({ playerWidth: 1200, pixelRatio: 1 }), 480);
 assert.equal(scrubStripTileWidth({ playerWidth: 700, pixelRatio: 1 }), 320);
+
+// A 404 that says how far the gap reaches is passed on; one that does not,
+// or says something impossible, is a gap of unknown size.
+{
+  const realFetch = globalThis.fetch;
+  const answer = (values) => { globalThis.fetch = async () => ({ status: 404, ok: false, headers: headers(values) }); };
+  try {
+    answer({ "X-SurvNG-Gap-Start": "1000.000", "X-SurvNG-Gap-End": "1060.000" });
+    assert.deepEqual(await loadScrubStrip("/strip"), { gap: { start: 1000, end: 1060 } });
+    answer({});
+    assert.equal(await loadScrubStrip("/strip"), null);
+    answer({ "X-SurvNG-Gap-Start": "1060.000", "X-SurvNG-Gap-End": "1000.000" });
+    assert.equal(await loadScrubStrip("/strip"), null);
+    globalThis.fetch = async () => ({ status: 429, ok: false, headers: headers({}) });
+    await assert.rejects(loadScrubStrip("/strip"));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
 
 // A store whose loads are resolved by hand, on a clock the test moves.
 // Timers run when the clock passes them.
@@ -260,6 +280,66 @@ const segment = (start) => ({ start, end: start + 10, step: 1, count: 10, column
   t.advance(SCRUB_STRIP_RETRY_MS + 1);
   await t.settle();
   assert.equal(t.pending.length, before + 1);
+}
+
+// The wait belongs to the segment that failed. Moving to another one, or
+// starting a new scrub, is not held back by it.
+{
+  const t = harness();
+  t.store.want(3005);
+  await t.settle();
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    t.pending.at(-1).reject(new Error("500"));
+    await t.settle();
+    t.advance(SCRUB_STRIP_RETRY_MAX_MS + 1);
+    await t.settle();
+  }
+  t.pending.at(-1).reject(new Error("500"));
+  await t.settle();
+  const before = t.pending.length;
+  t.store.want(9005);
+  await t.settle();
+  assert.deepEqual(t.pending.slice(before).map((item) => item.epoch), [9005]);
+  // Back on the failing segment within its wait: still not asked for.
+  t.store.idle();
+  t.store.want(3006);
+  await t.settle();
+  assert.equal(t.pending.length, before + 1);
+  // A different segment failing has its own count, starting at one second.
+  t.pending.at(-1).reject(new Error("429"));
+  await t.settle();
+  t.store.idle();
+  t.store.want(9006);
+  await t.settle();
+  assert.equal(t.pending.length, before + 1);
+  t.advance(SCRUB_STRIP_RETRY_MS + 1);
+  await t.settle();
+  assert.equal(t.pending.at(-1).epoch, 9006);
+  // Once it answers, its trouble is forgotten.
+  t.pending.at(-1).resolve(null);
+  await t.settle();
+  // And the first segment is asked for again when its own wait ends.
+  t.store.idle();
+  t.store.want(3006);
+  t.advance(SCRUB_STRIP_RETRY_MAX_MS + 1);
+  await t.settle();
+  assert.equal(t.pending.at(-1).epoch, 3006);
+}
+
+// Two requests failing together are two segments, one failure each.
+{
+  const t = harness();
+  t.store.want(4005);
+  t.store.want(4105);
+  await t.settle();
+  assert.equal(t.pending.length, 2);
+  t.pending[0].reject(new Error("429"));
+  t.pending[1].reject(new Error("429"));
+  await t.settle();
+  t.advance(SCRUB_STRIP_RETRY_MS + 1);
+  await t.settle();
+  // 4105 is where the playhead is; it is asked for after one second, not two.
+  assert.deepEqual(t.pending.map((item) => item.epoch), [4005, 4105, 4105]);
 }
 
 // How long a segment is, is judged from the strip nearest the time in

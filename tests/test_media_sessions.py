@@ -117,3 +117,27 @@ def test_media_session_lease_close_is_idempotent() -> None:
     snapshot = manager.snapshot()
     assert snapshot["active"] == 0
     assert snapshot["counters"]["completed"] == 1
+
+
+def test_preview_builds_have_a_resource_of_their_own() -> None:
+    limits = MediaAdmissionPolicy.enforced_defaults().global_limits
+    # Scrub-preview strips: two at a time, without touching the transcode
+    # slots or the JPEG encoders that live MJPEG streams hold.
+    assert limits[MediaResourceClass.PREVIEW_PROCESS] == 2
+    registry = MediaSessionManager(MediaAdmissionPolicy.enforced_defaults())
+    request = MediaSessionRequest(
+        MediaSessionKind.RECORDING_PREVIEW,
+        resources={MediaResourceClass.PREVIEW_PROCESS: 1},
+    )
+    first = registry.acquire(request, blocking=False)
+    second = registry.acquire(request, blocking=False)
+    with pytest.raises(MediaSessionAdmissionError):
+        registry.acquire(request, blocking=False)
+    # Both transcode slots are still free.
+    transcode = MediaSessionRequest(
+        MediaSessionKind.EVENT_CLIP,
+        resources={MediaResourceClass.TRANSCODE_PROCESS: 2},
+    )
+    registry.acquire(transcode, blocking=False).close()
+    first.close()
+    second.close()

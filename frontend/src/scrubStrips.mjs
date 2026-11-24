@@ -22,9 +22,10 @@ export const SCRUB_STRIP_CONCURRENCY = 2;
 export const SCRUB_STRIP_AHEAD = 2;
 // Until a strip has shown how long this camera's segments are.
 export const SCRUB_STRIP_SEGMENT_SECONDS = 10;
-// After a failed request (busy generator, storage error) wait before another,
-// twice as long after each failure in a row: a segment that cannot be built
-// costs the server a decode every time it is asked for.
+// After a failed request (busy generator, storage error) wait before asking
+// for that segment again, twice as long after each failure in a row: one that
+// cannot be built costs the server a decode every time it is asked for. The
+// wait belongs to the segment that failed; others are asked for as usual.
 export const SCRUB_STRIP_RETRY_MS = 1000;
 export const SCRUB_STRIP_RETRY_MAX_MS = 8000;
 // A request with no answer for this long is given up, so it cannot hold one
@@ -123,9 +124,9 @@ export function createScrubStripStore({
   let inFlight = [];
   let wanted = null;
   let direction = 0;
-  let retryAt = 0;
+  // Segments that failed: { epoch, failures, until }.
+  let troubled = [];
   let retryTimer = null;
-  let failures = 0;
   let closed = false;
 
   const find = (epoch) => strips.find((strip) => strip.start <= epoch && epoch < strip.end) || null;
@@ -153,7 +154,12 @@ export function createScrubStripStore({
     const window = segmentSeconds(epoch);
     return inFlight.some((request) => Math.abs(request.epoch - epoch) < window);
   };
-  const needed = (epoch) => !find(epoch) && !isGap(epoch) && !requested(epoch);
+  const trouble = (epoch) => {
+    const window = segmentSeconds(epoch);
+    return troubled.find((item) => Math.abs(item.epoch - epoch) < window) || null;
+  };
+  const waiting = (epoch) => (trouble(epoch)?.until ?? 0) > now();
+  const needed = (epoch) => !find(epoch) && !isGap(epoch) && !requested(epoch) && !waiting(epoch);
 
   function keep(strip) {
     // Only the same segment again replaces what is held. Strips that merely
@@ -203,23 +209,46 @@ export function createScrubStripStore({
   }
 
   function next() {
-    while (!closed && wanted !== null && inFlight.length < SCRUB_STRIP_CONCURRENCY && now() >= retryAt) {
+    while (!closed && wanted !== null && inFlight.length < SCRUB_STRIP_CONCURRENCY) {
       const epoch = target();
       if (epoch === null) return;
       start(epoch);
     }
   }
 
-  function failed() {
-    failures += 1;
-    const wait = Math.min(SCRUB_STRIP_RETRY_MAX_MS, SCRUB_STRIP_RETRY_MS * 2 ** (failures - 1));
-    retryAt = now() + wait;
-    // The playhead may be resting: nothing else would ask again.
+  function failed(epoch) {
+    const time = now();
+    // A failure long past says nothing about now.
+    troubled = troubled.filter((item) => time - item.until < SCRUB_STRIP_RETRY_MAX_MS * 4);
+    let item = trouble(epoch);
+    if (!item) {
+      item = { epoch, failures: 0, until: 0 };
+      troubled.push(item);
+    }
+    item.failures += 1;
+    const wait = Math.min(SCRUB_STRIP_RETRY_MAX_MS, SCRUB_STRIP_RETRY_MS * 2 ** (item.failures - 1));
+    item.until = time + wait;
+    arm();
+  }
+
+  // The playhead may be resting: nothing else would ask again. One timer,
+  // for whichever wait ends first; it re-arms for the next.
+  function arm() {
     if (retryTimer !== null) cancel(retryTimer);
+    retryTimer = null;
+    const time = now();
+    const pending = troubled.filter((item) => item.until > time).map((item) => item.until);
+    if (closed || !pending.length) return;
     retryTimer = schedule(() => {
       retryTimer = null;
       next();
-    }, wait + 1);
+      arm();
+    }, Math.min(...pending) - time + 1);
+  }
+
+  function succeeded(epoch) {
+    const item = trouble(epoch);
+    if (item) troubled = troubled.filter((other) => other !== item);
   }
 
   function start(epoch) {
@@ -235,7 +264,7 @@ export function createScrubStripStore({
       if (closed || !current()) return;
       controller?.abort();
       finish();
-      failed();
+      failed(epoch);
       onChange();
     }, SCRUB_STRIP_TIMEOUT_MS);
     Promise.resolve()
@@ -246,12 +275,12 @@ export function createScrubStripStore({
           if (strip) release(strip);
           return;
         }
-        failures = 0;
+        succeeded(epoch);
         if (strip) keep(strip);
         else rememberGap(epoch, result?.gap || null);
       })
       .catch(() => {
-        if (!closed && current()) failed();
+        if (!closed && current()) failed(epoch);
       })
       .finally(() => {
         if (!current()) return;
@@ -307,6 +336,7 @@ export function createScrubStripStore({
       strips.forEach(release);
       strips = [];
       gaps = [];
+      troubled = [];
     },
     get size() {
       return strips.length;
