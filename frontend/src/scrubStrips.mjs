@@ -4,9 +4,12 @@
 
 // Kept in memory at once. A strip of twelve 320 px tiles decodes to a few MB.
 export const SCRUB_STRIP_LIMIT = 24;
-// A time with no recording is not asked about again for this long.
-export const SCRUB_STRIP_GAP_SECONDS = 30;
-export const SCRUB_STRIP_GAP_BUCKET_SECONDS = 5;
+// A time with no recording is not asked about again for this long. Short,
+// because the newest footage is "not there" only until it is indexed. The
+// answer is remembered for that one second: the request named a time, and
+// says nothing about where the recording next to it begins or ends.
+export const SCRUB_STRIP_GAP_SECONDS = 10;
+export const SCRUB_STRIP_GAP_BUCKET_SECONDS = 1;
 // While the strip for the playhead's own time is loading, the nearest loaded
 // one within this distance stands in for it. A rail scrolls through minutes a
 // second; a frame from just behind the playhead says more than none.
@@ -20,6 +23,9 @@ export const SCRUB_STRIP_AHEAD = 2;
 export const SCRUB_STRIP_SEGMENT_SECONDS = 10;
 // After a failed request (busy generator, storage error) wait before another.
 export const SCRUB_STRIP_RETRY_MS = 1000;
+// A request with no answer for this long is given up, so it cannot hold one
+// of the two slots for the rest of the scrub.
+export const SCRUB_STRIP_TIMEOUT_MS = 10000;
 
 // Layout of a strip from the response headers of preview-strip.jpg.
 export function scrubStripLayout(headers) {
@@ -97,6 +103,8 @@ export function createScrubStripStore({
   release = () => {},
   limit = SCRUB_STRIP_LIMIT,
   now = () => Date.now(),
+  schedule = (callback, ms) => setTimeout(callback, ms),
+  cancel = (timer) => clearTimeout(timer),
 } = {}) {
   let strips = [];
   let gaps = new Map();
@@ -104,8 +112,8 @@ export function createScrubStripStore({
   let wanted = null;
   let direction = 0;
   let retryAt = 0;
+  let retryTimer = null;
   let closed = false;
-  let segmentSeconds = SCRUB_STRIP_SEGMENT_SECONDS;
 
   const gapKey = (epoch) => Math.floor(epoch / SCRUB_STRIP_GAP_BUCKET_SECONDS);
   const find = (epoch) => strips.find((strip) => strip.start <= epoch && epoch < strip.end) || null;
@@ -117,26 +125,42 @@ export function createScrubStripStore({
     return false;
   };
   // A request names a time, not a segment: one for a time this close is
-  // taken to be for the same segment.
-  const requested = (epoch) => inFlight.some((request) => Math.abs(request.epoch - epoch) < segmentSeconds);
+  // taken to be for the same segment. The longest segment held is the
+  // measure, so one short segment does not bring duplicate requests.
+  const segmentSeconds = () => strips.reduce(
+    (longest, strip) => Math.max(longest, strip.end - strip.start), SCRUB_STRIP_SEGMENT_SECONDS,
+  );
+  const requested = (epoch) => {
+    const window = segmentSeconds();
+    return inFlight.some((request) => Math.abs(request.epoch - epoch) < window);
+  };
   const needed = (epoch) => !find(epoch) && !isGap(epoch) && !requested(epoch);
 
   function keep(strip) {
-    // A segment asked for twice (the main and sub streams cut at different
-    // times) replaces what overlaps it.
+    // Only the same segment again replaces what is held. Strips that merely
+    // overlap stay side by side: the sub and main streams are cut at
+    // different times, and if one evicted the other, fetching ahead would
+    // keep throwing out the strip under the playhead and asking for it again.
     strips = strips.filter((item) => {
-      const overlaps = item.start < strip.end && strip.start < item.end;
-      if (overlaps) release(item);
-      return !overlaps;
+      const same = item.start === strip.start && item.end === strip.end;
+      if (same) release(item);
+      return !same;
     });
     strips.push(strip);
     strip.usedAt = now();
-    if (strip.end - strip.start > 0) segmentSeconds = strip.end - strip.start;
     while (strips.length > limit) {
       const oldest = strips.reduce((a, b) => (a.usedAt <= b.usedAt ? a : b));
       strips = strips.filter((item) => item !== oldest);
       release(oldest);
     }
+  }
+
+  function rememberGap(epoch) {
+    if (gaps.size > 512) {
+      const time = now();
+      gaps = new Map([...gaps].filter(([, until]) => until > time));
+    }
+    gaps.set(gapKey(epoch), now() + SCRUB_STRIP_GAP_SECONDS * 1000);
   }
 
   // The most useful time not yet loaded or asked for: the playhead's own,
@@ -163,11 +187,32 @@ export function createScrubStripStore({
     }
   }
 
+  function failed() {
+    retryAt = now() + SCRUB_STRIP_RETRY_MS;
+    // The playhead may be resting: nothing else would ask again.
+    if (retryTimer !== null) cancel(retryTimer);
+    retryTimer = schedule(() => {
+      retryTimer = null;
+      next();
+    }, SCRUB_STRIP_RETRY_MS + 1);
+  }
+
   function start(epoch) {
     const controller = typeof AbortController === "undefined" ? null : new AbortController();
     const request = { epoch, controller };
     inFlight.push(request);
     const current = () => inFlight.includes(request);
+    const finish = () => {
+      cancel(request.timer);
+      inFlight = inFlight.filter((item) => item !== request);
+    };
+    request.timer = schedule(() => {
+      if (closed || !current()) return;
+      controller?.abort();
+      finish();
+      failed();
+      onChange();
+    }, SCRUB_STRIP_TIMEOUT_MS);
     Promise.resolve()
       .then(() => load(epoch, controller?.signal))
       .then((strip) => {
@@ -176,14 +221,14 @@ export function createScrubStripStore({
           return;
         }
         if (strip) keep(strip);
-        else gaps.set(gapKey(epoch), now() + SCRUB_STRIP_GAP_SECONDS * 1000);
+        else rememberGap(epoch);
       })
       .catch(() => {
-        if (!closed && current()) retryAt = now() + SCRUB_STRIP_RETRY_MS;
+        if (!closed && current()) failed();
       })
       .finally(() => {
         if (!current()) return;
-        inFlight = inFlight.filter((item) => item !== request);
+        finish();
         if (closed) return;
         onChange();
         next();
@@ -217,7 +262,7 @@ export function createScrubStripStore({
       wanted = epoch;
       next();
     },
-    // A failed request is retried by the next want() once the wait has passed.
+    // The scrub is over: nothing more is asked for until the next want().
     idle() {
       wanted = null;
       direction = 0;
@@ -225,7 +270,12 @@ export function createScrubStripStore({
     close() {
       closed = true;
       wanted = null;
-      inFlight.forEach((request) => request.controller?.abort());
+      if (retryTimer !== null) cancel(retryTimer);
+      retryTimer = null;
+      inFlight.forEach((request) => {
+        cancel(request.timer);
+        request.controller?.abort();
+      });
       inFlight = [];
       strips.forEach(release);
       strips = [];

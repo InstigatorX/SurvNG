@@ -3751,6 +3751,13 @@ export function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, reco
   // strips and is shown in the player; the tile above it carries the time.
   const stripsEnabled = Boolean(onScrub && cameraId);
   const scrubActiveRef = useRef(false);
+  const onScrubRef = useRef(onScrub);
+  onScrubRef.current = onScrub;
+  // A layout switch can unmount this mid-drag; the scrub must still end.
+  useEffect(() => () => {
+    if (scrubActiveRef.current) onScrubRef.current?.(null, { committed: false });
+    scrubActiveRef.current = false;
+  }, []);
   const ticks = useMemo(() => {
     const tickInterval = timelineTickIntervalSeconds(windowHours);
     const formatter = new Intl.DateTimeFormat("en-US", {

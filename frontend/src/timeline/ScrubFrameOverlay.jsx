@@ -94,10 +94,9 @@ export const ScrubFrameOverlay = forwardRef(function ScrubFrameOverlay({ seeking
     <div
       className={`recording-scrub-frame${frame.loading ? " loading" : ""}${frame.gap ? " gap" : ""}`}
       data-drawn={drawnRef.current ? "true" : "false"}
-      aria-hidden="true"
     >
-      <canvas ref={canvasRef} />
-      {frame.gap ? <span><Film size={22} />No recording</span> : null}
+      <canvas ref={canvasRef} aria-hidden="true" />
+      {frame.gap ? <span role="status"><Film size={22} aria-hidden="true" />No recording</span> : null}
     </div>
   );
 });

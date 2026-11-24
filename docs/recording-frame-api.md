@@ -74,8 +74,11 @@ playhead is dragged, so moving within a loaded segment needs no request.
 The page runs two requests at a time with no queue: when one finishes, the
 next is for where the playhead is then, and after that for up to two segments
 ahead in the direction of the scrub. While the playhead's own segment loads,
-the nearest loaded strip within ten minutes stands in. It keeps at most 24
-strips in memory. Every Timeline layout reports its scrub position: the rail,
+the nearest loaded strip within ten minutes stands in. A failed request is
+tried again after a second, one with no answer is given up after ten, and a
+time with no recording is remembered, for that second only, for ten seconds.
+It keeps at most 24 strips in memory; strips from the sub and main streams,
+which are cut at different times, are kept side by side. Every Timeline layout reports its scrub position: the rail,
 the camera columns, the day strip's loupe and the classic scrubber. After a
 scrub that ends in a seek, the released time keeps loading and its frame stays
 up until the player has seeked there and shows the exact full-resolution

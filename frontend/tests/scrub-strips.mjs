@@ -3,6 +3,7 @@ import {
   SCRUB_STRIP_GAP_SECONDS,
   SCRUB_STRIP_NEAR_SECONDS,
   SCRUB_STRIP_RETRY_MS,
+  SCRUB_STRIP_TIMEOUT_MS,
   createScrubStripStore,
   scrubStripLayout,
   scrubStripTile,
@@ -46,23 +47,40 @@ assert.equal(scrubStripTileWidth({ playerWidth: 1200, pixelRatio: 1 }), 480);
 assert.equal(scrubStripTileWidth({ playerWidth: 700, pixelRatio: 1 }), 320);
 
 // A store whose loads are resolved by hand, on a clock the test moves.
+// Timers run when the clock passes them.
 function harness(options = {}) {
   const pending = [];
   const released = [];
+  const timers = [];
   let changes = 0;
   let clock = 1_000_000;
   const store = createScrubStripStore({
-    load: (epoch) => new Promise((resolve, reject) => pending.push({ epoch, resolve, reject })),
+    load: (epoch, signal) => new Promise((resolve, reject) => pending.push({ epoch, resolve, reject, signal })),
     onChange: () => { changes += 1; },
     release: (strip) => released.push(strip.start),
     now: () => clock,
+    schedule: (callback, ms) => {
+      const timer = { callback, at: clock + ms };
+      timers.push(timer);
+      return timer;
+    },
+    cancel: (timer) => {
+      const index = timers.indexOf(timer);
+      if (index >= 0) timers.splice(index, 1);
+    },
     ...options,
   });
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
   return {
-    store, pending, released, settle,
+    store, pending, released, settle, timers,
     changes: () => changes,
-    advance: (ms) => { clock += ms; },
+    advance: (ms) => {
+      clock += ms;
+      for (const timer of timers.filter((item) => item.at <= clock)) {
+        timers.splice(timers.indexOf(timer), 1);
+        timer.callback();
+      }
+    },
   };
 }
 const segment = (start) => ({ start, end: start + 10, step: 1, count: 10, columns: 6, rows: 2 });
@@ -140,24 +158,42 @@ const segment = (start) => ({ start, end: start + 10, step: 1, count: 10, column
 }
 
 // A time with no recording is remembered for a while, then asked about again.
+// Only that second is remembered: the answer names a time, and footage may
+// begin right next to it.
 {
   const t = harness();
-  t.store.want(205);
+  t.store.want(208);
   await t.settle();
   t.pending[0].resolve(null);
   await t.settle();
-  assert.deepEqual(t.store.frameAt(205), { strip: null, gap: true, loading: false });
-  t.store.want(206);
+  assert.deepEqual(t.store.frameAt(208.4), { strip: null, gap: true, loading: false });
+  t.store.want(208.6);
   await t.settle();
   assert.equal(t.pending.length, 1);
-  t.advance(SCRUB_STRIP_GAP_SECONDS * 1000 + 1);
-  assert.equal(t.store.frameAt(205).loading, true);
-  t.store.want(207);
+  // The recording ends at 207: one second away is still asked about.
+  assert.equal(t.store.frameAt(206.5).gap, false);
+  t.store.want(206.5);
   await t.settle();
-  assert.equal(t.pending.length, 2);
+  assert.deepEqual(t.pending.map((item) => item.epoch), [208, 206.5]);
+  t.pending[1].resolve({ ...segment(200), end: 207, count: 7 });
+  await t.settle();
+  assert.equal(t.store.frameAt(206.5).strip.start, 200);
+}
+{
+  const t = harness();
+  t.store.want(208);
+  await t.settle();
+  t.pending[0].resolve(null);
+  await t.settle();
+  t.advance(SCRUB_STRIP_GAP_SECONDS * 1000 + 1);
+  assert.equal(t.store.frameAt(208.4).gap, false);
+  t.store.want(208.4);
+  await t.settle();
+  assert.deepEqual(t.pending.map((item) => item.epoch), [208, 208.4]);
 }
 
-// A failed request (the generator is busy) is not repeated at once.
+// A failed request (the generator is busy) is not repeated at once, and is
+// repeated by itself after the wait: the playhead may be resting.
 {
   const t = harness();
   t.store.want(305);
@@ -169,34 +205,110 @@ const segment = (start) => ({ start, end: start + 10, step: 1, count: 10, column
   assert.equal(t.pending.length, 1);
   assert.equal(t.store.frameAt(305).loading, true);
   t.advance(SCRUB_STRIP_RETRY_MS + 1);
-  t.store.want(307);
+  await t.settle();
+  assert.deepEqual(t.pending.map((item) => item.epoch), [305, 306]);
+}
+
+// A request that never answers gives its slot back.
+{
+  const t = harness();
+  t.store.want(355);
+  await t.settle();
+  assert.equal(t.pending.length, 1);
+  t.advance(SCRUB_STRIP_TIMEOUT_MS + 1);
+  assert.equal(t.pending[0].signal.aborted, true);
+  assert.equal(t.changes(), 1);
+  t.advance(SCRUB_STRIP_RETRY_MS + 1);
   await t.settle();
   assert.equal(t.pending.length, 2);
+  // Its late answer is released, not kept.
+  t.pending[0].resolve(segment(350));
+  await t.settle();
+  assert.deepEqual(t.released, [350]);
+  assert.equal(t.store.size, 0);
 }
 
 // Memory is bounded: the strip used longest ago goes first, and its image is
-// released. A strip that overlaps a new one is replaced by it.
+// released. Looking at a strip counts as using it.
 {
   const t = harness({ limit: 2 });
-  for (const [index, epoch] of [405, 505, 605].entries()) {
+  const loadAt = async (epoch) => {
     t.store.idle();
     t.store.want(epoch);
     await t.settle();
-    t.pending[index].resolve(segment(epoch - 5));
+    t.pending.at(-1).resolve(segment(epoch - 5));
     await t.settle();
     t.advance(10);
-  }
+  };
+  await loadAt(405);
+  await loadAt(505);
+  t.store.frameAt(405);
+  t.advance(10);
+  await loadAt(605);
   assert.equal(t.store.size, 2);
-  assert.deepEqual(t.released, [400]);
-  assert.equal(t.store.frameAt(405).loading, true);
-  assert.notEqual(t.store.frameAt(405).strip?.start, 400);
+  assert.deepEqual(t.released, [500]);
+  assert.equal(t.store.frameAt(405).strip.start, 400);
+  // The same segment arriving again replaces the copy held.
   t.store.idle();
-  t.store.want(612);
+  t.store.want(408);
   await t.settle();
-  t.pending[3].resolve(segment(603));
+  assert.equal(t.pending.length, 3);
+  await loadAt(605);
+  assert.equal(t.pending.length, 3);
+}
+
+// Strips that overlap stay side by side. The sub and main streams are cut at
+// different times; if one replaced the other, fetching ahead would evict the
+// strip under a resting playhead and ask for it again, without end.
+{
+  const t = harness();
+  const live = { start: 100, end: 110, step: 1, count: 10, columns: 6, rows: 2, source: "live" };
+  const main = { start: 105, end: 115, step: 1, count: 10, columns: 6, rows: 2, source: "main" };
+  t.store.want(102);
+  t.store.want(103);
   await t.settle();
-  assert.deepEqual(t.released, [400, 600]);
-  assert.equal(t.store.frameAt(606).strip.start, 603);
+  t.pending[0].resolve(live);
+  await t.settle();
+  assert.deepEqual(t.pending.map((item) => item.epoch), [102, 110.5]);
+  t.pending[1].resolve(main);
+  await t.settle();
+  assert.equal(t.store.size, 2);
+  assert.deepEqual(t.released, []);
+  assert.equal(t.store.frameAt(103).strip, live);
+  // Resting at 103: one more segment ahead, then nothing.
+  assert.deepEqual(t.pending.map((item) => item.epoch), [102, 110.5, 115.5]);
+  t.pending[2].resolve(segment(115));
+  await t.settle();
+  assert.equal(t.pending.length, 3);
+}
+
+// One short segment does not make a later one look like two.
+{
+  const t = harness();
+  t.store.want(501);
+  await t.settle();
+  t.pending[0].resolve({ ...segment(500), end: 503.5, count: 4 });
+  await t.settle();
+  t.store.idle();
+  t.store.want(601);
+  t.store.want(607);
+  await t.settle();
+  assert.deepEqual(t.pending.map((item) => item.epoch), [501, 601]);
+}
+
+// The end of a scrub forgets which way it was going.
+{
+  const t = harness();
+  t.store.want(705);
+  t.store.want(706);
+  await t.settle();
+  t.store.idle();
+  t.pending[0].resolve(segment(700));
+  await t.settle();
+  t.store.want(706);
+  await t.settle();
+  // A new scrub that has not moved yet fetches nothing ahead.
+  assert.equal(t.pending.length, 1);
 }
 
 // Closing releases everything and ignores a request that finishes afterwards.

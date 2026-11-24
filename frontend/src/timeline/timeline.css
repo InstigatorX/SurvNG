@@ -1911,3 +1911,9 @@
 .recordings-v2-scrub-preview.strips>div {
   display: none;
 }
+
+/* Detection boxes are computed from the player's own picture, not from the
+   scrubbed frame drawn over it. */
+.recording-hero-media:has(.recording-scrub-frame[data-drawn="true"]) .event-detection-canvas {
+  visibility: hidden;
+}

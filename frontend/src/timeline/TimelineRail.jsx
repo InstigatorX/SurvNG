@@ -357,6 +357,13 @@ export function EdgeRail({ cameraId, source, dayStart, dayEnd, topEpoch, events,
   // With a scrub callback the player shows the frame under the loupe, so
   // the loupe itself carries only the time.
   const playerPreview = Boolean(onScrub && cameraId);
+  const onScrubRef = useRef(onScrub);
+  onScrubRef.current = onScrub;
+  // A layout switch can unmount this mid-gesture; the scrub must still end.
+  useEffect(() => () => {
+    if (gestureRef.current) onScrubRef.current?.(null, { committed: false });
+    gestureRef.current = null;
+  }, []);
   useEffect(() => {
     if (!loupe || playerPreview) return undefined;
     const timer = window.setTimeout(() => setPreviewEpoch(Math.round(loupe.epoch / 5) * 5), 140);

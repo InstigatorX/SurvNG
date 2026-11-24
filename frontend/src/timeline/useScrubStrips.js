@@ -59,11 +59,12 @@ export function useScrubStrips({ cameraId, source, onFrame }) {
     });
     storeRef.current = store;
     return () => {
-      const scrubbing = Number.isFinite(epochRef.current) && !heldRef.current;
       release();
       store.close();
       storeRef.current = null;
-      if (scrubbing) onFrameRef.current?.(null, { committed: false });
+      // Whatever is up belongs to the camera or stream being left, also
+      // when the scrub itself ended and only its last frame is still shown.
+      onFrameRef.current?.(null, { committed: false });
     };
   }, [cameraId, publish, source]);
 
