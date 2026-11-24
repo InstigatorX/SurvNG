@@ -262,6 +262,70 @@ class FrameStepDecodeTest(unittest.TestCase):
         image, actual = self.step_frame(row, 1000.0 + frames.times[1])
         self.assertEqual(self.shown_frame(image), 1)
 
+    def test_the_gpu_decodes_and_scales_under_auto_and_the_cpu_takes_over(self) -> None:
+        from survng.app import recording_media_runtime as runtime_module
+        from survng.app.recorded_decoder import FAILURE_HARDWARE_INIT, DecodeResult
+
+        path = self.clip("gpu.mp4", seconds=1.0)
+        row = {"path": str(path), "start_epoch": 1000.0, "end_epoch": 1001.0}
+        frames = self.segment_frames(row)
+        commands: list[list[str]] = []
+        real_run_decoder = runtime_module.run_decoder
+
+        def run_decoder(command, **kwargs):
+            commands.append(list(command))
+            if "-hwaccel" in command:
+                # No such device here: what a GPU that cannot be opened does.
+                return DecodeResult(command, kwargs["backend"], 1, None, b"", FAILURE_HARDWARE_INIT, "no VAAPI")
+            return real_run_decoder(command, **kwargs)
+
+        def step(epoch: float, *, mode: str = "auto", dimensions=(2560, 1920)):
+            with (
+                patch.object(main, "manager", self.manager),
+                patch.object(self.runtime, "_maintain_recording_preview_cache"),
+                patch.object(self.runtime, "_hardware_acceleration_mode", return_value=mode),
+                patch.object(
+                    self.runtime, "_ffmpeg_vaapi_info",
+                    return_value={"available": True, "device": "/dev/dri/renderD129"},
+                ),
+                patch.object(runtime_module, "run_decoder", side_effect=run_decoder),
+                patch.object(runtime_module, "mp4_video_dimensions", return_value=dimensions),
+            ):
+                return self.runtime._recording_step_frame(row, epoch, width=320)
+
+        self.addCleanup(setattr, self.runtime, "recording_strip_hardware_retry_at", 0.0)
+        self.runtime.recording_strip_hardware_retry_at = 0.0
+        with self.assertLogs("survng.app.recording_media_runtime", level="WARNING"):
+            image, actual = step(1000.0 + frames.times[3])
+        # Tried on the GPU first, decoding and scaling there, then the CPU.
+        self.assertEqual(len(commands), 2)
+        gpu, cpu = commands
+        self.assertEqual(gpu[gpu.index("-hwaccel") + 1], "vaapi")
+        self.assertEqual(gpu[gpu.index("-vaapi_device") + 1], "/dev/dri/renderD129")
+        self.assertLess(gpu.index("-hwaccel"), gpu.index("-i"))
+        gpu_filter = gpu[gpu.index("-vf") + 1]
+        self.assertIn("scale_vaapi=w=320:h=240", gpu_filter)
+        self.assertLess(gpu_filter.index("hwdownload"), gpu_filter.index("showinfo"))
+        self.assertNotIn("-hwaccel", cpu)
+        # The CPU's frame is still the exact one.
+        self.assertEqual(self.shown_frame(image), 3)
+        self.assertAlmostEqual(actual, 1000.0 + frames.times[3], places=5)
+        # A GPU that just failed is not tried again for the next run.
+        self.assertGreater(self.runtime.recording_strip_hardware_retry_at, 0.0)
+        commands.clear()
+        step(1000.0 + frames.times[12])
+        self.assertEqual(len(commands), 1)
+        self.assertNotIn("-hwaccel", commands[0])
+        # Hardware turned off, or a frame of unknown size: never the GPU.
+        self.runtime.recording_strip_hardware_retry_at = 0.0
+        for mode, dimensions, index in (("off", (2560, 1920), 5), ("auto", None, 15)):
+            commands.clear()
+            # Nothing cached: each case decodes.
+            shutil.rmtree(self.root / "database", ignore_errors=True)
+            step(1000.0 + frames.times[index], mode=mode, dimensions=dimensions)
+            self.assertEqual(len(commands), 1)
+            self.assertNotIn("-hwaccel", commands[0])
+
     def test_a_large_frame_is_scaled_to_the_width_asked_for(self) -> None:
         import cv2
 

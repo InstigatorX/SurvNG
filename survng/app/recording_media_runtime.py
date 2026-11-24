@@ -45,7 +45,6 @@ from .recorded_decoder import (
     DecodePlan,
     build_decode_command,
     read_bmp_frames,
-    recorded_decode_plans,
     run_decoder,
     warn_decoder_errors,
     warn_decoder_failure,
@@ -1269,6 +1268,8 @@ class RecordingMediaRuntime:
             found = cached()
             if found is not None:
                 return found
+            # Decided before a build slot is taken: the first VAAPI probe is slow.
+            size, plans = self._frame_run_plans(source_path, output_width)
             if not self.recording_frame_run_build_limiter.acquire(timeout=3.0):
                 raise HTTPException(status_code=429, detail='recording frame generator is busy', headers={'Retry-After': '1'})
             try:
@@ -1302,6 +1303,7 @@ class RecordingMediaRuntime:
                 with session if session is not None else contextlib.nullcontext():
                     decoded = self._decode_frame_run(
                         selected_config.ffmpeg_path, source_path, frames, run_start, run_stop, output_width,
+                        size=size, plans=plans,
                     )
                 times = []
                 written = 0
@@ -1342,6 +1344,36 @@ class RecordingMediaRuntime:
                 raise HTTPException(status_code=500, detail='recording frame failed')
             return found
 
+    def _frame_run_plans(self, source_path: Path, width: int) -> tuple[tuple[int, int] | None, tuple[DecodePlan, ...]]:
+        """The output size of a run's frames, and the decoder attempts for it.
+
+        As for preview strips: the GPU decodes and scales where hardware
+        acceleration is not ``off`` and VAAPI works, with the CPU after it;
+        after a GPU failure (for a strip or a run) the CPU does the work for
+        a while. A frame of unknown size stays on the CPU: the GPU scaler
+        would be told a size with nothing to check it against.
+        """
+        size = scaled_size(mp4_video_dimensions(source_path), width)
+        cpu = DecodePlan('cpu')
+        if (
+            size is None
+            or self._hardware_acceleration_mode() == 'off'
+            or time.monotonic() < self.recording_strip_hardware_retry_at
+        ):
+            return size, (cpu,)
+        vaapi = self._ffmpeg_vaapi_info()
+        if not vaapi.get('available'):
+            return size, (cpu,)
+        device = str(vaapi.get('device') or '/dev/dri/renderD128')
+        return size, (
+            DecodePlan(
+                'vaapi',
+                ('-vaapi_device', device, '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi'),
+                f'scale_vaapi=w={size[0]}:h={size[1]}:format=nv12,hwdownload,format=nv12',
+            ),
+            cpu,
+        )
+
     def _decode_frame_run(
         self,
         ffmpeg_path: str,
@@ -1350,15 +1382,16 @@ class RecordingMediaRuntime:
         run_start: int,
         run_stop: int,
         width: int,
+        *,
+        size: tuple[int, int] | None,
+        plans: tuple[DecodePlan, ...],
     ) -> list[tuple[float, bytes]]:
         """Decode frames ``[run_start, run_stop)`` once: (source pts, JPEG) each.
 
-        Goes through the shared recorded-frame decoder: its thread limits,
-        hardware plans (GPU scale where VAAPI or QSV is configured, the CPU
-        otherwise or after a GPU failure) and failure classes.
+        Goes through the shared recorded-frame decoder (thread limits,
+        process handling, failure classes), with the attempts from
+        ``_frame_run_plans``.
         """
-        size = scaled_size(mp4_video_dimensions(source_path), width)
-        plans = recorded_decode_plans(self._hardware_acceleration_mode(), scale=size) if size else (DecodePlan('cpu'),)
         count = run_stop - run_start
         # Accurate seek: decoding starts at the keyframe before this time and
         # frames before it are dropped. FFmpeg seeks from the file's start
@@ -1379,13 +1412,25 @@ class RecordingMediaRuntime:
                 # Raw frames of a known size skip a BMP encode and decode each.
                 transport='raw' if size else 'bmp',
             )
+            on_gpu = plan.backend != 'cpu'
             result = run_decoder(
-                command, backend=plan.backend, timeout=RECORDING_FRAME_RUN_TIMEOUT_SECONDS,
+                command, backend=plan.backend,
+                # A run takes well under a second on the GPU; one that takes
+                # this long is hung, and the CPU still has its own budget.
+                timeout=RECORDING_STRIP_HARDWARE_TIMEOUT_SECONDS if on_gpu else RECORDING_FRAME_RUN_TIMEOUT_SECONDS,
                 stdout_reader=(lambda stream: raw_bgr_frames(stream, size)) if size else read_bmp_frames,
             )
             warn_decoder_errors('frame_step', source_path, plan.backend, result.stderr)
             if result.ok and result.output:
                 break
+            if on_gpu:
+                # A broken or hung GPU must not cost every run its timeout.
+                self.recording_strip_hardware_retry_at = time.monotonic() + RECORDING_STRIP_HARDWARE_RETRY_SECONDS
+                LOGGER.warning(
+                    'recording frame run: hardware decode failed for %s, using the CPU: %s',
+                    source_path.name, redact_secret_text(result.describe()),
+                )
+                continue
             warn_decoder_failure('frame_step', source_path, result)
         if result is None or not result.ok or not result.output:
             if result is not None and result.failure == FAILURE_TIMEOUT:

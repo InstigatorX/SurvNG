@@ -143,10 +143,13 @@ If the decoder does not produce that frame (a damaged stream), the answer is
 - Frames are decoded a run at a time: the GOP holding the frame (from its
   keyframe to the next, at most 30 frames; a longer GOP is cut into slices of
   30, each decoded from the keyframe) in one FFmpeg process, through the shared
-  recorded-frame decoder, so explicit VAAPI or QSV hardware acceleration
-  decodes and scales on the GPU, with the CPU as fallback. The whole run is
-  kept in the preview cache, so the other frames of that GOP are served
-  without decoding.
+  recorded-frame decoder. The whole run is kept in the preview cache, so the
+  other frames of that GOP are served without decoding.
+- As for preview strips, a run is decoded and scaled on the GPU through VAAPI
+  where hardware acceleration is not `off` and VAAPI works. If that fails or
+  takes more than 5 s, the CPU decodes the run, and neither runs nor strips
+  try the GPU again, for any camera, for five minutes. A frame of unknown size
+  is always decoded on the CPU.
 - One run is built at a time. Each holds a preview-process media session
   (shared with preview strips), not one of the transcode slots that event
   clips, exports and HomeKit use. A busy generator answers `429` with
