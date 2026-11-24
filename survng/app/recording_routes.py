@@ -36,6 +36,7 @@ from .encoded_fragments import (
 )
 from .growing_playlists import (
     GROWING_HOLD_SECONDS,
+    GROWING_MAX_WINDOW_SECONDS,
     GROWING_RECORD_LINGER_SECONDS,
     GrowingPlaylistKey,
     GrowingPlaylistRecord,
@@ -1344,9 +1345,63 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             ),
         ):
             if names:
+                first = names[0]
+                if first in report.reasons:
+                    first = f"{first}: {report.reasons[first]}"
                 growing_log.log(
-                    level, kind, scope, message, window, len(names), names[0],
+                    level, kind, scope, message, window, len(names), first,
                 )
+
+    def new_growing_record(
+        key: GrowingPlaylistKey,
+        rows: list[dict],
+        *,
+        end_epoch: float,
+        segment_seconds: float,
+        requested_start: float,
+        query: str,
+    ) -> GrowingPlaylistRecord:
+        header = tuple(
+            day_playlist_header(
+                rows,
+                still_growing=True,
+                segment_seconds=segment_seconds,
+                requested_start=requested_start,
+            )
+        )
+        return GrowingPlaylistRecord(
+            key=key,
+            header=header,
+            query=query,
+            target_duration=int(
+                next(
+                    line for line in header
+                    if line.startswith("#EXT-X-TARGETDURATION:")
+                ).split(":", 1)[1]
+            ),
+            # Kept a little past the time the window can grow, so the re-read
+            # that ends the playlist, and any retry of it, find what it served.
+            expires_at=(
+                end_epoch
+                + max(30.0, 3.0 * segment_seconds)
+                + GROWING_RECORD_LINGER_SECONDS
+            ),
+        )
+
+    def log_growing_rebuild(key: GrowingPlaylistKey, why: str) -> None:
+        growing_log.log(
+            logging.WARNING,
+            "rebuilt",
+            key.camera_id,
+            "Growing playlist %s/%s %s-%s had its served record %s; it was "
+            "built again from the current recordings, so entries served "
+            "before may have changed",
+            key.camera_id,
+            key.source,
+            key.start_epoch,
+            key.end_epoch,
+            why,
+        )
 
     def growing_day_playlist(
         active_manager: Any,
@@ -1362,10 +1417,21 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
 
         The first read of a playlist (no record) is as strict as a finished
         one: it fails if any row cannot be checked. Later re-reads keep every
-        served entry unchanged and only append rows that can be checked.
+        served entry unchanged and only append rows that can be checked. The
+        re-read after the window closes finishes the playlist; the finished
+        playlist is served unchanged until the record expires.
         """
+        # Only windows of the size the page plays are tracked; a growing
+        # request for a longer one is rebuilt from the index on every read,
+        # as before records existed.
+        trackable = end_epoch - start_epoch <= GROWING_MAX_WINDOW_SECONDS
         with growing_playlists.lock:
-            record = growing_playlists.get(key)
+            record = growing_playlists.get(key) if trackable else None
+            if record is not None and record.finished:
+                return record.body(finished=True)
+            evicted_before = (
+                record is None and trackable and growing_playlists.was_evicted(key)
+            )
         if record is None and not still_growing:
             return None
         segment_seconds = _recording_segment_seconds(deps, active_manager)
@@ -1382,63 +1448,45 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             if record is None or exc.status_code < 404:
                 raise
             # The listing itself failed (not one row). Re-serve what was
-            # already served rather than fail the re-read.
+            # served, unfinished, rather than fail the re-read or end the
+            # playlist without the rows the listing could not return.
             growing_log.log(
                 logging.WARNING,
                 "listing-failed",
                 key.camera_id,
-                "Growing playlist %s/%s could not list recordings (HTTP %d); "
-                "serving its %d served segment(s) unchanged",
+                "Growing playlist %s/%s could not list recordings (HTTP %d: "
+                "%s); serving its %d served segment(s) unchanged",
                 key.camera_id,
                 key.source,
                 exc.status_code,
+                exc.detail,
                 len(record.entries),
             )
-            rows = None
+            with growing_playlists.lock:
+                return record.body(finished=False)
         if record is None:
             if not rows:
                 raise HTTPException(status_code=404, detail="no recordings found")
-            record = GrowingPlaylistRecord(
-                key=key,
-                header=tuple(
-                    day_playlist_header(
-                        rows,
-                        still_growing=True,
-                        segment_seconds=segment_seconds,
-                        requested_start=requested_start,
-                    )
-                ),
+            record = new_growing_record(
+                key,
+                rows,
+                end_epoch=end_epoch,
+                segment_seconds=segment_seconds,
+                requested_start=requested_start,
                 query=query,
-                target_duration=0,
-                # Kept a little past the time the window can grow, so the
-                # re-read that ends the playlist still finds what it served.
-                expires_at=(
-                    end_epoch
-                    + max(30.0, 3.0 * segment_seconds)
-                    + GROWING_RECORD_LINGER_SECONDS
-                ),
             )
-            record.target_duration = int(
-                next(
-                    line for line in record.header
-                    if line.startswith("#EXT-X-TARGETDURATION:")
-                ).split(":", 1)[1]
-            )
+            if evicted_before:
+                log_growing_rebuild(key, "evicted to bound memory")
         report: MergeReport | None = None
         evicted: list[GrowingPlaylistKey] = []
         with growing_playlists.lock:
-            stored = growing_playlists.get(key)
+            stored = growing_playlists.get(key) if trackable else None
+            if stored is not None and stored.finished:
+                return stored.body(finished=True)
             if stored is None and record.entries:
-                # Evicted or expired since it was read: start again from the
-                # rows just read, strictly, as a first read would.
-                record = GrowingPlaylistRecord(
-                    key=key,
-                    header=record.header,
-                    query=record.query,
-                    target_duration=record.target_duration,
-                    expires_at=record.expires_at,
-                )
-                if rows is None or not all(
+                # Evicted or expired since it was read. The rows were read
+                # tolerantly; start again only from rows that can all be read.
+                if not all(
                     getattr(row.get("_encoded_fragment"), "available", True)
                     for row in rows
                 ):
@@ -1446,31 +1494,39 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                         status_code=404,
                         detail="recording fragment is unavailable",
                     )
+                record = new_growing_record(
+                    key,
+                    rows,
+                    end_epoch=end_epoch,
+                    segment_seconds=segment_seconds,
+                    requested_start=requested_start,
+                    query=query,
+                )
+                log_growing_rebuild(key, "evicted while it was being read")
             # A concurrent first read of the same playlist may have stored
             # its record first; extend that one so both stay consistent.
             target = stored or record
-            if rows is not None:
-                fingerprints = resolve_stream_fingerprints(
+            report = merge_rows(
+                target,
+                rows,
+                resolve_stream_fingerprints(
                     [row.get("stream_fingerprint") for row in rows]
-                )
-                report = merge_rows(
-                    target,
-                    rows,
-                    fingerprints,
-                    now_monotonic=time.monotonic(),
-                )
+                ),
+                now_monotonic=time.monotonic(),
+            )
             if not target.entries:
                 raise HTTPException(status_code=404, detail="no recordings found")
-            if still_growing:
+            if not still_growing:
+                # The window can no longer grow: this read ends the playlist.
+                # Retries get the same finished playlist until it expires.
+                target.finished = True
+            if trackable:
                 if stored is None:
                     evicted = growing_playlists.put(target)
-            else:
-                # The window can no longer grow: this read ends the playlist
-                # and its record is no longer needed.
-                growing_playlists.drop(key)
+                else:
+                    evicted = growing_playlists.enforce_bounds(keep=key)
             body = target.body(finished=not still_growing)
-        if report is not None:
-            log_growing_merge(key, report)
+        log_growing_merge(key, report)
         if evicted:
             growing_log.log(
                 logging.WARNING,

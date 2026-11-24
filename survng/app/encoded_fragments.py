@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import math
 import threading
@@ -103,6 +104,18 @@ class EncodedFragmentSource(Protocol):
     def close(self) -> None: ...
 
 
+def _unavailable_reason(exc: BaseException) -> str:
+    """A short, secret-free description of why a file could not be checked."""
+    name = type(exc).__name__
+    code = getattr(exc, "errno", None)
+    if code is not None:
+        return f"{name}[{errno.errorcode.get(code, code)}]"
+    status = getattr(exc, "status_code", None)
+    if status is not None:
+        return f"{name}[{status}]"
+    return name
+
+
 class IndexedMp4FragmentSource:
     """Expose finalized recording-index rows as lazily materialized fMP4."""
 
@@ -114,8 +127,18 @@ class IndexedMp4FragmentSource:
         ],
         path_resolver: Callable[[object], Path],
         remuxer: Callable[[Path, float, float], tuple[Path, Path]],
+        tolerant_row_loader: Callable[
+            [str, float, float, str], list[dict]
+        ] | None = None,
+        unavailable_errors: tuple[type[BaseException], ...] = (),
     ) -> None:
         self._row_loader = row_loader
+        # Used by tolerant listings: it also returns rows whose file cannot be
+        # checked now, marked ``_storage_unavailable``, instead of hiding them.
+        self._tolerant_row_loader = tolerant_row_loader or row_loader
+        # Errors the path resolver raises for a missing or refused file, in
+        # addition to OSError, that a tolerant listing reports as unavailable.
+        self._unavailable_errors = tuple(unavailable_errors)
         self._path_resolver = path_resolver
         self._remuxer = remuxer
         self._lock = threading.Lock()
@@ -139,7 +162,8 @@ class IndexedMp4FragmentSource:
         """
         self._ensure_open()
         self._check_cancel(cancel)
-        rows = self._row_loader(
+        loader = self._tolerant_row_loader if tolerate_unavailable else self._row_loader
+        rows = loader(
             window.camera_id,
             window.start_epoch,
             window.end_epoch,
@@ -167,6 +191,12 @@ class IndexedMp4FragmentSource:
                 raise FragmentUnavailable(
                     "recording fragment is unavailable"
                 ) from exc
+            if tolerate_unavailable and row.get("_storage_unavailable"):
+                yield self._unavailable(
+                    sequence, row, wall_start, duration, fingerprint,
+                    str(row["_storage_unavailable"]),
+                )
+                continue
             try:
                 path = self._path_resolver(row.get("path"))
                 stat = path.stat()
@@ -176,16 +206,18 @@ class IndexedMp4FragmentSource:
                         "recording fragment is unavailable"
                     ) from exc
                 yield self._unavailable(
-                    sequence, row, wall_start, duration, fingerprint, exc
+                    sequence, row, wall_start, duration, fingerprint,
+                    _unavailable_reason(exc),
                 )
                 continue
-            except Exception as exc:
-                # The path resolver may raise its transport's own error (an
-                # HTTP 404/403); strict listings keep propagating it as-is.
+            except self._unavailable_errors as exc:
+                # The resolver's own error (an HTTP 404/403): strict listings
+                # keep propagating it unchanged.
                 if not tolerate_unavailable:
                     raise
                 yield self._unavailable(
-                    sequence, row, wall_start, duration, fingerprint, exc
+                    sequence, row, wall_start, duration, fingerprint,
+                    _unavailable_reason(exc),
                 )
                 continue
             name = str(row.get("name") or path.name)
@@ -228,7 +260,7 @@ class IndexedMp4FragmentSource:
         wall_start: float,
         duration: float,
         fingerprint: str,
-        exc: BaseException,
+        reason: str,
     ) -> EncodedFragment:
         raw_path = Path(str(row.get("path") or ""))
         return EncodedFragment(
@@ -243,7 +275,7 @@ class IndexedMp4FragmentSource:
             source_identity="",
             source_path=raw_path,
             available=False,
-            unavailable_reason=type(exc).__name__,
+            unavailable_reason=reason,
         )
 
     def materialize(

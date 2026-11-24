@@ -774,22 +774,32 @@ At the live edge, native HLS (Safari) can request the 15-minute window's
 playlist with `growing=true`. While the window can still receive recordings
 (until `max(30 s, 3 × recording_segment_seconds)` after it ends) it is served
 as an append-only `EVENT` playlist without `#EXT-X-ENDLIST`; the player re-reads
-it and plays new segments in place. The server keeps, in memory, the entries it
-has served for each playlist URL (camera, source, window, start offset and the
-page's `reload` token) and only appends to them, so a served entry keeps its
-lines and URLs even if its file cannot be checked on a re-read, it leaves the
-index, or its duration is revised; a revised entry's segment is served with
-the duration it was listed with. A new row whose file cannot be checked holds
-back the rows after it for up to 30 s and is then skipped. Each such case is
-logged at most once a minute per camera and kind. The first read of a playlist
-is as strict as a finished one: it fails if any row cannot be checked. The
-re-read after the window closes finishes the served playlist (`VOD`,
-`#EXT-X-ENDLIST`) and drops its record. Records survive a manager reload but
-not a restart, expire two minutes after their window stops growing, and are
-bounded (256 playlists, 16,384 entries; the least recently read are evicted).
-After a restart or eviction the next re-read is a first read again. Finished
-playlists, the event playlist and every request without `growing=true` are
-built from the index on every read, as before.
+it and plays new segments in place.
+
+The server keeps, in memory, the entries it has served for each playlist URL
+(camera, source, window, start offset and the page's `reload` token) and only
+appends to them. A served entry keeps its lines and URLs even if its file
+cannot be checked on a re-read, it leaves the index, or its duration is
+revised; a revised entry's segment is served with the duration it was listed
+with. For that, a re-read lists rows whose file has an unknown storage verdict
+as unreadable instead of hiding them. A new unreadable row holds back the rows
+after it for up to 30 s and is then skipped (if it becomes readable later it
+cannot be inserted, and the page's row list can then disagree with the
+player's by that row until the window is loaded again). If the listing itself
+fails, the served playlist is re-served unchanged. Each case is logged at most
+once a minute per camera and kind, with the reason a file could not be
+checked. The target duration is fixed at the first read, so an unusually long
+new segment can exceed it; that is logged too.
+
+The first read of a playlist is as strict as a finished one: it fails if a
+listed row cannot be checked. The re-read after the window closes finishes the
+served playlist (`VOD`, `#EXT-X-ENDLIST`); retries get the same finished
+playlist until the record expires two minutes after the window stopped
+growing. Records survive a manager reload but not a restart, and are bounded
+(windows up to an hour, 256 playlists, 16,384 entries; the least recently
+read are evicted). After a restart or eviction the next re-read is a first
+read again. Finished playlists, the event playlist and every request without
+`growing=true` are built from the index on every read, as before.
 
 Shaka Player is used for consistent browser integration, with Safari-specific
 media behavior handled by the playback layer. The current day's availability

@@ -61,7 +61,10 @@ class _Storage:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.rows: list[dict] = []
+        # Unknown storage verdict: hidden from ordinary listings.
         self.failing: set[str] = set()
+        # Listed as present, but the stat then fails (a race with storage).
+        self.racing: set[str] = set()
         self.remuxed: list[tuple[str, float, float]] = []
 
     def add(self, name: str, start: float, duration: float = 10.0) -> None:
@@ -80,8 +83,24 @@ class _Storage:
         return next(row for row in self.rows if row["name"] == name)
 
     def load(self, _camera, start, end, _source) -> list[dict]:
+        # Like discard_missing_recording_rows: a row whose file cannot be
+        # checked right now is withheld from an ordinary listing.
         return [
-            dict(row) for row in self.rows
+            dict(row) for row in self._window(start, end)
+            if row["name"] not in self.failing
+        ]
+
+    def load_tolerant(self, _camera, start, end, _source) -> list[dict]:
+        # Like discard_missing_recording_rows(keep_unknown=True).
+        return [
+            {**row, "_storage_unavailable": "storage verdict unknown"}
+            if row["name"] in self.failing else dict(row)
+            for row in self._window(start, end)
+        ]
+
+    def _window(self, start: float, end: float) -> list[dict]:
+        return [
+            row for row in self.rows
             if row["end_epoch"] > start and row["start_epoch"] < end
         ]
 
@@ -89,7 +108,7 @@ class _Storage:
         # Mirrors the production resolver: a file that is gone is an HTTP 404
         # from the resolver itself; a flaky stat is an OSError.
         path = Path(str(value))
-        if path.name in self.failing:
+        if path.name in self.failing or path.name in self.racing:
             raise OSError(errno.EIO, "Input/output error", str(path))
         if not path.exists():
             raise HTTPException(status_code=404, detail="recording file not found")
@@ -99,12 +118,17 @@ class _Storage:
         self.remuxed.append((path.name, duration, offset))
         return self.root / "init.mp4", self.root / "media.m4s"
 
-    def source(self) -> IndexedMp4FragmentSource:
+    def source(self, *, production_loaders: bool = True) -> IndexedMp4FragmentSource:
         return IndexedMp4FragmentSource(
-            row_loader=self.load,
+            row_loader=self.load if production_loaders else self._load_all,
+            tolerant_row_loader=self.load_tolerant if production_loaders else None,
             path_resolver=self.resolve,
             remuxer=self.remux,
+            unavailable_errors=(HTTPException,),
         )
+
+    def _load_all(self, _camera, start, end, _source) -> list[dict]:
+        return [dict(row) for row in self._window(start, end)]
 
 
 class _Harness:
@@ -151,10 +175,11 @@ class _Harness:
         growing: bool = True,
         reload: str = "1-0",
         start: float | None = None,
+        window: tuple[float, float] = WINDOW,
     ) -> str:
         with patch("survng.app.recording_routes.time.time", return_value=now):
             return self.handlers["recording_day_hls_playlist"](
-                "gate", *WINDOW, "main", start, growing, reload,
+                "gate", *window, "main", start, growing, reload,
             ).body.decode()
 
     def segment(self, url: str, kind: str = "media.m4s", now: float = OPEN):
@@ -287,16 +312,18 @@ class GrowingPlaylistTests(TestCase):
     def test_first_read_with_an_unreadable_row_fails_and_stores_nothing(self) -> None:
         self.storage.add("a.mp4", 100.0)
         self.storage.add("b.mp4", 110.0)
-        self.storage.failing.add("a.mp4")
+        self.storage.racing.add("a.mp4")
         with self.assertRaises(HTTPException) as failed:
             self.harness.playlist()
         self.assertEqual(failed.exception.status_code, 404)
         self.assertEqual(list(self.harness.registry.keys()), [])
         # Once the storage recovers the playlist is served from both rows.
-        self.storage.failing.clear()
+        self.storage.racing.clear()
         self.assertEqual(len(_media_lines(self.harness.playlist())), 2)
 
     def test_new_unreadable_row_holds_back_later_rows_until_readable(self) -> None:
+        # The production loader would hide b.mp4 entirely; the tolerant one
+        # reports it, so c.mp4 waits for it instead of taking its place.
         self.storage.add("a.mp4", 100.0)
         first = self.harness.playlist()
         self.storage.add("b.mp4", 110.0)
@@ -323,9 +350,17 @@ class GrowingPlaylistTests(TestCase):
             _entry_lines(first),
         )
         self.assertEqual(len(_media_lines(closed)), 3)
-        self.assertEqual(list(self.harness.registry.keys()), [])
-        # With the record gone the next read is an ordinary finished one.
-        after = self.harness.playlist(CLOSED)
+        # A retry of the finishing re-read gets the same finished playlist,
+        # even if more rows arrive; a new load gets an ordinary one.
+        self.storage.add("d.mp4", 130.0)
+        self.assertEqual(self.harness.playlist(CLOSED), closed)
+        self.assertNotIn("growing=true", self.harness.playlist(CLOSED, reload="2-0"))
+        # The record is dropped when it expires, after which the same URL is
+        # an ordinary finished playlist too.
+        expired = CLOSED + 121.0
+        with patch("survng.app.growing_playlists.time.time", return_value=expired):
+            after = self.harness.playlist(expired)
+            self.assertEqual(list(self.harness.registry.keys()), [])
         self.assertNotIn("a.mp4", after)
         self.assertNotIn("growing=true", after)
 
@@ -423,7 +458,7 @@ class GrowingPlaylistTests(TestCase):
         self.storage.add("a.mp4", 100.0)
         self.storage.add("b.mp4", 110.0)
         url = _media_lines(self.harness.playlist(growing=False))[1]
-        self.storage.failing.add("a.mp4")
+        self.storage.racing.add("a.mp4")
         with self.assertRaises(HTTPException) as failed:
             self.harness.segment(url)
         self.assertEqual(failed.exception.status_code, 404)
@@ -464,6 +499,128 @@ class GrowingPlaylistTests(TestCase):
         self.assertEqual(_offset(_media_lines(two_again)[2]), "20.400")
         # A viewer re-reading the same URL shares its record.
         self.assertEqual(self.harness.playlist(reload="1-0"), one_again)
+
+
+class GrowingPlaylistReviewTests(TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.harness = _Harness(self.root)
+        self.storage = self.harness.storage
+
+    def test_listing_failure_on_closing_read_does_not_finish_the_playlist(self) -> None:
+        self.storage.add("a.mp4", 100.0)
+        first = self.harness.playlist()
+        self.storage.add("b.mp4", 110.0)
+        broken = patch.object(
+            IndexedMp4FragmentSource,
+            "fragments",
+            side_effect=FragmentUnavailable("index unavailable"),
+        )
+        with broken, self.assertLogs(LOGGER_NAME, logging.WARNING) as logs:
+            unfinished = self.harness.playlist(CLOSED)
+        self.assertEqual(unfinished, first)
+        self.assertNotIn("#EXT-X-ENDLIST", unfinished)
+        self.assertIn("could not list recordings", logs.output[0])
+        closed = self.harness.playlist(CLOSED)
+        self.assertTrue(closed.endswith("#EXT-X-ENDLIST\n"))
+        self.assertEqual(len(_media_lines(closed)), 2)
+
+    def test_bounds_apply_as_records_grow_and_rebuild_is_logged(self) -> None:
+        self.harness.registry._max_entries = 4
+        self.storage.add("a.mp4", 100.0)
+        self.storage.add("b.mp4", 110.0)
+        self.harness.playlist(reload="1-0")
+        self.harness.playlist(reload="1-1")
+        # Growing one record past the budget evicts the least recently read.
+        self.storage.add("c.mp4", 120.0)
+        with self.assertLogs(LOGGER_NAME, logging.WARNING) as logs:
+            self.harness.playlist(reload="1-1")
+        self.assertEqual(
+            [key.reload for key in self.harness.registry.keys()], ["1-1"],
+        )
+        self.assertTrue(any("records are full" in line for line in logs.output))
+        with self.assertLogs(LOGGER_NAME, logging.WARNING) as logs:
+            self.harness.playlist(reload="1-0")
+        self.assertTrue(any("evicted to bound memory" in line for line in logs.output))
+
+    def test_long_growing_windows_are_not_tracked(self) -> None:
+        self.storage.add("a.mp4", 100.0)
+        long_window = (0.0, 7200.0)
+        first = self.harness.playlist(4000.0, window=long_window)
+        self.assertIn("#EXT-X-PLAYLIST-TYPE:EVENT", first)
+        self.assertEqual(list(self.harness.registry.keys()), [])
+        self.storage.racing.add("a.mp4")
+        with self.assertRaises(HTTPException):
+            self.harness.playlist(4000.0, window=long_window)
+
+    def test_log_names_why_a_served_segment_is_unreadable(self) -> None:
+        self.storage.add("a.mp4", 100.0)
+        self.harness.playlist()
+        (self.root / "a.mp4").unlink()
+        with self.assertLogs(LOGGER_NAME, logging.WARNING) as logs:
+            self.harness.playlist()
+        self.assertIn("a.mp4: HTTPException[404]", logs.output[0])
+
+    def test_tolerant_listing_does_not_hide_programming_errors(self) -> None:
+        self.storage.add("a.mp4", 100.0)
+        self.harness.playlist()
+        with patch.object(_Storage, "resolve", side_effect=AttributeError("bug")):
+            with self.assertRaises(AttributeError):
+                self.harness.playlist()
+
+    def test_index_keeps_unknown_rows_marked_only_when_asked(self) -> None:
+        from survng.app.recorder import Recorder
+
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = Recorder("ffmpeg", Path(directory), segment_seconds=10)
+            clip = recorder.recordings_dir / "gate" / "main" / "clip.mp4"
+            clip.parent.mkdir(parents=True)
+            clip.write_bytes(b"recording")
+            row = {
+                "path": str(clip), "name": clip.name, "start_epoch": 100.0,
+                "end_epoch": 110.0, "duration_seconds": 10.0, "size_bytes": 9,
+                "modified_at": clip.stat().st_mtime,
+            }
+            recorder._store_recording_rows("gate", "main", [row])
+            with patch(
+                "survng.app.recording_process.index.path_presence",
+                return_value="unknown",
+            ):
+                self.assertEqual(recorder.discard_missing_recording_rows([row]), [])
+                kept = recorder.discard_missing_recording_rows([row], keep_unknown=True)
+            self.assertEqual(kept, [{**row, "_storage_unavailable": "storage verdict unknown"}])
+            self.assertNotIn("_storage_unavailable", row)
+
+    def test_runtime_never_caches_rows_kept_for_a_growing_listing(self) -> None:
+        from survng.app.recording_media_runtime import RecordingMediaRuntime
+
+        calls = []
+        recorder = SimpleNamespace(
+            segment_seconds=10,
+            recording_rows_between=lambda *_args, **_kwargs: [
+                {"path": "a.mp4", "size_bytes": 4096, "start_epoch": 100.0}
+            ],
+            discard_missing_recording_rows=lambda rows, **kwargs: (
+                calls.append(kwargs) or [{**rows[0], "_storage_unavailable": "x"}]
+            ),
+            lease_recordings_for_playback=lambda _rows: None,
+            resolve_recording_playback_metadata=lambda _rows: None,
+            queue_stream_fingerprints=lambda _rows: None,
+        )
+        manager = SimpleNamespace(recorder=recorder)
+        runtime = RecordingMediaRuntime(SimpleNamespace(
+            get_config=lambda: SimpleNamespace(),
+            get_manager=lambda: manager,
+            ffprobe_path=lambda: "ffprobe",
+        ))
+        rows = runtime._recording_day_rows(
+            "gate", 0, 900, "main", fresh=True, keep_unknown=True,
+        )
+        self.assertEqual(rows[0]["_storage_unavailable"], "x")
+        self.assertEqual(calls, [{"keep_unknown": True}])
+        self.assertEqual(runtime.recording_day_cache, {})
 
 
 class GrowingPlaylistUnitTests(TestCase):
@@ -553,10 +710,11 @@ class GrowingPlaylistUnitTests(TestCase):
             (Path(directory) / "c.mp4").unlink()
             window = FragmentWindow("gate", "main", 0.0, 900.0)
             with self.assertRaises(FragmentUnavailable):
-                list(storage.source().fragments(window))
-            fragments = list(storage.source().fragments(window, tolerate_unavailable=True))
+                list(storage.source(production_loaders=False).fragments(window))
+            source = storage.source(production_loaders=False)
+            fragments = list(source.fragments(window, tolerate_unavailable=True))
             self.assertEqual([fragment.available for fragment in fragments], [True, False, False])
-            self.assertEqual(fragments[1].unavailable_reason, "OSError")
-            self.assertEqual(fragments[2].unavailable_reason, "HTTPException")
+            self.assertEqual(fragments[1].unavailable_reason, "OSError[EIO]")
+            self.assertEqual(fragments[2].unavailable_reason, "HTTPException[404]")
             with self.assertRaises(FragmentUnavailable):
                 storage.source().materialize(fragments[1])

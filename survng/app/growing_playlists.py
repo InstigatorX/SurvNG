@@ -16,10 +16,13 @@ The record is in-process and bounded:
   that matches the rows the page has just read.
 * It lives with the router, not the manager, so it survives a manager reload.
   It does not survive a process restart: the next re-read is then a first read.
-* It expires when its window can no longer grow, and the oldest records are
+* Only windows up to ``GROWING_MAX_WINDOW_SECONDS`` are tracked. A record
+  expires ``GROWING_RECORD_LINGER_SECONDS`` after its window stops growing;
+  the re-read that ends the playlist marks it finished, and retries get the
+  same finished playlist until then. The least recently read records are
   evicted when there are more than ``max_records`` or their entries exceed
-  ``max_entries`` in total. An evicted record also makes the next re-read a
-  first read.
+  ``max_entries`` in total; an evicted record makes the next re-read a first
+  read, which is logged.
 """
 
 from __future__ import annotations
@@ -45,6 +48,10 @@ GROWING_HOLD_SECONDS = 30.0
 # How long a record outlives the time its window can still grow, so the re-read
 # that finishes the playlist is built from what was served.
 GROWING_RECORD_LINGER_SECONDS = 120.0
+# Only growing playlists of windows up to this long are tracked (the page
+# plays 15-minute windows); longer ones are rebuilt on every read.
+GROWING_MAX_WINDOW_SECONDS = 3600.0
+GROWING_EVICTED_KEYS = 1024
 GROWING_LOG_INTERVAL_SECONDS = 60.0
 
 
@@ -84,6 +91,8 @@ class GrowingPlaylistRecord:
     previous_fingerprint: str | None = None
     # Unreadable new rows: name -> monotonic time first seen unreadable.
     held: dict[str, float] = field(default_factory=dict)
+    # Set by the re-read that ends the playlist; it is then served unchanged.
+    finished: bool = False
 
     def append(self, row: dict, fingerprint: str) -> ServedEntry:
         entry_lines, self.previous_fingerprint = day_playlist_entry_lines(
@@ -137,12 +146,19 @@ class MergeReport:
     skipped: tuple[str, ...] = ()
     out_of_order: tuple[str, ...] = ()
     over_target: tuple[str, ...] = ()
+    # Why a row could not be checked, by name (from the fragment source).
+    reasons: dict[str, str] = field(default_factory=dict)
 
 
 def row_fragment_id(row: dict) -> str:
     return str(
         getattr(row.get("_encoded_fragment"), "source_identity", "") or ""
     )
+
+
+def row_unavailable_reason(row: dict) -> str:
+    fragment = row.get("_encoded_fragment")
+    return str(getattr(fragment, "unavailable_reason", "") or "unavailable")
 
 
 def row_available(row: dict) -> bool:
@@ -200,6 +216,7 @@ def merge_rows(
     kept_unreadable: list[str] = []
     kept_missing: list[str] = []
     kept_changed: list[str] = []
+    reasons: dict[str, str] = {}
     fresh = {str(row.get("name")): row for row in rows}
     for entry in record.entries:
         row = fresh.get(entry.name)
@@ -207,6 +224,7 @@ def merge_rows(
             kept_missing.append(entry.name)
         elif not row_available(row):
             kept_unreadable.append(entry.name)
+            reasons[entry.name] = row_unavailable_reason(row)
         elif (
             f"{float(row['duration_seconds']):.3f}"
             != f"{entry.duration_seconds:.3f}"
@@ -231,6 +249,7 @@ def merge_rows(
             out_of_order.append(name)
             continue
         if not row_available(row):
+            reasons[name] = row_unavailable_reason(row)
             first_seen = record.held.setdefault(name, now_monotonic)
             if now_monotonic - first_seen < hold_seconds:
                 held.append(name)
@@ -254,6 +273,7 @@ def merge_rows(
         skipped=tuple(skipped),
         out_of_order=tuple(out_of_order),
         over_target=tuple(over_target),
+        reasons=reasons,
     )
 
 
@@ -318,6 +338,8 @@ class GrowingPlaylistRegistry:
         self._records: OrderedDict[GrowingPlaylistKey, GrowingPlaylistRecord] = (
             OrderedDict()
         )
+        # Recently evicted keys, so a re-read that must rebuild can say so.
+        self._evicted: OrderedDict[GrowingPlaylistKey, None] = OrderedDict()
 
     def get(self, key: GrowingPlaylistKey) -> GrowingPlaylistRecord | None:
         """Return a live record and mark it recently used (hold ``lock``)."""
@@ -335,6 +357,16 @@ class GrowingPlaylistRegistry:
 
     def drop(self, key: GrowingPlaylistKey) -> None:
         self._records.pop(key, None)
+
+    def was_evicted(self, key: GrowingPlaylistKey) -> bool:
+        """Whether ``key`` lost its record to the bounds (hold ``lock``)."""
+        return self._evicted.pop(key, False) is None
+
+    def _note_evicted(self, key: GrowingPlaylistKey) -> None:
+        self._evicted[key] = None
+        self._evicted.move_to_end(key)
+        while len(self._evicted) > GROWING_EVICTED_KEYS:
+            self._evicted.popitem(last=False)
 
     def enforce_bounds(
         self,
@@ -357,6 +389,8 @@ class GrowingPlaylistRegistry:
             # One record larger than the whole budget is not kept at all.
             self._records.pop(keep)
             evicted.append(keep)
+        for key in evicted:
+            self._note_evicted(key)
         return evicted
 
     def served_entry(
