@@ -486,13 +486,20 @@ class RecordingIndexMixin:
         with self._playback_lease_lock:
             self._playback_active_leases.pop(str(token), None)
 
-    def discard_missing_recording_rows(self, rows: list[dict]) -> list[dict]:
+    def discard_missing_recording_rows(
+        self,
+        rows: list[dict],
+        *,
+        keep_unknown: bool = False,
+    ) -> list[dict]:
         """Filter playback manifests without dropping index rows on flaky storage.
 
         Confirmed-missing files on a healthy root are removed from the index.
         Unknown stats and missing paths under an unavailable recording root are
         withheld from the manifest but left indexed so historical segments
-        reappear when the volume returns.
+        reappear when the volume returns. With ``keep_unknown`` they are
+        returned instead, marked ``_storage_unavailable``, for a caller that
+        must tell an unreadable row from one that has left the index.
         """
         existing: list[dict] = []
         stale_paths: list[str] = []
@@ -503,6 +510,8 @@ class RecordingIndexMixin:
                 existing.append(row)
             elif verdict == "confirmed_absent":
                 stale_paths.append(path)
+            elif keep_unknown:
+                existing.append({**row, "_storage_unavailable": "storage verdict unknown"})
         self._delete_index_paths(stale_paths)
         return existing
 

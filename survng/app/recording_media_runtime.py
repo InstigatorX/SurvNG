@@ -158,10 +158,24 @@ class RecordingMediaRuntime:
                     active_manager=selected_manager,
                 )
             ),
+            tolerant_row_loader=lambda camera_id, start_epoch, end_epoch, source: (
+                self._recording_day_rows(
+                    camera_id,
+                    start_epoch,
+                    end_epoch,
+                    source,
+                    fresh=True,
+                    active_manager=selected_manager,
+                    keep_unknown=True,
+                )
+            ),
             path_resolver=lambda value: self._recording_storage_path(
                 value,
                 active_manager=selected_manager,
             ),
+            # The resolver reports a missing or out-of-storage file as an
+            # HTTP error; a tolerant listing treats it as unavailable.
+            unavailable_errors=(HTTPException,),
             remuxer=lambda path, duration, media_offset: (
                 self._recording_fmp4_files(
                     path,
@@ -466,7 +480,7 @@ class RecordingMediaRuntime:
         device_args = ['-qsv_device', render_devices[0]] if render_devices else []
         return [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', *device_args, '-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv', '-c:v', decoder, '-f', 'concat', '-safe', '0', '-i', str(concat_path), '-ss', f'{local_start:.3f}', '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '23', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', str(tmp_path)]
 
-    def _recording_day_rows(self, camera_id: str, start_epoch: float, end_epoch: float, source: str, *, fresh: bool=False, active_manager: AppManager | None=None) -> list[dict]:
+    def _recording_day_rows(self, camera_id: str, start_epoch: float, end_epoch: float, source: str, *, fresh: bool=False, active_manager: AppManager | None=None, keep_unknown: bool=False) -> list[dict]:
         selected_manager = active_manager or self.manager
         selected_source = recording_source(source)
         cache_key = (camera_id, selected_source, int(start_epoch), int(end_epoch))
@@ -482,13 +496,20 @@ class RecordingMediaRuntime:
                 selected_manager.recorder.resolve_recording_playback_metadata(rows)
                 return rows
         rows = [row for row in selected_manager.recorder.recording_rows_between(camera_id, start_epoch, end_epoch, selected_source, discover_missing=False) if int(row.get('size_bytes') or 0) > 1024]
-        if fresh:
+        if keep_unknown:
+            # A growing playlist must see rows whose file cannot be checked
+            # right now (they are marked), not lose them for one re-read.
+            rows = selected_manager.recorder.discard_missing_recording_rows(rows, keep_unknown=True)
+        elif fresh:
             rows = selected_manager.recorder.discard_missing_recording_rows(rows)
         selected_manager.recorder.lease_recordings_for_playback(rows)
         # The index retains exact video sample durations separately from its
         # availability estimates. Unknown legacy files are resolved once here.
         selected_manager.recorder.resolve_recording_playback_metadata(rows)
         selected_manager.recorder.queue_stream_fingerprints(rows)
+        if keep_unknown:
+            # Marked rows must never reach the shared row cache.
+            return rows
         with self.recording_day_cache_lock:
             self.recording_day_cache[cache_key] = (now, rows)
             expired = [
