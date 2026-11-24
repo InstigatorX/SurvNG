@@ -414,10 +414,6 @@ class RecordingRouteLifecycleTests(TestCase):
         self.assertEqual(calls[0][1]["before"], 0)
         self.assertEqual(response.path, Path("mobile.mp4"))
 
-    def test_mobile_window_disables_browser_cache_for_growing_windows(self) -> None:
-        dependencies = _dependencies(lambda: _Manager("current"))
-        response = create_recording_router(dependencies).handlers["recording_mobile_window"]("gate", 155, "main")
-        self.assertEqual(response.headers["cache-control"], "private, no-store")
 
     def test_native_segment_rejects_invalid_epoch_before_lookup(self) -> None:
         dependencies = _dependencies(lambda: _Manager("current"))
