@@ -1,3 +1,4 @@
+// browser-test: live-survng
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
 
@@ -12,7 +13,7 @@ async function openWorkspace(page, path, readySelector) {
   await page.locator(readySelector).first().waitFor({ state: "visible", timeout: 30_000 });
 }
 
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH });
 try {
   const context = await browser.newContext({ viewport: DESKTOP });
   await context.addInitScript(() => localStorage.clear());

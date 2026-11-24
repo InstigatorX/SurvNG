@@ -1,3 +1,4 @@
+// browser-test: live-survng
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
 
@@ -310,7 +311,7 @@ async function assertMobileSheetHitTesting(page) {
   await sheet.waitFor({ state: "detached" });
 }
 
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH });
 try {
   // Each theme characterizes every workspace at desktop, where all workspace
   // interiors are available. Each theme also crosses the shell through every

@@ -14,7 +14,7 @@ const server = await createServer({ root, configFile: false, server: { host: "12
 let browser;
 try {
   await server.listen();
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH });
   const page = await browser.newPage();
   let failure = false, pending = true, mutations = [], linked = false, empty = false;
   let noSuggestions = false, blocked = false, mutationFailure = false;

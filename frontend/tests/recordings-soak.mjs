@@ -1,3 +1,4 @@
+// browser-test: live-survng
 import { chromium } from "playwright";
 
 const baseUrl = process.env.SURVNG_URL || "http://127.0.0.1:8088";
@@ -15,7 +16,7 @@ const today = new Intl.DateTimeFormat("en-CA", {
 const recordingDate = process.env.DATE || today;
 const url = `${baseUrl}/recordings?camera=${encodeURIComponent(camera)}&date=${recordingDate}&source=${source}`;
 
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 const failures = [];
 const fragmentUrls = [];
