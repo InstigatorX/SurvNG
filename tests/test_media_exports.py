@@ -473,6 +473,110 @@ class MediaExportTest(unittest.TestCase):
             self.assertGreaterEqual(keyframe_count, 8)
             self.assertLessEqual(keyframe_count, 10)
 
+    def _timelapse_attempts(
+        self, root: Path, profile: dict, rows: list[dict], options: dict
+    ) -> list[tuple[str, list[str]]]:
+        """Every attempt ``_build_timelapse`` would run, each made to fail."""
+        manager = self._command_manager(root, "vaapi")
+        manager._probe_source = lambda _path: profile  # type: ignore[method-assign]
+        manager._keyframe_interval = lambda _path: None  # type: ignore[method-assign]
+        attempts: list[tuple[str, list[str]]] = []
+        build = manager._timelapse_commands
+
+        def capture(*args, **kwargs):
+            commands = build(*args, **kwargs)
+            attempts.extend(commands)
+            return commands
+
+        def fail(*_args, **_kwargs) -> None:
+            raise RuntimeError("not run")
+
+        manager._timelapse_commands = capture  # type: ignore[method-assign]
+        manager._run_process = fail  # type: ignore[method-assign]
+        work = root / "work"
+        work.mkdir(exist_ok=True)
+        job = manager.store.create({
+            "kind": "timelapse", "camera_id": "gate", "source": "main",
+            "start_epoch": rows[0]["start_epoch"], "end_epoch": rows[-1]["end_epoch"],
+            "options": options,
+        })
+        with self.assertRaises(RuntimeError):
+            manager._build_timelapse(job, rows, work, threading.Event())
+        return attempts
+
+    def test_gpu_timelapse_width_matches_ffmpeg_half_up_rounding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            rows = [{"path": "a.mp4", "start_epoch": 0.0, "end_epoch": 60.0, "duration_seconds": 60.0}]
+            # scale=480:-2 on 512x1200 gives 1126 in FFmpeg; round() gives 1124.
+            attempts = self._timelapse_attempts(
+                Path(temporary), {"width": 512, "height": 1200, "codec": "h264"}, rows, {"width": 480},
+            )
+
+            self.assertEqual([name for name, _ in attempts], ["vaapi-gpu", "vaapi", "cpu"])
+            full = attempts[0][1]
+            self.assertIn("scale_vaapi=w=480:h=1126:format=nv12", full[full.index("-vf") + 1])
+
+    def test_gpu_timelapse_is_not_attempted_across_different_streams(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            rows = [
+                {"path": "a.mp4", "start_epoch": 0.0, "end_epoch": 60.0, "duration_seconds": 60.0,
+                 "stream_fingerprint": "4k"},
+                {"path": "b.mp4", "start_epoch": 60.0, "end_epoch": 120.0, "duration_seconds": 60.0,
+                 "stream_fingerprint": "1080p"},
+            ]
+            attempts = self._timelapse_attempts(
+                Path(temporary), {"width": 3840, "height": 2160, "codec": "h264"}, rows, {"height": 1080},
+            )
+
+            self.assertEqual([name for name, _ in attempts], ["vaapi", "cpu"])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
+    def test_short_keyframe_timelapse_is_replaced_by_a_full_decode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.mp4"
+            # Intra refresh: packets are flagged as keyframes every second,
+            # but the decoder has one real keyframe, at the start.
+            subprocess.run(
+                [
+                    "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10",
+                    "-t", "40", "-c:v", "libx264", "-preset", "ultrafast", "-g", "10",
+                    "-x264-params", "intra-refresh=1", "-pix_fmt", "yuv420p", "-y", str(source),
+                ],
+                check=True, timeout=60,
+            )
+            manager = MediaExportManager(
+                root / "storage", root / "database",
+                recorder=lambda: FakeRecorder([]), ffmpeg_path=lambda: shutil.which("ffmpeg"),
+                hardware_backend=lambda: "cpu",
+            )
+            rows = [{
+                "path": str(source), "start_epoch": 1000.0, "end_epoch": 1040.0,
+                "duration_seconds": 40.0,
+            }]
+            work = root / "work"
+            work.mkdir()
+            ran: list[list[str]] = []
+            run_process = manager._run_process
+
+            def recording_run(command, *args, **kwargs):
+                ran.append(command)
+                return run_process(command, *args, **kwargs)
+
+            manager._run_process = recording_run  # type: ignore[method-assign]
+            job = manager.store.create({
+                "kind": "timelapse", "camera_id": "gate", "source": "main",
+                "start_epoch": 1000.0, "end_epoch": 1040.0,
+                "options": {"sample_interval_seconds": 5.0, "width": 320},
+            })
+            if manager._keyframe_interval(source) is None:
+                self.skipTest("this FFmpeg does not flag intra-refresh recovery points")
+
+            output, _gaps = manager._build_timelapse(job, rows, work, threading.Event())
+
+            self.assertEqual(["-skip_frame" in command for command in ran], [True, False])
+            self.assertGreaterEqual(manager._video_frame_count(output), 8)
+
     def test_header_only_video_is_not_accepted_as_completed_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

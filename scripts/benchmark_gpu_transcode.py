@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import resource
 import subprocess
 import sys
 import tempfile
@@ -78,25 +78,25 @@ def _media_info(ffprobe: str, path: Path) -> dict[str, float | int | str]:
 def _run(command: list[str], timeout: float) -> tuple[int, float, float, str]:
     """Return ``(returncode, wall_seconds, cpu_seconds, stderr_tail)``."""
     with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stderr:
+        # Attempts run one at a time, so the growth in reaped-children CPU
+        # time across this wait belongs to this FFmpeg process.
+        before = resource.getrusage(resource.RUSAGE_CHILDREN)
         started = time.monotonic()
-        process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=stderr)
-        timer = threading.Timer(timeout, process.kill)
-        timer.start()
+        process = subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr,
+        )
         try:
-            _pid, status, usage = os.wait4(process.pid, 0)
-        finally:
-            timer.cancel()
+            code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            code = -9
+            stderr.write(f"\nkilled after the {timeout:g} s limit")
         wall = time.monotonic() - started
-        process.returncode = os.waitstatus_to_exitcode(status)
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
+        cpu = (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
         stderr.seek(0)
-        return process.returncode, wall, usage.ru_utime + usage.ru_stime, stderr.read().strip()[-300:]
-
-
-def _with_device(command: list[str], device: str) -> list[str]:
-    """Point QSV at ``device``; the builders already pass it for VAAPI."""
-    if device and "-hwaccel" in command and "qsv" in command and "-qsv_device" not in command:
-        return [command[0], "-qsv_device", device, *command[1:]]
-    return command
+        return code, wall, cpu, stderr.read().strip()[-300:]
 
 
 def _measure(
@@ -184,6 +184,9 @@ def main() -> int:
         runtime = RecordingMediaRuntime(SimpleNamespace(
             get_config=lambda: SimpleNamespace(ffmpeg_path=args.ffmpeg, hardware_acceleration="auto"),
         ))
+        if device:
+            # Probe the node the attempts run on, not always the first one.
+            runtime._dri_render_devices = lambda: [device]  # type: ignore[method-assign]
         available: dict[str, bool] = {}
         for name, probe in (("vaapi", runtime._ffmpeg_vaapi_info), ("qsv", runtime._ffmpeg_qsv_info)):
             info = probe()
@@ -231,7 +234,7 @@ def main() -> int:
             try:
                 build(job, rows, work, threading.Event())
             except _Captured as result:
-                return [(name, _with_device(command, device)) for name, command in result.commands], spacing
+                return result.commands, spacing
             raise RuntimeError(f"{kind} builder produced no commands")
 
         def merged(kind: str, options: dict, end_epoch: float, **kwargs):
@@ -270,7 +273,10 @@ def main() -> int:
             f"event clip, {clip_seconds:.0f} s", clip_commands, source_seconds=clip_seconds, **measure,
         )
 
-        options = {"sample_interval_seconds": args.interval, "height": args.height}
+        # Height 0 means source size; the timelapse expresses that as a width.
+        options = {"sample_interval_seconds": args.interval, **(
+            {"height": args.height} if args.height > 0 else {"width": int(first["width"])}
+        )}
         commands, _ = merged("timelapse", options, epoch, keyframes=False)
         results += _measure(
             f"timelapse, every frame decoded, 1 frame per {args.interval:g} s",
@@ -280,7 +286,7 @@ def main() -> int:
         if any("-skip_frame" in command for _name, command in commands):
             results += _measure(
                 f"timelapse, keyframes only (spacing {spacing:.2f} s)",
-                [(f"{name}-keyframes", command) for name, command in commands],
+                [(f"{name}-keyframes", command) for name, command in commands if "-skip_frame" in command],
                 source_seconds=total, **measure,
             )
         else:

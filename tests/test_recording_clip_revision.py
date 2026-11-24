@@ -58,3 +58,40 @@ def test_vaapi_event_clip_decodes_on_the_gpu_and_keeps_a_software_decode_attempt
     assert "-hwaccel" not in software
     assert software[software.index("-vf") + 1] == "format=nv12,hwupload"
     assert "h264_vaapi" in hardware and "h264_vaapi" in software
+
+
+def test_stalled_hardware_event_clip_attempt_falls_back_instead_of_timing_out(tmp_path, monkeypatch):
+    import subprocess
+
+    from survng.app import recording_media_runtime
+
+    source = tmp_path / "first.mp4"
+    source.write_bytes(b"recording")
+    rows = [{"path": str(source), "start_epoch": 120, "end_epoch": 150, "duration_seconds": 30}]
+    runtime = RecordingMediaRuntime(SimpleNamespace(
+        get_config=lambda: SimpleNamespace(ffmpeg_path="ffmpeg"),
+        get_manager=lambda: SimpleNamespace(),
+    ))
+    runtime._recording_storage_path = lambda value, **kwargs: Path(value)
+    runtime._write_concat_file = lambda *args, **kwargs: tmp_path / "clip.ffconcat"
+    runtime._probe_video_codec = lambda _path: "h264"
+    runtime._event_clip_vaapi_enabled = lambda _codec: True
+    runtime._event_clip_qsv_enabled = lambda _codec: False
+    runtime._ffmpeg_vaapi_info = lambda: {"device": "/dev/dri/renderD128"}
+    attempts = []
+
+    def run(command, **kwargs):
+        attempts.append(command)
+        if "-hwaccel" in command:
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        Path(command[-1]).write_bytes(b"clip")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(recording_media_runtime.subprocess, "run", run)
+    output = tmp_path / "clip.mp4"
+    event = {"id": 1, "camera_id": "gate", "created_at": "1970-01-01T00:02:00+00:00", "_recording_rows": rows}
+
+    runtime._build_event_clip(event, 0, 20, output)
+
+    assert output.read_bytes() == b"clip"
+    assert len(attempts) == 2 and "-hwaccel" not in attempts[1]

@@ -166,8 +166,9 @@ A timelapse whose sample interval is at least twice the keyframe spacing decodes
 
 ### Risks
 
-- The full-GPU attempts were written without a render node. A failure costs one failed FFmpeg start before the previous command runs.
-- A camera that lengthens its keyframe spacing after the first minute can leave an interval bucket empty, which shortens that timelapse.
+- The full-GPU attempts were written without a render node. A failure normally costs one failed FFmpeg start before the previous command runs; an attempt that stalls costs its whole time limit first.
+- Keyframe spacing is measured on the first minute only, and packet flags also mark intra-refresh recovery points that the decoder does not treat as keyframes. A keyframe timelapse with fewer than about 90% of the expected frames is discarded and every frame is decoded instead, so those sources pay for one extra cheap pass.
+- A timelapse spanning recordings with different stream fingerprints has no full-GPU attempt, because a hardware scaler would stretch a later recording that the software filters letterbox.
 
 ### Tests
 

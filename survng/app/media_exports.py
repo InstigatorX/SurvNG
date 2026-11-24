@@ -1099,10 +1099,11 @@ class MediaExportManager:
     def _gpu_filter_chain(
         backend: str,
         profile: dict[str, object],
-        size: tuple[int, int],
+        size: tuple[int, int] | None,
         *,
         before: list[str],
         after: list[str],
+        padded: bool = True,
     ) -> str | None:
         """Filter chain that decodes, scales and encodes without leaving the GPU.
 
@@ -1112,14 +1113,20 @@ class MediaExportManager:
         software filters. QSV scaling re-times frames, so ``after`` must
         restamp them.
         """
+        if size is None:
+            return None
         width, height = size
         source_width = int(profile.get("width") or 0)
         source_height = int(profile.get("height") or 0)
         if min(width, height, source_width, source_height) <= 0 or width % 2 or height % 2:
             return None
         # Mirror scale=...:force_original_aspect_ratio=decrease: it must
-        # already produce exactly ``size`` for the pad to be a no-op.
-        if width * source_height > height * source_width:
+        # already produce exactly ``size`` for the pad to be a no-op. A
+        # caller whose software filter scales straight to ``size`` without a
+        # pad passes ``padded=False``.
+        if not padded:
+            pass
+        elif width * source_height > height * source_width:
             if round(height * source_width / source_height) != width:
                 return None
         elif round(width * source_height / source_width) != height:
@@ -1176,7 +1183,8 @@ class MediaExportManager:
         requested_height = int(options.get("height") or 0)
         if requested_height > 0:
             target_width, target_height = self._target_dimensions(profile, requested_height)
-            gpu_size = (target_width, target_height)
+            gpu_size: tuple[int, int] | None = (target_width, target_height)
+            padded = True
             scale_filter = (
                 f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
                 f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
@@ -1188,14 +1196,18 @@ class MediaExportManager:
             scale_filter = f"scale='min({width},iw)':-2,setsar=1"
             # The same geometry as scale='min(width,iw)':-2, computed here
             # because hardware scalers take fixed dimensions.
-            source_width = max(2, int(profile.get("width") or 0))
-            source_height = max(2, int(profile.get("height") or 0))
+            source_width = int(profile.get("width") or 0)
+            source_height = int(profile.get("height") or 0)
             fitted_width = min(width, source_width)
-            fitted_width -= fitted_width % 2
-            gpu_size = (
-                fitted_width,
-                max(2, round(source_height * fitted_width / source_width / 2) * 2),
-            )
+            gpu_size = None
+            padded = False
+            if fitted_width >= 2 and fitted_width % 2 == 0 and source_height > 0:
+                # FFmpeg's -2 rounds half up to a multiple of two; round()
+                # rounds half to even and would differ by two pixels on a tie.
+                half_height = (
+                    (fitted_width * source_height + source_width) // (2 * source_width)
+                )
+                gpu_size = (fitted_width, max(2, half_height * 2))
         # A concat demuxer collapses recording gaps. That is desirable for a
         # timelapse: missing source time does not become a frozen video span.
         local_start, available_duration = concatenated_clip_timing(
@@ -1211,35 +1223,62 @@ class MediaExportManager:
         # every frame. Sampling then snaps to keyframes, so frames are chosen
         # per interval bucket: "interval since the last pick" would drift by
         # up to one keyframe spacing on every sample.
+        #
+        # The spacing is measured on the start of the first recording only,
+        # and packet flags also mark recovery points that the decoder does
+        # not treat as keyframes. A keyframe timelapse that comes out short
+        # is therefore discarded and every frame is decoded instead.
         keyframe_interval = self._keyframe_interval(Path(str(groups[0][0]["path"])))
         keyframes_only = keyframe_interval is not None and interval >= 2 * keyframe_interval
-        selection = (
-            f"select='isnan(prev_selected_t)"
-            f"+gt(floor(t/{interval:.6f}),floor(prev_selected_t/{interval:.6f}))'"
-            if keyframes_only
-            else f"select='isnan(prev_selected_t)+gte(t-prev_selected_t,{interval:.6f})'"
-        )
-        sampling = [
+        minimum_keyframe_frames = max(1, min(estimated_frames - 1, estimated_frames * 9 // 10))
+        trim = [
             f"trim=start={local_start:.6f}:duration={available_duration:.6f}",
             "setpts=PTS-STARTPTS",
-            selection,
         ]
         restamp = ["settb=AVTB", f"setpts=N/({output_fps}*TB)"]
-        filters = ",".join([*sampling, scale_filter, *restamp])
         backend = self._hardware_backend()
-        # Keyframe decode is already cheap on the CPU, and hardware decoders
-        # do not all honour -skip_frame; full-GPU decode is for dense sampling.
-        gpu_filters = None if keyframes_only else self._gpu_filter_chain(
+        source_codec = str(profile.get("codec") or "")
+        # The whole range is one concat input, and a hardware scaler has a
+        # fixed output size: it would stretch a later recording whose shape
+        # differs, where the software filters letterbox it.
+        fingerprints = {str(row.get("stream_fingerprint") or "") for row in rows}
+        uniform_source = len(groups) == 1 or (len(fingerprints) == 1 and "" not in fingerprints)
+        # (name, command, keyframes only), in the order they are tried.
+        attempts: list[tuple[str, list[str], bool]] = []
+        if keyframes_only:
+            sampling = [
+                *trim,
+                f"select='isnan(prev_selected_t)"
+                f"+gt(floor(t/{interval:.6f}),floor(prev_selected_t/{interval:.6f}))'",
+            ]
+            # Keyframe decode is already cheap on the CPU, and hardware
+            # decoders do not all honour -skip_frame: no full-GPU attempt.
+            attempts.extend(
+                (f"{name} keyframes", command, True)
+                for name, command in self._timelapse_commands(
+                    backend, concat, output, ",".join([*sampling, scale_filter, *restamp]),
+                    output_fps, keyframes_only=True,
+                )
+            )
+        sampling = [*trim, f"select='isnan(prev_selected_t)+gte(t-prev_selected_t,{interval:.6f})'"]
+        gpu_filters = self._gpu_filter_chain(
             backend, profile, gpu_size, before=sampling, after=["setsar=1", *restamp],
-        )
-        commands = self._timelapse_commands(
-            backend, concat, output, filters, output_fps,
-            keyframes_only=keyframes_only,
-            gpu_filters=gpu_filters,
-            source_codec=str(profile.get("codec") or ""),
+            padded=padded,
+        ) if uniform_source else None
+        attempts.extend(
+            (name, command, False)
+            for name, command in self._timelapse_commands(
+                backend, concat, output, ",".join([*sampling, scale_filter, *restamp]),
+                output_fps, gpu_filters=gpu_filters, source_codec=source_codec,
+            )
         )
         last_error = "timelapse generation failed"
-        for backend_name, command in commands:
+        keyframes_rejected = False
+        for position, (backend_name, command, keyframe_attempt) in enumerate(attempts):
+            if keyframe_attempt and keyframes_rejected:
+                continue
+            # Only the last attempt, software decoding every frame, may fail the job.
+            final = position == len(attempts) - 1
             output.unlink(missing_ok=True)
             try:
                 self.store.update(str(job["id"]), phase=f"Encoding timelapse ({backend_name})", progress=12)
@@ -1251,18 +1290,48 @@ class MediaExportManager:
                 )
             except RuntimeError as exc:
                 last_error = str(exc)
-                if backend_name != "cpu":
+                if not final:
                     LOGGER.warning("%s timelapse export failed; trying fallback: %s", backend_name, last_error)
                     continue
                 raise
             if self._valid_video_output(output):
-                return output, gaps
+                if not keyframe_attempt:
+                    return output, gaps
+                frames = self._video_frame_count(output)
+                if frames is not None and frames >= minimum_keyframe_frames:
+                    return output, gaps
+                keyframes_rejected = True
+                LOGGER.warning(
+                    "keyframe timelapse has %s of about %d frames; decoding every frame",
+                    "an unknown number" if frames is None else frames, estimated_frames,
+                )
+                continue
             last_error = f"{backend_name} timelapse produced no playable video frames"
-            if backend_name != "cpu":
+            if not final:
                 LOGGER.warning("%s; trying fallback", last_error)
                 continue
             raise RuntimeError(last_error)
         raise RuntimeError(last_error)
+
+    def _video_frame_count(self, path: Path) -> int | None:
+        """Frames in a finished MP4, from its header. None when unreadable."""
+        ffmpeg = Path(self._ffmpeg_path())
+        sibling = ffmpeg.with_name("ffprobe")
+        ffprobe = str(sibling) if ffmpeg.name == "ffmpeg" and sibling.is_file() else "ffprobe"
+        try:
+            probe = subprocess.run(
+                [
+                    ffprobe, "-v", "error", "-select_streams", "v:0",
+                    "-show_entries", "stream=nb_frames", "-of", "csv=p=0", str(path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=15,
+            )
+            return int((probe.stdout or "").strip().split(",")[0]) if probe.returncode == 0 else None
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return None
 
     def _timelapse_commands(
         self,

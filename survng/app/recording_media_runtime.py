@@ -1286,7 +1286,15 @@ class RecordingMediaRuntime:
             for backend, command in commands:
                 tmp_path.unlink(missing_ok=True)
                 clip_timeout = max(60.0, min(600.0, duration * 2.0))
-                result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=clip_timeout)
+                try:
+                    result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=clip_timeout)
+                except subprocess.TimeoutExpired:
+                    # A stalled hardware attempt must not hide the software one.
+                    if backend == 'cpu':
+                        raise
+                    last_error = f'event clip generation timed out using {backend}'
+                    logging.getLogger(__name__).warning('%s event clip generation timed out for %s, falling back to next backend', backend.upper(), output_path.name)
+                    continue
                 if result.returncode == 0 and tmp_path.exists() and (tmp_path.stat().st_size > 0):
                     tmp_path.replace(output_path)
                     logging.getLogger(__name__).info('built event clip %s using %s acceleration (source codec %s)', output_path.name, backend, source_codec or 'unknown')
