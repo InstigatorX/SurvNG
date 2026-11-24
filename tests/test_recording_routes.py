@@ -541,6 +541,12 @@ class RecordingRouteLifecycleTests(TestCase):
             with self.assertRaises(HTTPException) as live_edge:
                 handler("gate", 150.0, "main", 320)
         self.assertEqual(live_edge.exception.headers["X-SurvNG-Gap-End"], "152.500")
+        # A time at or ahead of the server's clock still gets a range that
+        # holds it.
+        with patch("survng.app.recording_routes.time.time", return_value=140.0):
+            with self.assertRaises(HTTPException) as ahead:
+                handler("gate", 150.0, "main", 320)
+        self.assertEqual(ahead.exception.headers["X-SurvNG-Gap-End"], "151.000")
         # A segment indexed between the two lookups: no gap after all, and
         # nothing is claimed about one.
         lookups = {"count": 0}

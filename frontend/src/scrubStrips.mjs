@@ -25,7 +25,8 @@ export const SCRUB_STRIP_SEGMENT_SECONDS = 10;
 // After a failed request (busy generator, storage error) wait before asking
 // for that segment again, twice as long after each failure in a row: one that
 // cannot be built costs the server a decode every time it is asked for. The
-// wait belongs to the segment that failed; others are asked for as usual.
+// wait belongs to the time that failed and what lies within a segment's
+// length of it; the rest of the recording is asked for as usual.
 export const SCRUB_STRIP_RETRY_MS = 1000;
 export const SCRUB_STRIP_RETRY_MAX_MS = 8000;
 // A request with no answer for this long is given up, so it cannot hold one

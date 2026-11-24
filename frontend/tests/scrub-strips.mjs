@@ -315,8 +315,21 @@ const segment = (start) => ({ start, end: start + 10, step: 1, count: 10, column
   t.advance(SCRUB_STRIP_RETRY_MS + 1);
   await t.settle();
   assert.equal(t.pending.at(-1).epoch, 9006);
-  // Once it answers, its trouble is forgotten.
+  // Once it answers, its trouble is forgotten: the next failure there
+  // waits one second again, not two.
   t.pending.at(-1).resolve(null);
+  await t.settle();
+  t.store.idle();
+  t.store.want(9008);
+  await t.settle();
+  assert.equal(t.pending.at(-1).epoch, 9008);
+  t.pending.at(-1).reject(new Error("500"));
+  await t.settle();
+  const afterAnswer = t.pending.length;
+  t.advance(SCRUB_STRIP_RETRY_MS + 1);
+  await t.settle();
+  assert.equal(t.pending.length, afterAnswer + 1);
+  t.pending.at(-1).resolve(segment(9000));
   await t.settle();
   // And the first segment is asked for again when its own wait ends.
   t.store.idle();

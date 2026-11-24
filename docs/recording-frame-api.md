@@ -72,14 +72,16 @@ playhead is dragged, so moving within a loaded segment needs no request.
   generator answers `429` with `Retry-After`.
 - A time with no recording is `404`, with `X-SurvNG-Gap-Start` and
   `X-SurvNG-Gap-End` saying how far the gap reaches on both streams, looking
-  up to five minutes either side and never past the present.
+  up to five minutes either side and not past the present (or one second past
+  the time asked about, if that is later).
 
 The page runs two requests at a time with no queue: when one finishes, the
 next is for where the playhead is then, and after that for up to two segments
 ahead in the direction of the scrub. While the playhead's own segment loads,
 the nearest loaded strip within ten minutes stands in. A segment whose request
 failed is asked for again after a second, then two, four and eight; that wait
-is the segment's own and holds back no other. A request with no answer is
+applies within a segment's length of the time that failed and holds back
+nothing further away. A request with no answer is
 given up after ten seconds. A gap is remembered for ten seconds, over the range the
 server stated, or for that one second if it stated none.
 It keeps at most 24 strips in memory; strips from the sub and main streams,
