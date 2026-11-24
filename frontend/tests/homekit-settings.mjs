@@ -230,8 +230,11 @@ try {
   await page.getByRole("button", { name: "Reset pairing" }).click();
   assert.equal(resets, 0);
   page.once("dialog", dialog => dialog.accept());
-  await page.getByRole("button", { name: "Reset pairing" }).click();
-  await page.waitForResponse(response => response.url().endsWith("/reset-pairing"));
+  // Listen before clicking: the mocked response can arrive before the click resolves.
+  await Promise.all([
+    page.waitForResponse(response => response.url().endsWith("/reset-pairing")),
+    page.getByRole("button", { name: "Reset pairing" }).click(),
+  ]);
   assert.equal(resets, 1);
   mode = "error";
   await page.getByRole("alert").waitFor();

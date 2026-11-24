@@ -1,7 +1,6 @@
 /* SurvNG mobile final: unified selectors + single-camera Timeline */
 .mobile-camera-select,
-.recordings-mobile-date,
-.recordings-mobile-time-navigation {
+.recordings-mobile-date {
   display: none;
 }
 
@@ -12,7 +11,6 @@
   }
 
   .mobile-camera-picker,
-  .recordings-v2-cameras,
   .timeline-camera-picker,
   .search-camera-list {
     display: none !important;
@@ -277,8 +275,7 @@
   }
 
   .recordings-tabs.recordings-commandbar .recordings-commandbar-live,
-  .recordings-commandbar-day-controls .recordings-playback-rate,
-  .recordings-commandbar-export {
+  .recordings-commandbar-day-controls .recordings-playback-rate {
     display: none !important;
   }
 
@@ -288,10 +285,6 @@
 
   .recordings-commandbar-day-controls {
     display: contents !important;
-  }
-
-  .recordings-toolbar-day-controls {
-    display: none !important;
   }
 
   .recordings-commandbar-day-controls .recordings-v2-date {
@@ -348,10 +341,7 @@
   .recordings-v2-incidents,
   .recordings-v2-investigation,
   .recordings-related-events,
-  .recordings-v2-events,
-  .recordings-event-inspector,
-  .recordings-inspector-toggle,
-  .recording-stage-pagination {
+  .recordings-v2-events {
     display: none !important;
   }
 
@@ -414,11 +404,6 @@
     bottom: calc(86px + 8px) !important;
   }
 
-  .recordings-v2-timeline-toolbar,
-  .recordings-timeline-display-controls {
-    display: none !important;
-  }
-
   .recordings-v2-date-toggle,
   .recordings-v2-date-calendar {
     display: none !important;
@@ -460,65 +445,6 @@
     align-items: center;
   }
 
-  .recordings-playhead::after {
-    content: "";
-    position: absolute;
-    top: 0;
-    left: -9px;
-    width: 20px;
-    height: 28px;
-    border-radius: 6px;
-    border: 2px solid white;
-    background: var(--accent, #38bdf8);
-    box-shadow: 0 1px 6px #0008;
-  }
-
-  .recordings-mobile-time-navigation {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    height: 44px;
-    padding: 0 6px;
-  }
-
-  .recordings-mobile-time-navigation button,
-  .recordings-mobile-time-navigation select {
-    height: 44px;
-    min-height: 44px;
-    font-size: var(--text-sm);
-  }
-
-  .recordings-mobile-time-navigation select {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .recordings-v2-controls {
-    height: 136px !important;
-    min-height: 136px !important;
-    overflow: hidden !important;
-    border-top: 1px solid var(--line) !important;
-    border-bottom: 0 !important;
-  }
-
-  .recordings-v2-timeline {
-    height: 104px !important;
-    min-height: 104px !important;
-    padding: 3px 6px !important;
-  }
-
-  .recordings-v2-track {
-    height: 66px !important;
-  }
-
-  .recordings-v2-event-lane.object {
-    top: 28px !important;
-  }
-
-  .recordings-v2-event-lane.motion {
-    top: 46px !important;
-  }
-
   body:has(.recordings-v2-page) {
     overflow: hidden !important;
   }
@@ -535,46 +461,8 @@
   }
 }
 
-/* SurvNG mobile final v1.0.1: hide Timeline evidence thumbnails */
+/* SurvNG mobile player stacking fix */
 @media (max-width: 760px) {
-
-  /*
-   * RecordingTimeline renders its own event/evidence filmstrip inside the
-   * scrubber when showThumbnails is true. This is the "Objects / Motion only"
-   * legend plus thumbnail row visible at the bottom of mobile Timeline.
-   */
-  .recordings-timeline-evidence {
-    display: none !important;
-  }
-
-  /*
-   * Reclaim the space that evidence thumbnails previously occupied.
-   * Keep the track below the mobile navigation row.
-   */
-  .recordings-v2-timeline {
-    height: 92px !important;
-    min-height: 92px !important;
-    overflow: hidden !important;
-  }
-}
-
-/* SurvNG mobile scrub preview stacking fix */
-@media (max-width: 760px) {
-  .recordings-v2-controls {
-    position: relative !important;
-    z-index: 30 !important;
-    overflow: visible !important;
-  }
-
-  .recordings-v2-timeline {
-    position: relative !important;
-    overflow: visible !important;
-  }
-
-  .recordings-v2-scrub-preview {
-    z-index: 100 !important;
-  }
-
   .recordings-v2-player {
     position: relative !important;
     z-index: 1 !important;
@@ -587,22 +475,6 @@
 
   .recordings-v2-player.selected-camera-stage:has(.recording-selected-companions) .recording-hero-controls {
     bottom: calc(86px + 8px);
-  }
-}
-
-@media (max-width: 760px) {
-
-  .recordings-v2-timeline,
-  .recordings-v2-track,
-  .recordings-v2-track input,
-  .recordings-v2-scrub-preview {
-    -webkit-user-select: none !important;
-    user-select: none !important;
-    -webkit-touch-callout: none !important;
-  }
-
-  .recordings-v2-track {
-    touch-action: none;
   }
 }
 

@@ -199,11 +199,14 @@ export async function checks({ open, shot, query, at, assert }) {
   assert.deepEqual(linked.errors, [], "event links on the phone rail must not raise errors");
   await linked.close();
 
-  // Classic layout remains available.
+  // The classic layout is retired: an old view=classic link opens the rail.
   const classic = await open({ width: 1440, height: 900 }, `${query}&view=classic`);
   await settle(classic);
-  assert.equal(await classic.locator(".recordings-v2-track").count(), 1, "classic keeps the horizontal track");
-  assert.equal(await classic.locator(".event-rail").count(), 0);
+  assert.match(await classic.locator(".recordings-v2-page").getAttribute("class"), /timeline-layout-rail/, "view=classic falls back to the rail");
+  assert.equal(await classic.locator(".event-rail").count(), 1, "the fallback shows the Event Rail");
+  assert.equal(await classic.locator(".recordings-v2-track").count(), 0, "no classic track remains");
+  assert.equal(new URL(classic.url()).searchParams.get("view"), null, "the URL drops the retired view");
+  assert.deepEqual(classic.errors, [], "an old classic link must not raise errors");
   await classic.close();
 
   // B · Edge rail with loupe on a phone.

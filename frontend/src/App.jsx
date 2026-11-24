@@ -131,7 +131,7 @@ function App() {
           : workspacePage === "exports"
             ? <ExportCenterPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
             : workspacePage === "timeline"
-              ? <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
+              ? <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
               : workspacePage === "search"
                 ? <SemanticSearchPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
                 : workspacePage === "observations"

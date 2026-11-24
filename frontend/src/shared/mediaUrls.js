@@ -52,10 +52,6 @@ export function eventClipUrl(eventId, before = 5, after = 5, source = "main") {
   return appUrl(`/api/events/${eventId}/clip.mp4?${params.toString()}`);
 }
 
-export function eventStreamUrl(eventId, before = 5, after = 5, source = "main") {
-  const params = new URLSearchParams({ before: before.toFixed(3), after: after.toFixed(3), source });
-  return appUrl(`/api/events/${eventId}/stream.m3u8?${params.toString()}`);
-}
 export function recordingDayUrl(cameraId, startEpoch, endEpoch, source, includeIdentities = true) {
   const params = new URLSearchParams({
     start_epoch: startEpoch.toFixed(3),

@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Camera,
-  CarFront,
   Crop,
   Check,
   CircleAlert,
@@ -12,7 +11,6 @@ import {
   Clock3,
   Download,
   Film,
-  Images,
   Search,
   Pause,
   Play,
@@ -21,12 +19,10 @@ import {
   RefreshCcw,
   Save,
   ShieldCheck,
-  SlidersHorizontal,
   Sparkles,
   SkipBack,
   SkipForward,
   Trash2,
-  UserRound,
   Volume2,
   VolumeX,
   X,
@@ -41,14 +37,14 @@ import { browserStorage } from "../storage.mjs";
 import { canSetClipBoundaryAtPlayhead, clipPreviewReachedEnd, clipRangeIsValid, setClipBoundaryAtPlayhead } from "../recordingClipSelection.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
-import { nativePlaylistStart, nativePlaylistStartStep, recordingCoverageUnion, recordingPlaybackTimeline, recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, recordingEdgeSeekEpoch, recordingLiveEdgeFollow, extendedPlaybackRows, adjustRecordingExportRange, describePlaybackError, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
+import { nativePlaylistStart, nativePlaylistStartStep, recordingCoverageUnion, recordingPlaybackTimeline, recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, recordingEdgeSeekEpoch, recordingLiveEdgeFollow, extendedPlaybackRows, describePlaybackError, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
 import { useScrubStrips } from "./useScrubStrips.js";
 import { ScrubFrameOverlay } from "./ScrubFrameOverlay.jsx";
 import { ALL_CAMERAS_LIVE_DELAY_SECONDS, allCamerasCustomIds, allCamerasGridSelection, allCamerasWindowStart, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { CameraDensityControl, CameraLayoutModeControl } from "../shared/CameraLayoutControls.jsx";
 import { useStoredState, useViewportQuery } from "../shared/hooks.js";
 import { AllCamerasGrid } from "./AllCamerasGrid.jsx";
-import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePlayheadInComfortZone, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { SpeechSearchWorkspace } from "../search/SpeechSearchResults.jsx";
 import { speechSearchMode } from "../speechSettings.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "../semanticSearchState.mjs";
@@ -69,7 +65,7 @@ import {
 import { appPathname, appUrl, mediaUrl, incidentRecordingContext, recordingsHref, fetch } from "../shared/api.js";
 import { incidentOpenedFromHref, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
 import { ALL_RECORDING_CAMERAS_ID } from "../shared/constants.js";
-import { formatDateTime, formatTimeOnly, formatExportHandleTime, formatBytes, formatDuration } from "../shared/format.js";
+import { formatDateTime, formatTimeOnly, formatBytes, formatDuration } from "../shared/format.js";
 import { dateKeyForTimeZone, addDaysToDateKey, zonedDateSecondToEpoch } from "../shared/datetime.js";
 import { preferredStreamSource } from "../shared/cameras.js";
 import { IdentityChip } from "../shared/identity.jsx";
@@ -98,13 +94,6 @@ export function recordingIncidentEpoch(incident) {
   if (Number.isFinite(direct)) return direct;
   const parsed = new Date(incident?.start_at || incident?.created_at || "").getTime() / 1000;
   return Number.isFinite(parsed) ? parsed : null;
-}
-
-export function recordingIncidentEndEpoch(incident) {
-  const direct = Number(incident?.last_epoch);
-  if (Number.isFinite(direct)) return direct;
-  const parsed = new Date(incident?.end_at || incident?.created_at || "").getTime() / 1000;
-  return Number.isFinite(parsed) ? parsed : recordingIncidentEpoch(incident);
 }
 
 function containedImageBounds(surface, image) {
@@ -678,7 +667,7 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
   </main>;
 }
 
-export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssistant = null }) {
+export function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const { cameras: sharedCameras, appConfig } = usePollingData();
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
   const today = dateKeyForTimeZone(Date.now(), timeZone);
@@ -732,7 +721,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [playbackDetail, setPlaybackDetail] = useState(null);
   const [events, setEvents] = useState([]);
   const [eventFilter, setEventFilter] = useState(initialView.eventFilter);
-  const [timelineLanes, setTimelineLanes] = useState(initialView.lanes);
   const [incidentRangeHours, setIncidentRangeHours] = useState(initialView.windowHours);
   const [availableSources, setAvailableSources] = useState([]);
   const [playhead, setPlayhead] = useState(null);
@@ -777,7 +765,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   );
   const [heroMuted, setHeroMuted] = useState(false);
   const [aiOverlayEnabled, setAiOverlayEnabled] = useState(false);
-  const [followPlayhead, setFollowPlayhead] = useState(true);
   const [playbackRate, setPlaybackRate] = useState(initialView.speed);
   const [timelineLayout, setTimelineLayout] = useState(initialView.view);
   const [railMinutes, setRailMinutes] = useState(initialView.railMinutes);
@@ -863,7 +850,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (phoneTimeline && cameraId === ALL_RECORDING_CAMERAS_ID && activeCameraId) setCameraId(activeCameraId);
   }, [activeCameraId, cameraId, phoneTimeline]);
   const unrecordedGridCameras = gridSelection.unrecorded;
-  const investigationShown = investigationOpen && !(isAllCameras && timelineLayout !== "classic");
+  // All cameras has no Nearby panel.
+  const investigationShown = investigationOpen && !isAllCameras;
   const railRecordings = useMemo(() => (isAllCameras ? recordingCoverageUnion(timeline) : timeline), [isAllCameras, timeline]);
   const nativeScope = `${activeCameraId}:${source}:${dayStart}:${dayEnd}`;
   const playbackTimeline = useMemo(() => {
@@ -1006,10 +994,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
 
   const filteredEvents = useMemo(() => events
     .filter((event) => timelineEventMatchesFilter(event, eventFilter))
-    .filter((event) => (event.has_objects ? timelineLanes.object : timelineLanes.motion))
     .map((event) => ({ ...event, incident_epoch: recordingIncidentEpoch(event) }))
     .filter((event) => Number.isFinite(event.incident_epoch))
-    .sort((left, right) => left.incident_epoch - right.incident_epoch), [eventFilter, events, timelineLanes.motion, timelineLanes.object]);
+    .sort((left, right) => left.incident_epoch - right.incident_epoch), [eventFilter, events]);
 
   const viewportAnchor = Number.isFinite(timelineViewportAnchor)
     ? timelineViewportAnchor
@@ -1142,21 +1129,12 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }, [playhead, timelineViewportAnchor]);
 
   useEffect(() => {
-    if (!followPlayhead || !Number.isFinite(playhead)) return;
+    if (!Number.isFinite(playhead)) return;
     const playing = isAllCameras ? gridPlaying : autoplayRef.current;
     if (!playing) return;
     if (timelinePlayheadInComfortZone(timelineView, playhead)) return;
     setTimelineViewportAnchor(playhead);
-  }, [followPlayhead, gridPlaying, isAllCameras, playhead, timelineView]);
-
-  const displayedTimelineEvents = useMemo(() => {
-    if (!selectedEvent || viewportEvents.some((event) => Number(event.id) === Number(selectedEvent.id))) return viewportEvents;
-    if (
-      selectedEvent.incident_epoch < timelineView.startEpoch
-      || selectedEvent.incident_epoch > timelineView.endEpoch
-    ) return viewportEvents;
-    return [...viewportEvents, selectedEvent].sort((left, right) => left.incident_epoch - right.incident_epoch);
-  }, [selectedEvent, timelineView.endEpoch, timelineView.startEpoch, viewportEvents]);
+  }, [gridPlaying, isAllCameras, playhead, timelineView]);
 
   // Event Rail, camera lanes and catch-up share these. The rail top is "now"
   // on today (rounded to five minutes so it does not shift every render).
@@ -1570,7 +1548,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       || target > timelineView.endEpoch
       )
     ) {
-      setFollowPlayhead(true);
       setTimelineViewportAnchor(target);
     }
     if (isAllCameras) {
@@ -1683,22 +1660,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setCameraId(camera);
   }
 
-  function panTimelineViewport(deltaSeconds) {
-    setFollowPlayhead(false);
-    // Several touch moves can arrive before React renders the next viewport.
-    setTimelineViewportAnchor((anchor) => {
-      const center = Number.isFinite(anchor) ? anchor : (timelineView.startEpoch + timelineView.endEpoch) / 2;
-      const current = timelineViewport(dayStart, dayEnd, center, incidentRangeHours);
-      const next = timelinePanViewport(dayStart, dayEnd, current, deltaSeconds);
-      return (next.startEpoch + next.endEpoch) / 2;
-    });
-  }
-
-  function returnToPlayhead() {
-    if (!Number.isFinite(playhead)) return;
-    setFollowPlayhead(true);
-    setTimelineViewportAnchor(playhead);
-  }
 
   useEffect(() => {
     if (!isAllCameras || !gridPlaying || !timeline.length) return undefined;
@@ -1981,13 +1942,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     const trailValue = serializeTrailEventIds(trailEventIds);
     if (trailValue) params.set("trail", trailValue);
     if (incidentRangeHours !== 1) params.set("window", String(incidentRangeHours));
-    if (!timelineLanes.object) params.set("objects", "0");
-    if (!timelineLanes.motion) params.set("motion", "0");
     if (playbackRate !== 1) params.set("speed", String(playbackRate));
     if (timelineLayout !== "rail") params.set("view", timelineLayout);
     if (railMinutes !== 60) params.set("rail", String(railMinutes));
     window.history.replaceState(null, "", appUrl(`/timeline?${params.toString()}`));
-  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, isAllCameras, incidentRangeHours, initialQuery, playbackRate, railMinutes, selectedEventId, source, timelineLanes.motion, timelineLanes.object, timelineLayout, trailEventIds]);
+  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, isAllCameras, incidentRangeHours, initialQuery, playbackRate, railMinutes, selectedEventId, source, timelineLayout, trailEventIds]);
 
   useEffect(() => {
     const restoreView = () => {
@@ -2011,7 +1970,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       setTrailEventIds(view.trailEventIds || []);
       if (view.eventId || view.trailEventIds?.length) setInvestigationOpen(true);
       setIncidentRangeHours(view.windowHours);
-      setTimelineLanes(view.lanes);
       setPlaybackRate(view.speed);
       setTimelineLayout(view.view);
       setRailMinutes(view.railMinutes);
@@ -2881,8 +2839,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     checkpointTimelineView();
     setTimelineLayout(nextLayout);
   }
-  // Rail, Catch up and Cameras carry day and event navigation in the player HUD.
-  const hudShown = timelineLayout !== "classic";
   const hudEventActions = (
     <div className="timeline-hud-actions" role="group" aria-label="Events">
       <button type="button" onClick={() => selectRailEvent(previousRailEvent)} disabled={!previousRailEvent} aria-label="Previous event" title="Previous event"><SkipBack size={15} /><span className="timeline-hud-label">Previous</span></button>
@@ -3163,7 +3119,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               Play recording
             </button>
           ) : null}
-          {!isAllCameras && !Number.isFinite(frameSearchEpoch) && (hudShown || (Number.isFinite(playhead) && hasPlaybackMedia && !playbackError)) ? (
+          {!isAllCameras && !Number.isFinite(frameSearchEpoch) ? (
             <div className="recording-grid-controls recording-hero-controls">
               {Number.isFinite(playhead) && hasPlaybackMedia && !playbackError ? <>
               <button type="button" onClick={() => skipPlayback(-10)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
@@ -3190,8 +3146,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
                 <Sparkles size={15} />AI
               </button>
               </> : null}
-              {hudShown ? hudPlayExtras() : null}
-              {hudShown ? <>{hudDayControls()}<span className="timeline-hud-break" aria-hidden="true" /></> : <time>{formatDateTime(playhead, timeZone)}</time>}
+              {hudPlayExtras()}
+              <>{hudDayControls()}<span className="timeline-hud-break" aria-hidden="true" /></>
               {Number.isFinite(playhead) && hasPlaybackMedia && !playbackError ? <>
               <button
                 type="button"
@@ -3204,7 +3160,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               </button>
               <small className="recording-frame-search-status">{semanticStatusLabel}</small>
               </> : null}
-              {hudShown ? hudEventActions : null}
+              {hudEventActions}
               <div className="incident-recording-source" role="group" aria-label="Playback stream">
                 {["main", "live"].map(value => <button key={value} type="button" aria-pressed={source === value}
                   disabled={availableSources.length > 0 && !availableSources.includes(value)}
@@ -3214,14 +3170,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               </div>
             </div>
           ) : null}
-          {isAllCameras && (hudShown || Number.isFinite(playhead)) ? <div className="recording-grid-controls recording-hero-controls all-cameras-controls">
+          {isAllCameras ? <div className="recording-grid-controls recording-hero-controls all-cameras-controls">
             {Number.isFinite(playhead) ? <>
             <button type="button" onClick={() => skipPlayback(-10, gridPlaying)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
             <button type="button" className="primary" onClick={toggleGridPlayback}>{gridPlaying ? <Pause size={17} /> : <Play size={17} fill="currentColor" />}{gridPlaying ? "Pause" : "Play"}</button>
             <button type="button" onClick={() => skipPlayback(10, gridPlaying)} aria-label="Forward 10 seconds"><SkipForward size={16} /></button>
             </> : null}
-            {hudShown ? hudPlayExtras() : null}
-            {hudShown ? <>{hudDayControls()}<span className="timeline-hud-break" aria-hidden="true" /></> : <time>{formatDateTime(playhead, timeZone)}</time>}
+            {hudPlayExtras()}
+            <>{hudDayControls()}<span className="timeline-hud-break" aria-hidden="true" /></>
             {Number.isFinite(playhead) ? <span
               className="all-cameras-summary"
               role="status"
@@ -3232,7 +3188,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
                 <em> · No recording: {unrecordedGridCameras.map((camera) => camera.name || camera.id).join(", ")}</em>
               ) : null}
             </span> : null}
-            {hudShown ? hudEventActions : null}
+            {hudEventActions}
             <div className="incident-recording-source" role="group" aria-label="Playback stream">
               {["main", "live"].map(value => <button key={value} type="button" aria-pressed={source === value}
                 disabled={availableSources.length > 0 && !availableSources.includes(value)}
@@ -3243,78 +3199,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           </div> : null}
         </div>
 
-        {timelineLayout === "classic" ? <div className="recordings-v2-controls">
-          <div className="recordings-mobile-time-navigation">
-            <button type="button" aria-label="Earlier time range" disabled={timelineView.startEpoch <= dayStart} onClick={() => panTimelineViewport(-(timelineView.endEpoch - timelineView.startEpoch) / 2)}><ChevronLeft size={18} /></button>
-            <select aria-label="Visible time span" value={incidentRangeHours} onChange={(event) => { checkpointTimelineView(); setIncidentRangeHours(Number(event.target.value)); }}>
-              {[[1, "1 hour"], [2, "2 hours"], [4, "4 hours"], [8, "8 hours"], [12, "12 hours"], [24, "Full day"]].map(([hours, label]) => <option key={hours} value={hours}>{label}</option>)}
-            </select>
-            <button type="button" aria-label="Later time range" disabled={timelineView.endEpoch >= dayEnd} onClick={() => panTimelineViewport((timelineView.endEpoch - timelineView.startEpoch) / 2)}><ChevronRight size={18} /></button>
-            <button type="button" disabled={followPlayhead || !Number.isFinite(playhead)} onClick={returnToPlayhead}>Playhead</button>
-          </div>
-          <div className="recordings-v2-timeline-toolbar">
-            <div className="recordings-v2-incidents-tools">
-              <span className="recordings-v2-filter-label" title="Evidence" aria-label="Evidence"><SlidersHorizontal size={14} /></span>
-              <div className="recordings-v2-event-filter" role="group" aria-label="Recording incident type">
-                <button type="button" className={eventFilter === "all" ? "active" : ""} aria-pressed={eventFilter === "all"} onClick={() => { checkpointTimelineView(); setEventFilter("all"); }}><Images size={14} />All events</button>
-                <button type="button" className={eventFilter === "people" ? "active" : ""} aria-pressed={eventFilter === "people"} onClick={() => { checkpointTimelineView(); setEventFilter("people"); }}><UserRound size={14} />People</button>
-                <button type="button" className={eventFilter === "vehicles" ? "active" : ""} aria-pressed={eventFilter === "vehicles"} onClick={() => { checkpointTimelineView(); setEventFilter("vehicles"); }}><CarFront size={14} />Vehicles</button>
-              </div>
-              <div className="recordings-v2-scale" role="group" aria-label="Visible time scale">
-                {[[1, "1h"], [2, "2h"], [4, "4h"], [8, "8h"], [12, "12h"], [24, "Day"]].map(([hours, label]) => (
-                  <button
-                    key={hours}
-                    type="button"
-                    className={incidentRangeHours === hours ? "active" : ""}
-                    aria-pressed={incidentRangeHours === hours}
-                    onClick={() => { checkpointTimelineView(); setIncidentRangeHours(hours); }}
-                  >{label}</button>
-                ))}
-              </div>
-              <div className="recordings-toolbar-day-controls">{timelineDayControls()}</div>
-            </div>
-            <div className="recordings-timeline-display-controls">
-              <button type="button" className={timelineLanes.object ? "active object" : "object"} aria-pressed={timelineLanes.object} onClick={() => { checkpointTimelineView(); setTimelineLanes((current) => ({ ...current, object: !current.object })); }}>Objects</button>
-              <button type="button" className={timelineLanes.motion ? "active motion" : "motion"} aria-pressed={timelineLanes.motion} onClick={() => { checkpointTimelineView(); setTimelineLanes((current) => ({ ...current, motion: !current.motion })); }}>Motion</button>
-            </div>
-            <button
-              type="button"
-              className={`recordings-investigation-toggle${investigationOpen ? " active" : ""}`}
-              aria-pressed={investigationOpen}
-              aria-expanded={investigationOpen}
-              aria-controls="timeline-investigation"
-              onClick={() => setInvestigationOpen((current) => !current)}
-            >
-              {investigationOpen ? <ChevronDown size={15} /> : <ChevronUp size={15} />}
-              Nearby
-            </button>
-            <button type="button" className={`recordings-v2-export-toggle${exportRange ? " active" : ""}`} onClick={toggleExport} disabled={isAllCameras || !timeline.length || exportActive}>
-              <Download size={15} />{isAllCameras ? "Select camera" : exportActive ? "Export running" : exportRange ? "Close export" : "Export"}
-            </button>
-            {!followPlayhead && Number.isFinite(playhead) ? <button type="button" className="recordings-return-playhead" onClick={returnToPlayhead}>Return to playhead</button> : null}
-          </div>
-          <RecordingTimeline
-            cameraId={isAllCameras ? "" : activeCameraId}
-            source={source}
-            startEpoch={timelineView.startEpoch}
-            endEpoch={timelineView.endEpoch}
-            recordings={timeline}
-            events={displayedTimelineEvents}
-            evidenceFilter={eventFilter}
-            laneVisibility={timelineLanes}
-            selectedEventId={selectedEvent?.id}
-            onEventSelect={(event) => { checkpointTimelineView(); setInvestigationOpen(true); setSelectedEventId(event.id); playAt(event.incident_epoch, true); }}
-            playhead={playhead ?? dayStart}
-            timeZone={timeZone}
-            windowHours={incidentRangeHours}
-            onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
-            onScrub={isAllCameras ? null : scrubPlayer}
-            onPanViewport={panTimelineViewport}
-            exportRange={isAllCameras ? null : exportRange}
-            onExportRangeChange={isAllCameras || exportJob ? null : (nextRange) => { cancelClipPreview(); setExportRange(nextRange); }}
-          />
-          {exportPanel}
-        </div> : railControls}
+        {railControls}
         {railAside}
       </section>
 
@@ -3728,475 +3613,3 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
   );
 }
 
-export function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings, events, evidenceFilter, laneVisibility, selectedEventId, onEventSelect, playhead, timeZone, onSeek, onScrub = null, onPanViewport, windowHours = 1, exportRange, onExportRangeChange }) {
-  const duration = Math.max(1, endEpoch - startEpoch);
-  const offset = Math.max(0, Math.min(duration, playhead - startEpoch));
-  const trackRef = useRef(null);
-  const [draft, setDraft] = useState(offset);
-  const [scrubbing, setScrubbing] = useState(false);
-  const [preview, setPreview] = useState({ epoch: null, url: "", loading: false, gap: false, unavailable: false, mode: "jpeg" });
-  const draftRef = useRef(offset);
-  const dragRef = useRef(null);
-  const ignoreInputCommitRef = useRef(0);
-  const previewTimerRef = useRef(null);
-  const previewAbortRef = useRef(null);
-  const previewLastRequestRef = useRef({ epoch: null, at: 0 });
-  const previewUrlRef = useRef("");
-  const previewInFlightRef = useRef(false);
-  const previewPendingRef = useRef(null);
-  const previewHideTimerRef = useRef(null);
-  const previewGenerationRef = useRef(0);
-  const exportDragRef = useRef(null);
-  // With a scrub callback the dragged playhead's picture comes from preview
-  // strips and is shown in the player; the tile above it carries the time.
-  const stripsEnabled = Boolean(onScrub && cameraId);
-  const scrubActiveRef = useRef(false);
-  const onScrubRef = useRef(onScrub);
-  onScrubRef.current = onScrub;
-  // A layout switch can unmount this mid-drag; the scrub must still end.
-  useEffect(() => () => {
-    if (scrubActiveRef.current) onScrubRef.current?.(null, { committed: false });
-    scrubActiveRef.current = false;
-  }, []);
-  const ticks = useMemo(() => {
-    const tickInterval = timelineTickIntervalSeconds(windowHours);
-    const formatter = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      hour: "numeric",
-      minute: "2-digit",
-    });
-    const partFormatter = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      hourCycle: "h23",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-    const items = [];
-    const first = Math.ceil(startEpoch / tickInterval) * tickInterval;
-    for (let epoch = first; epoch < endEpoch; epoch += tickInterval) {
-      const parts = partFormatter.formatToParts(new Date(epoch * 1000));
-      const minute = Number(parts.find((item) => item.type === "minute")?.value || 0);
-      const kind = minute === 0 ? "hour" : minute === 30 ? "half" : "quarter";
-      items.push({
-        epoch,
-        kind,
-        label: kind === "hour" ? formatter.format(new Date(epoch * 1000)).replace(":00", "") : "",
-      });
-    }
-    return items;
-  }, [endEpoch, startEpoch, timeZone, windowHours]);
-  useEffect(() => {
-    const track = trackRef.current;
-    if (!track || !onPanViewport) return undefined;
-    function onWheel(event) {
-      const horizontal = Math.abs(event.deltaX) >= Math.abs(event.deltaY);
-      event.preventDefault();
-      if (!horizontal && !event.shiftKey) return;
-      const deltaPx = horizontal ? event.deltaX : event.deltaY;
-      const width = track.clientWidth || 1;
-      onPanViewport((deltaPx / width) * duration);
-    }
-    track.addEventListener("wheel", onWheel, { passive: false });
-    return () => track.removeEventListener("wheel", onWheel);
-  }, [duration, onPanViewport]);
-  const eventMarkers = useMemo(() => (events || []).map((event) => {
-    const start = recordingIncidentEpoch(event);
-    const end = recordingIncidentEndEpoch(event);
-    if (!Number.isFinite(start) || start >= endEpoch || (Number.isFinite(end) && end < startEpoch)) return null;
-    const boundedStart = Math.max(startEpoch, start);
-    const boundedEnd = Math.min(endEpoch, Math.max(boundedStart + 1, Number.isFinite(end) ? end : start + 1));
-    return {
-      id: event.id,
-      hasObjects: Boolean(event.has_objects),
-      left: ((boundedStart - startEpoch) / duration) * 100,
-      width: ((boundedEnd - boundedStart) / duration) * 100,
-      event: { ...event, incident_epoch: start },
-    };
-  }).filter(Boolean), [duration, endEpoch, events, startEpoch]);
-  useEffect(() => {
-    if (dragRef.current) return;
-    draftRef.current = offset;
-    setDraft(offset);
-  }, [offset]);
-  useEffect(() => () => {
-    previewGenerationRef.current += 1;
-    if (previewTimerRef.current) window.clearTimeout(previewTimerRef.current);
-    if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
-    previewAbortRef.current?.abort();
-    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
-  }, []);
-  useEffect(() => {
-    previewGenerationRef.current += 1;
-    previewLastRequestRef.current = { epoch: null, at: 0 };
-    previewPendingRef.current = null;
-    previewInFlightRef.current = false;
-    if (previewTimerRef.current) window.clearTimeout(previewTimerRef.current);
-    if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
-    previewAbortRef.current?.abort();
-    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
-    previewUrlRef.current = "";
-    setScrubbing(false);
-    setPreview({ epoch: null, url: "", loading: false, gap: false, unavailable: false, mode: "jpeg" });
-  }, [cameraId, source, startEpoch]);
-  const percent = ((scrubbing ? draft : offset) / duration) * 100;
-
-  function scrubTo(epoch) {
-    scrubActiveRef.current = true;
-    onScrub?.(epoch);
-  }
-
-  function endScrub(committed) {
-    if (!scrubActiveRef.current) return;
-    scrubActiveRef.current = false;
-    onScrub?.(null, { committed });
-  }
-
-  function hidePreviewAfterDelay() {
-    if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
-    previewHideTimerRef.current = window.setTimeout(() => {
-      previewHideTimerRef.current = null;
-      if (!dragRef.current) setScrubbing(false);
-    }, 1400);
-  }
-
-  async function requestPreview(request) {
-    if (previewInFlightRef.current) {
-      previewPendingRef.current = request;
-      return;
-    }
-    const generation = previewGenerationRef.current;
-    previewInFlightRef.current = true;
-    previewLastRequestRef.current = { epoch: request.bucket, at: performance.now() };
-    const controller = new AbortController();
-    previewAbortRef.current = controller;
-    setPreview((current) => ({
-      ...current,
-      epoch: request.epoch,
-      loading: true,
-      gap: false,
-      unavailable: false,
-      mode: "jpeg",
-    }));
-    try {
-      const response = await fetch(recordingPreviewUrl(cameraId, request.epoch, source), {
-        signal: controller.signal,
-      });
-      if (controller.signal.aborted || generation !== previewGenerationRef.current) return;
-      if (response.status === 404) {
-        setPreview((current) => ({
-          ...current,
-          epoch: request.epoch,
-          loading: false,
-          gap: true,
-          unavailable: false,
-          mode: "jpeg",
-        }));
-      } else {
-        if (!response.ok) throw new Error(`Preview failed (${response.status})`);
-        const objectUrl = URL.createObjectURL(await response.blob());
-        if (controller.signal.aborted || generation !== previewGenerationRef.current) {
-          URL.revokeObjectURL(objectUrl);
-          return;
-        }
-        if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
-        previewUrlRef.current = objectUrl;
-        setPreview({
-          epoch: request.epoch,
-          url: objectUrl,
-          loading: false,
-          gap: false,
-          unavailable: false,
-          mode: "jpeg",
-        });
-      }
-    } catch (error) {
-      if (error.name !== "AbortError" && generation === previewGenerationRef.current) {
-        setPreview((current) => ({
-          ...current,
-          epoch: request.epoch,
-          loading: false,
-          gap: false,
-          unavailable: true,
-          mode: "jpeg",
-        }));
-      }
-    } finally {
-      if (generation !== previewGenerationRef.current) return;
-      previewInFlightRef.current = false;
-      const pending = previewPendingRef.current;
-      previewPendingRef.current = null;
-      if (pending && pending.bucket !== request.bucket) {
-        requestPreview(pending);
-      } else if (!dragRef.current) {
-        setScrubbing(true);
-        hidePreviewAfterDelay();
-      }
-    }
-  }
-
-  function schedulePreview(value, immediate = false) {
-    if (!cameraId) return;
-    if (stripsEnabled) {
-      if (dragRef.current?.mode === "seek") {
-        scrubTo(startEpoch + Math.max(0, Math.min(duration, Number(value) || 0)));
-      }
-      return;
-    }
-    const requestedEpoch = startEpoch + Math.max(0, Math.min(duration, Number(value) || 0));
-    const bucketSeconds = dragRef.current?.fine ? 1 : scrubPreviewBucketSeconds();
-    const previewBucket = `jpeg:${Math.floor((requestedEpoch - startEpoch) / bucketSeconds)}`;
-    if (previewLastRequestRef.current.epoch === previewBucket) {
-      previewPendingRef.current = null;
-      return;
-    }
-    if (previewTimerRef.current) window.clearTimeout(previewTimerRef.current);
-    const elapsed = performance.now() - previewLastRequestRef.current.at;
-    const delay = immediate ? 0 : Math.max(0, scrubPreviewDelayMs() - elapsed);
-    previewTimerRef.current = window.setTimeout(() => {
-      previewTimerRef.current = null;
-      const request = { epoch: requestedEpoch, bucket: previewBucket };
-      requestPreview(request);
-    }, delay);
-  }
-
-  function updateDraft(value, requestPreview = false) {
-    const next = Math.max(0, Math.min(duration, Number(value) || 0));
-    draftRef.current = next;
-    setDraft(next);
-    if (requestPreview) schedulePreview(next);
-    return next;
-  }
-
-  function commit(value) {
-    const next = updateDraft(value);
-    onSeek(startEpoch + next);
-  }
-
-  function commitFromInput(value) {
-    // iOS fires a change event after pointerup. That second commit starts
-    // another seek and cancels the play() issued for the first one.
-    if (performance.now() - ignoreInputCommitRef.current < 80) return;
-    commit(value);
-  }
-
-  function pointerValue(event, drag) {
-    if (drag.fine) return Math.max(0, Math.min(duration, drag.initialOffset + event.clientX - drag.originX));
-    const pointerX = Math.max(0, Math.min(drag.width, event.clientX - drag.left));
-    return (pointerX / drag.width) * duration;
-  }
-
-  function startDrag(event) {
-    const rect = event.currentTarget.getBoundingClientRect();
-    if (!rect.width) return;
-    const pointerX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-    const value = (pointerX / rect.width) * duration;
-    const grabPlayhead = event.pointerType === "touch" && Math.abs(pointerX - (offset / duration) * rect.width) <= 24;
-    const drag = {
-      fine: grabPlayhead,
-      initialOffset: offset,
-      pointerId: event.pointerId,
-      left: rect.left,
-      width: rect.width,
-      startX: pointerX,
-      startValue: value,
-      lastX: event.clientX,
-      originX: event.clientX,
-      mode: event.pointerType === "touch" && onPanViewport && !grabPlayhead ? "pending-pan" : "seek",
-    };
-    dragRef.current = drag;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    event.preventDefault();
-    // A touch tap seeks; a horizontal swipe browses without reloading playback.
-    if (drag.mode === "pending-pan") return;
-    if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
-    setScrubbing(true);
-    const seekValue = grabPlayhead ? offset : value;
-    updateDraft(seekValue, true);
-    schedulePreview(seekValue, true);
-  }
-
-  function moveDrag(event) {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    event.preventDefault();
-    if (drag.mode !== "seek") {
-      if (drag.mode === "pending-pan" && Math.abs(event.clientX - drag.originX) < 8) return;
-      drag.mode = "pan";
-      onPanViewport(((drag.lastX - event.clientX) / drag.width) * duration);
-      drag.lastX = event.clientX;
-      return;
-    }
-    updateDraft(pointerValue(event, drag), true);
-  }
-
-  function finishDrag(event, cancelled = false) {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    event.preventDefault();
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    dragRef.current = null;
-    if (previewTimerRef.current) window.clearTimeout(previewTimerRef.current);
-    previewTimerRef.current = null;
-    if (cancelled || drag.mode === "pan") {
-      endScrub(false);
-      updateDraft(offset);
-      setScrubbing(false);
-      hidePreviewAfterDelay();
-      return;
-    }
-    endScrub(true);
-    setScrubbing(false);
-    hidePreviewAfterDelay();
-    ignoreInputCommitRef.current = performance.now();
-    commit(drag.fine && Math.abs(event.clientX - drag.originX) < 8
-      ? ((Math.max(0, Math.min(drag.width, event.clientX - drag.left))) / drag.width) * duration
-      : pointerValue(event, drag));
-  }
-
-  function exportEpochAtPointer(event, drag) {
-    const pointerX = Math.max(0, Math.min(drag.width, event.clientX - drag.left));
-    return startEpoch + (pointerX / drag.width) * duration;
-  }
-
-  function updateExportHandle(kind, epoch) {
-    if (!exportRange) return;
-    const minimumGap = 1;
-    const next = kind === "start"
-      ? { ...exportRange, start: Math.max(startEpoch, Math.min(exportRange.end - minimumGap, epoch)) }
-      : { ...exportRange, end: Math.min(endEpoch, Math.max(exportRange.start + minimumGap, epoch)) };
-    onExportRangeChange?.(next);
-  }
-
-  function handleExportKey(kind, event) {
-    if (!exportRange || !onExportRangeChange) return;
-    const next = adjustRecordingExportRange({ range: exportRange, kind, key: event.key, shiftKey: event.shiftKey, startEpoch, endEpoch });
-    if (!next) return;
-    event.preventDefault();
-    onExportRangeChange(next);
-  }
-
-  function startExportDrag(kind, event) {
-    const track = event.currentTarget.parentElement;
-    const rect = track?.getBoundingClientRect();
-    if (!rect?.width) return;
-    exportDragRef.current = { kind, pointerId: event.pointerId, left: rect.left, width: rect.width };
-    event.currentTarget.setPointerCapture(event.pointerId);
-    event.preventDefault();
-  }
-
-  function moveExportDrag(event) {
-    const drag = exportDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    updateExportHandle(drag.kind, exportEpochAtPointer(event, drag));
-    event.preventDefault();
-  }
-
-  function finishExportDrag(event) {
-    const drag = exportDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    updateExportHandle(drag.kind, exportEpochAtPointer(event, drag));
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    exportDragRef.current = null;
-    event.preventDefault();
-  }
-
-  const exportStartPercent = exportRange ? ((exportRange.start - startEpoch) / duration) * 100 : 0;
-  const exportEndPercent = exportRange ? ((exportRange.end - startEpoch) / duration) * 100 : 0;
-
-  return (
-    <div className="recordings-v2-timeline">
-      <div ref={trackRef} className="recordings-v2-track">
-        <div className="recordings-v2-ticks" aria-hidden="true">
-          {ticks.map((tick) => (
-            <span className={tick.kind} key={tick.epoch} style={{ left: `${((tick.epoch - startEpoch) / duration) * 100}%` }}>
-              {tick.label ? <small>{tick.label}</small> : null}
-            </span>
-          ))}
-        </div>
-        {recordings.map((item) => (
-          <span
-            key={`${item.start_epoch}:${item.end_epoch}`}
-            style={{
-              left: `${((Math.max(startEpoch, item.start_epoch) - startEpoch) / duration) * 100}%`,
-              width: `${((Math.min(endEpoch, item.end_epoch) - Math.max(startEpoch, item.start_epoch)) / duration) * 100}%`,
-            }}
-          />
-        ))}
-        <div className={`recordings-v2-event-lane object${!laneVisibility?.object ? " hidden" : evidenceFilter === "motion" ? " muted" : ""}`} aria-hidden="true">
-          {eventMarkers.filter((event) => event.hasObjects).map((event) => <b key={event.id} style={{ left: `${event.left}%`, width: `${event.width}%` }} />)}
-        </div>
-        <div className={`recordings-v2-event-lane motion${!laneVisibility?.motion ? " hidden" : evidenceFilter === "object" ? " muted" : ""}`} aria-hidden="true">
-          {eventMarkers.filter((event) => !event.hasObjects).map((event) => <b key={event.id} style={{ left: `${event.left}%`, width: `${event.width}%` }} />)}
-        </div>
-        {exportRange ? (
-          <>
-            <div
-              className="recordings-v2-export-selection"
-              style={{ left: `${exportStartPercent}%`, width: `${Math.max(0, exportEndPercent - exportStartPercent)}%` }}
-              aria-hidden="true"
-            />
-            <button
-              type="button"
-              className="recordings-v2-export-handle start"
-              style={{ left: `${exportStartPercent}%` }}
-              onPointerDown={(event) => startExportDrag("start", event)}
-              onPointerMove={moveExportDrag}
-              onPointerUp={finishExportDrag}
-              onPointerCancel={finishExportDrag}
-              onKeyDown={(event) => handleExportKey("start", event)}
-              disabled={!onExportRangeChange}
-              aria-label={`Export start ${formatTimeOnly(exportRange.start, timeZone)}`}
-            ><span>{formatExportHandleTime(exportRange.start, timeZone)}</span></button>
-            <button
-              type="button"
-              className="recordings-v2-export-handle end"
-              style={{ left: `${exportEndPercent}%` }}
-              onPointerDown={(event) => startExportDrag("end", event)}
-              onPointerMove={moveExportDrag}
-              onPointerUp={finishExportDrag}
-              onPointerCancel={finishExportDrag}
-              onKeyDown={(event) => handleExportKey("end", event)}
-              disabled={!onExportRangeChange}
-              aria-label={`Export end ${formatTimeOnly(exportRange.end, timeZone)}`}
-            ><span>{formatExportHandleTime(exportRange.end, timeZone)}</span></button>
-          </>
-        ) : null}
-        <div
-          className={`recordings-v2-scrub-preview${scrubbing ? " active" : ""}${preview.loading ? " loading" : ""}${stripsEnabled ? " strips" : ""}`}
-          style={{ left: `${Math.max(8, Math.min(92, percent))}%` }}
-          role="status"
-          aria-live="polite"
-          aria-hidden={!scrubbing}
-        >
-          <div>
-            {preview.mode === "jpeg" && preview.url && !preview.gap && !preview.unavailable ? <img src={mediaUrl(preview.url)} alt="Recording preview" /> : null}
-            {preview.mode === "jpeg" && preview.gap ? <span><Film size={20} />No recording</span> : null}
-            {preview.mode === "jpeg" && preview.unavailable ? <span><RefreshCcw size={18} />Preview unavailable</span> : null}
-            {preview.mode === "jpeg" && !preview.url && !preview.gap && !preview.unavailable ? <span><RefreshCcw size={18} />Loading preview</span> : null}
-          </div>
-          <time>{formatTimeOnly(Number.isFinite(preview.epoch) ? preview.epoch : startEpoch + draft, timeZone)}</time>
-        </div>
-        <i className="recordings-playhead" style={{ left: `${percent}%` }} />
-        <output style={{ left: `${Math.max(4, Math.min(96, percent))}%` }}>{formatTimeOnly(startEpoch + (scrubbing ? draft : offset), timeZone)}</output>
-        <input
-          type="range"
-          min="0"
-          max={duration}
-          step="0.1"
-          value={scrubbing ? draft : offset}
-          onChange={(event) => {
-            if (!dragRef.current) commitFromInput(event.target.value);
-          }}
-          onPointerDown={startDrag}
-          onPointerMove={moveDrag}
-          onPointerUp={(event) => finishDrag(event)}
-          onPointerCancel={(event) => finishDrag(event, true)}
-          onKeyUp={(event) => commit(event.currentTarget.value)}
-          aria-label="Recording timeline"
-        />
-      </div>
-    </div>
-  );
-}

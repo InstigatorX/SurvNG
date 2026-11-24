@@ -28,19 +28,6 @@ export function formatTimeOnly(value, timeZone) {
   }).format(date);
 }
 
-export function formatExportHandleTime(value, timeZone) {
-  if (!value) return "--:--:--";
-  const date = typeof value === "number" ? new Date(value * 1000) : new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }).format(date);
-}
-
 export function formatBytes(bytes) {
   if (!Number.isFinite(bytes)) return "--";
   const units = ["B", "KB", "MB", "GB", "TB"];
