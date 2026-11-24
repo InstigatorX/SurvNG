@@ -21,7 +21,7 @@ from ..main_database import (
     startup_recovery_pending,
 )
 from ..media_storage import MediaStorageRegistry, path_presence
-from ..schema_minimum import EVENT_SCHEMA_MINIMUM, JOBS_SCHEMA_MINIMUM
+from ..schema_minimum import JOBS_SCHEMA_MINIMUM, MAIN_SCHEMA_MINIMUM
 from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 from ..object_motion import tracking_motion_promotions
 from ..perf_samples import SlowSiteTable, TimedLock
@@ -119,7 +119,7 @@ class EventStore(
         self._scene_notification_cache_bytes = 0
         # Refuse a database v1.2.0 never opened before any startup DDL runs.
         with self._connect() as conn:
-            require_minimum_schema(conn, EVENT_SCHEMA_MINIMUM)
+            require_minimum_schema(conn, MAIN_SCHEMA_MINIMUM)
         with self._connect_jobs() as conn:
             require_minimum_schema(conn, JOBS_SCHEMA_MINIMUM)
         self._init_db()

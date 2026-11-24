@@ -18,7 +18,7 @@ Each change was made on a stacked branch so the steps can be tested together:
 | t2 | 11 undocumented face diagnostic, benchmark and dedupe endpoints and the face-store code only they reached. The `scene_discovery_baselines` table and three redundant indexes (dropped at startup). The `detector.depth.motion_evidence_enabled` and `cameras[].video_backend` config fields. |
 | t3 | `tracking_evaluation.py`, the `HybridCandidateObjectTracker` alias and `ObjectTrackingLifecycle.bind_for_compatibility`; the uncalled `GET /api/cameras/{id}/recordings/mobile-window.mp4`. |
 | t4 | 102 route-handler aliases in `main.py` (tests use the router bundles); the derived "legacy" retention budget and the tuple live-frame fallback, both reachable only from tests. |
-| t5 | Upgrades that 1.2.0 already applied (see below) and the never-read `scene_changes` table. |
+| t5 | Upgrades that 1.2.0 already applied (see below). Incident revisions no longer write the never-read `scene_changes` table; existing installs keep it and its rows. |
 
 ## Decisions
 
@@ -26,14 +26,15 @@ Each change was made on a stacked branch so the steps can be tested together:
   upgrade was present in 1.2.0 and its column was already in that table's
   CREATE statement. `survng/app/schema_minimum.py` lists those columns per
   table. `AppManager` checks every existing database read-only before it builds
-  any store, and each store checks its own tables before its first DDL, so an
-  older table stops startup with `UnsupportedDatabaseError` naming the table and
-  leaves every database unchanged. A database created by the
-  `v1.2` branch head and then opened by `t5` matches a fresh one. One created
-  by the `v1.2.0` tag also keeps the retired `tracking_comparisons`,
-  `scene_migrations` and `scene_acquisition_migrations` tables and the
-  comparison index; they hold data and nothing writes them, so they stay. Its
-  unused `idx_event_camera_epoch`, which taxed every event insert, is dropped.
+  any store, and every store checks all tables of the file it opens before its
+  first DDL, so an older table stops startup with `UnsupportedDatabaseError`
+  naming it and leaves every database unchanged. A database created by the
+  `v1.2` branch head and then opened by `t5` matches a fresh one except for the
+  retired `scene_changes` table. One created by the `v1.2.0` tag also keeps the
+  retired `tracking_comparisons`, `scene_migrations` and
+  `scene_acquisition_migrations` tables and the comparison index. These hold
+  data and nothing writes them any more, so they stay. Its unused
+  `idx_event_camera_epoch`, which taxed every event insert, is dropped.
 - **Face rows linked by the retired dedupe** (`duplicate_of_observation_id`)
   can remain on installs; pruning of those trees is unchanged.
 - **Documented API stays** even without an in-repo caller, including

@@ -351,7 +351,6 @@ class EventStoreSceneMixin:
                     incident_id text not null, revision integer not null, payload_json text not null,
                     primary key(incident_id,revision)
                 );
-                drop table if exists scene_changes;
                 drop table if exists scene_discovery_baselines;
                 create table if not exists scene_identities (
                     event_id integer primary key references events(id) on delete cascade, payload_json text not null

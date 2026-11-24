@@ -212,8 +212,7 @@ def test_event_database_older_than_1_2_0_stops_before_changing_it(tmp_path):
         conn.execute('pragma foreign_keys=off')
         conn.execute('drop index scene_object_facet_label')
         conn.execute('alter table scene_objects drop column facet_label')
-        conn.execute('create table scene_changes(id integer primary key, incident_id text, revision integer, created_at real)')
-        conn.execute("insert into scene_changes values (1, 'incident', 1, 0)")
+        conn.execute('create table scene_discovery_baselines(camera_id text primary key)')
     before = _schema(database)
     with pytest.raises(UnsupportedDatabaseError, match='scene_objects predates SurvNG 1.2.0'):
         EventStore(tmp_path)
@@ -259,10 +258,14 @@ def test_manager_precheck_rejects_a_later_store_table_before_any_change(tmp_path
         for name in dependent:
             conn.execute(f'drop index {name}')
         conn.execute('alter table semantic_embeddings drop column evidence_revision')
-        conn.execute('create table scene_changes(id integer primary key, incident_id text, revision integer, created_at real)')
+        conn.execute('create table scene_discovery_baselines(camera_id text primary key)')
     before = _schema(database)
     with pytest.raises(UnsupportedDatabaseError, match='semantic_embeddings predates SurvNG 1.2.0'):
         require_minimum_databases(tmp_path, tmp_path)
+    assert _schema(database) == before
+    # The event store shares the file, so it refuses the same database itself.
+    with pytest.raises(UnsupportedDatabaseError, match='semantic_embeddings predates SurvNG 1.2.0'):
+        EventStore(tmp_path)
     assert _schema(database) == before
     require_minimum_databases(tmp_path / 'new', tmp_path / 'new')  # nothing yet: passes, creates nothing
     assert not (tmp_path / 'new').exists()
@@ -282,3 +285,27 @@ def test_manager_checks_databases_before_building_any_store(tmp_path):
     ):
         AppManager(AppConfig(storage_dir=str(tmp_path)))
     precheck.assert_called_once_with(tmp_path, tmp_path)
+
+
+def test_retired_scene_changes_history_is_kept_but_no_longer_written(tmp_path):
+    EventStore(tmp_path)
+    with sqlite3.connect(tmp_path / 'survng.sqlite3') as conn:
+        conn.execute('create table scene_changes(id integer primary key autoincrement, incident_id text not null, '
+                     'revision integer not null, created_at real not null)')
+        conn.execute("insert into scene_changes(incident_id, revision, created_at) values ('old', 1, 0)")
+    store = EventStore(tmp_path)
+    event = store.add_event(camera_id='gate', kind='motion', topic='motion', message='motion', snapshot_path='', recording_path='')
+    assert store.scene_incident(event_id=event['id'])
+    with sqlite3.connect(tmp_path / 'survng.sqlite3') as conn:
+        assert conn.execute('select incident_id from scene_changes').fetchall() == [('old',)]
+
+
+def test_startup_reports_an_old_database_instead_of_a_telemetry_failure():
+    from unittest.mock import patch
+
+    from survng.app import main
+    from survng.app.main_database import UnsupportedDatabaseError
+
+    with patch.object(main, 'get_manager', side_effect=UnsupportedDatabaseError('old database')):
+        with pytest.raises(UnsupportedDatabaseError):
+            main._record_process_lifecycle('startup_started')

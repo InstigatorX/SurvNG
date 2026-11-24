@@ -28,6 +28,14 @@ FACE_SCHEMA_MINIMUM: SchemaMinimum = {
 }
 SEMANTIC_SCHEMA_MINIMUM: SchemaMinimum = {"semantic_embeddings": ("evidence_revision",)}
 APPEARANCE_SCHEMA_MINIMUM: SchemaMinimum = {"appearance_embeddings": ("source",)}
+# Every store in survng.sqlite3: a store that writes the shared file checks all
+# of it, so it cannot change the file before another store's table is refused.
+MAIN_SCHEMA_MINIMUM: SchemaMinimum = {
+    **EVENT_SCHEMA_MINIMUM,
+    **FACE_SCHEMA_MINIMUM,
+    **SEMANTIC_SCHEMA_MINIMUM,
+    **APPEARANCE_SCHEMA_MINIMUM,
+}
 # detection-jobs.sqlite3, exports.sqlite3 and recordings.sqlite3.
 JOBS_SCHEMA_MINIMUM: SchemaMinimum = {
     "detection_jobs": ("lease_owner",),
@@ -48,14 +56,8 @@ def require_minimum_databases(database_dir: Path, recording_index_dir: Path) -> 
     A missing file is a new installation and passes. Nothing is created or
     changed here, so a rejected installation is left exactly as it was.
     """
-    main = {
-        **EVENT_SCHEMA_MINIMUM,
-        **FACE_SCHEMA_MINIMUM,
-        **SEMANTIC_SCHEMA_MINIMUM,
-        **APPEARANCE_SCHEMA_MINIMUM,
-    }
     for path, minimum in (
-        (database_dir / "survng.sqlite3", main),
+        (database_dir / "survng.sqlite3", MAIN_SCHEMA_MINIMUM),
         (database_dir / "detection-jobs.sqlite3", JOBS_SCHEMA_MINIMUM),
         (database_dir / "exports.sqlite3", EXPORTS_SCHEMA_MINIMUM),
         (recording_index_dir / "recordings.sqlite3", RECORDINGS_SCHEMA_MINIMUM),
