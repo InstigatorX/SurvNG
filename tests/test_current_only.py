@@ -309,3 +309,13 @@ def test_startup_reports_an_old_database_instead_of_a_telemetry_failure():
     with patch.object(main, 'get_manager', side_effect=UnsupportedDatabaseError('old database')):
         with pytest.raises(UnsupportedDatabaseError):
             main._record_process_lifecycle('startup_started')
+
+
+def test_event_store_refusing_an_old_jobs_database_creates_no_files(tmp_path):
+    from survng.app.main_database import UnsupportedDatabaseError
+
+    with sqlite3.connect(tmp_path / 'detection-jobs.sqlite3') as conn:
+        conn.execute('create table detection_jobs(id text primary key, camera_id text not null)')
+    with pytest.raises(UnsupportedDatabaseError, match='detection_jobs predates SurvNG 1.2.0'):
+        EventStore(tmp_path)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ['detection-jobs.sqlite3']

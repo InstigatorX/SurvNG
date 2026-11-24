@@ -26,9 +26,11 @@ Each change was made on a stacked branch so the steps can be tested together:
   upgrade was present in 1.2.0 and its column was already in that table's
   CREATE statement. `survng/app/schema_minimum.py` lists those columns per
   table. `AppManager` checks every existing database read-only before it builds
-  any store, and every store checks all tables of the file it opens before its
-  first DDL, so an older table stops startup with `UnsupportedDatabaseError`
-  naming it and leaves every database unchanged. A database created by the
+  any store, so an older table stops startup with `UnsupportedDatabaseError`
+  naming it and leaves every database unchanged. Stores also check before their
+  first DDL when built on their own: the event store checks all of
+  `survng.sqlite3` and its jobs database, read-only; the face, semantic,
+  appearance, export and recording-index stores check their own tables. A database created by the
   `v1.2` branch head and then opened by `t5` matches a fresh one except for the
   retired `scene_changes` table. One created by the `v1.2.0` tag also keeps the
   retired `tracking_comparisons`, `scene_migrations` and

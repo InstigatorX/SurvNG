@@ -28,8 +28,9 @@ FACE_SCHEMA_MINIMUM: SchemaMinimum = {
 }
 SEMANTIC_SCHEMA_MINIMUM: SchemaMinimum = {"semantic_embeddings": ("evidence_revision",)}
 APPEARANCE_SCHEMA_MINIMUM: SchemaMinimum = {"appearance_embeddings": ("source",)}
-# Every store in survng.sqlite3: a store that writes the shared file checks all
-# of it, so it cannot change the file before another store's table is refused.
+# Every store in survng.sqlite3. The manager and the event store, which writes
+# the shared file first, check all of it; the face, semantic and appearance
+# stores check only their own tables.
 MAIN_SCHEMA_MINIMUM: SchemaMinimum = {
     **EVENT_SCHEMA_MINIMUM,
     **FACE_SCHEMA_MINIMUM,
@@ -62,8 +63,13 @@ def require_minimum_databases(database_dir: Path, recording_index_dir: Path) -> 
         (database_dir / "exports.sqlite3", EXPORTS_SCHEMA_MINIMUM),
         (recording_index_dir / "recordings.sqlite3", RECORDINGS_SCHEMA_MINIMUM),
     ):
-        if not path.is_file():
-            continue
-        uri = f"{path.resolve().as_uri()}?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True, timeout=10.0)) as connection:
-            require_minimum_schema(connection, minimum)
+        require_minimum_file(path, minimum)
+
+
+def require_minimum_file(path: Path, minimum: SchemaMinimum) -> None:
+    """Check one database file read-only; a missing file is new and passes."""
+    if not path.is_file():
+        return
+    uri = f"{path.resolve().as_uri()}?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=10.0)) as connection:
+        require_minimum_schema(connection, minimum)
