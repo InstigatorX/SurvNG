@@ -32,3 +32,37 @@ when enabled, requires a bearer token with the `read` scope.
 Ordinary scrub previews omit `exact=true` and may be reused from a five-second
 cache bucket. Their requested timestamp is reported, but they intentionally do
 not make an exact decoded-time guarantee.
+
+## Scrub preview strips
+
+```http
+GET /api/cameras/{camera_id}/recordings/preview-strip.jpg?epoch={unix_seconds}&source=main&width=320
+```
+
+Returns one JPEG holding a grid of frames from the recording segment that
+contains `epoch`: one frame for each second (a segment longer than 60 s is
+thinned to at most 60 tiles). The Timeline shows these in the player while the
+playhead is dragged, so moving within a loaded segment needs no request.
+
+- The camera's sub stream is used when it was recorded at that time, whatever
+  `source` says: it shows the same scene and decodes several times faster.
+  Otherwise the requested source is used. `X-SurvNG-Strip-Source` reports
+  which.
+- `X-SurvNG-Strip-Start` and `X-SurvNG-Strip-End` are the wall-clock bounds of
+  that segment. Tile `i` (row-major, `X-SurvNG-Strip-Columns` by
+  `X-SurvNG-Strip-Rows`) is the last frame at or before
+  `start + i * X-SurvNG-Strip-Step`. Only the first `X-SurvNG-Strip-Count`
+  tiles hold a frame; the rest of the grid is blank.
+- A frame larger than about one megapixel is decoded at its keyframes only, so
+  on a camera with a keyframe interval longer than a second, a tile can show
+  the keyframe before its second. Smaller streams are decoded in full.
+- `width` is the tile width, 160 to 640.
+- A strip is built on first request and kept in the preview cache. Builds run
+  one at a time and share the preview's media-session admission; a busy
+  generator answers `429` with `Retry-After`. A time with no recording is
+  `404`.
+
+The page asks for one strip at a time, always for where the playhead is now,
+and fetches one segment ahead in the direction of the drag when idle. It keeps
+at most 24 strips in memory. On release the player seeks to the released time
+and shows the exact full-resolution frame.

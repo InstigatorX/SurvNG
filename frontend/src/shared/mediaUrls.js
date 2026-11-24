@@ -75,6 +75,15 @@ export function recordingWindowUrl(cameraId, startEpoch, endEpoch, source) {
   return appUrl(`/api/cameras/${cameraId}/recordings/window?${params.toString()}`);
 }
 
+export function recordingPreviewStripUrl(cameraId, epoch, source, width = 320) {
+  const params = new URLSearchParams({
+    epoch: epoch.toFixed(3),
+    source,
+    width: String(Math.max(160, Math.min(640, Math.round(width)))),
+  });
+  return appUrl(`/api/cameras/${cameraId}/recordings/preview-strip.jpg?${params.toString()}`);
+}
+
 export function recordingUpdatesUrl(cameraId, startEpoch, endEpoch, afterEpoch, source, includeIdentities = true) {
   const params = new URLSearchParams({
     start_epoch: startEpoch.toFixed(3),
