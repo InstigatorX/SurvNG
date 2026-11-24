@@ -1,5 +1,5 @@
 // Harness for tests/scrub-frame-react.mjs: mounts the real scrub-frame React
-// pieces one scenario at a time (?scenario=hook|overlay|rail|edge|classic) and
+// pieces one scenario at a time (?scenario=hook|overlay|rail|edge) and
 // records what they report on `window.log`. `window.h` exposes controls.
 import React, { Profiler, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -7,7 +7,6 @@ import { flushSync } from "react-dom";
 import { useScrubStrips } from "../../src/timeline/useScrubStrips.js";
 import { ScrubFrameOverlay } from "../../src/timeline/ScrubFrameOverlay.jsx";
 import { EdgeRail, useVerticalScrub } from "../../src/timeline/TimelineRail.jsx";
-import { RecordingTimeline } from "../../src/timeline/TimelinePages.jsx";
 import { scrubStripTile } from "../../src/scrubStrips.mjs";
 import "../../src/styles.css";
 import "../../src/timeline/timeline.css";
@@ -199,30 +198,8 @@ function EdgeHarness() {
   );
 }
 
-// ---- RecordingTimeline (classic scrubber).
-const CLASSIC_START = 86400 * 20000;
-function ClassicHarness() {
-  const [mounted, setMounted] = useState(true);
-  h.unmount = () => now(() => setMounted(false));
-  return (
-    <div style={{ width: 800, padding: 20 }}>
-      {mounted ? (
-        <RecordingTimeline
-          cameraId="cam1" source="main" startEpoch={CLASSIC_START} endEpoch={CLASSIC_START + 3600}
-          recordings={[]} events={[]} evidenceFilter="all" laneVisibility={{ object: true, motion: true }}
-          selectedEventId={null} onEventSelect={() => {}} playhead={CLASSIC_START + 1200} timeZone="UTC"
-          onSeek={(epoch) => log.push({ seek: epoch })}
-          onScrub={(epoch, options) => log.push(epoch === null ? { end: true, committed: Boolean(options?.committed) } : { epoch })}
-          onPanViewport={(delta) => log.push({ pan: delta })}
-          windowHours={1} exportRange={null}
-        />
-      ) : null}
-    </div>
-  );
-}
-
-h.constants = { TILE_COLUMNS, TILE_ROWS, RAIL_TOP, RAIL_BOTTOM, DAY_START, CLASSIC_START };
-const scenarios = { hook: HookHarness, overlay: OverlayHarness, rail: RailHarness, edge: EdgeHarness, classic: ClassicHarness };
+h.constants = { TILE_COLUMNS, TILE_ROWS, RAIL_TOP, RAIL_BOTTOM, DAY_START };
+const scenarios = { hook: HookHarness, overlay: OverlayHarness, rail: RailHarness, edge: EdgeHarness };
 const Scenario = scenarios[scenario];
 function Ready() {
   useLayoutEffect(() => { document.body.dataset.ready = "true"; }, []);

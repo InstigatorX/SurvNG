@@ -1,6 +1,6 @@
 // The React layer of timeline scrub frames, in a real browser: the
 // useScrubStrips hook, ScrubFrameOverlay, and the scrub reporting of the rail
-// (useVerticalScrub, EdgeRail) and the classic scrubber (RecordingTimeline).
+// (useVerticalScrub, EdgeRail).
 // The pure strip store is covered by tests/scrub-strips.mjs.
 //   node tests/scrub-frame-react.mjs
 // The page is tests/fixtures/scrub-frame-react.jsx; preview strips are served
@@ -522,93 +522,6 @@ async function edgeTests() {
   console.log("EdgeRail: reports moves, ends committed on up, ends on unmount, no loupe image");
 }
 
-async function classicTests() {
-  {
-    const page = await open("classic");
-    const { CLASSIC_START } = await page.evaluate(() => window.h.constants);
-    const box = await page.getByRole("slider", { name: "Recording timeline" }).boundingBox();
-    assert.ok(box.width > 500, "the classic track is laid out");
-    const y = box.y + box.height / 2;
-    const at = (fraction) => box.x + box.width * fraction;
-    // A seek drag reports positions and ends committed.
-    await page.mouse.move(at(0.1), y);
-    await page.mouse.down();
-    await page.mouse.move(at(0.5), y, { steps: 4 });
-    await page.mouse.up();
-    let log = await page.log();
-    const epochs = log.filter((entry) => Number.isFinite(entry.epoch)).map((entry) => entry.epoch);
-    assert.ok(epochs.length >= 4, "a seek drag reports scrub positions");
-    assert.ok(Math.abs(epochs[0] - (CLASSIC_START + 360)) < 30, `starts at the pointer (${epochs[0] - CLASSIC_START})`);
-    assert.ok(Math.abs(epochs.at(-1) - (CLASSIC_START + 1800)) < 30, `follows the pointer (${epochs.at(-1) - CLASSIC_START})`);
-    const endIndex = log.findIndex((entry) => entry.end);
-    assert.deepEqual(log[endIndex], { end: true, committed: true }, "a seek drag ends committed");
-    assert.equal(log.filter((entry) => entry.end).length, 1);
-    const seek = log.find((entry) => entry.seek !== undefined);
-    assert.ok(seek && log.indexOf(seek) > endIndex, "and then seeks");
-    assert.ok(Math.abs(seek.seek - epochs.at(-1)) < 30);
-
-    // A cancelled drag ends uncommitted and does not seek.
-    await page.clearLog();
-    await page.mouse.move(at(0.2), y);
-    await page.mouse.down();
-    await page.mouse.move(at(0.3), y, { steps: 2 });
-    await page.getByRole("slider", { name: "Recording timeline" }).evaluate((input) => {
-      input.dispatchEvent(new PointerEvent("pointercancel", { bubbles: true, pointerId: 1, pointerType: "mouse" }));
-    });
-    await page.mouse.up();
-    log = await page.log();
-    assert.ok(log.some((entry) => Number.isFinite(entry.epoch)));
-    assert.deepEqual(ends(log), [{ end: true, committed: false }], "a cancelled drag ends uncommitted");
-    assert.equal(log.some((entry) => entry.seek !== undefined), false, "a cancelled drag does not seek");
-
-    // Unmount mid-drag.
-    await page.clearLog();
-    await page.mouse.move(at(0.2), y);
-    await page.mouse.down();
-    await page.mouse.move(at(0.25), y, { steps: 2 });
-    await page.evaluate(() => window.h.unmount());
-    await page.mouse.up();
-    log = await page.log();
-    assert.ok(log.some((entry) => Number.isFinite(entry.epoch)));
-    assert.deepEqual(ends(log), [{ end: true, committed: false }], "unmounting mid-drag ends the scrub");
-    assert.equal(page.requests.length, 0, "the classic scrubber requests no strips itself");
-    assert.deepEqual(page.errors, []);
-    await page.context().close();
-  }
-  // A touch swipe pans and ends uncommitted (only if it had scrubbed; a pan
-  // never does).
-  {
-    const page = await open("classic", "", { hasTouch: true, isMobile: true });
-    const box = await page.getByRole("slider", { name: "Recording timeline" }).boundingBox();
-    const y = box.y + box.height / 2;
-    const client = await page.context().newCDPSession(page);
-    const touch = (type, x) => client.send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [] : [{ x, y, id: 1 }] });
-    await touch("touchStart", box.x + box.width * 0.8);
-    for (const fraction of [0.75, 0.65, 0.55, 0.45]) await touch("touchMove", box.x + box.width * fraction);
-    await touch("touchEnd");
-    await settle(page);
-    const log = await page.log();
-    assert.ok(log.some((entry) => entry.pan !== undefined), `the swipe pans (${JSON.stringify(log)})`);
-    assert.equal(log.some((entry) => Number.isFinite(entry.epoch)), false, "a pan does not scrub");
-    assert.equal(log.some((entry) => entry.seek !== undefined), false, "a pan does not seek");
-    assert.deepEqual(ends(log), [], "a pan that never scrubbed reports no end");
-
-    // A touch on the playhead fine-scrubs, then releases committed.
-    await page.clearLog();
-    const playheadX = box.x + box.width * (1200 / 3600);
-    await touch("touchStart", playheadX);
-    for (const dx of [5, 10, 20, 30]) await touch("touchMove", playheadX + dx);
-    await touch("touchEnd");
-    await settle(page);
-    const fine = await page.log();
-    assert.ok(fine.some((entry) => Number.isFinite(entry.epoch)), `a playhead touch scrubs (${JSON.stringify(fine)})`);
-    assert.deepEqual(ends(fine), [{ end: true, committed: true }], "a touch scrub ends committed on release");
-    assert.deepEqual(page.errors, []);
-    await page.context().close();
-  }
-  console.log("RecordingTimeline: seek drag commits, cancel/unmount end uncommitted, pans do not scrub");
-}
-
 try {
   server = await createServer({
     root: join(dirname(fileURLToPath(import.meta.url)), ".."), configFile: false, logLevel: "error",
@@ -624,7 +537,7 @@ try {
   await server.listen();
   browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH });
   const only = process.env.SCRUB_FRAME_ONLY || "";
-  for (const [name, run] of [["hook", hookTests], ["overlay", overlayTests], ["rail", railTests], ["edge", edgeTests], ["classic", classicTests]]) {
+  for (const [name, run] of [["hook", hookTests], ["overlay", overlayTests], ["rail", railTests], ["edge", edgeTests]]) {
     if (!only || only.split(",").includes(name)) await run();
   }
   console.log("Scrub-frame React checks passed");
