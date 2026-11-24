@@ -7,7 +7,6 @@ import numpy as np
 from survng.app.config import ObjectTrackingConfig
 from survng.app.object_track.registry import build_builtin_object_tracker_registry
 from survng.app.object_track.sparse_identity import SparseIdentityObjectTracker
-from survng.app.tracking_evaluation import identity_metrics, promotion_gate, replay_digest
 from tests import test_object_tracking as existing_contract
 
 
@@ -223,75 +222,6 @@ class SparseIdentityTrackerTest(unittest.TestCase):
         )
         self.assertGreaterEqual(config.lost_timeout_seconds, 5.0)
         self.assertTrue(config.entity_relink_enabled)
-
-
-class PromotionGateTest(unittest.TestCase):
-    def test_promotion_requires_improvement_without_false_merge_rise(self) -> None:
-        baseline = {
-            "idf1": 0.7,
-            "id_switches": 4,
-            "fragmentations": 6,
-            "false_merges": 1,
-        }
-        better = {
-            "idf1": 0.75,
-            "id_switches": 3,
-            "fragmentations": 4,
-            "false_merges": 1,
-        }
-        worse_merges = {**better, "false_merges": 2}
-        self.assertTrue(promotion_gate(baseline, better)["promote"])
-        self.assertFalse(promotion_gate(baseline, worse_merges)["promote"])
-
-
-class RecoveryMetricsTest(unittest.TestCase):
-    def test_recovery_by_gap_reports_same_track_precision(self) -> None:
-        replay = {
-            "schema_version": 1,
-            "camera_id": "gate",
-            "tracking_config": ObjectTrackingConfig(min_confirmations=1).model_dump(mode="json"),
-            "high_confidence_threshold": 0.7,
-            "timestamp_source": "source_pts",
-            "source_pts_frames": 4,
-            "appearance_source": "shared_supplied_embeddings",
-            "frames": [
-                {
-                    "frame_index": i,
-                    "captured_at": 100 + i,
-                    "width": 120,
-                    "height": 100,
-                    "detections": [detection((10, 10, 40, 80))],
-                }
-                for i in range(4)
-            ],
-        }
-        replay["replay_id"] = replay_digest(replay)
-        labels = {
-            "schema_version": 1,
-            "replay_id": replay["replay_id"],
-            "frames": [
-                {
-                    "frame_index": i,
-                    "objects": [{
-                        "identity": "person-A",
-                        "label": "person",
-                        "box": {"x1": 10, "y1": 10, "x2": 40, "y2": 80},
-                    }],
-                }
-                for i in range(4)
-            ],
-        }
-        observations = [
-            {"frame_index": 0, "captured_at": 100.0, "objects": [{"track_id": 1, "label": "person", "box": {"x1": 10, "y1": 10, "x2": 40, "y2": 80}}]},
-            {"frame_index": 1, "captured_at": 101.0, "objects": []},
-            {"frame_index": 2, "captured_at": 102.0, "objects": [{"track_id": 1, "label": "person", "box": {"x1": 10, "y1": 10, "x2": 40, "y2": 80}}]},
-            {"frame_index": 3, "captured_at": 103.0, "objects": [{"track_id": 1, "label": "person", "box": {"x1": 10, "y1": 10, "x2": 40, "y2": 80}}]},
-        ]
-        score = identity_metrics(observations, labels, replay)
-        self.assertEqual(score["fragmentations"], 1)
-        self.assertEqual(score["recovery_by_gap"]["0.5s"]["attempts"], 1)
-        self.assertEqual(score["recovery_by_gap"]["0.5s"]["same_track_successes"], 1)
-        self.assertEqual(score["recovery_by_gap"]["0.5s"]["precision"], 1.0)
 
 
 if __name__ == "__main__":

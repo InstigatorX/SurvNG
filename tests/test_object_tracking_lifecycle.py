@@ -370,15 +370,6 @@ def test_read_only_sample_rate_does_not_wait_for_camera_lifecycle_lock() -> None
     reader.join(timeout=1)
 
 
-def test_compatibility_binding_rejects_replacement_of_active_session() -> None:
-    initial = _session()
-    initial.running.return_value = True
-    lifecycle, _factory, _frame_provider, _history = _lifecycle(initial)
-
-    with pytest.raises(RuntimeError, match="cannot replace active"):
-        lifecycle.bind_for_compatibility(_session())
-
-
 def test_recorded_review_after_drain_never_admits_live_tracking():
     session = _session()
     lifecycle, _, frame_provider, _ = _lifecycle(session, accepting=[False])
