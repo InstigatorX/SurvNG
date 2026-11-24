@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
+import numpy as np
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
@@ -78,6 +79,25 @@ RECORDING_STRIP_HARDWARE_TIMEOUT_SECONDS = 5.0
 RECORDING_FRAME_LIST_CACHE_ENTRIES = 64
 RECORDING_FRAME_RUN_TIMEOUT_SECONDS = 10.0
 RECORDING_FRAME_JPEG_QUALITY = 88
+
+
+def raw_bgr_frames(stream, size: tuple[int, int]) -> list[np.ndarray]:
+    """Whole bgr24 frames of ``size`` from a raw decoder pipe; a partial tail is dropped."""
+    width, height = size
+    frame_bytes = width * height * 3
+    frames: list[np.ndarray] = []
+    while True:
+        chunks: list[bytes] = []
+        remaining = frame_bytes
+        while remaining > 0:
+            chunk = stream.read(remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if remaining:
+            return frames
+        frames.append(np.frombuffer(b''.join(chunks), dtype=np.uint8).reshape(height, width, 3))
 
 
 class RecordingPrewarmCancelled(RuntimeError):
@@ -1318,10 +1338,12 @@ class RecordingMediaRuntime:
                 ffmpeg_path, source_path, plan=plan, loglevel='info', seek=seek, copyts=True,
                 first_video_stream=True, video_filter=video_filter,
                 passthrough_timestamps=True, frames=count,
+                # Raw frames of a known size skip a BMP encode and decode each.
+                transport='raw' if size else 'bmp',
             )
             result = run_decoder(
                 command, backend=plan.backend, timeout=RECORDING_FRAME_RUN_TIMEOUT_SECONDS,
-                stdout_reader=read_bmp_frames,
+                stdout_reader=(lambda stream: raw_bgr_frames(stream, size)) if size else read_bmp_frames,
             )
             warn_decoder_errors('frame_step', source_path, plan.backend, result.stderr)
             if result.ok and result.output:

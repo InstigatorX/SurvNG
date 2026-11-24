@@ -20,6 +20,8 @@ export const FRAME_STEP_REPEAT_MS = 90;
 // After the last step, the real player is seeked to the stepped frame.
 export const FRAME_STEP_SETTLE_MS = 600;
 export const FRAME_STEP_IMAGE_LIMIT = 24;
+// Frames fetched ahead of the one shown, in frames from it.
+export const FRAME_STEP_WARM_AHEAD = [1, 10];
 export const FRAME_STEP_SEGMENT_LIMIT = 8;
 // A failed frame is asked for again after these waits, then given up.
 export const FRAME_STEP_RETRY_MS = [500, 1000, 2000];
@@ -304,10 +306,16 @@ export function createFrameStepper({
       fetchImage(epoch, false);
       return;
     }
-    const ahead = position.index + lastDirection;
-    if (ahead >= 0 && ahead < segment.frames.length) {
+    // Ahead in the direction of travel: the next frame, then one about half
+    // a second on. The server decodes a GOP (about a second) at a time, so
+    // the second asks for the next GOP before the steps get there.
+    for (const distance of FRAME_STEP_WARM_AHEAD) {
+      const ahead = position.index + lastDirection * distance;
+      if (ahead < 0 || ahead >= segment.frames.length) continue;
       const next = segment.frames[ahead];
-      if (!images.has(keyOf(next)) && !failures.get(keyOf(next))) fetchImage(next, true);
+      if (images.has(keyOf(next)) || failures.get(keyOf(next))) continue;
+      fetchImage(next, true);
+      return;
     }
   }
 

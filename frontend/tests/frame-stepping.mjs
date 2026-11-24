@@ -133,6 +133,7 @@ assert.equal(acceptRepeatedStep(1000, 1090), true);
   // The frame after it is fetched ahead.
   assert.deepEqual(h.openImages(), [first.frames[42]], "the next frame in the direction of travel is warmed");
   await h.answerImage();
+  assert.deepEqual(h.openImages(), [first.frames[51]], "then one about half a second on, so the next GOP is decoded early");
   h.stepper.step(1);
   assert.equal(h.state.epoch, first.frames[42]);
   assert.equal(h.state.loading, false, "a warmed frame shows at once");
