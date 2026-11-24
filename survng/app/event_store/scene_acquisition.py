@@ -75,7 +75,8 @@ class EventStoreSceneAcquisitionMixin:
                     sample_id text not null references acquired_samples(id), event_id integer not null,
                     primary key(sample_id,event_id)
                 );
-                create index if not exists acquired_source_event on acquired_sample_events(event_id);
+                -- No query looks these links up by event.
+                drop index if exists acquired_source_event;
                 create table if not exists scene_activity_decisions (
                     id text primary key, camera_id text not null, sample_ids_json text not null,
                     verdict text not null check(verdict in ('pending','supported','unsupported','incomplete')),

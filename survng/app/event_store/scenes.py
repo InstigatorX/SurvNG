@@ -356,10 +356,7 @@ class EventStoreSceneMixin:
                     id integer primary key autoincrement, incident_id text not null,
                     revision integer not null, created_at real not null
                 );
-                create table if not exists scene_discovery_baselines (
-                    camera_id text primary key, captured_epoch real not null, objects_json text not null,
-                    changed integer not null default 0, event_id integer
-                );
+                drop table if exists scene_discovery_baselines;
                 create table if not exists scene_identities (
                     event_id integer primary key references events(id) on delete cascade, payload_json text not null
                 );

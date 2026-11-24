@@ -340,10 +340,8 @@ class EventStoreJobsMixin:
                 )
                 """
             )
-            conn.execute(
-                "create index if not exists idx_route_incident_admissions_event "
-                "on route_incident_admissions(event_id)"
-            )
+            # event_id is unique, which already indexes it.
+            conn.execute("drop index if exists idx_route_incident_admissions_event")
             conn.execute(
                 "create index if not exists idx_events_created_at on events(created_at desc)"
             )
