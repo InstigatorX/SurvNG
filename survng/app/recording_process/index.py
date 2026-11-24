@@ -633,7 +633,7 @@ class RecordingIndexMixin:
 
     def _log_index_exception(self, key: str, message: str, *args: object) -> None:
         now = time.monotonic()
-        last = getattr(self, "_index_error_log_at", {}).get(key, 0.0)
+        last = getattr(self, "_index_error_log_at", {}).get(key, -math.inf)
         if now - last < 60.0:
             LOGGER.debug(message, *args, exc_info=True)
             return

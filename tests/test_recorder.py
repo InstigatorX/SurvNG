@@ -1655,6 +1655,27 @@ class RecorderTest(unittest.TestCase):
         logger.exception.assert_called_once()
         logger.debug.assert_called_once()
 
+    def test_first_index_exception_is_logged_shortly_after_boot(self) -> None:
+        # time.monotonic() counts from boot on Linux; "never logged" must not
+        # be treated as monotonic time 0, or the first error within 60 s of
+        # boot is demoted to DEBUG.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            with patch(
+                "survng.app.recording_process.index.time.monotonic",
+                side_effect=[5.0, 6.0],
+            ), patch("survng.app.recording_process.index.LOGGER") as logger:
+                for _ in range(2):
+                    recorder._log_index_exception(
+                        "edge:new-camera:main",
+                        "Near-live recording index discovery failed for %s/%s",
+                        "new-camera",
+                        "main",
+                    )
+
+        logger.exception.assert_called_once()
+        logger.debug.assert_called_once()
+
     def test_index_loop_starts_with_recent_discovery_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)

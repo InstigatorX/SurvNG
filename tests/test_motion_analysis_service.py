@@ -1766,3 +1766,23 @@ def test_visual_backup_does_not_audit_one_frame_below_gate_noise() -> None:
 
     service.audit_recorder.record_audit.assert_not_called()
     dependencies.media.sample_rejected_motion_frame.assert_not_called()
+
+
+def test_first_ema_candidate_persist_failure_is_logged_shortly_after_boot() -> None:
+    # time.monotonic() counts from boot on Linux; "never logged" must not be
+    # treated as monotonic time 0, or the first failure within 60 s of boot
+    # is silently dropped.
+    dependencies = _hooks()
+    service = _service(dependencies)
+    service.set_security_verification_context(
+        record_ema_candidate=Mock(side_effect=RuntimeError("ledger unavailable"))
+    )
+
+    with patch(
+        "survng.app.motion_analysis_service.time.monotonic",
+        side_effect=[5.0, 6.0],
+    ), patch("survng.app.motion_analysis_service.LOGGER") as logger:
+        service._persist_ema_route_candidate(100.0, {"accepted": True})
+        service._persist_ema_route_candidate(101.0, {"accepted": True})
+
+    logger.exception.assert_called_once()
