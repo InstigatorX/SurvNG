@@ -7,7 +7,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from .main_database import connect_main_database, create_index_logged
+from .main_database import connect_main_database, create_index_logged, require_schema_columns
 
 
 class AppearanceIndex:
@@ -67,6 +67,7 @@ class AppearanceIndex:
                 str(row[1])
                 for row in connection.execute("pragma table_info(appearance_embeddings)")
             }
+            require_schema_columns(connection, "appearance_embeddings", ("source",))
             for name in ("observation_id", "scene_object_id"):
                 if name not in columns:
                     connection.execute(f"alter table appearance_embeddings add column {name} text not null default ''")

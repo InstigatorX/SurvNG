@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
-from .main_database import closing_connection_factory
+from .main_database import closing_connection_factory, require_schema_columns
 from .recording_media import concatenated_clip_timing
 from .recorder import Recorder
 from .media_storage import MediaStorageRegistry
@@ -90,6 +90,7 @@ class MediaExportStore:
                 )
                 """
             )
+            require_schema_columns(connection, "media_exports", ("protected", "label", "origin"))
             connection.execute(
                 "UPDATE media_exports SET status = 'failed', phase = 'Interrupted by restart', "
                 "error = 'export interrupted by server restart', finished_at = ? "

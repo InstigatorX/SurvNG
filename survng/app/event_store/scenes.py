@@ -13,7 +13,7 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from ..incident_utils import portable_media_path
-from ..main_database import create_index_logged
+from ..main_database import create_index_logged, require_schema_columns
 from ..scene_identity import observation_identity
 from ..motion_topics import DOORBELL_TOPIC, SPEECH_TOPIC
 
@@ -369,6 +369,7 @@ class EventStoreSceneMixin:
             columns = {r[1] for r in conn.execute("pragma table_info(scene_observations)")}
             if "source_observation_id" not in columns:
                 conn.execute("alter table scene_observations add column source_observation_id text references acquired_observations(id)")
+            require_schema_columns(conn, "scene_objects", ("facet_label",))
             conn.execute("create index if not exists scene_object_facet_label on scene_objects(facet_label)")
             conn.execute("create index if not exists scene_observation_source on scene_observations(source_observation_id)")
             create_index_logged(

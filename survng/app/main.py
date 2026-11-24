@@ -1424,8 +1424,8 @@ app.include_router(
 
 
 # Assemble the recording HTTP boundary after its legacy media helpers exist.
-# The explicit aliases preserve the direct-call surface used by internal tools
-# and tests while route ownership lives in recording_routes.
+# Route ownership lives in recording_routes; tests call its handlers through
+# _recording_route_bundle.handlers.
 _recording_route_bundle = create_recording_router(
     RecordingRouteDependencies(
         get_manager=get_manager,

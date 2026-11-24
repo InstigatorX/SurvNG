@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from ..config import CameraConfig, RecordingRetentionConfig
-from ..main_database import closing_connection_factory, create_index_logged
+from ..main_database import closing_connection_factory, create_index_logged, require_schema_columns
 from ..media_storage import path_presence
 from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 from ..recording_retention import RETENTION_TOTALS_INDEX
@@ -125,6 +125,14 @@ class RecordingIndexMixin:
                     value TEXT NOT NULL
                 )
                 """
+            )
+            require_schema_columns(
+                connection,
+                "recordings",
+                (
+                    "playable", "health_error", "validated", "stream_fingerprint",
+                    "fingerprint_checked", "playback_duration_seconds", "location_id",
+                ),
             )
             connection.execute(
                 """

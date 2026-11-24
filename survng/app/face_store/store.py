@@ -14,7 +14,7 @@ from ..incident_utils import (
     event_snapshot_path, media_path_aliases, portable_media_path,
 )
 from ..media_storage import MediaStorageRegistry
-from ..main_database import connect_main_database, create_index_logged
+from ..main_database import connect_main_database, create_index_logged, require_schema_columns
 from .benchmarks import FaceStoreBenchmarkMixin
 from .ingest import FaceStoreIngestMixin
 from .people import FaceStorePeopleMixin
@@ -187,6 +187,11 @@ class FaceStore(
                     foreign key(person_id) references face_people(id) on delete cascade
                 );
                 """
+            )
+            require_schema_columns(
+                connection,
+                "face_unknown_members",
+                ("model_fingerprint", "policy_threshold", "generation"),
             )
             columns = {str(row[1]) for row in connection.execute("pragma table_info(face_observations)")}
             migrations = {

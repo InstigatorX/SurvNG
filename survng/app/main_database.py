@@ -156,6 +156,27 @@ def forget_startup_recovery() -> None:
 
 
 
+class UnsupportedDatabaseError(RuntimeError):
+    """A database older than the minimum this build opens (docs/current-only.md)."""
+
+
+def require_schema_columns(
+    connection: sqlite3.Connection, table: str, columns: tuple[str, ...]
+) -> None:
+    """Stop on a table SurvNG 1.2.0 never opened, before anything relies on it.
+
+    Startup no longer adds columns that 1.2.0 already added, so an older table
+    would otherwise fail later with an unexplained SQLite error.
+    """
+    present = {str(row[1]) for row in connection.execute(f"pragma table_info({table})")}
+    missing = [column for column in columns if column not in present]
+    if missing:
+        raise UnsupportedDatabaseError(
+            f"Database table {table} predates SurvNG 1.2.0 (missing {', '.join(missing)}). "
+            "Open it with SurvNG 1.2.x first; see docs/current-only.md."
+        )
+
+
 def create_index_logged(connection: sqlite3.Connection, name: str, sql: str) -> None:
     """Run ``create index if not exists``, logging a first-time build.
 

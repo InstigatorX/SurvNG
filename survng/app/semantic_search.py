@@ -24,7 +24,7 @@ import cv2
 
 from .config import SemanticSearchConfig
 from .incident_utils import event_snapshot_path
-from .main_database import connect_main_database, create_index_logged
+from .main_database import connect_main_database, create_index_logged, require_schema_columns
 from .media_storage import MediaStorageRegistry
 from .openclip_tokenizer import OpenClipBpeTokenizer
 
@@ -415,6 +415,7 @@ class SemanticIndex:
                 )
                 """
             )
+            require_schema_columns(connection, "semantic_embeddings", ("evidence_revision",))
             columns = {row[1] for row in connection.execute("pragma table_info(semantic_embeddings)")}
             if "observation_id" not in columns:
                 connection.execute("alter table semantic_embeddings add column observation_id text not null default ''")
