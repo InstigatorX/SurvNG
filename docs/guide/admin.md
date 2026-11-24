@@ -99,8 +99,13 @@ deleted with its audit row when no other row names the file.
 While pruning is active, the motion effectiveness range is capped at
 `motion_audit_days`.
 
-The job runs 10 minutes after startup and then every `interval_hours` (24),
-in small batches. It starts with `dry_run: true`, which only counts what it
+The job runs once a day at `run_at` ("03:00", host local time), in small
+batches; it briefly delays event writes while it runs, so pick a quiet hour.
+Times skipped or repeated by a daylight-saving change still run once that day.
+Restarting the service does not start a run. If the last completed run began
+more than `interval_hours` (24) ago, because the service was down at
+`run_at`, the job catches up 10 minutes after startup. Changing the policy
+also runs it 10 minutes later. It starts with `dry_run: true`, which only counts what it
 would remove; `./survngctl status` shows the counts under
 `database_retention.last_run`. Set `dry_run` to `false` to start pruning.
 SQLite reuses freed space, so the database file stops growing but does not
