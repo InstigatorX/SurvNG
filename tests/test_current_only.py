@@ -334,3 +334,16 @@ def test_event_store_refusing_an_old_jobs_database_creates_no_database(tmp_path)
         'detection-jobs.sqlite3', 'detection-jobs.sqlite3-wal', 'detection-jobs.sqlite3-shm',
     }
     assert _schema(tmp_path / 'detection-jobs.sqlite3') == before
+
+
+def test_shutdown_lifecycle_events_never_build_a_manager():
+    from unittest.mock import patch
+
+    from survng.app import main
+
+    with (
+        patch.dict(main.__dict__, {'manager': None}),
+        patch.object(main, 'get_manager', side_effect=AssertionError('built at shutdown')),
+    ):
+        main._record_process_lifecycle('shutdown_requested')
+        main._record_process_lifecycle('shutdown_completed')

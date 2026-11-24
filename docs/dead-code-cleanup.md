@@ -23,7 +23,7 @@ The CSS comparison removes candidate rules within a browser page, then compares 
 
 Absence of a production caller alone was not sufficient to retire tested operational APIs or test seams:
 
-- `HybridCandidateObjectTracker`, `bind_for_compatibility`, and `_index_event` preserve explicit compatibility contracts.
+- `HybridCandidateObjectTracker`, `bind_for_compatibility`, and `_index_event` preserve explicit compatibility contracts. (The 2026-11 cleanup removed the first two.)
 - `replay_ema_signal`, `qualify_motion`, `remember_frame`, `visual_backup_readiness`, `_best_match`, and `_is_motion_event` provide tested replay, reference, or focused entrypoints into live logic.
 - `source_is_idle`, `wait_for_camera_startup`, `active_leases`, `accepting_events`, `episode_snapshot`, and `evidence_attempts` support lifecycle/diagnostic assertions.
 - `cancel_admission`, `set_phase`, `reset_stages`, `settle_cover_requirement`, `update_objects`, and `record_operational_event` are tested lifecycle/storage interfaces. Their removal would retire contracts rather than simply remove unreferenced code.
