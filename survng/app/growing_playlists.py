@@ -355,9 +355,6 @@ class GrowingPlaylistRegistry:
         self._records.move_to_end(record.key)
         return self.enforce_bounds(keep=record.key)
 
-    def drop(self, key: GrowingPlaylistKey) -> None:
-        self._records.pop(key, None)
-
     def was_evicted(self, key: GrowingPlaylistKey) -> bool:
         """Whether ``key`` lost its record to the bounds (hold ``lock``)."""
         return self._evicted.pop(key, False) is None

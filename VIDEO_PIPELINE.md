@@ -793,7 +793,8 @@ new segment can exceed it; that is logged too.
 
 The first read of a playlist is as strict as a finished one: it fails if a
 listed row cannot be checked. The re-read after the window closes finishes the
-served playlist (`VOD`, `#EXT-X-ENDLIST`); retries get the same finished
+served playlist (`VOD`, `#EXT-X-ENDLIST`), unless a new row is still held
+back, in which case it waits for that row (at most 30 s); retries get the same finished
 playlist until the record expires two minutes after the window stopped
 growing. Records survive a manager reload but not a restart, and are bounded
 (windows up to an hour, 256 playlists, 16,384 entries; the least recently

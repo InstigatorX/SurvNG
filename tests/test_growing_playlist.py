@@ -527,6 +527,23 @@ class GrowingPlaylistReviewTests(TestCase):
         self.assertTrue(closed.endswith("#EXT-X-ENDLIST\n"))
         self.assertEqual(len(_media_lines(closed)), 2)
 
+    def test_closing_read_does_not_finish_while_a_row_is_held(self) -> None:
+        self.storage.add("a.mp4", 100.0)
+        first = self.harness.playlist()
+        self.storage.add("b.mp4", 110.0)
+        self.storage.add("c.mp4", 120.0)
+        self.storage.failing.add("b.mp4")
+        held = self.harness.playlist(CLOSED)
+        self.assertEqual(held, first)
+        self.assertNotIn("#EXT-X-ENDLIST", held)
+        self.storage.failing.clear()
+        closed = self.harness.playlist(CLOSED)
+        self.assertTrue(closed.endswith("#EXT-X-ENDLIST\n"))
+        self.assertEqual(
+            [_offset(url) for url in _media_lines(closed)],
+            ["0.000", "10.000", "20.000"],
+        )
+
     def test_bounds_apply_as_records_grow_and_rebuild_is_logged(self) -> None:
         self.harness.registry._max_entries = 4
         self.storage.add("a.mp4", 100.0)

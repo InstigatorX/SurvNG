@@ -1516,16 +1516,19 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             )
             if not target.entries:
                 raise HTTPException(status_code=404, detail="no recordings found")
-            if not still_growing:
-                # The window can no longer grow: this read ends the playlist.
-                # Retries get the same finished playlist until it expires.
+            # The window can no longer grow: this read ends the playlist,
+            # unless a new row is still held back (it would be lost). The
+            # hold resolves, by appending or skipping it, well before the
+            # record expires. Retries then get the same finished playlist.
+            finishing = not still_growing and not report.held
+            if finishing:
                 target.finished = True
             if trackable:
                 if stored is None:
                     evicted = growing_playlists.put(target)
                 else:
                     evicted = growing_playlists.enforce_bounds(keep=key)
-            body = target.body(finished=not still_growing)
+            body = target.body(finished=finishing)
         log_growing_merge(key, report)
         if evicted:
             growing_log.log(
