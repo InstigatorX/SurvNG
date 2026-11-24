@@ -1,16 +1,17 @@
 # Current-only compatibility
 
 This build intentionally stops supporting prior-generation configuration,
-databases, recording layouts, and semantic index identities. It does not migrate,
-reset, or delete existing data. Do not use it as an automatic upgrade path for
+databases, recording layouts, and semantic index identities. It does not migrate
+or reset existing data, and drops only tables and indexes that no build reads. Do not use it as an automatic upgrade path for
 older persisted generations. Keep application and data backups together.
 
 The minimum supported database is one that the SurvNG v1.2.0 release (tag
 `v1.2.0`) or a later build has already opened. Later builds no longer carry the
 column additions and index cleanups that v1.2.0 applied to older event, face,
 scene, semantic, appearance, export and recording-index databases. A table older
-than that stops startup with an error naming the table: start the `v1.2.0` tag
-once against the same data, then upgrade. Column additions that fresh databases
+than that stops startup, before anything is changed, with an error naming the
+table: start the `v1.2.0` tag once against the same data, with a configuration
+it accepts such as your pre-upgrade backup, then upgrade. Column additions that fresh databases
 still need, because the column is not in its table's CREATE statement, remain.
 
 Fresh installations initialize their configuration explicitly:

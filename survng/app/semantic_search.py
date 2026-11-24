@@ -24,9 +24,16 @@ import cv2
 
 from .config import SemanticSearchConfig
 from .incident_utils import event_snapshot_path
-from .main_database import connect_main_database, create_index_logged, require_schema_columns
+from .main_database import (
+    connect_main_database,
+    create_index_logged,
+    require_minimum_schema,
+)
 from .media_storage import MediaStorageRegistry
 from .openclip_tokenizer import OpenClipBpeTokenizer
+
+# Columns SurvNG v1.2.0 added to older databases (see require_minimum_schema).
+_SEMANTIC_SCHEMA_MINIMUM: dict[str, tuple[str, ...]] = {"semantic_embeddings": ("evidence_revision",)}
 
 LOGGER = logging.getLogger("uvicorn.error")
 SEMANTIC_WORKER_START_TIMEOUT_SECONDS = 60.0
@@ -386,6 +393,7 @@ class SemanticIndex:
 
     def _init_db(self) -> None:
         with self._connect() as connection:
+            require_minimum_schema(connection, _SEMANTIC_SCHEMA_MINIMUM)
             connection.execute("pragma journal_mode = wal")
             connection.execute("pragma synchronous = normal")
             connection.execute(
@@ -415,7 +423,6 @@ class SemanticIndex:
                 )
                 """
             )
-            require_schema_columns(connection, "semantic_embeddings", ("evidence_revision",))
             columns = {row[1] for row in connection.execute("pragma table_info(semantic_embeddings)")}
             if "observation_id" not in columns:
                 connection.execute("alter table semantic_embeddings add column observation_id text not null default ''")

@@ -13,7 +13,6 @@ from ..main_database import (
     closing_connection_factory,
     create_index_logged,
     mark_startup_recovered,
-    require_schema_columns,
     stamp_startup_recovery,
     startup_recovery_pending,
 )
@@ -230,7 +229,6 @@ class EventStoreJobsMixin:
                 )
                 """
             )
-            require_schema_columns(conn, "detection_jobs", ("lease_owner",))
             conn.execute(
                 "create index if not exists idx_detection_jobs_claim "
                 "on detection_jobs(camera_id, state, available_at, created_at)"
@@ -259,7 +257,6 @@ class EventStoreJobsMixin:
                 )
                 """
             )
-            require_schema_columns(conn, "motion_trigger_jobs", ("lease_owner",))
             conn.execute(
                 "create index if not exists idx_motion_trigger_jobs_claim "
                 "on motion_trigger_jobs(camera_id, state, available_at, created_at)"
@@ -296,7 +293,6 @@ class EventStoreJobsMixin:
                 )
                 """
             )
-            require_schema_columns(conn, "events", ("snapshot_size_bytes",))
             event_columns = {
                 str(row["name"])
                 for row in conn.execute("pragma table_info(events)").fetchall()
@@ -339,6 +335,8 @@ class EventStoreJobsMixin:
                 "where snapshot_path != ''",
             )
             conn.execute("drop index if exists idx_events_snapshot_retention")
+            # Created by v1.2.0 and no longer used; it only taxed event inserts.
+            conn.execute("drop index if exists idx_event_camera_epoch")
             conn.execute(
                 "create index if not exists idx_events_snapshot_size_pending "
                 "on events(id, snapshot_path) where snapshot_path != '' and snapshot_size_bytes <= 0"
@@ -381,9 +379,6 @@ class EventStoreJobsMixin:
                     foreign key(related_event_id) references events(id) on delete set null
                 )
                 """
-            )
-            require_schema_columns(
-                conn, "motion_audits", ("decision_id", "related_event_id", "category")
             )
             conn.execute(
                 "create index if not exists idx_motion_audits_created_at on motion_audits(created_at desc, id desc)"

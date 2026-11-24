@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from ..config import CameraConfig, RecordingRetentionConfig
-from ..main_database import closing_connection_factory, create_index_logged, require_schema_columns
+from ..main_database import (
+    closing_connection_factory,
+    create_index_logged,
+    require_minimum_schema,
+)
 from ..media_storage import path_presence
 from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 from ..recording_retention import RETENTION_TOTALS_INDEX
@@ -24,6 +28,14 @@ from ..recording_media import (
     mp4_playback_metadata,
     mp4_stream_fingerprint,
 )
+
+# Columns SurvNG v1.2.0 added to older databases (see require_minimum_schema).
+_RECORDINGS_SCHEMA_MINIMUM: dict[str, tuple[str, ...]] = {
+    "recordings": (
+        "playable", "health_error", "validated", "stream_fingerprint",
+        "fingerprint_checked", "playback_duration_seconds", "location_id",
+    ),
+}
 
 if TYPE_CHECKING:
     # Annotation-only: recorder.py imports this module, so a runtime import would cycle.
@@ -80,6 +92,7 @@ class RecordingIndexMixin:
             fresh = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recordings'"
             ).fetchone() is None
+            require_minimum_schema(connection, _RECORDINGS_SCHEMA_MINIMUM)
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute(
                 """
@@ -102,14 +115,6 @@ class RecordingIndexMixin:
                     location_id TEXT NOT NULL DEFAULT 'default'
                 )
                 """
-            )
-            require_schema_columns(
-                connection,
-                "recordings",
-                (
-                    "playable", "health_error", "validated", "stream_fingerprint",
-                    "fingerprint_checked", "playback_duration_seconds", "location_id",
-                ),
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS recordings_range ON recordings(camera_id, source, start_epoch, end_epoch)"

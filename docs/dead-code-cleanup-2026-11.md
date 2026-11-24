@@ -24,10 +24,14 @@ Each change was made on a stacked branch so the steps can be tested together:
 
 - **Minimum database:** one that SurvNG 1.2.0 or later has opened. Each removed
   upgrade was present in 1.2.0 and its column was already in that table's
-  CREATE statement. Stores call `require_schema_columns` where the upgrade used
-  to run, so an older table stops startup with `UnsupportedDatabaseError`
-  naming the table, not a later SQLite error. A database created by `v1.2` and
-  then opened by `t5` has the same tables, columns and indexes as a fresh one.
+  CREATE statement. Each store calls `require_minimum_schema` before its first
+  DDL, so an older table stops startup with `UnsupportedDatabaseError` naming
+  the table and leaves the database unchanged. A database created by the
+  `v1.2` branch head and then opened by `t5` matches a fresh one. One created
+  by the `v1.2.0` tag also keeps the retired `tracking_comparisons`,
+  `scene_migrations` and `scene_acquisition_migrations` tables and the
+  comparison index; they hold data and nothing writes them, so they stay. Its
+  unused `idx_event_camera_epoch`, which taxed every event insert, is dropped.
 - **Face rows linked by the retired dedupe** (`duplicate_of_observation_id`)
   can remain on installs; pruning of those trees is unchanged.
 - **Documented API stays** even without an in-repo caller, including

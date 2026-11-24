@@ -11,7 +11,6 @@ import time
 from typing import Any
 
 from ..database_polling import polling_connection
-from ..main_database import require_schema_columns
 
 
 class EventSnapshotChangedError(RuntimeError):
@@ -66,7 +65,6 @@ class EventStoreEvidenceMixin:
                 );
                 create index if not exists idx_event_evidence_attempts on event_evidence_attempts(event_id,id);
             """)
-            require_schema_columns(conn, "event_evidence_outbox", ("publication_done",))
 
     @staticmethod
     def _check_evidence_revision(row: sqlite3.Row, expected_revision: int | None) -> None:

@@ -196,18 +196,41 @@ def test_initializer_rejects_redacted_template_before_writing(tmp_path):
     assert not secrets_key_path(secrets_path(destination)).exists()
 
 
-def test_event_database_older_than_1_2_0_stops_with_a_clear_error(tmp_path):
+def _schema(path):
+    with sqlite3.connect(path) as conn:
+        return sorted(conn.execute('select type, name, sql from sqlite_master'))
+
+
+def test_event_database_older_than_1_2_0_stops_before_changing_it(tmp_path):
     from survng.app.main_database import UnsupportedDatabaseError
 
-    with sqlite3.connect(tmp_path / 'survng.sqlite3') as conn:
-        conn.execute('create table events(id integer primary key autoincrement, camera_id text not null, kind text not null, '
-                     'topic text, message text, snapshot_path text, recording_path text, '
-                     "objects_json text not null default '[]', created_at text not null)")
-    with pytest.raises(UnsupportedDatabaseError, match='events predates SurvNG 1.2.0'):
+    # A current database whose scene_objects table lacks the column v1.2.0 added,
+    # plus a table startup would otherwise drop.
+    EventStore(tmp_path)
+    database = tmp_path / 'survng.sqlite3'
+    with sqlite3.connect(database) as conn:
+        conn.execute('pragma foreign_keys=off')
+        conn.execute('drop index scene_object_facet_label')
+        conn.execute('alter table scene_objects drop column facet_label')
+        conn.execute('create table scene_changes(id integer primary key, incident_id text, revision integer, created_at real)')
+        conn.execute("insert into scene_changes values (1, 'incident', 1, 0)")
+    before = _schema(database)
+    with pytest.raises(UnsupportedDatabaseError, match='scene_objects predates SurvNG 1.2.0'):
         EventStore(tmp_path)
+    assert _schema(database) == before
 
 
-def test_recording_index_older_than_1_2_0_stops_with_a_clear_error(tmp_path):
+def test_v1_2_0_event_index_leftover_is_dropped(tmp_path):
+    EventStore(tmp_path)
+    with sqlite3.connect(tmp_path / 'survng.sqlite3') as conn:
+        conn.execute('create index idx_event_camera_epoch on events(camera_id, julianday(created_at), id)')
+    reopened = EventStore(tmp_path)
+    with reopened._connect() as conn:
+        names = {row[0] for row in conn.execute("select name from sqlite_master where type='index'")}
+    assert 'idx_event_camera_epoch' not in names
+
+
+def test_recording_index_older_than_1_2_0_stops_before_changing_it(tmp_path):
     from survng.app.main_database import UnsupportedDatabaseError
     from survng.app.recording_process.recorder import Recorder
 
@@ -215,5 +238,7 @@ def test_recording_index_older_than_1_2_0_stops_with_a_clear_error(tmp_path):
         conn.execute('create table recordings(path text primary key, camera_id text not null, source text not null, '
                      'name text not null, size_bytes integer not null, modified_at real not null, '
                      'start_epoch real not null, duration_seconds real not null, end_epoch real not null)')
+    before = _schema(tmp_path / 'recordings.sqlite3')
     with pytest.raises(UnsupportedDatabaseError, match='recordings predates SurvNG 1.2.0'):
         Recorder('ffmpeg', tmp_path)
+    assert _schema(tmp_path / 'recordings.sqlite3') == before

@@ -14,7 +14,11 @@ from ..incident_utils import (
     event_snapshot_path, media_path_aliases, portable_media_path,
 )
 from ..media_storage import MediaStorageRegistry
-from ..main_database import connect_main_database, create_index_logged, require_schema_columns
+from ..main_database import (
+    connect_main_database,
+    create_index_logged,
+    require_minimum_schema,
+)
 from .benchmarks import FaceStoreBenchmarkMixin
 from .ingest import FaceStoreIngestMixin
 from .people import FaceStorePeopleMixin
@@ -29,6 +33,9 @@ from .quality import (
 from .queries import FaceStoreQueryMixin
 from .recognition import FaceStoreRecognitionMixin
 from .unknown import FaceStoreUnknownMixin
+
+# Columns SurvNG v1.2.0 added to older databases (see require_minimum_schema).
+_FACE_SCHEMA_MINIMUM: dict[str, tuple[str, ...]] = {"face_unknown_members": ("model_fingerprint", "policy_threshold", "generation")}
 
 
 _PEOPLE_DIRECTORY_REVISION_KEY = "face_people_directory_revision_v1"
@@ -127,6 +134,7 @@ class FaceStore(
     def _init_db(self) -> None:
         pruned_paths: list[Path] = []
         with self._connect() as connection:
+            require_minimum_schema(connection, _FACE_SCHEMA_MINIMUM)
             connection.execute("pragma journal_mode = wal")
             connection.execute("pragma synchronous = normal")
             connection.execute(
@@ -187,11 +195,6 @@ class FaceStore(
                     foreign key(person_id) references face_people(id) on delete cascade
                 );
                 """
-            )
-            require_schema_columns(
-                connection,
-                "face_unknown_members",
-                ("model_fingerprint", "policy_threshold", "generation"),
             )
             columns = {str(row[1]) for row in connection.execute("pragma table_info(face_observations)")}
             migrations = {

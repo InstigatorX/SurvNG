@@ -16,6 +16,7 @@ from ..incident_utils import event_snapshot_path, portable_media_path, snapshot_
 from ..main_database import (
     connect_main_database,
     mark_startup_recovered,
+    require_minimum_schema,
     stamp_startup_recovery,
     startup_recovery_pending,
 )
@@ -34,6 +35,18 @@ from .scene_admission import EventStoreSceneAdmissionMixin
 from .scene_review import EventStoreSceneReviewMixin
 from .scene_tracking import EventStoreSceneTrackingMixin
 from .scene_context import EventStoreSceneContextMixin
+
+# Columns SurvNG v1.2.0 added to older databases (see require_minimum_schema).
+_EVENT_SCHEMA_MINIMUM: dict[str, tuple[str, ...]] = {
+    "events": ("snapshot_size_bytes",),
+    "motion_audits": ("decision_id", "related_event_id", "category"),
+    "event_evidence_outbox": ("publication_done",),
+    "scene_objects": ("facet_label",),
+}
+_JOBS_SCHEMA_MINIMUM: dict[str, tuple[str, ...]] = {
+    "detection_jobs": ("lease_owner",),
+    "motion_trigger_jobs": ("lease_owner",),
+}
 
 LOGGER = logging.getLogger(__name__)
 
@@ -114,6 +127,11 @@ class EventStore(
         self._scene_notification_cache = OrderedDict()
         self._scene_notification_cache_lock = threading.Lock()
         self._scene_notification_cache_bytes = 0
+        # Refuse a database v1.2.0 never opened before any startup DDL runs.
+        with self._connect() as conn:
+            require_minimum_schema(conn, _EVENT_SCHEMA_MINIMUM)
+        with self._connect_jobs() as conn:
+            require_minimum_schema(conn, _JOBS_SCHEMA_MINIMUM)
         self._init_db()
         self._init_scene_context_db()
         self._init_evidence_db()
