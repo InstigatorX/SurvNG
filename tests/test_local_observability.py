@@ -568,7 +568,8 @@ def test_database_retention_status_is_allowlisted() -> None:
         "enabled": True, "dry_run": True, "running": False, "runs": 2,
         "next_run_at": "2026-11-12T03:00:00+00:00",
         "policy": {"empty_discovery_hours": 24.0, "activity_days": 30,
-                   "motion_audit_days": 30, "interval_hours": 24.0, "path": secret},
+                   "motion_audit_days": 30, "interval_hours": 24.0, "run_at": "03:00",
+                   "path": secret},
         "last_run": {
             "started_at": "2026-11-11T03:00:00+00:00", "dry_run": True,
             "duration_seconds": 42.5, "error": secret,
@@ -589,6 +590,7 @@ def test_database_retention_status_is_allowlisted() -> None:
     assert status["dry_run"] is True
     assert status["runs"] == 2
     assert status["policy"]["motion_audit_days"] == 30
+    assert status["policy"]["run_at"] == "03:00"
     assert status["last_run"]["steps"]["motion_audits"] == {
         "eligible": 7, "deleted": 0, "skipped_batches": None,
     }
@@ -596,6 +598,13 @@ def test_database_retention_status_is_allowlisted() -> None:
         "eligible": None, "deleted": None, "skipped_batches": None,
     }
     assert secret not in json.dumps(status)
+
+
+def test_database_retention_run_at_reports_only_a_clock_time() -> None:
+    from survng.app.local_observability import _retention_run_at
+
+    for value in ("rtsp://admin:secret@camera", "25:00", None, 3):
+        assert _retention_run_at(value) is None
 
 
 def test_database_retention_failure_reasons_match_the_retention_module() -> None:
