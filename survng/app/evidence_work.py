@@ -32,10 +32,6 @@ def report_evidence_stage(stage: str) -> None:
         callback(stage)
 
 
-def evidence_work_active() -> bool:
-    return _cancelled.get() is not None
-
-
 def optional_evidence_work_active() -> bool:
     return _optional.get()
 

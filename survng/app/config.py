@@ -776,7 +776,6 @@ class CameraConfig(BaseModel):
     incident_notifications_enabled: bool = True
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     name: str = Field(min_length=1, max_length=128)
-    video_backend: str = "url"
     stream_url: str = Field(max_length=4096)
     live_stream_url: str | None = Field(default=None, max_length=4096)
     live_view: CameraLiveViewConfig = Field(default_factory=CameraLiveViewConfig)
@@ -863,10 +862,6 @@ class DepthConfig(BaseModel):
     max_incident_distance_m: float | None = Field(default=None, ge=0.5, le=500.0)
     store_heatmap: bool = False
     heatmap_max_width: int = Field(default=192, ge=64, le=512)
-    # Retained only so existing configuration files remain loadable. Depth is
-    # now decision-scoped recorded-refinement attribution, not rolling motion
-    # evidence, so this setting has no effect on new runtime behavior.
-    motion_evidence_enabled: bool = True
 
     @model_validator(mode="after")
     def validate_distance_range(self) -> "DepthConfig":
@@ -1486,9 +1481,6 @@ def apply_stream_url_defaults(camera: CameraConfig) -> None:
             "username": camera.onvif.username or username,
             "password": camera.onvif.password or password,
         })
-
-    # SurvNG only ingests URL-backed streams (RTSP/HTTP via FFmpeg/go2rtc).
-    camera.video_backend = "url"
 
 
 def normalize_config(config: AppConfig, assign_ids: bool = False) -> AppConfig:

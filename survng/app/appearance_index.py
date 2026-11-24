@@ -67,10 +67,6 @@ class AppearanceIndex:
                 str(row[1])
                 for row in connection.execute("pragma table_info(appearance_embeddings)")
             }
-            if "source" not in columns:
-                connection.execute(
-                    "alter table appearance_embeddings add column source text not null default 'tracking_multiframe'"
-                )
             for name in ("observation_id", "scene_object_id"):
                 if name not in columns:
                     connection.execute(f"alter table appearance_embeddings add column {name} text not null default ''")

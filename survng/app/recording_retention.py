@@ -575,7 +575,6 @@ class RecordingRetentionService:
                 before,
                 apply=apply,
                 now_epoch=started,
-                capacity_reclaim_bytes=0,
                 quota_reclaim_bytes=int(before["reclaim"]["quota_bytes"]),
                 free_reclaim_by_location=dict(
                     before["reclaim"].get("free_space_by_location") or {}
@@ -592,10 +591,9 @@ class RecordingRetentionService:
         *,
         apply: bool,
         now_epoch: float,
-        capacity_reclaim_bytes: int,
         planned_reclaim_bytes: int,
-        quota_reclaim_bytes: int | None = None,
-        free_reclaim_by_location: Mapping[str, int] | None = None,
+        quota_reclaim_bytes: int,
+        free_reclaim_by_location: Mapping[str, int],
     ) -> dict[str, Any]:
         result: dict[str, Any] = {
             "started_at": _iso_time(now_epoch),
@@ -623,7 +621,6 @@ class RecordingRetentionService:
             candidates = self._candidates(
                 plan,
                 now_epoch=now_epoch,
-                capacity_reclaim_bytes=max(0, int(capacity_reclaim_bytes)),
                 quota_reclaim_bytes=quota_reclaim_bytes,
                 free_reclaim_by_location=free_reclaim_by_location,
             )
@@ -957,7 +954,6 @@ class RecordingRetentionService:
                 plan,
                 apply=apply,
                 now_epoch=time.time(),
-                capacity_reclaim_bytes=0,
                 quota_reclaim_bytes=self._quota_reclaim_remaining,
                 free_reclaim_by_location=self._free_reclaim_remaining,
                 planned_reclaim_bytes=self._planned_reclaim_remaining,
@@ -1241,9 +1237,8 @@ class RecordingRetentionService:
         plan: Mapping[str, Any],
         *,
         now_epoch: float,
-        capacity_reclaim_bytes: int | None = None,
-        quota_reclaim_bytes: int | None = None,
-        free_reclaim_by_location: Mapping[str, int] | None = None,
+        quota_reclaim_bytes: int,
+        free_reclaim_by_location: Mapping[str, int],
     ) -> list[sqlite3.Row]:
         limit = max(
             1,
@@ -1272,26 +1267,10 @@ class RecordingRetentionService:
                     candidates[path_key] = row
                     if len(candidates) >= limit:
                         break
-            legacy_capacity_reclaim = (
-                max(
-                    int(plan["reclaim"]["quota_bytes"]),
-                    int(plan["reclaim"]["free_space_bytes"]),
-                )
-                if capacity_reclaim_bytes is None
-                else max(0, int(capacity_reclaim_bytes))
-            )
-            quota_remaining = (
-                legacy_capacity_reclaim
-                if quota_reclaim_bytes is None and free_reclaim_by_location is None
-                else max(0, int(quota_reclaim_bytes or 0))
-            )
+            quota_remaining = max(0, int(quota_reclaim_bytes or 0))
             location_budgets = {
                 str(key): max(0, int(value or 0))
-                for key, value in dict(
-                    free_reclaim_by_location
-                    if free_reclaim_by_location is not None
-                    else plan.get("reclaim", {}).get("free_space_by_location", {})
-                ).items()
+                for key, value in dict(free_reclaim_by_location).items()
             }
             selected_bytes = sum(int(row["size_bytes"] or 0) for row in candidates.values())
             selected_by_location: dict[str, int] = {}

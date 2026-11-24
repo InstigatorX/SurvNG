@@ -193,13 +193,6 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
 
         return with_manager(status)
 
-    @router.get("/api/faces/unknown-cluster-health")
-    def face_unknown_cluster_health() -> dict[str, Any]:
-        deps.start_observation_sync()
-        return with_manager(
-            lambda active: active.faces.unknown_cluster_health()
-        )
-
     @router.post("/api/faces/unknown-clusters/rebuild")
     def rebuild_unknown_clusters() -> dict[str, Any]:
         deps.start_observation_sync()
@@ -221,31 +214,6 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
             active.faces.unknown_clusters_revision,
             active.faces.unknown_clusters,
         ))
-
-
-    @router.get("/api/faces/diagnostics/duplicates")
-    def face_duplicate_diagnostics() -> dict[str, Any]:
-        deps.start_observation_sync()
-        return with_manager(lambda active: active.faces.duplicate_stats())
-
-    @router.post("/api/faces/maintenance/dedupe")
-    def face_dedupe(window_seconds: float = 60.0) -> dict[str, Any]:
-        deps.start_observation_sync()
-        return with_manager(
-            lambda active: active.faces.dedupe_exact_embeddings(
-                window_seconds=window_seconds
-            )
-        )
-
-    @router.get("/api/faces/diagnostics/confirmed-quality")
-    def face_confirmed_quality(limit: int = 100) -> list[dict[str, Any]]:
-        deps.start_observation_sync()
-        return with_manager(
-            lambda active: [
-                _public_face_observation(item)
-                for item in active.faces.confirmed_quality_issues(limit=limit)
-            ]
-        )
 
     @router.get("/api/faces/unknown-clusters/{cluster_id}/members")
     def face_unknown_cluster_members(
@@ -296,20 +264,6 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
         return with_manager(update)
 
-
-
-    @router.get("/api/faces/gallery-optimization")
-    def face_gallery_optimization(
-        max_references: int = 8,
-    ) -> list[dict[str, Any]]:
-        deps.start_observation_sync()
-        return with_manager(
-            lambda active: active.faces.optimize_all_galleries(
-                max_references=max_references,
-                apply=False,
-            )
-        )
-
     @router.post("/api/faces/people/{person_id}/gallery/optimize")
     def face_person_gallery_optimize(
         person_id: int,
@@ -330,11 +284,6 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
         return with_manager(optimize)
 
-    @router.get("/api/faces/people/representation-health")
-    def face_people_representation_health() -> list[dict[str, Any]]:
-        deps.start_observation_sync()
-        return with_manager(lambda active: active.faces.people_representation_health())
-
     @router.get("/api/faces/people/{person_id}/representation")
     def face_person_representation(person_id: int) -> dict[str, Any]:
         deps.start_observation_sync()
@@ -346,19 +295,6 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
             except RuntimeError as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
         return with_manager(diagnostics)
-
-    @router.get("/api/faces/people/{person_id}/gallery-candidates")
-    def face_person_gallery_candidates(person_id: int, limit: int = 20) -> list[dict[str, Any]]:
-        deps.start_observation_sync()
-        def candidates(active_manager: AppManager) -> list[dict[str, Any]]:
-            try:
-                return [
-                    _public_face_observation(item)
-                    for item in active_manager.faces.gallery_candidates(person_id, limit=limit)
-                ]
-            except ValueError as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return with_manager(candidates)
 
     @router.post("/api/faces/people/{person_id}/gallery/enrich")
     def face_person_gallery_enrich(person_id: int, target_count: int = 8) -> dict[str, Any]:
@@ -399,30 +335,6 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
             active.faces.people_directory_revision,
             active.faces.people,
         ))
-
-    @router.get("/api/faces/camera-suitability")
-    def face_camera_suitability() -> list[dict[str, Any]]:
-        deps.start_observation_sync()
-        return with_manager(lambda active: active.faces.camera_suitability())
-
-    @router.get("/api/faces/benchmark/production")
-    def face_benchmark_production() -> dict[str, Any]:
-        deps.start_observation_sync()
-        return with_manager(
-            lambda active: active.faces.benchmark_production_matcher()
-        )
-
-    @router.get("/api/faces/benchmark/camera-pairs")
-    def face_benchmark_camera_pairs() -> dict[str, Any]:
-        deps.start_observation_sync()
-        return with_manager(
-            lambda active: active.faces.benchmark_camera_pairs()
-        )
-
-    @router.get("/api/faces/benchmark/by-identity")
-    def face_benchmark_by_identity() -> dict[str, Any]:
-        deps.start_observation_sync()
-        return with_manager(lambda active: active.faces.benchmark_by_identity())
 
     @router.get("/api/faces/benchmark")
     def face_benchmark() -> dict[str, Any]:

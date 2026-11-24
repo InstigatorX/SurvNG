@@ -56,18 +56,6 @@ def test_both_compose_examples_forward_go2rtc_settings():
             assert resolved['SURVNG_GO2RTC_CONFIG'] == selected.get('SURVNG_GO2RTC_CONFIG', '/config/go2rtc.yaml')
 
 
-def test_face_suitability_uses_finite_populated_quality(tmp_path):
-    store = FaceStore(tmp_path, start_recognition=False)
-    with store._connect() as con:
-        for event_id, size in enumerate([0.7, 0.3, 'invalid', float('nan'), float('inf'), None], 1):
-            con.execute('''insert into face_observations(event_id, object_index, camera_id, snapshot_path, box_json, observed_at, created_at, quality_json)
-                values (?,0,'gate','','{}','now','now',?)''', (event_id, json.dumps({'size': size})))
-    result = store.camera_suitability()[0]
-    assert result['observations'] == 6
-    assert result['average_face_size'] == 0.5
-    store.close()
-
-
 def test_face_shutdown_joins_when_real_ingestion_fills_queue(tmp_path, monkeypatch):
     snapshot = tmp_path / 'candidate.jpg'
     snapshot.write_bytes(b'candidate')

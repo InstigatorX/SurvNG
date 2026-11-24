@@ -10,9 +10,13 @@ from starlette.responses import Response
 
 from survng.app.camera_api_routes import CameraApiDependencies, create_camera_api_router
 from survng.app.manager_access import ManagerAccessCoordinator
-from survng.app.main import live_info, relay_go2rtc_websocket, stream, stream_source
+from survng.app.main import _camera_api_route_bundle
 from starlette.websockets import WebSocketDisconnect
 
+live_info = _camera_api_route_bundle.handlers["live_info"]
+relay_go2rtc_websocket = _camera_api_route_bundle.handlers["relay_go2rtc_websocket"]
+stream = _camera_api_route_bundle.handlers["stream"]
+stream_source = _camera_api_route_bundle.handlers["stream_source"]
 
 
 def _to_thread_resolving(url: str) -> AsyncMock:

@@ -325,10 +325,8 @@ class EmaRouteCandidateCache:
                 "payload_json text not null, created_at text not null, "
                 "primary key(camera_id, captured_at))"
             )
-            connection.execute(
-                "create index if not exists idx_ema_route_candidates_window "
-                "on ema_route_candidates(camera_id, captured_at)"
-            )
+            # The primary key already indexes (camera_id, captured_at).
+            connection.execute("drop index if exists idx_ema_route_candidates_window")
             connection.execute(
                 "create index if not exists idx_ema_route_candidates_age "
                 "on ema_route_candidates(captured_at)"

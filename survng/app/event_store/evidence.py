@@ -65,9 +65,6 @@ class EventStoreEvidenceMixin:
                 );
                 create index if not exists idx_event_evidence_attempts on event_evidence_attempts(event_id,id);
             """)
-            outbox_columns = {row["name"] for row in conn.execute("pragma table_info(event_evidence_outbox)")}
-            if "publication_done" not in outbox_columns:
-                conn.execute("alter table event_evidence_outbox add column publication_done integer not null default 0")
 
     @staticmethod
     def _check_evidence_revision(row: sqlite3.Row, expected_revision: int | None) -> None:

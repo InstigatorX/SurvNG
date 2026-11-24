@@ -254,7 +254,6 @@ class EventStoreSceneMixin:
                     on scene_observation_zones(episode_id, displayable);
                 create index if not exists scene_observation_zones_zone
                     on scene_observation_zones(zone, episode_id);
-                drop index if exists scene_observation_event;
                 create index if not exists scene_observation_media on scene_observations(snapshot_path);
                 create index if not exists scene_observation_recording
                     on scene_observations(recording_path) where recording_path != '';
@@ -352,14 +351,13 @@ class EventStoreSceneMixin:
                     incident_id text not null, revision integer not null, payload_json text not null,
                     primary key(incident_id,revision)
                 );
-                create table if not exists scene_changes (
-                    id integer primary key autoincrement, incident_id text not null,
-                    revision integer not null, created_at real not null
-                );
-                create table if not exists scene_discovery_baselines (
-                    camera_id text primary key, captured_epoch real not null, objects_json text not null,
-                    changed integer not null default 0, event_id integer
-                );
+                -- Retired tables no build reads: an incident-revision log, the tracking
+                -- comparison results and the prior generation's migration markers.
+                drop table if exists scene_discovery_baselines;
+                drop table if exists scene_changes;
+                drop table if exists tracking_comparisons;
+                drop table if exists scene_migrations;
+                drop table if exists scene_acquisition_migrations;
                 create table if not exists scene_identities (
                     event_id integer primary key references events(id) on delete cascade, payload_json text not null
                 );
@@ -376,9 +374,6 @@ class EventStoreSceneMixin:
             columns = {r[1] for r in conn.execute("pragma table_info(scene_observations)")}
             if "source_observation_id" not in columns:
                 conn.execute("alter table scene_observations add column source_observation_id text references acquired_observations(id)")
-            object_columns = {r[1] for r in conn.execute("pragma table_info(scene_objects)")}
-            if "facet_label" not in object_columns:
-                conn.execute("alter table scene_objects add column facet_label text not null default ''")
             conn.execute("create index if not exists scene_object_facet_label on scene_objects(facet_label)")
             conn.execute("create index if not exists scene_observation_source on scene_observations(source_observation_id)")
             create_index_logged(
@@ -898,7 +893,6 @@ class EventStoreSceneMixin:
         incident_id=self._scene_resolve(conn,incident_id)
         conn.execute("update scene_incidents set revision=revision+1 where id=?",(incident_id,))
         incident = conn.execute("select * from scene_incidents where id=?",(incident_id,)).fetchone()
-        conn.execute("insert into scene_changes(incident_id,revision,created_at) values(?,?,?)",(incident_id,incident["revision"],time.time()))
         self._scene_facet_cache = {}
         if notify and incident["state"] != "unconfirmed":
             # One pending marker per incident. Publication builds the newest

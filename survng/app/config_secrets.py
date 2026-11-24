@@ -359,8 +359,10 @@ def load_secrets_file(path: Path) -> dict[str, Any] | None:
                 f"encrypted secrets.json requires the key file, which is missing: {key_path}"
             ) from exc
         return _decrypt_secrets(payload, key)
-    # Legacy plaintext sidecar (schema v1) remains readable until the next save.
-    return payload
+    raise ValueError(
+        f"secrets file is not an encrypted SurvNG secrets envelope: {path}. "
+        "Restore secrets.json and secrets.key from a backup saved by SurvNG 1.2 or later."
+    )
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:

@@ -82,7 +82,6 @@ export function cameraWithDerivedConnection(camera) {
   if (!defaults.host) return camera;
   return {
     ...camera,
-    video_backend: "url",
     onvif: {
       ...camera.onvif,
       host: camera.onvif?.host || defaults.host,

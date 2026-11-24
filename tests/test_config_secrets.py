@@ -143,28 +143,15 @@ class ConfigSecretsTest(unittest.TestCase):
             self.assertEqual(loaded.cameras[0].live_stream_url, config.cameras[0].live_stream_url)
             self.assertEqual(loaded.cameras[0].onvif.password, config.cameras[0].onvif.password)
 
-    def test_plaintext_sidecar_still_loads_until_next_save(self) -> None:
+    def test_plaintext_sidecar_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "config.json"
             sidecar = Path(tmpdir) / "secrets.json"
             config = _secret_config()
-            public = public_config_dict(config)
-            path.write_text(json.dumps(public, indent=2) + "\n", encoding="utf-8")
-            sidecar.write_text(
-                json.dumps(extract_secrets(config), indent=2) + "\n",
-                encoding="utf-8",
-            )
-            loaded = load_config(str(path))
-            self.assertEqual(loaded.mqtt.password, "mqtt-secret")
-            self.assertFalse((Path(tmpdir) / "secrets.key").exists())
-
-            save_config(loaded, str(path), assign_ids=False)
-            envelope = json.loads(sidecar.read_text(encoding="utf-8"))
-            self.assertEqual(envelope["version"], 2)
-            self.assertNotIn("mqtt-secret", sidecar.read_text(encoding="utf-8"))
-            self.assertTrue((Path(tmpdir) / "secrets.key").is_file())
-            reloaded = load_config(str(path))
-            self.assertEqual(reloaded.mqtt.password, "mqtt-secret")
+            path.write_text(json.dumps(public_config_dict(config), indent=2) + "\n", encoding="utf-8")
+            sidecar.write_text(json.dumps(extract_secrets(config)) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "not an encrypted SurvNG secrets envelope"):
+                load_config(str(path))
 
     def test_wrong_key_rejects_encrypted_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

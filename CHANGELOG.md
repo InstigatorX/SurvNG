@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Only data written by `v1.2.0` or later is supported. Startup no longer
+  upgrades older databases, `secrets.json` must be the encrypted format, and
+  completed exports are always served as MP4. Startup drops retired tables that
+  no current build reads (`scene_changes`, `tracking_comparisons`, `scene_migrations`,
+  `scene_acquisition_migrations`, `scene_discovery_baselines`) and unused
+  indexes. See `docs/current-only.md`.
+- Removed endpoints with no caller and no documentation: the
+  `/api/faces/` diagnostics, benchmark (`/production`, `/camera-pairs`,
+  `/by-identity`), `gallery-optimization`, `camera-suitability`,
+  `unknown-cluster-health`, `representation-health`, `gallery-candidates` and
+  `maintenance/dedupe` routes, and
+  `/api/cameras/{id}/recordings/mobile-window.mp4`.
+- Removed config fields `detector.depth.motion_evidence_enabled` and
+  `cameras[].video_backend`; files that still contain them load unchanged.
+  See `docs/dead-code-cleanup-2026-11.md`.
+
 ## SurvNG v1.2
 
 Released as `v1.2.0`.

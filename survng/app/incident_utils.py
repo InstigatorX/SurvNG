@@ -14,7 +14,6 @@ SNAPSHOT_MEDIA_TYPES = {
     ".png": "image/png",
     ".webp": "image/webp",
 }
-MEDIA_DIRECTORIES = ("snapshots", "motion_samples", "recordings")
 DEFAULT_INCIDENT_GAP_SECONDS = 45
 
 

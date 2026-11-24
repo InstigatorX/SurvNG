@@ -1,5 +1,7 @@
 # Dead-code and duplication audit — 2026-10-04
 
+> Superseded in part by [the 2026-11 cleanup](dead-code-cleanup-2026-11.md), which removed several items retained here.
+
 Audited commit: `99cc078d38227b6c346924ecf2e11d48f4ac7dd5` (`v1.2`).
 The plan was prepared at `9f0e02e`; the branch advanced by one cleanly merged
 face-recognition fix before execution, so the six changed files and three new

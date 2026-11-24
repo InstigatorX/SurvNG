@@ -152,7 +152,7 @@ class RecordingApiTest(unittest.TestCase):
         )
 
         with patch.object(main, "manager", manager):
-            payload = main.recording_day("gate", 100.0, 200.0, "main")
+            payload = main._recording_route_bundle.handlers["recording_day"]("gate", 100.0, 200.0, "main")
 
         self.assertEqual(payload["available_sources"], ["main"])
         self.assertEqual(recorder.recording_availability_between.call_count, 2)
@@ -180,7 +180,7 @@ class RecordingApiTest(unittest.TestCase):
         )
 
         with patch.object(main, "manager", manager), patch.object(main, "config", config):
-            payload = main.recording_grid_day(100.0, 200.0, "live")
+            payload = main._recording_route_bundle.handlers["recording_grid_day"](100.0, 200.0, "live")
 
         self.assertEqual(payload["view"], "all_cameras")
         self.assertEqual(payload["available_sources"], ["live", "main"])
@@ -210,7 +210,7 @@ class RecordingApiTest(unittest.TestCase):
         config = SimpleNamespace(cameras=[SimpleNamespace(id="gate", name="Gate")])
 
         with patch.object(main, "manager", manager), patch.object(main, "config", config):
-            payload = main.recording_grid_updates(100.0, 200.0, 190.0, "live")
+            payload = main._recording_route_bundle.handlers["recording_grid_updates"](100.0, 200.0, 190.0, "live")
 
         self.assertEqual(payload["start_epoch"], 100.0)
         self.assertEqual(payload["availability"][0]["camera_id"], "gate")
@@ -223,7 +223,7 @@ class RecordingApiTest(unittest.TestCase):
 
     def test_recording_grid_updates_rejects_non_finite_cursor(self) -> None:
         with self.assertRaises(HTTPException) as invalid:
-            main.recording_grid_updates(100.0, 200.0, float("nan"), "live")
+            main._recording_route_bundle.handlers["recording_grid_updates"](100.0, 200.0, float("nan"), "live")
         self.assertEqual(invalid.exception.status_code, 400)
 
     def test_recording_grid_incident_payload_omits_investigation_details(self) -> None:
@@ -283,7 +283,7 @@ class RecordingApiTest(unittest.TestCase):
         )
 
         with patch.object(main, "manager", manager):
-            payload = main.recording_day("gate", 100.0, 200.0, "main")
+            payload = main._recording_route_bundle.handlers["recording_day"]("gate", 100.0, 200.0, "main")
 
         self.assertEqual(len(payload["events"]), 2)
         self.assertEqual(len(payload["incidents"]), 1)
@@ -312,7 +312,7 @@ class RecordingApiTest(unittest.TestCase):
         )
 
         with patch.object(main, "manager", manager), patch.object(main._recording_media_runtime, "_media_export_manager", return_value=export_manager):
-            payload = main.create_media_export(request)
+            payload = main._recording_route_bundle.handlers["create_media_export"](request)
 
         self.assertEqual(payload["id"], "job-1")
         export_manager.create.assert_called_once_with({
@@ -342,7 +342,7 @@ class RecordingApiTest(unittest.TestCase):
 
         with patch.object(main, "manager", manager), patch.object(main._recording_media_runtime, "_media_export_manager", return_value=export_manager):
             with self.assertRaises(HTTPException) as invalid:
-                main.create_media_export(request)
+                main._recording_route_bundle.handlers["create_media_export"](request)
 
         self.assertEqual(invalid.exception.status_code, 400)
         export_manager.create.assert_not_called()
@@ -362,7 +362,7 @@ class RecordingApiTest(unittest.TestCase):
         with patch.object(main, "manager", manager), patch.object(
             main._recording_media_runtime, "_media_export_manager", return_value=export_manager
         ):
-            main.create_media_export(request)
+            main._recording_route_bundle.handlers["create_media_export"](request)
 
         options = export_manager.create.call_args.args[0]["options"]
         self.assertEqual(options["width"], 1920)
@@ -370,7 +370,7 @@ class RecordingApiTest(unittest.TestCase):
 
     def test_public_media_export_applies_proxy_base_path_to_download(self) -> None:
         with patch.object(main.config, "base_path", "/survng"):
-            payload = main._public_media_export({
+            payload = main._recording_route_bundle.handlers["_public_media_export"]({
                 "id": "job-1",
                 "status": "completed",
                 "download_url": "/api/exports/job-1/download",
@@ -386,7 +386,7 @@ class RecordingApiTest(unittest.TestCase):
         export_manager.count.return_value = 7
 
         with patch.object(main._recording_media_runtime, "_media_export_manager", return_value=export_manager):
-            payload = main.list_media_exports(
+            payload = main._recording_route_bundle.handlers["list_media_exports"](
                 limit=25,
                 offset=5,
                 camera_id="gate",
@@ -413,7 +413,7 @@ class RecordingApiTest(unittest.TestCase):
         }
 
         with patch.object(main._recording_media_runtime, "_media_export_manager", return_value=export_manager):
-            payload = main.protect_media_export(
+            payload = main._recording_route_bundle.handlers["protect_media_export"](
                 "job-1", MediaExportProtectionRequest(protected=True)
             )
 
@@ -430,10 +430,10 @@ class RecordingApiTest(unittest.TestCase):
         }
 
         with patch.object(main._recording_media_runtime, "_media_export_manager", return_value=export_manager):
-            renamed = main.update_media_export_metadata(
+            renamed = main._recording_route_bundle.handlers["update_media_export_metadata"](
                 "job-1", MediaExportMetadataRequest(label=" Gate delivery ")
             )
-            summary = main.media_export_summary()
+            summary = main._recording_route_bundle.handlers["media_export_summary"]()
 
         export_manager.set_label.assert_called_once_with("job-1", " Gate delivery ")
         self.assertEqual(renamed["label"], "Gate delivery")
@@ -455,7 +455,7 @@ class RecordingApiTest(unittest.TestCase):
         with patch.object(main.config, "base_path", "/survng"), patch.object(
             main._recording_media_runtime, "_media_export_manager", return_value=export_manager
         ):
-            payload = main.batch_media_exports(MediaExportBatchRequest(
+            payload = main._recording_route_bundle.handlers["batch_media_exports"](MediaExportBatchRequest(
                 ids=["job-1"], action="protect"
             ))
 
@@ -471,7 +471,7 @@ class RecordingApiTest(unittest.TestCase):
 
         with patch.object(main._recording_media_runtime, "_media_export_manager", return_value=export_manager):
             with self.assertRaises(HTTPException) as protected:
-                main.delete_media_export("job-1")
+                main._recording_route_bundle.handlers["delete_media_export"]("job-1")
 
         self.assertEqual(protected.exception.status_code, 409)
         export_manager.cancel_or_delete.assert_called_once_with("job-1", force=False)
@@ -491,7 +491,7 @@ class RecordingApiTest(unittest.TestCase):
         )
 
         with patch.object(main, "manager", manager):
-            payload = main.recording_updates("gate", 100.0, 200.0, 190.0, "main")
+            payload = main._recording_route_bundle.handlers["recording_updates"]("gate", 100.0, 200.0, 190.0, "main")
 
         recorder.request_recording_edge_refresh.assert_called_once_with(
             "gate",
@@ -519,7 +519,7 @@ class RecordingApiTest(unittest.TestCase):
         )
 
         with patch.object(main, "manager", manager):
-            main.recording_updates("gate", 100.0, 1000.0, 900.0, "main")
+            main._recording_route_bundle.handlers["recording_updates"]("gate", 100.0, 1000.0, 900.0, "main")
 
         event_start = datetime.fromisoformat(events.for_camera_range.call_args.args[1]).timestamp()
         self.assertEqual(event_start, 600.0)
@@ -1082,7 +1082,7 @@ class RecordingApiTest(unittest.TestCase):
         )
         with patch.object(main, "manager", manager):
             with self.assertRaises(HTTPException) as missing:
-                main.recording_preview("gate", 100.0, "main")
+                main._recording_route_bundle.handlers["recording_preview"]("gate", 100.0, "main")
 
         self.assertEqual(missing.exception.status_code, 404)
         recorder.recording_rows_between.assert_called_once_with(

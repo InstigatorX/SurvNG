@@ -103,6 +103,14 @@ class DummyRecorder:
         return []
 
 
+def bind_tracking_session(worker, session) -> None:
+    """Install a test session the way the lifecycle replaces an idle one."""
+    lifecycle = worker.tracking_lifecycle
+    with lifecycle.lifecycle_lock:
+        assert not lifecycle.current().running(), "cannot replace an active tracking session"
+        lifecycle._session = session
+
+
 def make_worker(
     camera: CameraConfig,
     storage_dir: Path,
@@ -385,7 +393,7 @@ class CameraWorkerTest(unittest.TestCase):
             )
             tracking = Mock()
             tracking.stop.return_value = True
-            worker.tracking_lifecycle.bind_for_compatibility(tracking)
+            bind_tracking_session(worker, tracking)
             worker._stop.clear()
 
             worker.pause_object_tracking_session()
@@ -805,7 +813,7 @@ class CameraWorkerTest(unittest.TestCase):
             previous.stop.return_value = True
             replacement = Mock()
             replacement.config = ObjectTrackingConfig(sample_fps=3.0)
-            worker.tracking_lifecycle.bind_for_compatibility(previous)
+            bind_tracking_session(worker, previous)
             worker._stop.clear()
             worker.tracking_frames.frames.extend([
                 (1.0, np.zeros((2, 2, 3), dtype=np.uint8)),
@@ -833,7 +841,7 @@ class CameraWorkerTest(unittest.TestCase):
             previous = Mock()
             previous.stop.return_value = False
             replacement = Mock()
-            worker.tracking_lifecycle.bind_for_compatibility(previous)
+            bind_tracking_session(worker, previous)
 
             with self.assertRaisesRegex(RuntimeError, "did not stop"):
                 worker.replace_object_tracking_session(replacement)
@@ -853,7 +861,7 @@ class CameraWorkerTest(unittest.TestCase):
             replacement.config = ObjectTrackingConfig(sample_fps=2.0)
             replacement.set_accepting.side_effect = RuntimeError("accept failed")
             replacement.stop.side_effect = RuntimeError("cleanup failed")
-            worker.tracking_lifecycle.bind_for_compatibility(previous)
+            bind_tracking_session(worker, previous)
             worker._stop.clear()
 
             with self.assertRaisesRegex(RuntimeError, "accept failed"):

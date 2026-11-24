@@ -68,7 +68,7 @@ class EventApiSerializationTest(unittest.TestCase):
             config=AppConfig(base_path="/survng"),
         )
         with patch.object(main, "manager", active):
-            response = main.semantic_search(SemanticSearchRequest(query="red car"))
+            response = main._semantic_route_bundle.handlers["semantic_search"](SemanticSearchRequest(query="red car"))
 
         self.assertEqual(response["count"], 1)
         self.assertEqual(response["results"][0]["score"], 0.91)
@@ -152,7 +152,7 @@ class EventApiSerializationTest(unittest.TestCase):
             appearance_index=appearance_index,
         )
         with patch.object(main, "manager", active_manager):
-            response = main.event_appearance_matches(
+            response = main._appearance_route_bundle.handlers["event_appearance_matches"](
                 7,
                 hours=1000,
                 limit=500,
@@ -216,7 +216,7 @@ class EventApiSerializationTest(unittest.TestCase):
                 return_value={"id": "incident-gate-8", "representative_event_id": 8},
             ),
         ):
-            response = main.event_related_incidents(7)
+            response = main._appearance_route_bundle.handlers["event_related_incidents"](7)
 
         self.assertEqual(response["configured_routes"], 1)
         self.assertEqual(response["matches"][0]["relation_type"], "expected_route")
@@ -282,7 +282,7 @@ class EventApiSerializationTest(unittest.TestCase):
             patch.object(main, "manager", active_manager),
             patch.object(main.INCIDENT_QUERIES, "resolve_event", side_effect=resolve_event),
         ):
-            response = main.event_related_incidents(7)
+            response = main._appearance_route_bundle.handlers["event_related_incidents"](7)
 
         self.assertEqual([match["event_id"] for match in response["matches"]], [8])
         self.assertEqual(response["matches"][0]["incident_id"], "incident-front-door-8")
@@ -298,7 +298,7 @@ class EventApiSerializationTest(unittest.TestCase):
             patch.object(main, "manager", active_manager),
             patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=expected) as resolve,
         ):
-            response = main.incident_for_event(7)
+            response = main._incident_query_bundle.handlers["incident_for_event"](7)
 
         self.assertEqual(response, expected)
         resolve.assert_called_once_with(active_manager, 7)
@@ -309,7 +309,7 @@ class EventApiSerializationTest(unittest.TestCase):
             patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=None),
             self.assertRaises(HTTPException) as raised,
         ):
-            main.incident_for_event(999)
+            main._incident_query_bundle.handlers["incident_for_event"](999)
 
         self.assertEqual(raised.exception.status_code, 404)
 
@@ -669,7 +669,7 @@ class EventApiSerializationTest(unittest.TestCase):
         telemetry.lifecycle_events.assert_not_called()
 
     def test_object_tracking_catalog_exposes_safe_production_backends(self) -> None:
-        catalog = main.object_tracking_catalog()
+        catalog = main._system_route_bundle.handlers["object_tracking_catalog"]()
         implementations = {
             item["id"]: item for item in catalog["implementations"]
         }
@@ -729,7 +729,7 @@ class EventApiSerializationTest(unittest.TestCase):
             )
 
             with patch.object(main, "manager", active_manager), patch.object(main, "config", active_config):
-                response = main.detect_event_snapshot(7)
+                response = main._detection_route_bundle.handlers["detect_event_snapshot"](7)
 
             self.assertEqual(response["object_count"], 1)
             events.replace_detected_objects.assert_called_once()
@@ -985,7 +985,7 @@ class EventApiSerializationTest(unittest.TestCase):
                 patch.object(SystemTelemetryService, "system_status", return_value={}),
                 patch.object(main.asyncio, "to_thread", new=inline_to_thread),
             ):
-                response = await main.application_event_stream(Request())
+                response = await main._system_route_bundle.handlers["application_event_stream"](Request())
                 iterator = response.body_iterator
                 return [await anext(iterator) for _ in range(5)]
 
@@ -997,7 +997,7 @@ class EventApiSerializationTest(unittest.TestCase):
 
     def test_face_crop_rejects_non_finite_padding_before_storage_access(self) -> None:
         with self.assertRaises(HTTPException) as invalid:
-            main.face_crop(1, padding=float("nan"))
+            main._face_route_bundle.handlers["face_crop"](1, padding=float("nan"))
 
         self.assertEqual(invalid.exception.status_code, 422)
 
@@ -1005,7 +1005,7 @@ class EventApiSerializationTest(unittest.TestCase):
         for aspect_w, aspect_h in ((float("nan"), 9.0), (16.0, float("inf"))):
             with self.subTest(aspect_w=aspect_w, aspect_h=aspect_h):
                 with self.assertRaises(HTTPException) as invalid:
-                    main.event_thumbnail(
+                    main._appearance_route_bundle.handlers["event_thumbnail"](
                         1,
                         object_focus=True,
                         aspect_w=aspect_w,
@@ -1027,9 +1027,9 @@ class EventApiSerializationTest(unittest.TestCase):
             )
 
             with patch.object(main, "manager", fake_manager):
-                first = main.event_thumbnail(1, width=320, quality=80)
+                first = main._appearance_route_bundle.handlers["event_thumbnail"](1, width=320, quality=80)
                 with patch.object(cv2, "imread", side_effect=AssertionError("cache miss")):
-                    second = main.event_thumbnail(1, width=320, quality=80)
+                    second = main._appearance_route_bundle.handlers["event_thumbnail"](1, width=320, quality=80)
 
             cached = cv2.imread(str(first.path))
             self.assertIsNotNone(cached)
@@ -1050,7 +1050,7 @@ class EventApiSerializationTest(unittest.TestCase):
             )
 
             with patch.object(main, "manager", fake_manager):
-                response = main.event_thumbnail(1, width=9000, quality=100)
+                response = main._appearance_route_bundle.handlers["event_thumbnail"](1, width=9000, quality=100)
 
             cached = cv2.imread(str(response.path))
             self.assertIsNotNone(cached)
@@ -1083,8 +1083,8 @@ class EventApiSerializationTest(unittest.TestCase):
             )
 
             with patch.object(main, "manager", fake_manager):
-                full = main.event_thumbnail(1, width=640, quality=90)
-                focused = main.event_thumbnail(1, width=640, quality=90, object_focus=True, zoom=1.0)
+                full = main._appearance_route_bundle.handlers["event_thumbnail"](1, width=640, quality=90)
+                focused = main._appearance_route_bundle.handlers["event_thumbnail"](1, width=640, quality=90, object_focus=True, zoom=1.0)
 
             full_image = cv2.imread(str(full.path))
             focused_image = cv2.imread(str(focused.path))
@@ -1116,8 +1116,8 @@ class EventApiSerializationTest(unittest.TestCase):
             )
 
             with patch.object(main, "manager", fake_manager):
-                full = main.event_thumbnail(1, width=640, quality=90)
-                focused = main.event_thumbnail(
+                full = main._appearance_route_bundle.handlers["event_thumbnail"](1, width=640, quality=90)
+                focused = main._appearance_route_bundle.handlers["event_thumbnail"](
                     1,
                     width=640,
                     quality=90,
@@ -1125,7 +1125,7 @@ class EventApiSerializationTest(unittest.TestCase):
                     aspect_w=16,
                     aspect_h=11,
                 )
-                tight = main.event_thumbnail(
+                tight = main._appearance_route_bundle.handlers["event_thumbnail"](
                     1,
                     width=640,
                     quality=90,
@@ -1222,8 +1222,8 @@ class EventApiSerializationTest(unittest.TestCase):
             )
 
             with patch.object(main, "manager", fake_manager):
-                inline = main.event_snapshot(1)
-                downloaded = main.event_snapshot(1, download=True)
+                inline = main._appearance_route_bundle.handlers["event_snapshot"](1)
+                downloaded = main._appearance_route_bundle.handlers["event_snapshot"](1, download=True)
 
             self.assertEqual(inline.media_type, "image/webp")
             self.assertNotIn("content-disposition", inline.headers)
@@ -1247,9 +1247,9 @@ class EventApiSerializationTest(unittest.TestCase):
             )
 
             with patch.object(main, "manager", fake_manager):
-                first = main.face_crop(7, padding=0.2)
+                first = main._face_route_bundle.handlers["face_crop"](7, padding=0.2)
                 with patch.object(cv2, "imread", side_effect=AssertionError("cache miss")):
-                    second = main.face_crop(7, padding=0.2)
+                    second = main._face_route_bundle.handlers["face_crop"](7, padding=0.2)
 
             crop = cv2.imread(str(first.path))
             self.assertIsNotNone(crop)
@@ -1258,7 +1258,7 @@ class EventApiSerializationTest(unittest.TestCase):
 
     def test_incident_search_rejects_unsafe_timezone_paths(self) -> None:
         with self.assertRaises(HTTPException) as invalid:
-            main.incident_search(time_zone="../../etc/passwd")
+            main._incident_query_bundle.handlers["incident_search"](time_zone="../../etc/passwd")
 
         self.assertEqual(invalid.exception.status_code, 422)
 
@@ -1438,7 +1438,7 @@ class EventApiSerializationTest(unittest.TestCase):
         )
 
         with patch.object(main, "manager", fake_manager):
-            detail = main.incident_detail("7")
+            detail = main._incident_query_bundle.handlers["incident_detail"]("7")
 
         self.assertEqual(detail["camera_id"], "gate")
         self.assertEqual(detail["representative_event_id"], 7)
@@ -1453,7 +1453,7 @@ class EventApiSerializationTest(unittest.TestCase):
         fake_manager = SimpleNamespace(events=SimpleNamespace(scene_incident=lambda event_id: next((_incident_row(row["camera_id"], [_event_row(row)]) for row in rows if row["id"] == event_id), None)))
 
         with patch.object(main, "manager", fake_manager), self.assertRaises(HTTPException) as invalid:
-            main.incident_detail("1,2")
+            main._incident_query_bundle.handlers["incident_detail"]("1,2")
 
         self.assertEqual(invalid.exception.status_code, 422)
 

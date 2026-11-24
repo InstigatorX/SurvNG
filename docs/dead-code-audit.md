@@ -1,5 +1,7 @@
 # Dead-code audit
 
+> Superseded in part by [the 2026-11 cleanup](dead-code-cleanup-2026-11.md), which removed several items retained here.
+
 Audited commit: `f29de45`. This is the original report-only audit, preserved as a historical inventory. See [the cleanup campaign](dead-code-cleanup.md) for subsequent removals, retained candidates, and validation.
 
 ## Scope and method

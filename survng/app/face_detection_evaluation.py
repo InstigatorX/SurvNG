@@ -7,7 +7,6 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .face_detection import parse_ssd_face_detections
 from .face_detection_geometry import box_tuple
 
 
@@ -461,6 +460,3 @@ def validate_ir_contract(model_path: Path) -> dict[str, Any]:
         "parser_check": "ssd-7",
     }
 
-
-def detections_from_ssd(raw: Any, width: int, height: int, threshold: float) -> list[Detection]:
-    return parse_ssd_face_detections(raw, width, height, threshold)
