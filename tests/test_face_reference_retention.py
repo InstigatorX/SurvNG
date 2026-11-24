@@ -210,8 +210,12 @@ def test_prune_removes_cross_event_duplicate_tree_and_owned_crops(tmp_path):
     legacy.write_bytes(b"event-owned")
     source = observation(faces, 1, path=legacy.name, vector=[1, 0])
     hidden = observation(faces, 2, vector=[1, 0])
+    # Rows linked by the retired exact-embedding dedupe can remain on installs.
     with faces._connect() as connection:
-        assert faces._mark_exact_embedding_duplicate_locked(connection, hidden) == source
+        connection.execute(
+            "update face_observations set canonical = 0, duplicate_of_observation_id = ? where id = ?",
+            (source, hidden),
+        )
     crop = tmp_path / "crop.jpg"
     crop.write_bytes(b"crop")
     temporal = observation(faces, 3, path=crop.name, canonical=0, duplicate_of=hidden, track="track")

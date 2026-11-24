@@ -462,21 +462,6 @@ class FaceStorePeopleMixin:
             "applied": bool(apply and improved),
         }
 
-    def optimize_all_galleries(
-        self,
-        *,
-        max_references: int = 8,
-        apply: bool = False,
-    ) -> list[dict[str, Any]]:
-        return [
-            self.optimize_person_gallery(
-                int(person["id"]),
-                max_references=max_references,
-                apply=apply,
-            )
-            for person in self.people()
-        ]
-
     def person_representation(
         self,
         person_id: int,
@@ -778,19 +763,6 @@ class FaceStorePeopleMixin:
             "added": max(0, after - before),
             "selected_observation_ids": selected_ids,
         }
-
-    def people_representation_health(self) -> list[dict[str, Any]]:
-        results = []
-        for person in self.people():
-            results.append(self.person_representation(int(person["id"])))
-        results.sort(
-            key=lambda item: (
-                0 if item.get("flags") else 1,
-                int(item.get("sample_count") or 0),
-                str(item.get("name") or ""),
-            )
-        )
-        return results
 
     def person_history(
         self,
