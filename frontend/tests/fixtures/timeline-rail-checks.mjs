@@ -217,7 +217,9 @@ export async function checks({ open, shot, query, at, assert }) {
   await mobile.mouse.move(box.x + box.width / 2, box.y + box.height * 0.3);
   await mobile.mouse.down();
   await mobile.mouse.move(box.x + box.width / 2, box.y + box.height * 0.6, { steps: 6 });
-  await mobile.waitForSelector(".edge-rail-loupe img");
+  await mobile.waitForSelector(".edge-rail-loupe");
+  // The scrubbed frame is shown in the player, so the loupe carries only the time.
+  assert.equal(await mobile.locator(".edge-rail-loupe img").count(), 0, "the loupe shows no image of its own");
   await shot(mobile, "mobile-loupe");
   await mobile.mouse.up();
   assert.equal(await mobile.locator(".edge-rail-loupe").count(), 0, "the loupe closes on release");

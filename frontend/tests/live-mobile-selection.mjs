@@ -1,8 +1,9 @@
 // Run against PREVIEW_CAMERA_COUNT=20 node tools/camera-workspace-preview.mjs.
+// browser-test: preview-server PREVIEW_CAMERA_COUNT=20
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
 
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH });
 try {
   const context = await browser.newContext({
     viewport: { width: 390, height: 844 },

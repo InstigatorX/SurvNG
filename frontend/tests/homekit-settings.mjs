@@ -56,7 +56,7 @@ try {
   await server.listen();
   const port = server.httpServer.address().port;
   const url = `http://127.0.0.1:${port}/${directory.split("/").at(-1)}/index.html`;
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1200 } });
   const pageErrors = [];
   page.on("pageerror", error => pageErrors.push(error.message));

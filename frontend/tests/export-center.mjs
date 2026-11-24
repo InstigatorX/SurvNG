@@ -1,7 +1,8 @@
+// browser-test: live-survng
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
 
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH });
 try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const cameras = [
