@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 import tempfile
 import struct
 import unittest
@@ -11,6 +13,7 @@ from unittest.mock import Mock, patch
 from fastapi import HTTPException
 
 from survng.app import main
+from survng.app.media_sessions import MediaResourceClass
 from survng.app.incident_presenter import _event_row, _incident_row, _recording_grid_incident_payload
 from survng.app.recording_mp4 import offset_fmp4_timestamps
 from survng.app.recording_routes import (
@@ -573,6 +576,382 @@ class RecordingApiTest(unittest.TestCase):
             self.assertEqual(before_input[before_input.index("-filter_threads") + 1], "1")
             self.assertEqual(after_input[after_input.index("-threads:v") + 1], "1")
             self.assertIn(str(manager.database_dir / "recording-preview-cache"), str(first))
+
+    def test_recording_preview_strip_holds_one_frame_a_second_and_is_built_once(self) -> None:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            self.skipTest("ffmpeg unavailable")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            recordings_dir = root / "recordings"
+            recordings_dir.mkdir()
+            source_path = recordings_dir / "segment.mp4"
+            # 4.5 s, a keyframe every 2 s: frames exist for seconds 0 to 4.
+            subprocess.run([
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                "testsrc2=size=160x120:rate=10:duration=4.5", "-c:v", "libx264", "-g", "20",
+                "-bf", "0", "-y", str(source_path),
+            ], check=True, capture_output=True, timeout=60)
+            manager = SimpleNamespace(
+                database_dir=root / "database",
+                recorder=SimpleNamespace(recordings_dir=recordings_dir),
+                config=SimpleNamespace(ffmpeg_path=ffmpeg),
+            )
+            row = {"path": str(source_path), "start_epoch": 100.0, "end_epoch": 104.5}
+            runtime = main._recording_media_runtime
+            real_run = subprocess.run
+            with (
+                patch.object(main, "manager", manager),
+                patch("survng.app.recording_media_runtime.subprocess.run", side_effect=real_run) as run,
+                patch.object(runtime, "_maintain_recording_preview_cache"),
+                # The CPU path; the GPU has its own test.
+                patch.object(runtime, "_hardware_acceleration_mode", return_value="off"),
+            ):
+                strip, layout = runtime._recording_preview_strip(row, width=160)
+                again, cached_layout = runtime._recording_preview_strip(row, width=160)
+                small_command = run.call_args_list[0].args[0]
+                # A large frame costs most of its time in the decoder: only
+                # its keyframes are decoded, and the grid has the same tiles.
+                with patch(
+                    "survng.app.recording_media_runtime.mp4_video_dimensions",
+                    return_value=(2560, 1920),
+                ):
+                    _wide, wide_layout = runtime._recording_preview_strip(row, width=200)
+                large_command = run.call_args_list[-1].args[0]
+
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual((again, cached_layout), (strip, layout))
+            self.assertEqual(
+                layout,
+                {
+                    "count": 5, "columns": 6, "rows": 2, "step_seconds": 1,
+                    "keyframes_only": False, "hardware": False,
+                },
+            )
+            self.assertNotIn("-skip_frame", small_command)
+            self.assertEqual(large_command[large_command.index("-skip_frame") + 1], "nokey")
+            self.assertLess(large_command.index("-skip_frame"), large_command.index("-i"))
+            self.assertEqual(wide_layout["count"], 5)
+            self.assertTrue(wide_layout["keyframes_only"])
+            # Bounded decoder threads, as for every other recorded-frame read.
+            before_input = small_command[:small_command.index("-i")]
+            self.assertEqual(before_input[before_input.index("-threads:v") + 1], "2")
+            import cv2
+
+            image = cv2.imread(str(strip))
+            # Six tiles of 160x120 across, two rows; unused tiles are blank.
+            self.assertEqual(image.shape[:2], (240, 960))
+            tiles = [image[0:120, index * 160:(index + 1) * 160] for index in range(6)]
+            self.assertTrue(all(float(tile.mean()) > 20 for tile in tiles[:5]))
+            self.assertLess(float(tiles[5].mean()), 5)
+            # testsrc2 moves: consecutive seconds are different pictures.
+            self.assertGreater(float(cv2.absdiff(tiles[0], tiles[1]).mean()), 1.0)
+            self.assertIn(str(manager.database_dir / "recording-preview-cache"), str(strip))
+
+    def _strip_fixture(self, root: Path, name: str, lavfi: str, *extra: str) -> Path:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            self.skipTest("ffmpeg unavailable")
+        recordings_dir = root / "recordings"
+        recordings_dir.mkdir(exist_ok=True)
+        source_path = recordings_dir / name
+        subprocess.run([
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", lavfi,
+            "-c:v", "libx264", "-qp", "0", "-g", "20", "-bf", "0", "-pix_fmt", "yuv420p",
+            *extra, "-y", str(source_path),
+        ], check=True, capture_output=True, timeout=120)
+        return source_path
+
+    def _strip_manager(self, root: Path) -> SimpleNamespace:
+        return SimpleNamespace(
+            database_dir=root / "database",
+            recorder=SimpleNamespace(recordings_dir=root / "recordings"),
+            config=SimpleNamespace(ffmpeg_path=shutil.which("ffmpeg")),
+        )
+
+    @staticmethod
+    def _tile_seconds(strip: Path, layout: dict, tile_width: int = 160, tile_height: int = 120) -> list[float]:
+        """The source second each tile shows, from a clip whose brightness is its time."""
+        import cv2
+
+        image = cv2.imread(str(strip), 0)
+        seconds = []
+        for index in range(layout["count"]):
+            x = (index % layout["columns"]) * tile_width
+            y = (index // layout["columns"]) * tile_height
+            seconds.append(round((float(image[y:y + tile_height, x:x + tile_width].mean()) - 20) / 40, 1))
+        return seconds
+
+    def test_recording_preview_strip_tiles_show_the_frame_at_their_own_second(self) -> None:
+        # Brightness encodes time: luma = 20 + 40 * seconds.
+        clock = "color=c=black:size=160x120:rate=10:duration=4.5,format=gray,geq=lum='T*40+20'"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            plain = self._strip_fixture(root, "plain.mp4", clock)
+            # The same video starting 0.3 s into the file, as when audio
+            # arrives before the first video keyframe.
+            late = root / "recordings" / "late.mp4"
+            subprocess.run([
+                shutil.which("ffmpeg"), "-hide_banner", "-loglevel", "error", "-itsoffset", "0.3",
+                "-i", str(plain), "-f", "lavfi", "-i", "sine=frequency=440:duration=4.8",
+                "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-y", str(late),
+            ], check=True, capture_output=True, timeout=120)
+            manager = self._strip_manager(root)
+            runtime = main._recording_media_runtime
+
+            def strip(path: Path, end: float, *, large: bool = False):
+                row = {"path": str(path), "start_epoch": 100.0, "end_epoch": end}
+                dimensions = (2560, 1920) if large else (160, 120)
+                with (
+                    patch.object(main, "manager", manager),
+                    patch.object(runtime, "_maintain_recording_preview_cache"),
+                    patch.object(runtime, "_hardware_acceleration_mode", return_value="off"),
+                    patch("survng.app.recording_media_runtime.mp4_video_dimensions", return_value=dimensions),
+                ):
+                    # A width of its own: the cache does not know how a
+                    # strip was decoded, which a real file never changes.
+                    # Tiles are never wider than the 160 px source.
+                    path, layout = runtime._recording_preview_strip(row, width=200 if large else 160)
+                return self._tile_seconds(path, layout)
+
+            # Tile i is the last frame at or before second i, not one from
+            # the second after it.
+            for shown, second in zip(strip(plain, 104.5), range(5), strict=True):
+                self.assertAlmostEqual(shown, second, delta=0.15)
+            # Keyframes only (every 2 s): the keyframe before each second.
+            for shown, keyframe in zip(strip(plain, 104.5, large=True), (0, 0, 2, 2, 4), strict=True):
+                self.assertAlmostEqual(shown, keyframe, delta=0.15)
+            # A late video track does not shift the tiles: tile 0 has the
+            # first frame there is, tile i the frame at or before file
+            # second i (video time i - 0.3).
+            shown = strip(late, 104.8)
+            self.assertAlmostEqual(shown[0], 0.0, delta=0.15)
+            for index in range(1, len(shown)):
+                self.assertAlmostEqual(shown[index], index - 0.3, delta=0.15)
+            self.assertEqual(len(shown), 5)
+
+    def test_recording_preview_strip_thins_a_long_segment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = self._strip_fixture(root, "long.mp4", "testsrc2=size=160x120:rate=2:duration=150")
+            manager = self._strip_manager(root)
+            runtime = main._recording_media_runtime
+            row = {"path": str(source), "start_epoch": 100.0, "end_epoch": 250.0}
+            with (
+                patch.object(main, "manager", manager),
+                patch.object(runtime, "_maintain_recording_preview_cache"),
+                patch.object(runtime, "_hardware_acceleration_mode", return_value="off"),
+            ):
+                _path, layout = runtime._recording_preview_strip(row, width=160)
+            # 150 s at one tile every 3 s: 50 tiles, never one a second.
+            self.assertEqual(layout["step_seconds"], 3)
+            self.assertEqual(layout["count"], 50)
+            self.assertGreaterEqual(layout["columns"] * layout["rows"], layout["count"])
+
+    def test_recording_preview_strip_releases_its_session_and_spares_transcodes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = self._strip_fixture(root, "segment.mp4", "testsrc2=size=160x120:rate=10:duration=2")
+            manager = self._strip_manager(root)
+            requests: list = []
+            entered: list[str] = []
+
+            class Lease:
+                def __enter__(self):
+                    entered.append("enter")
+                    return self
+
+                def __exit__(self, *_exc):
+                    entered.append("exit")
+                    return False
+
+            def acquire(request, **_kwargs):
+                requests.append(request)
+                return Lease()
+
+            manager.media_sessions = SimpleNamespace(acquire=acquire)
+            runtime = main._recording_media_runtime
+            row = {"path": str(source), "start_epoch": 100.0, "end_epoch": 102.0}
+
+            def strip(width: int):
+                with (
+                    patch.object(main, "manager", manager),
+                    patch.object(runtime, "_maintain_recording_preview_cache"),
+                    patch.object(runtime, "_hardware_acceleration_mode", return_value="off"),
+                ):
+                    return runtime._recording_preview_strip(row, width=width)
+
+            strip(160)
+            # A resource of its own: not a transcode slot (two strips at once
+            # would take both, and event clips, exports and HomeKit share
+            # those), and not a JPEG encoder, which live MJPEG streams hold.
+            self.assertEqual(dict(requests[0].resources), {MediaResourceClass.PREVIEW_PROCESS: 1})
+            self.assertEqual(entered, ["enter", "exit"])
+            # A build that fails still gives the session and the build slot back.
+            entered.clear()
+            with patch(
+                "survng.app.recording_media_runtime.subprocess.run",
+                side_effect=OSError("cannot start ffmpeg"),
+            ), self.assertRaises(HTTPException) as failed:
+                strip(200)
+            self.assertEqual(failed.exception.status_code, 500)
+            self.assertEqual(entered, ["enter", "exit"])
+            # A failure before the session is taken leaves none behind: a
+            # session that is taken and never entered is never released.
+            entered.clear()
+            taken = len(requests)
+            with patch.object(Path, "mkdir", side_effect=OSError("read-only")), self.assertRaises(OSError):
+                strip(240)
+            self.assertEqual(entered, [])
+            self.assertEqual(len(requests), taken)
+            self.assertTrue(runtime.recording_strip_build_limiter.acquire(blocking=False))
+            self.assertTrue(runtime.recording_strip_build_limiter.acquire(blocking=False))
+            runtime.recording_strip_build_limiter.release()
+            runtime.recording_strip_build_limiter.release()
+
+    def test_recording_preview_strip_uses_the_gpu_for_large_frames_and_falls_back(self) -> None:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            self.skipTest("ffmpeg unavailable")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            recordings_dir = root / "recordings"
+            recordings_dir.mkdir()
+            source_path = recordings_dir / "segment.mp4"
+            subprocess.run([
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                "testsrc2=size=160x120:rate=10:duration=3", "-c:v", "libx264", "-g", "10",
+                "-bf", "0", "-y", str(source_path),
+            ], check=True, capture_output=True, timeout=60)
+            manager = SimpleNamespace(
+                database_dir=root / "database",
+                recorder=SimpleNamespace(recordings_dir=recordings_dir),
+                config=SimpleNamespace(ffmpeg_path=ffmpeg),
+            )
+            row = {"path": str(source_path), "start_epoch": 100.0, "end_epoch": 103.0}
+            runtime = main._recording_media_runtime
+            real_run = subprocess.run
+            commands: list[list[str]] = []
+
+            def run(command, **kwargs):
+                commands.append(list(command))
+                if "-hwaccel" in command:
+                    # No such device here: what a GPU that cannot be opened does.
+                    return SimpleNamespace(returncode=1, stderr=b"Failed to initialise VAAPI connection")
+                return real_run(command, **kwargs)
+
+            def strip(width: int, mode: str = "auto") -> dict:
+                with (
+                    patch.object(main, "manager", manager),
+                    patch("survng.app.recording_media_runtime.subprocess.run", side_effect=run),
+                    patch.object(runtime, "_maintain_recording_preview_cache"),
+                    patch.object(runtime, "_hardware_acceleration_mode", return_value=mode),
+                    patch.object(
+                        runtime, "_ffmpeg_vaapi_info",
+                        return_value={"available": True, "device": "/dev/dri/renderD128"},
+                    ),
+                    patch(
+                        "survng.app.recording_media_runtime.mp4_video_dimensions",
+                        return_value=(2560, 1920),
+                    ),
+                ):
+                    return runtime._recording_preview_strip(row, width=width)[1]
+
+            self.addCleanup(setattr, runtime, "recording_strip_hardware_retry_at", 0.0)
+            runtime.recording_strip_hardware_retry_at = 0.0
+            with self.assertLogs("survng.app.recording_media_runtime", level="WARNING"):
+                first = strip(160)
+            # The GPU was tried, with the frames scaled there, then the CPU.
+            self.assertEqual(len(commands), 2)
+            hardware_command, cpu_command = commands
+            self.assertEqual(hardware_command[hardware_command.index("-hwaccel") + 1], "vaapi")
+            self.assertEqual(hardware_command[hardware_command.index("-vaapi_device") + 1], "/dev/dri/renderD128")
+            self.assertLess(hardware_command.index("-hwaccel"), hardware_command.index("-i"))
+            self.assertIn("-skip_frame", hardware_command)
+            hardware_filter = hardware_command[hardware_command.index("-vf") + 1]
+            self.assertIn("scale_vaapi=w=160:h=-2", hardware_filter)
+            self.assertLess(hardware_filter.index("hwdownload"), hardware_filter.index("showinfo@strip"))
+            self.assertNotIn("-hwaccel", cpu_command)
+            self.assertEqual(first["count"], 3)
+            self.assertFalse(first["hardware"])
+            # A GPU that just failed is not tried again for every strip.
+            commands.clear()
+            self.assertFalse(strip(200)["hardware"])
+            self.assertEqual(len(commands), 1)
+            self.assertNotIn("-hwaccel", commands[0])
+            # Hardware turned off in the configuration is never tried.
+            runtime.recording_strip_hardware_retry_at = 0.0
+            commands.clear()
+            strip(240, mode="off")
+            self.assertEqual(len(commands), 1)
+            self.assertNotIn("-hwaccel", commands[0])
+
+            # A GPU build that cannot even start falls back the same way.
+            def unstartable(command, **kwargs):
+                commands.append(list(command))
+                if "-hwaccel" in command:
+                    raise OSError("cannot allocate memory")
+                return real_run(command, **kwargs)
+
+            def gpu_strip(width: int, side_effect, dimensions=(2560, 1920)) -> dict:
+                with (
+                    patch.object(main, "manager", manager),
+                    patch("survng.app.recording_media_runtime.subprocess.run", side_effect=side_effect),
+                    patch.object(runtime, "_maintain_recording_preview_cache"),
+                    patch.object(runtime, "_hardware_acceleration_mode", return_value="auto"),
+                    patch.object(
+                        runtime, "_ffmpeg_vaapi_info",
+                        return_value={"available": True, "device": "/dev/dri/renderD128"},
+                    ),
+                    patch("survng.app.recording_media_runtime.mp4_video_dimensions", return_value=dimensions),
+                ):
+                    return runtime._recording_preview_strip(row, width=width)[1]
+
+            runtime.recording_strip_hardware_retry_at = 0.0
+            commands.clear()
+            with self.assertLogs("survng.app.recording_media_runtime", level="WARNING"):
+                layout = gpu_strip(260, unstartable)
+            self.assertEqual(len(commands), 2)
+            self.assertEqual(layout["count"], 3)
+            self.assertFalse(layout["hardware"])
+            # A frame of unknown size is not sent to the GPU: its scaler
+            # would be told a width with nothing to compare it to.
+            runtime.recording_strip_hardware_retry_at = 0.0
+            commands.clear()
+            layout = gpu_strip(300, run, dimensions=None)
+            self.assertEqual(len(commands), 1)
+            self.assertNotIn("-hwaccel", commands[0])
+            self.assertTrue(layout["keyframes_only"])
+
+            # A GPU that hangs is cut short, and the CPU still makes the strip.
+            def hung(command, **kwargs):
+                commands.append(list(command))
+                if "-hwaccel" in command:
+                    raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+                return real_run(command, **kwargs)
+
+            run_before = run
+            runtime.recording_strip_hardware_retry_at = 0.0
+            commands.clear()
+            with (
+                patch.object(main, "manager", manager),
+                patch("survng.app.recording_media_runtime.subprocess.run", side_effect=hung) as hung_run,
+                patch.object(runtime, "_maintain_recording_preview_cache"),
+                patch.object(runtime, "_hardware_acceleration_mode", return_value="auto"),
+                patch.object(
+                    runtime, "_ffmpeg_vaapi_info",
+                    return_value={"available": True, "device": "/dev/dri/renderD128"},
+                ),
+                patch("survng.app.recording_media_runtime.mp4_video_dimensions", return_value=(2560, 1920)),
+                self.assertLogs("survng.app.recording_media_runtime", level="WARNING"),
+            ):
+                layout = runtime._recording_preview_strip(row, width=280)[1]
+            self.assertIs(run_before, run)
+            self.assertEqual(len(commands), 2)
+            self.assertLess(hung_run.call_args_list[0].kwargs["timeout"], 10)
+            self.assertEqual(layout["count"], 3)
+            self.assertFalse(layout["hardware"])
+            self.assertGreater(runtime.recording_strip_hardware_retry_at, 0.0)
 
     def test_recording_preview_can_extract_an_exact_display_frame(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

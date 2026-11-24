@@ -11,7 +11,7 @@ function functionsBetween(first, next) {
   return source.slice(start, end);
 }
 function gestureHarness() {
-  const seeks = [], pans = [], previews = [], drafts = [];
+  const seeks = [], pans = [], previews = [], drafts = [], scrubEnds = [];
   const captures = new Set();
   const target = {
     getBoundingClientRect: () => ({ left: 10, width: 360 }),
@@ -24,23 +24,23 @@ function gestureHarness() {
     dragRef: { current: null }, draftRef: { current: 1200 },
     previewHideTimerRef: { current: null }, previewTimerRef: { current: null },
     ignoreInputCommitRef: { current: 0 }, performance,
-    previewManifestUrl: "", prefersJpegScrubPreview: () => true,
-    window: { clearTimeout() {} }, setLocalPreviewEnabled() {},
+    window: { clearTimeout() {} },
     setDraft: value => drafts.push(value), setScrubbing() {}, hidePreviewAfterDelay() {},
     schedulePreview: value => previews.push(value),
+    stripsEnabled: false, endScrub: committed => scrubEnds.push(committed),
     onSeek: epoch => seeks.push(epoch), onPanViewport: delta => pans.push(delta),
   });
   vm.runInContext(functionsBetween("updateDraft", "exportEpochAtPointer"), context);
   const event = (clientX, pointerType = "touch", pointerId = 1) => ({
     currentTarget: target, clientX, pointerType, pointerId, preventDefault() {},
   });
-  return { context, seeks, pans, previews, drafts, captures, event };
+  return { context, seeks, pans, previews, drafts, scrubEnds, captures, event };
 }
 
 // Pointer capture allows a swipe to continue beyond the visible track. The
 // resulting pan must exceed the original hour without moving playback.
 {
-  const { context, seeks, pans, previews, captures, event } = gestureHarness();
+  const { context, seeks, pans, previews, scrubEnds, captures, event } = gestureHarness();
   context.startDrag(event(310));
   context.moveDrag(event(250));
   context.moveDrag(event(70));
@@ -49,6 +49,8 @@ function gestureHarness() {
   assert.ok(pans.reduce((sum, delta) => sum + delta, 0) > 3600);
   assert.deepEqual(seeks, []);
   assert.deepEqual(previews, [], "viewport browsing should not load scrub previews");
+  // A drag that did not seek takes the scrubbed frame off the player at once.
+  assert.deepEqual(scrubEnds, [false]);
   assert.equal(context.dragRef.current, null);
   assert.equal(captures.size, 0);
 }
@@ -64,24 +66,27 @@ for (const jitter of [0, 3, -3]) {
 }
 
 for (const mode of ["touch", "mouse"]) {
-  const { context, seeks, captures, drafts, event } = gestureHarness();
+  const { context, seeks, captures, drafts, scrubEnds, event } = gestureHarness();
   context.startDrag(event(100, mode));
   context.moveDrag(event(200, mode));
   context.finishDrag(event(200, mode), true);
   assert.deepEqual(seeks, [], `cancelled ${mode} gesture must not commit a seek`);
+  assert.deepEqual(scrubEnds, [false]);
   assert.equal(drafts.at(-1), 1200);
   assert.equal(captures.size, 0);
 }
 
 // Touch drags on the playhead fine scrub without moving the viewport.
 {
-  const { context, seeks, pans, previews, event } = gestureHarness();
+  const { context, seeks, pans, previews, scrubEnds, event } = gestureHarness();
   context.startDrag(event(130)); // current playhead at 1200 seconds / 3600
   context.moveDrag(event(175));
   context.finishDrag(event(175));
   assert.deepEqual(pans, [], "grabbing the playhead must scrub, not pan");
   assert.deepEqual(seeks, [21600 + 1245], "fine scrubbing moves one second per pixel");
   assert.ok(previews.length > 0);
+  // Released on a seek: the scrubbed frame stays until the player gets there.
+  assert.deepEqual(scrubEnds, [true]);
 }
 
 {

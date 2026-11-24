@@ -90,6 +90,7 @@ class RecordingRouteDependencies:
     event_clip_window: Callable[..., tuple[float, float]]
     ensure_event_clip: Callable[..., Path]
     manager_lock: threading.RLock | None = None
+    recording_preview_strip: Callable[..., tuple[Path, dict]] | None = None
     manager_access: ManagerAccessCoordinator | None = None
     encoded_fragment_source: (
         Callable[[Any], EncodedFragmentSource] | None
@@ -198,6 +199,11 @@ def _recording_segment_seconds(
             10.0,
         )
     )
+
+
+# How far either side of a time with no recording a preview-strip request
+# looks for where the recording stops and starts again.
+RECORDING_STRIP_GAP_WINDOW_SECONDS = 300.0
 
 
 def _recording_playback_window(epoch: float) -> tuple[float, float]:
@@ -974,6 +980,117 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             headers=headers,
         )
 
+    @router.get("/api/cameras/{camera_id}/recordings/preview-strip.jpg")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
+    def recording_preview_strip(
+        camera_id: str,
+        epoch: float,
+        source: str = "main",
+        width: int = 320,
+    ) -> FileResponse:
+        """One segment's frames as a grid, for scrubbing without a request per move.
+
+        The segment is the one holding ``epoch``. A camera's sub stream is
+        used when it was recorded then: it shows the same scene and decodes
+        several times faster. The headers say which seconds the tiles cover.
+        """
+        active_manager = _require_recording_camera(deps, camera_id)
+        if deps.recording_preview_strip is None:
+            raise HTTPException(status_code=404, detail="recording preview strips are unavailable")
+        if not math.isfinite(epoch) or epoch <= 0:
+            raise HTTPException(status_code=400, detail="invalid recording preview time")
+        if width < 160 or width > 640:
+            raise HTTPException(status_code=400, detail="invalid recording preview width")
+        selected_source = recording_source(source)
+        built = None
+        unavailable: HTTPException | None = None
+        for candidate_source in dict.fromkeys(("live", selected_source)):
+            rows = active_manager.recorder.recording_rows_between(
+                camera_id,
+                epoch - 0.001,
+                epoch + 0.001,
+                candidate_source,
+                discover_missing=False,
+            )
+            row = next(
+                (
+                    candidate for candidate in rows
+                    if float(candidate.get("start_epoch") or 0) <= epoch
+                    < float(candidate.get("end_epoch") or 0)
+                ),
+                None,
+            )
+            if row is None:
+                continue
+            try:
+                strip_path, layout = deps.recording_preview_strip(
+                    active_manager,
+                    row,
+                    width=width,
+                )
+            except HTTPException as exc:
+                # An indexed file that has gone (or cannot be served) is not
+                # the end of it: the other stream may still hold this time.
+                if exc.status_code not in {403, 404}:
+                    raise
+                unavailable = exc
+                continue
+            built = (row, candidate_source, strip_path, layout)
+            break
+        if built is None:
+            if unavailable is not None:
+                raise unavailable
+            # Say how far the gap reaches, so the page need not ask about
+            # every second of it. Bounded: beyond the window it asks again.
+            gap_start = epoch - RECORDING_STRIP_GAP_WINDOW_SECONDS
+            # Not into the future: what is being recorded now is "not there"
+            # only until it is indexed.
+            gap_end = min(
+                epoch + RECORDING_STRIP_GAP_WINDOW_SECONDS,
+                max(epoch + 1.0, time.time()),
+            )
+            known = True
+            for candidate_source in dict.fromkeys(("live", selected_source)):
+                for nearby in active_manager.recorder.recording_rows_between(
+                    camera_id,
+                    gap_start,
+                    gap_end,
+                    candidate_source,
+                    discover_missing=False,
+                ):
+                    start = float(nearby.get("start_epoch") or 0)
+                    end = float(nearby.get("end_epoch") or 0)
+                    if end <= epoch:
+                        gap_start = max(gap_start, end)
+                    elif start > epoch:
+                        gap_end = min(gap_end, start)
+                    else:
+                        # Indexed since the lookup above: no gap after all,
+                        # and nothing is claimed about how far one reaches.
+                        known = False
+            raise HTTPException(
+                status_code=404,
+                detail="no recording exists at this time",
+                headers={
+                    "X-SurvNG-Gap-Start": f"{gap_start:.3f}",
+                    "X-SurvNG-Gap-End": f"{gap_end:.3f}",
+                } if known else None,
+            )
+        row, row_source, strip_path, layout = built
+        return FileResponse(
+            strip_path,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "private, max-age=3600",
+                "X-SurvNG-Strip-Start": f"{float(row['start_epoch']):.3f}",
+                "X-SurvNG-Strip-End": f"{float(row['end_epoch']):.3f}",
+                "X-SurvNG-Strip-Step": f"{float(layout['step_seconds']):g}",
+                "X-SurvNG-Strip-Count": str(int(layout["count"])),
+                "X-SurvNG-Strip-Columns": str(int(layout["columns"])),
+                "X-SurvNG-Strip-Rows": str(int(layout["rows"])),
+                "X-SurvNG-Strip-Source": row_source,
+            },
+        )
 
     @router.get("/api/cameras/{camera_id}/recordings/updates")
     @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
@@ -1475,6 +1592,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                 recording_mobile_window,
                 recording_window,
                 recording_preview,
+                recording_preview_strip,
                 recording_updates,
                 recording_day_hls_playlist,
                 recording_day_hls_init,

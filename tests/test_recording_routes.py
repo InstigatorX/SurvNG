@@ -443,6 +443,142 @@ class RecordingRouteLifecycleTests(TestCase):
         self.assertEqual(response.headers["x-survng-actual-timestamp"], "107.909000")
         self.assertEqual(response.headers["x-survng-timestamp-source"], "source_pts")
 
+    def test_preview_strip_prefers_the_sub_stream_and_describes_its_tiles(self) -> None:
+        recorded = {
+            "live": [{"path": "/recordings/gate-sub.mp4", "start_epoch": 103.0, "end_epoch": 113.0}],
+            "main": [{"path": "/recordings/gate.mp4", "start_epoch": 100.0, "end_epoch": 110.0}],
+        }
+        asked: list[str] = []
+
+        def rows_between(_camera_id, _start, _end, source, **_kwargs):
+            asked.append(source)
+            return recorded[source]
+
+        manager = SimpleNamespace(
+            camera=lambda camera_id: object() if camera_id == "gate" else None,
+            recorder=SimpleNamespace(recording_rows_between=rows_between),
+        )
+        built: list[tuple[str, int]] = []
+
+        def strip(_manager, row, *, width):
+            built.append((row["path"], width))
+            return Path("strip.jpg"), {"count": 10, "columns": 6, "rows": 2, "step_seconds": 1}
+
+        handler = create_recording_router(
+            replace(_dependencies(lambda: manager), recording_preview_strip=strip)
+        ).handlers["recording_preview_strip"]
+
+        response = handler("gate", 107.9, "main", 320)
+
+        # The sub stream shows the same scene and decodes several times faster.
+        self.assertEqual(built, [("/recordings/gate-sub.mp4", 320)])
+        self.assertEqual(response.headers["x-survng-strip-source"], "live")
+        # The tiles are placed by this segment's own start, not the main one's.
+        self.assertEqual(response.headers["x-survng-strip-start"], "103.000")
+        self.assertEqual(response.headers["x-survng-strip-end"], "113.000")
+        self.assertEqual(response.headers["x-survng-strip-step"], "1")
+        self.assertEqual(response.headers["x-survng-strip-count"], "10")
+        self.assertEqual(response.headers["x-survng-strip-columns"], "6")
+        self.assertEqual(response.headers["x-survng-strip-rows"], "2")
+
+        # No sub recording at that time: the stream being played is used.
+        built.clear()
+        response = handler("gate", 101.0, "main", 320)
+        self.assertEqual(built, [("/recordings/gate.mp4", 320)])
+        self.assertEqual(response.headers["x-survng-strip-source"], "main")
+        self.assertEqual(response.headers["x-survng-strip-start"], "100.000")
+
+        # The sub stream is indexed but its file has gone: the stream being
+        # played still has this time.
+        def strip_without_sub(_manager, row, *, width):
+            if "sub" in row["path"]:
+                raise HTTPException(status_code=404, detail="recording file not found")
+            return strip(_manager, row, width=width)
+
+        fallback = create_recording_router(
+            replace(_dependencies(lambda: manager), recording_preview_strip=strip_without_sub)
+        ).handlers["recording_preview_strip"]
+        built.clear()
+        response = fallback("gate", 107.9, "main", 320)
+        self.assertEqual(built, [("/recordings/gate.mp4", 320)])
+        self.assertEqual(response.headers["x-survng-strip-source"], "main")
+        # With no other stream to turn to, the reason is reported as it was.
+        def strip_forbidden(_manager, row, *, width):
+            raise HTTPException(status_code=403, detail="outside media storage")
+
+        with self.assertRaises(HTTPException) as gone:
+            create_recording_router(
+                replace(_dependencies(lambda: manager), recording_preview_strip=strip_forbidden)
+            ).handlers["recording_preview_strip"]("gate", 107.9, "live", 320)
+        self.assertEqual(gone.exception.status_code, 403)
+        # A busy generator is not a reason to try the other stream, which
+        # would only add to the load.
+        def busy_sub(_manager, row, *, width):
+            if "sub" in row["path"]:
+                raise HTTPException(status_code=429, detail="busy")
+            return strip(_manager, row, width=width)
+
+        built.clear()
+        with self.assertRaises(HTTPException) as refused:
+            create_recording_router(
+                replace(_dependencies(lambda: manager), recording_preview_strip=busy_sub)
+            ).handlers["recording_preview_strip"]("gate", 107.9, "main", 320)
+        self.assertEqual(refused.exception.status_code, 429)
+        self.assertEqual(built, [])
+
+        # Nothing recorded there, or a row that ends before it: a gap.
+        with self.assertRaises(HTTPException) as gap:
+            handler("gate", 150.0, "main", 320)
+        self.assertEqual(gap.exception.status_code, 404)
+        # The answer says how far the gap reaches: from the end of the last
+        # recording on either stream (the sub stream's, at 113) to the next
+        # one, or to the edge of the window looked at.
+        self.assertEqual(gap.exception.headers["X-SurvNG-Gap-Start"], "113.000")
+        self.assertEqual(gap.exception.headers["X-SurvNG-Gap-End"], "450.000")
+        # At the live edge the gap is not said to reach into the future:
+        # what is being recorded now is only not indexed yet.
+        with patch("survng.app.recording_routes.time.time", return_value=152.5):
+            with self.assertRaises(HTTPException) as live_edge:
+                handler("gate", 150.0, "main", 320)
+        self.assertEqual(live_edge.exception.headers["X-SurvNG-Gap-End"], "152.500")
+        # A time at or ahead of the server's clock still gets a range that
+        # holds it.
+        with patch("survng.app.recording_routes.time.time", return_value=140.0):
+            with self.assertRaises(HTTPException) as ahead:
+                handler("gate", 150.0, "main", 320)
+        self.assertEqual(ahead.exception.headers["X-SurvNG-Gap-End"], "151.000")
+        # A segment indexed between the two lookups: no gap after all, and
+        # nothing is claimed about one.
+        lookups = {"count": 0}
+
+        def rows_then_indexed(_camera_id, start, end, source, **_kwargs):
+            lookups["count"] += 1
+            if end - start < 1:
+                return []
+            return [{"path": "/recordings/new.mp4", "start_epoch": 145.0, "end_epoch": 155.0}]
+
+        racing = SimpleNamespace(
+            camera=lambda camera_id: object() if camera_id == "gate" else None,
+            recorder=SimpleNamespace(recording_rows_between=rows_then_indexed),
+        )
+        with self.assertRaises(HTTPException) as raced:
+            create_recording_router(
+                replace(_dependencies(lambda: racing), recording_preview_strip=strip)
+            ).handlers["recording_preview_strip"]("gate", 150.0, "main", 320)
+        self.assertEqual(raced.exception.status_code, 404)
+        self.assertIsNone(raced.exception.headers)
+        recorded["main"].append({"path": "/recordings/later.mp4", "start_epoch": 160.0, "end_epoch": 170.0})
+        with self.assertRaises(HTTPException) as bounded:
+            handler("gate", 150.0, "main", 320)
+        self.assertEqual(bounded.exception.headers["X-SurvNG-Gap-End"], "160.000")
+        recorded["main"].pop()
+        asked.clear()
+        handler("gate", 107.9, "live", 320)
+        self.assertEqual(asked, ["live"])
+        with self.assertRaises(HTTPException) as bad_width:
+            handler("gate", 107.9, "main", 4000)
+        self.assertEqual(bad_width.exception.status_code, 400)
+
     def test_request_holds_manager_lease_while_query_runs(self) -> None:
         active_manager = _Manager("current")
         access = ManagerAccessCoordinator()

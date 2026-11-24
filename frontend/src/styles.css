@@ -11366,28 +11366,10 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   background: #080d0f;
 }
 
-.recordings-v2-scrub-preview img,
-.recordings-v2-scrub-preview canvas {
+.recordings-v2-scrub-preview img {
   width: 100%;
   height: 100%;
   object-fit: contain;
-}
-
-.recordings-v2-scrub-preview canvas {
-  display: none;
-}
-
-.recordings-v2-local-preview-decoder {
-  display: block;
-  position: absolute;
-  inset: 0 auto auto 0;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-}
-
-.recordings-v2-scrub-preview.local canvas {
-  display: block;
 }
 
 .recordings-v2-scrub-preview span {

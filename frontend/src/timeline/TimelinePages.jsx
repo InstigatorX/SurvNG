@@ -41,7 +41,9 @@ import { browserStorage } from "../storage.mjs";
 import { canSetClipBoundaryAtPlayhead, clipPreviewReachedEnd, clipRangeIsValid, setClipBoundaryAtPlayhead } from "../recordingClipSelection.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
-import { nativePlaylistStart, nativePlaylistStartStep, recordingCoverageUnion, recordingPlaybackTimeline, recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, recordingEdgeSeekEpoch, recordingLiveEdgeFollow, extendedPlaybackRows, adjustRecordingExportRange, describePlaybackError, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
+import { nativePlaylistStart, nativePlaylistStartStep, recordingCoverageUnion, recordingPlaybackTimeline, recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, recordingEdgeSeekEpoch, recordingLiveEdgeFollow, extendedPlaybackRows, adjustRecordingExportRange, describePlaybackError, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
+import { useScrubStrips } from "./useScrubStrips.js";
+import { ScrubFrameOverlay } from "./ScrubFrameOverlay.jsx";
 import { ALL_CAMERAS_LIVE_DELAY_SECONDS, allCamerasCustomIds, allCamerasGridSelection, allCamerasWindowStart, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { CameraDensityControl, CameraLayoutModeControl } from "../shared/CameraLayoutControls.jsx";
 import { useStoredState, useViewportQuery } from "../shared/hooks.js";
@@ -72,7 +74,6 @@ import { dateKeyForTimeZone, addDaysToDateKey, zonedDateSecondToEpoch } from "..
 import { preferredStreamSource } from "../shared/cameras.js";
 import { IdentityChip } from "../shared/identity.jsx";
 import { eventThumbnailUrl, recordingDayUrl, recordingWindowUrl, recordingUpdatesUrl, recordingDayHlsUrl, recordingGridDayUrl, recordingGridUpdatesUrl, recordingPreviewUrl, recordingSegmentUrl } from "../shared/mediaUrls.js";
-import { ShakaVideo } from "../shared/media.jsx";
 import { CameraLanes, CatchUpStory, EventRail } from "./TimelineRail.jsx";
 import { condenseStory, nextStoryEvent, storyEventAt } from "../timelineRail.mjs";
 import { RecordingHlsVideo } from "../shared/RecordingHlsVideo.jsx";
@@ -742,6 +743,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
   const [heroPlaying, setHeroPlaying] = useState(false);
   const [heroSeeking, setHeroSeeking] = useState(false);
+  const scrubOverlayRef = useRef(null);
   const [playbackWindow, setPlaybackWindow] = useState(null);
   const [playbackWindowRevision, setPlaybackWindowRevision] = useState(0);
   const [manifestRetryToken, setManifestRetryToken] = useState(0);
@@ -1298,6 +1300,15 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       });
     return () => controller.abort();
   }, [activeCameraId, date, source]);
+
+  // Every timeline layout reports its scrub position here. The frames go
+  // straight to the overlay: a scrub reports on every scroll event, and this
+  // page must not render for each one.
+  const scrubPlayer = useScrubStrips({
+    cameraId: isAllCameras ? "" : activeCameraId,
+    source,
+    onFrame: (frame, options) => scrubOverlayRef.current?.show(frame, options),
+  });
 
   function snapToRecording(epoch, continuing = false) {
     if (!timeline.length) return null;
@@ -2906,6 +2917,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           dayStart={dayStart}
           playhead={railPlayhead}
           onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
+          onScrub={isAllCameras ? null : scrubPlayer}
           onSelectCamera={(nextCameraId) => {
             if (isAllCameras) focusGridCamera(nextCameraId);
             else if (nextCameraId !== activeCameraId) selectPlaybackCamera(nextCameraId);
@@ -2938,6 +2950,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       selectedEventId={selectedEvent?.id}
       onEventSelect={selectRailEvent}
       onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
+      onScrub={isAllCameras ? null : scrubPlayer}
       timeZone={timeZone}
       onPreviousDay={() => changeDate(addDaysToDateKey(date, -1))}
       onNextDay={date < today ? () => changeDate(addDaysToDateKey(date, 1)) : null}
@@ -3083,6 +3096,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             />
           ) : null}
           {coveringNativeStartup ? <div className="recording-hero-startup-cover" aria-hidden="true" /> : null}
+          <ScrubFrameOverlay ref={scrubOverlayRef} seeking={heroSeeking} />
           <DebugDetectionOverlay
             key={aiOverlayKey}
             videoRef={videoRef}
@@ -3282,9 +3296,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           <RecordingTimeline
             cameraId={isAllCameras ? "" : activeCameraId}
             source={source}
-            previewManifestUrl={manifestUrl}
-            previewStartTime={manifestStartTime}
-            previewTimeline={playbackTimeline}
             startEpoch={timelineView.startEpoch}
             endEpoch={timelineView.endEpoch}
             recordings={timeline}
@@ -3297,6 +3308,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             timeZone={timeZone}
             windowHours={incidentRangeHours}
             onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
+            onScrub={isAllCameras ? null : scrubPlayer}
             onPanViewport={panTimelineViewport}
             exportRange={isAllCameras ? null : exportRange}
             onExportRangeChange={isAllCameras || exportJob ? null : (nextRange) => { cancelClipPreview(); setExportRange(nextRange); }}
@@ -3716,16 +3728,13 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
   );
 }
 
-export function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartTime, previewTimeline, startEpoch, endEpoch, recordings, events, evidenceFilter, laneVisibility, selectedEventId, onEventSelect, playhead, timeZone, onSeek, onPanViewport, windowHours = 1, exportRange, onExportRangeChange }) {
+export function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings, events, evidenceFilter, laneVisibility, selectedEventId, onEventSelect, playhead, timeZone, onSeek, onScrub = null, onPanViewport, windowHours = 1, exportRange, onExportRangeChange }) {
   const duration = Math.max(1, endEpoch - startEpoch);
   const offset = Math.max(0, Math.min(duration, playhead - startEpoch));
   const trackRef = useRef(null);
   const [draft, setDraft] = useState(offset);
   const [scrubbing, setScrubbing] = useState(false);
   const [preview, setPreview] = useState({ epoch: null, url: "", loading: false, gap: false, unavailable: false, mode: "jpeg" });
-  const [localPreviewEnabled, setLocalPreviewEnabled] = useState(false);
-  const [localPreviewReady, setLocalPreviewReady] = useState(false);
-  const [localPreviewFrameReady, setLocalPreviewFrameReady] = useState(false);
   const draftRef = useRef(offset);
   const dragRef = useRef(null);
   const ignoreInputCommitRef = useRef(0);
@@ -3737,10 +3746,18 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
   const previewPendingRef = useRef(null);
   const previewHideTimerRef = useRef(null);
   const previewGenerationRef = useRef(0);
-  const localPreviewRef = useRef(null);
-  const localPreviewCanvasRef = useRef(null);
-  const localPreviewTargetRef = useRef(null);
   const exportDragRef = useRef(null);
+  // With a scrub callback the dragged playhead's picture comes from preview
+  // strips and is shown in the player; the tile above it carries the time.
+  const stripsEnabled = Boolean(onScrub && cameraId);
+  const scrubActiveRef = useRef(false);
+  const onScrubRef = useRef(onScrub);
+  onScrubRef.current = onScrub;
+  // A layout switch can unmount this mid-drag; the scrub must still end.
+  useEffect(() => () => {
+    if (scrubActiveRef.current) onScrubRef.current?.(null, { committed: false });
+    scrubActiveRef.current = false;
+  }, []);
   const ticks = useMemo(() => {
     const tickInterval = timelineTickIntervalSeconds(windowHours);
     const formatter = new Intl.DateTimeFormat("en-US", {
@@ -3819,18 +3836,20 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
     previewUrlRef.current = "";
     setScrubbing(false);
-    setLocalPreviewEnabled(false);
-    setLocalPreviewReady(false);
-    setLocalPreviewFrameReady(false);
-    localPreviewTargetRef.current = null;
     setPreview({ epoch: null, url: "", loading: false, gap: false, unavailable: false, mode: "jpeg" });
   }, [cameraId, source, startEpoch]);
-  useEffect(() => {
-    setLocalPreviewReady(false);
-    setLocalPreviewFrameReady(false);
-    localPreviewTargetRef.current = null;
-  }, [previewManifestUrl]);
   const percent = ((scrubbing ? draft : offset) / duration) * 100;
+
+  function scrubTo(epoch) {
+    scrubActiveRef.current = true;
+    onScrub?.(epoch);
+  }
+
+  function endScrub(committed) {
+    if (!scrubActiveRef.current) return;
+    scrubActiveRef.current = false;
+    onScrub?.(null, { committed });
+  }
 
   function hidePreviewAfterDelay() {
     if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
@@ -3907,7 +3926,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
       const pending = previewPendingRef.current;
       previewPendingRef.current = null;
       if (pending && pending.bucket !== request.bucket) {
-        if (!requestLocalPreview(pending)) requestPreview(pending);
+        requestPreview(pending);
       } else if (!dragRef.current) {
         setScrubbing(true);
         hidePreviewAfterDelay();
@@ -3915,106 +3934,17 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     }
   }
 
-  function requestLocalPreview(request) {
-    if (prefersJpegScrubPreview()) return false;
-    const video = localPreviewRef.current;
-    const mediaTime = playbackMediaTimeForEpoch(previewTimeline, request.epoch);
-    if (!localPreviewReady || previewInFlightRef.current || !video || !Number.isFinite(mediaTime)) {
-      return false;
-    }
-    previewLastRequestRef.current = { epoch: request.bucket, at: performance.now() };
-    previewPendingRef.current = null;
-    const target = { epoch: request.epoch, mediaTime };
-    localPreviewTargetRef.current = target;
-    setPreview((current) => ({
-      ...current,
-      loading: true,
-      gap: false,
-      unavailable: false,
-      mode: localPreviewFrameReady ? "local" : current.mode,
-    }));
-    video.pause();
-    if (Math.abs(video.currentTime - mediaTime) <= 0.04 && video.readyState >= 2) {
-      publishLocalPreviewFrame(video, target);
-    } else {
-      seekVideoToTime(video, mediaTime);
-    }
-    return true;
-  }
-
-  function handleLocalPreviewReady(_player, video) {
-    video.pause();
-    setLocalPreviewReady(true);
-    const target = localPreviewTargetRef.current;
-    if (target && Number.isFinite(target.mediaTime)) seekVideoToTime(video, target.mediaTime);
-  }
-
-  function handleLocalPreviewSeeked(event) {
-    const target = localPreviewTargetRef.current;
-    if (!target || Math.abs(event.currentTarget.currentTime - target.mediaTime) > 0.08) return;
-    publishLocalPreviewFrame(event.currentTarget, target);
-  }
-
-  function publishLocalPreviewFrame(video, target) {
-    const publish = () => {
-      if (localPreviewTargetRef.current !== target || video.readyState < 2) return;
-      const canvas = localPreviewCanvasRef.current;
-      const sourceWidth = Number(video.videoWidth) || 0;
-      const sourceHeight = Number(video.videoHeight) || 0;
-      if (!canvas || !sourceWidth || !sourceHeight) return;
-      const width = Math.min(480, sourceWidth);
-      const height = Math.max(1, Math.round(sourceHeight * (width / sourceWidth)));
-      if (canvas.width !== width) canvas.width = width;
-      if (canvas.height !== height) canvas.height = height;
-      canvas.getContext("2d", { alpha: false })?.drawImage(video, 0, 0, width, height);
-      setLocalPreviewFrameReady(true);
-      setPreview((current) => ({
-        ...current,
-        epoch: target.epoch,
-        loading: false,
-        gap: false,
-        unavailable: false,
-        mode: "local",
-      }));
-      if (!dragRef.current) {
-        setScrubbing(true);
-        hidePreviewAfterDelay();
-      }
-    };
-    if (typeof video.requestVideoFrameCallback === "function") {
-      let published = false;
-      const fallback = window.setTimeout(() => {
-        if (!published) publish();
-      }, 80);
-      video.requestVideoFrameCallback(() => {
-        published = true;
-        window.clearTimeout(fallback);
-        publish();
-      });
-    } else {
-      window.requestAnimationFrame(publish);
-    }
-  }
-
-  function handleLocalPreviewError() {
-    setLocalPreviewReady(false);
-    setLocalPreviewFrameReady(false);
-    localPreviewTargetRef.current = null;
-    previewLastRequestRef.current = { epoch: null, at: 0 };
-    if (dragRef.current) schedulePreview(draftRef.current, true);
-  }
-
   function schedulePreview(value, immediate = false) {
     if (!cameraId) return;
+    if (stripsEnabled) {
+      if (dragRef.current?.mode === "seek") {
+        scrubTo(startEpoch + Math.max(0, Math.min(duration, Number(value) || 0)));
+      }
+      return;
+    }
     const requestedEpoch = startEpoch + Math.max(0, Math.min(duration, Number(value) || 0));
-    const useLocalPreview = !prefersJpegScrubPreview() && localPreviewReady && !previewInFlightRef.current;
-    const localMediaTime = useLocalPreview
-      ? playbackMediaTimeForEpoch(previewTimeline, requestedEpoch)
-      : null;
     const bucketSeconds = dragRef.current?.fine ? 1 : scrubPreviewBucketSeconds();
-    const previewBucket = Number.isFinite(localMediaTime)
-      ? `local:${Math.floor(requestedEpoch * 2)}`
-      : `jpeg:${Math.floor((requestedEpoch - startEpoch) / bucketSeconds)}`;
+    const previewBucket = `jpeg:${Math.floor((requestedEpoch - startEpoch) / bucketSeconds)}`;
     if (previewLastRequestRef.current.epoch === previewBucket) {
       previewPendingRef.current = null;
       return;
@@ -4025,7 +3955,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     previewTimerRef.current = window.setTimeout(() => {
       previewTimerRef.current = null;
       const request = { epoch: requestedEpoch, bucket: previewBucket };
-      if (!requestLocalPreview(request)) requestPreview(request);
+      requestPreview(request);
     }, delay);
   }
 
@@ -4079,7 +4009,6 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     // A touch tap seeks; a horizontal swipe browses without reloading playback.
     if (drag.mode === "pending-pan") return;
     if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
-    if (previewManifestUrl && !prefersJpegScrubPreview()) setLocalPreviewEnabled(true);
     setScrubbing(true);
     const seekValue = grabPlayhead ? offset : value;
     updateDraft(seekValue, true);
@@ -4111,11 +4040,13 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     if (previewTimerRef.current) window.clearTimeout(previewTimerRef.current);
     previewTimerRef.current = null;
     if (cancelled || drag.mode === "pan") {
+      endScrub(false);
       updateDraft(offset);
       setScrubbing(false);
       hidePreviewAfterDelay();
       return;
     }
+    endScrub(true);
     setScrubbing(false);
     hidePreviewAfterDelay();
     ignoreInputCommitRef.current = performance.now();
@@ -4232,33 +4163,14 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
             ><span>{formatExportHandleTime(exportRange.end, timeZone)}</span></button>
           </>
         ) : null}
-        {localPreviewEnabled && previewManifestUrl && !prefersJpegScrubPreview() ? (
-          <ShakaVideo
-            ref={localPreviewRef}
-            src={previewManifestUrl}
-            mimeType="application/vnd.apple.mpegurl"
-            startTime={previewStartTime}
-            bufferingGoal={2}
-            muted
-            playsInline
-            preload="metadata"
-            className="recordings-v2-local-preview-decoder"
-            tabIndex={-1}
-            aria-label="Local recording scrub preview"
-            onReady={handleLocalPreviewReady}
-            onError={handleLocalPreviewError}
-            onSeeked={handleLocalPreviewSeeked}
-          />
-        ) : null}
         <div
-          className={`recordings-v2-scrub-preview${scrubbing ? " active" : ""}${preview.loading ? " loading" : ""}${preview.mode === "local" ? " local" : ""}`}
+          className={`recordings-v2-scrub-preview${scrubbing ? " active" : ""}${preview.loading ? " loading" : ""}${stripsEnabled ? " strips" : ""}`}
           style={{ left: `${Math.max(8, Math.min(92, percent))}%` }}
           role="status"
           aria-live="polite"
           aria-hidden={!scrubbing}
         >
           <div>
-            <canvas ref={localPreviewCanvasRef} aria-label="Decoded recording preview frame" />
             {preview.mode === "jpeg" && preview.url && !preview.gap && !preview.unavailable ? <img src={mediaUrl(preview.url)} alt="Recording preview" /> : null}
             {preview.mode === "jpeg" && preview.gap ? <span><Film size={20} />No recording</span> : null}
             {preview.mode === "jpeg" && preview.unavailable ? <span><RefreshCcw size={18} />Preview unavailable</span> : null}
