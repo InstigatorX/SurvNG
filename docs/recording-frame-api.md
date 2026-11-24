@@ -86,7 +86,7 @@ given up after ten seconds. A gap is remembered for ten seconds, over the range 
 server stated, or for that one second if it stated none.
 It keeps at most 24 strips in memory; strips from the sub and main streams,
 which are cut at different times, are kept side by side. Every Timeline layout reports its scrub position: the rail,
-the camera columns, the day strip's loupe and the classic scrubber. After a
+the camera columns and the day strip's loupe. After a
 scrub that ends in a seek, the released time keeps loading and its frame stays
 up until the player has seeked there and shows the exact full-resolution
 frame.

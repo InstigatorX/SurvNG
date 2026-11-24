@@ -8,7 +8,7 @@ export const RAIL_SPANS = [
   { minutes: 1440, label: "24h" },
 ];
 
-export const TIMELINE_VIEWS = ["rail", "cameras", "catchup", "classic"];
+export const TIMELINE_VIEWS = ["rail", "cameras", "catchup"];
 
 export function normalizedRailMinutes(value) {
   const minutes = Number(value);

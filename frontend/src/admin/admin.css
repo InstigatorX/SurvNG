@@ -582,10 +582,6 @@ a.button {
   .recordings-v2-events::before {
     display: none;
   }
-
-  .recordings-v2-event-filter button {
-    min-width: max-content;
-  }
 }
 
 /* Admin owns one bounded desktop scroll surface; nested camera forms remain natural content. */

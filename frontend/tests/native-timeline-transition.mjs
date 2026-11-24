@@ -29,7 +29,7 @@ for (const autoplay of [true, false]) {
     setNativeSegment: (value) => calls.push(["segment", value]),
     requestPlaybackWindow: () => { throw new Error("Warm window must not be fetched again"); },
   });
-  vm.runInContext(functionSource("playAt", "panTimelineViewport"), context);
+  vm.runInContext(functionSource("playAt", "selectPlaybackCamera"), context);
   context.playAt(110.01, autoplay);
   assert.equal(calls.find(([name]) => name === "detail")[1].rows, warmWindow.rows);
   assert.equal(calls.find(([name]) => name === "segment")[1].start_epoch, 110);

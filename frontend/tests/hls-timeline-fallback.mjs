@@ -439,7 +439,7 @@ for (const outcome of ["zero", "landed", "corrected", "user-paused", "unmute-pau
     setHeroSeeking() {}, setFollowTarget() {}, setPlaybackError() {}, setPlaybackErrorStage() {}, setPlayhead() {},
     setPlaybackWindow() {}, setPlaybackNotice() {}, scheduleSeekWatchdog() {}, clearSeekWatchdog() {},
   });
-  const playAt = source.slice(source.indexOf("  function playAt("), source.indexOf("  function panTimelineViewport("));
+  const playAt = source.slice(source.indexOf("  function playAt("), source.indexOf("  function selectPlaybackCamera("));
   vm.runInContext(playAt, context);
   for (const target of [1002, 1008, 1004]) {
     context.playAt(target, true);
@@ -482,7 +482,7 @@ for (const outcome of ["zero", "landed", "corrected", "user-paused", "unmute-pau
     setHeroSeeking() {}, setFollowTarget() {}, setPlaybackError() {}, setPlaybackErrorStage() {}, setPlayhead() {},
     setPlaybackWindow() {}, setPlaybackNotice() {}, scheduleSeekWatchdog() {}, clearSeekWatchdog() {},
   });
-  const playAt = source.slice(source.indexOf("  function playAt("), source.indexOf("  function panTimelineViewport("));
+  const playAt = source.slice(source.indexOf("  function playAt("), source.indexOf("  function selectPlaybackCamera("));
   vm.runInContext(playAt, context);
   context.playAt(1006, true);
   assert.deepEqual(order, ["pause", ["seek", 6], "play"], "a scrub pauses, seeks, then plays in the gesture");
@@ -521,7 +521,7 @@ for (const outcome of ["zero", "landed", "corrected", "user-paused", "unmute-pau
     setHeroSeeking() {}, setHeroPlaying() {}, setFollowTarget() {}, setPlaybackError() {}, setPlaybackErrorStage() {},
     setPlayhead() {}, setPlaybackWindow() {}, setPlaybackNotice() {}, setPlaybackDetail() {}, setNativeSegment() {},
   });
-  vm.runInContext(source.slice(source.indexOf("  function playAt("), source.indexOf("  function panTimelineViewport(")), context);
+  vm.runInContext(source.slice(source.indexOf("  function playAt("), source.indexOf("  function selectPlaybackCamera(")), context);
   context.playAt(104, true);
   assert.deepEqual(order, ["pause", ["seek", 4], "play"]);
   assert.equal(context.pendingSeekModeRef.current, "native-local");
