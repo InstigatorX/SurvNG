@@ -2,7 +2,7 @@
 
 This build intentionally stops supporting prior-generation configuration,
 databases, recording layouts, and semantic index identities. It does not migrate
-or reset existing data, and drops only tables and indexes that no build reads.
+or reset existing data, and drops only tables and indexes that no current build reads.
 Do not use it as an automatic upgrade path for older persisted generations. Keep application and data backups together.
 
 Only databases that SurvNG v1.2.0 or later has opened are supported: later

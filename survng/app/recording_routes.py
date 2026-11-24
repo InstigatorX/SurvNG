@@ -830,6 +830,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         return FileResponse(
             path,
             filename=name,
+            # Recording and timelapse exports are always MP4 files.
             media_type="video/mp4",
             headers={"Cache-Control": "private, no-store"},
         )

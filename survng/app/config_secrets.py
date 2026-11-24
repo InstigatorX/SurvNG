@@ -360,7 +360,8 @@ def load_secrets_file(path: Path) -> dict[str, Any] | None:
             ) from exc
         return _decrypt_secrets(payload, key)
     raise ValueError(
-        f"secrets file is not an encrypted SurvNG secrets envelope: {path}"
+        f"secrets file is not an encrypted SurvNG secrets envelope: {path}. "
+        "Restore secrets.json and secrets.key from a backup saved by SurvNG 1.2 or later."
     )
 
 

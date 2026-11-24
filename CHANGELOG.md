@@ -5,7 +5,7 @@
 - Only data written by `v1.2.0` or later is supported. Startup no longer
   upgrades older databases, `secrets.json` must be the encrypted format, and
   completed exports are always served as MP4. Startup drops retired tables that
-  no build reads (`scene_changes`, `tracking_comparisons`, `scene_migrations`,
+  no current build reads (`scene_changes`, `tracking_comparisons`, `scene_migrations`,
   `scene_acquisition_migrations`, `scene_discovery_baselines`) and unused
   indexes. See `docs/current-only.md`.
 - Removed endpoints with no caller and no documentation: the

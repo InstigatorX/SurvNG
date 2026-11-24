@@ -26,7 +26,7 @@ Each change was made on a stacked branch so the steps can be tested together:
 - **Minimum database:** one that SurvNG 1.2.0 or later has opened. Each removed
   upgrade was present in 1.2.0 and its column was already in that table's
   CREATE statement. There is no startup check: the only install runs on 1.2
-  data. Startup drops retired tables no build reads and v1.2.0's unused
+  data. Startup drops retired tables no current build reads and v1.2.0's unused
   `idx_event_camera_epoch`, which taxed every event insert.
 - **Face rows linked by the retired dedupe** (`duplicate_of_observation_id`)
   can remain on installs; pruning of those trees is unchanged.
