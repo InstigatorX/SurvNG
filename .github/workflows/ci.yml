@@ -160,7 +160,9 @@ jobs:
     # the synthetic preview server. Tests that need a running SurvNG
     # (`// browser-test: live-survng`) are skipped by --offline.
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # The Ubuntu mirror can serve these runners at under 100 kB/s, which made
+    # an uncached FFmpeg install take 12 minutes.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7.1.0
@@ -168,13 +170,27 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      # FFmpeg's packages are kept between runs, so only packages that changed
+      # since the last run are downloaded.
+      - name: Restore FFmpeg package cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-ffmpeg-ubuntu-24.04-${{ github.run_id }}
+          restore-keys: apt-ffmpeg-ubuntu-24.04-
       - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+        run: |
+          mkdir -p ~/apt-archives/partial
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-archives" ffmpeg
+          sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
       - name: Install frontend dependencies
         run: npm --prefix frontend ci
+      # The runner image already has Chromium's system libraries; --with-deps
+      # only added fonts and Mesa updates, over the same slow mirror.
       - name: Install Playwright Chromium
         working-directory: frontend
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
       - name: Build frontend static assets
         run: npm --prefix frontend run build
       - name: Run frontend browser tests
