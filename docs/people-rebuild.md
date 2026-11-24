@@ -179,3 +179,29 @@ denominator. The command never reads/writes the live gallery or changes settings
 Visit merge accuracy must also be checked on labeled camera sequences; this face
 corpus tool does not measure visit association. No real-camera accuracy claim is
 made until a suitable labeled corpus has been evaluated.
+
+## Face funnel report
+
+To see where faces are lost on each camera, run this on the SurvNG host as the
+service user, giving the directory that holds `survng.sqlite3`:
+
+```bash
+.venv/bin/python -m survng.app.face_funnel /path/to/database-dir --days 14
+```
+
+It opens the database read-only, loads no model and changes nothing. For each
+camera it counts the recorded person events that reached each stage: a person
+large enough for a face, a face found, kept, embedded, suggested and named. It
+also prints person and face sizes in pixels and the stored faces by outcome
+(`too_small`, `failed`, `embedded`). `--json` prints the same data as JSON.
+
+The "large enough" stage is an estimate from the person's height, assuming a
+face about 9% as wide as a standing person is tall. Stored faces are pruned at
+`face_max_observations`, so the later stages undercount for older events; the
+report says how far back stored faces reach.
+
+Events recorded from this version on also carry face-search counters, shown as
+"Search detail": people examined, people skipped over the per-frame cap, people
+too small to crop, crops searched, crops where the detector found no face, and
+faces found. A crop the detector could not search because inference was busy
+or failed counts as "no face"; the two are not yet told apart.
