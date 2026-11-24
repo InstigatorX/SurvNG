@@ -347,7 +347,7 @@ class MediaExportTest(unittest.TestCase):
 
         self.assertEqual(
             vaapi,
-            "format=nv12|vaapi,hwupload,fps=20,scale_vaapi=w=1920:h=1080:format=nv12,setsar=1",
+            "fps=20,format=nv12|vaapi,hwupload,scale_vaapi=w=1920:h=1080:format=nv12,setsar=1",
         )
         self.assertEqual(qsv, "fps=20,vpp_qsv=w=1920:h=1080:format=nv12,setsar=1")
         # A 4:3 source in a 16:9 frame needs the software pad.
@@ -535,8 +535,9 @@ class MediaExportTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "source.mp4"
-            # Intra refresh: packets are flagged as keyframes every second,
-            # but the decoder has one real keyframe, at the start.
+            # Intra refresh: one real keyframe, at the start. The spacing
+            # probe is overridden to stand for a camera whose keyframes
+            # were frequent only while it was measured.
             subprocess.run(
                 [
                     "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10",
@@ -569,8 +570,9 @@ class MediaExportTest(unittest.TestCase):
                 "start_epoch": 1000.0, "end_epoch": 1040.0,
                 "options": {"sample_interval_seconds": 5.0, "width": 320},
             })
-            if manager._keyframe_interval(source) is None:
-                self.skipTest("this FFmpeg does not flag intra-refresh recovery points")
+            # The decoder-based probe is not fooled by the container flags.
+            self.assertIsNone(manager._keyframe_interval(source))
+            manager._keyframe_interval = lambda _path: 1.0  # type: ignore[method-assign]
 
             output, _gaps = manager._build_timelapse(job, rows, work, threading.Event())
 

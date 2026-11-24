@@ -60,7 +60,7 @@ def test_vaapi_event_clip_decodes_on_the_gpu_and_keeps_a_software_decode_attempt
     assert "h264_vaapi" in hardware and "h264_vaapi" in software
 
 
-def test_stalled_hardware_event_clip_attempt_falls_back_instead_of_timing_out(tmp_path, monkeypatch):
+def _clip_attempts(tmp_path, monkeypatch, pix_fmt):
     import subprocess
 
     from survng.app import recording_media_runtime
@@ -74,7 +74,7 @@ def test_stalled_hardware_event_clip_attempt_falls_back_instead_of_timing_out(tm
     ))
     runtime._recording_storage_path = lambda value, **kwargs: Path(value)
     runtime._write_concat_file = lambda *args, **kwargs: tmp_path / "clip.ffconcat"
-    runtime._probe_video_codec = lambda _path: "h264"
+    runtime._probe_video_stream = lambda _path: ("h264", pix_fmt)
     runtime._event_clip_vaapi_enabled = lambda _codec: True
     runtime._event_clip_qsv_enabled = lambda _codec: False
     runtime._ffmpeg_vaapi_info = lambda: {"device": "/dev/dri/renderD128"}
@@ -94,4 +94,17 @@ def test_stalled_hardware_event_clip_attempt_falls_back_instead_of_timing_out(tm
     runtime._build_event_clip(event, 0, 20, output)
 
     assert output.read_bytes() == b"clip"
-    assert len(attempts) == 2 and "-hwaccel" not in attempts[1]
+    return attempts
+
+
+def test_stalled_hardware_event_clip_attempt_falls_back_instead_of_timing_out(tmp_path, monkeypatch):
+    attempts = _clip_attempts(tmp_path, monkeypatch, "yuv420p")
+
+    assert len(attempts) == 2 and "-hwaccel" in attempts[0] and "-hwaccel" not in attempts[1]
+
+
+def test_ten_bit_event_clip_skips_the_hardware_decode_attempt(tmp_path, monkeypatch):
+    attempts = _clip_attempts(tmp_path, monkeypatch, "yuv420p10le")
+
+    assert len(attempts) == 1 and "-hwaccel" not in attempts[0]
+    assert attempts[0][attempts[0].index("-vf") + 1] == "format=nv12,hwupload"

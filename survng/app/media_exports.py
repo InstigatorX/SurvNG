@@ -1058,7 +1058,9 @@ class MediaExportManager:
     def _keyframe_interval(self, path: Path) -> float | None:
         """Longest keyframe spacing in the first minute of ``path``.
 
-        Packet flags are read without decoding. None means the spacing could
+        Measured with the decoder's own keyframe skipping, because container
+        keyframe flags also mark recovery points and non-IDR I-frames that
+        ``-skip_frame nokey`` does not output. None means the spacing could
         not be established, so the caller must decode every frame.
         """
         ffmpeg = Path(self._ffmpeg_path())
@@ -1067,9 +1069,9 @@ class MediaExportManager:
         try:
             probe = subprocess.run(
                 [
-                    ffprobe, "-v", "error", "-select_streams", "v:0",
+                    ffprobe, "-v", "error", "-skip_frame", "nokey", "-select_streams", "v:0",
                     "-read_intervals", "%+60",
-                    "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(path),
+                    "-show_entries", "frame=pts_time", "-of", "csv=p=0", str(path),
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -1082,9 +1084,7 @@ class MediaExportManager:
             return None
         keyframes: list[float] = []
         for line in (probe.stdout or "").splitlines():
-            timestamp, _, flags = line.strip().partition(",")
-            if "K" not in flags:
-                continue
+            timestamp = line.strip().partition(",")[0]
             try:
                 keyframes.append(float(timestamp))
             except ValueError:
@@ -1133,9 +1133,10 @@ class MediaExportManager:
             return None
         if backend == "vaapi":
             # format=nv12|vaapi,hwupload also accepts frames from a decoder
-            # that fell back to software inside FFmpeg.
+            # that fell back to software inside FFmpeg. It follows ``before``
+            # so such frames are dropped before they are uploaded.
             return ",".join([
-                "format=nv12|vaapi", "hwupload", *before,
+                *before, "format=nv12|vaapi", "hwupload",
                 f"scale_vaapi=w={width}:h={height}:format=nv12", *after,
             ])
         if backend == "qsv":
@@ -1225,9 +1226,8 @@ class MediaExportManager:
         # up to one keyframe spacing on every sample.
         #
         # The spacing is measured on the start of the first recording only,
-        # and packet flags also mark recovery points that the decoder does
-        # not treat as keyframes. A keyframe timelapse that comes out short
-        # is therefore discarded and every frame is decoded instead.
+        # and a camera can lengthen it later. A keyframe timelapse that comes
+        # out short is therefore discarded and every frame is decoded instead.
         keyframe_interval = self._keyframe_interval(Path(str(groups[0][0]["path"])))
         keyframes_only = keyframe_interval is not None and interval >= 2 * keyframe_interval
         minimum_keyframe_frames = max(1, min(estimated_frames - 1, estimated_frames * 9 // 10))

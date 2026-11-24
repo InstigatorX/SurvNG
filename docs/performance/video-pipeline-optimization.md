@@ -158,16 +158,16 @@ Each of these now tries an attempt that never leaves the GPU, then the previous 
 | Job | Attempts in order |
 | --- | --- |
 | Recording export, timelapse | `vaapi-gpu` or `qsv-gpu`, then `vaapi` or `qsv` (software filters, hardware encode), then `cpu` |
-| VAAPI event clip | `vaapi` (hardware decode), then `vaapi-encode` (software decode), then `cpu` |
+| VAAPI event clip | `vaapi` (hardware decode, skipped for 10-bit sources), then `vaapi-encode` (software decode), then `cpu` |
 
-The full-GPU filter chain is `format=nv12\|vaapi,hwupload,…,scale_vaapi` for VAAPI and `…,vpp_qsv` for QSV, with frame dropping and timestamp filters around the scaler. There is no hardware pad: a source whose aspect does not exactly fill the output frame keeps the software filters. QSV needs an H.264 or HEVC source, because the decoder is named explicitly.
+The full-GPU filter chain is `…,format=nv12\|vaapi,hwupload,scale_vaapi` for VAAPI and `…,vpp_qsv` for QSV, with frame dropping and timestamp filters around the scaler. There is no hardware pad: a source whose aspect does not exactly fill the output frame keeps the software filters. QSV needs an H.264 or HEVC source, because the decoder is named explicitly.
 
-A timelapse whose sample interval is at least twice the keyframe spacing decodes keyframes only (`-skip_frame nokey`). The spacing is the longest gap between keyframe packets in the first minute of the first recording, read without decoding. In that mode one frame is taken per interval bucket, so sampling follows keyframes without drifting. Keyframe timelapses decode in software and skip the full-GPU attempt.
+A timelapse whose sample interval is at least twice the keyframe spacing decodes keyframes only (`-skip_frame nokey`). The spacing is the longest gap between the frames FFmpeg's decoder outputs with `-skip_frame nokey` in the first minute of the first recording. Container keyframe flags are not used: they also mark intra-refresh recovery points and non-IDR I-frames that the decoder skips. In that mode one frame is taken per interval bucket, so sampling follows keyframes without drifting. Keyframe timelapses decode in software and skip the full-GPU attempt.
 
 ### Risks
 
 - The full-GPU attempts were written without a render node. A failure normally costs one failed FFmpeg start before the previous command runs; an attempt that stalls costs its whole time limit first.
-- Keyframe spacing is measured on the first minute only, and packet flags also mark intra-refresh recovery points that the decoder does not treat as keyframes. A keyframe timelapse with fewer than about 90% of the expected frames is discarded and every frame is decoded instead, so those sources pay for one extra cheap pass.
+- Keyframe spacing is measured on the first minute of the first recording only, and a camera can lengthen it later. A keyframe timelapse with fewer than about 90% of the expected frames is discarded and every frame is decoded instead, so those sources pay for one extra cheap pass.
 - A timelapse spanning recordings with different stream fingerprints has no full-GPU attempt, because a hardware scaler would stretch a later recording that the software filters letterbox.
 
 ### Tests

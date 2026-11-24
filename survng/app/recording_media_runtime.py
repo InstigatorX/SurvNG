@@ -402,12 +402,17 @@ class RecordingMediaRuntime:
             self.media_exports = replacement
             return True
 
-    def _probe_video_codec(self, path: Path) -> str:
+    def _probe_video_stream(self, path: Path) -> tuple[str, str]:
+        """Lower-case ``(codec, pixel format)`` of the first video stream."""
         try:
-            result = subprocess.run([self.deps.ffprobe_path(), '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name', '-of', 'default=nw=1:nk=1', str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=8)
-            return (result.stdout or '').strip().lower()
+            result = subprocess.run([self.deps.ffprobe_path(), '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,pix_fmt', '-of', 'default=nw=1', str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=8)
         except Exception:
-            return ''
+            return '', ''
+        fields = dict(line.strip().lower().partition('=')[::2] for line in (result.stdout or '').splitlines() if '=' in line)
+        return fields.get('codec_name', ''), fields.get('pix_fmt', '')
+
+    def _probe_video_codec(self, path: Path) -> str:
+        return self._probe_video_stream(path)[0]
 
     def _event_clip_vaapi_enabled(self, source_codec: str) -> bool:
         mode = self._hardware_acceleration_mode()
@@ -1271,12 +1276,14 @@ class RecordingMediaRuntime:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         concat_path = self._write_concat_file(selected, active_manager=selected_manager)
         tmp_path = output_path.with_name(f'.{output_path.stem}.{os.getpid()}.tmp.mp4')
-        source_codec = self._probe_video_codec(Path(str(selected[0]['path'])))
+        source_codec, source_pix_fmt = self._probe_video_stream(Path(str(selected[0]['path'])))
         commands: list[tuple[str, list[str]]] = []
         if self._event_clip_vaapi_enabled(source_codec):
-            commands.append(('vaapi', self._event_clip_vaapi_command(source_codec, concat_path, local_start, duration, tmp_path)))
-            # The previous software-decode command stays as the next attempt,
-            # for example a 10-bit source the H.264 encoder cannot take directly.
+            # Decoded 10-bit surfaces cannot go straight into the 8-bit H.264
+            # encoder; the software-decode command converts them first.
+            if '10' not in source_pix_fmt and '12' not in source_pix_fmt:
+                commands.append(('vaapi', self._event_clip_vaapi_command(source_codec, concat_path, local_start, duration, tmp_path)))
+            # The previous software-decode command stays as the next attempt.
             commands.append(('vaapi-encode', self._event_clip_vaapi_command(source_codec, concat_path, local_start, duration, tmp_path, hardware_decode=False)))
         if self._event_clip_qsv_enabled(source_codec):
             commands.append(('qsv', self._event_clip_qsv_command(source_codec, concat_path, local_start, duration, tmp_path)))
