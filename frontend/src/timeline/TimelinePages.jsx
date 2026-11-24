@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Camera,
   Crop,
@@ -40,6 +40,8 @@ import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob
 import { nativePlaylistStart, nativePlaylistStartStep, recordingCoverageUnion, recordingPlaybackTimeline, recordingPlaybackTransport, recordingTransportOverride, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, recordingEdgeSeekEpoch, recordingLiveEdgeFollow, extendedPlaybackRows, describePlaybackError, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
 import { useScrubStrips } from "./useScrubStrips.js";
 import { ScrubFrameOverlay } from "./ScrubFrameOverlay.jsx";
+import { useFrameStepper } from "./useFrameStepper.js";
+import { FrameStepButtons, FrameStepOverlay, FrameStepTime } from "./FrameStepOverlay.jsx";
 import { ALL_CAMERAS_LIVE_DELAY_SECONDS, allCamerasCustomIds, allCamerasGridSelection, allCamerasWindowStart, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { CameraDensityControl, CameraLayoutModeControl } from "../shared/CameraLayoutControls.jsx";
 import { useStoredState, useViewportQuery } from "../shared/hooks.js";
@@ -1288,6 +1290,37 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
     onFrame: (frame, options) => scrubOverlayRef.current?.show(frame, options),
   });
 
+  // Frame stepping of the paused player (one camera only). The stepped frame
+  // is drawn over the player from the server; once stepping pauses the
+  // player is seeked there too, so play resumes from it. Anything else that
+  // moves playback ends stepping (playAt, a scrub, another camera or day).
+  const frameStepSeekRef = useRef(false);
+  const frameStep = useFrameStepper({
+    cameraId: isAllCameras ? "" : activeCameraId,
+    source,
+    enabled: !isAllCameras && !heroPlaying && hasPlaybackMedia && !playbackError
+      && Number.isFinite(playhead) && !Number.isFinite(frameSearchEpoch),
+    currentEpoch: currentPlaybackEpoch,
+    onSettle: (epoch) => seekToSteppedFrame(epoch, false),
+    measure: () => heroMediaRef.current?.clientWidth,
+  });
+  const timelineScrub = useCallback((epoch, options) => {
+    if (Number.isFinite(epoch)) frameStep.leave();
+    scrubPlayer(epoch, options);
+  }, [frameStep, scrubPlayer]);
+  function seekToSteppedFrame(epoch, autoplay) {
+    frameStepSeekRef.current = true;
+    try {
+      playAt(epoch, autoplay);
+    } finally {
+      frameStepSeekRef.current = false;
+    }
+  }
+  useEffect(() => {
+    if (heroPlaying && !heroSeeking) frameStep.leave();
+  }, [frameStep, heroPlaying, heroSeeking]);
+  useEffect(() => { frameStep.leave(); }, [date, frameStep]);
+
   function snapToRecording(epoch, continuing = false) {
     if (!timeline.length) return null;
     const bounded = Math.max(dayStart, Math.min(dayEnd - 0.01, epoch));
@@ -1539,6 +1572,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
   }
 
   function playAt(epoch, autoplay = true, preserveTimelineViewport = false, fastSeek = false, continuing = false) {
+    if (!frameStepSeekRef.current) frameStep.leave();
     const target = snapToRecording(epoch, continuing);
     if (target === null || !activeCameraId) return;
     if (
@@ -2261,6 +2295,12 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
   function toggleHeroPlayback() {
     const video = videoRef.current;
     if (!video) return;
+    const stepped = frameStep.epoch();
+    if (Number.isFinite(stepped) && video.paused) {
+      // Resume from the stepped frame; its picture stays up until playing.
+      seekToSteppedFrame(stepped, true);
+      return;
+    }
     if (!video.paused || (heroSeeking && autoplayRef.current)) {
       if (typeof cancelClipPreview === "function") cancelClipPreview();
       autoplayRef.current = false;
@@ -2285,7 +2325,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
     autoplayRef.current = false;
     setHeroPlaying(false);
     videoRef.current?.pause();
-    setFrameSearchEpoch(playhead);
+    // The exact frame being stepped through, if any.
+    setFrameSearchEpoch(frameStep.epoch() ?? playhead);
     setFrameSearchCrop(null);
     setFrameSearchImageBounds(null);
     setFrameSearchImageReady(false);
@@ -2433,8 +2474,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
     }
   }
 
-  function skipPlayback(seconds, playing = autoplayRef.current || heroPlaying) {
-    cancelClipPreview();
+  // Where playback is: the player's own time where it has one.
+  function currentPlaybackEpoch() {
     const video = videoRef.current;
     let currentEpoch = Number.isFinite(playhead) ? playhead : desiredEpochRef.current;
     if (!isAllCameras && pendingSeekModeRef.current !== "playlist-start" && video && Number.isFinite(video.currentTime)) {
@@ -2443,6 +2484,13 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
         : mediaTimeToEpoch(video.currentTime);
       if (Number.isFinite(mediaEpoch)) currentEpoch = mediaEpoch;
     }
+    return currentEpoch;
+  }
+
+  function skipPlayback(seconds, playing = autoplayRef.current || heroPlaying) {
+    cancelClipPreview();
+    // Ten seconds from a stepped frame, not from where the player was.
+    const currentEpoch = frameStep.epoch() ?? currentPlaybackEpoch();
     if (!Number.isFinite(currentEpoch)) return;
     // The transport buttons should feel immediate. Timeline clicks remain
     // exact; a fast seek may land on the nearest decodable keyframe first.
@@ -2725,7 +2773,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
           value={date}
           max={today}
           onChange={changeDate}
-          label={Number.isFinite(playhead) ? `${formatTimelineDateLabel(date)} ${formatTimeOnly(playhead, timeZone)}` : null}
+          label={Number.isFinite(playhead) ? (
+            <FrameStepTime stepper={frameStep} timeZone={timeZone} prefix={`${formatTimelineDateLabel(date)} `}>
+              {`${formatTimelineDateLabel(date)} ${formatTimeOnly(playhead, timeZone)}`}
+            </FrameStepTime>
+          ) : null}
           title={Number.isFinite(playhead) ? `${formatDateTime(playhead, timeZone)} · choose a day` : "Choose a day"}
         />
         <button type="button" onClick={() => changeDate(addDaysToDateKey(date, 1))} disabled={date >= today} aria-label="Next day" title="Next day"><ChevronRight size={16} /></button>
@@ -2873,7 +2925,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
           dayStart={dayStart}
           playhead={railPlayhead}
           onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
-          onScrub={isAllCameras ? null : scrubPlayer}
+          onScrub={isAllCameras ? null : timelineScrub}
           onSelectCamera={(nextCameraId) => {
             if (isAllCameras) focusGridCamera(nextCameraId);
             else if (nextCameraId !== activeCameraId) selectPlaybackCamera(nextCameraId);
@@ -2906,7 +2958,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
       selectedEventId={selectedEvent?.id}
       onEventSelect={selectRailEvent}
       onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
-      onScrub={isAllCameras ? null : scrubPlayer}
+      onScrub={isAllCameras ? null : timelineScrub}
       timeZone={timeZone}
       onPreviousDay={() => changeDate(addDaysToDateKey(date, -1))}
       onNextDay={date < today ? () => changeDate(addDaysToDateKey(date, 1)) : null}
@@ -3052,6 +3104,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
             />
           ) : null}
           {coveringNativeStartup ? <div className="recording-hero-startup-cover" aria-hidden="true" /> : null}
+          <FrameStepOverlay stepper={frameStep} />
           <ScrubFrameOverlay ref={scrubOverlayRef} seeking={heroSeeking} />
           <DebugDetectionOverlay
             key={aiOverlayKey}
@@ -3128,6 +3181,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
                 {heroPlaying ? "Pause" : "Play"}
               </button>
               <button type="button" onClick={() => skipPlayback(10)} aria-label="Forward 10 seconds"><SkipForward size={16} /></button>
+              <FrameStepButtons stepper={frameStep} disabled={heroPlaying} />
               <button
                 type="button"
                 onClick={() => setHeroMuted((current) => !current)}

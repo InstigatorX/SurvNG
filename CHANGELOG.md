@@ -17,6 +17,10 @@
 - Removed config fields `detector.depth.motion_evidence_enabled` and
   `cameras[].video_backend`; files that still contain them load unchanged.
   See `docs/dead-code-cleanup-2026-11.md`.
+- Timeline: step the paused player one frame back or forward (buttons beside
+  the ±10 s skips, or `,` and `.`), with exact server-decoded frames and their
+  time to the millisecond. New endpoints `recordings/frames.json` and
+  `recordings/frame.jpg`; see `docs/recording-frame-api.md`.
 
 ## SurvNG v1.2
 
