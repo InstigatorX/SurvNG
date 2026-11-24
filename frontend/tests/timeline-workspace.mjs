@@ -118,13 +118,18 @@ const filteredEvidence = [
 assert.deepEqual(timelineEvidenceWindow(filteredEvidence, 10, 12).map((event) => event.id), [1]);
 assert.deepEqual(parseTimelineView("?camera=gate&date=2026-08-15&source=main&at=123.5&event=44101&filter=vehicles&inspector=ai&window=4&objects=0&thumbs=0&speed=2", "2026-08-16"), {
   cameraId: "gate", date: "2026-08-15", source: "main", at: 123.5, eventFilter: "vehicles", eventId: 44101,
-  trailEventIds: [], windowHours: 4, lanes: { object: false, motion: true }, speed: 2, view: "rail", railMinutes: 60,
+  trailEventIds: [], windowHours: 4, speed: 2, view: "rail", railMinutes: 60,
 });
 assert.deepEqual(parseTimelineView("?camera=all&date=2026-08-15&at=123.5&window=1", "2026-08-16"), {
   cameraId: "all", date: "2026-08-15", source: null, at: 123.5, eventFilter: "all", eventId: null,
-  trailEventIds: [], windowHours: 1, lanes: { object: true, motion: true }, speed: 1, view: "rail", railMinutes: 60,
+  trailEventIds: [], windowHours: 1, speed: 1, view: "rail", railMinutes: 60,
 });
 assert.deepEqual(parseTimelineView("?camera=gate&event=84&trail=12,84,91&query_mode=visual", "2026-08-16").trailEventIds, [12, 84, 91]);
+// The Objects/Motion lane filter is gone: old links that hid a lane show every event.
+assert.deepEqual(
+  parseTimelineView("?camera=gate&date=2026-08-15&objects=0&motion=0", "2026-08-16"),
+  parseTimelineView("?camera=gate&date=2026-08-15", "2026-08-16"),
+);
 assert.equal(resolveTimelineHeroCameraId(routeCameras, parseTimelineView("?camera=all", "2026-08-16").cameraId), "gate");
 // Only an explicit camera=all opens the All cameras grid; no camera means the first camera.
 assert.equal(parseTimelineView("?date=2026-08-15", "2026-08-16").cameraId, "");

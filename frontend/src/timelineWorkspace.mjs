@@ -188,7 +188,6 @@ export function parseTimelineView(search, today = "") {
     eventId: rawEvent && Number.isFinite(Number(rawEvent)) ? Number(rawEvent) : rawEvent || null,
     trailEventIds,
     windowHours: [1, 2, 4, 8, 12, 24].includes(Number(params.get("window"))) ? Number(params.get("window")) : 1,
-    lanes: { object: params.get("objects") !== "0", motion: params.get("motion") !== "0" },
     speed: normalizedTimelinePlaybackRate(params.get("speed")),
     view: normalizedTimelineView(params.get("view")),
     railMinutes: normalizedRailMinutes(params.get("rail")),

@@ -409,8 +409,7 @@
     bottom: calc(86px + 8px) !important;
   }
 
-  .recordings-v2-timeline-toolbar,
-  .recordings-timeline-display-controls {
+  .recordings-v2-timeline-toolbar {
     display: none !important;
   }
 

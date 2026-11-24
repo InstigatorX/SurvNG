@@ -732,7 +732,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [playbackDetail, setPlaybackDetail] = useState(null);
   const [events, setEvents] = useState([]);
   const [eventFilter, setEventFilter] = useState(initialView.eventFilter);
-  const [timelineLanes, setTimelineLanes] = useState(initialView.lanes);
   const [incidentRangeHours, setIncidentRangeHours] = useState(initialView.windowHours);
   const [availableSources, setAvailableSources] = useState([]);
   const [playhead, setPlayhead] = useState(null);
@@ -1006,10 +1005,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
 
   const filteredEvents = useMemo(() => events
     .filter((event) => timelineEventMatchesFilter(event, eventFilter))
-    .filter((event) => (event.has_objects ? timelineLanes.object : timelineLanes.motion))
     .map((event) => ({ ...event, incident_epoch: recordingIncidentEpoch(event) }))
     .filter((event) => Number.isFinite(event.incident_epoch))
-    .sort((left, right) => left.incident_epoch - right.incident_epoch), [eventFilter, events, timelineLanes.motion, timelineLanes.object]);
+    .sort((left, right) => left.incident_epoch - right.incident_epoch), [eventFilter, events]);
 
   const viewportAnchor = Number.isFinite(timelineViewportAnchor)
     ? timelineViewportAnchor
@@ -1981,13 +1979,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
     const trailValue = serializeTrailEventIds(trailEventIds);
     if (trailValue) params.set("trail", trailValue);
     if (incidentRangeHours !== 1) params.set("window", String(incidentRangeHours));
-    if (!timelineLanes.object) params.set("objects", "0");
-    if (!timelineLanes.motion) params.set("motion", "0");
     if (playbackRate !== 1) params.set("speed", String(playbackRate));
     if (timelineLayout !== "rail") params.set("view", timelineLayout);
     if (railMinutes !== 60) params.set("rail", String(railMinutes));
     window.history.replaceState(null, "", appUrl(`/timeline?${params.toString()}`));
-  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, isAllCameras, incidentRangeHours, initialQuery, playbackRate, railMinutes, selectedEventId, source, timelineLanes.motion, timelineLanes.object, timelineLayout, trailEventIds]);
+  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, isAllCameras, incidentRangeHours, initialQuery, playbackRate, railMinutes, selectedEventId, source, timelineLayout, trailEventIds]);
 
   useEffect(() => {
     const restoreView = () => {
@@ -2011,7 +2007,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
       setTrailEventIds(view.trailEventIds || []);
       if (view.eventId || view.trailEventIds?.length) setInvestigationOpen(true);
       setIncidentRangeHours(view.windowHours);
-      setTimelineLanes(view.lanes);
       setPlaybackRate(view.speed);
       setTimelineLayout(view.view);
       setRailMinutes(view.railMinutes);
@@ -3273,10 +3268,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
               </div>
               <div className="recordings-toolbar-day-controls">{timelineDayControls()}</div>
             </div>
-            <div className="recordings-timeline-display-controls">
-              <button type="button" className={timelineLanes.object ? "active object" : "object"} aria-pressed={timelineLanes.object} onClick={() => { checkpointTimelineView(); setTimelineLanes((current) => ({ ...current, object: !current.object })); }}>Objects</button>
-              <button type="button" className={timelineLanes.motion ? "active motion" : "motion"} aria-pressed={timelineLanes.motion} onClick={() => { checkpointTimelineView(); setTimelineLanes((current) => ({ ...current, motion: !current.motion })); }}>Motion</button>
-            </div>
             <button
               type="button"
               className={`recordings-investigation-toggle${investigationOpen ? " active" : ""}`}
@@ -3301,7 +3292,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
             recordings={timeline}
             events={displayedTimelineEvents}
             evidenceFilter={eventFilter}
-            laneVisibility={timelineLanes}
             selectedEventId={selectedEvent?.id}
             onEventSelect={(event) => { checkpointTimelineView(); setInvestigationOpen(true); setSelectedEventId(event.id); playAt(event.incident_epoch, true); }}
             playhead={playhead ?? dayStart}
@@ -3728,7 +3718,7 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
   );
 }
 
-export function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings, events, evidenceFilter, laneVisibility, selectedEventId, onEventSelect, playhead, timeZone, onSeek, onScrub = null, onPanViewport, windowHours = 1, exportRange, onExportRangeChange }) {
+export function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings, events, evidenceFilter, selectedEventId, onEventSelect, playhead, timeZone, onSeek, onScrub = null, onPanViewport, windowHours = 1, exportRange, onExportRangeChange }) {
   const duration = Math.max(1, endEpoch - startEpoch);
   const offset = Math.max(0, Math.min(duration, playhead - startEpoch));
   const trackRef = useRef(null);
@@ -4124,10 +4114,10 @@ export function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, reco
             }}
           />
         ))}
-        <div className={`recordings-v2-event-lane object${!laneVisibility?.object ? " hidden" : evidenceFilter === "motion" ? " muted" : ""}`} aria-hidden="true">
+        <div className={`recordings-v2-event-lane object${evidenceFilter === "motion" ? " muted" : ""}`} aria-hidden="true">
           {eventMarkers.filter((event) => event.hasObjects).map((event) => <b key={event.id} style={{ left: `${event.left}%`, width: `${event.width}%` }} />)}
         </div>
-        <div className={`recordings-v2-event-lane motion${!laneVisibility?.motion ? " hidden" : evidenceFilter === "object" ? " muted" : ""}`} aria-hidden="true">
+        <div className={`recordings-v2-event-lane motion${evidenceFilter === "object" ? " muted" : ""}`} aria-hidden="true">
           {eventMarkers.filter((event) => !event.hasObjects).map((event) => <b key={event.id} style={{ left: `${event.left}%`, width: `${event.width}%` }} />)}
         </div>
         {exportRange ? (

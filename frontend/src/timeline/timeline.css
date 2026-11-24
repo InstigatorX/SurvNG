@@ -665,39 +665,6 @@
   padding: 4px 10px;
 }
 
-.recordings-timeline-display-controls {
-  display: flex;
-  gap: 4px;
-}
-
-.recordings-timeline-display-controls button {
-  min-height: 32px;
-  border-color: transparent;
-  background: transparent;
-  color: var(--muted);
-  font-size: var(--text-xs);
-}
-
-.recordings-timeline-display-controls button::before {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
-  content: "";
-}
-
-.recordings-timeline-display-controls button.object {
-  color: #4b82ff;
-}
-
-.recordings-timeline-display-controls button.motion {
-  color: #f4a019;
-}
-
-.recordings-timeline-display-controls button:not(.active) {
-  opacity: .45;
-}
-
 .recordings-v2-timeline-toolbar>span {
   color: var(--muted);
   font-size: var(--text-xs);
@@ -766,10 +733,6 @@
   background: color-mix(in srgb, var(--canvas) 78%, transparent);
   touch-action: pan-y;
   overscroll-behavior-x: contain;
-}
-
-.recordings-v2-event-lane.hidden {
-  display: none;
 }
 
 .recordings-v2-event-lane b {
@@ -1191,10 +1154,6 @@
     min-height: 44px;
     height: 44px;
   }
-
-  .recordings-timeline-display-controls button {
-    min-height: 44px;
-  }
 }
 
 @media (max-width: 760px) {
@@ -1381,7 +1340,6 @@
     min-height: 146px;
   }
 
-  .recordings-timeline-display-controls button,
   .recordings-v2-event-filter button {
     min-height: 44px;
   }

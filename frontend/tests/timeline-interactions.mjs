@@ -86,7 +86,7 @@ try {
     });
   } }] });
   await server.listen();
-  const url = `${server.resolvedUrls.local[0]}timeline?camera=gate&date=${date}&at=${dayStart + 12 * 3600 + 5}&source=main&view=classic`;
+  const url = `${server.resolvedUrls.local[0]}timeline?camera=gate&date=${date}&at=${dayStart + 12 * 3600 + 5}&source=main`;
   console.log(`Full RecordingsPage fixture: ${url}\nDiagnostics: ${server.resolvedUrls.local[0]}timeline-interactions-requests.json`);
   if (process.env.TIMELINE_INTERACTIONS_SERVE === "1") {
     await new Promise(done => { process.once("SIGINT", done); process.once("SIGTERM", done); });
@@ -106,11 +106,15 @@ try {
     const desktop = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     await desktop.goto(url);
     await desktop.waitForFunction(() => window.timelineFixture?.snapshot().readyState >= 2);
-    await desktop.locator('.recordings-toolbar-day-controls .recordings-v2-date-toggle').click();
+    // Wider screens also switch camera from the companion strip beside the hero.
+    await desktop.getByRole("button", { name: "Show Yard recording at the current time", exact: true }).click();
+    await desktop.waitForFunction(() => window.timelineFixture.snapshot().context?.camera_id === "yard");
+    // The player HUD carries the day picker; the Event Rail carries the zoom.
+    await desktop.locator(".timeline-hud-day .recordings-v2-date-toggle").click();
     await desktop.getByRole("dialog", { name: "Choose recording day" }).getByRole("button", { name: "8", exact: true }).click();
     await desktop.waitForFunction(() => new URL(location.href).searchParams.get("date") === "2026-09-08");
-    await desktop.getByRole("group", { name: "Visible time scale" }).getByRole("button", { name: "2h", exact: true }).click();
-    await desktop.waitForFunction(() => window.timelineFixture.snapshot().rangeSeconds === 7200);
+    await desktop.getByRole("group", { name: "Rail zoom" }).getByRole("button", { name: "6h", exact: true }).click();
+    await desktop.waitForFunction(() => window.timelineFixture.snapshot().railSpan === "6h" && new URL(location.href).searchParams.get("rail") === "360");
     console.log("Full Timeline interaction checks passed");
   }
 } finally {
@@ -188,10 +192,10 @@ async function runInteractions(page, url, engine) {
     assert.ok(bounds.y >= commandBar.y && bounds.y + bounds.height <= commandBar.y + commandBar.height,
       "mobile date and camera controls must stay inside the visible command bar");
   }
-  const controls = await page.locator(".recordings-v2-controls").boundingBox();
-  const timeline = await page.locator(".recordings-v2-timeline").boundingBox();
-  assert.ok(timeline.y + timeline.height <= controls.y + controls.height + 1,
-    "the range navigation must not push the timeline outside its reserved height");
+  const scroller = page.locator(".event-rail-scroller");
+  const railBox = await scroller.boundingBox();
+  assert.ok(railBox && railBox.height > 200 && railBox.y + railBox.height <= page.viewportSize().height + 1,
+    "the phone rail must keep its scrub height inside the viewport");
   await calendar.fill("2026-09-08");
   await page.waitForFunction(() => new URL(location.href).searchParams.get("date") === "2026-09-08");
   await waitReady();
@@ -200,67 +204,29 @@ async function runInteractions(page, url, engine) {
   await camera.selectOption("yard");
   await page.waitForFunction(() => window.timelineFixture.snapshot().context?.camera_id === "yard");
   await waitReady();
-  // Reset to a known midday anchor so directional pan assertions never depend
+  // Reset to a known midday anchor so directional seek assertions never depend
   // on the production policy for choosing a first clip on a different day.
   await page.goto(url);
   await waitReady();
-  const scale = page.getByLabel("Visible time span", { exact: true });
-  assert.ok(await scale.isVisible());
+  const zoom = page.getByRole("group", { name: "Rail zoom" });
+  assert.ok(await zoom.isVisible());
   const beforeScale = await read();
-  for (const hours of [4, 24, 1]) {
-    await scale.selectOption(String(hours));
-    await page.waitForFunction(seconds => window.timelineFixture.snapshot().rangeSeconds === seconds, hours * 3600);
+  for (const span of ["6h", "24h", "1h"]) {
+    await zoom.getByRole("button", { name: span, exact: true }).click();
+    await page.waitForFunction(label => window.timelineFixture.snapshot().railSpan === label, span);
   }
-  assert.equal((await read()).videoId, beforeScale.videoId, "changing the visible span must retain the hero video");
-  const beforePan = await read();
-  const beforePanManifests = playlistCount();
-  for (let i = 0; i < 3; i++) {
-    const previous = JSON.stringify((await read()).ticks);
-    await page.getByRole("button", { name: "Earlier time range", exact: true }).click();
-    await page.waitForFunction(ticks => JSON.stringify(window.timelineFixture.snapshot().ticks) !== ticks, previous);
-  }
-  for (let i = 0; i < 3; i++) await page.getByRole("button", { name: "Later time range", exact: true }).click();
-  await page.waitForFunction(ticks => JSON.stringify(window.timelineFixture.snapshot().ticks) === ticks, JSON.stringify(beforePan.ticks));
-  const slider = page.getByRole("slider", { name: "Recording timeline", exact: true });
-  const box = await slider.boundingBox();
-  assert.ok(box && box.width > 100);
-  if (engine === "chromium") {
-    // Real touch input exercises pointer capture and swipe/tap discrimination.
-    const cdp = await page.context().newCDPSession(page);
-    const x = box.x + box.width * 0.72;
-    const y = box.y + box.height * 0.5;
-    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
-    for (let i = 1; i <= 8; i++) {
-      await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: x - box.width * 0.4 * i / 8, y }] });
-      await page.waitForTimeout(20);
-    }
-    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-    await page.waitForFunction(ticks => JSON.stringify(window.timelineFixture.snapshot().ticks) !== ticks, JSON.stringify(beforePan.ticks));
-    assert.ok(Math.abs((await read()).playhead - beforePan.playhead) < 1, "swiping the viewport must not seek the hero");
-    await cdp.detach();
-  }
-  const beforeWheel = JSON.stringify((await read()).ticks);
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  if (engine === "webkit") {
-    await slider.dispatchEvent("wheel", { deltaX: 180, deltaY: 0 });
-  } else {
-    await page.mouse.wheel(180, 0);
-  }
-  await page.waitForFunction(ticks => JSON.stringify(window.timelineFixture.snapshot().ticks) !== ticks, beforeWheel);
-  assert.equal(playlistCount(), beforePanManifests, "viewport panning must not request a new hero playlist");
-  assert.equal((await read()).videoId, beforePan.videoId);
+  assert.equal((await read()).videoId, beforeScale.videoId, "changing the rail zoom must retain the hero video");
 
-  await page.goto(url);
-  await waitReady();
-  async function tapAtFraction(fraction) {
+  // The rail scrubs by scrolling time under its playhead line (newest at the
+  // top), and a scroll that settles commits a seek. One scroll pixel is the
+  // finest time step it can commit.
+  const spanSeconds = { "15m": 900, "1h": 3600, "6h": 21600, "24h": 86400 };
+  const secondsPerPixel = async () => {
     const state = await read();
-    const start = state.playhead - state.rangeOffset;
-    const currentBox = await slider.boundingBox();
-    const x = currentBox.x + currentBox.width * fraction;
-    const y = currentBox.y + currentBox.height / 2;
-    const target = start + state.rangeSeconds * fraction;
-    await page.touchscreen.tap(x, y);
-    const tolerance = state.rangeSeconds / currentBox.width + 1;
+    return Math.max(60, spanSeconds[state.railSpan]) / state.railHeight;
+  };
+  const windowEnd = epoch => (Math.floor(epoch / 900) + 1) * 900;
+  async function waitSeek(target, tolerance) {
     await page.waitForFunction(({ target, tolerance }) => {
       const s = window.timelineFixture.snapshot();
       const mediaTarget = ((target % 900) + 900) % 900;
@@ -270,10 +236,60 @@ async function runInteractions(page, url, engine) {
     }, { target, tolerance });
     return await read();
   }
+  // Seek through the rail's keyboard scrub: ArrowUp/ArrowDown move a thirtieth
+  // of the zoom span and PageUp/PageDown half of it (later/earlier).
+  async function railSeek(key, seconds) {
+    const state = await read();
+    await scroller.focus();
+    await page.keyboard.press(key);
+    return waitSeek(state.playhead + seconds, await secondsPerPixel() + 1);
+  }
+  const beforeScrub = await read();
+  const beforeScrubManifests = playlistCount();
+  const box = await scroller.boundingBox();
+  if (engine === "chromium") {
+    // Real touch input: dragging the rail down brings later time under the
+    // line. Touch slop absorbs the first pixels, so expect at least a minute.
+    const distance = 40;
+    const cdp = await page.context().newCDPSession(page);
+    const x = box.x + box.width * 0.5;
+    const y = box.y + box.height * 0.3;
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+    for (let i = 1; i <= 8; i++) {
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y + distance * i / 8 }] });
+      await page.waitForTimeout(20);
+    }
+    await page.waitForTimeout(150); // come to rest before lifting, so the swipe does not fling
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await cdp.detach();
+    await page.waitForFunction(previous => {
+      const s = window.timelineFixture.snapshot();
+      return s.readyState >= 2 && !s.seeking && s.playhead > previous + 60
+        && Math.abs(s.currentTime - (((s.playhead % 900) + 900) % 900)) < 2;
+    }, beforeScrub.playhead);
+    const swiped = await read();
+    assert.ok(swiped.playhead < windowEnd(beforeScrub.playhead), "the touch scrub stays inside the loaded window");
+    assert.equal(swiped.videoId, beforeScrub.videoId, "touch scrubbing must keep the hero video");
+  }
+  // A wheel scrub the other way (scrolling down brings earlier time).
+  const beforeWheel = await read();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(0, 12);
+  await page.waitForFunction(previous => {
+    const s = window.timelineFixture.snapshot();
+    return s.readyState >= 2 && !s.seeking && s.playhead < previous - 30
+      && Math.abs(s.currentTime - (((s.playhead % 900) + 900) % 900)) < 2;
+  }, beforeWheel.playhead);
+  assert.ok((await read()).playhead >= Math.floor(beforeScrub.playhead / 900) * 900, "the wheel scrub stays inside the loaded window");
+  assert.equal(playlistCount(), beforeScrubManifests, "scrubbing within the loaded window must not request a new hero playlist");
+  assert.equal((await read()).videoId, beforeScrub.videoId);
+
+  await page.goto(url);
+  await waitReady();
   const initial = await read();
   const initialManifests = playlistCount();
-  for (const fraction of [0.53, 0.56, 0.54]) {
-    const after = await tapAtFraction(fraction);
+  for (const [key, seconds] of [["ArrowUp", 120], ["ArrowUp", 120], ["ArrowDown", -120]]) {
+    const after = await railSeek(key, seconds);
     assert.equal(after.videoId, initial.videoId, "same-window seeks must keep the same hero video");
     assert.equal(after.src, initial.src, "same-window seeks must retain their source");
   }
@@ -285,7 +301,7 @@ async function runInteractions(page, url, engine) {
   const windowStarted = new Promise(resolve => { windowRequested = resolve; });
   const delayWindow = async route => { windowRequested(); await blockedWindow; await route.continue(); };
   await page.route("**/recordings/window?**", delayWindow);
-  const crossSeek = tapAtFraction(0.86);
+  const crossSeek = railSeek("PageUp", 1800);
   await windowStarted;
   assert.equal((await read()).paused, true, "a pending seek stops outgoing footage immediately");
   const requestedPlayhead = (await read()).playhead;
@@ -298,16 +314,13 @@ async function runInteractions(page, url, engine) {
   const selectedPlaylists = requests.filter(request => request.path.endsWith("/day.m3u8"));
   assert.ok(new Set(selectedPlaylists.map(request => new URLSearchParams(request.query).get("start_epoch"))).size > 1);
   const crossCount = playlistCount();
-  const crossState = await read();
-  const nextTarget = cross.playhead + 60;
-  const currentStart = crossState.playhead - crossState.rangeOffset;
-  const repeated = await tapAtFraction((nextTarget - currentStart) / crossState.rangeSeconds);
+  const repeated = await railSeek("ArrowUp", 120);
   assert.equal(repeated.src, cross.src);
   assert.equal(repeated.videoId, cross.videoId);
   assert.equal(playlistCount(), crossCount, "later seek in new window must not reload it");
   const windowCount = requests.filter(request => request.path.endsWith("/window")).length;
-  const revisit = await read();
-  await tapAtFraction((initial.playhead + 120 - (revisit.playhead - revisit.rangeOffset)) / revisit.rangeSeconds);
+  const revisit = await railSeek("PageDown", -1800);
+  assert.equal(Math.floor(revisit.playhead / 900), Math.floor(initial.playhead / 900), "the revisit lands in the first window");
   assert.equal(requests.filter(request => request.path.endsWith("/window")).length, windowCount,
     "revisiting a recent archive window reuses its metadata");
   if ((await read()).paused) await page.locator(".recording-hero-controls").getByRole("button", { name: "Play", exact: true }).click();
@@ -329,7 +342,9 @@ async function runInteractions(page, url, engine) {
   const cameraWindowDone = new Promise(resolve => { cameraWindowFinished = resolve; });
   const delayCameraWindow = async route => { cameraWindowRequested(); await cameraWindowGate; await route.continue(); cameraWindowFinished(); };
   await page.route("**/yard/recordings/window?**", delayCameraWindow);
-  await page.getByRole("button", { name: "Show Yard recording at the current time", exact: true }).click();
+  // Phones switch camera from the command bar (the rail views hide the
+  // companion strip there); both call the same camera switch.
+  await camera.selectOption("yard");
   await cameraWindowStarted;
   await page.waitForTimeout(150);
   const prematurePlaylists = requests.slice(beforeCameraRequests).filter(request => request.path.endsWith("/yard/recordings/day.m3u8"));
@@ -344,22 +359,25 @@ async function runInteractions(page, url, engine) {
   assert.equal((await read()).videoId, beforeCamera.videoId, "camera changes retain Safari's authorized video element");
   assert.ok(Math.abs((await read()).playhead - beforeCamera.playhead) < 5, "camera switch retains the selected time");
 
-  // Drag the visible playhead instead of panning the surrounding time range.
+  // Fine scrub: at the finest zoom, grabbing the rail and dragging it seeks
+  // from a paused hero and resumes playback there.
   if (engine === "chromium") {
     await page.locator(".recording-hero-controls").getByRole("button", { name: "Pause", exact: true }).click();
+    await zoom.getByRole("button", { name: "15m", exact: true }).click();
+    await page.waitForFunction(() => window.timelineFixture.snapshot().railSpan === "15m");
     const fineBefore = await read();
-    const fineBox = await slider.boundingBox();
-    const fineX = fineBox.x + fineBox.width * fineBefore.rangeOffset / fineBefore.rangeSeconds;
-    const fineY = fineBox.y + fineBox.height / 2;
-    const fineInput = await page.context().newCDPSession(page);
-    await fineInput.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: fineX, y: fineY }] });
-    await fineInput.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: fineX + 40, y: fineY }] });
-    await fineInput.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-    await fineInput.detach();
-    await page.waitForFunction(target => {
+    const fineStep = await secondsPerPixel();
+    const fineBox = await scroller.boundingBox();
+    const fineX = fineBox.x + fineBox.width / 2;
+    const fineY = fineBox.y + fineBox.height * 0.4;
+    await page.mouse.move(fineX, fineY);
+    await page.mouse.down();
+    await page.mouse.move(fineX, fineY + 20, { steps: 5 });
+    await page.mouse.up();
+    await page.waitForFunction(({ target, tolerance }) => {
       const s = window.timelineFixture.snapshot();
-      return !s.seeking && !s.paused && Math.abs(s.playhead - target) < 3;
-    }, fineBefore.playhead + 40);
-    assert.deepEqual((await read()).ticks, fineBefore.ticks, "fine scrub must retain the browsed time range");
+      return !s.seeking && !s.paused && Math.abs(s.playhead - target) < tolerance;
+    }, { target: fineBefore.playhead + 20 * fineStep, tolerance: fineStep + 3 });
+    assert.equal((await read()).railSpan, "15m", "fine scrub must retain the rail zoom");
   }
 }
