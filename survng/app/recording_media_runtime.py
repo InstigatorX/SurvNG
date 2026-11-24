@@ -1293,6 +1293,10 @@ class RecordingMediaRuntime:
             for backend, command in commands:
                 tmp_path.unlink(missing_ok=True)
                 clip_timeout = max(60.0, min(600.0, duration * 2.0))
+                if backend == 'vaapi':
+                    # Hardware decode and encode that cannot keep up with real
+                    # time is stalled; leave the time for the next attempts.
+                    clip_timeout = max(30.0, min(clip_timeout, duration))
                 try:
                     result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=clip_timeout)
                 except subprocess.TimeoutExpired:

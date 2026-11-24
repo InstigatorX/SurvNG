@@ -131,10 +131,10 @@ def _measure(
             except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
                 detail = f"unreadable output: {exc}"
         row["frames"] = frames
-        speed = source_seconds / wall if wall > 0 else 0.0
+        speed = f"{source_seconds / wall:.1f}" if row["ok"] and wall > 0 else "-"
         print(
             f"{name:<22}{'ok' if row['ok'] else 'FAILED':<8}{wall:>8.2f}{cpu:>8.2f}"
-            f"{speed:>8.1f}{frames:>8}  {detail}"
+            f"{speed:>8}{frames:>8}  {detail}"
         )
         if show_commands or not row["ok"]:
             print("    " + " ".join(command))
@@ -151,7 +151,7 @@ def main() -> int:
     parser.add_argument("--backends", default="vaapi,qsv", help="comma-separated: vaapi, qsv")
     parser.add_argument("--height", type=int, default=1080, help="export height; 0 keeps the source size")
     parser.add_argument("--seconds", type=float, default=30.0, help="source seconds for the export and clip jobs")
-    parser.add_argument("--interval", type=float, default=10.0, help="timelapse sample interval in seconds")
+    parser.add_argument("--interval", type=float, default=30.0, help="timelapse sample interval in seconds")
     parser.add_argument("--timeout", type=float, default=600.0, help="per-attempt limit in seconds")
     parser.add_argument("--show-commands", action="store_true", help="print every command, not only failed ones")
     args = parser.parse_args()
@@ -165,7 +165,9 @@ def main() -> int:
     infos = [_media_info(ffprobe, path) for path in sources]
     total = sum(float(info["duration"]) for info in infos)
     first = infos[0]
-    version = subprocess.run([args.ffmpeg, "-version"], stdout=subprocess.PIPE, text=True).stdout.splitlines()[0]
+    version = subprocess.run(
+        [args.ffmpeg, "-version"], stdout=subprocess.PIPE, text=True, timeout=15,
+    ).stdout.splitlines()[0]
     print(version)
     print(f"render nodes: {', '.join(devices) or 'none'}   using: {device or 'none'}")
     print(
@@ -202,6 +204,9 @@ def main() -> int:
             rows.append({
                 "path": str(path), "start_epoch": epoch, "end_epoch": epoch + duration,
                 "duration_seconds": duration,
+                # SurvNG only keeps frames on the GPU across recordings its
+                # index knows to share one stream layout.
+                "stream_fingerprint": f"{info['codec']}:{info['width']}x{info['height']}:{info['pix_fmt']}",
             })
             epoch += duration
         clip_seconds = max(1.0, min(args.seconds, total))
@@ -260,9 +265,11 @@ def main() -> int:
         clip = work / "clip.mp4"
         codec = str(first["codec"])
         clip_commands: list[tuple[str, list[str]]] = []
-        if "vaapi" in backends:
+        if "vaapi" in backends and codec in {"h264", "hevc"}:
             runtime._ffmpeg_vaapi_info = lambda: {"device": device}  # type: ignore[method-assign]
-            clip_commands.append(("vaapi", runtime._event_clip_vaapi_command(codec, concat, 0.0, clip_seconds, clip)))
+            # SurvNG skips hardware decode for 10-bit sources.
+            if "10" not in str(first["pix_fmt"]) and "12" not in str(first["pix_fmt"]):
+                clip_commands.append(("vaapi", runtime._event_clip_vaapi_command(codec, concat, 0.0, clip_seconds, clip)))
             clip_commands.append(("vaapi-encode", runtime._event_clip_vaapi_command(
                 codec, concat, 0.0, clip_seconds, clip, hardware_decode=False)))
         if "qsv" in backends and codec in {"h264", "hevc"}:
@@ -292,7 +299,7 @@ def main() -> int:
         else:
             known = "unknown" if spacing is None else f"{spacing:.2f} s"
             print(f"\nKeyframe-only timelapse not used: keyframe spacing is {known}, and "
-                  f"--interval {args.interval:g} must be at least twice that.")
+                  f"--interval {args.interval:g} must be at least ten times that.")
 
     # A backend SurvNG's own probe calls usable must run every attempt built for it.
     failures = [

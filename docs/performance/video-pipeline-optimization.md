@@ -157,23 +157,31 @@ Each of these now tries an attempt that never leaves the GPU, then the previous 
 
 | Job | Attempts in order |
 | --- | --- |
-| Recording export, timelapse | `vaapi-gpu` or `qsv-gpu`, then `vaapi` or `qsv` (software filters, hardware encode), then `cpu` |
+| Recording export | `vaapi-gpu` or `qsv-gpu`, then `vaapi` or `qsv` (software filters, hardware encode), then `cpu` |
+| Timelapse, sparse sampling | `vaapi keyframes` or `qsv keyframes` (software keyframe decode, hardware encode), then `cpu keyframes`, then the dense attempts |
+| Timelapse, dense sampling | `vaapi-gpu` or `qsv-gpu`, then `vaapi` or `qsv`, then `cpu` |
 | VAAPI event clip | `vaapi` (hardware decode, skipped for 10-bit sources), then `vaapi-encode` (software decode), then `cpu` |
 
-The full-GPU filter chain is `…,format=nv12\|vaapi,hwupload,scale_vaapi` for VAAPI and `…,vpp_qsv` for QSV, with frame dropping and timestamp filters around the scaler. There is no hardware pad: a source whose aspect does not exactly fill the output frame keeps the software filters. QSV needs an H.264 or HEVC source, because the decoder is named explicitly.
+The full-GPU filter chain is `…,format=nv12\|vaapi,hwupload,scale_vaapi` for VAAPI and `…,vpp_qsv` for QSV, with frame dropping and timestamp filters around the scaler. It is used only when:
 
-A timelapse whose sample interval is at least twice the keyframe spacing decodes keyframes only (`-skip_frame nokey`). The spacing is the longest gap between the frames FFmpeg's decoder outputs with `-skip_frame nokey` in the first minute of the first recording. Container keyframe flags are not used: they also mark intra-refresh recovery points and non-IDR I-frames that the decoder skips. In that mode one frame is taken per interval bucket, so sampling follows keyframes without drifting. Keyframe timelapses decode in software and skip the full-GPU attempt.
+- every recording in the job carries the same stream fingerprint, because a hardware scaler has a fixed output size and would stretch a recording the software filters letterbox;
+- the source exactly fills the output frame, because there is no hardware pad;
+- for QSV, the source is H.264 or HEVC, because the decoder is named explicitly.
+
+A full-GPU result with fewer than about 90% of the expected frames is discarded and the previous command runs.
+
+A timelapse whose sample interval is at least ten keyframe spacings decodes keyframes only (`-skip_frame nokey`). The spacing is the longest gap between the frames FFmpeg's decoder outputs with `-skip_frame nokey` in the first minute of the first recording. Container keyframe flags are not used: they also mark intra-refresh recovery points and non-IDR I-frames that the decoder skips. In that mode one frame is taken per interval bucket.
 
 ### Risks
 
-- The full-GPU attempts were written without a render node. A failure normally costs one failed FFmpeg start before the previous command runs; an attempt that stalls costs its whole time limit first.
-- Keyframe spacing is measured on the first minute of the first recording only, and a camera can lengthen it later. A keyframe timelapse with fewer than about 90% of the expected frames is discarded and every frame is decoded instead, so those sources pay for one extra cheap pass.
-- A timelapse spanning recordings with different stream fingerprints has no full-GPU attempt, because a hardware scaler would stretch a later recording that the software filters letterbox.
+- The full-GPU attempts were written without a render node. A failure normally costs one failed FFmpeg start before the previous command runs; an attempt that stalls costs its time limit first. The hardware-decode event clip is limited to real time, with a 30 s floor.
+- A keyframe timelapse samples the first keyframe in each interval, so samples sit up to one keyframe spacing late: at most a tenth of the interval. Decoding every frame samples exactly on the interval.
+- Keyframe spacing is measured on the first minute of the first recording only, and a camera can lengthen it later. A keyframe timelapse with fewer frames than decoding every frame would give is discarded and every frame is decoded instead, at the cost of one extra cheap pass.
 
 ### Tests
 
-`tests/test_media_exports.py` covers the attempt order, the aspect rule for the full-GPU chain, and a real FFmpeg timelapse where keyframe-only decode produces the same frame count as decoding every frame. `tests/test_recording_clip_revision.py` covers the VAAPI event-clip commands.
+`tests/test_media_exports.py` covers the attempt order, the aspect and fingerprint rules for the full-GPU chain, a real FFmpeg timelapse where keyframe-only decode produces the same frame count as decoding every frame, and a real intra-refresh source whose short keyframe result is replaced. `tests/test_recording_clip_revision.py` covers the VAAPI event-clip commands, the 10-bit skip and the stalled-attempt fallback.
 
 ### Benchmark
 
-Not measured: this machine has no `/dev/dri` render node. Compare a 4K HEVC export with `hardware_acceleration` set to `vaapi` against `off` on a GPU host before treating this as a measured gain.
+Not measured: this machine has no `/dev/dri` render node. `scripts/benchmark_gpu_transcode.py` runs every attempt above on a real recording and reports wall time, FFmpeg CPU time and output frames; run it on a GPU host before treating this as a measured gain.

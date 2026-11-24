@@ -34,6 +34,11 @@ LOGGER = logging.getLogger(__name__)
 
 # Source codecs with a named QSV decoder that the full-GPU export selects.
 _QSV_DECODE_CODECS = frozenset({"h264", "hevc"})
+
+# A keyframe-only timelapse needs its sample interval to be at least this many
+# keyframe spacings, so snapping samples to keyframes moves each by at most a
+# tenth of the interval.
+_KEYFRAME_TIMELAPSE_MIN_INTERVALS = 10
 ACTIVE_STATUSES = {"queued", "running", "cancelling"}
 
 
@@ -872,7 +877,7 @@ class MediaExportManager:
                 (target_width, target_height),
                 before=[f"fps={target_fps:.6f}"],
                 after=["setsar=1", "settb=AVTB", f"setpts=N/({target_fps:.6f}*TB)"],
-            )
+            ) if self._uniform_stream(group) else None
             commands = self._recording_commands(
                 backend, concat, output, filters, local_start, duration, include_audio,
                 gpu_filters=gpu_filters,
@@ -900,7 +905,10 @@ class MediaExportManager:
                         LOGGER.warning("%s recording export failed; trying fallback: %s", backend_name, last_error)
                         continue
                     raise
-                if self._valid_video_output(output):
+                if self._valid_video_output(output) and (
+                    not backend_name.endswith("-gpu")
+                    or self._has_frames(output, duration * target_fps * 0.9)
+                ):
                     encoded = True
                     break
                 last_error = f"{backend_name} recording export produced no playable video"
@@ -1219,18 +1227,21 @@ class MediaExportManager:
             raise RuntimeError("timelapse would exceed 20,000 frames; increase the sample interval")
         concat = self._write_concat(rows, work / "timelapse.ffconcat")
         output = work / "timelapse.mp4"
-        # A timelapse keeps one frame per interval. When keyframes are at
-        # least twice as frequent as that, decode only keyframes instead of
-        # every frame. Sampling then snaps to keyframes, so frames are chosen
-        # per interval bucket: "interval since the last pick" would drift by
-        # up to one keyframe spacing on every sample.
+        # A timelapse keeps one frame per interval. When keyframes are much
+        # more frequent than that, decode only keyframes instead of every
+        # frame. Sampling then snaps to keyframes, which moves each sample by
+        # up to one keyframe spacing; the required ratio keeps that uneven
+        # spacing small. Frames are chosen per interval bucket: "interval
+        # since the last pick" would also drift on every sample.
         #
         # The spacing is measured on the start of the first recording only,
         # and a camera can lengthen it later. A keyframe timelapse that comes
         # out short is therefore discarded and every frame is decoded instead.
         keyframe_interval = self._keyframe_interval(Path(str(groups[0][0]["path"])))
-        keyframes_only = keyframe_interval is not None and interval >= 2 * keyframe_interval
-        minimum_keyframe_frames = max(1, min(estimated_frames - 1, estimated_frames * 9 // 10))
+        keyframes_only = (
+            keyframe_interval is not None
+            and interval >= _KEYFRAME_TIMELAPSE_MIN_INTERVALS * keyframe_interval
+        )
         trim = [
             f"trim=start={local_start:.6f}:duration={available_duration:.6f}",
             "setpts=PTS-STARTPTS",
@@ -1238,11 +1249,8 @@ class MediaExportManager:
         restamp = ["settb=AVTB", f"setpts=N/({output_fps}*TB)"]
         backend = self._hardware_backend()
         source_codec = str(profile.get("codec") or "")
-        # The whole range is one concat input, and a hardware scaler has a
-        # fixed output size: it would stretch a later recording whose shape
-        # differs, where the software filters letterbox it.
-        fingerprints = {str(row.get("stream_fingerprint") or "") for row in rows}
-        uniform_source = len(groups) == 1 or (len(fingerprints) == 1 and "" not in fingerprints)
+        # The whole range is one concat input, so every recording must match.
+        uniform_source = self._uniform_stream(rows)
         # (name, command, keyframes only), in the order they are tried.
         attempts: list[tuple[str, list[str], bool]] = []
         if keyframes_only:
@@ -1295,23 +1303,45 @@ class MediaExportManager:
                     continue
                 raise
             if self._valid_video_output(output):
-                if not keyframe_attempt:
+                if keyframe_attempt:
+                    # Decoding every frame yields at least this many, so a
+                    # keyframe result may not have fewer samples.
+                    if self._has_frames(output, estimated_frames):
+                        return output, gaps
+                    keyframes_rejected = True
+                    LOGGER.warning(
+                        "keyframe timelapse has fewer than %d frames; decoding every frame",
+                        estimated_frames,
+                    )
+                    continue
+                # The full-GPU attempt is new enough to be checked for gross
+                # frame loss; the established commands are trusted as before.
+                if not backend_name.endswith("-gpu") or self._has_frames(
+                    output, estimated_frames * 0.9
+                ):
                     return output, gaps
-                frames = self._video_frame_count(output)
-                if frames is not None and frames >= minimum_keyframe_frames:
-                    return output, gaps
-                keyframes_rejected = True
-                LOGGER.warning(
-                    "keyframe timelapse has %s of about %d frames; decoding every frame",
-                    "an unknown number" if frames is None else frames, estimated_frames,
-                )
-                continue
             last_error = f"{backend_name} timelapse produced no playable video frames"
             if not final:
                 LOGGER.warning("%s; trying fallback", last_error)
                 continue
             raise RuntimeError(last_error)
         raise RuntimeError(last_error)
+
+    def _has_frames(self, path: Path, minimum: float) -> bool:
+        """True when ``path`` is known to hold at least ``minimum`` frames."""
+        frames = self._video_frame_count(path)
+        return frames is not None and frames >= max(1, math.floor(minimum))
+
+    @staticmethod
+    def _uniform_stream(rows: list[dict]) -> bool:
+        """True when every recording is known to share one stream layout.
+
+        A hardware scaler has a fixed output size and stretches a recording
+        whose shape differs, where the software filters letterbox it. Rows
+        without a fingerprint are not assumed to match.
+        """
+        fingerprints = {str(row.get("stream_fingerprint") or "") for row in rows}
+        return len(fingerprints) == 1 and "" not in fingerprints
 
     def _video_frame_count(self, path: Path) -> int | None:
         """Frames in a finished MP4, from its header. None when unreadable."""

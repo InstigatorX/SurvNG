@@ -458,20 +458,20 @@ class MediaExportTest(unittest.TestCase):
                 return int(counted.stdout.strip())
 
             self.assertAlmostEqual(manager._keyframe_interval(source), 1.0, places=3)
-            # 5 s is at least twice the keyframe spacing: keyframes only.
-            keyframe_count = frames(5.0)
+            # 10 s is ten keyframe spacings: keyframes only.
+            keyframe_count = frames(10.0)
             self.assertIn("-skip_frame", ran[-1])
-            self.assertIn("floor(t/5.000000)", ran[-1][ran[-1].index("-vf") + 1])
-            # 1 s is not, so every frame is decoded as before.
-            frames(1.0)
+            self.assertIn("floor(t/10.000000)", ran[-1][ran[-1].index("-vf") + 1])
+            # 5 s is not, so every frame is decoded as before.
+            frames(5.0)
             self.assertNotIn("-skip_frame", ran[-1])
-            # Decoding every frame samples the same eight source frames. The
+            # Decoding every frame samples the same four source frames. The
             # CFR output may repeat the last one, identically in both modes.
             manager._keyframe_interval = lambda _path: None  # type: ignore[method-assign]
-            self.assertEqual(frames(5.0), keyframe_count)
+            self.assertEqual(frames(10.0), keyframe_count)
             self.assertNotIn("-skip_frame", ran[-1])
-            self.assertGreaterEqual(keyframe_count, 8)
-            self.assertLessEqual(keyframe_count, 10)
+            self.assertGreaterEqual(keyframe_count, 4)
+            self.assertLessEqual(keyframe_count, 6)
 
     def _timelapse_attempts(
         self, root: Path, profile: dict, rows: list[dict], options: dict
@@ -506,7 +506,8 @@ class MediaExportTest(unittest.TestCase):
 
     def test_gpu_timelapse_width_matches_ffmpeg_half_up_rounding(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            rows = [{"path": "a.mp4", "start_epoch": 0.0, "end_epoch": 60.0, "duration_seconds": 60.0}]
+            rows = [{"path": "a.mp4", "start_epoch": 0.0, "end_epoch": 60.0, "duration_seconds": 60.0,
+                     "stream_fingerprint": "portrait"}]
             # scale=480:-2 on 512x1200 gives 1126 in FFmpeg; round() gives 1124.
             attempts = self._timelapse_attempts(
                 Path(temporary), {"width": 512, "height": 1200, "codec": "h264"}, rows, {"width": 480},
@@ -528,6 +529,12 @@ class MediaExportTest(unittest.TestCase):
                 Path(temporary), {"width": 3840, "height": 2160, "codec": "h264"}, rows, {"height": 1080},
             )
 
+            self.assertEqual([name for name, _ in attempts], ["vaapi", "cpu"])
+            # Recordings without a fingerprint are not assumed to match.
+            unknown = [{key: value for key, value in rows[0].items() if key != "stream_fingerprint"}]
+            attempts = self._timelapse_attempts(
+                Path(temporary), {"width": 3840, "height": 2160, "codec": "h264"}, unknown, {"height": 1080},
+            )
             self.assertEqual([name for name, _ in attempts], ["vaapi", "cpu"])
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
@@ -572,7 +579,7 @@ class MediaExportTest(unittest.TestCase):
             })
             # The decoder-based probe is not fooled by the container flags.
             self.assertIsNone(manager._keyframe_interval(source))
-            manager._keyframe_interval = lambda _path: 1.0  # type: ignore[method-assign]
+            manager._keyframe_interval = lambda _path: 0.5  # type: ignore[method-assign]
 
             output, _gaps = manager._build_timelapse(job, rows, work, threading.Event())
 
