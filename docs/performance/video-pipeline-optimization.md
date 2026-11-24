@@ -9,6 +9,7 @@ The capture-transport and color-reuse benchmarks below also run nightly with fix
 | 1 | Raw BGR instead of BMP on the live capture pipe (FFmpeg 8.1.2) | Lower at 720p | Read p95 lower at 720p | One pipe fill into the NumPy frame | Similar | Keep |
 | 2 | Hardware decode on the one live capture process, then the Phase 1 software path | Not measured | Not measured | Same bgr24 pipe after hwdownload | Not measured | Revert the live wiring. QSV stays on recorded evidence frames |
 | 3 | Reuse an analysis-sized BGR frame as the color slot, and reuse its gray in the illumination filter | About 0.04 ms less preprocess at 640x360 | Not a capture-read change | Drops the same-size color resize | Same | Keep |
+| 4 | Keep export, timelapse and VAAPI event-clip frames on the GPU; decode only keyframes for sparse timelapses | Not measured on a GPU | Not a capture-read change | No download/upload between decode and encode | Not measured | Keep, with the previous commands as fallbacks |
 
 ## Phase 1 — raw BGR transport
 
@@ -141,3 +142,37 @@ The 1280x720 path still downscales. Repeated runs kept the reuse path below the 
 ### Recommendation
 
 Keep. The motion hot path was already gray. This stops the extra color copy on analysis-sized live frames and stops the illumination filter from converting those same frames to gray again. Roll back this phase if a same-size frame must be a distinct buffer from the submission copy.
+
+## Phase 4 — on-demand transcodes
+
+Recording, live capture and recorded evidence frames are unchanged. This phase covers the FFmpeg processes a user starts: recording exports, timelapses and event clips.
+
+### Current state
+
+With `hardware_acceleration` resolving to `vaapi` or `qsv`, exports and timelapses decoded and filtered (scale, pad, fps) in software and used the GPU only to encode. The VAAPI event clip did the same; only the QSV event clip decoded on the GPU. A timelapse decoded every source frame to keep one per sample interval.
+
+### Change
+
+Each of these now tries an attempt that never leaves the GPU, then the previous command, then software:
+
+| Job | Attempts in order |
+| --- | --- |
+| Recording export, timelapse | `vaapi-gpu` or `qsv-gpu`, then `vaapi` or `qsv` (software filters, hardware encode), then `cpu` |
+| VAAPI event clip | `vaapi` (hardware decode), then `vaapi-encode` (software decode), then `cpu` |
+
+The full-GPU filter chain is `format=nv12\|vaapi,hwupload,…,scale_vaapi` for VAAPI and `…,vpp_qsv` for QSV, with frame dropping and timestamp filters around the scaler. There is no hardware pad: a source whose aspect does not exactly fill the output frame keeps the software filters. QSV needs an H.264 or HEVC source, because the decoder is named explicitly.
+
+A timelapse whose sample interval is at least twice the keyframe spacing decodes keyframes only (`-skip_frame nokey`). The spacing is the longest gap between keyframe packets in the first minute of the first recording, read without decoding. In that mode one frame is taken per interval bucket, so sampling follows keyframes without drifting. Keyframe timelapses decode in software and skip the full-GPU attempt.
+
+### Risks
+
+- The full-GPU attempts were written without a render node. A failure costs one failed FFmpeg start before the previous command runs.
+- A camera that lengthens its keyframe spacing after the first minute can leave an interval bucket empty, which shortens that timelapse.
+
+### Tests
+
+`tests/test_media_exports.py` covers the attempt order, the aspect rule for the full-GPU chain, and a real FFmpeg timelapse where keyframe-only decode produces the same frame count as decoding every frame. `tests/test_recording_clip_revision.py` covers the VAAPI event-clip commands.
+
+### Benchmark
+
+Not measured: this machine has no `/dev/dri` render node. Compare a 4K HEVC export with `hardware_acceleration` set to `vaapi` against `off` on a GPU host before treating this as a measured gain.

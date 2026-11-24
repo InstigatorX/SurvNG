@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -327,6 +329,149 @@ class MediaExportTest(unittest.TestCase):
             self.assertNotIn("-t", qsv)
             self.assertEqual(qsv[qsv.index("-qsv_device") + 1], "/dev/dri/renderD129")
             self.assertEqual(qsv[qsv.index("-fps_mode") + 1], "cfr")
+
+    def _command_manager(self, root: Path, backend: str) -> MediaExportManager:
+        return MediaExportManager(
+            root / "storage", root / "database",
+            recorder=lambda: FakeRecorder([]), ffmpeg_path=lambda: "ffmpeg",
+            hardware_backend=lambda: backend,
+            hardware_device=lambda _backend: "/dev/dri/renderD129",
+        )
+
+    def test_gpu_filter_chain_requires_a_source_that_fills_the_target(self) -> None:
+        chain = MediaExportManager._gpu_filter_chain
+        source = {"width": 3840, "height": 2160}
+
+        vaapi = chain("vaapi", source, (1920, 1080), before=["fps=20"], after=["setsar=1"])
+        qsv = chain("qsv", source, (1920, 1080), before=["fps=20"], after=["setsar=1"])
+
+        self.assertEqual(
+            vaapi,
+            "format=nv12|vaapi,hwupload,fps=20,scale_vaapi=w=1920:h=1080:format=nv12,setsar=1",
+        )
+        self.assertEqual(qsv, "fps=20,vpp_qsv=w=1920:h=1080:format=nv12,setsar=1")
+        # A 4:3 source in a 16:9 frame needs the software pad.
+        self.assertIsNone(chain(
+            "vaapi", {"width": 2592, "height": 1944}, (1920, 1080), before=[], after=[],
+        ))
+        self.assertIsNone(chain("cpu", source, (1920, 1080), before=[], after=[]))
+        self.assertIsNone(chain("vaapi", {}, (1920, 1080), before=[], after=[]))
+
+    def test_recording_commands_try_full_gpu_then_hardware_encode_then_cpu(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            arguments = (root / "input.ffconcat", root / "out.mp4", "scale=1920:1080,fps=20", 1.25, 10.0, False)
+
+            vaapi = self._command_manager(root, "vaapi")._recording_commands(
+                "vaapi", *arguments, gpu_filters="hwupload,scale_vaapi=w=1920:h=1080", source_codec="hevc",
+            )
+            qsv = self._command_manager(root, "qsv")._recording_commands(
+                "qsv", *arguments, gpu_filters="vpp_qsv=w=1920:h=1080", source_codec="hevc",
+            )
+            unsupported = self._command_manager(root, "qsv")._recording_commands(
+                "qsv", *arguments, gpu_filters="vpp_qsv=w=1920:h=1080", source_codec="mjpeg",
+            )
+
+            self.assertEqual([name for name, _ in vaapi], ["vaapi-gpu", "vaapi", "cpu"])
+            full = vaapi[0][1]
+            # Decoder options are input options.
+            self.assertLess(full.index("-hwaccel_output_format"), full.index("-i"))
+            self.assertEqual(full[full.index("-vf") + 1], "hwupload,scale_vaapi=w=1920:h=1080")
+            self.assertEqual(full[full.index("-ss") + 1], "1.250000")
+            self.assertIn("hwupload", vaapi[1][1][vaapi[1][1].index("-vf") + 1])
+            self.assertNotIn("-hwaccel", vaapi[1][1])
+
+            self.assertEqual([name for name, _ in qsv], ["qsv-gpu", "qsv", "cpu"])
+            full = qsv[0][1]
+            self.assertLess(full.index("hevc_qsv"), full.index("-i"))
+            self.assertNotIn("-pix_fmt", full)
+            self.assertEqual([name for name, _ in unsupported], ["qsv", "cpu"])
+
+    def test_keyframe_timelapse_skips_non_keyframes_in_software_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commands = self._command_manager(root, "vaapi")._timelapse_commands(
+                "vaapi", root / "input.ffconcat", root / "out.mp4", "select=1", 30,
+                keyframes_only=True, gpu_filters="hwupload", source_codec="h264",
+            )
+            dense = self._command_manager(root, "vaapi")._timelapse_commands(
+                "vaapi", root / "input.ffconcat", root / "out.mp4", "select=1", 30,
+                gpu_filters="hwupload", source_codec="h264",
+            )
+
+            self.assertEqual([name for name, _ in commands], ["vaapi", "cpu"])
+            for _name, command in commands:
+                self.assertLess(command.index("-skip_frame"), command.index("-i"))
+                self.assertEqual(command[command.index("-skip_frame") + 1], "nokey")
+            self.assertEqual([name for name, _ in dense], ["vaapi-gpu", "vaapi", "cpu"])
+            for _name, command in dense:
+                self.assertNotIn("-skip_frame", command)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
+    def test_real_timelapse_samples_keyframes_once_per_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.mp4"
+            # 40 s at 10 fps with a keyframe every second.
+            subprocess.run(
+                [
+                    "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10",
+                    "-t", "40", "-c:v", "libx264", "-preset", "ultrafast", "-g", "10",
+                    "-keyint_min", "10", "-sc_threshold", "0", "-pix_fmt", "yuv420p", "-y", str(source),
+                ],
+                check=True, timeout=60,
+            )
+            manager = MediaExportManager(
+                root / "storage", root / "database",
+                recorder=lambda: FakeRecorder([]), ffmpeg_path=lambda: shutil.which("ffmpeg"),
+                hardware_backend=lambda: "cpu",
+            )
+            rows = [{
+                "path": str(source), "start_epoch": 1000.0, "end_epoch": 1040.0,
+                "duration_seconds": 40.0,
+            }]
+            work = root / "work"
+            work.mkdir()
+            ran: list[list[str]] = []
+            run_process = manager._run_process
+
+            def recording_run(command, *args, **kwargs):
+                ran.append(command)
+                return run_process(command, *args, **kwargs)
+
+            manager._run_process = recording_run  # type: ignore[method-assign]
+
+            def frames(interval: float) -> int:
+                job = manager.store.create({
+                    "kind": "timelapse", "camera_id": "gate", "source": "main",
+                    "start_epoch": 1000.0, "end_epoch": 1040.0,
+                    "options": {"sample_interval_seconds": interval, "width": 320},
+                })
+                output, _gaps = manager._build_timelapse(job, rows, work, threading.Event())
+                counted = subprocess.run(
+                    [
+                        "ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+                        "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(output),
+                    ],
+                    stdout=subprocess.PIPE, text=True, check=True, timeout=30,
+                )
+                return int(counted.stdout.strip())
+
+            self.assertAlmostEqual(manager._keyframe_interval(source), 1.0, places=3)
+            # 5 s is at least twice the keyframe spacing: keyframes only.
+            keyframe_count = frames(5.0)
+            self.assertIn("-skip_frame", ran[-1])
+            self.assertIn("floor(t/5.000000)", ran[-1][ran[-1].index("-vf") + 1])
+            # 1 s is not, so every frame is decoded as before.
+            frames(1.0)
+            self.assertNotIn("-skip_frame", ran[-1])
+            # Decoding every frame samples the same eight source frames. The
+            # CFR output may repeat the last one, identically in both modes.
+            manager._keyframe_interval = lambda _path: None  # type: ignore[method-assign]
+            self.assertEqual(frames(5.0), keyframe_count)
+            self.assertNotIn("-skip_frame", ran[-1])
+            self.assertGreaterEqual(keyframe_count, 8)
+            self.assertLessEqual(keyframe_count, 10)
 
     def test_header_only_video_is_not_accepted_as_completed_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

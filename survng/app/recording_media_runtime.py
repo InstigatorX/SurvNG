@@ -438,10 +438,15 @@ class RecordingMediaRuntime:
     def _event_clip_cpu_command(self, concat_path: Path, local_start: float, duration: float, tmp_path: Path) -> list[str]:
         return [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-f', 'concat', '-safe', '0', '-i', str(concat_path), '-ss', f'{local_start:.3f}', '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-vf', 'format=yuv420p', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', str(tmp_path)]
 
-    def _event_clip_vaapi_command(self, source_codec: str, concat_path: Path, local_start: float, duration: float, tmp_path: Path) -> list[str]:
+    def _event_clip_vaapi_command(self, source_codec: str, concat_path: Path, local_start: float, duration: float, tmp_path: Path, *, hardware_decode: bool=True) -> list[str]:
         info = self._ffmpeg_vaapi_info()
         device = str(info.get('device') or '/dev/dri/renderD128')
-        return [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-vaapi_device', device, '-f', 'concat', '-safe', '0', '-i', str(concat_path), '-ss', f'{local_start:.3f}', '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-vf', 'format=nv12,hwupload', '-c:v', 'h264_vaapi', '-qp', '23', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', str(tmp_path)]
+        # With hardware decode the frames reach the encoder as VAAPI surfaces.
+        # format=nv12|vaapi,hwupload also accepts frames from a decoder that
+        # fell back to software inside FFmpeg.
+        decode_args = ['-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi'] if hardware_decode else []
+        video_filter = 'format=nv12|vaapi,hwupload' if hardware_decode else 'format=nv12,hwupload'
+        return [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-vaapi_device', device, *decode_args, '-f', 'concat', '-safe', '0', '-i', str(concat_path), '-ss', f'{local_start:.3f}', '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-vf', video_filter, '-c:v', 'h264_vaapi', '-qp', '23', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', str(tmp_path)]
 
     def _event_clip_qsv_command(self, source_codec: str, concat_path: Path, local_start: float, duration: float, tmp_path: Path) -> list[str]:
         decoder = 'hevc_qsv' if source_codec == 'hevc' else 'h264_qsv'
@@ -1270,6 +1275,9 @@ class RecordingMediaRuntime:
         commands: list[tuple[str, list[str]]] = []
         if self._event_clip_vaapi_enabled(source_codec):
             commands.append(('vaapi', self._event_clip_vaapi_command(source_codec, concat_path, local_start, duration, tmp_path)))
+            # The previous software-decode command stays as the next attempt,
+            # for example a 10-bit source the H.264 encoder cannot take directly.
+            commands.append(('vaapi-encode', self._event_clip_vaapi_command(source_codec, concat_path, local_start, duration, tmp_path, hardware_decode=False)))
         if self._event_clip_qsv_enabled(source_codec):
             commands.append(('qsv', self._event_clip_qsv_command(source_codec, concat_path, local_start, duration, tmp_path)))
         commands.append(('cpu', self._event_clip_cpu_command(concat_path, local_start, duration, tmp_path)))
@@ -1284,7 +1292,7 @@ class RecordingMediaRuntime:
                     logging.getLogger(__name__).info('built event clip %s using %s acceleration (source codec %s)', output_path.name, backend, source_codec or 'unknown')
                     return
                 last_error = (result.stderr or f'event clip generation failed using {backend}').strip()[-500:]
-                if backend in {'vaapi', 'qsv'}:
+                if backend != 'cpu':
                     logging.getLogger(__name__).warning('%s event clip generation failed for %s, falling back to next backend: %s', backend.upper(), output_path.name, last_error)
             logging.getLogger(__name__).error('event clip generation failed for %s: %s', output_path.name, redact_secret_text(last_error))
             raise HTTPException(status_code=500, detail='event clip generation failed')

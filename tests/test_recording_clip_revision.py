@@ -38,3 +38,23 @@ def test_growing_clip_uses_new_frozen_recording_revision(tmp_path):
     assert runtime._ensure_event_clip(event, before=0, after=120) == first
     offline.clear()
     assert runtime._ensure_event_clip(event, before=0, after=120) == second
+
+
+def test_vaapi_event_clip_decodes_on_the_gpu_and_keeps_a_software_decode_attempt(tmp_path):
+    runtime = RecordingMediaRuntime(SimpleNamespace(
+        get_config=lambda: SimpleNamespace(ffmpeg_path="ffmpeg"),
+    ))
+    runtime._ffmpeg_vaapi_info = lambda: {"device": "/dev/dri/renderD129"}
+    arguments = ("hevc", tmp_path / "clip.ffconcat", 1.5, 20.0, tmp_path / "clip.mp4")
+
+    hardware = runtime._event_clip_vaapi_command(*arguments)
+    software = runtime._event_clip_vaapi_command(*arguments, hardware_decode=False)
+
+    # Decoder options are input options, on the device the probe selected.
+    assert hardware[hardware.index("-vaapi_device") + 1] == "/dev/dri/renderD129"
+    assert hardware.index("-hwaccel_output_format") < hardware.index("-i")
+    assert hardware[hardware.index("-hwaccel_output_format") + 1] == "vaapi"
+    assert hardware[hardware.index("-vf") + 1] == "format=nv12|vaapi,hwupload"
+    assert "-hwaccel" not in software
+    assert software[software.index("-vf") + 1] == "format=nv12,hwupload"
+    assert "h264_vaapi" in hardware and "h264_vaapi" in software
