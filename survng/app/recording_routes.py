@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import logging
 import threading
@@ -32,6 +33,17 @@ from .encoded_fragments import (
     FragmentUnavailable,
     FragmentWindow,
     InvalidFragmentWindow,
+)
+from .growing_playlists import (
+    GROWING_HOLD_SECONDS,
+    GROWING_RECORD_LINGER_SECONDS,
+    GrowingPlaylistKey,
+    GrowingPlaylistRecord,
+    GrowingPlaylistRegistry,
+    MergeReport,
+    RateLimitedLog,
+    day_playlist_entry_lines,
+    merge_rows,
 )
 from .media_exports import MediaExportManager
 from .manager_access import ManagerAccessCoordinator, guard_manager_generation
@@ -101,6 +113,7 @@ class RecordingRouteDependencies:
 class RecordingRouteBundle:
     router: APIRouter
     handlers: dict[str, Callable[..., Any]]
+    growing_playlists: GrowingPlaylistRegistry | None = None
 
 
 def recording_source(source: str = "main") -> str:
@@ -216,6 +229,10 @@ def _recording_playback_window(epoch: float) -> tuple[float, float]:
 
 def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteBundle:
     router = APIRouter()
+    # Entries served by growing day playlists. It belongs to the router, not
+    # to a manager, so a manager reload does not reset what players hold.
+    growing_playlists = GrowingPlaylistRegistry()
+    growing_log = RateLimitedLog(LOGGER)
 
     def fragment_rows(
         active_manager: Any,
@@ -225,10 +242,14 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         source: str,
         *,
         trim_end: bool,
+        tolerate_unavailable: bool = False,
     ) -> list[dict] | None:
         source_factory = getattr(deps, "encoded_fragment_source", None)
         if source_factory is None:
             return None
+        # Only growing playlists ask for a tolerant listing; every other
+        # caller keeps the strict one, where any unreadable row fails it.
+        options = {"tolerate_unavailable": True} if tolerate_unavailable else {}
         try:
             fragments = list(
                 source_factory(active_manager).fragments(
@@ -239,6 +260,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                         end_epoch=end_epoch,
                     ),
                     trim_end=trim_end,
+                    **options,
                 )
             )
         except InvalidFragmentWindow as exc:
@@ -269,6 +291,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         media_offset: float,
         trim_end: bool,
         fragment_id: str,
+        growing: bool = False,
     ) -> tuple[Any | None, Callable[[], None] | None]:
         if not math.isfinite(media_offset) or media_offset < 0:
             raise HTTPException(
@@ -278,6 +301,9 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         source_factory = getattr(deps, "encoded_fragment_source", None)
         if source_factory is None:
             return None, None
+        # A growing playlist's segment needs only its own row (and the next,
+        # for lookahead): another row of the window that cannot be checked
+        # must not fail it.
         rows = fragment_rows(
             active_manager,
             camera_id,
@@ -285,7 +311,13 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             end_epoch,
             source,
             trim_end=trim_end,
+            tolerate_unavailable=growing,
         ) or []
+        if growing:
+            rows = [
+                row for row in rows
+                if getattr(row.get("_encoded_fragment"), "available", True)
+            ]
         selected = next(
             (
                 row.get("_encoded_fragment")
@@ -300,10 +332,43 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                 detail="recording segment not found",
             )
         if fragment_id and fragment_id != selected.source_identity:
-            raise HTTPException(
-                status_code=409,
-                detail="recording fragment revision changed",
-                headers={"Cache-Control": "no-store"},
+            served = (
+                growing_playlists.served_entry(
+                    (
+                        camera_id,
+                        recording_source(source),
+                        f"{start_epoch:.3f}",
+                        f"{end_epoch:.3f}",
+                    ),
+                    segment_name,
+                    fragment_id,
+                )
+                if growing and not trim_end
+                else None
+            )
+            if served is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="recording fragment revision changed",
+                    headers={"Cache-Control": "no-store"},
+                )
+            # A growing playlist keeps an entry it has served even when the
+            # index later revises the row (for example, a nominal duration
+            # replaced by the measured one). Serve the file as that entry
+            # described it, so the player's timeline stays as listed.
+            growing_log.log(
+                logging.WARNING,
+                "revised-segment",
+                camera_id,
+                "Growing playlist segment %s/%s was revised after it was "
+                "served; serving it with its served duration %.3f s",
+                camera_id,
+                segment_name,
+                served.duration_seconds,
+            )
+            selected = replace(
+                selected,
+                media_duration_seconds=served.duration_seconds,
             )
         # The manifest owns the compact media timeline. Index changes between
         # manifest and fragment requests must not silently move tfdt/sidx.
@@ -1160,6 +1225,264 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             ],
         }
 
+    def day_playlist_rows(
+        active_manager: Any,
+        camera_id: str,
+        start_epoch: float,
+        end_epoch: float,
+        selected_source: str,
+        *,
+        tolerate_unavailable: bool = False,
+    ) -> list[dict]:
+        rows = fragment_rows(
+            active_manager,
+            camera_id,
+            start_epoch,
+            end_epoch,
+            selected_source,
+            trim_end=False,
+            tolerate_unavailable=tolerate_unavailable,
+        )
+        if rows is None:
+            rows = deps.recording_day_rows(
+                active_manager,
+                camera_id,
+                start_epoch,
+                end_epoch,
+                selected_source,
+                fresh=True,
+            )
+        return rows
+
+    def day_playlist_header(
+        rows: list[dict],
+        *,
+        still_growing: bool,
+        segment_seconds: float,
+        requested_start: float,
+    ) -> list[str]:
+        target_duration = max(
+            1,
+            math.ceil(max(float(row["duration_seconds"]) for row in rows)),
+        )
+        if still_growing:
+            # A playlist's target duration may not change between re-reads.
+            # Segments are cut at the first keyframe after the nominal length,
+            # so one a little longer than those listed so far can still come.
+            target_duration = max(
+                target_duration,
+                math.ceil(segment_seconds) + 1,
+            )
+        lines = [
+            "#EXTM3U",
+            "#EXT-X-VERSION:7",
+            # The recorder's segment muxer stream-copies video and can only cut
+            # at keyframes, so every recording file (and so every segment)
+            # decodes on its own. Apple's player uses this to start or seek in
+            # any segment without fetching the one before it.
+            "#EXT-X-INDEPENDENT-SEGMENTS",
+            f"#EXT-X-TARGETDURATION:{target_duration}",
+            "#EXT-X-MEDIA-SEQUENCE:0",
+            f"#EXT-X-PLAYLIST-TYPE:{'EVENT' if still_growing else 'VOD'}",
+        ]
+        media_duration = sum(float(row["duration_seconds"]) for row in rows)
+        # Native Safari applies EXT-X-START while building seekable ranges.
+        # Post-metadata currentTime seeks are raced and intermittent on iPhone.
+        # Without a start tag a player opens an unfinished playlist near its
+        # end, so a growing playlist always names its start, even at zero.
+        if media_duration > 0 and (requested_start > 0 or still_growing):
+            start_offset = min(
+                requested_start,
+                max(0.0, media_duration - 0.01),
+            )
+            lines.append(
+                f"#EXT-X-START:TIME-OFFSET={start_offset:.3f},PRECISE=YES"
+            )
+        return lines
+
+    def log_growing_merge(
+        key: GrowingPlaylistKey,
+        report: MergeReport,
+    ) -> None:
+        scope = key.camera_id
+        window = f"{key.camera_id}/{key.source} {key.start_epoch}-{key.end_epoch}"
+        for kind, names, level, message in (
+            (
+                "kept-unreadable", report.kept_unreadable, logging.WARNING,
+                "Growing playlist %s kept %d served segment(s) whose file "
+                "could not be checked (first: %s)",
+            ),
+            (
+                "kept-missing", report.kept_missing, logging.WARNING,
+                "Growing playlist %s kept %d served segment(s) no longer in "
+                "the recording index (first: %s)",
+            ),
+            (
+                "kept-changed", report.kept_changed, logging.WARNING,
+                "Growing playlist %s kept %d served segment(s) the index has "
+                "since revised (first: %s)",
+            ),
+            (
+                "held", report.held, logging.INFO,
+                "Growing playlist %s is holding back %d new segment(s) whose "
+                "file could not be checked (first: %s)",
+            ),
+            (
+                "skipped", report.skipped, logging.WARNING,
+                "Growing playlist %s skipped %d new segment(s) unreadable for "
+                f"over {GROWING_HOLD_SECONDS:.0f} s (first: %s)",
+            ),
+            (
+                "out-of-order", report.out_of_order, logging.WARNING,
+                "Growing playlist %s cannot insert %d segment(s) indexed "
+                "after a later one was served (first: %s)",
+            ),
+            (
+                "over-target", report.over_target, logging.WARNING,
+                "Growing playlist %s appended %d segment(s) longer than its "
+                "target duration (first: %s)",
+            ),
+        ):
+            if names:
+                growing_log.log(
+                    level, kind, scope, message, window, len(names), names[0],
+                )
+
+    def growing_day_playlist(
+        active_manager: Any,
+        key: GrowingPlaylistKey,
+        *,
+        start_epoch: float,
+        end_epoch: float,
+        still_growing: bool,
+        requested_start: float,
+        query: str,
+    ) -> str | None:
+        """Serve a growing playlist from its record, or None if it has none.
+
+        The first read of a playlist (no record) is as strict as a finished
+        one: it fails if any row cannot be checked. Later re-reads keep every
+        served entry unchanged and only append rows that can be checked.
+        """
+        with growing_playlists.lock:
+            record = growing_playlists.get(key)
+        if record is None and not still_growing:
+            return None
+        segment_seconds = _recording_segment_seconds(deps, active_manager)
+        try:
+            rows = day_playlist_rows(
+                active_manager,
+                key.camera_id,
+                start_epoch,
+                end_epoch,
+                key.source,
+                tolerate_unavailable=record is not None,
+            )
+        except HTTPException as exc:
+            if record is None or exc.status_code < 404:
+                raise
+            # The listing itself failed (not one row). Re-serve what was
+            # already served rather than fail the re-read.
+            growing_log.log(
+                logging.WARNING,
+                "listing-failed",
+                key.camera_id,
+                "Growing playlist %s/%s could not list recordings (HTTP %d); "
+                "serving its %d served segment(s) unchanged",
+                key.camera_id,
+                key.source,
+                exc.status_code,
+                len(record.entries),
+            )
+            rows = None
+        if record is None:
+            if not rows:
+                raise HTTPException(status_code=404, detail="no recordings found")
+            record = GrowingPlaylistRecord(
+                key=key,
+                header=tuple(
+                    day_playlist_header(
+                        rows,
+                        still_growing=True,
+                        segment_seconds=segment_seconds,
+                        requested_start=requested_start,
+                    )
+                ),
+                query=query,
+                target_duration=0,
+                # Kept a little past the time the window can grow, so the
+                # re-read that ends the playlist still finds what it served.
+                expires_at=(
+                    end_epoch
+                    + max(30.0, 3.0 * segment_seconds)
+                    + GROWING_RECORD_LINGER_SECONDS
+                ),
+            )
+            record.target_duration = int(
+                next(
+                    line for line in record.header
+                    if line.startswith("#EXT-X-TARGETDURATION:")
+                ).split(":", 1)[1]
+            )
+        report: MergeReport | None = None
+        evicted: list[GrowingPlaylistKey] = []
+        with growing_playlists.lock:
+            stored = growing_playlists.get(key)
+            if stored is None and record.entries:
+                # Evicted or expired since it was read: start again from the
+                # rows just read, strictly, as a first read would.
+                record = GrowingPlaylistRecord(
+                    key=key,
+                    header=record.header,
+                    query=record.query,
+                    target_duration=record.target_duration,
+                    expires_at=record.expires_at,
+                )
+                if rows is None or not all(
+                    getattr(row.get("_encoded_fragment"), "available", True)
+                    for row in rows
+                ):
+                    raise HTTPException(
+                        status_code=404,
+                        detail="recording fragment is unavailable",
+                    )
+            # A concurrent first read of the same playlist may have stored
+            # its record first; extend that one so both stay consistent.
+            target = stored or record
+            if rows is not None:
+                fingerprints = resolve_stream_fingerprints(
+                    [row.get("stream_fingerprint") for row in rows]
+                )
+                report = merge_rows(
+                    target,
+                    rows,
+                    fingerprints,
+                    now_monotonic=time.monotonic(),
+                )
+            if not target.entries:
+                raise HTTPException(status_code=404, detail="no recordings found")
+            if still_growing:
+                if stored is None:
+                    evicted = growing_playlists.put(target)
+            else:
+                # The window can no longer grow: this read ends the playlist
+                # and its record is no longer needed.
+                growing_playlists.drop(key)
+            body = target.body(finished=not still_growing)
+        if report is not None:
+            log_growing_merge(key, report)
+        if evicted:
+            growing_log.log(
+                logging.WARNING,
+                "evicted",
+                "registry",
+                "Growing playlist records are full; evicted %d (first: %s/%s)",
+                len(evicted),
+                evicted[0].camera_id,
+                evicted[0].source,
+            )
+        return body
+
     @router.get("/api/cameras/{camera_id}/recordings/day.m3u8")
     @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def recording_day_hls_playlist(
@@ -1169,6 +1492,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         source: str = "main",
         start: float | None = None,
         growing: bool = False,
+        reload: str = "",
     ) -> Response:
         active_manager = _require_recording_camera(deps, camera_id)
         _validate_recording_range(
@@ -1186,103 +1510,77 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             3.0 * _recording_segment_seconds(deps, active_manager),
         )
         selected_source = recording_source(source)
-        rows = fragment_rows(
+        requested_start = (
+            float(start)
+            if start is not None and math.isfinite(start) and start > 0
+            else 0.0
+        )
+        query = (
+            f"start_epoch={start_epoch:.3f}&end_epoch={end_epoch:.3f}"
+            f"&source={selected_source}"
+        )
+        if growing:
+            reload_token = str(reload or "")
+            if len(reload_token) > 128:
+                reload_token = hashlib.sha256(
+                    reload_token.encode("utf-8")
+                ).hexdigest()
+            # One growing playlist is one URL: the player re-reads exactly
+            # the URL it loaded, and a page that loads the window again sends
+            # a new reload token (and so gets rows matching its own).
+            body = growing_day_playlist(
+                active_manager,
+                GrowingPlaylistKey(
+                    camera_id=camera_id,
+                    source=selected_source,
+                    start_epoch=f"{start_epoch:.3f}",
+                    end_epoch=f"{end_epoch:.3f}",
+                    start=f"{requested_start:.3f}",
+                    reload=reload_token,
+                ),
+                start_epoch=start_epoch,
+                end_epoch=end_epoch,
+                still_growing=still_growing,
+                requested_start=requested_start,
+                query=query,
+            )
+            if body is not None:
+                return Response(
+                    body,
+                    media_type="application/vnd.apple.mpegurl",
+                    headers={"Cache-Control": "no-store"},
+                )
+        rows = day_playlist_rows(
             active_manager,
             camera_id,
             start_epoch,
             end_epoch,
             selected_source,
-            trim_end=False,
         )
-        if rows is None:
-            rows = deps.recording_day_rows(
-                active_manager,
-                camera_id,
-                start_epoch,
-                end_epoch,
-                selected_source,
-                fresh=True,
-            )
         if not rows:
             raise HTTPException(status_code=404, detail="no recordings found")
-        target_duration = max(
-            1,
-            math.ceil(max(float(row["duration_seconds"]) for row in rows)),
+        lines = day_playlist_header(
+            rows,
+            still_growing=False,
+            segment_seconds=0.0,  # only a growing header uses it
+            requested_start=requested_start,
         )
-        if still_growing:
-            # A playlist's target duration may not change between re-reads.
-            # Segments are cut at the first keyframe after the nominal length,
-            # so one a little longer than those listed so far can still come.
-            target_duration = max(
-                target_duration,
-                math.ceil(_recording_segment_seconds(deps, active_manager)) + 1,
-            )
-        query = (
-            f"start_epoch={start_epoch:.3f}&end_epoch={end_epoch:.3f}"
-            f"&source={selected_source}"
-        )
-        lines = [
-            "#EXTM3U",
-            "#EXT-X-VERSION:7",
-            # The recorder's segment muxer stream-copies video and can only cut
-            # at keyframes, so every recording file (and so every segment)
-            # decodes on its own. Apple's player uses this to start or seek in
-            # any segment without fetching the one before it.
-            "#EXT-X-INDEPENDENT-SEGMENTS",
-            f"#EXT-X-TARGETDURATION:{target_duration}",
-            "#EXT-X-MEDIA-SEQUENCE:0",
-            f"#EXT-X-PLAYLIST-TYPE:{'EVENT' if still_growing else 'VOD'}",
-        ]
-        header_lines = len(lines)
         media_offset = 0.0
         previous_fingerprint: str | None = None
         fingerprints = resolve_stream_fingerprints(
             [row.get("stream_fingerprint") for row in rows]
         )
         for row, stream_fingerprint in zip(rows, fingerprints):
-            row_start = float(row["start_epoch"])
-            segment_name = quote(str(row["name"]), safe="")
-            encoded_fragment = row.get("_encoded_fragment")
-            fragment_id = str(
-                getattr(encoded_fragment, "source_identity", "") or ""
-            )
-            segment_query = (
-                f"{query}&media_offset={media_offset:.3f}"
-                f"&fragment_id={quote(fragment_id, safe='')}"
-                f"&v={RECORDING_FMP4_VERSION}"
-            )
-            map_lines, previous_fingerprint = hls_map_transition(
-                previous_fingerprint,
+            entry_lines, previous_fingerprint = day_playlist_entry_lines(
+                row,
                 stream_fingerprint,
-                f"day/segment/{segment_name}/init.mp4?{segment_query}",
+                previous_fingerprint,
+                query,
+                media_offset,
             )
-            lines.extend(map_lines)
-            lines.extend(
-                [
-                    "#EXT-X-PROGRAM-DATE-TIME:"
-                    f"{datetime.fromtimestamp(row_start, timezone.utc).isoformat()}",
-                    f"#EXTINF:{float(row['duration_seconds']):.3f},",
-                    f"day/segment/{segment_name}/media.m4s?{segment_query}",
-                ]
-            )
+            lines.extend(entry_lines)
             media_offset += float(row["duration_seconds"])
-        # Native Safari applies EXT-X-START while building seekable ranges.
-        # Post-metadata currentTime seeks are raced and intermittent on iPhone.
-        requested_start = (
-            float(start)
-            if start is not None and math.isfinite(start) and start > 0
-            else 0.0
-        )
-        # Without a start tag a player opens an unfinished playlist near its
-        # end, so a growing playlist always names its start, even at zero.
-        if media_offset > 0 and (requested_start > 0 or still_growing):
-            start_offset = min(requested_start, max(0.0, media_offset - 0.01))
-            lines.insert(
-                header_lines,
-                f"#EXT-X-START:TIME-OFFSET={start_offset:.3f},PRECISE=YES",
-            )
-        if not still_growing:
-            lines.append("#EXT-X-ENDLIST")
+        lines.append("#EXT-X-ENDLIST")
         return Response(
             "\n".join(lines) + "\n",
             media_type="application/vnd.apple.mpegurl",
@@ -1302,6 +1600,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         media_offset: float = 0.0,
         trim_end: bool = False,
         fragment_id: str = "",
+        growing: bool = False,
     ) -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
         materialized, _prewarm_next = materialize_fragment(
@@ -1314,6 +1613,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             media_offset,
             trim_end,
             fragment_id,
+            growing,
         )
         if materialized is not None:
             if materialized.stream.init_path is None:
@@ -1350,6 +1650,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         media_offset: float = 0.0,
         trim_end: bool = False,
         fragment_id: str = "",
+        growing: bool = False,
     ) -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
         materialized, prewarm_next = materialize_fragment(
@@ -1362,6 +1663,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             media_offset,
             trim_end,
             fragment_id,
+            growing,
         )
         if materialized is not None:
             if materialized.media_path is None:
@@ -1568,6 +1870,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
 
     return RecordingRouteBundle(
         router=router,
+        growing_playlists=growing_playlists,
         handlers={
             handler.__name__: handler
             for handler in (

@@ -57,6 +57,7 @@ jobs:
             tests/test_app_lifespan.py \
             tests/test_frontend_routes.py \
             tests/test_recorder.py \
+            tests/test_growing_playlist.py \
             tests/test_calibration.py \
             tests/test_live_delivery.py \
             tests/test_stream_info.py \

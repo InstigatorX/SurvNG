@@ -328,7 +328,18 @@ class RecordingRouteLifecycleTests(TestCase):
         closed = playlist(931.0, True)
         self.assertIn("#EXT-X-PLAYLIST-TYPE:VOD", closed)
         self.assertTrue(closed.rstrip().endswith("#EXT-X-ENDLIST"))
-        self.assertNotIn("#EXT-X-START", closed)
+        # The re-read that ends a served playlist only finishes it: its header
+        # and served entries (even one since gone from the index) stay as
+        # served. A new load of the closed window is an ordinary finished one.
+        self.assertIn("#EXT-X-START:TIME-OFFSET=0.000,PRECISE=YES", closed)
+        self.assertIn("later.mp4", closed)
+        with patch("survng.app.recording_routes.time.time", return_value=931.0):
+            reloaded = handlers["recording_day_hls_playlist"](
+                "gate", 0, 900, "main", None, True, "2-0",
+            ).body.decode()
+        self.assertIn("#EXT-X-PLAYLIST-TYPE:VOD", reloaded)
+        self.assertNotIn("#EXT-X-START", reloaded)
+        self.assertNotIn("later.mp4", reloaded)
         # Not requested: unchanged finished playlist, even for an open window.
         default = playlist(500.0, False)
         self.assertIn("#EXT-X-PLAYLIST-TYPE:VOD", default)

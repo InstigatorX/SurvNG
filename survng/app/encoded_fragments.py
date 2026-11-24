@@ -77,6 +77,10 @@ class EncodedFragment:
     media_path: Path | None = None
     discontinuity_before: bool = False
     finalized: bool = True
+    # False only in a tolerant listing: the row is indexed but its file could
+    # not be checked. Such a fragment has no identity and must not be served.
+    available: bool = True
+    unavailable_reason: str = ""
 
 
 class EncodedFragmentSource(Protocol):
@@ -86,6 +90,7 @@ class EncodedFragmentSource(Protocol):
         *,
         trim_end: bool = False,
         cancel: threading.Event | None = None,
+        tolerate_unavailable: bool = False,
     ) -> Iterator[EncodedFragment]: ...
 
     def materialize(
@@ -122,7 +127,16 @@ class IndexedMp4FragmentSource:
         *,
         trim_end: bool = False,
         cancel: threading.Event | None = None,
+        tolerate_unavailable: bool = False,
     ) -> Iterator[EncodedFragment]:
+        """List the window's fragments.
+
+        By default any row whose file cannot be checked fails the listing
+        with ``FragmentUnavailable``. With ``tolerate_unavailable`` such a row
+        is yielded with ``available=False`` instead (and adds nothing to the
+        media offset), so a caller that already served the other rows can
+        keep serving them.
+        """
         self._ensure_open()
         self._check_cancel(cancel)
         rows = self._row_loader(
@@ -142,8 +156,6 @@ class IndexedMp4FragmentSource:
         ):
             self._check_cancel(cancel)
             try:
-                path = self._path_resolver(row.get("path"))
-                stat = path.stat()
                 wall_start = float(row["start_epoch"])
                 duration = playback_segment_duration(
                     wall_start,
@@ -155,6 +167,27 @@ class IndexedMp4FragmentSource:
                 raise FragmentUnavailable(
                     "recording fragment is unavailable"
                 ) from exc
+            try:
+                path = self._path_resolver(row.get("path"))
+                stat = path.stat()
+            except (KeyError, OSError, TypeError, ValueError) as exc:
+                if not tolerate_unavailable:
+                    raise FragmentUnavailable(
+                        "recording fragment is unavailable"
+                    ) from exc
+                yield self._unavailable(
+                    sequence, row, wall_start, duration, fingerprint, exc
+                )
+                continue
+            except Exception as exc:
+                # The path resolver may raise its transport's own error (an
+                # HTTP 404/403); strict listings keep propagating it as-is.
+                if not tolerate_unavailable:
+                    raise
+                yield self._unavailable(
+                    sequence, row, wall_start, duration, fingerprint, exc
+                )
+                continue
             name = str(row.get("name") or path.name)
             identity = hashlib.sha256(
                 (
@@ -188,12 +221,39 @@ class IndexedMp4FragmentSource:
             previous_fingerprint = fingerprint
             media_offset += duration
 
+    @staticmethod
+    def _unavailable(
+        sequence: int,
+        row: dict,
+        wall_start: float,
+        duration: float,
+        fingerprint: str,
+        exc: BaseException,
+    ) -> EncodedFragment:
+        raw_path = Path(str(row.get("path") or ""))
+        return EncodedFragment(
+            sequence=sequence,
+            segment_name=str(row.get("name") or raw_path.name),
+            wall_start_epoch=wall_start,
+            wall_end_epoch=float(row.get("end_epoch") or wall_start + duration),
+            media_start_seconds=0.0,
+            media_duration_seconds=duration,
+            keyframe_aligned=bool(row.get("playable", True)),
+            stream=StreamDescription(fingerprint=fingerprint),
+            source_identity="",
+            source_path=raw_path,
+            available=False,
+            unavailable_reason=type(exc).__name__,
+        )
+
     def materialize(
         self,
         fragment: EncodedFragment,
         *,
         cancel: threading.Event | None = None,
     ) -> EncodedFragment:
+        if not fragment.available:
+            raise FragmentUnavailable("recording fragment is unavailable")
         self._ensure_open()
         self._check_cancel(cancel)
         init_path, media_path = self._remuxer(
