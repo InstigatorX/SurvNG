@@ -242,3 +242,43 @@ def test_recording_index_older_than_1_2_0_stops_before_changing_it(tmp_path):
     with pytest.raises(UnsupportedDatabaseError, match='recordings predates SurvNG 1.2.0'):
         Recorder('ffmpeg', tmp_path)
     assert _schema(tmp_path / 'recordings.sqlite3') == before
+
+
+def test_manager_precheck_rejects_a_later_store_table_before_any_change(tmp_path):
+    from survng.app.main_database import UnsupportedDatabaseError
+    from survng.app.schema_minimum import require_minimum_databases
+    from survng.app.semantic_search import SemanticIndex
+
+    EventStore(tmp_path)
+    database = tmp_path / 'survng.sqlite3'
+    SemanticIndex(database)
+    with sqlite3.connect(database) as conn:
+        dependent = [name for (name,) in conn.execute(
+            "select name from sqlite_master where type='index' and tbl_name='semantic_embeddings' "
+            "and sql like '%evidence_revision%'")]
+        for name in dependent:
+            conn.execute(f'drop index {name}')
+        conn.execute('alter table semantic_embeddings drop column evidence_revision')
+        conn.execute('create table scene_changes(id integer primary key, incident_id text, revision integer, created_at real)')
+    before = _schema(database)
+    with pytest.raises(UnsupportedDatabaseError, match='semantic_embeddings predates SurvNG 1.2.0'):
+        require_minimum_databases(tmp_path, tmp_path)
+    assert _schema(database) == before
+    require_minimum_databases(tmp_path / 'new', tmp_path / 'new')  # nothing yet: passes, creates nothing
+    assert not (tmp_path / 'new').exists()
+
+
+def test_manager_checks_databases_before_building_any_store(tmp_path):
+    from unittest.mock import patch
+
+    from survng.app.main_database import UnsupportedDatabaseError
+    from survng.app.manager import AppManager
+
+    stop = UnsupportedDatabaseError('old database')
+    with (
+        patch('survng.app.manager.require_minimum_databases', side_effect=stop) as precheck,
+        patch('survng.app.manager.EventStore', side_effect=AssertionError('store built first')),
+        pytest.raises(UnsupportedDatabaseError),
+    ):
+        AppManager(AppConfig(storage_dir=str(tmp_path)))
+    precheck.assert_called_once_with(tmp_path, tmp_path)

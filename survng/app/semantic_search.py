@@ -29,11 +29,10 @@ from .main_database import (
     create_index_logged,
     require_minimum_schema,
 )
+from .schema_minimum import SEMANTIC_SCHEMA_MINIMUM
 from .media_storage import MediaStorageRegistry
 from .openclip_tokenizer import OpenClipBpeTokenizer
 
-# Columns SurvNG v1.2.0 added to older databases (see require_minimum_schema).
-_SEMANTIC_SCHEMA_MINIMUM: dict[str, tuple[str, ...]] = {"semantic_embeddings": ("evidence_revision",)}
 
 LOGGER = logging.getLogger("uvicorn.error")
 SEMANTIC_WORKER_START_TIMEOUT_SECONDS = 60.0
@@ -393,7 +392,7 @@ class SemanticIndex:
 
     def _init_db(self) -> None:
         with self._connect() as connection:
-            require_minimum_schema(connection, _SEMANTIC_SCHEMA_MINIMUM)
+            require_minimum_schema(connection, SEMANTIC_SCHEMA_MINIMUM)
             connection.execute("pragma journal_mode = wal")
             connection.execute("pragma synchronous = normal")
             connection.execute(

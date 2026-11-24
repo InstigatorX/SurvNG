@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Callable
 
 from .main_database import closing_connection_factory, require_minimum_schema
+from .schema_minimum import EXPORTS_SCHEMA_MINIMUM
 from .recording_media import concatenated_clip_timing
 from .recorder import Recorder
 from .media_storage import MediaStorageRegistry
@@ -28,9 +29,6 @@ from .media_sessions import (
     MediaSessionManager,
     MediaSessionRequest,
 )
-
-# Columns SurvNG v1.2.0 added to older databases (see require_minimum_schema).
-_EXPORTS_SCHEMA_MINIMUM: dict[str, tuple[str, ...]] = {"media_exports": ("protected", "label", "origin")}
 
 
 LOGGER = logging.getLogger(__name__)
@@ -64,7 +62,7 @@ class MediaExportStore:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
-            require_minimum_schema(connection, _EXPORTS_SCHEMA_MINIMUM)
+            require_minimum_schema(connection, EXPORTS_SCHEMA_MINIMUM)
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute(
                 """

@@ -2125,6 +2125,33 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertEqual(result.objects[0]["status"], "fast_frame_unavailable")
         self.assertTrue(result.refinement_pending)
 
+    def test_wrong_frame_type_is_reported_once_and_treated_as_no_frame(self) -> None:
+        event_epoch = 1_800_000_000.0
+        frame = np.zeros((20, 20, 3), dtype=np.uint8)
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            SimpleNamespace(config=detector_config()),
+            SimpleNamespace(),
+            lambda: None,
+            timestamped_live_frame_provider=lambda: (frame, event_epoch),
+        )
+        with self.assertLogs(
+            "survng.app.motion_pipeline.object_detection", level="WARNING"
+        ) as logs:
+            results = [
+                backend.detect_initial(datetime.fromtimestamp(event_epoch, timezone.utc))
+                for _ in range(2)
+            ]
+
+        for result in results:
+            self.assertIsNone(result.frame)
+            self.assertEqual(result.objects[0]["status"], "fast_frame_unavailable")
+        self.assertEqual(
+            [line for line in logs.output if "instead of TimestampedLiveFrame" in line],
+            [logs.output[0]],
+        )
+        self.assertIn("gate returned tuple", logs.output[0])
+
     def test_initial_detection_rejects_stale_live_frame_but_keeps_refinement_pending(self) -> None:
         event_epoch = 1_800_000_000.0
 

@@ -51,6 +51,7 @@ from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
 from .identity_projection import apply_event_identity
 from .media_storage import MediaStorageRegistry
+from .schema_minimum import require_minimum_databases
 from .media_sessions import (
     MediaSessionKind,
     MediaSessionManager,
@@ -299,6 +300,11 @@ class AppManager:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.database_dir = Path(config.database_dir) if config.database_dir else self.storage_dir
         self.database_dir.mkdir(parents=True, exist_ok=True)
+        # Refuse a database v1.2.0 never opened before any store changes one.
+        require_minimum_databases(
+            self.database_dir,
+            Path(config.recording_index_dir) if config.recording_index_dir else self.storage_dir,
+        )
         self.database_write_lock = database_write_lock or threading.RLock()
         self.image_cache = LocalImageCache(self.database_dir / "image-cache")
         self.image_writer = DurableImageWriter(config.image_storage)

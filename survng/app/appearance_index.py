@@ -12,9 +12,7 @@ from .main_database import (
     create_index_logged,
     require_minimum_schema,
 )
-
-# Columns SurvNG v1.2.0 added to older databases (see require_minimum_schema).
-_APPEARANCE_SCHEMA_MINIMUM: dict[str, tuple[str, ...]] = {"appearance_embeddings": ("source",)}
+from .schema_minimum import APPEARANCE_SCHEMA_MINIMUM
 
 
 class AppearanceIndex:
@@ -44,7 +42,7 @@ class AppearanceIndex:
 
     def _init_db(self) -> None:
         with self._connect() as connection:
-            require_minimum_schema(connection, _APPEARANCE_SCHEMA_MINIMUM)
+            require_minimum_schema(connection, APPEARANCE_SCHEMA_MINIMUM)
             connection.execute("pragma journal_mode = wal")
             connection.execute("pragma synchronous = normal")
             connection.execute(

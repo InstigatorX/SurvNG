@@ -579,6 +579,7 @@ class RecordedMotionObjectDetector:
         self.decode_budget = decode_budget
         self._scene_frames: deque[TimestampedLiveFrame] = deque(maxlen=4)
         self._scene_frames_lock = threading.Lock()
+        self._unexpected_frame_types: set[str] = set()
         # Bytes of the last frame decoded for this camera (width x height x 3).
         self._last_frame_bytes = 0
 
@@ -762,7 +763,8 @@ class RecordedMotionObjectDetector:
         retained = sample is not None
         if sample is None:
             sample = self.timestamped_live_frame_provider() if self.timestamped_live_frame_provider else None
-        if not isinstance(sample, TimestampedLiveFrame):
+        sample = self._timestamped_sample(sample)
+        if sample is None:
             return None
         captured = float(sample.captured_at_epoch)
         age = time.time() - captured
@@ -854,7 +856,8 @@ class RecordedMotionObjectDetector:
             sample = None
         else:
             sample = provider() if provider is not None else None
-        if not isinstance(sample, TimestampedLiveFrame):
+        sample = self._timestamped_sample(sample)
+        if sample is None:
             return self._result(
                 None,
                 [{"status": "fast_frame_unavailable", "frame_source": "live_fast_path"}],
@@ -1675,11 +1678,26 @@ class RecordedMotionObjectDetector:
                                     [], [], event_epoch, self.camera.id, planned_offsets))
         return self._live_fallback_result(event_epoch, timing, workflow_started, refinement_pending)
 
+    def _timestamped_sample(self, sample: object) -> TimestampedLiveFrame | None:
+        """Accept only provenance-carrying frames; say once per type when not."""
+        if sample is None or isinstance(sample, TimestampedLiveFrame):
+            return sample
+        kind = type(sample).__name__
+        if kind not in self._unexpected_frame_types:
+            self._unexpected_frame_types.add(kind)
+            LOGGER.warning(
+                "Frame provider for %s returned %s instead of TimestampedLiveFrame; "
+                "treating it as no frame",
+                self.camera.id,
+                kind,
+            )
+        return None
+
     def _live_fallback_result(
         self, event_epoch: float, timing: dict[str, float],
         workflow_started: float, refinement_pending: bool,
     ) -> RecordedDetectionResult:
-        fallback_sample = (
+        fallback_sample = self._timestamped_sample(
             self.timestamped_live_frame_provider()
             if self.timestamped_live_frame_provider is not None
             else None

@@ -24,9 +24,11 @@ Each change was made on a stacked branch so the steps can be tested together:
 
 - **Minimum database:** one that SurvNG 1.2.0 or later has opened. Each removed
   upgrade was present in 1.2.0 and its column was already in that table's
-  CREATE statement. Each store calls `require_minimum_schema` before its first
-  DDL, so an older table stops startup with `UnsupportedDatabaseError` naming
-  the table and leaves the database unchanged. A database created by the
+  CREATE statement. `survng/app/schema_minimum.py` lists those columns per
+  table. `AppManager` checks every existing database read-only before it builds
+  any store, and each store checks its own tables before its first DDL, so an
+  older table stops startup with `UnsupportedDatabaseError` naming the table and
+  leaves every database unchanged. A database created by the
   `v1.2` branch head and then opened by `t5` matches a fresh one. One created
   by the `v1.2.0` tag also keeps the retired `tracking_comparisons`,
   `scene_migrations` and `scene_acquisition_migrations` tables and the
