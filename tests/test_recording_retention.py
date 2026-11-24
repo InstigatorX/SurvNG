@@ -409,7 +409,7 @@ class RecordingRetentionServiceTest(unittest.TestCase):
                         "free_space_by_location": {"two": 150}},
         }
         result = service._apply_plan(
-            plan, apply=True, now_epoch=time.time(), capacity_reclaim_bytes=0,
+            plan, apply=True, now_epoch=time.time(),
             planned_reclaim_bytes=150, quota_reclaim_bytes=0,
             free_reclaim_by_location={"two": 150},
         )
@@ -625,7 +625,8 @@ class RecordingRetentionServiceTest(unittest.TestCase):
             plan,
             apply=True,
             now_epoch=time.time() + 2 * 86400,
-            capacity_reclaim_bytes=0,
+            quota_reclaim_bytes=0,
+            free_reclaim_by_location=plan["reclaim"].get("free_space_by_location", {}),
             planned_reclaim_bytes=0,
         )
 
@@ -646,7 +647,8 @@ class RecordingRetentionServiceTest(unittest.TestCase):
             plan,
             apply=True,
             now_epoch=time.time(),
-            capacity_reclaim_bytes=1,
+            quota_reclaim_bytes=1,
+            free_reclaim_by_location=plan["reclaim"].get("free_space_by_location", {}),
             planned_reclaim_bytes=1,
         )
 
@@ -672,7 +674,8 @@ class RecordingRetentionServiceTest(unittest.TestCase):
         candidates = service._candidates(
             plan,
             now_epoch=time.time(),
-            capacity_reclaim_bytes=0,
+            quota_reclaim_bytes=0,
+            free_reclaim_by_location=plan["reclaim"].get("free_space_by_location", {}),
         )
 
         self.assertEqual([str(row["path"]) for row in candidates], [str(yard), str(gate)])
@@ -702,7 +705,8 @@ class RecordingRetentionServiceTest(unittest.TestCase):
         ):
             result = service._apply_plan(
                 plan, apply=True, now_epoch=time.time(),
-                capacity_reclaim_bytes=0,
+                quota_reclaim_bytes=0,
+                free_reclaim_by_location=plan["reclaim"].get("free_space_by_location", {}),
                 planned_reclaim_bytes=plan["reclaim"]["planned_bytes"],
             )
 
@@ -929,7 +933,8 @@ class RecordingRetentionServiceTest(unittest.TestCase):
         candidates = service._candidates(
             plan,
             now_epoch=time.time(),
-            capacity_reclaim_bytes=0,
+            quota_reclaim_bytes=0,
+            free_reclaim_by_location=plan["reclaim"].get("free_space_by_location", {}),
         )
 
         self.assertEqual([str(row["path"]) for row in candidates], [str(newer)])
@@ -988,7 +993,8 @@ class RecordingRetentionServiceTest(unittest.TestCase):
             plan,
             apply=True,
             now_epoch=time.time(),
-            capacity_reclaim_bytes=0,
+            quota_reclaim_bytes=0,
+            free_reclaim_by_location=plan["reclaim"].get("free_space_by_location", {}),
             planned_reclaim_bytes=int(plan["reclaim"]["planned_bytes"]),
         )
 

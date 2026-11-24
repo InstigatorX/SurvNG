@@ -314,10 +314,8 @@ class MotionRecordingProvider(Protocol):
 
 
 LiveFrameProvider = Callable[[], Frame | None]
-TimestampedLiveFrameProvider = Callable[[], TimestampedLiveFrame | tuple[Frame, float] | None]
-TimestampedEvidenceFrameProvider = Callable[
-    [dict[str, Any]], TimestampedLiveFrame | tuple[Frame, float] | None
-]
+TimestampedLiveFrameProvider = Callable[[], TimestampedLiveFrame | None]
+TimestampedEvidenceFrameProvider = Callable[[dict[str, Any]], TimestampedLiveFrame | None]
 StopRequested = Callable[[], bool]
 
 
@@ -856,7 +854,7 @@ class RecordedMotionObjectDetector:
             sample = None
         else:
             sample = provider() if provider is not None else None
-        if sample is None:
+        if not isinstance(sample, TimestampedLiveFrame):
             return self._result(
                 None,
                 [{"status": "fast_frame_unavailable", "frame_source": "live_fast_path"}],
@@ -865,31 +863,20 @@ class RecordedMotionObjectDetector:
                 workflow_started,
                 refinement_pending=True,
             )
-        if isinstance(sample, TimestampedLiveFrame):
-            frame = sample.frame
-            captured_at = float(sample.captured_at_epoch)
-            sequence = int(sample.sequence)
-            generation = int(sample.camera_generation)
-            capture_generation = int(sample.capture_generation)
-            source = str(sample.source or "live")
-            geometry_trusted = bool(sample.geometry_trusted)
-            provenance_valid = bool(
-                source == "live"
-                and sequence > 0
-                and generation > 0
-                and capture_generation > 0
-                and math.isfinite(float(sample.captured_at_monotonic))
-            )
-        else:
-            # Compatibility for external factories/tests. It remains fresh but
-            # cannot claim capture-generation provenance.
-            frame, captured_at = sample
-            sequence = 0
-            generation = 0
-            capture_generation = 0
-            source = "live"
-            geometry_trusted = True
-            provenance_valid = True
+        frame = sample.frame
+        captured_at = float(sample.captured_at_epoch)
+        sequence = int(sample.sequence)
+        generation = int(sample.camera_generation)
+        capture_generation = int(sample.capture_generation)
+        source = str(sample.source or "live")
+        geometry_trusted = bool(sample.geometry_trusted)
+        provenance_valid = bool(
+            source == "live"
+            and sequence > 0
+            and generation > 0
+            and capture_generation > 0
+            and math.isfinite(float(sample.captured_at_monotonic))
+        )
         if not math.isfinite(float(captured_at)) or not provenance_valid:
             return self._result(
                 None,

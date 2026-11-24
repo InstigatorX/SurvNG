@@ -1994,7 +1994,14 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             Detector(),
             Recorder(),
             lambda: None,
-            timestamped_live_frame_provider=lambda: (frame, event_epoch + 19.5),
+            timestamped_live_frame_provider=lambda: TimestampedLiveFrame(
+                frame=frame,
+                captured_at_epoch=event_epoch + 19.5,
+                captured_at_monotonic=1.0,
+                sequence=1,
+                camera_generation=1,
+                capture_generation=1,
+            ),
         )
         with (
             patch("survng.app.motion_pipeline.object_detection.time.time", return_value=event_epoch + 20.0),
@@ -2137,9 +2144,13 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             Detector(),
             SimpleNamespace(),
             lambda: None,
-            timestamped_live_frame_provider=lambda: (
-                np.zeros((20, 20, 3), dtype=np.uint8),
-                event_epoch + 10.0,
+            timestamped_live_frame_provider=lambda: TimestampedLiveFrame(
+                frame=np.zeros((20, 20, 3), dtype=np.uint8),
+                captured_at_epoch=event_epoch + 10.0,
+                captured_at_monotonic=1.0,
+                sequence=1,
+                camera_generation=1,
+                capture_generation=1,
             ),
         )
         with patch(
@@ -2274,7 +2285,14 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             Detector(),
             SimpleNamespace(),
             lambda: frame,
-            timestamped_live_frame_provider=lambda: (frame, event_epoch),
+            timestamped_live_frame_provider=lambda: TimestampedLiveFrame(
+                frame=frame,
+                captured_at_epoch=event_epoch,
+                captured_at_monotonic=1.0,
+                sequence=1,
+                camera_generation=1,
+                capture_generation=1,
+            ),
         )
         with patch(
             "survng.app.motion_pipeline.object_detection.time.time",
