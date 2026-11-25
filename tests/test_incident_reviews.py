@@ -1,0 +1,177 @@
+"""Incident review verdicts: operator feedback that never rewrites evidence."""
+import json
+import threading
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+
+from survng.app.events import EventStore
+from survng.app.incident_queries import IncidentQueryDependencies, IncidentQueryService, create_incident_query_router
+from survng.app.security import required_api_scope
+
+# 2026-05-28 20:26:40 UTC = 16:26:40 in New York, well inside one local day.
+BASE = 1780000000
+DAY = "2026-05-28"
+
+
+def person(x=10):
+    return {"label": "person", "confidence": .8, "temporal_observations": 5,
+            "box": {"x1": x, "y1": 10, "x2": x + 10, "y2": 40}}
+
+
+def add_incident(store, seconds, camera="driveway"):
+    store.add_event(camera, "motion", created_at=datetime.fromtimestamp(BASE + seconds, timezone.utc).isoformat(),
+                    objects_json=json.dumps([person()]))
+    return store.list_scene_incidents(start_epoch=BASE + seconds - 1, end_epoch=BASE + seconds + 1, summary_only=True)[0]["id"]
+
+
+@pytest.fixture
+def store(tmp_path):
+    return EventStore(tmp_path)
+
+
+def routes(store):
+    manager = SimpleNamespace(events=store)
+    bundle = create_incident_query_router(IncidentQueryDependencies(lambda: manager, threading.RLock()), IncidentQueryService())
+    return {(route.path, method): route.endpoint for route in bundle.router.routes for method in route.methods}
+
+
+def test_verdict_is_recorded_replaced_and_cleared_without_touching_the_scene(store):
+    incident_id = add_incident(store, 0)
+    before = store.scene_incident(incident_id)
+    assert store.incident_review(incident_id)["verdict"] is None
+    recorded = store.set_incident_review(incident_id, "keep", now=BASE + 100)
+    assert recorded["verdict"] == "keep"
+    assert recorded["reviewed_revision"] == before["revision"]
+    assert recorded["changed_since_review"] is False
+    assert store.set_incident_review(incident_id, "nothing_here")["verdict"] == "nothing_here"
+    after = store.scene_incident(incident_id)
+    assert after["revision"] == before["revision"]
+    assert after["scene_objects"] == before["scene_objects"]
+    assert after["establishment"] == before["establishment"]
+    assert store.set_incident_review(incident_id, None)["verdict"] is None
+    assert store.incident_review(incident_id)["verdict"] is None
+
+
+def test_unknown_verdicts_and_incidents_are_rejected(store):
+    incident_id = add_incident(store, 0)
+    with pytest.raises(ValueError):
+        store.set_incident_review(incident_id, "dismissed")
+    with pytest.raises(LookupError):
+        store.set_incident_review("incident-missing", "reviewed")
+    with pytest.raises(LookupError):
+        store.incident_review("incident-missing")
+
+
+def test_later_evidence_marks_a_verdict_as_changed_since_review(store):
+    incident_id = add_incident(store, 0)
+    store.set_incident_review(incident_id, "reviewed")
+    store.add_event("driveway", "motion", created_at=datetime.fromtimestamp(BASE + 5, timezone.utc).isoformat(),
+                    objects_json=json.dumps([person(60)]))
+    assert store.scene_incident(incident_id)["revision"] > store.incident_review(incident_id)["reviewed_revision"]
+    assert store.incident_review(incident_id)["changed_since_review"] is True
+
+
+def test_settling_is_not_a_change_since_review(store):
+    incident_id = add_incident(store, 0)
+    store.set_incident_review(incident_id, "reviewed")
+    before = store.scene_incident(incident_id)["revision"]
+    store.settle_scene_incidents(now=BASE + 1000)
+    assert store.scene_incident(incident_id)["revision"] > before, "settling advances the revision"
+    assert store.incident_review(incident_id)["changed_since_review"] is False
+    assert store.incident_review_queue(start_epoch=BASE - 10, end_epoch=BASE + 10)["items"][0]["changed_since_review"] is False
+
+
+def test_corrections_are_a_change_since_review(store):
+    incident_id = add_incident(store, 0)
+    store.set_incident_review(incident_id, "keep")
+    detail = store.scene_incident(incident_id)
+    store.correct_scene_incident(incident_id, detail["revision"], {"operation": "label", "object_id": detail["scene_objects"][0]["id"], "label": "cyclist"})
+    assert store.incident_review(incident_id)["changed_since_review"] is True
+
+
+def test_merge_carries_the_verdict_to_the_survivor(store):
+    first = add_incident(store, 0)
+    second = add_incident(store, 3600, camera="front-door")
+    store.set_incident_review(first, "nothing_here")
+    revisions = {item: store.scene_incident(item)["revision"] for item in (first, second)}
+    store.correct_scene_incident(second, revisions[second], {"operation": "merge", "incident_ids": [second, first], "expected_revisions": revisions})
+    merged = store.incident_review(second)
+    assert merged["verdict"] == "nothing_here"
+    assert merged["changed_since_review"] is True, "the merged evidence was not what was reviewed"
+    assert store.incident_review(first)["incident_id"] == second, "the old link resolves to the survivor"
+    queue = store.incident_review_queue(start_epoch=BASE - 10, end_epoch=BASE + 8000)
+    assert [(item["incident_id"], item["verdict"]) for item in queue["items"]] == [(second, "nothing_here")]
+
+
+def test_merge_keeps_keep_for_later_from_either_side(store):
+    first = add_incident(store, 0)
+    second = add_incident(store, 3600, camera="front-door")
+    store.set_incident_review(first, "keep")
+    store.set_incident_review(second, "reviewed")
+    revisions = {item: store.scene_incident(item)["revision"] for item in (first, second)}
+    store.correct_scene_incident(second, revisions[second], {"operation": "merge", "incident_ids": [second, first], "expected_revisions": revisions})
+    assert store.incident_review(second)["verdict"] == "keep"
+
+
+def test_reviews_from_an_early_table_gain_the_evidence_mark(tmp_path):
+    early = EventStore(tmp_path)
+    incident_id = add_incident(early, 0)
+    with early._connect() as connection:
+        connection.execute("drop table scene_incident_reviews")
+        connection.execute("create table scene_incident_reviews (incident_id text primary key, verdict text not null, incident_revision integer not null, updated_epoch real not null)")
+        connection.execute("insert into scene_incident_reviews values(?, 'reviewed', 1, 0)", (incident_id,))
+    reopened = EventStore(tmp_path)
+    assert reopened.incident_review(incident_id)["changed_since_review"] is True
+    assert reopened.incident_review_queue(start_epoch=BASE - 10, end_epoch=BASE + 10)["items"][0]["verdict"] == "reviewed"
+    with reopened._connect() as conn:
+        assert conn.execute("select 1 from sqlite_master where name='scene_corrections_incident'").fetchone()
+
+
+def test_queue_follows_list_order_and_counts_what_is_left(store):
+    first = add_incident(store, 0)
+    second = add_incident(store, 3600, camera="front-door")
+    third = add_incident(store, 7200)
+    store.set_incident_review(second, "reviewed")
+    store.set_incident_review(third, "keep")
+    queue = store.incident_review_queue(start_epoch=BASE - 10, end_epoch=BASE + 8000)
+    assert [item["incident_id"] for item in queue["items"]] == [third, second, first]
+    assert [item["verdict"] for item in queue["items"]] == ["keep", "reviewed", None]
+    assert (queue["total"], queue["reviewed"], queue["kept"], queue["remaining"]) == (3, 1, 1, 1)
+    assert store.incident_review_queue(start_epoch=BASE - 10, end_epoch=BASE + 8000, camera_id="front-door")["total"] == 1
+    # Like the incident list, the queue defaults to incidents with objects.
+    store.add_event("driveway", "motion", created_at=datetime.fromtimestamp(BASE + 7300, timezone.utc).isoformat(), objects_json="[]")
+    assert store.incident_review_queue(start_epoch=BASE - 10, end_epoch=BASE + 8000)["total"] == 3
+
+
+def test_review_routes(store):
+    incident_id = add_incident(store, 0)
+    endpoints = routes(store)
+    put = endpoints[("/api/incidents/{incident_id}/review", "PUT")]
+    get = endpoints[("/api/incidents/{incident_id}/review", "GET")]
+    queue = endpoints[("/api/incidents/review-queue", "GET")]
+    assert put(incident_id, {"verdict": "reviewed"})["verdict"] == "reviewed"
+    assert get(incident_id)["verdict"] == "reviewed"
+    result = queue(day=DAY, time_zone="America/New_York")
+    assert (result["day"], result["total"], result["remaining"]) == (DAY, 1, 0)
+    for body, status in (({}, 422), ({"verdict": "maybe"}, 422)):
+        with pytest.raises(HTTPException) as error:
+            put(incident_id, body)
+        assert error.value.status_code == status
+    with pytest.raises(HTTPException) as error:
+        put("incident-missing", {"verdict": "reviewed"})
+    assert error.value.status_code == 404
+    with pytest.raises(HTTPException) as error:
+        queue(day="28-05-2026")
+    assert error.value.status_code == 422
+
+
+def test_route_order_and_scopes():
+    endpoints = routes(SimpleNamespace())
+    paths = [path for path, _ in endpoints]
+    # The literal queue path must win over the incident-id catch-all.
+    assert paths.index("/api/incidents/review-queue") < paths.index("/api/incidents/{incident_id}")
+    assert required_api_scope("GET", "/api/incidents/review-queue") == "read"
+    assert required_api_scope("PUT", "/api/incidents/incident-x/review") == "admin"

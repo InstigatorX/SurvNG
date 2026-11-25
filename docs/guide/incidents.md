@@ -40,6 +40,51 @@ detection is switched off. Tracking must remain enabled and the camera worker
 must be running. Missing or expired footage remains unavailable; saved evidence
 and completed analysis remain visible.
 
+## The incident page
+
+Opening an incident on a phone, or from a notification link, shows the incident
+page. Its title is built from what was observed, for example *Car arrives, person
+walks to Front Door*. Administrators can optionally have the AI provider word
+titles instead; see [AI incident titles](assistant.md#ai-incident-titles-optional).
+
+- **Player.** The incident opens on its best frame with every object's box.
+  **Play incident** plays each camera episode in order.
+- **Storyline.** One lane per camera episode on a shared time axis, with a bar for
+  each object's visible interval: people blue, vehicles amber, uncertain objects
+  dashed violet. A stationary stretch continues the same bar in a muted color. A
+  gap in a bar means the object was not observed then, not that it left. Click a
+  bar to jump to that camera and moment.
+- **Observed objects.** One card per object in the incident's inventory, including
+  stationary, ignored-zone and uncertain objects. Select a card to focus on it:
+  the other objects dim, the player follows it across cameras (announcing each
+  switch), and the panel below shows its path, how each hand-off was associated,
+  and **Find similar**. Select the card again to bring everything back.
+- **Why this is an incident.** With nothing selected, the panel explains which
+  evidence established the incident, whether the alert policy's criteria were
+  met (a policy decision, not proof of delivery), and any camera whose analysis is
+  still pending or incomplete.
+- **Corrections.** Selecting an uncertain object offers corrections for that
+  object only: confirm its label, change it, or mark it as the same object as
+  another one. Other objects offer the same through **Correct this object**. The
+  full correction set, activity list and alert policy details remain under
+  **All activity, alert policy and corrections**.
+
+### Review mode
+
+**Review mode** (administrators) adds one bar to the same page: how many of the
+day's incidents are left, and three verdicts.
+
+| Verdict | Key | Meaning |
+| --- | --- | --- |
+| Reviewed | E | You looked at it. |
+| Keep for later | F | Come back to it; it is still counted as decided today. |
+| Nothing here | X | Not worth attention. Feedback only: the incident and its evidence are unchanged. To fix what the evidence says, use corrections. |
+
+A verdict moves to the next incident without one. **J** and **K** move to the next
+and previous incident without deciding. Shortcuts work only in review mode and
+never while you are typing in a field. If new evidence arrives after a verdict,
+the incident is marked as changed since review.
+
 ## Focus vs mosaic
 
 Incidents can show one primary piece of evidence at a time (**Focus**) or a denser mosaic of thumbnails. Pick whichever helps you review faster; SurvNG remembers the preference for the session.

@@ -106,6 +106,12 @@ export function IncidentRecordingPlayer({
   onAnalysisStats,
   onEnded,
   onClose,
+  // Optional: open at this moment inside [startEpoch, endEpoch] instead of
+  // its start, and report the playhead so a caller can follow it.
+  initialEpoch = null,
+  onPlayhead = null,
+  // Optional: told once when this window has no recording, so a caller can move on.
+  onUnavailable = null,
 }) {
   const videoRef = useRef(null);
   const [selectedSource, setSelectedSource] = useState(() => source || preferredStreamSource());
@@ -113,7 +119,16 @@ export function IncidentRecordingPlayer({
   const failedSourcesRef = useRef(new Set());
   const endedRef = useRef(false);
   const scrubbingRef = useRef(false);
-  const appliedSeekRef = useRef(startEpoch);
+  const safeInitial = (Number.isFinite(Number(initialEpoch)) && Number(initialEpoch) > startEpoch
+    && Number(initialEpoch) < (Number.isFinite(endEpoch) ? endEpoch : startEpoch + 1)) ? Number(initialEpoch) : startEpoch;
+  const appliedSeekRef = useRef(safeInitial);
+  const onPlayheadRef = useRef(onPlayhead);
+  onPlayheadRef.current = onPlayhead;
+  const onUnavailableRef = useRef(onUnavailable);
+  onUnavailableRef.current = onUnavailable;
+  // True while the windows are being checked from the clip's first window
+  // and nothing has loaded yet: only then can "no recording" be concluded.
+  const probingFromStartRef = useRef(true);
   const readySourceRef = useRef("");
   const ignorePauseRef = useRef(0);
   const [nativeHls] = useState(supportsNativeRecordingHls);
@@ -126,8 +141,8 @@ export function IncidentRecordingPlayer({
   const [transport, setTransport] = useState(initialTransport);
   const [startNeedsPlay, setStartNeedsPlay] = useState(false);
   const [loaded, setLoaded] = useState(null);
-  const [targetEpoch, setTargetEpoch] = useState(startEpoch);
-  const [playhead, setPlayhead] = useState(startEpoch);
+  const [targetEpoch, setTargetEpoch] = useState(safeInitial);
+  const [playhead, setPlayhead] = useState(safeInitial);
   const [playing, setPlaying] = useState(autoPlay);
   const [muted, setMuted] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -143,14 +158,19 @@ export function IncidentRecordingPlayer({
     endedRef.current = false;
     readySourceRef.current = "";
     ignorePauseRef.current = performance.now() + 1500;
-    appliedSeekRef.current = startEpoch;
-    setTargetEpoch(startEpoch);
-    setPlayhead(startEpoch);
+    appliedSeekRef.current = safeInitial;
+    probingFromStartRef.current = playbackWindowForEpoch(safeInitial).start === playbackWindowForEpoch(startEpoch).start;
+    setTargetEpoch(safeInitial);
+    setPlayhead(safeInitial);
     setPlaying(autoPlay);
     setError("");
     setStartNeedsPlay(false);
     setTransport(initialTransport());
-  }, [autoPlay, cameraId, endEpoch, nativeHls, source, startEpoch]);
+  }, [autoPlay, cameraId, endEpoch, nativeHls, source, startEpoch, safeInitial]);
+
+  useEffect(() => {
+    if (Number.isFinite(playhead)) onPlayheadRef.current?.(playhead);
+  }, [playhead]);
 
   useEffect(() => {
     if (!cameraId || !Number.isFinite(startEpoch)) return undefined;
@@ -162,17 +182,21 @@ export function IncidentRecordingPlayer({
     setLoading(true);
     setError("");
     async function load() {
+      // Only every source answering with no recording proves there is none;
+      // one failed source (often main, with the sub stream unrecorded) does not.
+      let failed = false;
       for (const candidate of candidates) {
         const response = await fetch(
           recordingWindowUrl(cameraId, requested.start, requested.end, candidate),
           { signal: controller.signal },
         );
-        if (!response.ok) continue;
+        if (!response.ok) { failed = true; continue; }
         const payload = await response.json();
         const rows = rowsOverlapping(withMediaTimeline(payload.recordings || []), startEpoch, safeEnd);
         const playable = recordingPlayableEpoch(rows, fetchEpoch);
         if (!rows.length || !Number.isFinite(playable)) continue;
         if (cancelled) return;
+        probingFromStartRef.current = false;
         setLoaded({
           cameraId,
           source: payload.source || candidate,
@@ -187,12 +211,21 @@ export function IncidentRecordingPlayer({
         return;
       }
       if (!cancelled) {
+        // An empty window before the clip's end: look in the next window
+        // (targetEpoch only moves forward and stops at the clip's end).
+        if (!failed && candidates.length && safeEnd > requested.end) {
+          setTargetEpoch(requested.end);
+          return;
+        }
         setLoaded(null);
         setLoading(false);
         setError("No recording window found");
+        // Every window from the clip's start to its end answered empty.
+        if (!failed && candidates.length && probingFromStartRef.current) onUnavailableRef.current?.();
       }
     }
     load().catch((loadError) => {
+      // A failed request is not proof there is no recording; do not skip on it.
       if (!cancelled && loadError.name !== "AbortError") {
         setLoaded(null);
         setLoading(false);
@@ -336,6 +369,7 @@ export function IncidentRecordingPlayer({
   function scrubTo(epoch) {
     const next = Math.max(startEpoch, Math.min(safeEnd, Number(epoch)));
     if (!Number.isFinite(next)) return;
+    probingFromStartRef.current = false;
     endedRef.current = false;
     setTargetEpoch(next);
     setPlayhead(next);

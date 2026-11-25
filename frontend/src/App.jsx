@@ -120,7 +120,11 @@ function App() {
   }
   const detailMatch = pathname.match(/^\/incidents\/(incident-[^/]+)\/?$/);
   if (detailMatch) {
-    return <Suspense fallback={<WorkspaceFallback />}><IncidentDetailPage incidentId={detailMatch[1]} timeZone={timeZone} canCorrectIncident={!viewer} /></Suspense>;
+    // The incident detail lives inside the workspace shell (top navigation,
+    // Incidents active) but without the assistant panel.
+    return <RuntimeStateProvider><Shell page="incidents" theme={theme} textSize={textSize} recordingContext={recordingContext} session={session} onSignOut={() => void signOut()}>
+      <Suspense fallback={<WorkspaceFallback />}><IncidentDetailPage incidentId={(() => { try { return decodeURIComponent(detailMatch[1]); } catch { return detailMatch[1]; } })()} timeZone={timeZone} canCorrectIncident={!viewer} /></Suspense>
+    </Shell></RuntimeStateProvider>;
   }
   const workspacePage = viewer && page === "admin" ? "live" : page;
   return (
