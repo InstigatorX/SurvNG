@@ -126,6 +126,9 @@ export function IncidentRecordingPlayer({
   onPlayheadRef.current = onPlayhead;
   const onUnavailableRef = useRef(onUnavailable);
   onUnavailableRef.current = onUnavailable;
+  // True while the windows are being checked from the clip's first window
+  // and nothing has loaded yet: only then can "no recording" be concluded.
+  const probingFromStartRef = useRef(true);
   const readySourceRef = useRef("");
   const ignorePauseRef = useRef(0);
   const [nativeHls] = useState(supportsNativeRecordingHls);
@@ -156,6 +159,7 @@ export function IncidentRecordingPlayer({
     readySourceRef.current = "";
     ignorePauseRef.current = performance.now() + 1500;
     appliedSeekRef.current = safeInitial;
+    probingFromStartRef.current = playbackWindowForEpoch(safeInitial).start === playbackWindowForEpoch(startEpoch).start;
     setTargetEpoch(safeInitial);
     setPlayhead(safeInitial);
     setPlaying(autoPlay);
@@ -192,6 +196,7 @@ export function IncidentRecordingPlayer({
         const playable = recordingPlayableEpoch(rows, fetchEpoch);
         if (!rows.length || !Number.isFinite(playable)) continue;
         if (cancelled) return;
+        probingFromStartRef.current = false;
         setLoaded({
           cameraId,
           source: payload.source || candidate,
@@ -215,8 +220,8 @@ export function IncidentRecordingPlayer({
         setLoaded(null);
         setLoading(false);
         setError("No recording window found");
-        // Every window from here to the clip's end answered empty.
-        if (!failed && candidates.length) onUnavailableRef.current?.();
+        // Every window from the clip's start to its end answered empty.
+        if (!failed && candidates.length && probingFromStartRef.current) onUnavailableRef.current?.();
       }
     }
     load().catch((loadError) => {
@@ -364,6 +369,7 @@ export function IncidentRecordingPlayer({
   function scrubTo(epoch) {
     const next = Math.max(startEpoch, Math.min(safeEnd, Number(epoch)));
     if (!Number.isFinite(next)) return;
+    probingFromStartRef.current = false;
     endedRef.current = false;
     setTargetEpoch(next);
     setPlayhead(next);

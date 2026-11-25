@@ -430,7 +430,9 @@ async function followThemeChecks() {
   for (let attempt = 0; attempt < 50 && !windowStarts.includes(BOUNDARY); attempt += 1) await page.waitForTimeout(100);
   assert.ok(windowStarts.includes(BOUNDARY - 900) && windowStarts.includes(BOUNDARY), JSON.stringify(windowStarts));
   // (The fixture's segment has no real media, so playback itself is not checked here.)
+  await page.waitForTimeout(500);
   assert.equal(await page.locator(".story-frame .incident-recording-player").getAttribute("data-camera-id"), "front-door");
+  assert.doesNotMatch(await page.locator(".story-frame [role=status]").innerText(), /No recording on Front Door/);
   assert.deepEqual(errors, []);
   await page.close();
 }
