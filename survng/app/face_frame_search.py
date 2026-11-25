@@ -20,8 +20,9 @@ sheets of each event's best face under both rules for a visual check.
 upper-body crops of the same frames and reports it separately, aligning its
 faces from its own landmarks, so the two detectors differ in nothing else.
 
-The norm needs the original AdaFace checkpoint and PyTorch (installed with
-requirements-semantic-export.txt); the exported OpenVINO model drops it.
+The norm comes from ``adaface-ir50-webface4m-norm.xml``, an OpenVINO export
+with both the embedding and the norm (``export_openvino_norm.py`` in the model
+directory); the embedding-only export drops the norm.
 
 It reads the database and recordings only. It loads its own CPU copies of the
 models and leaves the running service, its config and its caches alone.
@@ -211,14 +212,12 @@ def _resolve_model_path(value: str) -> str:
 
 
 def _quality_models(detector_config: Any) -> tuple[Any, Any]:
-    """The live aligner (landmarks + template) and the original AdaFace backbone."""
-    import importlib.util
-
-    import torch
-
+    """The live aligner (landmarks + template) and AdaFace with its norm output."""
     from .face_recognition import OpenVinoFaceRecognizer
 
-    torch.set_num_threads(max(1, int(os.environ.get("OV_CPU_THREADS_NUM", "4"))))
+    model_path = ADAFACE_DIR / "adaface-ir50-webface4m-norm.xml"
+    if not model_path.is_file():
+        raise FileNotFoundError(f"{model_path} is missing; run export_openvino_norm.py in that directory")
     recognizer = OpenVinoFaceRecognizer(detector_config.model_copy(update={
         "face_recognition_enabled": True,
         "face_recognition_device": "CPU",
@@ -229,18 +228,17 @@ def _quality_models(detector_config: Any) -> tuple[Any, Any]:
     }))
     if not recognizer.ready:
         raise RuntimeError(f"face aligner unavailable: {recognizer.error}")
-    spec = importlib.util.spec_from_file_location("adaface_net", ADAFACE_DIR / "net.py")
-    if spec is None or spec.loader is None:
-        raise RuntimeError("AdaFace net.py is missing")
-    net = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(net)
-    checkpoint = torch.load(ADAFACE_DIR / "adaface_ir50_webface4m.ckpt", map_location="cpu", weights_only=True)
-    backbone = net.build_model("ir_50")
-    backbone.load_state_dict(
-        {key[6:]: value for key, value in checkpoint["state_dict"].items() if key.startswith("model.")},
-        strict=True,
-    )
-    return recognizer, backbone.eval()
+    try:
+        from openvino import Core
+    except ImportError:
+        from openvino.runtime import Core
+    threads = max(1, int(os.environ.get("OV_CPU_THREADS_NUM", "4")))
+    # f32: the embedding-only export failed parity at the GPU's default f16.
+    compiled = Core().compile_model(str(model_path), "CPU", {
+        "PERFORMANCE_HINT": "LATENCY", "NUM_STREAMS": "1",
+        "INFERENCE_NUM_THREADS": threads, "INFERENCE_PRECISION_HINT": "f32",
+    })
+    return recognizer, compiled
 
 
 class YuNetFaces:
@@ -333,14 +331,11 @@ class FrameSearcher:
         return self._norm(aligned)
 
     def _norm(self, aligned: np.ndarray) -> tuple[float, np.ndarray]:
-        import torch
-
-        tensor = torch.from_numpy(
-            ((aligned.astype(np.float32) - 127.5) / 127.5).transpose(2, 0, 1)[None].copy()
-        )
-        with torch.inference_mode():
-            embedding, norm = self.adaface(tensor)
-        return float(norm.reshape(-1)[0]), embedding.numpy().reshape(-1).astype(np.float32)
+        tensor = ((aligned.astype(np.float32) - 127.5) / 127.5).transpose(2, 0, 1)[None].copy()
+        result = self.adaface([tensor])
+        embedding = np.asarray(result[self.adaface.output(0)], dtype=np.float32).reshape(-1)
+        norm = float(np.asarray(result[self.adaface.output(1)]).reshape(-1)[0])
+        return norm, embedding
 
     def search(self, frame: Any, offset: float) -> FrameResult:
         from .motion_pipeline.object_detection import RecordedMotionObjectDetector, _box
