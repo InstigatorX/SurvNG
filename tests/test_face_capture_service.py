@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from survng.app.config import DetectorConfig
 from survng.app.face_capture import service as service_module
@@ -103,7 +104,7 @@ def test_a_capture_is_stored_and_a_failure_is_recorded(tmp_path, monkeypatch):
 
     monkeypatch.setattr(service_module, "capture_event", fake_capture)
     assert service.run_once(NOW) is True
-    assert service.run_once(NOW) is True
+    assert service.run_once(NOW) is False  # a failure waits the idle interval
     assert service.store.attempts([1, 2]) == {2: ("done", 1, 1), 1: ("failed", 1, 1)}
     stored = service.store.faces(2)
     assert len(stored) == 1 and Path(stored[0]["crop_path"]).is_file()
@@ -139,3 +140,39 @@ def test_the_face_worker_runs_for_recognition_or_capture():
     assert not DetectorConfig().face_worker_enabled()
     assert DetectorConfig(face_capture_enabled=True).face_worker_enabled()
     assert DetectorConfig(face_recognition_enabled=True).face_worker_enabled()
+
+
+def test_events_older_than_a_captured_batch_are_still_reached(tmp_path, monkeypatch):
+    monkeypatch.setattr(service_module, "CANDIDATE_BATCH", 2)
+    service = _service(tmp_path, [(i, "gate", _person_event(), _at(100 - i)) for i in range(1, 6)])
+    for event_id in (5, 4, 3):
+        service.store.record(event_id=event_id, camera_id="gate", event_epoch=0.0, result=CaptureResult(),
+                             embedding_model="m", seconds=1.0)
+    assert service.next_event(NOW)[0] == 2
+
+
+def test_unanswered_person_detection_defers_instead_of_finishing_the_event():
+    from survng.app.face_capture.service import _people
+
+    inference = SimpleNamespace(detect_enrichment=lambda *a, **k: [{"status": "detector_unavailable"}])
+    with pytest.raises(InferenceUnavailable):
+        _people(inference, DetectorConfig(), np.zeros((8, 8, 3), np.uint8))
+
+
+def test_main_stream_errors_without_faces_count_as_a_failed_attempt(tmp_path, monkeypatch):
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(30))])
+    monkeypatch.setattr(service_module, "capture_event",
+                        lambda **kwargs: CaptureResult(errors=["main stream -1.0..+1.0: face inference failed"]))
+    assert service.run_once(NOW) is False
+    assert service.store.attempts([1]) == {1: ("failed", 1, 1)}
+
+
+def test_a_failed_lookup_before_the_capture_uses_an_attempt(tmp_path):
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(30))])
+
+    def broken_rows(*args, **kwargs):
+        raise OSError("recording index locked")
+
+    service._recording_rows = broken_rows
+    assert service.run_once(NOW) is False
+    assert service.store.attempts([1]) == {1: ("failed", 1, 1)}

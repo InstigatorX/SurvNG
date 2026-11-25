@@ -17,7 +17,8 @@ from .pipeline import CapturedFace, CaptureResult
 
 LOGGER = logging.getLogger(__name__)
 
-# Bumped when what a capture keeps changes; older events are not redone.
+# Bumped when what a capture keeps changes; events captured ("done") by an
+# older version are captured again.
 CAPTURE_VERSION = 1
 CROP_JPEG_QUALITY = 92
 
@@ -60,6 +61,16 @@ create index if not exists face_captures_event on face_captures(event_id);
 """
 
 
+class ClosingConnection(sqlite3.Connection):
+    """A connection that also closes when its ``with`` block ends."""
+
+    def __exit__(self, *exc_info):
+        try:
+            return super().__exit__(*exc_info)
+        finally:
+            self.close()
+
+
 class FaceCaptureStore:
     def __init__(self, database_dir: Path) -> None:
         self.path = Path(database_dir) / "face-captures.sqlite3"
@@ -70,7 +81,7 @@ class FaceCaptureStore:
             connection.executescript(SCHEMA)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=10.0)
+        connection = sqlite3.connect(self.path, timeout=10.0, factory=ClosingConnection)
         connection.execute("pragma journal_mode = wal")
         connection.row_factory = sqlite3.Row
         return connection

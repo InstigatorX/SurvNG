@@ -49,20 +49,30 @@ def person_events(
     until: str,
     cameras: list[str] | None = None,
     limit: int = 200,
+    before_id: int | None = None,
 ) -> list[tuple[int, str, float, dict[str, Any]]]:
-    """Recorded person events created in ``[since, until]``, newest first."""
+    """Recorded person events created in ``[since, until]``, newest first.
+
+    ``before_id`` continues a listing below the last id it returned.
+    """
     query = (
         "select id, camera_id, objects_json, created_at from events"
         " where created_at >= ? and created_at <= ? and objects_json like '%\"person\"%'"
     )
     args: list[Any] = [since, until]
+    if before_id is not None:
+        query += " and id < ?"
+        args.append(int(before_id))
     if cameras:
         query += f" and camera_id in ({','.join('?' * len(cameras))})"
         args += cameras
     query += " order by id desc"
     found = []
     for event_id, camera_id, objects_json, created_at in connection.execute(query, args):
-        objects = json.loads(objects_json or "[]")
+        try:
+            objects = json.loads(objects_json or "[]")
+        except ValueError:
+            continue  # one malformed row must not stop every later pass
         if not has_confirmed_person(objects):
             continue
         qualification = motion_qualification(objects)

@@ -49,6 +49,9 @@ STARTUP_DELAY_SECONDS = 600.0
 # Re-read the wall clock at least this often while waiting, so a clock step
 # (NTP sync after boot, host suspend) cannot delay the daily run by hours.
 MAX_WAIT_SECONDS = 900.0
+# A run_at this soon after a run (a catch-up or policy-change run just before
+# it) is skipped, so the job does not run twice in a row.
+MIN_RUN_GAP_SECONDS = 3600.0
 BATCH_ROWS = 500
 SCAN_ROWS = 5000
 BATCH_PAUSE_SECONDS = 0.05
@@ -267,7 +270,7 @@ class DatabaseRetention:
                     with self._status_lock:
                         self._running = False
                         self._status["last_error"] = type(error).__name__
-            due = next_daily_run(self._clock(), self._config().run_at, self._tz)
+            due = next_daily_run(self._clock() + MIN_RUN_GAP_SECONDS, self._config().run_at, self._tz)
 
     def _first_due(self) -> float:
         """Next ``run_at``, or a catch-up run soon if the last one is overdue.

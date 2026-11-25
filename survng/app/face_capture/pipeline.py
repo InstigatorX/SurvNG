@@ -272,11 +272,14 @@ def main_stream_source(
 ) -> FrameSource:
     """Every main-stream frame in a window, decoded a GOP run at a time (frame stepping's decoder)."""
     from ..recorded_decoder import recorded_decode_plans
-    from ..recording_frame_runs import decode_frame_run, list_segment_frames
+    from ..recording_frame_runs import FrameRunError, decode_frame_run, list_segment_frames
     from ..recording_frame_steps import frame_run
     from ..recording_media import mp4_video_dimensions
 
     listed: dict[str, Any] = {}
+    # A hardware decode that failed for other than the file is not tried
+    # again for this event, so a broken GPU costs one timeout, not one a run.
+    decoder = {"hardware": hardware_acceleration}
 
     def frames(start: float, end: float) -> Iterator[tuple[float, np.ndarray]]:
         for row in rows("main", event_epoch + start, event_epoch + end):
@@ -290,14 +293,21 @@ def main_stream_source(
             if not wanted:
                 continue
             size = mp4_video_dimensions(path)
-            plans = recorded_decode_plans(hardware_acceleration, scale=size) if size else recorded_decode_plans(None)
             runs = sorted({frame_run(segment, index, CAPTURE_RUN_MAX_FRAMES) for index in wanted})
             for run_start, run_stop in runs:
-                run = decode_frame_run(
-                    ffmpeg_path, path, segment, run_start, run_stop, size[0] if size else 100_000,
-                    size=size, plans=plans, consumer="face_capture",
-                    hardware_timeout=5.0, cpu_timeout=20.0,
-                )
+                plans = recorded_decode_plans(decoder["hardware"], scale=size) if size else recorded_decode_plans(None)
+                try:
+                    run = decode_frame_run(
+                        ffmpeg_path, path, segment, run_start, run_stop, size[0] if size else 100_000,
+                        size=size, plans=plans, consumer="face_capture",
+                        hardware_timeout=5.0, cpu_timeout=20.0,
+                    )
+                except FrameRunError as error:
+                    if error.hardware_failed:
+                        decoder["hardware"] = None
+                    raise
+                if run.hardware_failed:
+                    decoder["hardware"] = None
                 for pts, image in run.frames:
                     if local_start <= pts <= local_end:
                         yield segment_start + pts - event_epoch, image

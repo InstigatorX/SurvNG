@@ -19,6 +19,8 @@ from .recorded_decoder import (
     FAILURE_BITSTREAM,
     FAILURE_MISSING_INPUT,
     FAILURE_OTHER,
+    FAILURE_SPAWN,
+    FAILURE_TIMEOUT,
     FAILURE_UNFINALIZED_INPUT,
     FAILURE_UNREADABLE_INPUT,
     DecodePlan,
@@ -95,9 +97,9 @@ def list_segment_frames(ffprobe_path: str, source_path: Path) -> SegmentFrames:
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=FRAME_LIST_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
-        raise FrameRunError("timeout", f"frame list of {source_path.name} timed out") from exc
+        raise FrameRunError(FAILURE_TIMEOUT, f"frame list of {source_path.name} timed out") from exc
     except OSError as exc:
-        raise FrameRunError("spawn", f"frame list of {source_path.name} failed to start") from exc
+        raise FrameRunError(FAILURE_SPAWN, f"frame list of {source_path.name} failed to start") from exc
     frames = parse_packet_listing((result.stdout or b"").decode("utf-8", errors="replace"))
     if result.returncode != 0 or not frames.times:
         error = (result.stderr or b"").decode("utf-8", errors="replace").strip()

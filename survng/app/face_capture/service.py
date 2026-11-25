@@ -20,7 +20,7 @@ from typing import Any
 
 from .events import person_events, plan_offsets, stored_people
 from .pipeline import CaptureCancelled, CaptureSettings, capture_event, main_stream_source, sub_stream_source
-from .store import CAPTURE_VERSION, FaceCaptureStore
+from .store import CAPTURE_VERSION, ClosingConnection, FaceCaptureStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -112,30 +112,43 @@ class FaceCaptureService:
         now = now or datetime.now(timezone.utc)
         since = (now - timedelta(hours=float(config.face_capture_backfill_hours))).isoformat()
         until = (now - timedelta(seconds=SETTLE_SECONDS)).isoformat()
-        with self._events_connection() as connection:
-            candidates = person_events(connection, since=since, until=until, limit=CANDIDATE_BATCH)
-        seen = self.store.attempts(event_id for event_id, *_ in candidates)
-        for candidate in candidates:
-            previous = seen.get(candidate[0])
-            if previous is None:
-                return candidate
-            state, attempts, version = previous
-            if state == "failed" and attempts < MAX_ATTEMPTS:
-                return candidate
-            if version < CAPTURE_VERSION and state == "done":
-                return candidate
-        return None
+        before_id: int | None = None
+        # Page back through the backfill window, so events older than the
+        # newest batch are still reached once that batch is captured.
+        while True:
+            with self._events_connection() as connection:
+                candidates = person_events(
+                    connection, since=since, until=until, limit=CANDIDATE_BATCH, before_id=before_id,
+                )
+            seen = self.store.attempts(event_id for event_id, *_ in candidates)
+            for candidate in candidates:
+                previous = seen.get(candidate[0])
+                if previous is None:
+                    return candidate
+                state, attempts, version = previous
+                if state == "failed" and attempts < MAX_ATTEMPTS:
+                    return candidate
+                if version < CAPTURE_VERSION and state == "done":
+                    return candidate
+            if len(candidates) < CANDIDATE_BATCH:
+                return None
+            before_id = candidates[-1][0]
 
     def run_once(self, now: datetime | None = None) -> bool:
-        """Capture one event if one is due; True when an event was processed."""
+        """Capture one event if one is due; True when an event was captured.
+
+        A deferred or failed capture returns False, so the loop waits the
+        idle interval before the next pass (and a failure's next attempt).
+        """
         if not self.enabled():
             return False
         self._prune_if_due()
         candidate = self.next_event(now)
         if candidate is None:
             return False
+        failed = self.failed
         # A capture deferred for incident work waits the idle interval.
-        return self.capture(*candidate) is not None
+        return self.capture(*candidate) is not None and self.failed == failed
 
     def capture(self, event_id: int, camera_id: str, epoch: float, qualification: dict[str, Any]) -> int | None:
         """Capture one event; the number of faces kept, or None when deferred."""
@@ -155,11 +168,13 @@ class FaceCaptureService:
         ffmpeg = str(app_config.ffmpeg_path or "ffmpeg")
         ffprobe = str(Path(ffmpeg).with_name("ffprobe")) if "/" in ffmpeg else "ffprobe"
         hardware = str(app_config.hardware_acceleration or "")
-        main_rows = rows("main", epoch - 1.0, epoch + 1.0)
-        main_size = mp4_video_dimensions(Path(main_rows[0]["path"])) if main_rows else None
-        with self._events_connection() as connection:
-            stored = stored_people(connection, event_id, epoch, main_size)
         try:
+            # Inside the try: an event whose lookups fail is recorded as a
+            # failed attempt instead of being picked again on every pass.
+            main_rows = rows("main", epoch - 1.0, epoch + 1.0)
+            main_size = mp4_video_dimensions(Path(main_rows[0]["path"])) if main_rows else None
+            with self._events_connection() as connection:
+                stored = stored_people(connection, event_id, epoch, main_size)
             with cancellable_evidence_work(self._stop.is_set, optional=True, source="face_capture"):
                 result = capture_event(
                     plan_offsets=plan_offsets(config, qualification, epoch, camera_id),
@@ -182,6 +197,14 @@ class FaceCaptureService:
             self.store.record_failure(event_id=event_id, camera_id=camera_id, event_epoch=epoch, error=str(exc))
             self._log_error(f"face capture failed for event {event_id} on {camera_id}: {exc}")
             return 0
+        if not result.faces and any(error.startswith("main stream") for error in result.errors):
+            # Main-stream decoding or the face models failed and nothing was
+            # kept: an attempt to retry, not an event with no faces.
+            error = "; ".join(result.errors)
+            self.failed += 1
+            self.store.record_failure(event_id=event_id, camera_id=camera_id, event_epoch=epoch, error=error)
+            self._log_error(f"face capture failed for event {event_id} on {camera_id}: {error}")
+            return 0
         kept = self.store.record(
             event_id=event_id, camera_id=camera_id, event_epoch=epoch, result=result,
             embedding_model=Path(config.face_capture_embedding_model_path).stem,
@@ -191,7 +214,9 @@ class FaceCaptureService:
         return kept
 
     def _events_connection(self) -> sqlite3.Connection:
-        return sqlite3.connect(f"file:{self._events_db_path}?mode=ro", uri=True, timeout=10.0)
+        return sqlite3.connect(
+            f"file:{self._events_db_path}?mode=ro", uri=True, timeout=10.0, factory=ClosingConnection,
+        )
 
     def _prune_if_due(self) -> None:
         now = time.monotonic()
@@ -225,11 +250,17 @@ class FaceCaptureService:
 
 
 def _people(inference: Any, config: Any, frame: Any) -> list[tuple[float, float, float, float]]:
+    from ..inference_runtime.types import InferenceUnavailable
     from ..motion_pipeline.object_detection import _box
 
     objects = inference.detect_enrichment(
         frame, confidence_threshold=float(config.event_candidate_confidence_threshold),
     )
+    for item in objects:
+        if isinstance(item, dict) and item.get("status") in {"detector_unavailable", "inference_deferred"}:
+            # No answer is not "no people": defer the capture rather than
+            # recording the event as done without faces.
+            raise InferenceUnavailable(str(item.get("error") or "person detection unavailable"))
     return [
         box for item in objects
         if isinstance(item, dict) and str(item.get("label") or "").lower() == "person"
