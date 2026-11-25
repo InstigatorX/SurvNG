@@ -118,6 +118,24 @@ def _filter_incidents_by_person(
     ]
 
 
+def _local_day_start(day: str, time_zone: str) -> tuple[datetime, str]:
+    try:
+        selected_zone = ZoneInfo(time_zone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="unknown timezone") from exc
+    if day:
+        try:
+            selected_date = datetime.strptime(day, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail="day must use YYYY-MM-DD"
+            ) from exc
+    else:
+        selected_date = datetime.now(selected_zone).date()
+        day = selected_date.isoformat()
+    return datetime.combine(selected_date, datetime.min.time(), selected_zone), day
+
+
 class IncidentQueryService:
     """Read, hydrate, and present canonical incidents for one manager generation."""
 
@@ -389,21 +407,7 @@ class IncidentQueryService:
         offset: int = 0,
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
     ) -> dict[str, Any]:
-        try:
-            selected_zone = ZoneInfo(time_zone)
-        except (ZoneInfoNotFoundError, ValueError) as exc:
-            raise HTTPException(status_code=422, detail="unknown timezone") from exc
-        if day:
-            try:
-                selected_date = datetime.strptime(day, "%Y-%m-%d").date()
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=422, detail="day must use YYYY-MM-DD"
-                ) from exc
-        else:
-            selected_date = datetime.now(selected_zone).date()
-            day = selected_date.isoformat()
-        day_start = datetime.combine(selected_date, datetime.min.time(), selected_zone)
+        day_start, day = _local_day_start(day, time_zone)
         day_end = day_start + timedelta(days=1)
         bounds = {"start_epoch":day_start.timestamp(), "end_epoch":day_end.timestamp()}
         facets = manager.events.scene_incident_facets(**bounds)
@@ -441,6 +445,25 @@ class IncidentQueryService:
             "end_at": day_end.astimezone(timezone.utc).isoformat(),
             "facets": facets,
         }
+
+    @staticmethod
+    def review_queue(
+        manager: AppManager,
+        *,
+        day: str = "",
+        time_zone: str = "America/New_York",
+        camera_id: str = "",
+        event_type: str = "motion",
+        object_label: str = "",
+        zone: str = "",
+    ) -> dict[str, Any]:
+        """The day's listed incidents in list order, with review verdicts."""
+        day_start, day = _local_day_start(day, time_zone)
+        day_end = day_start + timedelta(days=1)
+        queue = manager.events.incident_review_queue(
+            start_epoch=day_start.timestamp(), end_epoch=day_end.timestamp(), camera_id=camera_id,
+            event_type=event_type, object_label=object_label, zone=zone)
+        return {**queue, "day": day, "time_zone": time_zone}
 
     def resolve_event(
         self, manager: AppManager, event_id: int
@@ -671,6 +694,19 @@ def create_incident_query_router(
             )
         )
 
+    @router.get("/api/incidents/review-queue")
+    def incident_review_queue(
+        day: str = "",
+        time_zone: str = "America/New_York",
+        camera_id: str = "",
+        event_type: str = "motion",
+        object_label: str = "",
+        zone: str = "",
+    ) -> dict[str, Any]:
+        return with_manager(lambda active: service.review_queue(
+            active, day=day, time_zone=time_zone, camera_id=camera_id,
+            event_type=event_type, object_label=object_label, zone=zone))
+
     @router.get("/api/incidents/notification/{incident_id}")
     def notification_incident(incident_id: str) -> dict[str, Any]:
         return with_manager(lambda active: service.notification_detail(active, incident_id))
@@ -838,6 +874,32 @@ def create_incident_query_router(
             })
             return service.with_faces(active, [result])[0]
         return with_manager(correct)
+
+    @router.get("/api/incidents/{incident_id}/review")
+    def incident_review(incident_id: str):
+        def resolve(active):
+            try:
+                return active.events.incident_review(incident_id)
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return with_manager(resolve)
+
+    @router.put("/api/incidents/{incident_id}/review")
+    def review_incident(incident_id: str, review: dict[str, Any] = Body(...)):
+        # A verdict is operator feedback, not evidence: it never changes the
+        # scene, so it needs no expected revision. Admin scope (the default
+        # for mutating routes) because it is shared household state.
+        if "verdict" not in review:
+            raise HTTPException(status_code=422, detail="verdict is required")
+        def record(active):
+            try:
+                result = active.events.set_incident_review(incident_id, review["verdict"])
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            return result
+        return with_manager(record)
 
     @router.get("/api/incidents/{incident_id}/analysis")
     def incident_analysis(incident_id: str):
