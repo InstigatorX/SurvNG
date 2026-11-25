@@ -205,3 +205,33 @@ Events recorded from this version on also carry face-search counters, shown as
 too small to crop, crops searched, crops where the detector found no face, and
 faces found. A crop the detector could not search because inference was busy
 or failed counts as "no face"; the two are not yet told apart.
+
+## Every-frame face search comparison
+
+To measure how much the frame choice costs, run this on the SurvNG host as the
+service user. It is CPU-heavy, so keep it niced and bounded:
+
+```bash
+nice -n 19 ionice -c3 .venv/bin/python -m survng.app.face_frame_search \
+    runtime/database --cameras boiler,gate --events-per-camera 10 --margin 3
+```
+
+For the most recent recorded person events on each camera it decodes every
+frame of the event window from the main recording (software decode, full size,
+through the shared recorded-frame decoder), runs the configured person detector
+and the existing upper-body face search on each frame, and reports the best
+face per event three ways:
+
+- **old**: the refinement plan frames plus the face-evidence extras the old
+  search would have added around its best anchors. Every plan frame counts as
+  decoded and the face-evidence time budget is ignored, so this is an upper
+  bound for the old search.
+- **plan**: every frame in the window the old search could reach.
+- **all**: every frame including `--margin` seconds either side.
+
+A face is usable when its shorter side reaches `face_min_size`. The tool opens
+the database and recording index read-only, loads its own CPU copies of the
+models with the OpenVINO cache off (`--threads` sets the CPU threads), and does
+not touch the service or its config. Zones are not evaluated offline, so anchor
+ranking treats a person at the alert confidence as eligible. `--json` also
+writes the per-event data.
