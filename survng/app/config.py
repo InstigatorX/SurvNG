@@ -1065,11 +1065,11 @@ class DetectorConfig(BaseModel):
     face_capture_faces_per_track: int = Field(default=3, ge=1, le=16)
     face_capture_margin_seconds: float = Field(default=3.0, ge=0.0, le=15.0)
     face_capture_moment_radius_seconds: float = Field(default=0.5, ge=0.05, le=2.0)
-    # The whole look-back window: it must reach past the recording settle time
-    # (minutes), or no event is ever old enough and young enough to capture.
     # Cosine similarity a person's faces in one event need to the mean face of
     # a group to join it (docs/face-capture-design.md, grouping).
     face_group_threshold: float = Field(default=0.40, ge=0.20, le=0.90)
+    # The whole look-back window: it must reach past the recording settle time
+    # (minutes), or no event is ever old enough and young enough to capture.
     face_capture_backfill_hours: float = Field(default=24.0, ge=1.0, le=720.0)
     confidence_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
     event_candidate_confidence_threshold: float = Field(default=0.25, ge=0.01, le=0.95)

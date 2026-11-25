@@ -78,12 +78,21 @@ def _centroids(connection) -> tuple[list[int], np.ndarray]:
     return ids, (np.vstack(vectors) if vectors else np.zeros((0, 512), np.float32))
 
 
-def recompute_group(connection, group_id: int) -> None:
-    """Refresh a group's mean face, count and dates from its faces; drop it when empty."""
+def recompute_group(connection, group_id: int, drop_empty: bool = True) -> None:
+    """Refresh a group's mean face, count and dates from its faces; drop it when empty.
+
+    With ``drop_empty`` false an emptied group is kept (at zero faces, its mean
+    face and name intact) so an event's replacement faces can rejoin it; the
+    next grouping pass drops it if nothing did.
+    """
     rows = connection.execute(
         "select embedding, captured_epoch from face_captures where group_id = ?", (group_id,)).fetchall()
     if not rows:
-        connection.execute("delete from capture_groups where id = ?", (group_id,))
+        if drop_empty:
+            connection.execute("delete from capture_groups where id = ?", (group_id,))
+        else:
+            connection.execute(
+                "update capture_groups set faces = 0, updated_at = ? where id = ?", (_now(), group_id))
         return
     mean = _unit(np.mean([np.frombuffer(row[0], dtype=np.float32) for row in rows], axis=0)).astype(np.float32)
     epochs = [float(row[1]) for row in rows]
@@ -105,8 +114,13 @@ def assign_faces(connection, threshold: float = DEFAULT_GROUP_THRESHOLD, event_i
     for face_id, face_event, track, blob, epoch in connection.execute(query + " order by id", args):
         tracks[(int(face_event), int(track))].append((int(face_id), np.frombuffer(blob, dtype=np.float32), float(epoch)))
     if not tracks:
+        drop_empty_groups(connection)
         return 0
     group_ids, centroids = _centroids(connection)
+    # Running sums per group touched, so each track updates its group's mean
+    # face in memory; the stored row is refreshed once per group at the end.
+    sums: dict[int, np.ndarray] = {}
+    counts: dict[int, int] = {}
     placed = 0
     now = _now()
     for faces in tracks.values():
@@ -125,15 +139,31 @@ def assign_faces(connection, threshold: float = DEFAULT_GROUP_THRESHOLD, event_i
             best = int(cursor.lastrowid)
             group_ids.append(best)
             centroids = np.vstack([centroids, mean[None, :]])
+        if best not in sums:
+            existing = [np.frombuffer(row[0], dtype=np.float32) for row in connection.execute(
+                "select embedding from face_captures where group_id = ?", (best,))]
+            sums[best] = np.sum(existing, axis=0, dtype=np.float64) if existing else np.zeros(mean.shape, np.float64)
+            counts[best] = len(existing)
         connection.executemany(
             "update face_captures set group_id = ?, assignment = 'auto' where id = ?",
             [(best, face_id) for face_id, _, _ in faces],
         )
-        recompute_group(connection, best)
-        updated = connection.execute("select centroid from capture_groups where id = ?", (best,)).fetchone()
-        centroids[group_ids.index(best)] = np.frombuffer(updated[0], dtype=np.float32)
+        sums[best] = sums[best] + np.sum([vector for _, vector, _ in faces], axis=0, dtype=np.float64)
+        counts[best] += len(faces)
+        centroids[group_ids.index(best)] = _unit(sums[best] / counts[best]).astype(np.float32)
         placed += len(faces)
+    for group_id in sums:
+        recompute_group(connection, group_id)
+    drop_empty_groups(connection)
     return placed
+
+
+def drop_empty_groups(connection) -> None:
+    """Drop groups left without faces (kept through an event's recapture), and names left without groups."""
+    if connection.execute(
+        "delete from capture_groups where faces = 0"
+        " and id not in (select group_id from face_captures where group_id is not null)").rowcount:
+        _drop_unused_people(connection)
 
 
 class GroupNotFound(KeyError):
@@ -152,6 +182,13 @@ class FaceGroups:
 
     def assign(self, event_id: int | None = None, threshold: float = DEFAULT_GROUP_THRESHOLD) -> int:
         with self.store._lock, self.store._connect() as connection:
+            # Read first: the capture loop calls this every pass, and most
+            # passes have nothing to group, so they take no write lock.
+            pending = connection.execute(
+                "select exists(select 1 from face_captures where group_id is null)"
+                " or exists(select 1 from capture_groups where faces = 0)").fetchone()[0]
+            if not pending:
+                return 0
             connection.execute("begin immediate")
             return assign_faces(connection, threshold, event_id)
 
@@ -195,7 +232,7 @@ class FaceGroups:
             "unnamed": "g.person_id is null and g.ignored = 0",
             "named": "g.person_id is not null and g.ignored = 0",
             "ignored": "g.ignored = 1",
-        }[status]
+        }[status] + " and g.faces > 0"  # not a group emptied by a recapture, until regrouped
         with self.store._connect() as connection:
             total = connection.execute(f"select count(*) from capture_groups g where {where}").fetchone()[0]
             return {"total": int(total), "groups": self._group_rows(connection, where, (), limit, offset)}
@@ -268,6 +305,7 @@ class FaceGroups:
             connection.execute(
                 "update capture_groups set person_id = ?, ignored = 0, updated_at = ? where id = ?",
                 (person_id, _now(), int(group_id)))
+            _drop_unused_people(connection)  # the group's previous name, if nothing else has it
         return self.group(group_id)
 
     def unname_group(self, group_id: int) -> dict[str, Any]:
@@ -304,7 +342,7 @@ class FaceGroups:
             connection.execute("delete from capture_groups where id = ?", (int(source_id),))
             if source_person is not None:
                 connection.execute(
-                    "update capture_groups set person_id = coalesce(person_id, ?) where id = ?",
+                    "update capture_groups set person_id = coalesce(person_id, ?) where id = ? and ignored = 0",
                     (source_person, int(target_id)))
             recompute_group(connection, int(target_id))
             _drop_unused_people(connection)
@@ -363,7 +401,7 @@ class FaceGroups:
         with self.store._connect() as connection:
             row = connection.execute(
                 "select sum(person_id is null and ignored = 0), sum(person_id is not null and ignored = 0),"
-                " sum(ignored = 1) from capture_groups").fetchone()
+                " sum(ignored = 1) from capture_groups where faces > 0").fetchone()
             people = connection.execute("select count(*) from capture_people").fetchone()[0]
             ungrouped = connection.execute("select count(*) from face_captures where group_id is null").fetchone()[0]
         return {"unnamed_groups": int(row[0] or 0), "named_groups": int(row[1] or 0),

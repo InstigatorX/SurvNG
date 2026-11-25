@@ -4,6 +4,7 @@ import { appUrl, fetch, recordingsHref } from "../shared/api.js";
 import { formatDateTime } from "../shared/format.js";
 
 const PAGE_SIZE = 48;
+const MAX_REQUEST = 200; // the API's largest page
 const REFRESH_MS = 30000;
 const TABS = [
   ["unnamed", "To name", ScanFace],
@@ -34,6 +35,17 @@ async function call(path, { method = "GET", body } = {}) {
   return payload;
 }
 
+async function loadGroups(status, limit) {
+  // Fetched in API-sized pages: scrolling grows the limit past what one request may ask for.
+  let listing = null;
+  for (let offset = 0; offset < limit; offset += MAX_REQUEST) {
+    const page = await call(`/api/face-groups?status=${status}&limit=${Math.min(MAX_REQUEST, limit - offset)}&offset=${offset}`);
+    listing = listing ? { ...page, groups: [...listing.groups, ...page.groups] } : page;
+    if (page.groups.length < Math.min(MAX_REQUEST, limit - offset)) break;
+  }
+  return listing;
+}
+
 function cameraNames(ids, cameras) {
   const names = new Map((cameras || []).map((camera) => [camera.id, camera.name]));
   return (ids || []).map((id) => names.get(id) || id).join(", ");
@@ -50,7 +62,7 @@ function NameForm({ names, busy, onName, label = "Name" }) {
   return <form className="people-name-form" onSubmit={(event) => {
     event.preventDefault();
     const name = value.trim();
-    if (name) onName(name).then(() => setValue(""));
+    if (name) onName(name).then((ok) => { if (ok !== false) setValue(""); });
   }}>
     <input value={value} onChange={(event) => setValue(event.target.value)} placeholder="Who is this?" list="people-names" maxLength={80} aria-label="Name" disabled={busy} />
     <button type="submit" className="primary" disabled={busy || !value.trim()}><UserCheck size={14} />{label}</button>
@@ -113,8 +125,10 @@ function GroupDetail({ groupId, cameras, names, timeZone, onClose, onChanged }) 
       await call(path, { method: "POST", body });
       await onChanged();
       await load();
+      return true;
     } catch (reason) {
       setError(reason.message);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -147,7 +161,7 @@ function GroupDetail({ groupId, cameras, names, timeZone, onClose, onChanged }) 
   </aside>;
 }
 
-function PersonDetail({ personId, cameras, timeZone, onClose, onChanged, onOpenGroup }) {
+function PersonDetail({ personId, cameras, timeZone, onClose, onChanged, onOpenGroup, onOpenPerson }) {
   const [person, setPerson] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -188,7 +202,9 @@ function PersonDetail({ personId, cameras, timeZone, onClose, onChanged, onOpenG
       <form className="people-name-form" onSubmit={async (event) => {
         event.preventDefault();
         const result = await act(`/api/face-people/${personId}/rename`, { method: "POST", body: { name: rename } });
-        if (result) await load();
+        // Renaming to another person's name joins this person into that one.
+        if (result && result.id !== personId) onOpenPerson(result.id);
+        else if (result) await load();
       }}>
         <input value={rename} onChange={(event) => setRename(event.target.value)} maxLength={80} aria-label="Name" disabled={busy} />
         <button type="submit" disabled={busy || !rename.trim() || rename.trim() === person.name}>Rename</button>
@@ -203,7 +219,10 @@ function PersonDetail({ personId, cameras, timeZone, onClose, onChanged, onOpenG
           <button type="button" className="people-group-open" onClick={() => onOpenGroup(group.id)}><Faces ids={group.samples} /></button>
           <small>{group.faces} faces · {cameraNames(group.cameras, cameras)}</small>
           <button type="button" className="link-button" disabled={busy} onClick={async () => {
-            if (await act(`/api/face-groups/${group.id}/unname`, { method: "POST" })) await load();
+            if (!(await act(`/api/face-groups/${group.id}/unname`, { method: "POST" }))) return;
+            // Unnaming a person's last group removes the person.
+            if (person.groups.length <= 1) onClose();
+            else await load();
           }}>Not {person.name}</button>
         </div>)}
       </div>
@@ -228,7 +247,7 @@ export function PeoplePage({ timeZone }) {
   const load = useCallback(async () => {
     try {
       const [groups, peopleList] = await Promise.all([
-        tab === "named" ? null : call(`/api/face-groups?status=${tab}&limit=${limit}`),
+        tab === "named" ? null : loadGroups(tab, limit),
         call("/api/face-people"),
       ]);
       if (groups) setListing(groups);
@@ -264,8 +283,10 @@ export function PeoplePage({ timeZone }) {
     try {
       await call(path, { method: "POST", body });
       await load();
+      return true;
     } catch (reason) {
       setError(reason.message);
+      return false;
     } finally {
       setBusyId(null);
     }
@@ -312,7 +333,7 @@ export function PeoplePage({ timeZone }) {
       {openGroup ? <GroupDetail groupId={openGroup} cameras={listing.cameras} names={names} timeZone={timeZone}
         onClose={() => setOpenGroup(null)} onChanged={load} /> : null}
       {openPerson && !openGroup ? <PersonDetail personId={openPerson} cameras={listing.cameras} timeZone={timeZone}
-        onClose={() => setOpenPerson(null)} onChanged={load} onOpenGroup={(id) => setOpenGroup(id)} /> : null}
+        onClose={() => setOpenPerson(null)} onChanged={load} onOpenGroup={(id) => setOpenGroup(id)} onOpenPerson={setOpenPerson} /> : null}
     </div>
   </main>;
 }

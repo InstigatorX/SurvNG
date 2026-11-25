@@ -14,7 +14,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .groups import ensure_group_schema, recompute_group
+from .groups import drop_empty_groups, ensure_group_schema, recompute_group
 from .pipeline import CapturedFace, CaptureResult
 
 LOGGER = logging.getLogger(__name__)
@@ -184,7 +184,9 @@ class FaceCaptureStore:
             old_groups = _groups_of(connection, "event_id = ?", (event_id,))
             connection.execute("delete from face_captures where event_id = ?", (event_id,))
             for group_id in old_groups:
-                recompute_group(connection, group_id)
+                # Kept when emptied, name and all, so the replacement faces
+                # can rejoin it; grouping drops it if they do not.
+                recompute_group(connection, group_id, drop_empty=False)
             connection.executemany(
                 "insert into face_captures (event_id, camera_id, track, offset_seconds, captured_epoch, box_json,"
                 " landmarks_json, detector, confidence, norm, embedding, embedding_model, crop_path,"
@@ -251,7 +253,8 @@ class FaceCaptureStore:
                 old_groups = _groups_of(connection, f"event_id in ({marks})", tuple(chunk))
                 connection.execute(f"delete from face_captures where event_id in ({marks})", chunk)
                 for group_id in old_groups:
-                    recompute_group(connection, group_id)
+                    recompute_group(connection, group_id, drop_empty=False)
+                drop_empty_groups(connection)  # and the names only those groups had
                 removed += connection.execute(
                     f"delete from face_capture_events where event_id in ({marks})", chunk).rowcount
             for path in paths:

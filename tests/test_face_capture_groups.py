@@ -164,3 +164,29 @@ def test_an_unnamed_group_suggests_the_person_it_resembles(setup):
     rows = {g["id"]: g for g in groups.groups("unnamed")["groups"]}
     assert rows[second]["suggestion"]["name"] == "A"
     assert "suggestion" not in rows[bob]  # someone else: no suggestion
+
+
+def test_a_recapture_keeps_the_name_and_renaming_a_group_drops_the_old_name(setup):
+    store, groups = setup
+    _capture(store, groups, 1, _face(ALICE))
+    [group] = groups.groups("unnamed")["groups"]
+    groups.name_group(group["id"], "A")
+    groups.name_group(group["id"], "B")
+    assert [p["name"] for p in groups.people()] == ["B"]  # "A" named nothing any more
+    _capture(store, groups, 1, _face(ALICE))  # the group's only event recaptured
+    [person] = groups.people()
+    assert person["name"] == "B" and person["faces"] == 1
+    assert groups.groups("unnamed")["total"] == 0
+    store.forget_events([1])
+    assert groups.people() == [] and groups.summary()["named_groups"] == 0
+
+
+def test_merging_a_named_group_into_an_ignored_one_does_not_name_it(setup):
+    store, groups = setup
+    _capture(store, groups, 1, _face(ALICE), _face(BOB, track=1))
+    alice, bob = sorted(groups.groups("unnamed")["groups"], key=lambda g: g["id"])
+    groups.name_group(alice["id"], "A")
+    groups.ignore_group(bob["id"], True)
+    merged = groups.merge_groups(alice["id"], bob["id"])
+    assert merged["ignored"] and merged["person_id"] is None
+    assert groups.people() == []
