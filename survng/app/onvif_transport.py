@@ -26,6 +26,8 @@ from __future__ import annotations
 import socket
 import threading
 import weakref
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import requests
@@ -49,6 +51,7 @@ class SocketRegistry:
         self._open: weakref.WeakSet[socket.socket] = weakref.WeakSet()
         self._cancelled = False
         self._connect_aborts = 0
+        self._protected = 0
 
     @property
     def cancelled(self) -> bool:
@@ -77,8 +80,21 @@ class SocketRegistry:
             self._connecting.discard(sock)
             self._open.discard(sock)
 
+    @contextmanager
+    def protected(self) -> Iterator[None]:
+        """Connects made inside are spared by abort_connecting (Unsubscribe)."""
+        with self._lock:
+            self._protected += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._protected -= 1
+
     def abort_connecting(self) -> None:
         with self._lock:
+            if self._protected:
+                return
             self._connect_aborts += 1
             sockets = list(self._connecting)
         _shutdown(sockets)

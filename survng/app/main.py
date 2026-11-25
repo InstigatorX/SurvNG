@@ -433,9 +433,16 @@ class SecurityBoundaryMiddleware:
             and APPLICATION_STOPPING.is_set()
             and str(scope.get("method") or "GET").upper() not in {"GET", "HEAD", "OPTIONS"}
             and api_path.startswith("/api/")
+            # Stopping without restarting (no supervisor): the restart is
+            # how the operator gets out of it.
+            and not (RESTART_REQUIRED.is_set() and api_path == "/api/system/restart")
         ):
             response = JSONResponse(
-                {"detail": "SurvNG is shutting down; configuration changes are temporarily unavailable"},
+                {
+                    "detail": _settings_frozen_detail()
+                    if RESTART_REQUIRED.is_set()
+                    else "SurvNG is shutting down; configuration changes are temporarily unavailable"
+                },
                 status_code=503,
                 headers={"Cache-Control": "no-store", "Retry-After": "10"},
             )

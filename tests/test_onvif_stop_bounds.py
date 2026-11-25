@@ -363,3 +363,51 @@ def test_settings_saves_are_refused_while_a_saved_change_waits_for_a_restart(mon
         main.APPLICATION_STOPPING.clear()
         main.RESTART_REQUIRED.clear()
         main.SERVER_RESTART_SCHEDULED = False
+
+
+def test_an_unsubscribe_connect_is_spared_by_the_early_abort_but_not_the_interrupt():
+    with _blackhole() as port:
+        session = CancellableSession()
+        result: dict = {}
+
+        def unsubscribe() -> None:
+            with session.registry.protected():
+                try:
+                    session.post(f"http://127.0.0.1:{port}/", data=b"x", timeout=(10, 10))
+                except Exception as error:  # noqa: BLE001
+                    result["error"] = error
+
+        thread = threading.Thread(target=unsubscribe, daemon=True)
+        thread.start()
+        time.sleep(0.3)
+        session.abort_connecting()
+        thread.join(0.3)
+        assert thread.is_alive()
+        session.interrupt()
+        thread.join(2)
+        assert not thread.is_alive()
+        assert isinstance(result["error"], requests.exceptions.ConnectionError)
+
+
+def test_the_restart_button_gets_through_while_a_manual_restart_is_required(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from survng.app import main
+
+    monkeypatch.setattr(main, "get_manager", Mock())
+    monkeypatch.setattr(main, "_active_storage_tasks", lambda _manager: [])
+    monkeypatch.setattr(main.threading, "Thread", lambda target, **_kw: SimpleNamespace(start=lambda: None))
+    client = TestClient(main.app)
+    main.APPLICATION_STOPPING.set()
+    try:
+        refused = client.post("/api/system/restart")
+        assert refused.status_code == 503
+        main.RESTART_REQUIRED.set()
+        assert client.post("/api/system/restart").status_code == 202
+        frozen = client.put("/api/config/cameras/gate/zones", json=[])
+        assert frozen.status_code == 503
+        assert "needs a restart" in frozen.json()["detail"]
+    finally:
+        main.APPLICATION_STOPPING.clear()
+        main.RESTART_REQUIRED.clear()
+        main.SERVER_RESTART_SCHEDULED = False

@@ -33,16 +33,17 @@ RETRY_MAX_SECONDS = 60.0
 POLL_RETRY_SECONDS = 2.0
 PULL_TIMEOUT_SECONDS = 5
 # A LAN camera completes a TCP handshake in milliseconds; 3 s still allows
-# SYN retransmits. The read timeout is per receive and covers the PullMessages
-# long poll with room to spare.
+# SYN retransmits. The read timeout stays generous for slow cameras and long
+# polls: a stop interrupts sockets directly instead of waiting it out.
 TRANSPORT_CONNECT_TIMEOUT_SECONDS = 3.0
-TRANSPORT_READ_TIMEOUT_SECONDS = 20.0
+TRANSPORT_READ_TIMEOUT_SECONDS = 45.0
 TRANSPORT_TIMEOUT = (TRANSPORT_CONNECT_TIMEOUT_SECONDS, TRANSPORT_READ_TIMEOUT_SECONDS)
 STOP_GRACE_SECONDS = PULL_TIMEOUT_SECONDS + 2
 STOP_FORCE_SECONDS = 5
 # After its sockets are interrupted a worker returns in milliseconds; give it
 # this long even when the caller's budget is spent before calling it stuck.
-STOP_INTERRUPTED_MIN_SECONDS = 0.25
+# Small, because fleet stops wait on cameras one after another.
+STOP_INTERRUPTED_MIN_SECONDS = 0.05
 MAX_POLL_FAILURES = 6
 TIMEOUT_WORDS = ("timed out", "timeout", "read timed out", "operation timed out")
 PULLPOINT_NAMESPACE = "http://www.onvif.org/ver10/events/wsdl/PullPointSubscription"
@@ -346,10 +347,11 @@ class OnvifEventListener:
                 self._transport
                 if self._transport_generation in {None, ticket.generation}
                 else None,
-                self._releasing_transports.get(ticket.generation),
             ]
-        # A connect still in progress cannot finish anything the stop needs;
-        # abort it now. Established connections stay usable for Unsubscribe.
+        # A connect still in progress for subscribing or polling cannot finish
+        # anything the stop needs; abort it now. Unsubscribe calls protect
+        # their connects (_send_unsubscribe), and established connections
+        # stay usable.
         for transport in transports:
             session = getattr(transport, "session", None)
             if isinstance(session, CancellableSession):
@@ -1000,10 +1002,21 @@ class OnvifEventListener:
             self._transport_generation = None
         return manager, transport
 
+    @staticmethod
+    def _send_unsubscribe(manager: Any) -> None:
+        """Unsubscribe, shielded from the early connect abort of a stop."""
+        transport = getattr(getattr(manager, "_client", None), "transport", None)
+        session = getattr(transport, "session", None)
+        if isinstance(session, CancellableSession):
+            with session.registry.protected():
+                manager.Unsubscribe()
+        else:
+            manager.Unsubscribe()
+
     def _release_detached_resources(self, manager: Any, transport: Any) -> None:
         if manager is not None:
             try:
-                manager.Unsubscribe()
+                self._send_unsubscribe(manager)
                 LOGGER.info("released ONVIF subscription for %s", self.camera.id)
             except Exception:
                 LOGGER.debug(
@@ -1098,7 +1111,7 @@ class OnvifEventListener:
         if manager is None:
             return
         try:
-            manager.Unsubscribe()
+            self._send_unsubscribe(manager)
             LOGGER.info("released ONVIF subscription for %s", self.camera.id)
         except Exception:
             LOGGER.debug(
