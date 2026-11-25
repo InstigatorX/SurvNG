@@ -8,11 +8,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from .groups import GroupNotFound
 from .store import SeedConflict
 
 
@@ -25,6 +28,18 @@ class SeedRequest(BaseModel):
     start: str = Field(..., description="ISO 8601 with a timezone")
     end: str = Field(..., description="ISO 8601 with a timezone")
     cameras: list[str] | None = Field(default=None, description="camera ids; empty or missing means all")
+
+
+class NameRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+
+
+class IgnoreRequest(BaseModel):
+    ignored: bool = True
+
+
+class MergeRequest(BaseModel):
+    into: int
 
 
 def _epoch(value: str, name: str) -> float:
@@ -92,5 +107,79 @@ def create_face_capture_router(deps: FaceCaptureRouteDependencies) -> APIRouter:
             raise HTTPException(status_code=409, detail=str(exc)) from None
         capture.wake()
         return seed
+
+    # People: groups of captured faces, named once -------------------------
+
+    def groups() -> Any:
+        return service().groups
+
+    def edit(action: Callable[[], Any]) -> Any:
+        try:
+            return action()
+        except GroupNotFound:
+            raise HTTPException(status_code=404, detail="not found") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    @router.get("/api/face-groups")
+    def list_groups(
+        status: Literal["unnamed", "named", "ignored"] = "unnamed",
+        limit: int = Query(default=60, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        return {**groups().groups(status, limit, offset), "summary": groups().summary(), "cameras": cameras()}
+
+    @router.get("/api/face-groups/{group_id}")
+    def get_group(group_id: int) -> dict[str, Any]:
+        return edit(lambda: groups().group(group_id))
+
+    @router.post("/api/face-groups/{group_id}/name")
+    def name_group(group_id: int, request: NameRequest) -> dict[str, Any]:
+        return edit(lambda: groups().name_group(group_id, request.name))
+
+    @router.post("/api/face-groups/{group_id}/unname")
+    def unname_group(group_id: int) -> dict[str, Any]:
+        return edit(lambda: groups().unname_group(group_id))
+
+    @router.post("/api/face-groups/{group_id}/ignore")
+    def ignore_group(group_id: int, request: IgnoreRequest) -> dict[str, Any]:
+        return edit(lambda: groups().ignore_group(group_id, request.ignored))
+
+    @router.post("/api/face-groups/{group_id}/merge")
+    def merge_group(group_id: int, request: MergeRequest) -> dict[str, Any]:
+        return edit(lambda: groups().merge_groups(group_id, request.into))
+
+    @router.post("/api/face-captures/{face_id}/remove")
+    def remove_face(face_id: int) -> dict[str, Any]:
+        return edit(lambda: groups().remove_face(face_id))
+
+    @router.get("/api/face-captures/{face_id}/image")
+    def face_image(face_id: int) -> FileResponse:
+        capture = service()
+        path = capture.groups.face_crop_path(face_id)
+        if not path:
+            raise HTTPException(status_code=404, detail="face not found")
+        resolved = Path(path).resolve()
+        # Only crops the store wrote are served.
+        if not resolved.is_relative_to(capture.store.crop_dir.resolve()) or not resolved.is_file():
+            raise HTTPException(status_code=404, detail="face image not found")
+        return FileResponse(resolved, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+    @router.get("/api/face-people")
+    def list_people() -> dict[str, Any]:
+        return {"people": groups().people(), "summary": groups().summary()}
+
+    @router.get("/api/face-people/{person_id}")
+    def get_person(person_id: int) -> dict[str, Any]:
+        return edit(lambda: groups().person(person_id))
+
+    @router.post("/api/face-people/{person_id}/rename")
+    def rename_person(person_id: int, request: NameRequest) -> dict[str, Any]:
+        return edit(lambda: groups().rename_person(person_id, request.name))
+
+    @router.delete("/api/face-people/{person_id}")
+    def forget_person(person_id: int) -> dict[str, Any]:
+        edit(lambda: groups().forget_person(person_id))
+        return {"forgotten": person_id}
 
     return router

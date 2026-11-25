@@ -530,7 +530,7 @@ def required_api_scope(method: str, path: str) -> ApiScope:
     if path.startswith("/api/speech/segments"):
         return "admin"
     # Captured faces and their processing are personal data.
-    if path.startswith("/api/face-capture"):
+    if path.startswith(("/api/face-capture", "/api/face-groups", "/api/face-people")):
         return "admin"
     if path.startswith("/api/auth/") and path not in {"/api/auth/session", "/api/auth/login", "/api/auth/logout", "/api/auth/bootstrap"}:
         return "admin"

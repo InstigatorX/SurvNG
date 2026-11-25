@@ -30,6 +30,7 @@ from .pipeline import (
     main_stream_source,
     sub_stream_source,
 )
+from .groups import FaceGroups
 from .store import CAPTURE_VERSION, ClosingConnection, FaceCaptureStore, SeedConflict
 
 LOGGER = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ class FaceCaptureService:
         self._config = config
         self._events_db_path = Path(events_db_path)
         self._store: FaceCaptureStore | None = None
+        self._groups: FaceGroups | None = None
         self._inference = inference
         self._recording_rows = recording_rows
         self._stop = threading.Event()
@@ -152,6 +154,19 @@ class FaceCaptureService:
         if self._store is None:
             self._store = FaceCaptureStore(self._events_db_path.parent)
         return self._store
+
+    @property
+    def groups(self) -> FaceGroups:
+        if self._groups is None:
+            self._groups = FaceGroups(self.store)
+        return self._groups
+
+    def _group(self, event_id: int | None) -> None:
+        """Group new faces by person; a failure leaves them for the next pass."""
+        try:
+            self.groups.assign(event_id, float(self._config().detector.face_group_threshold))
+        except Exception as exc:
+            self._log_error(f"grouping faces failed: {exc}")
 
     def enabled(self) -> bool:
         return bool(self._config().detector.face_capture_enabled)
@@ -327,6 +342,7 @@ class FaceCaptureService:
         if not self.enabled():
             return False
         self._prune_if_due()
+        self._group(None)  # faces stored before grouping, or by the offline seed
         candidate = self.next_event(now)
         if candidate is not None:
             failed = self.failed
@@ -448,6 +464,7 @@ class FaceCaptureService:
         except Exception as exc:  # cv2 and encoding errors too: an attempt, not a crashed pass
             return self._fail(event_id, camera_id, epoch, f"storing faces failed: {exc}")
         self.processed += 1
+        self._group(event_id)
         return kept
 
     def _fail(self, event_id: int, camera_id: str, epoch: float, error: str) -> int:

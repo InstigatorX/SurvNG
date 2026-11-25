@@ -14,6 +14,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from .groups import ensure_group_schema, recompute_group
 from .pipeline import CapturedFace, CaptureResult
 
 LOGGER = logging.getLogger(__name__)
@@ -94,6 +95,7 @@ class FaceCaptureStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(SCHEMA)
+            ensure_group_schema(connection)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10.0, factory=ClosingConnection)
@@ -179,7 +181,10 @@ class FaceCaptureStore:
         with self._lock, self._connect() as connection:
             old = [row[0] for row in connection.execute(
                 "select crop_path from face_captures where event_id = ?", (event_id,))]
+            old_groups = _groups_of(connection, "event_id = ?", (event_id,))
             connection.execute("delete from face_captures where event_id = ?", (event_id,))
+            for group_id in old_groups:
+                recompute_group(connection, group_id)
             connection.executemany(
                 "insert into face_captures (event_id, camera_id, track, offset_seconds, captured_epoch, box_json,"
                 " landmarks_json, detector, confidence, norm, embedding, embedding_model, crop_path,"
@@ -243,7 +248,10 @@ class FaceCaptureStore:
             with self._lock, self._connect() as connection:
                 paths = [row[0] for row in connection.execute(
                     f"select crop_path from face_captures where event_id in ({marks})", chunk)]
+                old_groups = _groups_of(connection, f"event_id in ({marks})", tuple(chunk))
                 connection.execute(f"delete from face_captures where event_id in ({marks})", chunk)
+                for group_id in old_groups:
+                    recompute_group(connection, group_id)
                 removed += connection.execute(
                     f"delete from face_capture_events where event_id in ({marks})", chunk).rowcount
             for path in paths:
@@ -332,3 +340,8 @@ class FaceCaptureStore:
 
 class SeedConflict(RuntimeError):
     """A seed request that conflicts with the seed already running or paused."""
+
+
+def _groups_of(connection, where: str, args: tuple) -> list[int]:
+    return [int(row[0]) for row in connection.execute(
+        f"select distinct group_id from face_captures where {where} and group_id is not null", args)]

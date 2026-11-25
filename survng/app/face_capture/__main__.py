@@ -272,6 +272,9 @@ def _seed_one(store, engine, people, settings, config, events, rows, ffmpeg, ffp
         return
     store.record(event_id=event_id, camera_id=camera_id, event_epoch=epoch, result=result,
                  embedding_model=engine.embedding_model, seconds=time.monotonic() - started)
+    from .groups import FaceGroups
+
+    FaceGroups(store).assign(event_id, float(config.face_group_threshold))
 
 
 def compare(summary: list[dict[str, Any]], reference: dict[str, Any], minimum: float) -> str:
