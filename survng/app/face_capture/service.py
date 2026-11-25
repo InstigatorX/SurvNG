@@ -165,6 +165,7 @@ class FaceCaptureService:
                     plan_offsets=plan_offsets(config, qualification, epoch, camera_id),
                     main_frames=main_stream_source(rows, epoch, ffmpeg, ffprobe, hardware),
                     sub_frames=sub_stream_source(rows, epoch, ffmpeg),
+                    find_faces=lambda crop: inference.capture_faces(crop, embed=False),
                     main_size=main_size,
                     stored_people=stored,
                     detect_people=lambda frame: _people(inference, config, frame),

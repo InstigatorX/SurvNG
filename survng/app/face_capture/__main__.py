@@ -108,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sheets", type=Path, help="write a contact sheet per camera here")
     parser.add_argument("--json", type=Path, help="write a per-event summary here")
     parser.add_argument("--store-dir", type=Path, help="also record the faces in a face capture store here")
+    parser.add_argument("--reference", type=Path,
+                        help="face_frame_search --json report (with --yunet) to compare against")
     args = parser.parse_args(argv)
 
     os.environ.setdefault("OV_CPU_THREADS_NUM", str(max(1, args.threads)))
@@ -148,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
                 plan_offsets=plan_offsets(config, qualification, epoch, camera_id),
                 main_frames=main_stream_source(rows, epoch, ffmpeg, ffprobe, hardware),
                 sub_frames=sub_stream_source(rows, epoch, ffmpeg),
+                find_faces=lambda crop: engine.capture(crop, embed=False),
                 main_size=main_size,
                 stored_people=stored_people(events, event_id, epoch, main_size),
                 detect_people=people,
@@ -177,7 +180,40 @@ def main(argv: list[str] | None = None) -> int:
             print(f"contact sheet: {_sheet(camera_id, results, args.sheets)}", flush=True)
     if args.json:
         args.json.write_text(json.dumps(summary, indent=1))
+    if args.reference:
+        print(compare(summary, json.loads(args.reference.read_text()), float(settings.min_size)))
     return 0
+
+
+def compare(summary: list[dict[str, Any]], reference: dict[str, Any], minimum: float) -> str:
+    """Events where every-frame search found a usable YuNet face, and how many capture kept."""
+    cameras = reference["detectors"]["yunet"]["cameras"]
+    rows = {e["event_id"]: e for cam in cameras.values() for e in cam["events"]}
+    lines = [f"Capture vs every frame (YuNet, usable = recognisable and >= {minimum:g} px)"]
+    totals: dict[str, list[float]] = {}
+    for item in summary:
+        ref = rows.get(item["event_id"])
+        if ref is None:
+            continue
+        found = ref["recognisable"]["all_best"] >= minimum
+        kept = any(face["side"] >= minimum for face in item["kept"])
+        for name in (item["camera_id"], "TOTAL"):
+            t = totals.setdefault(name, [0, 0, 0, 0, 0.0, 0.0])
+            t[0] += found
+            t[1] += found and kept
+            t[2] += item["main_frames"]
+            t[3] += ref["frames"]
+            t[4] += item["seconds"]
+            t[5] += ref["seconds"]
+    for name, (found, kept, frames, ref_frames, seconds, ref_seconds) in sorted(
+        totals.items(), key=lambda kv: kv[0] == "TOTAL",
+    ):
+        share = f" ({100 * kept / found:.0f}%)" if found else ""
+        lines.append(
+            f"{name:14} kept {int(kept)}/{int(found)}{share}  main frames {int(frames)}/{int(ref_frames)}"
+            f" ({100 * frames / max(1, ref_frames):.0f}%)  time {seconds:.0f}/{ref_seconds:.0f} s"
+        )
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

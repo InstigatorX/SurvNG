@@ -28,6 +28,9 @@ MAX_WINDOW_SECONDS = 30.0
 SUB_SAMPLE_FPS = 5.0
 # Kept faces of one person are at least this far apart in time.
 MIN_FACE_SPACING_SECONDS = 0.25
+# Frames decoded together in one run. A 4K frame is about 25 MB; frame
+# stepping's 30-frame runs would hold 750 MB, too much beside the service.
+CAPTURE_RUN_MAX_FRAMES = 8
 
 FrameSource = Callable[[float, float], Iterable[tuple[float, np.ndarray]]]
 """(start, end) seconds relative to the event -> (offset, BGR frame), in order."""
@@ -127,6 +130,7 @@ def capture_event(
     capture_faces: Callable[[np.ndarray], list[dict[str, Any]]],
     settings: CaptureSettings,
     sub_frames: FrameSource | None = None,
+    find_faces: Callable[[np.ndarray], list[dict[str, Any]]] | None = None,
     main_size: tuple[int, int] | None = None,
     stored_people: Iterable[tuple[float, list[Box]]] = (),
     cancelled: Callable[[], bool] = lambda: False,
@@ -142,16 +146,34 @@ def capture_event(
     # Pass one: where is each person closest?
     if sub_frames is not None:
         samples: list[tuple[float, list[Box]]] = []
+        face_sizes: dict[tuple[float, Box], float] = {}
         try:
             for offset, frame in sub_frames(start, end):
                 check()
                 result.sub_frames += 1
-                samples.append((offset, _scaled(detect_people(frame), frame, main_size)))
+                people = detect_people(frame)
+                scaled = _scaled(people, frame, main_size)
+                samples.append((offset, scaled))
+                if find_faces is None:
+                    continue
+                height, width = frame.shape[:2]
+                scale = (main_size[0] / width) if main_size else 1.0
+                for person, main_box in zip(people, scaled):
+                    window = upper_body_window(person, width, height)
+                    if window is None:
+                        continue
+                    left, top, right, bottom = window
+                    sides = [min(f["box"][2] - f["box"][0], f["box"][3] - f["box"][1])
+                             for f in find_faces(frame[top:bottom, left:right])]
+                    if sides:
+                        face_sizes[(offset, main_box)] = max(sides) * scale
         except (OSError, RuntimeError) as error:
             if _transient(error):
                 raise
             result.errors.append(f"sub-stream: {error}")
-        result.moments = choose_moments(link_tracks(samples), per_track=settings.moments_per_track)
+        result.moments = choose_moments(
+            link_tracks(samples), per_track=settings.moments_per_track, face_sizes=face_sizes,
+        )
         result.moment_source = "sub-stream" if result.moments else ""
     if not result.moments:
         stored = [(o, b) for o, b in stored_people if start <= o <= end and b]
@@ -162,6 +184,7 @@ def capture_event(
         result.moment_source = "plan offsets"
 
     # Pass two: the main stream around those moments.
+    # Only the padded face crop is kept, never the whole frame.
     found: list[tuple[float, Box, dict[str, Any], np.ndarray]] = []
     people_by_frame: list[tuple[float, list[Box]]] = []
     for low, high in merge_windows(result.moments, settings.moment_radius_seconds):
@@ -183,8 +206,12 @@ def capture_event(
                         result.candidates += 1
                         if face["norm"] < settings.min_norm or min(box[2] - box[0], box[3] - box[1]) < settings.min_size:
                             continue
+                        cropped = _padded_crop(frame, box)
+                        if cropped is None:
+                            continue
                         landmarks = [[x + left, y + top] for x, y in face["landmarks"]]
-                        found.append((offset, person, {**face, "box": box, "landmarks": landmarks}, frame))
+                        crop = np.ascontiguousarray(cropped[0]).copy()
+                        found.append((offset, person, {**face, "box": box, "landmarks": landmarks}, crop))
         except (OSError, RuntimeError) as error:
             if _transient(error):
                 raise
@@ -195,10 +222,7 @@ def capture_event(
         for offset, box in track.samples:
             track_of[(offset, box)] = index
     candidates = []
-    for offset, person, face, frame in found:
-        cropped = _padded_crop(frame, face["box"])
-        if cropped is None:
-            continue
+    for offset, person, face, crop in found:
         candidates.append(CapturedFace(
             track=track_of.get((offset, person), -1),
             offset=round(offset, 3),
@@ -207,7 +231,7 @@ def capture_event(
             confidence=float(face["confidence"]),
             norm=float(face["norm"]),
             embedding=np.asarray(face["embedding"], dtype=np.float32),
-            crop=np.ascontiguousarray(cropped[0]).copy(),
+            crop=crop,
         ))
     result.faces = keep_best(candidates, settings.faces_per_track)
     return result
@@ -267,7 +291,7 @@ def main_stream_source(
                 continue
             size = mp4_video_dimensions(path)
             plans = recorded_decode_plans(hardware_acceleration, scale=size) if size else recorded_decode_plans(None)
-            runs = sorted({frame_run(segment, index) for index in wanted})
+            runs = sorted({frame_run(segment, index, CAPTURE_RUN_MAX_FRAMES) for index in wanted})
             for run_start, run_stop in runs:
                 run = decode_frame_run(
                     ffmpeg_path, path, segment, run_start, run_stop, size[0] if size else 100_000,

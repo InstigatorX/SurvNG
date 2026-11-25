@@ -959,10 +959,11 @@ class InferenceSupervisor:
         finally:
             self._leave_device_workload(workload)
 
-    def capture_faces(self, crop: np.ndarray) -> list[dict[str, Any]]:
+    def capture_faces(self, crop: np.ndarray, *, embed: bool = True) -> list[dict[str, Any]]:
         """Faces in an upper-body crop with landmarks, AdaFace norm and embedding.
 
-        Optional enrichment: shed for incident inference (``InferenceUnavailable``).
+        ``embed=False`` only detects. Optional enrichment: shed for incident
+        inference (``InferenceUnavailable``).
         """
         if not self.config.face_capture_enabled:
             raise InferenceUnavailable("Face capture is disabled.")
@@ -970,7 +971,7 @@ class InferenceSupervisor:
         if not self._enter_device_workload(workload, source="face_capture"):
             raise InferenceUnavailable("face capture shed for incident inference")
         try:
-            return list(self._face.request("capture_faces", frame=crop, workload=workload) or [])
+            return list(self._face.request("capture_faces", frame=crop, embed=embed, workload=workload) or [])
         finally:
             self._leave_device_workload(workload)
 

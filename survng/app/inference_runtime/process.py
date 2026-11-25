@@ -222,7 +222,7 @@ def _inference_worker_main(
                     elif operation == "capture_faces" and role == "face":
                         if capture_engine is None:
                             raise ValueError("face capture is disabled in the face worker")
-                        result = capture_engine.capture(frame)
+                        result = capture_engine.capture(frame, embed=bool(request.get("embed", True)))
                     elif operation == "detect_faces" and role == "face":
                         result = face_detector.detect(
                             frame,

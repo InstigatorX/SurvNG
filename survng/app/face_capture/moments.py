@@ -54,17 +54,30 @@ def choose_moments(
     per_track: int = MOMENTS_PER_TRACK,
     spacing: float = MOMENT_MIN_SPACING,
     limit: int = MAX_MOMENTS,
+    face_sizes: dict[tuple[float, Box], float] | None = None,
 ) -> list[float]:
-    """Each track's tallest samples (person height), spaced apart, best first."""
-    candidates: list[tuple[float, float]] = []
+    """Each track's best samples, spaced apart, best first.
+
+    A sample where a face was seen (``face_sizes``, the face's size) beats one
+    where none was; a track without any falls back to its tallest samples.
+    """
+    faces = face_sizes or {}
+    candidates: list[tuple[tuple[int, float], float]] = []
     for track in tracks:
+        seen = [(o, b) for o, b in track.samples if faces.get((o, b), 0.0) > 0]
+        if seen:
+            ranked = sorted(seen, key=lambda item: faces[item], reverse=True)
+            rank = lambda item: (1, faces[item])  # noqa: E731
+        else:
+            ranked = sorted(track.samples, key=lambda item: item[1][3] - item[1][1], reverse=True)
+            rank = lambda item: (0, item[1][3] - item[1][1])  # noqa: E731
         chosen: list[float] = []
-        for offset, box in sorted(track.samples, key=lambda item: item[1][3] - item[1][1], reverse=True):
+        for item in ranked:
             if len(chosen) >= per_track:
                 break
-            if all(abs(offset - other) >= spacing for other in chosen):
-                chosen.append(offset)
-                candidates.append((box[3] - box[1], offset))
+            if all(abs(item[0] - other) >= spacing for other in chosen):
+                chosen.append(item[0])
+                candidates.append((rank(item), item[0]))
     moments: list[float] = []
     for _, offset in sorted(candidates, reverse=True):
         if len(moments) >= limit:

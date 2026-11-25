@@ -112,8 +112,12 @@ class FaceCaptureEngine:
         norm = float(np.asarray(result[self._embedder.output(1)]).reshape(-1)[0])
         return embedding, norm
 
-    def capture(self, crop: np.ndarray) -> list[dict[str, Any]]:
-        """Faces in ``crop``: box and landmarks in crop pixels, confidence, norm, embedding."""
+    def capture(self, crop: np.ndarray, *, embed: bool = True) -> list[dict[str, Any]]:
+        """Faces in ``crop``: box and landmarks in crop pixels, confidence, norm, embedding.
+
+        With ``embed`` false only detection runs (no norm or embedding): a cheap
+        "is a face visible here" check for choosing moments.
+        """
         if not self.ready:
             raise RuntimeError(self.error or "Face capture is unavailable.")
         height, width = crop.shape[:2]
@@ -135,6 +139,13 @@ class FaceCaptureEngine:
                 if x2 <= x1 or y2 <= y1:
                     continue
                 landmarks = values[4:14].reshape(5, 2)
+                if not embed:
+                    faces.append({
+                        "box": [x1, y1, x2, y2],
+                        "landmarks": landmarks.round(2).tolist(),
+                        "confidence": round(float(row[14]), 4),
+                    })
+                    continue
                 aligned = align_face(crop, landmarks)
                 if aligned is None:
                     continue
