@@ -313,6 +313,44 @@ def test_a_worker_woken_by_the_interrupt_is_not_abandoned_on_a_spent_budget(tmp_
         assert not listener.running
 
 
+def test_settings_saves_are_refused_while_a_saved_change_waits_for_a_restart(monkeypatch):
+    from fastapi import HTTPException
+
+    from survng.app import main
+
+    save = Mock()
+    monkeypatch.setattr(main, "save_config_with_history", save)
+    main.APPLICATION_STOPPING.set()
+    try:
+        with pytest.raises(HTTPException) as raised:
+            main.save_settings_change(main.config, assign_ids=False)
+        assert raised.value.status_code == 503
+        save.assert_not_called()
+
+        # Without a supervisor the restart is manual, and the Restart button
+        # is exactly how to do it.
+        main.RESTART_REQUIRED.set()
+        with pytest.raises(HTTPException) as raised:
+            main.save_settings_change(main.config, assign_ids=False)
+        assert "needs a restart" in raised.value.detail
+        monkeypatch.setattr(main, "get_manager", Mock())
+        monkeypatch.setattr(main, "_active_storage_tasks", lambda _manager: [])
+        started = []
+        monkeypatch.setattr(main.threading, "Thread", lambda target, **_kw: SimpleNamespace(start=lambda: started.append(target)))
+        assert main._request_server_restart()["status"] == "restart_scheduled"
+        # If the restart itself fails, the process stays frozen: the saved
+        # change has still not run.
+        monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(main.subprocess, "run", Mock(side_effect=OSError("no systemd")))
+        started[0]()
+        assert main.APPLICATION_STOPPING.is_set()
+        assert main.SERVER_RESTART_SCHEDULED is False
+    finally:
+        main.APPLICATION_STOPPING.clear()
+        main.RESTART_REQUIRED.clear()
+        main.SERVER_RESTART_SCHEDULED = False
+
+
 def test_an_unsubscribe_connect_is_spared_by_the_early_abort_but_not_the_interrupt():
     with _blackhole() as port:
         session = CancellableSession()
@@ -335,3 +373,27 @@ def test_an_unsubscribe_connect_is_spared_by_the_early_abort_but_not_the_interru
         thread.join(2)
         assert not thread.is_alive()
         assert isinstance(result["error"], requests.exceptions.ConnectionError)
+
+
+def test_the_restart_button_gets_through_while_a_manual_restart_is_required(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from survng.app import main
+
+    monkeypatch.setattr(main, "get_manager", Mock())
+    monkeypatch.setattr(main, "_active_storage_tasks", lambda _manager: [])
+    monkeypatch.setattr(main.threading, "Thread", lambda target, **_kw: SimpleNamespace(start=lambda: None))
+    client = TestClient(main.app)
+    main.APPLICATION_STOPPING.set()
+    try:
+        refused = client.post("/api/system/restart")
+        assert refused.status_code == 503
+        main.RESTART_REQUIRED.set()
+        assert client.post("/api/system/restart").status_code == 202
+        frozen = client.put("/api/config/cameras/gate/zones", json=[])
+        assert frozen.status_code == 503
+        assert "needs a restart" in frozen.json()["detail"]
+    finally:
+        main.APPLICATION_STOPPING.clear()
+        main.RESTART_REQUIRED.clear()
+        main.SERVER_RESTART_SCHEDULED = False

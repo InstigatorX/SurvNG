@@ -341,7 +341,11 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
             except ValueError as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
             try:
-                effective, result = deps.apply_config(next_config, assign_ids=False)
+                effective, result = deps.apply_config(
+                    next_config,
+                    assign_ids=False,
+                    allow_restart_pending=True,
+                )
             except (OSError, ValueError) as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
         return {"ok": True, "cameras": len(effective.cameras), **result}
@@ -545,7 +549,7 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
             deps.validate_config(next_config)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-        _effective, result = deps.apply_config(next_config)
+        _effective, result = deps.apply_config(next_config, allow_restart_pending=True)
         return result
 
     @router.put("/api/config/cameras")
@@ -590,8 +594,8 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
             if len(remaining) == len(next_config.cameras):
                 raise HTTPException(status_code=404, detail="camera not found")
             next_config.cameras = remaining
-            deps.reload_manager(next_config)
-        return {"ok": True, "camera_id": camera_id}
+            _effective, result = deps.apply_config(next_config, allow_restart_pending=True)
+        return {"ok": True, "camera_id": camera_id, **result}
 
     @router.post("/api/config/probe")
     def probe_config(payload: ConfigProbeRequest) -> dict:
