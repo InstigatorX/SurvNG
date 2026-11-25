@@ -28,10 +28,18 @@ IDLE_SECONDS = 30.0
 BETWEEN_EVENTS_SECONDS = 1.0
 # Recordings of the event window are finalised and indexed by then.
 SETTLE_SECONDS = 90.0
+# A recording segment is indexed only once it closes: the event window (up to
+# 30 s) plus one segment plus indexing slack must have passed.
+SETTLE_SLACK_SECONDS = 60.0
 MAX_ATTEMPTS = 3
 CANDIDATE_BATCH = 200
 PRUNE_INTERVAL_SECONDS = 6 * 3600.0
 ERROR_LOG_INTERVAL_SECONDS = 300.0
+# A deferred event (inference shed, worker timed out or unavailable) waits
+# this long, doubling per deferral, so one event cannot hold the queue.
+DEFER_BASE_SECONDS = IDLE_SECONDS
+DEFER_MAX_SECONDS = 3600.0
+MAX_TRACKED_DEFERRALS = 10_000
 
 
 class FaceCaptureService:
@@ -53,6 +61,8 @@ class FaceCaptureService:
         self._thread: threading.Thread | None = None
         self._last_prune = 0.0
         self._last_error_log = 0.0
+        # event id -> (deferrals, monotonic time it may be tried again)
+        self._deferred: dict[int, tuple[int, float]] = {}
         self.processed = 0
         self.failed = 0
         self.last_event_id: int | None = None
@@ -62,7 +72,14 @@ class FaceCaptureService:
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
-            return
+            if not self._stop.is_set():
+                return
+            # A previous stop timed out: let that pass finish first, so two
+            # threads never capture into the same store.
+            self._thread.join(30.0)
+            if self._thread.is_alive():
+                LOGGER.warning("face capture did not stop in time; not starting another")
+                return
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="face-capture", daemon=True)
         self._thread.start()
@@ -73,6 +90,8 @@ class FaceCaptureService:
         thread = self._thread
         if thread is not None:
             thread.join(timeout)
+            if thread.is_alive():
+                return  # still finishing; start() waits for it
         self._thread = None
 
     def wake(self) -> None:
@@ -111,7 +130,10 @@ class FaceCaptureService:
         config = self._config().detector
         now = now or datetime.now(timezone.utc)
         since = (now - timedelta(hours=float(config.face_capture_backfill_hours))).isoformat()
-        until = (now - timedelta(seconds=SETTLE_SECONDS)).isoformat()
+        segment = float(getattr(self._config(), "recording_segment_seconds", 0.0) or 0.0)
+        settle = max(SETTLE_SECONDS, segment + SETTLE_SLACK_SECONDS)
+        until = (now - timedelta(seconds=settle)).isoformat()
+        waiting = time.monotonic()
         before_id: int | None = None
         # Page back through the backfill window, so events older than the
         # newest batch are still reached once that batch is captured.
@@ -122,6 +144,9 @@ class FaceCaptureService:
                 )
             seen = self.store.attempts(event_id for event_id, *_ in candidates)
             for candidate in candidates:
+                deferred = self._deferred.get(candidate[0])
+                if deferred is not None and deferred[1] > waiting:
+                    continue
                 previous = seen.get(candidate[0])
                 if previous is None:
                     return candidate
@@ -169,6 +194,12 @@ class FaceCaptureService:
         ffprobe = str(Path(ffmpeg).with_name("ffprobe")) if "/" in ffmpeg else "ffprobe"
         hardware = str(app_config.hardware_acceleration or "")
         try:
+            # Models that did not load defer every event instead of using up
+            # each one's attempts.
+            unavailable = getattr(inference, "face_capture_unavailable", None)
+            reason = unavailable() if callable(unavailable) else ""
+            if reason:
+                raise InferenceUnavailable(reason)
             # Inside the try: an event whose lookups fail is recorded as a
             # failed attempt instead of being picked again on every pass.
             main_rows = rows("main", epoch - 1.0, epoch + 1.0)
@@ -188,30 +219,49 @@ class FaceCaptureService:
                     settings=CaptureSettings.from_config(config),
                     cancelled=self._stop.is_set,
                 )
-        except (CaptureCancelled, EvidenceWorkPreempted, InferenceUnavailable):
+        except CaptureCancelled:
+            return None
+        except (EvidenceWorkPreempted, InferenceUnavailable):
+            if not self._stop.is_set():
+                self._defer(event_id)
             return None
         except Exception as exc:
             if self._stop.is_set():
                 return None
-            self.failed += 1
-            self.store.record_failure(event_id=event_id, camera_id=camera_id, event_epoch=epoch, error=str(exc))
-            self._log_error(f"face capture failed for event {event_id} on {camera_id}: {exc}")
-            return 0
+            return self._fail(event_id, camera_id, epoch, str(exc))
+        self._deferred.pop(event_id, None)
         if not result.faces and any(error.startswith("main stream") for error in result.errors):
             # Main-stream decoding or the face models failed and nothing was
             # kept: an attempt to retry, not an event with no faces.
-            error = "; ".join(result.errors)
-            self.failed += 1
-            self.store.record_failure(event_id=event_id, camera_id=camera_id, event_epoch=epoch, error=error)
-            self._log_error(f"face capture failed for event {event_id} on {camera_id}: {error}")
-            return 0
-        kept = self.store.record(
-            event_id=event_id, camera_id=camera_id, event_epoch=epoch, result=result,
-            embedding_model=Path(config.face_capture_embedding_model_path).stem,
-            seconds=time.monotonic() - started,
-        )
+            return self._fail(event_id, camera_id, epoch, "; ".join(result.errors))
+        if not result.faces and not result.main_frames:
+            # No main-stream recording of the window (not indexed yet, or
+            # missing): an attempt to retry, not an event with no faces.
+            return self._fail(event_id, camera_id, epoch, "no main-stream frames in the event window")
+        try:
+            kept = self.store.record(
+                event_id=event_id, camera_id=camera_id, event_epoch=epoch, result=result,
+                embedding_model=Path(config.face_capture_embedding_model_path).stem,
+                seconds=time.monotonic() - started,
+            )
+        except (OSError, sqlite3.Error) as exc:
+            return self._fail(event_id, camera_id, epoch, f"storing faces failed: {exc}")
         self.processed += 1
         return kept
+
+    def _fail(self, event_id: int, camera_id: str, epoch: float, error: str) -> int:
+        self._deferred.pop(event_id, None)
+        self.failed += 1
+        self.store.record_failure(event_id=event_id, camera_id=camera_id, event_epoch=epoch, error=error)
+        self._log_error(f"face capture failed for event {event_id} on {camera_id}: {error}")
+        return 0
+
+    def _defer(self, event_id: int) -> None:
+        if len(self._deferred) >= MAX_TRACKED_DEFERRALS:
+            self._deferred.clear()
+        count = self._deferred.get(event_id, (0, 0.0))[0]
+        delay = min(DEFER_MAX_SECONDS, DEFER_BASE_SECONDS * (2 ** min(count, 16)))
+        self._deferred[event_id] = (count + 1, time.monotonic() + delay)
 
     def _events_connection(self) -> sqlite3.Connection:
         return sqlite3.connect(

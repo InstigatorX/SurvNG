@@ -131,8 +131,10 @@ def test_a_rerun_replaces_the_event_faces_and_their_crops(tmp_path):
     first = {row["crop_path"] for row in store.faces(7)}
     store.record(event_id=7, camera_id="gate", event_epoch=0.0, result=CaptureResult(faces=[face]),
                  embedding_model="m", seconds=1.0)
-    assert len(store.faces(7)) == 1
-    assert sum(Path(p).exists() for p in first) == 1
+    second = [row["crop_path"] for row in store.faces(7)]
+    assert len(second) == 1 and Path(second[0]).is_file()
+    assert not first & set(second)  # a rerun never overwrites crops the old rows point at
+    assert not any(Path(p).exists() for p in first)
     assert store.attempts([7]) == {7: ("done", 2, 1)}
 
 
@@ -176,3 +178,56 @@ def test_a_failed_lookup_before_the_capture_uses_an_attempt(tmp_path):
     service._recording_rows = broken_rows
     assert service.run_once(NOW) is False
     assert service.store.attempts([1]) == {1: ("failed", 1, 1)}
+
+
+def test_a_window_without_main_stream_frames_is_retried_not_done(tmp_path, monkeypatch):
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(30))])
+    monkeypatch.setattr(service_module, "capture_event", lambda **kwargs: CaptureResult(main_frames=0))
+    assert service.run_once(NOW) is False
+    assert service.store.attempts([1]) == {1: ("failed", 1, 1)}
+
+
+def test_a_failure_to_store_faces_uses_an_attempt(tmp_path, monkeypatch):
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(30))])
+    monkeypatch.setattr(service_module, "capture_event", lambda **kwargs: CaptureResult(main_frames=5))
+
+    def disk_full(**kwargs):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(service.store, "record", disk_full)
+    assert service.run_once(NOW) is False
+    assert service.store.attempts([1]) == {1: ("failed", 1, 1)}
+
+
+def test_a_deferred_event_backs_off_so_older_events_are_reached(tmp_path, monkeypatch):
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(60)), (2, "gate", _person_event(), _at(30))])
+
+    def shed(**kwargs):
+        raise InferenceUnavailable("worker timed out")
+
+    monkeypatch.setattr(service_module, "capture_event", shed)
+    assert service.run_once(NOW) is False
+    assert service.next_event(NOW)[0] == 1
+    assert service.store.attempts([1, 2]) == {}
+
+
+def test_unloaded_capture_models_defer_instead_of_using_attempts(tmp_path, monkeypatch):
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(30))])
+    service._inference = lambda: SimpleNamespace(face_capture_unavailable=lambda: "models missing")
+    monkeypatch.setattr(service_module, "capture_event", lambda **kwargs: pytest.fail("captured"))
+    assert service.run_once(NOW) is False
+    assert service.store.attempts([1]) == {}
+
+
+def test_a_malformed_stored_observation_is_skipped():
+    from survng.app.face_capture.events import stored_people
+
+    connection = sqlite3.connect(":memory:")
+    connection.execute("create table scene_observations (event_id integer, payload_json text, captured_epoch real)")
+    connection.executemany("insert into scene_observations values (1, ?, ?)", [
+        ("not json", 10.0),
+        ("[1, 2]", 10.0),
+        (json.dumps({"label": "person", "box": {"x1": 0, "y1": 0, "x2": 10, "y2": 20}}), None),
+        (json.dumps({"label": "person", "box": {"x1": 0, "y1": 0, "x2": 10, "y2": 20}}), 11.0),
+    ])
+    assert stored_people(connection, 1, 10.0, None) == [(1.0, [(0.0, 0.0, 10.0, 20.0)])]

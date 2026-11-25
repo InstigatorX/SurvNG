@@ -20,7 +20,7 @@ import numpy as np
 
 from ..face_candidates import _padded_crop
 from ..face_detection_geometry import upper_body_window
-from .moments import Box, choose_moments, link_tracks, merge_windows
+from .moments import Box, Track, choose_moments, iou, link_tracks, merge_windows
 
 # The old face-evidence step reached 0.8 s past the outermost plan offsets.
 PLAN_REACH_SECONDS = 0.9
@@ -28,6 +28,12 @@ MAX_WINDOW_SECONDS = 30.0
 SUB_SAMPLE_FPS = 5.0
 # Kept faces of one person are at least this far apart in time.
 MIN_FACE_SPACING_SECONDS = 0.25
+# A second-pass person belongs to a first-pass track when their boxes overlap
+# this much at the nearest first-pass sample within this time.
+TRACK_MATCH_IOU = 0.1
+TRACK_MATCH_SECONDS = 1.0
+# Second-pass tracks matched to no first-pass track are numbered from here.
+UNMATCHED_TRACK_BASE = 1000
 # Frames decoded together in one run. A 4K frame is about 25 MB; frame
 # stepping's 30-frame runs would hold 750 MB, too much beside the service.
 CAPTURE_RUN_MAX_FRAMES = 8
@@ -108,6 +114,28 @@ def _scaled(boxes: list[Box], frame: np.ndarray, size: tuple[int, int] | None) -
     return [(b[0] * sx, b[1] * sy, b[2] * sx, b[3] * sy) for b in boxes]
 
 
+def person_keys(first: list[Track], second: list[Track]) -> list[int]:
+    """For each second-pass track, the first-pass track it continues (by majority of
+    its samples), so one person searched in separate windows keeps one id."""
+    keys = []
+    for index, track in enumerate(second):
+        votes: dict[int, int] = {}
+        for offset, box in track.samples:
+            best, best_overlap = None, TRACK_MATCH_IOU
+            for number, candidate in enumerate(first):
+                near = [s for s in candidate.samples if abs(s[0] - offset) <= TRACK_MATCH_SECONDS]
+                if not near:
+                    continue
+                _, nearest = min(near, key=lambda s: abs(s[0] - offset))
+                overlap = iou(box, nearest)
+                if overlap >= best_overlap:
+                    best, best_overlap = number, overlap
+            if best is not None:
+                votes[best] = votes.get(best, 0) + 1
+        keys.append(max(votes, key=votes.get) if votes else UNMATCHED_TRACK_BASE + index)
+    return keys
+
+
 def keep_best(candidates: list[CapturedFace], per_track: int) -> list[CapturedFace]:
     """Each track's highest-norm faces, at least 0.25 s apart."""
     kept: list[CapturedFace] = []
@@ -144,6 +172,7 @@ def capture_event(
             raise CaptureCancelled()
 
     # Pass one: where is each person closest?
+    first_tracks: list[Track] = []
     if sub_frames is not None:
         samples: list[tuple[float, list[Box]]] = []
         face_sizes: dict[tuple[float, Box], float] = {}
@@ -171,13 +200,15 @@ def capture_event(
             if _transient(error):
                 raise
             result.errors.append(f"sub-stream: {error}")
+        first_tracks = link_tracks(samples)
         result.moments = choose_moments(
-            link_tracks(samples), per_track=settings.moments_per_track, face_sizes=face_sizes,
+            first_tracks, per_track=settings.moments_per_track, face_sizes=face_sizes,
         )
         result.moment_source = "sub-stream" if result.moments else ""
     if not result.moments:
         stored = [(o, b) for o, b in stored_people if start <= o <= end and b]
-        result.moments = choose_moments(link_tracks(stored), per_track=settings.moments_per_track)
+        first_tracks = link_tracks(stored)
+        result.moments = choose_moments(first_tracks, per_track=settings.moments_per_track)
         result.moment_source = "stored observations" if result.moments else ""
     if not result.moments:
         result.moments = sorted(round(o, 3) for o in plan)
@@ -217,10 +248,12 @@ def capture_event(
                 raise
             result.errors.append(f"main stream {low:+.1f}..{high:+.1f}: {error}")
 
+    result.errors.extend(getattr(main_frames, "errors", ()))
+    second_tracks = link_tracks(people_by_frame)
     track_of: dict[tuple[float, Box], int] = {}
-    for index, track in enumerate(link_tracks(people_by_frame)):
+    for key, track in zip(person_keys(first_tracks, second_tracks), second_tracks):
         for offset, box in track.samples:
-            track_of[(offset, box)] = index
+            track_of[(offset, box)] = key
     candidates = []
     for offset, person, face, crop in found:
         candidates.append(CapturedFace(
@@ -281,35 +314,53 @@ def main_stream_source(
     # again for this event, so a broken GPU costs one timeout, not one a run.
     decoder = {"hardware": hardware_acceleration}
 
-    def frames(start: float, end: float) -> Iterator[tuple[float, np.ndarray]]:
-        for row in rows("main", event_epoch + start, event_epoch + end):
-            path = Path(row["path"])
-            segment_start = float(row["start_epoch"])
-            local_start, local_end = event_epoch + start - segment_start, event_epoch + end - segment_start
-            if str(path) not in listed:
-                listed[str(path)] = list_segment_frames(ffprobe_path, path)
-            segment = listed[str(path)]
-            wanted = [i for i, t in enumerate(segment.times) if local_start <= t <= local_end]
-            if not wanted:
-                continue
-            size = mp4_video_dimensions(path)
-            runs = sorted({frame_run(segment, index, CAPTURE_RUN_MAX_FRAMES) for index in wanted})
-            for run_start, run_stop in runs:
-                plans = recorded_decode_plans(decoder["hardware"], scale=size) if size else recorded_decode_plans(None)
-                try:
-                    run = decode_frame_run(
-                        ffmpeg_path, path, segment, run_start, run_stop, size[0] if size else 100_000,
-                        size=size, plans=plans, consumer="face_capture",
-                        hardware_timeout=5.0, cpu_timeout=20.0,
-                    )
-                except FrameRunError as error:
-                    if error.hardware_failed:
-                        decoder["hardware"] = None
-                    raise
-                if run.hardware_failed:
-                    decoder["hardware"] = None
-                for pts, image in run.frames:
-                    if local_start <= pts <= local_end:
-                        yield segment_start + pts - event_epoch, image
+    class Frames:
+        """The frame source; a segment that cannot be listed or decoded is
+        skipped and noted in ``errors``, and the window's other segments
+        are still searched."""
 
-    return frames
+        def __init__(self) -> None:
+            self.errors: list[str] = []
+
+        def __call__(self, start: float, end: float) -> Iterator[tuple[float, np.ndarray]]:
+            for row in rows("main", event_epoch + start, event_epoch + end):
+                path = Path(row["path"])
+                segment_start = float(row["start_epoch"])
+                local_start, local_end = event_epoch + start - segment_start, event_epoch + end - segment_start
+                if str(path) not in listed:
+                    try:
+                        listed[str(path)] = list_segment_frames(ffprobe_path, path)
+                    except FrameRunError as error:
+                        listed[str(path)] = error
+                        self.errors.append(f"{path.name}: {error}")
+                segment = listed[str(path)]
+                if isinstance(segment, FrameRunError):
+                    continue
+                wanted = [i for i, t in enumerate(segment.times) if local_start <= t <= local_end]
+                if not wanted:
+                    continue
+                size = mp4_video_dimensions(path)
+                runs = sorted({frame_run(segment, index, CAPTURE_RUN_MAX_FRAMES) for index in wanted})
+                for run_start, run_stop in runs:
+                    plans = (
+                        recorded_decode_plans(decoder["hardware"], scale=size) if size
+                        else recorded_decode_plans(None)
+                    )
+                    try:
+                        run = decode_frame_run(
+                            ffmpeg_path, path, segment, run_start, run_stop, size[0] if size else 100_000,
+                            size=size, plans=plans, consumer="face_capture",
+                            hardware_timeout=5.0, cpu_timeout=20.0,
+                        )
+                    except FrameRunError as error:
+                        if error.hardware_failed:
+                            decoder["hardware"] = None
+                        self.errors.append(f"{path.name} frames {run_start}-{run_stop}: {error}")
+                        continue
+                    if run.hardware_failed:
+                        decoder["hardware"] = None
+                    for pts, image in run.frames:
+                        if local_start <= pts <= local_end:
+                            yield segment_start + pts - event_epoch, image
+
+    return Frames()

@@ -100,17 +100,24 @@ def stored_people(
     for payload, captured in connection.execute(
         "select payload_json, captured_epoch from scene_observations where event_id = ?", (event_id,)
     ):
-        item = json.loads(payload or "{}")
-        box = item.get("box") or {}
-        if item.get("label") != "person" or not box:
-            continue
-        sx = sy = 1.0
-        if main_size:
-            sx = main_size[0] / float(item.get("detection_frame_width") or main_size[0])
-            sy = main_size[1] / float(item.get("detection_frame_height") or main_size[1])
+        # A malformed observation is skipped; it must not fail the event.
         try:
-            scaled = (float(box["x1"]) * sx, float(box["y1"]) * sy, float(box["x2"]) * sx, float(box["y2"]) * sy)
-        except (KeyError, TypeError, ValueError):
+            item = json.loads(payload or "{}")
+        except ValueError:
             continue
-        by_time.setdefault(round(float(captured) - epoch, 3), []).append(scaled)
+        if not isinstance(item, dict):
+            continue
+        box = item.get("box") or {}
+        if item.get("label") != "person" or not isinstance(box, dict) or not box:
+            continue
+        try:
+            sx = sy = 1.0
+            if main_size:
+                sx = main_size[0] / float(item.get("detection_frame_width") or main_size[0])
+                sy = main_size[1] / float(item.get("detection_frame_height") or main_size[1])
+            scaled = (float(box["x1"]) * sx, float(box["y1"]) * sy, float(box["x2"]) * sx, float(box["y2"]) * sy)
+            offset = round(float(captured) - epoch, 3)
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+        by_time.setdefault(offset, []).append(scaled)
     return sorted(by_time.items())

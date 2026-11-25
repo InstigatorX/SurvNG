@@ -959,14 +959,28 @@ class InferenceSupervisor:
         finally:
             self._leave_device_workload(workload)
 
+    def face_capture_unavailable(self) -> str:
+        """Why face capture cannot run, from the face worker's last status; "" when it may.
+
+        Reads cached status only (no IPC). A worker that has not reported a
+        capture engine yet is given the request, which starts it.
+        """
+        if not self.config.face_capture_enabled:
+            return "Face capture is disabled."
+        capture = self._face.cached_status().get("capture")
+        if isinstance(capture, dict) and capture.get("ready") is False:
+            return f"Face capture models are unavailable: {capture.get('error') or 'not loaded'}"
+        return ""
+
     def capture_faces(self, crop: np.ndarray, *, embed: bool = True) -> list[dict[str, Any]]:
         """Faces in an upper-body crop with landmarks, AdaFace norm and embedding.
 
         ``embed=False`` only detects. Optional enrichment: shed for incident
         inference (``InferenceUnavailable``).
         """
-        if not self.config.face_capture_enabled:
-            raise InferenceUnavailable("Face capture is disabled.")
+        reason = self.face_capture_unavailable()
+        if reason:
+            raise InferenceUnavailable(reason)
         workload = InferenceWorkload.ENRICHMENT
         if not self._enter_device_workload(workload, source="face_capture"):
             raise InferenceUnavailable("face capture shed for incident inference")

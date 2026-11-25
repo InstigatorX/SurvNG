@@ -5,6 +5,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -115,17 +116,34 @@ class FaceCaptureStore:
         written: list[tuple[CapturedFace, str]] = []
         day = datetime.fromtimestamp(event_epoch, timezone.utc).strftime("%Y-%m-%d")
         folder = self.crop_dir / camera_id / day
+        # Names unique to this capture: a rerun never overwrites the crops the
+        # event's current rows point at, so a failed rerun leaves them intact.
+        stamp = time.time_ns()
         try:
             for index, face in enumerate(result.faces):
                 folder.mkdir(parents=True, exist_ok=True)
-                path = folder / f"{event_id}-{index}.jpg"
+                path = folder / f"{event_id}-{stamp}-{index}.jpg"
                 if not cv2.imwrite(str(path), face.crop, [cv2.IMWRITE_JPEG_QUALITY, CROP_JPEG_QUALITY]):
                     raise OSError(f"could not write {path}")
                 written.append((face, str(path)))
-        except OSError:
+            old = self._replace_faces(
+                event_id=event_id, camera_id=camera_id, event_epoch=event_epoch, result=result,
+                embedding_model=embedding_model, seconds=seconds, written=written, now=now,
+            )
+        except (OSError, sqlite3.Error):
             for _, path in written:
                 Path(path).unlink(missing_ok=True)
             raise
+        kept = {path for _, path in written}
+        for path in old:
+            if path not in kept:
+                Path(path).unlink(missing_ok=True)
+        return len(written)
+
+    def _replace_faces(
+        self, *, event_id, camera_id, event_epoch, result, embedding_model, seconds, written, now,
+    ) -> list[str]:
+        """Swap the event's rows for ``written`` in one transaction; the replaced crop paths."""
         with self._lock, self._connect() as connection:
             old = [row[0] for row in connection.execute(
                 "select crop_path from face_captures where event_id = ?", (event_id,))]
@@ -148,11 +166,7 @@ class FaceCaptureStore:
                 connection, event_id=event_id, camera_id=camera_id, event_epoch=event_epoch, state="done",
                 faces=len(written), result=result, seconds=seconds, error="; ".join(result.errors)[:500], now=now,
             )
-        kept = {path for _, path in written}
-        for path in old:
-            if path not in kept:
-                Path(path).unlink(missing_ok=True)
-        return len(written)
+        return old
 
     def record_failure(self, *, event_id: int, camera_id: str, event_epoch: float, error: str) -> None:
         now = datetime.now(timezone.utc).isoformat()

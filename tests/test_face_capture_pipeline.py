@@ -89,3 +89,13 @@ def test_keep_best_takes_the_highest_norms_spaced_apart_per_track():
 
     kept = keep_best([face(0, 1.0, 20), face(0, 1.1, 19), face(0, 2.0, 18), face(1, 1.0, 14)], per_track=2)
     assert [(f.track, f.offset) for f in kept] == [(0, 1.0), (0, 2.0), (1, 1.0)]
+
+
+def test_one_person_searched_in_separate_windows_keeps_one_track():
+    from survng.app.face_capture.moments import Track
+    from survng.app.face_capture.pipeline import UNMATCHED_TRACK_BASE, person_keys
+
+    first = [Track([(t / 5, PERSON) for t in range(0, 30)])]  # 0..5.8 s
+    second = [Track([(0.5, PERSON), (0.6, PERSON)]), Track([(5.0, PERSON)]),
+              Track([(2.0, (900.0, 50.0, 1100.0, 650.0))])]  # someone else
+    assert person_keys(first, second) == [0, 0, UNMATCHED_TRACK_BASE + 2]
