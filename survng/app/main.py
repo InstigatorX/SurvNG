@@ -751,6 +751,7 @@ def _request_server_restart() -> dict[str, object]:
                 "SurvNG cannot restart while storage work is active: "
                 f"{', '.join(active_tasks)}. Wait for it to finish or cancel it from Maintenance."
             )
+        already_stopping = APPLICATION_STOPPING.is_set()
         SERVER_RESTART_SCHEDULED = True
         APPLICATION_STOPPING.set()
 
@@ -774,7 +775,10 @@ def _request_server_restart() -> dict[str, object]:
             )
             with SERVER_RESTART_LOCK:
                 SERVER_RESTART_SCHEDULED = False
-                APPLICATION_STOPPING.clear()
+                # A process that was already stopping (a change waiting for
+                # this restart) must stay frozen; only undo our own stop.
+                if not already_stopping:
+                    APPLICATION_STOPPING.clear()
 
     threading.Thread(
         target=restart_from_supervisor,
@@ -865,7 +869,7 @@ RESTART_REQUIRED = threading.Event()
 
 def _settings_frozen_detail() -> str:
     if RESTART_REQUIRED.is_set():
-        return "Restart SurvNG to apply the saved change before changing settings again"
+        return "SurvNG needs a restart before settings can change again"
     return "SurvNG is restarting; change settings again once it is back"
 
 
@@ -943,13 +947,14 @@ def apply_config_update(
                     keep_unapplied=allow_restart_pending,
                 )
             except ManagerReloadRestartPending as pending:
+                if not pending.restarting:
+                    # The process stays stopping until someone restarts it.
+                    RESTART_REQUIRED.set()
                 if not pending.persisted:
                     raise
                 # Saved, but this process cannot finish the cutover. With a
                 # supervisor it restarts with the saved configuration; without
                 # one, someone has to restart SurvNG.
-                if not pending.restarting:
-                    RESTART_REQUIRED.set()
                 return effective, {
                     "apply_mode": (
                         "restart_pending" if pending.restarting else "restart_required"

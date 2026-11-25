@@ -523,7 +523,7 @@ class OnvifEventListener:
                     return
                 # This worker's own raw-response capture: a retired worker
                 # can run beside the next one and must not touch its buffer.
-                capture = self._pullmessages_capture
+                capture = self._capture_of(pullpoint)
                 if self.last_connected_at:
                     self.resubscriptions += 1
                 # A release missed while disconnected must not hide the next
@@ -580,7 +580,7 @@ class OnvifEventListener:
                     )
                     if overlapped is not None:
                         pullpoint = overlapped
-                        capture = self._pullmessages_capture
+                        capture = self._capture_of(pullpoint)
                         failures = 0
                         retry_delay = RETRY_INITIAL_SECONDS
                         continue
@@ -1313,7 +1313,18 @@ class OnvifEventListener:
             return
         capture = _PullMessagesResponseCapture()
         plugins.append(capture)
+        # The worker reads the capture from its own pullpoint, never from
+        # this shared slot, which a retired worker may still write.
+        try:
+            pullpoint._survng_pullmessages_capture = capture
+        except AttributeError:
+            pass
         self._pullmessages_capture = capture
+
+    @staticmethod
+    def _capture_of(pullpoint: Any) -> _PullMessagesResponseCapture | None:
+        capture = getattr(pullpoint, "_survng_pullmessages_capture", None)
+        return capture if isinstance(capture, _PullMessagesResponseCapture) else None
 
     @staticmethod
     def _notification_inputs(

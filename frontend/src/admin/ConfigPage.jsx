@@ -1823,6 +1823,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
         // Saved on disk; the running process still serves the old values.
         baselineConfigRef.current = structuredClone(configToSave);
         setBaselineRevision((current) => current + 1);
+        setConfig(structuredClone(configToSave));
       }
       if (await handleUnappliedSave(payload, "Saved", setSaveNotice)) return true;
       const reloaded = await load();

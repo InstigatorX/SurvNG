@@ -624,6 +624,9 @@ class ConfigReloadTest(unittest.TestCase):
             _effective, result = main.apply_config_update(incoming, allow_restart_pending=True)
         self.assertEqual(result["apply_mode"], "restart_required")
 
+        self.assertTrue(main.RESTART_REQUIRED.is_set())
+        main.RESTART_REQUIRED.clear()
+
         # Callers that cannot report it never ask for the change to be kept.
         unsaved = ManagerReloadRestartPending("stuck; restarting", persisted=False)
         with (
@@ -632,6 +635,19 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             main.apply_config_update(incoming)
         self.assertFalse(reload.call_args.kwargs["keep_unapplied"])
+        self.assertFalse(main.RESTART_REQUIRED.is_set())
+
+        # Unsaved and no supervisor: still frozen until a manual restart.
+        stranded = ManagerReloadRestartPending("stuck", persisted=False, restarting=False)
+        try:
+            with (
+                patch("survng.app.main.reload_manager", side_effect=stranded),
+                self.assertRaises(ManagerReloadRestartPending),
+            ):
+                main.apply_config_update(incoming)
+            self.assertTrue(main.RESTART_REQUIRED.is_set())
+        finally:
+            main.RESTART_REQUIRED.clear()
 
     def test_no_change_is_applied_while_surviving_a_restart_to_apply_a_saved_one(self) -> None:
         from fastapi import HTTPException

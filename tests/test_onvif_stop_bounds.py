@@ -346,11 +346,19 @@ def test_settings_saves_are_refused_while_a_saved_change_waits_for_a_restart(mon
         main.RESTART_REQUIRED.set()
         with pytest.raises(HTTPException) as raised:
             main.save_settings_change(main.config, assign_ids=False)
-        assert "Restart SurvNG" in raised.value.detail
+        assert "needs a restart" in raised.value.detail
         monkeypatch.setattr(main, "get_manager", Mock())
         monkeypatch.setattr(main, "_active_storage_tasks", lambda _manager: [])
-        monkeypatch.setattr(main.threading, "Thread", Mock())
+        started = []
+        monkeypatch.setattr(main.threading, "Thread", lambda target, **_kw: SimpleNamespace(start=lambda: started.append(target)))
         assert main._request_server_restart()["status"] == "restart_scheduled"
+        # If the restart itself fails, the process stays frozen: the saved
+        # change has still not run.
+        monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(main.subprocess, "run", Mock(side_effect=OSError("no systemd")))
+        started[0]()
+        assert main.APPLICATION_STOPPING.is_set()
+        assert main.SERVER_RESTART_SCHEDULED is False
     finally:
         main.APPLICATION_STOPPING.clear()
         main.RESTART_REQUIRED.clear()
