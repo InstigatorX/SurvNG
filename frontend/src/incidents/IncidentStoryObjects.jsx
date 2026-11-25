@@ -108,7 +108,7 @@ export function PathPanel({ object, cameraName, timeZone, activeCameraId, canCor
   </section>;
 }
 
-export function CorrectPanel({ incident, object, objects, cameraName, canCorrect, onCorrected, onDone }) {
+export function CorrectPanel({ incident, object, objects, cameraName, timeZone, canCorrect, onCorrected, onDone }) {
   const [mode, setMode] = useState("");
   const [label, setLabel] = useState(object.label || "");
   const [other, setOther] = useState("");
@@ -152,7 +152,7 @@ export function CorrectPanel({ incident, object, objects, cameraName, canCorrect
       {mode === "associate" ? <form className="story-correct-form" onSubmit={(event) => { event.preventDefault(); if (other) void submit({ operation: "associate", object_ids: [other, object.id] }, "Objects associated."); }}>
         <label>Same object as<select value={other} onChange={(event) => setOther(event.target.value)} required>
           <option value="">Choose an object</option>
-          {others.map((item) => <option key={item.id} value={item.id}>{objectName(item)} · {formatTimeOnly(item.intervals[0]?.start, undefined)}</option>)}
+          {others.map((item) => <option key={item.id} value={item.id}>{objectName(item)} · {formatTimeOnly(item.intervals[0]?.start, timeZone)}</option>)}
         </select></label>
         <button type="submit" disabled={busy}>{busy ? "Saving…" : "Associate"}</button>
       </form> : null}

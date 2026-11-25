@@ -234,7 +234,67 @@ async function storyChecks(width) {
   await page.close();
 }
 
+// Optional provider title: shown when ready; the built-in title otherwise.
+async function titleChecks() {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  let reply = { status: 200, json: { incident_id: "incident-story-1", status: "ready", title: "Car pulls in and a person walks to the front door", revision: 7, current: true } };
+  const titleRequests = [];
+  await page.route("**/api/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
+    if (path.endsWith("/api/cameras")) return route.fulfill({ json: CAMERAS });
+    if (path.includes("/incidents/notification/")) return route.fulfill({ json: { incident: storyIncident(), notification: { state: "complete" }, camera_name: "Front Driveway" } });
+    if (path.endsWith("/incident-story-1/title")) { titleRequests.push(path); return route.fulfill(reply); }
+    return route.fulfill({ json: {} });
+  });
+  const url = `${origin}/survng/incidents/incident-story-1`;
+  await page.goto(url);
+  await page.getByRole("heading", { level: 1, name: "Car pulls in and a person walks to the front door" }).waitFor();
+  assert.match(await page.locator(".story-heading h1").getAttribute("title"), /Built-in: Car arrives, person walks to Front Door/);
+  reply = { status: 200, json: { incident_id: "incident-story-1", status: "failed", title: null, reason: "provider_failed", message: "AI title unavailable" } };
+  await page.goto(url);
+  await page.getByRole("heading", { level: 1, name: "Car arrives, person walks to Front Door" }).waitFor();
+  await page.getByText("· AI title unavailable").waitFor();
+  reply = { status: 200, json: { incident_id: "incident-story-1", status: "disabled", title: null } };
+  await page.goto(url);
+  await page.getByRole("heading", { level: 1, name: "Car arrives, person walks to Front Door" }).waitFor();
+  assert.equal(await page.getByText("AI title unavailable").count(), 0);
+  reply = { status: 500, json: {} };
+  await page.goto(url);
+  await page.getByRole("heading", { level: 1, name: "Car arrives, person walks to Front Door" }).waitFor();
+  assert.ok(titleRequests.length >= 4);
+  assert.deepEqual(errors, []);
+  await page.close();
+}
+
+// Viewers cannot record verdicts, so a review link opens the plain page.
+async function viewerChecks() {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("**/api/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: true, user: { username: "guest", role: "viewer" } } });
+    if (path.endsWith("/api/cameras")) return route.fulfill({ json: CAMERAS });
+    if (path.includes("/incidents/notification/")) return route.fulfill({ json: { incident: storyIncident(), notification: { state: "complete" }, camera_name: "Front Driveway" } });
+    if (path.endsWith("/incidents/review-queue")) return route.fulfill({ json: queueFor("incident-story-1") });
+    return route.fulfill({ json: {} });
+  });
+  await page.goto(`${origin}/survng/incidents/incident-story-1?review=1`);
+  await page.getByRole("heading", { level: 1, name: "Car arrives, person walks to Front Door" }).waitFor();
+  assert.equal(await page.getByRole("region", { name: "Review" }).count(), 0);
+  assert.equal(await page.getByRole("button", { name: /Review mode|Exit review/ }).count(), 0);
+  await page.locator(".story-card", { hasText: "Dog" }).click();
+  await page.getByText("Only an administrator can correct objects.").waitFor();
+  assert.deepEqual(errors, []);
+  await page.close();
+}
+
 try {
+  await viewerChecks();
+  await titleChecks();
   for (const width of [360, 390, 1440]) await legacyChecks(width);
   for (const width of [390, 1440]) await storyChecks(width);
   console.log("Incident detail: storyboard states, review keys, corrections, mobile, playback, reconnect, missing image and expired link checks passed");
