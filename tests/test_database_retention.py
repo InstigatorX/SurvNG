@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -238,9 +238,9 @@ def test_motion_effectiveness_range_follows_audit_retention(dry_run: bool, expec
 def test_reschedule_wakes_the_loop_to_run_after_the_startup_delay(store: EventStore) -> None:
     import threading
 
-    config = DatabaseRetentionConfig(dry_run=True, interval_hours=24.0)
+    holder = {"config": DatabaseRetentionConfig(dry_run=True, interval_hours=24.0)}
     retention = DatabaseRetention(
-        store, lambda: config, pause_seconds=0, startup_delay_seconds=0.2,
+        store, lambda: holder["config"], pause_seconds=0, startup_delay_seconds=0.2,
     )
     ran = threading.Event()
     retention.run_once = lambda **_: ran.set()  # type: ignore[method-assign]
@@ -249,6 +249,11 @@ def test_reschedule_wakes_the_loop_to_run_after_the_startup_delay(store: EventSt
         assert ran.wait(5.0)  # no completed run on record: catch up
         ran.clear()
         assert not ran.wait(0.5)  # next run is the daily run_at
+        later = (datetime.now() + timedelta(hours=12)).strftime("%H:%M")
+        holder["config"] = holder["config"].model_copy(update={"run_at": later})
+        retention.reschedule()
+        assert not ran.wait(0.5)  # only run_at changed: no run at a busy time
+        holder["config"] = holder["config"].model_copy(update={"dry_run": False})
         retention.reschedule()
         assert ran.wait(5.0)  # policy change: runs after the short delay
     finally:

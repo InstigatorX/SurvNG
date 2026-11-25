@@ -53,6 +53,10 @@ ERROR_LOG_INTERVAL_SECONDS = 300.0
 DEFER_BASE_SECONDS = IDLE_SECONDS
 DEFER_MAX_SECONDS = 3600.0
 MAX_TRACKED_DEFERRALS = 10_000
+# An event deferred this many times in a row (about a day with the backoff)
+# counts as a failed attempt: one that keeps timing the face worker out must
+# not restart it, for recognition too, all through the backfill window.
+MAX_CONSECUTIVE_DEFERRALS = 8
 # A failed event waits this long before its next attempt, so a passing cause
 # (a segment not indexed yet, a decoder timing out under load) does not use
 # up every attempt within a minute.
@@ -169,8 +173,11 @@ class FaceCaptureService:
         # newest batch are still reached once that batch is captured.
         while True:
             with self._events_connection() as connection:
+                # The floor is applied in SQL too, so an incremental pass does
+                # not read and parse every event of the backfill window.
                 candidates = person_events(
                     connection, since=since, until=until, limit=CANDIDATE_BATCH, before_id=before_id,
+                    after_id=floor or None,
                 )
             seen = self.store.attempts(event_id for event_id, *_ in candidates)
             reached_floor = False
@@ -190,6 +197,16 @@ class FaceCaptureService:
                 if version < CAPTURE_VERSION:
                     return candidate  # attempts restart with the new version
                 if state == "failed" and attempts < MAX_ATTEMPTS:
+                    if deferred is None:
+                        # No hold in memory (this service started after the
+                        # failure, e.g. a manager reload): space the retry from
+                        # the stored failure time instead of retrying at once.
+                        failed_at = self.store.failed_at(candidate[0])
+                        wait = 0.0 if failed_at is None else failed_at + FAILURE_RETRY_SECONDS - time.time()
+                        if wait > 0:
+                            self._hold(candidate[0], 0, wait)
+                            pending = candidate[0] if pending is None else min(pending, candidate[0])
+                            continue
                     return candidate
             if reached_floor or len(candidates) < CANDIDATE_BATCH:
                 self._scan_floor = pending - 1 if pending is not None else max(floor, newest)
@@ -268,9 +285,13 @@ class FaceCaptureService:
                 )
         except CaptureCancelled:
             return None
-        except (EvidenceWorkPreempted, InferenceUnavailable):
-            if not self._stop.is_set():
-                self._defer(event_id)
+        except (EvidenceWorkPreempted, InferenceUnavailable) as exc:
+            if self._stop.is_set():
+                return None
+            if self._deferred.get(event_id, (0, 0.0))[0] + 1 >= MAX_CONSECUTIVE_DEFERRALS:
+                self._fail(event_id, camera_id, epoch, f"deferred {MAX_CONSECUTIVE_DEFERRALS} times: {exc}")
+                return None
+            self._defer(event_id)
             return None
         except Exception as exc:
             if self._stop.is_set():

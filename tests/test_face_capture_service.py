@@ -70,7 +70,25 @@ def test_done_events_are_skipped_and_failures_retry_a_few_times(tmp_path):
     for _ in range(MAX_ATTEMPTS):
         assert service.next_event(NOW)[0] == 1
         service.store.record_failure(event_id=1, camera_id="gate", event_epoch=0.0, error="boom")
+        _age_failures(service.store)
     assert service.next_event(NOW) is None
+
+
+def _age_failures(store, seconds=service_module.FAILURE_RETRY_SECONDS + 1):
+    old = datetime.fromtimestamp(time.time() - seconds, timezone.utc).isoformat()
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("update face_capture_events set updated_at = ? where state = 'failed'", (old,))
+    connection.close()
+
+
+def test_a_new_service_spaces_the_retry_of_a_recent_failure(tmp_path):
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(30))])
+    service.store.record_failure(event_id=1, camera_id="gate", event_epoch=0.0, error="boom")
+    # A fresh service (a manager reload) has no hold in memory for event 1.
+    assert service.next_event(NOW) is None
+    service._deferred.clear()
+    _age_failures(service.store)
+    assert service.next_event(NOW)[0] == 1
 
 
 def test_disabled_capture_does_nothing_and_leaves_no_store(tmp_path):
@@ -287,3 +305,30 @@ def test_after_a_full_scan_only_newer_events_are_read_but_waiting_ones_are_kept(
     service._deferred[3] = (1, time.monotonic() + 60)
     assert service.next_event(NOW) is None
     assert service._scan_floor == 2
+
+
+def test_a_crop_that_cannot_be_written_leaves_no_files_behind(tmp_path):
+    store = FaceCaptureStore(tmp_path)
+    good = CapturedFace(track=0, offset=0.0, box=(0, 0, 8, 8), landmarks=[], confidence=0.9, norm=20.0,
+                        embedding=np.zeros(512, np.float32), crop=np.zeros((8, 8, 3), np.uint8))
+    bad = CapturedFace(track=0, offset=1.0, box=(0, 0, 8, 8), landmarks=[], confidence=0.9, norm=20.0,
+                       embedding=np.zeros(512, np.float32), crop=np.empty((0, 0, 3), np.uint8))
+    with pytest.raises(Exception):
+        store.record(event_id=1, camera_id="gate", event_epoch=0.0, result=CaptureResult(faces=[good, bad]),
+                     embedding_model="m", seconds=1.0)
+    assert not [path for path in store.crop_dir.rglob("*") if path.is_file()]
+
+
+def test_an_event_deferred_again_and_again_becomes_a_failed_attempt(tmp_path, monkeypatch):
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(30))])
+
+    def shed(**kwargs):
+        raise InferenceUnavailable("face inference request timed out")
+
+    monkeypatch.setattr(service_module, "capture_event", shed)
+    for _ in range(service_module.MAX_CONSECUTIVE_DEFERRALS - 1):
+        assert service.capture(*service.next_event(NOW)) is None
+        service._deferred[1] = (service._deferred[1][0], 0.0)  # the hold has passed
+    assert service.store.attempts([1]) == {}
+    service.capture(*service.next_event(NOW))
+    assert service.store.attempts([1])[1][:2] == ("failed", 1)

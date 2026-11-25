@@ -101,6 +101,20 @@ class FaceCaptureStore:
                     found[int(row[0])] = (str(row[1]), int(row[2]), int(row[3]))
         return found
 
+    def failed_at(self, event_id: int) -> float | None:
+        """Epoch of the event's last failed attempt, or None when it is not failed."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "select updated_at from face_capture_events where event_id = ? and state = 'failed'",
+                (int(event_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return datetime.fromisoformat(str(row[0])).timestamp()
+        except ValueError:
+            return None
+
     def record(
         self,
         *,
@@ -119,10 +133,12 @@ class FaceCaptureStore:
         # Names unique to this capture: a rerun never overwrites the crops the
         # event's current rows point at, so a failed rerun leaves them intact.
         stamp = time.time_ns()
+        attempted: list[Path] = []
         try:
             for index, face in enumerate(result.faces):
                 folder.mkdir(parents=True, exist_ok=True)
                 path = folder / f"{event_id}-{stamp}-{index}.jpg"
+                attempted.append(path)
                 if not cv2.imwrite(str(path), face.crop, [cv2.IMWRITE_JPEG_QUALITY, CROP_JPEG_QUALITY]):
                     raise OSError(f"could not write {path}")
                 written.append((face, str(path)))
@@ -130,9 +146,11 @@ class FaceCaptureStore:
                 event_id=event_id, camera_id=camera_id, event_epoch=event_epoch, result=result,
                 embedding_model=embedding_model, seconds=seconds, written=written, now=now,
             )
-        except (OSError, sqlite3.Error):
-            for _, path in written:
-                Path(path).unlink(missing_ok=True)
+        except BaseException:
+            # Any failure (a cv2.error on a bad crop too): no row points at
+            # these crops, so nothing would ever remove them otherwise.
+            for path in attempted:
+                path.unlink(missing_ok=True)
             raise
         kept = {path for _, path in written}
         for path in old:

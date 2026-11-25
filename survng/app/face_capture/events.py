@@ -50,10 +50,12 @@ def person_events(
     cameras: list[str] | None = None,
     limit: int = 200,
     before_id: int | None = None,
+    after_id: int | None = None,
 ) -> list[tuple[int, str, float, dict[str, Any]]]:
     """Recorded person events created in ``[since, until]``, newest first.
 
-    ``before_id`` continues a listing below the last id it returned.
+    ``before_id`` continues a listing below the last id it returned;
+    ``after_id`` leaves out events at or below an id already finished.
     """
     query = (
         "select id, camera_id, objects_json, created_at from events"
@@ -63,6 +65,9 @@ def person_events(
     if before_id is not None:
         query += " and id < ?"
         args.append(int(before_id))
+    if after_id is not None:
+        query += " and id > ?"
+        args.append(int(after_id))
     if cameras:
         query += f" and camera_id in ({','.join('?' * len(cameras))})"
         args += cameras
