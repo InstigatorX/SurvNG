@@ -190,3 +190,27 @@ def test_merging_a_named_group_into_an_ignored_one_does_not_name_it(setup):
     merged = groups.merge_groups(alice["id"], bob["id"])
     assert merged["ignored"] and merged["person_id"] is None
     assert groups.people() == []
+
+
+def test_faces_by_event_list_who_was_seen_in_an_incident(setup):
+    store, groups = setup
+    _capture(store, groups, 1, _face(ALICE), _face(BOB, track=1))
+    _capture(store, groups, 2, _face(ALICE))
+    alice = next(g for g in groups.groups("unnamed")["groups"] if g["faces"] == 2)
+    groups.name_group(alice["id"], "A")
+    found = groups.for_events([1, 2, 99])
+    assert set(found["events"]) == {"1", "2"}
+    assert len(found["events"]["1"]) == 2 and found["events"]["2"] == [alice["id"]]
+    names = {g["id"]: g.get("person_name") for g in found["groups"]}
+    assert names[alice["id"]] == "A" and len(names) == 2
+    assert all(g["incident_faces"] for g in found["groups"])
+    assert groups.for_events([]) == {"events": {}, "groups": []}
+    service = SimpleNamespace(store=store, groups=groups, enabled=lambda: True)
+    manager = SimpleNamespace(face_capture=service, config=SimpleNamespace(cameras=[]))
+    router = create_face_capture_router(FaceCaptureRouteDependencies(get_manager=lambda: manager))
+    endpoint = next(r.endpoint for r in router.routes if r.path == "/api/face-captures/by-events")
+    assert set(endpoint(ids="1,2")["events"]) == {"1", "2"}
+    with pytest.raises(HTTPException) as error:
+        endpoint(ids="1,x")
+    assert error.value.status_code == 400
+    assert required_api_scope("GET", "/api/face-captures/by-events") == "admin"

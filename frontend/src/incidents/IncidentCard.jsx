@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { FaceNameChips } from "../people/IncidentPeople.jsx";
 import { IncidentSpeechBadge, IncidentSpeechPanel } from "./IncidentSpeech.jsx";
 import {
   Activity,
@@ -127,7 +128,7 @@ function EvidenceTimeline({ incident, hero, timeline, timeZone, stripRef, onSele
   );
 }
 
-export function IncidentCard({ incident, scenePlayback, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, zones = null, analysisMode = "clean", depthLayer = "both", replayRequest = 0, observationPreviewRequest = null, selectedObjectIndex = null, onSelectObject = null, onReturnToSelected = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
+export function IncidentCard({ incident, faceNames = null, scenePlayback, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, zones = null, analysisMode = "clean", depthLayer = "both", replayRequest = 0, observationPreviewRequest = null, selectedObjectIndex = null, onSelectObject = null, onReturnToSelected = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
   const rawEvents = incident.events || [];
   const motionObservations = incident.motion_observations || [];
   const [selectedPreview, setSelectedPreview] = useState(null);
@@ -472,6 +473,7 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
                 <div className="pill-row compact incident-labels">
                   <IncidentObjectBadges labels={labels} />
                   <IncidentSpeechBadge speech={incident.speech} />
+                  <FaceNameChips names={faceNames} />
                 </div>
               </div>
             ) : null}

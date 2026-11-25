@@ -13,6 +13,7 @@ import { IncidentScenePanel } from "./IncidentScenePanel.jsx";
 import { IncidentSpeechPanel } from "./IncidentSpeech.jsx";
 import { IncidentStoryline } from "./IncidentStoryline.jsx";
 import { CorrectPanel, ObjectCards, PathPanel, WhyPanel } from "./IncidentStoryObjects.jsx";
+import { IncidentPeople } from "../people/IncidentPeople.jsx";
 import "./incident-detail.css";
 import "./incident-story.css";
 
@@ -90,6 +91,7 @@ function routeState() {
 }
 
 export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = false }) {
+  const [faceNames, setFaceNames] = useState([]);
   const [currentId, setCurrentId] = useState(incidentId);
   const [reviewRequested, setReview] = useState(() => routeState().review);
   // Review mode is for those who can record verdicts.
@@ -409,7 +411,9 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
   }, [incident, notification?.revision, zone]);
 
   const ongoing = ["active", "new", "updated"].includes(notification?.state || incident?.state);
-  const people = notification?.people || (incident?.identities || []).map((item) => item?.name).filter(Boolean);
+  const identityNames = notification?.people || (incident?.identities || []).map((item) => item?.name).filter(Boolean);
+  // Names from face capture join the incident's own identities.
+  const people = [...new Set([...identityNames, ...faceNames])];
   const builtTitle = incident ? incidentStoryTitle(incident, { cameraName, objects, people, fallback: notification?.summary || "" }) : "";
   // Only a wording of the current evidence replaces the built-in title.
   // A reopened (ongoing again) incident goes back to the built-in title.
@@ -503,6 +507,7 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
               <h2 className="story-aside-title">{objects.length} observed object{objects.length === 1 ? "" : "s"}</h2>
               {objects.length ? <ObjectCards objects={objects} line={line} selectedId={focusId} cameraName={cameraName} identities={cardNames} onSelect={selectObject} />
                 : <p className="story-muted">{incident.has_objects === false || !incident.labels?.length ? "Motion only. No objects were observed in the analyzed evidence." : "No object observations are available."}</p>}
+              <IncidentPeople eventIds={incident.event_ids || (incident.events || []).map((event) => event.id)} onNames={setFaceNames} />
               {!selected ? <WhyPanel incident={incident} cameraName={cameraName} />
                 : selected.kind === "uncertain" || correcting
                   ? <CorrectPanel incident={incident} object={selected} objects={objects} cameraName={cameraName} canCorrect={canCorrectIncident}

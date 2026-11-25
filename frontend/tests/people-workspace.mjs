@@ -70,3 +70,15 @@ for (const path of ["/api/face-groups?status=", "/api/face-people", "/api/face-c
   assert.ok(peoplePageSource.includes(path), `PeoplePage uses ${path}`);
 }
 assert.match(peoplePageSource, /This is \{group\.suggestion\.name\}\?/);
+
+// Faces captured in an incident show on its page and as name chips on its card.
+const incidentPeopleSource = readFileSync(new URL("../src/people/IncidentPeople.jsx", import.meta.url), "utf8");
+const incidentDetailSource = readFileSync(new URL("../src/incidents/IncidentDetailPage.jsx", import.meta.url), "utf8");
+const incidentCardSource = readFileSync(new URL("../src/incidents/IncidentCard.jsx", import.meta.url), "utf8");
+const incidentsPageSource = readFileSync(new URL("../src/incidents/IncidentsPage.jsx", import.meta.url), "utf8");
+assert.ok(incidentPeopleSource.includes("/api/face-captures/by-events?ids="));
+assert.match(incidentDetailSource, /<IncidentPeople eventIds=\{incident\.event_ids/);
+assert.match(incidentDetailSource, /const people = \[\.\.\.new Set\(\[\.\.\.identityNames, \.\.\.faceNames\]\)\]/);
+assert.match(incidentCardSource, /<FaceNameChips names=\{faceNames\} \/>/);
+assert.match(incidentsPageSource, /faceNames=\{incidentFaceNames\[String\(incident\.id\)\]\}/);
+assert.ok(peoplePageSource.includes("/api/incidents/by-event/"), "visits open their incident");

@@ -273,6 +273,30 @@ class FaceGroups:
                 connection, "group_id in (select id from capture_groups where person_id = ?)", (int(person_id),))
         return person
 
+    def for_events(self, event_ids: list[int]) -> dict[str, Any]:
+        """Who was captured in these events: per event, the groups seen; per group,
+        its person (or suggestion) and best faces in these events."""
+        ids = sorted({int(i) for i in event_ids})[:500]
+        if not ids:
+            return {"events": {}, "groups": []}
+        marks = ",".join("?" * len(ids))
+        with self.store._connect() as connection:
+            rows = connection.execute(
+                f"select id, event_id, group_id, norm from face_captures where event_id in ({marks})"
+                " and group_id is not null order by norm desc", ids).fetchall()
+            by_event: dict[int, list[int]] = defaultdict(list)
+            faces: dict[int, list[int]] = defaultdict(list)
+            for face_id, event_id, group_id, _ in rows:
+                if int(group_id) not in by_event[int(event_id)]:
+                    by_event[int(event_id)].append(int(group_id))
+                if len(faces[int(group_id)]) < SAMPLE_FACES:
+                    faces[int(group_id)].append(int(face_id))
+            groups = self._group_rows(
+                connection, f"g.id in ({','.join('?' * len(faces))})", tuple(faces), 500, 0) if faces else []
+        for group in groups:
+            group["incident_faces"] = faces[group["id"]]
+        return {"events": {str(event): group_ids for event, group_ids in by_event.items()}, "groups": groups}
+
     def face_crop_path(self, face_id: int) -> str | None:
         with self.store._connect() as connection:
             row = connection.execute("select crop_path from face_captures where id = ?", (int(face_id),)).fetchone()

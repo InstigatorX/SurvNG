@@ -91,6 +91,14 @@ function GroupCard({ group, cameras, names, busy, onName, onIgnore, onOpen, time
   </article>;
 }
 
+async function openIncident(eventId) {
+  const response = await fetch(`/api/incidents/by-event/${encodeURIComponent(eventId)}`).catch(() => null);
+  const incident = response?.ok ? await response.json().catch(() => null) : null;
+  const id = incident?.incident_id || incident?.id;
+  if (id) window.location.assign(appUrl(`/incidents/${encodeURIComponent(id)}`));
+  else window.alert("That visit's incident could not be found.");
+}
+
 function Visits({ visits, cameras, timeZone }) {
   if (!visits?.length) return null;
   return <section className="people-visits">
@@ -99,7 +107,10 @@ function Visits({ visits, cameras, timeZone }) {
       {visits.map((visit) => <li key={visit.event_id}>
         <img src={faceUrl(visit.best_face)} alt="" loading="lazy" />
         <span>{formatDateTime(visit.epoch, timeZone)}<small>{cameraNames([visit.camera_id], cameras)} · {visit.faces} {visit.faces === 1 ? "face" : "faces"}</small></span>
-        <a href={recordingsHref({ cameraId: visit.camera_id, epoch: visit.epoch, eventId: visit.event_id })}>Recording</a>
+        <span className="people-visit-links">
+          <button type="button" className="link-button" onClick={() => void openIncident(visit.event_id)}>Incident</button>
+          <a href={recordingsHref({ cameraId: visit.camera_id, epoch: visit.epoch, eventId: visit.event_id })}>Recording</a>
+        </span>
       </li>)}
     </ul>
   </section>;

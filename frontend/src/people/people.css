@@ -502,3 +502,15 @@
 .people-visits li img { width: 3rem; height: 3.75rem; object-fit: cover; border-radius: 4px; }
 .people-visits li span { display: grid; }
 .people-visits li small { opacity: 0.75; }
+
+/* Faces on incidents */
+.incident-face-names { display: inline-flex; gap: 0.25rem; flex-wrap: wrap; }
+.incident-face-name { display: inline-flex; gap: 0.2rem; align-items: center; padding: 0.05rem 0.4rem; border-radius: 999px; background: rgba(46, 125, 50, 0.85); color: #fff; font-size: 0.75rem; }
+.incident-people { display: grid; gap: 0.5rem; margin-top: 0.75rem; }
+.incident-people-group { display: grid; gap: 0.35rem; padding: 0.5rem; border: 1px solid rgba(127, 127, 127, 0.25); border-radius: 8px; }
+.incident-people-faces { display: flex; gap: 3px; }
+.incident-people-faces img { width: 3.2rem; height: 4rem; object-fit: cover; border-radius: 4px; }
+.incident-people-name { display: inline-flex; gap: 0.3rem; align-items: center; font-weight: 600; }
+.incident-people-unnamed { display: grid; gap: 0.35rem; }
+.incident-people-unnamed button { justify-self: start; display: inline-flex; gap: 0.3rem; align-items: center; }
+.people-visit-links { display: inline-flex; gap: 0.6rem; align-items: center; }

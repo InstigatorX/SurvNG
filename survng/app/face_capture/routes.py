@@ -153,6 +153,14 @@ def create_face_capture_router(deps: FaceCaptureRouteDependencies) -> APIRouter:
     def remove_face(face_id: int) -> dict[str, Any]:
         return edit(lambda: groups().remove_face(face_id))
 
+    @router.get("/api/face-captures/by-events")
+    def faces_by_events(ids: str = Query(..., max_length=8000, description="comma-separated event ids")) -> dict[str, Any]:
+        try:
+            event_ids = [int(part) for part in ids.split(",") if part.strip()]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="ids must be comma-separated event ids") from None
+        return groups().for_events(event_ids)
+
     @router.get("/api/face-captures/{face_id}/image")
     def face_image(face_id: int) -> FileResponse:
         capture = service()
