@@ -307,9 +307,9 @@ class _StreamSource:
     """Frames of one recording source over event-relative windows.
 
     Each segment covering a window is decoded once from its keyframe through
-    the window (``recording_frame_runs.stream_frames``), one frame held at a
-    time. ``fps`` thins the frames by time (the sub-stream's moment pass);
-    without it every frame comes through. A segment that cannot be decoded is
+    the window (``recording_frame_runs.stream_frames``), holding only its
+    short, byte-bounded queue of frames. ``fps`` thins the frames by time
+    (the sub-stream's moment pass); without it every frame comes through. A segment that cannot be decoded is
     skipped and noted in ``errors``; the window's other segments still run. A
     GPU that fails for other than the file is not used again for this event.
     """
@@ -332,7 +332,12 @@ class _StreamSource:
         if key not in self._sizes:
             size = mp4_video_dimensions(path)
             if size is None:
-                width, height, *_ = _ffprobe_video_metadata(path, self.ffmpeg_path)
+                try:
+                    width, height, *_ = _ffprobe_video_metadata(path, self.ffmpeg_path)
+                except RuntimeError:
+                    # Unprobeable (gone, unfinished): this segment is skipped
+                    # and noted, the window's other segments still run.
+                    width = height = 0
                 size = (width, height) if width > 0 and height > 0 else None
             self._sizes[key] = size
         return self._sizes[key]
@@ -341,6 +346,7 @@ class _StreamSource:
         self.hardware = None
 
     def __call__(self, start: float, end: float) -> Iterator[tuple[float, np.ndarray]]:
+        from ..recorded_decoder import FAILURE_UNREADABLE_INPUT
         from ..recording_frame_runs import FrameRunError, stream_frames
 
         epoch = self.event_epoch
@@ -355,7 +361,7 @@ class _StreamSource:
             try:
                 size = self._size(path)
                 if size is None:
-                    raise FrameRunError("unreadable_input", f"{path.name} has no video size")
+                    raise FrameRunError(FAILURE_UNREADABLE_INPUT, f"{path.name} has no video size")
                 for pts, frame in stream_frames(
                     self.ffmpeg_path, path, local_start, local_end, size=size,
                     hardware_acceleration=self.hardware, consumer="face_capture",

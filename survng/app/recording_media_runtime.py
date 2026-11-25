@@ -43,7 +43,7 @@ from .recorded_decoder import (
     FAILURE_TIMEOUT,
     DecodePlan,
 )
-from .recording_frame_runs import STREAM_FAILURES, FrameRunError, decode_frame_run, raw_bgr_frames  # noqa: F401
+from .recording_frame_runs import FrameRunError, decode_frame_run
 from .recording_frame_steps import (
     FRAME_TIME_TOLERANCE_SECONDS,
     SegmentFrames,
@@ -76,7 +76,6 @@ RECORDING_FRAME_JPEG_QUALITY = 88
 RECORDING_FRAME_MAINTENANCE_BYTES = 32 * 1024 * 1024
 # Frame lists probed at once (a demux each, on request threads).
 RECORDING_FRAME_LIST_PROBES = 2
-# Failures that are about the file, not the GPU: they do not turn it off.
 
 
 class RecordingPrewarmCancelled(RuntimeError):

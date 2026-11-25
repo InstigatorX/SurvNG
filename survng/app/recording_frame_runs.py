@@ -54,6 +54,9 @@ STREAM_FAILURES = frozenset({
 FRAME_LIST_TIMEOUT_SECONDS = 8.0
 # Decoded frames held while their times are read from stderr.
 STREAM_PENDING_BYTES = 64 * 1024 * 1024
+# A GPU stream with no first frame by then is hung; the CPU still has the
+# decoder's own (longer) first-output budget.
+STREAM_HARDWARE_FIRST_OUTPUT_SECONDS = 10.0
 
 
 class FrameRunError(RuntimeError):
@@ -207,17 +210,18 @@ def stream_frames(
     consumer: str,
     on_hardware_failure: Callable[[], None] | None = None,
 ) -> Iterator[tuple[float | None, np.ndarray]]:
-    """Every presented frame in ``[start, end)`` of one file at its full ``size``, streamed.
+    """Every presented frame in ``[start, end)`` of one file at ``size``, streamed.
 
     One decoder runs from the keyframe before ``start`` through ``end``, so
-    each GOP is decoded once and only one frame is held at a time; frame runs
-    suit a stepping player, this suits a consumer that wants every frame of a
+    each GOP is decoded once and only a bounded queue of frames is held (up
+    to ``STREAM_PENDING_BYTES`` while their times arrive); frame runs suit a
+    stepping player, this suits a consumer that wants every frame of a
     window. Times are seconds from the file's start time (accurate seek with
     -copyts -start_at_zero). A frame whose showinfo line was lost or torn
     comes with ``None``, never a neighbour's time. Explicit ``qsv`` or
-    ``vaapi`` decodes on the GPU; a GPU attempt that fails before its first
-    frame is retried on the CPU (``on_hardware_failure`` is told when the
-    failure was not the file's).
+    ``vaapi`` decodes on the GPU; a GPU attempt that fails or yields nothing
+    before its first frame is retried on the CPU (``on_hardware_failure`` is
+    told when the failure was not the file's).
     """
     plans = recorded_decode_plans(hardware_acceleration)
     for attempt, plan in enumerate(plans):
@@ -226,6 +230,10 @@ def stream_frames(
             for item in _stream_with_plan(ffmpeg_path, source_path, start_seconds, end_seconds, size, plan, consumer):
                 yielded = True
                 yield item
+            if not yielded and plan.backend != "cpu" and attempt < len(plans) - 1:
+                # A clean GPU exit with no frames: the CPU tries the window,
+                # and the GPU stays in use for other files.
+                continue
             return
         except FrameRunError as error:
             if yielded or attempt == len(plans) - 1:
@@ -241,13 +249,22 @@ def _stream_with_plan(
     width, height = size
     times: dict[int, float] = {}
     arrived = threading.Condition()
+    # showinfo numbers frames from 0 again when FFmpeg rebuilds the filter
+    # graph (a resolution or format change mid-file): frames before the
+    # rebuild are counted into ``numbering`` so each output frame keeps its
+    # own time.
+    numbering = {"base": 0, "last": -1}
 
     def on_line(line: bytes) -> bool:
         match = _SHOWINFO_FRAME.search(line)
         if match is None:
             return b"Parsed_showinfo" in line
+        number = int(match.group(1))
         with arrived:
-            times[int(match.group(1))] = float(match.group(2))
+            if number <= numbering["last"]:
+                numbering["base"] += numbering["last"] + 1
+            numbering["last"] = number
+            times[numbering["base"] + number] = float(match.group(2))
             arrived.notify_all()
         return True
 
@@ -256,23 +273,28 @@ def _stream_with_plan(
             times[-1] = 0.0
             arrived.notify_all()
 
-    # Hardware frames are brought to system memory before showinfo.
+    # Hardware frames are brought to system memory before showinfo. The
+    # scale keeps every raw frame exactly ``size`` even when the decoded size
+    # differs from the probed one, so the pipe never falls out of frame.
     download = f"{plan.download_filter}," if plan.download_filter else ""
     command = build_decode_command(
         ffmpeg_path, source_path, plan=plan, loglevel="info",
         seek=f"{max(0.0, start_seconds - FRAME_TIME_TOLERANCE_SECONDS):.6f}", copyts=True, start_at_zero=True,
         first_video_stream=True,
-        video_filter=f"trim=start={start_seconds:.6f}:end={end_seconds:.6f},{download}showinfo",
+        video_filter=(
+            f"trim=start={start_seconds:.6f}:end={end_seconds:.6f},{download}scale={width}:{height},showinfo"
+        ),
         passthrough_timestamps=True, transport="raw",
     )
     frame_bytes = width * height * 3
     try:
         decoder = StreamingDecode(
             command, backend=plan.backend, buffer_bytes=frame_bytes * 2,
+            first_output_timeout=None if plan.backend == "cpu" else STREAM_HARDWARE_FIRST_OUTPUT_SECONDS,
             on_stderr_line=on_line, on_stderr_end=on_end,
         )
     except OSError as exc:
-        raise FrameRunError("spawn", f"decoder for {source_path.name} failed to start") from exc
+        raise FrameRunError(FAILURE_SPAWN, f"decoder for {source_path.name} failed to start") from exc
     # A frame's time arrives on stderr, read by another thread. Waiting for it
     # frame by frame costs a thread handoff each (milliseconds); instead frames
     # wait in a short queue until their time is in, bounded by bytes.

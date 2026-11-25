@@ -245,8 +245,10 @@ class FaceCaptureService:
             # sub-stream and stored boxes are in main-stream pixels even when
             # no segment covers the epoch itself.
             low, high = event_window(plan, settings.margin_seconds)
-            # One recording-index lookup per source for the whole event.
-            window_rows = rows_for_window(rows, epoch + low - 1.0, epoch + high + 1.0)
+            # One recording-index lookup per source for the whole event; it
+            # reaches past the window by the moment radius, as pass two does.
+            reach = settings.moment_radius_seconds + 1.0
+            window_rows = rows_for_window(rows, epoch + low - reach, epoch + high + reach)
             main_rows = window_rows("main", epoch + low, epoch + high)
             main_size = mp4_video_dimensions(Path(main_rows[0]["path"])) if main_rows else None
             with self._events_connection() as connection:

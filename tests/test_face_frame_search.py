@@ -1,4 +1,4 @@
-from survng.app import face_frame_search
+from survng.app import face_frame_search, recording_frame_runs
 from survng.app.face_frame_search import (
     EventResult,
     FrameResult,
@@ -72,7 +72,7 @@ def test_showinfo_frame_index_and_time_are_read_together():
         b"[Parsed_showinfo_1 @ 0x55] n:  17 pts:  77400 pts_time:0.86 "
         b"duration:4500 fmt:yuv420p"
     )
-    match = face_frame_search._SHOWINFO_FRAME.search(line)
+    match = recording_frame_runs._SHOWINFO_FRAME.search(line)
     assert match is not None
     assert int(match.group(1)) == 17
     assert float(match.group(2)) == 0.86

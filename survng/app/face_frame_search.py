@@ -35,7 +35,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sqlite3
 import sys
 import time
@@ -426,11 +425,6 @@ class FrameSearcher:
                 "_thumb": thumb,
             })
         return FrameResult(round(offset, 3), usefulness, measured, heights)
-
-
-_SHOWINFO_FRAME = re.compile(
-    rb"Parsed_showinfo[^\r\n]*\bn:\s*(\d+)[^\r\n]*\bpts_time:\s*([-+0-9.eE]+)"
-)
 
 
 def every_frame(
