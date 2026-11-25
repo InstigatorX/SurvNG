@@ -236,6 +236,47 @@ def test_unloaded_capture_models_defer_instead_of_using_attempts(tmp_path, monke
     monkeypatch.setattr(service_module, "capture_event", lambda **kwargs: pytest.fail("captured"))
     assert service.run_once(NOW) is False
     assert service.store.attempts([1]) == {}
+    # However long the models stay unloaded, the event is neither held nor failed.
+    for _ in range(service_module.MAX_CONSECUTIVE_DEFERRALS + 1):
+        assert service.run_once(NOW) is False
+    assert service.store.attempts([1]) == {}
+    assert 1 not in service._deferred
+
+
+def test_preemption_by_incident_work_is_not_counted_toward_failure(tmp_path, monkeypatch):
+    from survng.app.evidence_work import EvidenceWorkPreempted
+
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(30))])
+
+    def preempted(**kwargs):
+        raise EvidenceWorkPreempted()
+
+    monkeypatch.setattr(service_module, "capture_event", preempted)
+    for _ in range(service_module.MAX_CONSECUTIVE_DEFERRALS + 1):
+        assert service.capture(*service.next_event(NOW)) is None
+        service._deferred[1] = (service._deferred[1][0], 0.0)  # the hold has passed
+    assert service.store.attempts([1]) == {}
+    assert service._deferred[1][0] == 0
+
+
+def test_a_full_scan_cut_short_by_a_newer_event_is_finished_on_the_next_pass(tmp_path):
+    # Event 1 is confirmed only after event 2 was scanned past it.
+    rows = [(1, "gate", _person_event(consensus=False), _at(90)), (2, "gate", _person_event(), _at(60))]
+    service = _service(tmp_path, rows)
+    service.store.record(event_id=2, camera_id="gate", event_epoch=0.0, result=CaptureResult(),
+                         embedding_model="m", seconds=1.0)
+    assert service.next_event(NOW) is None
+    assert service._scan_floor == 2
+    connection = sqlite3.connect(tmp_path / "survng.sqlite3")
+    connection.execute("update events set objects_json = ? where id = 1", (_person_event(),))
+    connection.execute("insert into events values (3, 'gate', ?, ?)", (_person_event(), _at(30)))
+    connection.commit()
+    connection.close()
+    service._full_scan_due = 0.0  # the hourly full scan is due
+    assert service.next_event(NOW)[0] == 3  # the full scan returns the newer event first
+    service.store.record(event_id=3, camera_id="gate", event_epoch=0.0, result=CaptureResult(),
+                         embedding_model="m", seconds=1.0)
+    assert service.next_event(NOW)[0] == 1
 
 
 def test_a_malformed_stored_observation_is_skipped():

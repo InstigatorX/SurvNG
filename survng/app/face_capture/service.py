@@ -53,10 +53,12 @@ ERROR_LOG_INTERVAL_SECONDS = 300.0
 DEFER_BASE_SECONDS = IDLE_SECONDS
 DEFER_MAX_SECONDS = 3600.0
 MAX_TRACKED_DEFERRALS = 10_000
-# An event deferred this many times in a row (about a day with the backoff)
-# counts as a failed attempt: one that keeps timing the face worker out must
-# not restart it, for recognition too, all through the backfill window.
-MAX_CONSECUTIVE_DEFERRALS = 8
+# An event deferred this many times in a row (about a day with the backoff:
+# 30 s doubling to the 1 h cap, then hourly) counts as a failed attempt: one
+# that keeps timing the face worker out must not restart it, for recognition
+# too, all through the backfill window. Preemption by incident work and
+# capture models that did not load are not counted.
+MAX_CONSECUTIVE_DEFERRALS = 31
 # A failed event waits this long before its next attempt, so a passing cause
 # (a segment not indexed yet, a decoder timing out under load) does not use
 # up every attempt within a minute.
@@ -163,9 +165,10 @@ class FaceCaptureService:
         # created_at: its recordings must have settled too.
         settled_epoch = now.timestamp() - settle - MAX_WINDOW_SECONDS
         waiting = time.monotonic()
+        # Passes stay full scans until one reaches the end of the window: a
+        # full scan that returns a newer candidate first has not yet reached
+        # older events (e.g. confirmed after a newer one was scanned).
         floor = self._scan_floor if waiting < self._full_scan_due else 0
-        if floor == 0:
-            self._full_scan_due = waiting + FULL_SCAN_SECONDS
         pending: int | None = None  # lowest id that may still need work
         newest = 0
         before_id: int | None = None
@@ -210,6 +213,8 @@ class FaceCaptureService:
                     return candidate
             if reached_floor or len(candidates) < CANDIDATE_BATCH:
                 self._scan_floor = pending - 1 if pending is not None else max(floor, newest)
+                if floor == 0:
+                    self._full_scan_due = waiting + FULL_SCAN_SECONDS
                 return None
             before_id = candidates[-1][0]
 
@@ -247,13 +252,14 @@ class FaceCaptureService:
         ffmpeg = str(app_config.ffmpeg_path or "ffmpeg")
         ffprobe = str(Path(ffmpeg).with_name("ffprobe")) if "/" in ffmpeg else "ffprobe"
         hardware = str(app_config.hardware_acceleration or "")
+        # Models that did not load hold up every event alike: nothing is held
+        # or counted against this one, and the next pass checks again.
+        unavailable = getattr(inference, "face_capture_unavailable", None)
+        reason = unavailable() if callable(unavailable) else ""
+        if reason:
+            self._log_error(f"face capture waiting: {reason}")
+            return None
         try:
-            # Models that did not load defer every event instead of using up
-            # each one's attempts.
-            unavailable = getattr(inference, "face_capture_unavailable", None)
-            reason = unavailable() if callable(unavailable) else ""
-            if reason:
-                raise InferenceUnavailable(reason)
             # Inside the try: an event whose lookups fail is recorded as a
             # failed attempt instead of being picked again on every pass.
             plan = plan_offsets(config, qualification, epoch, camera_id)
@@ -285,7 +291,12 @@ class FaceCaptureService:
                 )
         except CaptureCancelled:
             return None
-        except (EvidenceWorkPreempted, InferenceUnavailable) as exc:
+        except EvidenceWorkPreempted:
+            # Incident work came first: retried soon, never counted.
+            if not self._stop.is_set():
+                self._defer(event_id, counted=False)
+            return None
+        except InferenceUnavailable as exc:
             if self._stop.is_set():
                 return None
             if self._deferred.get(event_id, (0, 0.0))[0] + 1 >= MAX_CONSECUTIVE_DEFERRALS:
@@ -324,10 +335,10 @@ class FaceCaptureService:
         self._log_error(f"face capture failed for event {event_id} on {camera_id}: {error}")
         return 0
 
-    def _defer(self, event_id: int) -> None:
+    def _defer(self, event_id: int, *, counted: bool = True) -> None:
         count = self._deferred.get(event_id, (0, 0.0))[0]
         delay = min(DEFER_MAX_SECONDS, DEFER_BASE_SECONDS * (2 ** min(count, 16)))
-        self._hold(event_id, count + 1, delay)
+        self._hold(event_id, count + 1 if counted else count, delay)
 
     def _hold(self, event_id: int, count: int, delay: float) -> None:
         if event_id not in self._deferred and len(self._deferred) >= MAX_TRACKED_DEFERRALS:
