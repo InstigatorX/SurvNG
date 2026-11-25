@@ -274,6 +274,8 @@ class CameraStatusService:
             f"onvif_{field}": getattr(self.onvif, field)
             for field in fields
         }
+        diagnostics["onvif_unreachable"] = bool(getattr(self.onvif, "unreachable", False))
+        diagnostics["onvif_abandoned_workers"] = int(getattr(self.onvif, "abandoned_workers", 0) or 0)
         effectiveness_snapshot = getattr(
             self.onvif, "effectiveness_snapshot", None
         )
