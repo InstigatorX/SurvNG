@@ -337,6 +337,19 @@ class FrameSearcher:
         norm = float(np.asarray(result[self.adaface.output(1)]).reshape(-1)[0])
         return norm, embedding
 
+    def people(self, frame: Any) -> list[tuple[float, float, float, float]]:
+        """Person boxes at the candidate threshold, as (x1, y1, x2, y2)."""
+        from .motion_pipeline.object_detection import _box
+
+        objects = self.person_detector.detect(
+            frame, confidence_threshold=float(self.config.event_candidate_confidence_threshold)
+        )
+        return [
+            box for item in objects
+            if isinstance(item, dict) and str(item.get("label") or "").lower() == "person"
+            and (box := _box(item)) is not None
+        ]
+
     def search(self, frame: Any, offset: float) -> FrameResult:
         from .motion_pipeline.object_detection import RecordedMotionObjectDetector, _box
         from .motion_pipeline.recorded_evidence import _image_quality

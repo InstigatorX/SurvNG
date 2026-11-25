@@ -124,12 +124,11 @@ dropped in the same change.
 `face_capture_faces_per_track`, `face_capture_margin_seconds`. Recognition
 settings stay as they are until priority 2.
 
-## Decisions needed
+## Decisions (agreed 2026-11-24)
 
-1. Face detector: YuNet with the norm cut (recommended), or both detectors.
-2. Whether refinement stops searching for faces as soon as the job ships
-   (recommended), or both run for a comparison period.
-3. Cameras without a sub-stream use the fallbacks; confirm none need more.
+1. Face detector: YuNet, with the AdaFace norm cut.
+2. Refinement stops searching for faces as soon as the capture job ships.
+3. Cameras without a sub-stream use the fallbacks above.
 
 ## Verification before building
 
