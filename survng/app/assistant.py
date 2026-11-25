@@ -705,6 +705,18 @@ class AssistantProvider:
         except AiProviderTransportError as exc:
             raise AuditAiError(str(exc)) from exc
 
+    def complete_json(
+        self,
+        system_prompt: str,
+        prompt: str,
+        schema: dict[str, Any],
+        schema_name: str,
+        *,
+        model_override: str = "",
+    ) -> str:
+        """Text-only structured completion on the shared provider settings."""
+        return self._complete_json(system_prompt, prompt, schema, schema_name, model_override=model_override)
+
     def _complete_json(
         self,
         system_prompt: str,

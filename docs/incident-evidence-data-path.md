@@ -234,6 +234,17 @@ the incident list; "Nothing here" does not move an incident to Observations.
 in list order (newest first) with their verdicts and `total`, `reviewed`, `kept`
 and `remaining` counts. The PUT requires admin scope like corrections.
 
+`GET /api/incidents/{incident_id}/title` returns an optional provider-worded
+title when `audit_ai.enabled` and `audit_ai.incident_titles_enabled` are on
+(the latter is off by default): `status` is `disabled`, `skipped` (no observed
+objects), `ready` (with `title`, `revision`, and `current` false while an older
+wording is kept for up to a minute) or `failed` (with a `reason`). The provider
+receives only identifier-free scene facts (`incident_titles.incident_title_facts`)
+through the assistant's text-only structured call. Results are cached per
+incident and revision; failures are logged with rate limiting and retried after
+a minute. The page never waits on this route and keeps its built-in title
+unless the status is `ready`.
+
 Search, assistant investigation, recording views and notifications resolve the
 same canonical scene. Semantic and appearance indexes can reference retained
 observations independently of current covers. Image/model unavailability remains

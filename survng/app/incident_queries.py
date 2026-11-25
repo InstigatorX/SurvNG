@@ -29,6 +29,7 @@ from .incident_utils import (
     event_snapshot_path,
 )
 from .identity_projection import apply_incident_identities
+from .incident_titles import IncidentTitleGenerator
 from .manager import AppManager
 from .manager_access import ManagerAccessCoordinator, manager_generation_lease
 
@@ -874,6 +875,22 @@ def create_incident_query_router(
             })
             return service.with_faces(active, [result])[0]
         return with_manager(correct)
+
+    titles = IncidentTitleGenerator()
+
+    @router.get("/api/incidents/{incident_id}/title")
+    def incident_title(incident_id: str) -> dict[str, Any]:
+        # Opt-in provider wording. The incident page keeps its built-in title
+        # unless this returns status "ready"; it never waits on this route.
+        def snapshot(active):
+            incident = active.events.scene_incident(incident_id)
+            if incident is None:
+                raise HTTPException(status_code=404, detail="incident was not found")
+            names = {camera.id: camera.name or camera.id for camera in active.config.cameras}
+            return incident, active.config.audit_ai.model_copy(), names
+        incident, ai_config, names = with_manager(snapshot)
+        # The provider call runs outside the manager lease.
+        return titles.title(incident, ai_config, names)
 
     @router.get("/api/incidents/{incident_id}/review")
     def incident_review(incident_id: str):

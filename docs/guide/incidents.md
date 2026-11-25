@@ -44,7 +44,8 @@ and completed analysis remain visible.
 
 Opening an incident on a phone, or from a notification link, shows the incident
 page. Its title is built from what was observed, for example *Car arrives, person
-walks to Front Door*.
+walks to Front Door*. Administrators can optionally have the AI provider word
+titles instead; see [AI incident titles](assistant.md#ai-incident-titles-optional).
 
 - **Player.** The incident opens on its best frame with every object's box.
   **Play incident** plays each camera episode in order.

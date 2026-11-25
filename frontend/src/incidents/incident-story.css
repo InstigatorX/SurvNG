@@ -43,6 +43,7 @@
 .story-heading h1 { margin: 0; font-size: 1.375rem; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
 .story-meta { margin: 0; font-size: var(--text-sm); color: var(--muted); display: flex; flex-wrap: wrap; align-items: center; gap: 0 4px; }
 .story-status { margin-left: 8px; padding: 2px 8px; border-radius: 10px; background: color-mix(in srgb, var(--story-good) 22%, transparent); color: var(--story-good-ink); font-size: var(--text-xs); }
+.story-ai-note { margin-left: 4px; color: var(--muted); }
 .story-header-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .story-header-actions > button, .story-button {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;

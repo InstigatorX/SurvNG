@@ -245,6 +245,9 @@ class AuditAiConfig(BaseModel):
     assistant_reasoning_model: str = Field(default="", max_length=256)
     timeout_seconds: float = Field(default=45.0, ge=5.0, le=120.0)
     allow_apply_recommendations: bool = False
+    # Opt-in: word incident titles with the provider. The built-in title from
+    # objects, cameras and zones stays the default and the fallback.
+    incident_titles_enabled: bool = False
 
 
 class SemanticSearchConfig(BaseModel):

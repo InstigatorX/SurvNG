@@ -11,6 +11,10 @@
   `GET /api/incidents/review-queue` and `GET`/`PUT /api/incidents/{id}/review`.
   A verdict is feedback only and never changes evidence. See
   `docs/guide/incidents.md`.
+- Optional AI incident titles (Admin → AI Provider, off by default) word the
+  incident page title with the configured provider from scene facts only, and
+  fall back to the built-in title when off or on failure. See
+  `docs/guide/assistant.md`.
 - Database cleanup runs daily at `database_retention.run_at` (host local time,
   default `03:00`) instead of 10 minutes after every restart. A restart only
   starts a catch-up run when the last completed run began more than
