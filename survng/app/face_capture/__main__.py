@@ -275,6 +275,9 @@ def _seed_one(store, engine, people, settings, config, events, rows, ffmpeg, ffp
     from .groups import FaceGroups
 
     FaceGroups(store).assign(event_id, float(config.face_group_threshold))
+    # Its names reach scene identities when SurvNG next syncs them (at start,
+    # or after the next People page edit).
+    store.queue_identity_sync([event_id])
 
 
 def compare(summary: list[dict[str, Any]], reference: dict[str, Any], minimum: float) -> str:

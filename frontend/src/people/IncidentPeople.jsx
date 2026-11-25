@@ -44,7 +44,18 @@ export function useIncidentFaceNames(incidents) {
     const controller = new AbortController();
     const eventsOf = new Map((incidents || []).map((incident) => [String(incident.id), (incident.events || []).map((event) => Number(event.id))]));
     fetchFacesForEvents([...eventsOf.values()].flat(), controller.signal).then((found) => {
-      if (!found) return;
+      if (!found) {
+        // Not allowed to read the People data (viewer role) or it failed:
+        // the names the incidents themselves carry.
+        if (controller.signal.aborted) return;
+        const next = {};
+        for (const incident of incidents || []) {
+          const people = [...new Set((incident.identities || []).map((item) => item?.name).filter(Boolean))];
+          if (people.length) next[String(incident.id)] = people;
+        }
+        setNames(next);
+        return;
+      }
       const personOf = new Map(found.groups.filter((group) => group.person_name && !group.ignored).map((group) => [group.id, group.person_name]));
       const next = {};
       for (const [incidentId, eventIds] of eventsOf) {

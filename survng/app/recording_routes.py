@@ -191,8 +191,7 @@ def _identity_hydrated_recording_incidents(
     incidents.sort(key=lambda item: item["start_epoch"], reverse=True)
     if not include_identities:
         return incidents
-    face_store = getattr(active_manager, "faces", None)
-    if face_store is None or not hasattr(face_store, "for_event_ids"):
+    if not callable(getattr(active_manager, "face_identity_observations", None)):
         return incidents
     from .incident_queries import IncidentQueryService
     return IncidentQueryService.with_faces(active_manager, incidents)

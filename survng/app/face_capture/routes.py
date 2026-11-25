@@ -5,6 +5,7 @@ Faces are personal data, so every route here requires the admin scope (see
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,6 +18,8 @@ from pydantic import BaseModel, Field
 
 from .groups import GroupNotFound
 from .store import SeedConflict
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,13 +148,29 @@ def create_face_capture_router(deps: FaceCaptureRouteDependencies) -> APIRouter:
     def groups() -> Any:
         return service().groups
 
-    def edit(action: Callable[[], Any]) -> Any:
+    def edit(action: Callable[[], Any], affected: Callable[[], list[int]] | None = None) -> Any:
+        """Run an edit; names in the events it touched reach their incidents.
+
+        ``affected`` is read before the edit (a merge or a forget empties
+        what it would look up afterwards).
+        """
         try:
-            return action()
+            events = affected() if affected is not None else []
+            result = action()
         except GroupNotFound:
             raise HTTPException(status_code=404, detail="not found") from None
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
+        # The edit is committed: what follows must not turn it into an error.
+        try:
+            # Again after: faces the capture thread grouped meanwhile too.
+            events = sorted(set(events) | set(affected() if affected is not None else []))
+            sync = getattr(deps.get_manager(), "sync_face_identities", None)
+            if events and callable(sync):
+                sync(events)
+        except Exception:
+            LOGGER.exception("a People page edit was saved but its names could not be queued for incidents")
+        return result
 
     @router.get("/api/face-groups")
     def list_groups(
@@ -167,23 +186,28 @@ def create_face_capture_router(deps: FaceCaptureRouteDependencies) -> APIRouter:
 
     @router.post("/api/face-groups/{group_id}/name")
     def name_group(group_id: int, request: NameRequest) -> dict[str, Any]:
-        return edit(lambda: groups().name_group(group_id, request.name))
+        return edit(lambda: groups().name_group(group_id, request.name),
+                    lambda: groups().event_ids_of(group_ids=[group_id]))
 
     @router.post("/api/face-groups/{group_id}/unname")
     def unname_group(group_id: int) -> dict[str, Any]:
-        return edit(lambda: groups().unname_group(group_id))
+        return edit(lambda: groups().unname_group(group_id),
+                    lambda: groups().event_ids_of(group_ids=[group_id]))
 
     @router.post("/api/face-groups/{group_id}/ignore")
     def ignore_group(group_id: int, request: IgnoreRequest) -> dict[str, Any]:
-        return edit(lambda: groups().ignore_group(group_id, request.ignored))
+        return edit(lambda: groups().ignore_group(group_id, request.ignored),
+                    lambda: groups().event_ids_of(group_ids=[group_id]))
 
     @router.post("/api/face-groups/{group_id}/merge")
     def merge_group(group_id: int, request: MergeRequest) -> dict[str, Any]:
-        return edit(lambda: groups().merge_groups(group_id, request.into))
+        return edit(lambda: groups().merge_groups(group_id, request.into),
+                    lambda: groups().event_ids_of(group_ids=[group_id, request.into]))
 
     @router.post("/api/face-captures/{face_id}/remove")
     def remove_face(face_id: int) -> dict[str, Any]:
-        return edit(lambda: groups().remove_face(face_id))
+        return edit(lambda: groups().remove_face(face_id),
+                    lambda: groups().event_ids_of(face_ids=[face_id]))
 
     @router.get("/api/face-captures/by-events")
     def faces_by_events(ids: str = Query(..., max_length=8000, description="comma-separated event ids")) -> dict[str, Any]:
@@ -215,6 +239,13 @@ def create_face_capture_router(deps: FaceCaptureRouteDependencies) -> APIRouter:
             raise HTTPException(status_code=404, detail="face image not found")
         return FileResponse(resolved, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
 
+    @router.get("/api/face-names")
+    def list_names() -> dict[str, Any]:
+        """Named people, id and name only: the incident person filter, for every role
+        that sees incidents (their names are on the incidents already). From the
+        source that names incidents, so a choice always matches."""
+        return {"people": deps.get_manager().identity_people()}
+
     @router.get("/api/face-people")
     def list_people() -> dict[str, Any]:
         return {"people": groups().people(), "summary": groups().summary()}
@@ -225,11 +256,13 @@ def create_face_capture_router(deps: FaceCaptureRouteDependencies) -> APIRouter:
 
     @router.post("/api/face-people/{person_id}/rename")
     def rename_person(person_id: int, request: NameRequest) -> dict[str, Any]:
-        return edit(lambda: groups().rename_person(person_id, request.name))
+        return edit(lambda: groups().rename_person(person_id, request.name),
+                    lambda: groups().event_ids_of(person_ids=[person_id]))
 
     @router.delete("/api/face-people/{person_id}")
     def forget_person(person_id: int) -> dict[str, Any]:
-        edit(lambda: groups().forget_person(person_id))
+        edit(lambda: groups().forget_person(person_id),
+             lambda: groups().event_ids_of(person_ids=[person_id]))
         return {"forgotten": person_id}
 
     return router

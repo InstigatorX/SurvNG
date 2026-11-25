@@ -1619,6 +1619,12 @@ class EventStoreSceneMixin:
                 + ("and event_id=? " if event_id is not None else "") + "order by id limit ?",
                 (after_id, *((event_id,) if event_id is not None else ()), max(1,min(int(limit),1000))))]
 
+    def scene_identities_of(self,event_id):
+        """The accepted identities the event's scene identities hold now."""
+        with self._connect() as conn:
+            row=conn.execute("select payload_json from scene_identities where event_id=?",(int(event_id),)).fetchone()
+        return list(json.loads(row[0])) if row and row[0] else []
+
     def update_scene_identities(self,event_id,identities,*,routes=()):
         """Attach accepted identity evidence and conservatively connect episodes.
 

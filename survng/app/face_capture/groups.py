@@ -18,6 +18,7 @@ from __future__ import annotations
 import sqlite3
 from collections import defaultdict
 from datetime import datetime, timezone
+from collections.abc import Iterable
 from typing import Any
 
 import numpy as np
@@ -148,8 +149,14 @@ def recompute_group(connection, group_id: int, drop_empty: bool = True) -> None:
     )
 
 
-def assign_faces(connection, threshold: float = DEFAULT_GROUP_THRESHOLD, event_id: int | None = None) -> int:
-    """Group faces that have no group yet (one event's, or all); returns how many."""
+def assign_faces(
+    connection, threshold: float = DEFAULT_GROUP_THRESHOLD, event_id: int | None = None,
+    grouped: set[int] | None = None,
+) -> int:
+    """Group faces that have no group yet (one event's, or all); returns how many.
+
+    ``grouped`` collects the events whose faces were placed.
+    """
     query = "select id, event_id, track, embedding, captured_epoch from face_captures where group_id is null"
     args: tuple[Any, ...] = ()
     if event_id is not None:
@@ -181,7 +188,7 @@ def assign_faces(connection, threshold: float = DEFAULT_GROUP_THRESHOLD, event_i
     counts: dict[int, int] = {}
     placed = 0
     now = _now()
-    for faces in tracks.values():
+    for track_key, faces in tracks.items():
         mean = _unit(np.mean([vector for _, vector, _ in faces], axis=0)).astype(np.float32)
         best = None
         assignment = "auto"
@@ -219,6 +226,8 @@ def assign_faces(connection, threshold: float = DEFAULT_GROUP_THRESHOLD, event_i
             "update face_captures set group_id = ?, assignment = ? where id = ?",
             [(best, assignment, face_id) for face_id, _, _ in faces],
         )
+        if grouped is not None:
+            grouped.add(int(track_key[0]))
         if owner.get(best) is not None and best not in ignored:
             track_sum = np.sum([vector for _, vector, _ in faces], axis=0, dtype=np.float64)
             people[owner[best]] = people.get(owner[best], 0) + track_sum
@@ -254,7 +263,10 @@ class FaceGroups:
 
     # Grouping --------------------------------------------------------------
 
-    def assign(self, event_id: int | None = None, threshold: float = DEFAULT_GROUP_THRESHOLD) -> int:
+    def assign(
+        self, event_id: int | None = None, threshold: float = DEFAULT_GROUP_THRESHOLD,
+        grouped: set[int] | None = None,
+    ) -> int:
         with self.store._lock, self.store._connect() as connection:
             # Read first: the capture loop calls this every pass, and most
             # passes have nothing to group, so they take no write lock.
@@ -264,7 +276,7 @@ class FaceGroups:
             if not pending:
                 return 0
             connection.execute("begin immediate")
-            return assign_faces(connection, threshold, event_id)
+            return assign_faces(connection, threshold, event_id, grouped)
 
     # Reading ---------------------------------------------------------------
 
@@ -350,6 +362,71 @@ class FaceGroups:
             person["visits"] = _visits(
                 connection, "group_id in (select id from capture_groups where person_id = ?)", (int(person_id),))
         return person
+
+    def identity_observations(self, event_ids: list[int]) -> list[dict[str, Any]]:
+        """Named people seen in these events, shaped like the face store's observations.
+
+        One row per event and person: the face closest to its group's mean.
+        Incidents, search and scene identities read names through this. A
+        face a person placed by hand ('moved') is confirmed; one placed by
+        similarity is automatic. Ignored groups name no one.
+        """
+        ids = sorted({int(i) for i in event_ids if int(i) > 0})
+        best: dict[tuple[int, int], dict[str, Any]] = {}
+        with self.store._connect() as connection:
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                for row in connection.execute(
+                        "select f.id, f.event_id, f.camera_id, f.captured_epoch, f.embedding, f.assignment,"
+                        " g.centroid, p.id as person_id, p.name from face_captures f"
+                        " join capture_groups g on g.id = f.group_id join capture_people p on p.id = g.person_id"
+                        f" where g.ignored = 0 and f.event_id in ({','.join('?' * len(chunk))})", chunk):
+                    similarity = float(np.frombuffer(row[4], dtype=np.float32) @ np.frombuffer(row[6], dtype=np.float32))
+                    confidence = round(max(0.0, min(1.0, similarity)), 4)
+                    confirmed = row[5] == "moved"
+                    key = (int(row[1]), int(row[7]))
+                    current = best.get(key)
+                    if current is not None and (current["_confirmed"], current["match_confidence"]) >= (
+                            confirmed, confidence):
+                        continue
+                    best[key] = {
+                        "observation_id": int(row[0]),
+                        "event_id": int(row[1]),
+                        "camera_id": str(row[2]),
+                        "observed_at": datetime.fromtimestamp(float(row[3]), timezone.utc).isoformat(),
+                        "person_id": int(row[7]),
+                        "person_name": str(row[8]),
+                        "auto_identified": not confirmed,
+                        "review_status": "confirmed" if confirmed else "auto_identified",
+                        "match_confidence": confidence,
+                        "source": "face_capture",
+                        "_confirmed": confirmed,
+                    }
+        for row in best.values():
+            row.pop("_confirmed")
+        return sorted(best.values(), key=lambda row: (row["event_id"], row["person_name"].lower()))
+
+    def event_ids_of(
+        self, *, group_ids: Iterable[int] = (), person_ids: Iterable[int] = (), face_ids: Iterable[int] = (),
+    ) -> list[int]:
+        """Events with faces in these groups, any group of these people, or these faces."""
+        with self.store._connect() as connection:
+            events = set()
+            for face_id in face_ids:
+                row = connection.execute("select event_id from face_captures where id = ?", (int(face_id),)).fetchone()
+                if row:
+                    events.add(int(row[0]))
+            groups = {int(i) for i in group_ids}
+            for person_id in person_ids:
+                groups.update(int(r[0]) for r in connection.execute(
+                    "select id from capture_groups where person_id = ?", (int(person_id),)))
+            ordered = sorted(groups)
+            for start in range(0, len(ordered), 500):
+                chunk = ordered[start:start + 500]
+                events.update(int(r[0]) for r in connection.execute(
+                    f"select distinct event_id from face_captures where group_id in ({','.join('?' * len(chunk))})",
+                    chunk))
+            return sorted(events)
 
     def for_events(self, event_ids: list[int]) -> dict[str, Any]:
         """Who was captured in these events: per event, the groups seen; per group,
@@ -478,7 +555,9 @@ class FaceGroups:
             self._require_group(connection, source_id)
             self._require_group(connection, target_id)
             connection.execute(
-                "update face_captures set group_id = ?, assignment = 'moved' where group_id = ?",
+                # Faces keep how they were placed: merging two groups confirms
+                # nobody's face (only taking one face out does).
+                "update face_captures set group_id = ? where group_id = ?",
                 (int(target_id), int(source_id)))
             source_person = connection.execute(
                 "select person_id from capture_groups where id = ?", (int(source_id),)).fetchone()[0]

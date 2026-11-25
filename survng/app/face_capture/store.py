@@ -91,10 +91,18 @@ create table if not exists face_capture_covered (
     primary key (event_id, source_event_id)
 );
 create index if not exists face_capture_covered_source on face_capture_covered(source_event_id);
+-- Events whose names changed on the People page and still have to be
+-- recorded as scene identities (kept across reloads and restarts).
 -- Counters other processes (the offline seed) raise for the service to see.
 create table if not exists face_capture_state (
     key text primary key,
     value integer not null
+);
+create table if not exists face_identity_sync (
+    event_id integer primary key,
+    -- Raised on every queueing: a sync done for an older version leaves the
+    -- row for the newer one.
+    version integer not null default 1
 );
 """
 
@@ -116,8 +124,10 @@ class ClosingConnection(sqlite3.Connection):
 
 
 class FaceCaptureStore:
+    DATABASE_NAME = "face-captures.sqlite3"
+
     def __init__(self, database_dir: Path) -> None:
-        self.path = Path(database_dir) / "face-captures.sqlite3"
+        self.path = Path(database_dir) / self.DATABASE_NAME
         self.crop_dir = Path(database_dir) / "face-captures"
         self._lock = threading.Lock()
         # The reset counter last seen (see take_dependents_reset).
@@ -307,6 +317,42 @@ class FaceCaptureStore:
             changed = self._resets_seen is not None and count != self._resets_seen
             self._resets_seen = count
         return changed
+
+    def queue_identity_sync(self, event_ids: Iterable[int]) -> None:
+        with self._lock, self._connect() as connection:
+            connection.executemany(
+                "insert into face_identity_sync (event_id) values (?)"
+                " on conflict(event_id) do update set version = version + 1",
+                [(int(event_id),) for event_id in event_ids])
+
+    def identity_sync_pending(self) -> bool:
+        with self._connect() as connection:
+            return connection.execute("select exists(select 1 from face_identity_sync)").fetchone()[0] == 1
+
+    def identity_sync_batch(self, limit: int = 100) -> list[tuple[int, int]]:
+        """Queued (event, version), oldest event first; rows stay until done."""
+        with self._connect() as connection:
+            return [(int(row[0]), int(row[1])) for row in connection.execute(
+                "select event_id, version from face_identity_sync order by event_id limit ?", (int(limit),))]
+
+    def identity_sync_done(self, event_id: int, version: int) -> None:
+        """Done for this version; an edit that queued the event again since keeps it."""
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "delete from face_identity_sync where event_id = ? and version = ?", (int(event_id), int(version)))
+
+    def event_places(self, event_ids: Iterable[int]) -> dict[int, tuple[str, float]]:
+        """event -> (camera, event time) for captured events."""
+        ids = sorted({int(event_id) for event_id in event_ids})
+        found: dict[int, tuple[str, float]] = {}
+        with self._connect() as connection:
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                for event_id, camera_id, epoch in connection.execute(
+                        "select event_id, camera_id, event_epoch from face_capture_events"
+                        f" where event_id in ({','.join('?' * len(chunk))})", chunk):
+                    found[int(event_id)] = (str(camera_id), float(epoch))
+        return found
 
     def captured_event_ids(self) -> list[int]:
         with self._connect() as connection:

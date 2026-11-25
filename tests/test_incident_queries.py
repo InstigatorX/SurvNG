@@ -28,7 +28,7 @@ class IncidentQueryRouterTest(unittest.TestCase):
             with store._connect() as conn:
                 conn.execute("delete from scene_event_membership where event_id=?", (event["id"],))
             self.assertIsNone(store.scene_incident(event_id=event["id"]))
-            manager = SimpleNamespace(events=store, faces=SimpleNamespace(for_event_ids=lambda _ids: []))
+            manager = SimpleNamespace(events=store, face_identity_observations=lambda _ids: [])
             bundle = create_incident_query_router(IncidentQueryDependencies(
                 get_manager=lambda: manager, manager_lock=threading.RLock(),
             ), IncidentQueryService())
@@ -59,7 +59,7 @@ class IncidentQueryRouterTest(unittest.TestCase):
             store = EventStore(Path(tmp))
             for camera, label, zone in (("gate", "person", "front"), ("garage", "vehicle", "drive")):
                 store.add_event(camera, "object", created_at="2026-01-01T12:00:00+00:00", objects_json=json.dumps([{"label":label,"confidence":.9,"zones":[zone]}]))
-            manager = SimpleNamespace(events=store, faces=SimpleNamespace(for_event_ids=lambda _ids: []))
+            manager = SimpleNamespace(events=store, face_identity_observations=lambda _ids: [])
             result = IncidentQueryService.search(manager, day="2026-01-01", time_zone="UTC", camera_id="gate", event_type="all")
             self.assertEqual([item["camera_id"] for item in result["items"]], ["gate"])
             self.assertEqual(result["facets"]["camera_ids"], ["garage", "gate"])
@@ -91,8 +91,7 @@ class IncidentQueryRouterTest(unittest.TestCase):
 
     def test_face_enrichment_preserves_automatic_identity_provenance(self) -> None:
         manager = SimpleNamespace(
-            faces=SimpleNamespace(
-                for_event_ids=lambda _ids: [
+            face_identity_observations=lambda _ids: [
                     {
                         "observation_id": 10,
                         "event_id": 7,
@@ -105,7 +104,6 @@ class IncidentQueryRouterTest(unittest.TestCase):
                         "consensus": {},
                     }
                 ]
-            )
         )
 
         result = IncidentQueryService.with_faces(
@@ -121,8 +119,7 @@ class IncidentQueryRouterTest(unittest.TestCase):
 
     def test_face_enrichment_keeps_distinct_unknown_tracks(self) -> None:
         manager = SimpleNamespace(
-            faces=SimpleNamespace(
-                for_event_ids=lambda _ids: [
+            face_identity_observations=lambda _ids: [
                     {
                         "observation_id": 11,
                         "event_id": 7,
@@ -140,7 +137,6 @@ class IncidentQueryRouterTest(unittest.TestCase):
                         "consensus": {"candidate_count": 2},
                     },
                 ]
-            )
         )
         incidents = [{"events": [{"id": 7}]}]
 
@@ -229,7 +225,7 @@ class NotificationIncidentTest(unittest.TestCase):
             store = EventStore(Path(tmp))
             event = store.add_event("front-door", "motion")
             service = IncidentQueryService()
-            manager = SimpleNamespace(events=store, faces=SimpleNamespace(for_event_ids=lambda _ids: []),
+            manager = SimpleNamespace(events=store, face_identity_observations=lambda _ids: [],
                 incidents=SimpleNamespace(get=lambda _key: None),
                 config=SimpleNamespace(cameras=[SimpleNamespace(id="front-door", name="Front Door")]))
             result = service.notification_detail(manager, f"incident-front-door-{event['id']}")

@@ -41,17 +41,17 @@ class EventApiSerializationTest(unittest.TestCase):
             {"id": "incident-gate-7", "events": [{"id": 7}]},
             {"id": "incident-gate-8", "events": [{"id": 8}]},
         ]
-        faces = SimpleNamespace(for_event_ids=Mock(return_value=[
+        observations = Mock(return_value=[
             {"event_id": 7, "person_id": 42},
             {"event_id": 8, "person_id": None},
-        ]))
+        ])
 
         filtered = _filter_incidents_by_person(
-            SimpleNamespace(faces=faces), incidents, 42
+            SimpleNamespace(face_identity_observations=observations), incidents, 42
         )
 
         self.assertEqual(filtered, [incidents[0]])
-        faces.for_event_ids.assert_called_once_with([7, 8])
+        observations.assert_called_once_with([7, 8])
 
     def test_semantic_search_deduplicates_evidence_by_event(self) -> None:
         hits = [
@@ -1434,7 +1434,7 @@ class EventApiSerializationTest(unittest.TestCase):
                 get_many=lambda event_ids: [row for row in rows if row["id"] in event_ids],
                 motion_audits_for_related_events=lambda _event_ids: [],
             ),
-            faces=SimpleNamespace(for_event_ids=lambda _event_ids: []),
+            face_identity_observations=lambda _event_ids: [],
         )
 
         with patch.object(main, "manager", fake_manager):
