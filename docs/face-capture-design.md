@@ -155,3 +155,51 @@ inference time.
 3. YuNet detection in the inference worker, with its landmarks.
 4. Capture job, moment selection and storage, behind `face_capture_enabled`.
 5. Remove face search from refinement.
+
+## As built (2026-11-25)
+
+Package `survng/app/face_capture/`: `moments` (track linking and moment
+choice), `pipeline` (both passes; decoding and inference are passed in),
+`engine` (YuNet, landmark alignment, AdaFace embedding and norm; loaded in the
+isolated face worker), `events` (person events, timing, stored boxes), `store`
+(`face-captures.sqlite3` and `face-captures/` beside the event store),
+`service` (background loop) and `__main__` (offline run with contact sheets).
+The frame-run decode is shared through `recording_frame_runs`.
+
+Deviations from the proposal, on purpose:
+
+- The job is a dedicated loop with its own state table
+  (`face_capture_events`: done or failed with an attempt count), not a new kind
+  in the detection-job queue. It is restart-safe because the state is stored,
+  and it keeps optional work out of the queue incident jobs depend on.
+- Faces go to their own database instead of the old face tables, which keep
+  their readers (People page, recognition) until priority 2 replaces them.
+- The service does not take the recorded-decode budget. It runs one event at
+  a time with one decoder process, at enrichment priority for inference; how
+  much it competes with refinement on a busy evening is still to be measured.
+
+Settings (all under `detector`, capture off by default): `face_capture_enabled`,
+`face_capture_detector_model_path`, `face_capture_embedding_model_path`,
+`face_capture_detection_threshold` (these four restart the face worker), and
+`face_capture_min_norm`, `face_capture_min_size`,
+`face_capture_moments_per_track`, `face_capture_faces_per_track`,
+`face_capture_margin_seconds`, `face_capture_moment_radius_seconds`,
+`face_capture_backfill_hours` (applied live).
+
+### Trying it
+
+Offline, without touching the service (reads the database and recordings,
+writes only where told):
+
+```bash
+nice -n 19 .venv/bin/python -m survng.app.face_capture runtime/database \
+    --cameras gate,foyer,downstairs --events-per-camera 5 --device GPU \
+    --sheets /tmp/face-capture-sheets
+```
+
+In the service: set `detector.face_capture_enabled` to `true` and apply the
+configuration. The face worker restarts with the capture models; the service
+then works through the last `face_capture_backfill_hours` of recorded person
+events, newest first, one at a time. Progress is in
+`face-captures.sqlite3` (`face_capture_events`, `face_captures`) and the crops
+in `face-captures/` under the database directory.
