@@ -28,7 +28,6 @@ import { IncidentCard, IncidentInspector } from "./IncidentCard.jsx";
 import { IncidentAnalysisStatus } from "./IncidentAnalysisStatus.jsx";
 import { useIncidentPlayback } from "./useIncidentPlayback.js";
 import "./mobile-incidents.css";
-import { FaceReviewDialog } from "../people/FacesPage.jsx";
 
 export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordingContextChange, onAssistantContextChange, onAskAssistant = null }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
@@ -79,8 +78,6 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const linkedIncidentBootRef = useRef(
     typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("event_ids") || new URLSearchParams(window.location.search).get("incident_id")) : null,
   );
-  const [selectedFace, setSelectedFace] = useState(null);
-  const [facePeople, setFacePeople] = useState([]);
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
   const [incidentPage, setIncidentPage] = useState(0);
   const incidentRailListRef = useRef(null);
@@ -476,32 +473,17 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     { immediate: false },
   );
 
-  async function openFaceReview(face) {
-    const observationId = Number(face?.observation_id);
-    if (!Number.isFinite(observationId)) return;
-    try {
-      const [observationResponse, peopleResponse] = await Promise.all([
-        fetch(`/api/faces/observations/${observationId}`),
-        fetch("/api/faces/people"),
-      ]);
-      if (!observationResponse.ok || !peopleResponse.ok) return;
-      setFacePeople(await peopleResponse.json());
-      setSelectedFace(await observationResponse.json());
-    } catch {
-      // Leave the current incident visible when face details are unavailable.
-    }
-  }
-
   useEffect(() => {
     if (incidentDay > today) setIncidentDay(today);
   }, [incidentDay, setIncidentDay, today]);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch("/api/faces/people", { signal: controller.signal })
-      .then((response) => response.ok ? response.json() : [])
-      .then((people) => {
-        if (!controller.signal.aborted) setIncidentPeople(Array.isArray(people) ? people : []);
+    // People named on the People page (face capture), id and name only.
+    fetch("/api/face-names", { signal: controller.signal })
+      .then((response) => response.ok ? response.json() : {})
+      .then((payload) => {
+        if (!controller.signal.aborted) setIncidentPeople(Array.isArray(payload?.people) ? payload.people : []);
       })
       .catch(() => {
         if (!controller.signal.aborted) setIncidentPeople([]);
@@ -644,7 +626,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
 
   useEffect(() => {
     function onKey(keyEvent) {
-      if (keyEvent.defaultPrevented || selectedFace || tabletInspectorOpen) return;
+      if (keyEvent.defaultPrevented || tabletInspectorOpen) return;
       if (keyEvent.key === "Escape" && galleryExpanded && !selectedEvent) {
         keyEvent.preventDefault();
         changeGallery(false);
@@ -657,7 +639,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [expandedIncidentId, selectedEvent, galleryExpanded, selectedFace, tabletInspectorOpen, focusedIncident]);
+  }, [expandedIncidentId, selectedEvent, galleryExpanded, tabletInspectorOpen, focusedIncident]);
 
   function changeGallery(expanded, selectedIncident = focusedIncident) {
     retainedGallerySelectionRef.current = selectedIncident;
@@ -1009,7 +991,6 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
               }}
               onAnalysisModeChange={selectDesktopAnalysisMode}
               onDepthLayerChange={setDesktopDepthLayer}
-              onFaceOpen={openFaceReview}
               onRelatedSelect={selectRelatedIncident}
               onRelatedReturn={returnToSelectedIncident}
               onClose={() => closeTabletInspector()}
@@ -1017,7 +998,6 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
             />
           </div>
         </section>
-        {selectedFace ? <FaceReviewDialog observation={selectedFace} people={facePeople} timeZone={timeZone} onClose={() => setSelectedFace(null)} onUpdated={() => { setSelectedFace(null); refresh(); }} /> : null}
       </main>
     );
   }

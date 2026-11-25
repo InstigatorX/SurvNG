@@ -31,6 +31,19 @@ files.
 | Data: empty face tables in `survng.sqlite3`, `face-detection-dataset.sqlite3`, `face-detection-crops/`, `image-cache/faces/` | | nothing | Empty since the reset |
 | Tools: `face_funnel` (reads the old counters), `face_frame_search` (old detector, comparison runs) | | nobody at runtime | Keep `face_frame_search` as the evidence tool, or retire both |
 
+## Status
+
+- **Step 1 done** (branch `claude/people-naming`): the old People components,
+  the incident inspector's Faces box and face review dialog, the
+  detector-labelling backend, `face_evaluation.py` and `face_routes.py` are
+  removed. The incident list's person filter lists the people named on the
+  People page.
+- **Step 3 decided and done**: identities on incidents, search, the person
+  filter and scene identities read face capture's names through
+  `AppManager.face_identity_observations` (the previous store only when face
+  capture is off).
+- **Step 2 remains** for after the 14-day seed.
+
 ## Proposed order
 
 **1. Screens and routes nobody reaches (low risk).**

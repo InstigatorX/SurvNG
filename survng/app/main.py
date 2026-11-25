@@ -48,14 +48,6 @@ from .detection_routes import (
     DetectionRouteDependencies,
     create_detection_router,
 )
-from .face_detection_routes import (
-    FaceDetectionRouteDependencies,
-    create_face_detection_router,
-)
-from .face_routes import (
-    FaceRouteDependencies,
-    create_face_router,
-)
 from .frontend_routes import FrontendRouteDependencies, create_frontend_router
 from .help_docs import HelpRouteDependencies, create_help_router
 from .onvif_inspector_routes import create_onvif_inspector_router
@@ -1502,25 +1494,6 @@ app.include_router(
                 )
             ),
             recording_preview_timestamp=_recording_media_runtime._recording_preview_timestamp,
-        )
-    )
-)
-
-
-_face_route_bundle = create_face_router(
-    FaceRouteDependencies(
-        get_manager=get_manager,
-        manager_lock=MANAGER_RELOAD_LOCK,
-        start_observation_sync=_start_face_observation_sync,
-        manager_access=MANAGER_ACCESS,
-    )
-)
-app.include_router(_face_route_bundle.router)
-app.include_router(
-    create_face_detection_router(
-        FaceDetectionRouteDependencies(
-            get_manager=get_manager,
-            get_config=lambda: config,
         )
     )
 )
