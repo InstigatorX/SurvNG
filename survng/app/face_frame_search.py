@@ -16,6 +16,10 @@ faces (norm at least ``--min-norm``). Raw norms go to ``--json`` so the cut can
 be retuned without decoding again, and ``--sheets`` writes per-camera contact
 sheets of each event's best face under both rules for a visual check.
 
+``--yunet`` also runs the YuNet detector (five built-in landmarks) on the same
+upper-body crops of the same frames and reports it separately, aligning its
+faces from its own landmarks, so the two detectors differ in nothing else.
+
 The norm needs the original AdaFace checkpoint and PyTorch (installed with
 requirements-semantic-export.txt); the exported OpenVINO model drops it.
 
@@ -35,7 +39,7 @@ import sqlite3
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -53,6 +57,9 @@ MIN_QUALITY_NORM = 13.0
 RULES = ("any", "recognisable")
 THUMB_HEIGHT = 112
 ADAFACE_DIR = Path("models/face_model/adaface-ir50-webface4m")
+YUNET_MODEL = Path("models/face_detector/yunet/face_detection_yunet_2023mar.onnx")
+# YuNet cost grows with input size; larger upper-body crops are downscaled.
+YUNET_MAX_SIDE = 640
 
 
 def passes(face: dict[str, Any], rule: str) -> bool:
@@ -233,12 +240,50 @@ def _quality_models(detector_config: Any) -> tuple[Any, Any]:
     return recognizer, backbone.eval()
 
 
+class YuNetFaces:
+    """YuNet on one crop; landmarks are kept relative to each face box."""
+
+    def __init__(self, model_path: Path, threshold: float) -> None:
+        import cv2
+
+        if not Path(model_path).is_file():
+            raise FileNotFoundError(f"YuNet model not found: {model_path}")
+        self.detector = cv2.FaceDetectorYN.create(str(model_path), "", (320, 320), float(threshold), 0.3, 50)
+
+    def detect(self, crop: np.ndarray) -> list[dict[str, Any]]:
+        import cv2
+
+        height, width = crop.shape[:2]
+        scale = min(1.0, YUNET_MAX_SIDE / max(height, width))
+        image = crop if scale == 1.0 else cv2.resize(
+            crop, (max(1, round(width * scale)), max(1, round(height * scale))), interpolation=cv2.INTER_AREA,
+        )
+        self.detector.setInputSize((image.shape[1], image.shape[0]))
+        _, rows = self.detector.detect(image)
+        faces = []
+        for row in () if rows is None else rows:
+            values = np.asarray(row[:14], dtype=np.float32) / scale
+            x, y, box_width, box_height = (float(value) for value in values[:4])
+            x1, y1 = max(0.0, x), max(0.0, y)
+            x2, y2 = min(float(width), x + box_width), min(float(height), y + box_height)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            points = values[4:14].reshape(5, 2) - np.asarray([x1, y1], dtype=np.float32)
+            faces.append({
+                "label": "face",
+                "confidence": round(float(row[14]), 4),
+                "box": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                "landmarks_from_box": points.tolist(),
+            })
+        return faces
+
+
 class FrameSearcher:
-    def __init__(self, detector_config: Any) -> None:
+    def __init__(self, detector_config: Any, yunet: YuNetFaces | None = None, device: str = "CPU") -> None:
         from .detector import OpenVinoDetector
         from .face_detection import OpenVinoFaceDetector
 
-        cpu = {"device": "CPU", "cache_enabled": False}
+        cpu = {"device": device, "cache_enabled": False}
         self.config = detector_config
         self.person_detector = OpenVinoDetector(detector_config.model_copy(update=cpu))
         self.face_detector = OpenVinoFaceDetector(
@@ -246,7 +291,7 @@ class FrameSearcher:
                 update={
                     **cpu,
                     "face_recognition_enabled": True,
-                    "face_recognition_device": "CPU",
+                    "face_recognition_device": device,
                     "face_detection_model_path": _resolve_model_path(
                         detector_config.face_detection_model_path
                     ),
@@ -256,15 +301,35 @@ class FrameSearcher:
         if not self.face_detector.ready:
             raise RuntimeError(f"face detector unavailable: {self.face_detector.error}")
         self.recognizer, self.adaface = _quality_models(detector_config)
+        self.yunet = yunet
 
     def quality_norm(self, crop: np.ndarray) -> float:
         """AdaFace feature norm of the face aligned as the live path aligns it."""
-        import torch
-
         try:
             aligned = self.recognizer._align(crop)
         except ValueError:
             return 0.0
+        return self._norm(aligned)
+
+    def quality_norm_from_points(self, frame: np.ndarray, points: np.ndarray) -> float:
+        """AdaFace norm after aligning on a detector's own five landmarks."""
+        import cv2
+
+        target = self.recognizer._ARCFACE_TEMPLATE.copy()
+        target[:, 0] *= self.recognizer.input_shape[0] / 112.0
+        target[:, 1] *= self.recognizer.input_shape[1] / 112.0
+        matrix, _ = cv2.estimateAffinePartial2D(points.astype(np.float32), target, method=cv2.LMEDS)
+        if matrix is None or not np.all(np.isfinite(matrix)):
+            return 0.0
+        aligned = cv2.warpAffine(
+            frame, matrix, self.recognizer.input_shape,
+            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE,
+        )
+        return self._norm(aligned)
+
+    def _norm(self, aligned: np.ndarray) -> float:
+        import torch
+
         tensor = torch.from_numpy(
             ((aligned.astype(np.float32) - 127.5) / 127.5).transpose(2, 0, 1)[None].copy()
         )
@@ -285,9 +350,19 @@ class FrameSearcher:
             item for item in objects
             if isinstance(item, dict) and str(item.get("label") or "").lower() == "person"
         ]
-        faces = RecordedMotionObjectDetector._detect_faces_in_people(
-            frame, people, self.face_detector.detect, max_people=8,
-        )
+        faces = [
+            {**face, "detector": "retail"}
+            for face in RecordedMotionObjectDetector._detect_faces_in_people(
+                frame, people, self.face_detector.detect, max_people=8,
+            )
+        ]
+        if self.yunet is not None:
+            faces += [
+                {**face, "detector": "yunet"}
+                for face in RecordedMotionObjectDetector._detect_faces_in_people(
+                    frame, people, self.yunet.detect, max_people=8,
+                )
+            ]
         height, width = frame.shape[:2]
         usefulness = 0.0
         heights: list[float] = []
@@ -322,10 +397,18 @@ class FrameSearcher:
                 crop, (max(1, round(crop.shape[1] * THUMB_HEIGHT / crop.shape[0])), THUMB_HEIGHT),
                 interpolation=cv2.INTER_AREA,
             )
+            if face["detector"] == "yunet":
+                points = np.asarray(face["landmarks_from_box"], dtype=np.float32) + np.asarray(
+                    [box[0], box[1]], dtype=np.float32
+                )
+                norm = self.quality_norm_from_points(frame, points)
+            else:
+                norm = self.quality_norm(crop)
             measured.append({
+                "detector": face["detector"],
                 "side": round(min(box[2] - box[0], box[3] - box[1]), 1),
                 "confidence": round(float(face.get("confidence") or 0.0), 3),
-                "norm": round(self.quality_norm(crop), 2),
+                "norm": round(norm, 2),
                 "_thumb": thumb,
             })
         return FrameResult(round(offset, 3), usefulness, measured, heights)
@@ -341,20 +424,49 @@ def every_frame(
     start_seconds: float,
     end_seconds: float,
     ffmpeg_path: str,
+    hardware_acceleration: str | None = None,
 ) -> Iterator[tuple[float | None, np.ndarray]]:
-    """Every presented frame in ``[start, end)`` of one file, full size, in software.
+    """Every presented frame in ``[start, end)`` of one file, full size.
+
+    ``hardware_acceleration`` follows recorded-frame policy (explicit ``qsv``
+    or ``vaapi`` decodes on the GPU); a hardware attempt that fails before its
+    first frame is retried in software.
 
     Same command shape as the timeline frame-step decoder (PR 370): accurate
     seek with -copyts -start_at_zero, so ``showinfo`` reports file-relative
     PTS. Frames are streamed, not buffered. A frame whose showinfo line was
     lost or torn is yielded with ``None`` rather than a neighbour's time.
     """
-    from .recorded_decoder import DecodePlan, StreamingDecode, build_decode_command, warn_decoder_errors
+    from .recorded_decoder import recorded_decode_plans
     from .recorded_video_frames import _ffprobe_video_metadata
 
     width, height, *_ = _ffprobe_video_metadata(path, ffmpeg_path)
     if width <= 0 or height <= 0:
         raise RuntimeError("video dimensions are unavailable")
+    plans = recorded_decode_plans(hardware_acceleration)
+    for attempt, plan in enumerate(plans):
+        yielded = False
+        try:
+            for item in _every_frame_with_plan(path, start_seconds, end_seconds, ffmpeg_path, plan, width, height):
+                yielded = True
+                yield item
+            return
+        except (OSError, RuntimeError):
+            if yielded or attempt == len(plans) - 1:
+                raise
+
+
+def _every_frame_with_plan(
+    path: Path,
+    start_seconds: float,
+    end_seconds: float,
+    ffmpeg_path: str,
+    plan: Any,
+    width: int,
+    height: int,
+) -> Iterator[tuple[float | None, np.ndarray]]:
+    from .recorded_decoder import StreamingDecode, build_decode_command, warn_decoder_errors
+
     times: dict[int, float] = {}
     arrived = threading.Condition()
 
@@ -372,12 +484,13 @@ def every_frame(
             times[-1] = 0.0
             arrived.notify_all()
 
-    plan = DecodePlan("cpu")
+    # Hardware frames are brought to system memory before showinfo.
+    download = f"{plan.download_filter}," if plan.download_filter else ""
     command = build_decode_command(
         ffmpeg_path, path, plan=plan, loglevel="info",
         seek=f"{max(0.0, start_seconds - 0.001):.6f}", copyts=True, start_at_zero=True,
         first_video_stream=True,
-        video_filter=f"trim=start={start_seconds:.6f}:end={end_seconds:.6f},showinfo",
+        video_filter=f"trim=start={start_seconds:.6f}:end={end_seconds:.6f},{download}showinfo",
         passthrough_timestamps=True, transport="raw",
     )
     frame_bytes = width * height * 3
@@ -417,6 +530,7 @@ def search_event(
     plan_offsets: list[float],
     ffmpeg_path: str,
     max_extra: int,
+    hardware_acceleration: str | None = None,
     margin: float,
 ) -> EventResult:
     # The plan window holds every frame the old search could reach.
@@ -444,7 +558,9 @@ def search_event(
             continue
         try:
             frames = []
-            for pts, frame in every_frame(Path(path), local_start, local_end, ffmpeg_path):
+            for pts, frame in every_frame(
+                Path(path), local_start, local_end, ffmpeg_path, hardware_acceleration,
+            ):
                 if pts is None:
                     result.inexact_frames += 1
                     continue
@@ -452,9 +568,10 @@ def search_event(
                 for face in found.faces:
                     thumb = face.pop("_thumb")
                     for rule in RULES:
-                        best = result.thumbs.get(rule)
+                        key = f"{face['detector']}/{rule}"
+                        best = result.thumbs.get(key)
                         if passes(face, rule) and (best is None or face["side"] > best[0]):
-                            result.thumbs[rule] = (face["side"], found.offset, thumb)
+                            result.thumbs[key] = (face["side"], found.offset, thumb)
                 frames.append(found)
             result.frames.extend(frames)
         except (OSError, RuntimeError) as error:
@@ -464,6 +581,26 @@ def search_event(
     result.baseline_offsets = [frame.offset for frame in chosen]
     result.seconds = round(time.monotonic() - started, 1)
     return result
+
+
+def for_detector(results: list[EventResult], name: str) -> list[EventResult]:
+    """The same events with only one face detector's faces and thumbnails."""
+    prefix = f"{name}/"
+    return [
+        replace(
+            result,
+            frames=[
+                FrameResult(
+                    frame.offset, frame.usefulness,
+                    [face for face in frame.faces if face.get("detector", "retail") == name],
+                    frame.person_heights,
+                )
+                for frame in result.frames
+            ],
+            thumbs={key[len(prefix):]: value for key, value in result.thumbs.items() if key.startswith(prefix)},
+        )
+        for result in results
+    ]
 
 
 def summarize(results: list[EventResult], face_min_size: int) -> dict[str, Any]:
@@ -614,6 +751,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--margin", type=float, default=3.0, help="seconds searched beyond the plan window")
     parser.add_argument("--threads", type=int, default=4, help="OpenVINO CPU threads")
     parser.add_argument("--min-norm", type=float, default=MIN_QUALITY_NORM, help="AdaFace norm for a recognisable face")
+    parser.add_argument("--device", default="CPU", help="OpenVINO device for the person and face detectors")
+    parser.add_argument("--hw-decode", action="store_true", help="decode with the configured hardware_acceleration")
+    parser.add_argument("--yunet", action="store_true", help="also run the YuNet face detector and compare")
+    parser.add_argument("--yunet-model", type=Path, default=YUNET_MODEL)
+    parser.add_argument("--yunet-threshold", type=float, default=0.6, help="YuNet score threshold")
     parser.add_argument("--json", type=Path, help="also write the full report here")
     parser.add_argument("--sheets", type=Path, help="write per-camera contact sheets of best faces here")
     args = parser.parse_args(argv)
@@ -630,7 +772,8 @@ def main(argv: list[str] | None = None) -> int:
     raw = json.loads(args.config.read_text())
     detector_config = DetectorConfig.model_validate(raw["detector"])
     ffmpeg_path = str(raw.get("ffmpeg_path") or "ffmpeg")
-    searcher = FrameSearcher(detector_config)
+    yunet = YuNetFaces(args.yunet_model, args.yunet_threshold) if args.yunet else None
+    searcher = FrameSearcher(detector_config, yunet, device=args.device)
 
     since = (datetime.now(timezone.utc) - timedelta(days=args.days)).isoformat()
     events_db = sqlite3.connect(f"file:{args.database_dir / 'survng.sqlite3'}?mode=ro", uri=True)
@@ -651,6 +794,7 @@ def main(argv: list[str] | None = None) -> int:
             plan_offsets=list(_flatten_refinement_stages(stages)),
             ffmpeg_path=ffmpeg_path,
             max_extra=int(detector_config.face_evidence_max_extra_frames),
+            hardware_acceleration=raw.get("hardware_acceleration") if args.hw_decode else None,
             margin=max(0.0, args.margin),
         )
         results.append(result)
@@ -659,12 +803,17 @@ def main(argv: list[str] | None = None) -> int:
             f"in {result.seconds} s" + (f" ({'; '.join(result.decode_errors)})" if result.decode_errors else ""),
             file=sys.stderr, flush=True,
         )
-    report = summarize(results, int(detector_config.face_min_size))
+    names = ["retail"] + (["yunet"] if yunet is not None else [])
+    reports = {
+        name: summarize(for_detector(results, name), int(detector_config.face_min_size))
+        for name in names
+    }
     if args.json:
-        args.json.write_text(json.dumps(report, indent=1))
+        args.json.write_text(json.dumps({"detectors": reports}, indent=1))
     if args.sheets:
-        write_sheets(results, args.sheets)
-    print(format_report(report))
+        for name in names:
+            write_sheets(for_detector(results, name), args.sheets / name)
+    print("\n\n".join(f"== face detector: {name} ==\n{format_report(reports[name])}" for name in names))
     return 0
 
 

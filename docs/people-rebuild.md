@@ -242,6 +242,16 @@ alignment scores 0. The norm needs the original AdaFace checkpoint under
 OpenVINO model drops it. `--sheets DIR` writes a contact sheet per camera with
 each event's best face under both rules, for checking the cut by eye.
 
+`--yunet` also runs the YuNet face detector (five built-in landmarks; model
+and provenance under `models/face_detector/yunet/`) on the same upper-body crops
+of the same frames, aligns its faces from its own landmarks, and reports and
+draws it separately, so the two detectors differ in nothing else.
+`--device GPU` runs the person and face detectors on the GPU and `--hw-decode`
+decodes with the configured `hardware_acceleration`; the AdaFace norm and YuNet
+stay on the CPU. FP16 GPU inference moves person boxes slightly, which can
+change which frames the old search would have picked, so compare runs made on
+the same device.
+
 The tool opens
 the database and recording index read-only, loads its own CPU copies of the
 models with the OpenVINO cache off (`--threads` sets the CPU threads), and does

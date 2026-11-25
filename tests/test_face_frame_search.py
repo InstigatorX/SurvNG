@@ -76,3 +76,20 @@ def test_showinfo_frame_index_and_time_are_read_together():
     assert match is not None
     assert int(match.group(1)) == 17
     assert float(match.group(2)) == 0.86
+
+
+def test_detectors_are_summarized_separately_on_the_same_frames():
+    retail = {**_face(40.0), "detector": "retail"}
+    yunet = {**_face(90.0), "detector": "yunet"}
+    frames = _frames(faces={0.0: [retail, yunet]}, useful={0.0: 1.0})
+    result = EventResult(1, "gate", 0.0, (-4.0, 12.0), (-1.3, 9.3), frames=frames)
+    result.baseline_offsets = [0.0]
+    result.thumbs = {"retail/any": (40.0, 0.0, None), "yunet/any": (90.0, 0.0, None)}
+    for name, side in (("retail", 40.0), ("yunet", 90.0)):
+        (only,) = face_frame_search.for_detector([result], name)
+        assert only.thumbs == {"any": (side, 0.0, None)}
+        event = summarize([only], 48)["cameras"]["gate"]["events"][0]
+        assert event["recognisable"]["baseline_best"] == side
+    # Faces recorded before detectors were tagged belong to the original one.
+    untagged = EventResult(2, "gate", 0.0, (-4.0, 12.0), (-1.3, 9.3), frames=_frames(faces={0.0: [_face(60.0)]}))
+    assert face_frame_search.for_detector([untagged], "retail")[0].frames[80].faces
