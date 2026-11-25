@@ -6,6 +6,19 @@ upper-body face search on each frame, and compares the best face per event
 with what the old sampled search (refinement plan frames plus face-evidence
 extras around the best anchors) would have seen with the same detectors.
 
+The 300 px face detector also fires on the backs of heads, caps, torsos and
+leaves, and the five-point landmark model fits points to any of them. Each face
+is therefore aligned exactly as the live path aligns it (20%-padded crop,
+landmarks, similarity transform) and scored with the AdaFace feature norm,
+which is low for non-faces and unrecognisable faces. A face that fails
+alignment scores 0. Results are reported for any face and for recognisable
+faces (norm at least ``--min-norm``). Raw norms go to ``--json`` so the cut can
+be retuned without decoding again, and ``--sheets`` writes per-camera contact
+sheets of each event's best face under both rules for a visual check.
+
+The norm needs the original AdaFace checkpoint and PyTorch (installed with
+requirements-semantic-export.txt); the exported OpenVINO model drops it.
+
 It reads the database and recordings only. It loads its own CPU copies of the
 models and leaves the running service, its config and its caches alone.
 
@@ -34,18 +47,31 @@ EXTRA_DELTAS = (-0.4, 0.4, -0.8, 0.8)
 EXTRA_MIN_SEPARATION = 0.15
 MAX_ANCHORS = 3
 MAX_WINDOW_SECONDS = 30.0
+# AdaFace feature norm separating faces from detector false positives. On
+# this host real faces measured 16-18 and heads, caps, torsos and leaves 9-11.
+MIN_QUALITY_NORM = 13.0
+RULES = ("any", "recognisable")
+THUMB_HEIGHT = 112
+ADAFACE_DIR = Path("models/face_model/adaface-ir50-webface4m")
+
+
+def passes(face: dict[str, Any], rule: str) -> bool:
+    return rule == "any" or face.get("norm", 0.0) >= MIN_QUALITY_NORM
 
 
 @dataclass
 class FrameResult:
     offset: float
     usefulness: float
-    face_sides: list[float]
+    faces: list[dict[str, Any]]
     person_heights: list[float]
+
+    def best(self, rule: str = "any") -> float:
+        return max((face["side"] for face in self.faces if passes(face, rule)), default=0.0)
 
     @property
     def best_face(self) -> float:
-        return max(self.face_sides, default=0.0)
+        return self.best("any")
 
 
 @dataclass
@@ -60,6 +86,8 @@ class EventResult:
     decode_errors: list[str] = field(default_factory=list)
     seconds: float = 0.0
     baseline_offsets: list[float] = field(default_factory=list)
+    # rule -> (side, offset, thumbnail) of the best face anywhere in the window
+    thumbs: dict[str, tuple[float, float, Any]] = field(default_factory=dict)
 
 
 def nearest_frame(frames: list[FrameResult], target: float, tolerance: float) -> FrameResult | None:
@@ -172,6 +200,39 @@ def _resolve_model_path(value: str) -> str:
     raise FileNotFoundError(f"model not found: {value}")
 
 
+def _quality_models(detector_config: Any) -> tuple[Any, Any]:
+    """The live aligner (landmarks + template) and the original AdaFace backbone."""
+    import importlib.util
+
+    import torch
+
+    from .face_recognition import OpenVinoFaceRecognizer
+
+    torch.set_num_threads(max(1, int(os.environ.get("OV_CPU_THREADS_NUM", "4"))))
+    recognizer = OpenVinoFaceRecognizer(detector_config.model_copy(update={
+        "face_recognition_enabled": True,
+        "face_recognition_device": "CPU",
+        "cache_enabled": False,
+        "face_embedding_profile": "adaface",
+        "face_embedding_model_path": str(ADAFACE_DIR / "adaface-ir50-webface4m.xml"),
+        "face_landmark_model_path": _resolve_model_path(detector_config.face_landmark_model_path),
+    }))
+    if not recognizer.ready:
+        raise RuntimeError(f"face aligner unavailable: {recognizer.error}")
+    spec = importlib.util.spec_from_file_location("adaface_net", ADAFACE_DIR / "net.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("AdaFace net.py is missing")
+    net = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(net)
+    checkpoint = torch.load(ADAFACE_DIR / "adaface_ir50_webface4m.ckpt", map_location="cpu", weights_only=True)
+    backbone = net.build_model("ir_50")
+    backbone.load_state_dict(
+        {key[6:]: value for key, value in checkpoint["state_dict"].items() if key.startswith("model.")},
+        strict=True,
+    )
+    return recognizer, backbone.eval()
+
+
 class FrameSearcher:
     def __init__(self, detector_config: Any) -> None:
         from .detector import OpenVinoDetector
@@ -194,6 +255,22 @@ class FrameSearcher:
         )
         if not self.face_detector.ready:
             raise RuntimeError(f"face detector unavailable: {self.face_detector.error}")
+        self.recognizer, self.adaface = _quality_models(detector_config)
+
+    def quality_norm(self, crop: np.ndarray) -> float:
+        """AdaFace feature norm of the face aligned as the live path aligns it."""
+        import torch
+
+        try:
+            aligned = self.recognizer._align(crop)
+        except ValueError:
+            return 0.0
+        tensor = torch.from_numpy(
+            ((aligned.astype(np.float32) - 127.5) / 127.5).transpose(2, 0, 1)[None].copy()
+        )
+        with torch.inference_mode():
+            _, norm = self.adaface(tensor)
+        return float(norm.reshape(-1)[0])
 
     def search(self, frame: Any, offset: float) -> FrameResult:
         from .motion_pipeline.object_detection import RecordedMotionObjectDetector, _box
@@ -227,12 +304,31 @@ class FrameSearcher:
             crop = frame[max(0, int(y1)):min(height, int(y2)), max(0, int(x1)):min(width, int(x2))]
             if crop.size:
                 usefulness = max(usefulness, crop.shape[0] * crop.shape[1] * _image_quality(crop).score)
-        sides = []
+        import cv2
+        from .face_candidates import _padded_crop
+
+        measured = []
         for face in faces:
             box = _box(face)
-            if box is not None:
-                sides.append(min(box[2] - box[0], box[3] - box[1]))
-        return FrameResult(round(offset, 3), usefulness, sides, heights)
+            if box is None:
+                continue
+            cropped = _padded_crop(frame, box)
+            if cropped is None:
+                continue
+            crop = cropped[0]
+            if crop.shape[0] < 2 or crop.shape[1] < 2:
+                continue
+            thumb = cv2.resize(
+                crop, (max(1, round(crop.shape[1] * THUMB_HEIGHT / crop.shape[0])), THUMB_HEIGHT),
+                interpolation=cv2.INTER_AREA,
+            )
+            measured.append({
+                "side": round(min(box[2] - box[0], box[3] - box[1]), 1),
+                "confidence": round(float(face.get("confidence") or 0.0), 3),
+                "norm": round(self.quality_norm(crop), 2),
+                "_thumb": thumb,
+            })
+        return FrameResult(round(offset, 3), usefulness, measured, heights)
 
 
 _SHOWINFO_FRAME = re.compile(
@@ -352,7 +448,14 @@ def search_event(
                 if pts is None:
                     result.inexact_frames += 1
                     continue
-                frames.append(searcher.search(frame, float(segment_start) + pts - event_epoch))
+                found = searcher.search(frame, float(segment_start) + pts - event_epoch)
+                for face in found.faces:
+                    thumb = face.pop("_thumb")
+                    for rule in RULES:
+                        best = result.thumbs.get(rule)
+                        if passes(face, rule) and (best is None or face["side"] > best[0]):
+                            result.thumbs[rule] = (face["side"], found.offset, thumb)
+                frames.append(found)
             result.frames.extend(frames)
         except (OSError, RuntimeError) as error:
             result.decode_errors.append(f"{Path(path).name}: {error}")
@@ -369,57 +472,59 @@ def summarize(results: list[EventResult], face_min_size: int) -> dict[str, Any]:
         camera = cameras.setdefault(result.camera_id, {"events": []})
         by_offset = {frame.offset: frame for frame in result.frames}
         baseline = [by_offset[offset] for offset in result.baseline_offsets]
-        full_best = max((frame.best_face for frame in result.frames), default=0.0)
         low, high = result.plan_window
-        plan_best = max(
-            (frame.best_face for frame in result.frames if low <= frame.offset <= high), default=0.0
-        )
-        base_best = max((frame.best_face for frame in baseline), default=0.0)
-        best_frame = max(result.frames, key=lambda frame: frame.best_face, default=None)
-        camera["events"].append({
+        plan = [frame for frame in result.frames if low <= frame.offset <= high]
+        event: dict[str, Any] = {
             "event_id": result.event_id,
             "frames": len(result.frames),
             "baseline_frames": len(baseline),
-            "frames_with_face": sum(1 for frame in result.frames if frame.face_sides),
-            "frames_with_usable_face": sum(1 for frame in result.frames if frame.best_face >= face_min_size),
-            "baseline_best_face": round(base_best, 1),
-            "plan_window_best_face": round(plan_best, 1),
-            "full_best_face": round(full_best, 1),
+            "baseline_offsets": result.baseline_offsets,
             "window": list(result.window),
             "plan_window": list(result.plan_window),
-            "full_best_offset": best_frame.offset if best_frame and full_best else None,
             "max_person_height": round(max((h for f in result.frames for h in f.person_heights), default=0.0), 1),
             "inexact": result.inexact_frames,
             "errors": result.decode_errors,
             "seconds": result.seconds,
-        })
+            "faces": [
+                {"offset": frame.offset, **face}
+                for frame in result.frames for face in frame.faces
+            ],
+        }
+        for rule in RULES:
+            best_frame = max(result.frames, key=lambda frame: frame.best(rule), default=None)
+            full = best_frame.best(rule) if best_frame else 0.0
+            event[rule] = {
+                "baseline_best": round(max((f.best(rule) for f in baseline), default=0.0), 1),
+                "plan_best": round(max((f.best(rule) for f in plan), default=0.0), 1),
+                "all_best": round(full, 1),
+                "all_best_offset": best_frame.offset if best_frame and full else None,
+                "usable_frames": sum(1 for f in result.frames if f.best(rule) >= face_min_size),
+            }
+        camera["events"].append(event)
     for camera in cameras.values():
-        events = camera["events"]
-        searched = [e for e in events if e["frames"]]
+        searched = [e for e in camera["events"] if e["frames"]]
         camera["summary"] = {
-            "events": len(events),
+            "events": len(camera["events"]),
             "events_decoded": len(searched),
             "frames": sum(e["frames"] for e in searched),
-            "baseline_any_face": sum(1 for e in searched if e["baseline_best_face"] > 0),
-            "plan_window_any_face": sum(1 for e in searched if e["plan_window_best_face"] > 0),
-            "full_any_face": sum(1 for e in searched if e["full_best_face"] > 0),
-            "baseline_usable": sum(1 for e in searched if e["baseline_best_face"] >= face_min_size),
-            "plan_window_usable": sum(1 for e in searched if e["plan_window_best_face"] >= face_min_size),
-            "full_usable": sum(1 for e in searched if e["full_best_face"] >= face_min_size),
-            "gained_usable_plan_window": sum(
-                1 for e in searched
-                if e["plan_window_best_face"] >= face_min_size > e["baseline_best_face"]
-            ),
-            "gained_usable": sum(
-                1 for e in searched
-                if e["full_best_face"] >= face_min_size > e["baseline_best_face"]
-            ),
-            "median_baseline_best": _median([e["baseline_best_face"] for e in searched if e["baseline_best_face"]]),
-            "median_plan_window_best": _median([e["plan_window_best_face"] for e in searched if e["plan_window_best_face"]]),
-            "median_full_best": _median([e["full_best_face"] for e in searched if e["full_best_face"]]),
-            "seconds": round(sum(e["seconds"] for e in events), 1),
+            "seconds": round(sum(e["seconds"] for e in camera["events"]), 1),
         }
-    return {"face_min_size": face_min_size, "cameras": cameras}
+        for rule in RULES:
+            rows = [e[rule] for e in searched]
+            summary: dict[str, Any] = {}
+            for name in ("baseline", "plan", "all"):
+                key = f"{name}_best"
+                summary[f"{name}_any"] = sum(1 for r in rows if r[key] > 0)
+                summary[f"{name}_usable"] = sum(1 for r in rows if r[key] >= face_min_size)
+                summary[f"{name}_median"] = _median([r[key] for r in rows if r[key]])
+            summary["gained_plan"] = sum(1 for r in rows if r["plan_best"] >= face_min_size > r["baseline_best"])
+            summary["gained_all"] = sum(1 for r in rows if r["all_best"] >= face_min_size > r["baseline_best"])
+            camera["summary"][rule] = summary
+    return {
+        "face_min_size": face_min_size,
+        "min_quality_norm": MIN_QUALITY_NORM,
+        "cameras": cameras,
+    }
 
 
 def _median(values: list[float]) -> float | None:
@@ -435,33 +540,70 @@ def format_report(report: dict[str, Any]) -> str:
         f"Every frame vs. old sampled search (usable face = shorter side >= {minimum} px)",
         "old = plan frames + face-evidence extras; plan = every frame the old search could reach;",
         "all = every frame including the margin around it",
+        f"recognisable = AdaFace norm >= {report['min_quality_norm']} after the live alignment",
     ]
     for camera_id, camera in report["cameras"].items():
         s = camera["summary"]
         lines.append("")
         lines.append(f"{camera_id}: {s['events_decoded']}/{s['events']} events decoded, {s['frames']} frames, {s['seconds']} s")
-        lines.append(f"  any face:     old {s['baseline_any_face']}  plan {s['plan_window_any_face']}  all {s['full_any_face']}")
-        lines.append(
-            f"  usable face:  old {s['baseline_usable']}  plan {s['plan_window_usable']}  all {s['full_usable']}"
-            f"  (gained: plan {s['gained_usable_plan_window']}, all {s['gained_usable']})"
-        )
-        lines.append(
-            f"  median best face when found: old {s['median_baseline_best']}"
-            f"  plan {s['median_plan_window_best']}  all {s['median_full_best']}"
-        )
-        lines.append("  event   frames old-frames  old-best  plan-best  all-best @offset  usable-frames  person-h")
-        for e in camera["events"]:
-            offset = "" if e["full_best_offset"] is None else f"@{e['full_best_offset']:+.2f}"
+        for name in RULES:
+            r = s[name]
             lines.append(
-                f"  {e['event_id']:<7} {e['frames']:>6} {e['baseline_frames']:>10} "
-                f"{e['baseline_best_face']:>9} {e['plan_window_best_face']:>10} {e['full_best_face']:>9} {offset:<8} "
-                f"{e['frames_with_usable_face']:>13} {e['max_person_height']:>9}"
+                f"  {name:<12} usable: old {r['baseline_usable']}  plan {r['plan_usable']}  all {r['all_usable']}"
+                f"  (gained: plan {r['gained_plan']}, all {r['gained_all']});"
+                f"  median best: old {r['baseline_median']}  plan {r['plan_median']}  all {r['all_median']}"
+            )
+        lines.append("  event   frames  old-n | any: old  plan   all @offset | recognisable: old  plan   all @offset  n>=min | person-h")
+        for e in camera["events"]:
+            cells = []
+            for name in RULES:
+                r = e[name]
+                offset = "" if r["all_best_offset"] is None else f"@{r['all_best_offset']:+.2f}"
+                cells.append(f"{r['baseline_best']:>5} {r['plan_best']:>5} {r['all_best']:>5} {offset:<7}")
+            lines.append(
+                f"  {e['event_id']:<7} {e['frames']:>6} {e['baseline_frames']:>6} | {cells[0]} |"
+                f" {cells[1]} {e['recognisable']['usable_frames']:>6} | {e['max_person_height']:>8}"
                 + (f"  errors: {'; '.join(e['errors'])}" if e["errors"] else "")
             )
     return "\n".join(lines)
 
 
+def write_sheets(results: list[EventResult], directory: Path) -> list[Path]:
+    """One image per camera: each event's best face, any rule then facing."""
+    import cv2
+
+    directory.mkdir(parents=True, exist_ok=True)
+    written = []
+    cameras: dict[str, list[EventResult]] = {}
+    for result in results:
+        cameras.setdefault(result.camera_id, []).append(result)
+    thumb_width = THUMB_HEIGHT + 90
+    row_width = 70 + len(RULES) * (thumb_width + 10)
+    for camera_id, events in cameras.items():
+        rows = []
+        for result in events:
+            row = np.full((THUMB_HEIGHT + 22, row_width, 3), 255, dtype=np.uint8)
+            cv2.putText(row, str(result.event_id), (4, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
+            for column, rule in enumerate(RULES):
+                left = 70 + column * (thumb_width + 10)
+                best = result.thumbs.get(rule)
+                label = f"{rule}: none"
+                if best is not None:
+                    side, offset, thumb = best
+                    thumb = thumb[:, :thumb_width]
+                    row[20:20 + thumb.shape[0], left:left + thumb.shape[1]] = thumb
+                    label = f"{rule} {side:.0f}px {offset:+.1f}s"
+                cv2.putText(row, label, (left, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 160), 1)
+            rows.append(row)
+        if rows:
+            path = directory / f"{camera_id}.jpg"
+            cv2.imwrite(str(path), np.vstack(rows))
+            written.append(path)
+    return written
+
+
 def main(argv: list[str] | None = None) -> int:
+    global MIN_QUALITY_NORM
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("database_dir", type=Path)
     parser.add_argument("--recording-index", type=Path, default=Path("runtime/recording-index/recordings.sqlite3"))
@@ -471,10 +613,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--days", type=int, default=14)
     parser.add_argument("--margin", type=float, default=3.0, help="seconds searched beyond the plan window")
     parser.add_argument("--threads", type=int, default=4, help="OpenVINO CPU threads")
+    parser.add_argument("--min-norm", type=float, default=MIN_QUALITY_NORM, help="AdaFace norm for a recognisable face")
     parser.add_argument("--json", type=Path, help="also write the full report here")
+    parser.add_argument("--sheets", type=Path, help="write per-camera contact sheets of best faces here")
     args = parser.parse_args(argv)
 
     os.environ.setdefault("OV_CPU_THREADS_NUM", str(max(1, args.threads)))
+    MIN_QUALITY_NORM = args.min_norm
     os.nice(19)
     from .config import DetectorConfig
     from .motion_pipeline.object_detection import (
@@ -516,7 +661,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     report = summarize(results, int(detector_config.face_min_size))
     if args.json:
-        args.json.write_text(json.dumps(report, indent=2))
+        args.json.write_text(json.dumps(report, indent=1))
+    if args.sheets:
+        write_sheets(results, args.sheets)
     print(format_report(report))
     return 0
 
