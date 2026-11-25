@@ -156,7 +156,9 @@ def main(argv: list[str] | None = None) -> int:
             started = time.monotonic()
             plan = plan_offsets(config, qualification, epoch, camera_id)
             low, high = event_window(plan, settings.margin_seconds)
-            window_rows = rows_for_window(rows, epoch + low - 1.0, epoch + high + 1.0)
+            # Reaches past the window by the moment radius, as the service does.
+            reach = settings.moment_radius_seconds + 1.0
+            window_rows = rows_for_window(rows, epoch + low - reach, epoch + high + reach)
             main_rows = window_rows("main", epoch + low, epoch + high)
             main_size = mp4_video_dimensions(Path(main_rows[0]["path"])) if main_rows else None
             result = capture_event(

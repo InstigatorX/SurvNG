@@ -23,6 +23,10 @@ class InferenceUnavailable(RuntimeError):
     pass
 
 
+class InferenceShed(InferenceUnavailable):
+    """Optional work turned away so incident inference goes first; nothing failed."""
+
+
 class InferenceRollbackIncomplete(InferenceUnavailable):
     """A failed reconfiguration could not restore the previous safe pool."""
 

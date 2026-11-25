@@ -21,6 +21,7 @@ from .types import (
     MAX_INFERENCE_FRAME_BYTES,
     PERSON_REID_REQUEST_TIMEOUT_SECONDS,
     InferenceRollbackIncomplete,
+    InferenceShed,
     InferenceUnavailable,
     InferenceWorkload,
 )
@@ -983,7 +984,7 @@ class InferenceSupervisor:
             raise InferenceUnavailable(reason)
         workload = InferenceWorkload.ENRICHMENT
         if not self._enter_device_workload(workload, source="face_capture"):
-            raise InferenceUnavailable("face capture shed for incident inference")
+            raise InferenceShed("face capture shed for incident inference")
         try:
             return list(self._face.request("capture_faces", frame=crop, embed=embed, workload=workload) or [])
         finally:

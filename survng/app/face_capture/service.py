@@ -53,12 +53,11 @@ ERROR_LOG_INTERVAL_SECONDS = 300.0
 DEFER_BASE_SECONDS = IDLE_SECONDS
 DEFER_MAX_SECONDS = 3600.0
 MAX_TRACKED_DEFERRALS = 10_000
-# An event deferred this many times in a row (about a day with the backoff:
-# 30 s doubling to the 1 h cap, then hourly) counts as a failed attempt: one
-# that keeps timing the face worker out must not restart it, for recognition
-# too, all through the backfill window. Preemption by incident work and
-# capture models that did not load are not counted.
-MAX_CONSECUTIVE_DEFERRALS = 31
+# An event whose inference keeps failing (a face-worker timeout restarts the
+# worker recognition shares) counts as a failed attempt after this many
+# deferrals in a row, about an hour of backoff. Shedding for incident work,
+# preemption and capture models that did not load are not counted.
+MAX_CONSECUTIVE_DEFERRALS = 8
 # A failed event waits this long before its next attempt, so a passing cause
 # (a segment not indexed yet, a decoder timing out under load) does not use
 # up every attempt within a minute.
@@ -237,7 +236,7 @@ class FaceCaptureService:
     def capture(self, event_id: int, camera_id: str, epoch: float, qualification: dict[str, Any]) -> int | None:
         """Capture one event; the number of faces kept, or None when deferred."""
         from ..evidence_work import EvidenceWorkPreempted, cancellable_evidence_work
-        from ..inference_runtime.types import InferenceUnavailable
+        from ..inference_runtime.types import InferenceShed, InferenceUnavailable
         from ..recording_media import mp4_video_dimensions
 
         app_config = self._config()
@@ -291,7 +290,7 @@ class FaceCaptureService:
                 )
         except CaptureCancelled:
             return None
-        except EvidenceWorkPreempted:
+        except (EvidenceWorkPreempted, InferenceShed):
             # Incident work came first: retried soon, never counted.
             if not self._stop.is_set():
                 self._defer(event_id, counted=False)
@@ -384,16 +383,17 @@ class FaceCaptureService:
 
 
 def _people(inference: Any, config: Any, frame: Any) -> list[tuple[float, float, float, float]]:
-    from ..inference_runtime.types import InferenceUnavailable
+    from ..inference_runtime.types import InferenceShed, InferenceUnavailable
     from ..motion_pipeline.object_detection import _box
 
     objects = inference.detect_enrichment(
         frame, confidence_threshold=float(config.event_candidate_confidence_threshold),
     )
     for item in objects:
-        if isinstance(item, dict) and item.get("status") in {"detector_unavailable", "inference_deferred"}:
-            # No answer is not "no people": defer the capture rather than
-            # recording the event as done without faces.
+        if isinstance(item, dict) and item.get("status") == "inference_deferred":
+            # Shed for incident work: no answer is not "no people".
+            raise InferenceShed(str(item.get("error") or "person detection deferred"))
+        if isinstance(item, dict) and item.get("status") == "detector_unavailable":
             raise InferenceUnavailable(str(item.get("error") or "person detection unavailable"))
     return [
         box for item in objects

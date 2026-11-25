@@ -373,3 +373,18 @@ def test_an_event_deferred_again_and_again_becomes_a_failed_attempt(tmp_path, mo
     assert service.store.attempts([1]) == {}
     service.capture(*service.next_event(NOW))
     assert service.store.attempts([1])[1][:2] == ("failed", 1)
+
+
+def test_shedding_for_incident_work_never_counts_toward_failure(tmp_path, monkeypatch):
+    from survng.app.inference_runtime.types import InferenceShed
+
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(30))])
+
+    def shed(**kwargs):
+        raise InferenceShed("face capture shed for incident inference")
+
+    monkeypatch.setattr(service_module, "capture_event", shed)
+    for _ in range(3 * service_module.MAX_CONSECUTIVE_DEFERRALS):
+        assert service.capture(*service.next_event(NOW)) is None
+        service._deferred[1] = (service._deferred[1][0], 0.0)  # the hold has passed
+    assert service.store.attempts([1]) == {}
