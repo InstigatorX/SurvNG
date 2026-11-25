@@ -229,9 +229,22 @@ face per event three ways:
 - **plan**: every frame in the window the old search could reach.
 - **all**: every frame including `--margin` seconds either side.
 
-A face is usable when its shorter side reaches `face_min_size`. The tool opens
+A face is usable when its shorter side reaches `face_min_size`. Each result is
+given twice: for any detected face, and for recognisable faces only. The 300 px
+face detector also fires on the backs of heads, caps, torsos and leaves, and
+the five-point landmark model places points on all of them, so neither
+confidence nor landmark geometry separates them. Each face is instead aligned
+exactly as the live path aligns it and scored with the AdaFace feature norm,
+which on this host was 16-18 for real faces and 9-11 for those false hits. A
+face counts as recognisable from `--min-norm` (default 13); one that fails
+alignment scores 0. The norm needs the original AdaFace checkpoint under
+`models/face_model/adaface-ir50-webface4m/` and PyTorch, because the exported
+OpenVINO model drops it. `--sheets DIR` writes a contact sheet per camera with
+each event's best face under both rules, for checking the cut by eye.
+
+The tool opens
 the database and recording index read-only, loads its own CPU copies of the
 models with the OpenVINO cache off (`--threads` sets the CPU threads), and does
 not touch the service or its config. Zones are not evaluated offline, so anchor
 ranking treats a person at the alert confidence as eligible. `--json` also
-writes the per-event data.
+writes the per-event data, including every face's size, confidence and norm.

@@ -1,5 +1,15 @@
 from survng.app import face_frame_search
-from survng.app.face_frame_search import FrameResult, baseline_frames, summarize, EventResult
+from survng.app.face_frame_search import (
+    EventResult,
+    FrameResult,
+    baseline_frames,
+    passes,
+    summarize,
+)
+
+
+def _face(side, *, recognisable=True):
+    return {"side": side, "confidence": 0.95, "norm": 17.0 if recognisable else 10.0}
 
 
 def _frames(fps=20, start=-4.0, end=12.0, faces=None, useful=None):
@@ -27,18 +37,34 @@ def test_baseline_without_useful_people_is_only_the_plan():
     assert sorted(frame.offset for frame in chosen) == [-0.5, 0.0, 0.5]
 
 
-def test_summary_separates_denser_search_from_a_wider_window():
-    faces = {2.0: [52.0], -3.0: [70.0], 0.0: [30.0]}
+def test_summary_separates_denser_search_wider_window_and_recognisable():
+    faces = {
+        2.0: [_face(52.0)],
+        -3.0: [_face(70.0)],
+        0.0: [_face(30.0)],
+        5.0: [_face(300.0, recognisable=False)],
+    }
     frames = _frames(faces=faces, useful={0.0: 1.0})
     result = EventResult(1, "gate", 0.0, (-4.0, 12.0), (-1.3, 9.3), frames=frames)
     result.baseline_offsets = [
         frame.offset for frame in baseline_frames(frames, [-0.5, 0.0, 0.5], max_extra=4)
     ]
-    event = summarize([result], 48)["cameras"]["gate"]["events"][0]
-    assert event["baseline_best_face"] == 30.0
-    assert event["plan_window_best_face"] == 52.0
-    assert event["full_best_face"] == 70.0
-    assert event["full_best_offset"] == -3.0
+    report = summarize([result], 48)
+    event = report["cameras"]["gate"]["events"][0]
+    assert event["any"]["baseline_best"] == 30.0
+    assert event["any"]["all_best"] == 300.0
+    # A large detection with a low norm (the back of a head) does not count.
+    assert event["recognisable"]["plan_best"] == 52.0
+    assert event["recognisable"]["all_best"] == 70.0
+    assert event["recognisable"]["all_best_offset"] == -3.0
+    assert report["cameras"]["gate"]["summary"]["recognisable"]["gained_all"] == 1
+
+
+def test_recognisable_needs_the_quality_norm_and_failed_alignment_never_passes():
+    assert passes({"norm": 13.0}, "recognisable")
+    assert not passes({"norm": 12.9}, "recognisable")
+    assert not passes({"norm": 0.0}, "recognisable")
+    assert passes({"norm": 0.0}, "any")
 
 
 def test_showinfo_frame_index_and_time_are_read_together():
