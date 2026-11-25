@@ -99,11 +99,13 @@ export function objectNames(found) {
   return result;
 }
 
-export function IncidentPeople({ incidentId = null, eventIds, onNames, onObjects }) {
+export function IncidentPeople({ incidentId = null, revision = null, eventIds, onNames, onObjects }) {
   const [found, setFound] = useState(null);
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState("");
-  const idsKey = `${incidentId || ""}|${(eventIds || []).join(",")}`;
+  // The revision moves when scene observations arrive or a correction changes
+  // the tracked people, so their faces are bound afresh.
+  const idsKey = `${incidentId || ""}|${incidentId ? revision ?? "" : ""}|${(eventIds || []).join(",")}`;
   const signalRef = useRef(null);
 
   const load = useCallback(async (signal) => {

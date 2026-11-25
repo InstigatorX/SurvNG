@@ -32,16 +32,16 @@ export function ObjectCards({ objects, line, selectedId, cameraName, identities,
     {cardOrder(objects).map((object) => {
       const selected = String(object.id) === String(selectedId);
       const dimmed = selectedId != null && !selected;
+      // A face bound to this tracked person names it. Bound to no named group,
+      // the incident's identities still apply; with none, it is not recognized.
+      const bound = objectNames?.[object.id];
+      const cardIdentities = bound?.length ? bound.map((name) => ({ name })) : bound ? (identities || []) : identities;
       return <button key={object.id} type="button" className={`story-card ${object.kind}${selected ? " selected" : ""}${dimmed ? " dimmed" : ""}`}
         aria-pressed={selected} onClick={() => onSelect(selected ? null : object.id)}>
         <ObjectThumb object={object} />
         <span className="story-card-body">
           <span className="story-card-title">{objectName(object)}{object.kind === "uncertain" ? <> <span className="story-uncertain-tag">uncertain</span></> : null}</span>
-          <span className="story-card-summary">{objectSummary(object, {
-            cameraName,
-            // A face bound to this tracked person names it; otherwise the incident's identities.
-            identities: objectNames?.[object.id] ? objectNames[object.id].map((name) => ({ name })) : identities,
-          })}</span>
+          <span className="story-card-summary">{objectSummary(object, { cameraName, identities: cardIdentities })}</span>
           <MiniBar object={object} line={line} />
         </span>
       </button>;

@@ -243,8 +243,10 @@ box holds the face's centre on the same camera at the face's moment
 (`face_capture/binding.py`). Scene observations are sparse, a median of 1.7 s
 from a face, so the person's box is interpolated between two of its
 observations at most 4 s apart, or taken from its nearest observation within
-2 s; the same event is preferred. When no box holds the face but only one
-person was tracked on that camera in the incident, the face is theirs. Faces
+2 s; the same event is preferred. When the face cannot be placed (no
+frame size, or no observation near its moment) and only one person was tracked
+on that camera in the incident, the face is theirs; a face placed outside every
+box stays unbound. Faces
 store the size of their main-stream frame (faces stored before that use the
 camera's newest main recording), because scene boxes are in the detector's
 frame.
@@ -255,6 +257,6 @@ arriving while an incident is open. Each person card on the incident page shows
 the name of the faces bound to it, across every camera that scene object
 spans.
 
-Measured on this host's 173 captured faces in 13 incidents, 11 of them with
-more than one tracked person: 151 faces (87%) bound. A one-second
-nearest-observation rule bound 59%.
+Measured on this host's captured faces (13 incidents, 11 of them with more
+than one tracked person): 84% of 205 faces bound with these rules, against
+59% of 173 for a one-second nearest-observation rule.

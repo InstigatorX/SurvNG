@@ -45,6 +45,14 @@ def _box(value: Any) -> tuple[float, float, float, float] | None:
     return box if len(box) == 4 and box[2] > box[0] and box[3] > box[1] else None
 
 
+def _size(value: Any) -> float | None:
+    try:
+        size = float(value)
+    except (TypeError, ValueError):
+        return None
+    return size if size > 0 else None
+
+
 def person_observations(scene_objects: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Each person observation as {object_id, event_id, camera_id, epoch, box, frame}."""
     found = []
@@ -61,15 +69,15 @@ def person_observations(scene_objects: Iterable[dict[str, Any]]) -> list[dict[st
                 "camera_id": observation.get("camera_id"),
                 "epoch": epoch,
                 "box": box,
-                "frame": (observation.get("detection_frame_width"), observation.get("detection_frame_height")),
+                "frame": (_size(observation.get("detection_frame_width")), _size(observation.get("detection_frame_height"))),
             })
     return found
 
 
 def _scaled(observation: dict[str, Any], frame: tuple[int, int]) -> tuple[float, float, float, float]:
     width, height = observation["frame"]
-    sx = float(frame[0]) / float(width or frame[0])
-    sy = float(frame[1]) / float(height or frame[1])
+    sx = float(frame[0]) / float(width)
+    sy = float(frame[1]) / float(height)
     x1, y1, x2, y2 = observation["box"]
     return x1 * sx, y1 * sy, x2 * sx, y2 * sy
 
@@ -121,11 +129,18 @@ def bind_faces(
             frame = main_size(camera)
         cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
         best: tuple[tuple, Any] | None = None
+        placed_anywhere = False  # some person box was known at the face's moment
         if frame and all(frame):
             for object_id, track in tracks[camera].items():
+                # A box without its detector frame size cannot be put in the
+                # face's frame; reading it as main-stream pixels misplaces it.
+                track = [o for o in track if all(o["frame"])]
+                if not track:
+                    continue
                 placed = _box_at(track, epoch, frame)
                 if placed is None:
                     continue
+                placed_anywhere = True
                 (x1, y1, x2, y2), gap = placed
                 mx, my = (x2 - x1) * BOX_MARGIN, (y2 - y1) * BOX_MARGIN
                 if not (x1 - mx <= cx <= x2 + mx and y1 - my <= cy <= y2 + my):
@@ -135,8 +150,11 @@ def bind_faces(
                 rank = (not same_event, gap, (x2 - x1) * (y2 - y1))
                 if best is None or rank < best[0]:
                     best = (rank, object_id)
-        if best is None and len(tracks[camera]) == 1:
-            # The only person tracked on this camera in the incident.
+        if best is None and not placed_anywhere and len(tracks[camera]) == 1:
+            # The face could not be placed (no frame size, or no observation
+            # near its moment) and only one person was tracked on this camera
+            # in the incident: theirs. A face placed outside that person's box
+            # stays unbound (someone the tracker missed, or a stray hit).
             best = ((True,), next(iter(tracks[camera])))
         if best is not None:
             bound[int(face["id"])] = best[1]

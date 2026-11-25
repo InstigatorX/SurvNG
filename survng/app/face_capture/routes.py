@@ -52,20 +52,26 @@ def _epoch(value: str, name: str) -> float:
     return parsed.timestamp()
 
 
-def _main_sizes(manager: Any) -> Callable[[str], tuple[int, int] | None]:
-    """Main-stream frame size per camera, from its newest main recording (for
-    faces stored before their frame size was)."""
+def _main_sizes(manager: Any, incident: dict[str, Any] | None = None) -> Callable[[str], tuple[int, int] | None]:
+    """Main-stream frame size per camera, from its main recordings around the
+    incident (for faces stored before their frame size was). A camera's
+    resolution can change, so today's recordings need not match the incident."""
     from ..recording_media import mp4_video_dimensions
+    from .binding import _epoch as epoch_of
 
     cache: dict[str, tuple[int, int] | None] = {}
+    start = epoch_of((incident or {}).get("start_at"))
+    end = epoch_of((incident or {}).get("end_at")) or start
+    if start is None:
+        end = datetime.now(timezone.utc).timestamp()
+        start = end - 6 * 3600
 
     def size(camera_id: str) -> tuple[int, int] | None:
         if camera_id not in cache:
             cache[camera_id] = None
-            now = datetime.now(timezone.utc).timestamp()
             try:
                 rows = manager.recorder.recording_rows_between(
-                    camera_id, now - 6 * 3600, now, "main", discover_missing=False)
+                    camera_id, start - 600, end + 600, "main", discover_missing=False)
             except Exception:
                 rows = []
             for row in reversed(rows or []):
@@ -195,7 +201,7 @@ def create_face_capture_router(deps: FaceCaptureRouteDependencies) -> APIRouter:
         incident = manager.events.scene_incident(incident_id)
         if not incident:
             raise HTTPException(status_code=404, detail="incident not found")
-        return groups().for_incident(incident, _main_sizes(manager))
+        return groups().for_incident(incident, _main_sizes(manager, incident))
 
     @router.get("/api/face-captures/{face_id}/image")
     def face_image(face_id: int) -> FileResponse:

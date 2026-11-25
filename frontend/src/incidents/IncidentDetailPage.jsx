@@ -511,7 +511,7 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
               <h2 className="story-aside-title">{objects.length} observed object{objects.length === 1 ? "" : "s"}</h2>
               {objects.length ? <ObjectCards objects={objects} line={line} selectedId={focusId} cameraName={cameraName} identities={cardNames} objectNames={faceObjects} onSelect={selectObject} />
                 : <p className="story-muted">{incident.has_objects === false || !incident.labels?.length ? "Motion only. No objects were observed in the analyzed evidence." : "No object observations are available."}</p>}
-              <IncidentPeople incidentId={incident.incident_id || currentId} eventIds={incident.event_ids || (incident.events || []).map((event) => event.id)} onNames={setFaceNames} onObjects={setFaceObjects} />
+              <IncidentPeople incidentId={incident.incident_id || currentId} eventIds={incident.event_ids || (incident.events || []).map((event) => event.id)} revision={incident.revision} onNames={setFaceNames} onObjects={setFaceObjects} />
               {!selected ? <WhyPanel incident={incident} cameraName={cameraName} />
                 : selected.kind === "uncertain" || correcting
                   ? <CorrectPanel incident={incident} object={selected} objects={objects} cameraName={cameraName} canCorrect={canCorrectIncident}

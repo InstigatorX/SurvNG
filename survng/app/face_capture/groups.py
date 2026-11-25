@@ -13,6 +13,7 @@ The tables live in the face capture store's database.
 """
 from __future__ import annotations
 
+import sqlite3
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
@@ -69,9 +70,16 @@ def ensure_group_schema(connection) -> None:
         connection.execute("alter table face_captures add column assignment text not null default ''")
     connection.execute("create index if not exists face_captures_group on face_captures(group_id)")
     # The frame the face box is in (faces stored before this have none).
-    if "frame_width" not in columns:
-        connection.execute("alter table face_captures add column frame_width integer")
-        connection.execute("alter table face_captures add column frame_height integer")
+    # Each column on its own: an interrupted upgrade must not leave one
+    # without the other, which would fail every later insert.
+    for column in ("frame_width", "frame_height"):
+        if column not in columns:
+            try:
+                connection.execute(f"alter table face_captures add column {column} integer")
+            except sqlite3.OperationalError as exc:
+                # Another process opening the store added it first.
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
 
 def _centroids(connection) -> tuple[list[int], np.ndarray]:
@@ -309,15 +317,31 @@ class FaceGroups:
         from .binding import bind_faces
 
         event_ids = incident.get("event_ids") or [event.get("id") for event in incident.get("events") or []]
-        found = self.for_events([int(i) for i in event_ids if i is not None])
-        ids = sorted({int(i) for i in event_ids if i is not None})[:500]
+        ids = sorted({int(i) for i in event_ids if i is not None})
+        # A busy incident can hold more events than one lookup takes.
+        events: dict[str, list[int]] = {}
+        groups: dict[int, dict[str, Any]] = {}
+        for start in range(0, len(ids), 500):
+            part = self.for_events(ids[start:start + 500])
+            events.update(part["events"])
+            for group in part["groups"]:
+                seen = groups.get(group["id"])
+                if seen is None:
+                    groups[group["id"]] = group
+                else:
+                    merged = list(dict.fromkeys(seen["incident_faces"] + group["incident_faces"]))
+                    seen["incident_faces"] = merged[:SAMPLE_FACES]
+        found = {"events": events, "groups": list(groups.values())}
         objects: dict[str, list[int]] = {}
         if ids:
+            rows = []
             with self.store._connect() as connection:
-                rows = [dict(row) for row in connection.execute(
-                    f"select id, event_id, camera_id, captured_epoch, box_json, frame_width, frame_height, group_id"
-                    f" from face_captures where event_id in ({','.join('?' * len(ids))}) and group_id is not null",
-                    ids)]
+                for start in range(0, len(ids), 500):
+                    chunk = ids[start:start + 500]
+                    rows.extend(dict(row) for row in connection.execute(
+                        "select id, event_id, camera_id, captured_epoch, box_json, frame_width, frame_height, group_id"
+                        f" from face_captures where event_id in ({','.join('?' * len(chunk))}) and group_id is not null",
+                        chunk))
             bound = bind_faces(rows, incident.get("scene_objects") or [], main_size)
             group_of = {row["id"]: row["group_id"] for row in rows}
             for face_id, object_id in bound.items():
