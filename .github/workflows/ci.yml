@@ -115,6 +115,7 @@ jobs:
         run: |
           scripts/run-tests.sh \
             tests/test_scene_incidents.py \
+            tests/test_scene_visible_intervals.py \
             tests/test_scene_history_extent.py \
             tests/test_evidence_gallery.py \
             tests/test_face_reference_retention.py \

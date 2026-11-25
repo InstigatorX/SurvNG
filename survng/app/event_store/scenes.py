@@ -191,6 +191,65 @@ def _overlap(a, b):
         return 0.0
 
 
+# A visible interval is a run of one object's observations on one camera
+# episode. Sampling is sparse, so a longer silence starts a new interval rather
+# than drawing presence nobody observed. Consecutive boxes that barely move are
+# a stationary stretch of the same interval.
+VISIBLE_INTERVAL_MAX_GAP_SECONDS = 60.0
+STATIONARY_BOX_OVERLAP = 0.7
+
+
+def _visible_state(previous, item):
+    # The activity attribution already decided whether this sighting was
+    # active or stationary scene context; geometry only fills in when it
+    # did not (legacy or indeterminate evidence).
+    role = item.get("activity_role")
+    if role == "scene_context":
+        return "stationary"
+    if role == "active":
+        return "moving"
+    if previous.get("box") and item.get("box") and _overlap(previous, item) >= STATIONARY_BOX_OVERLAP:
+        return "stationary"
+    return "moving"
+
+
+def _scene_visible_intervals(evidence):
+    """Return per-camera visible intervals for one object.
+
+    ``evidence`` is ``[(episode_id, observation)]`` in capture order; each
+    observation carries ``id``, ``camera_id``, ``captured_at`` and optionally
+    ``box``/``zones``. States: ``moving``, ``stationary``, or ``observed`` for a
+    single sighting whose motion cannot be judged.
+    """
+    runs = {}
+    for episode_id, observation in evidence:
+        runs.setdefault((observation["camera_id"], episode_id), []).append(observation)
+    intervals = []
+    for (camera_id, episode_id), items in runs.items():
+        current = None
+        for previous, item in zip([None, *items], items):
+            epoch = _epoch(item["captured_at"])
+            if previous is None or epoch - _epoch(previous["captured_at"]) > VISIBLE_INTERVAL_MAX_GAP_SECONDS:
+                current = {"camera_id": camera_id, "episode_id": episode_id, "start_at": item["captured_at"],
+                           "end_at": item["captured_at"], "state": "observed", "observation_id": item["id"],
+                           "last_observation_id": item["id"], "observation_count": 1, "zones": list(item.get("zones") or [])}
+                intervals.append(current)
+                continue
+            state = _visible_state(previous, item)
+            if current["state"] not in {"observed", state}:
+                # The state changed: the new stretch continues from the last
+                # shared sighting, so the bar has no hole between them.
+                current = {"camera_id": camera_id, "episode_id": episode_id, "start_at": previous["captured_at"],
+                           "end_at": previous["captured_at"], "state": state, "observation_id": previous["id"],
+                           "last_observation_id": previous["id"], "observation_count": 1, "zones": list(previous.get("zones") or [])}
+                intervals.append(current)
+            current.update(state=state, end_at=item["captured_at"], last_observation_id=item["id"],
+                           observation_count=current["observation_count"] + 1)
+            current["zones"].extend(zone for zone in item.get("zones") or [] if zone not in current["zones"])
+    intervals.sort(key=lambda interval: (_epoch(interval["start_at"]), interval["camera_id"]))
+    return intervals
+
+
 class EventStoreSceneMixin:
 
     def _init_scene_db(self):
@@ -987,8 +1046,10 @@ class EventStoreSceneMixin:
                 subject.update(confidence=float(item["confidence"]),source_event_id=row["event_id"],object_index=row["object_index"])
             if row["label_override"] or item.get("historical_track_confirmed") or (item.get("confidence_provenance") != "track_summary" and float(item.get("confidence") or 0)>=float(item.get("scene_confirmation_threshold", .45)) and int(item.get("temporal_observations") or item.get("track_observations") or 1)>=2):
                 subject["certainty"] = "observed"
+        episode_by_observation = {row["id"]: row["episode_id"] for row in observations}
         for subject in grouped.values():
             subject["observation_count"]=len(subject["observations"])
+            subject["visible_intervals"]=_scene_visible_intervals([(episode_by_observation[o["id"]], o) for o in subject["observations"]])
             strong_times = {o["captured_at"] for o in subject["observations"] if o.get("confidence_provenance") != "track_summary" and float(o.get("confidence") or 0)>=float(o.get("scene_confirmation_threshold", .45))}
             if len(strong_times)>=2:
                 subject["certainty"]="observed"
