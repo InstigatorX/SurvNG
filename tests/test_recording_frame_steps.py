@@ -326,6 +326,94 @@ class FrameStepDecodeTest(unittest.TestCase):
             self.assertEqual(len(commands), 1)
             self.assertNotIn("-hwaccel", commands[0])
 
+    def test_frames_past_100_seconds_into_a_file_are_still_exact(self) -> None:
+        # FFmpeg prints frame times to six significant digits: past 100 s
+        # that is a millisecond, as coarse as the matching tolerance. A
+        # 90 kHz time base at 19.84 fps lands some frames right on it.
+        path = self.root / "recordings" / "long.mp4"
+        subprocess.run([
+            self.ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+            "color=c=gray:size=64x48:rate=19.84:duration=106", "-c:v", "libx264", "-g", "20",
+            "-pix_fmt", "yuv420p", "-video_track_timescale", "90000", "-y", str(path),
+        ], check=True, capture_output=True, timeout=120)
+        row = {"path": str(path), "start_epoch": 1000.0, "end_epoch": 1106.0}
+        frames = self.segment_frames(row)
+        for index in (2015, 2077):  # 101.5625 s and 104.6875 s
+            _image, actual = self.step_frame(row, 1000.0 + frames.times[index])
+            self.assertAlmostEqual(actual, 1000.0 + frames.times[index], places=5)
+
+    def test_a_short_or_failed_gpu_run_falls_back_without_turning_the_gpu_off(self) -> None:
+        from survng.app import recording_media_runtime as runtime_module
+        from survng.app.recorded_decoder import FAILURE_BITSTREAM, DecodeResult
+
+        path = self.clip("partial.mp4", seconds=1.0)
+        row = {"path": str(path), "start_epoch": 1000.0, "end_epoch": 1001.0}
+        frames = self.segment_frames(row)
+        real_run_decoder = runtime_module.run_decoder
+        commands: list[list[str]] = []
+
+        def gpu_as(outcome):
+            def run_decoder(command, **kwargs):
+                commands.append(list(command))
+                if "-hwaccel" not in command:
+                    return real_run_decoder(command, **kwargs)
+                if outcome == "short":
+                    # Exit 0 with frames missing, as a GPU decoder can.
+                    cpu = [part for part in command]
+                    hw = cpu.index("-vaapi_device")
+                    del cpu[hw:hw + 6]
+                    cpu[cpu.index("-vf") + 1] = "scale=320:240,showinfo"
+                    result = real_run_decoder(cpu, **kwargs)
+                    result.output = result.output[:3]
+                    return result
+                return DecodeResult(command, kwargs["backend"], 1, None, b"", FAILURE_BITSTREAM, "corrupt")
+            return run_decoder
+
+        self.addCleanup(setattr, self.runtime, "recording_strip_hardware_retry_at", 0.0)
+        for outcome, index in (("short", 4), ("corrupt", 14)):
+            with self.subTest(outcome):
+                self.runtime.recording_strip_hardware_retry_at = 0.0
+                commands.clear()
+                with (
+                    patch.object(main, "manager", self.manager),
+                    patch.object(self.runtime, "_maintain_recording_preview_cache"),
+                    patch.object(self.runtime, "_hardware_acceleration_mode", return_value="auto"),
+                    patch.object(self.runtime, "_ffmpeg_vaapi_info", return_value={"available": True, "device": "/dev/dri/renderD128"}),
+                    patch.object(runtime_module, "run_decoder", side_effect=gpu_as(outcome)),
+                    patch.object(runtime_module, "mp4_video_dimensions", return_value=(2560, 1920)),
+                ):
+                    image, actual = self.runtime._recording_step_frame(row, 1000.0 + frames.times[index], width=320)
+                # The CPU made the whole run; the frame is exact.
+                self.assertEqual(len(commands), 2)
+                self.assertNotIn("-hwaccel", commands[1])
+                self.assertEqual(self.shown_frame(image), index)
+                # A problem with this file is not a broken GPU.
+                self.assertEqual(self.runtime.recording_strip_hardware_retry_at, 0.0)
+
+    def test_a_run_in_use_stays_fresh_as_a_whole_and_big_runs_bring_maintenance_forward(self) -> None:
+        import os
+
+        from survng.app import recording_media_runtime as runtime_module
+
+        path = self.clip("fresh.mp4", seconds=0.5)
+        row = {"path": str(path), "start_epoch": 1000.0, "end_epoch": 1000.5}
+        frames = self.segment_frames(row)
+        self.addCleanup(setattr, self.runtime, "recording_frame_bytes_since_maintenance", 0)
+        self.runtime.recording_preview_last_maintenance = 0.0
+        with patch.object(runtime_module, "RECORDING_FRAME_MAINTENANCE_BYTES", 1):
+            self.step_frame(row, 1000.0 + frames.times[0])
+        # Enough new bytes force the next maintenance pass, even soon after boot.
+        self.assertEqual(self.runtime.recording_preview_last_maintenance, float("-inf"))
+        self.runtime.recording_preview_last_maintenance = 0.0
+        cache = self.root / "database" / "recording-preview-cache"
+        files = sorted(cache.glob("*.jpg"))
+        self.assertGreater(len(files), 2)
+        for item in files:
+            os.utime(item, (1_000_000, 1_000_000))
+        self.step_frame(row, 1000.0 + frames.times[2])
+        # Serving one frame keeps every frame of its run, used or not.
+        self.assertTrue(all(item.stat().st_mtime > 1_000_000 for item in files))
+
     def test_a_large_frame_is_scaled_to_the_width_asked_for(self) -> None:
         import cv2
 

@@ -41,7 +41,11 @@ from .media_sessions import (
 from .recording_media import RECORDING_FMP4_VERSION, concatenated_clip_timing, event_clip_window, mp4_video_dimensions, playback_segment_duration
 from .recording_mp4 import offset_fmp4_timestamps
 from .recorded_decoder import (
+    FAILURE_BITSTREAM,
+    FAILURE_MISSING_INPUT,
     FAILURE_TIMEOUT,
+    FAILURE_UNFINALIZED_INPUT,
+    FAILURE_UNREADABLE_INPUT,
     DecodePlan,
     build_decode_command,
     read_bmp_frames,
@@ -82,6 +86,10 @@ RECORDING_FRAME_JPEG_QUALITY = 88
 RECORDING_FRAME_MAINTENANCE_BYTES = 32 * 1024 * 1024
 # Frame lists probed at once (a demux each, on request threads).
 RECORDING_FRAME_LIST_PROBES = 2
+# Failures that are about the file, not the GPU: they do not turn it off.
+STREAM_FAILURES = frozenset({
+    FAILURE_BITSTREAM, FAILURE_MISSING_INPUT, FAILURE_UNFINALIZED_INPUT, FAILURE_UNREADABLE_INPUT,
+})
 
 
 def raw_bgr_frames(stream, size: tuple[int, int]) -> list[np.ndarray]:
@@ -154,6 +162,8 @@ class RecordingMediaRuntime:
         self.recording_frame_list_lock = threading.Lock()
         self.recording_frame_list_limiter = threading.BoundedSemaphore(RECORDING_FRAME_LIST_PROBES)
         self.recording_frame_bytes_since_maintenance = 0
+        self.recording_frame_short_warned_at = float('-inf')
+        self.recording_frame_short_suppressed = 0
         self.recording_preview_locks: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
         self.recording_preview_locks_guard = threading.Lock()
         self.recording_preview_maintenance_lock = threading.Lock()
@@ -1227,7 +1237,7 @@ class RecordingMediaRuntime:
         except OSError as exc:
             raise HTTPException(status_code=404, detail='recording file not found') from exc
         fingerprint = (
-            f'frame-run-v2:{source_path}:{stat.st_mtime_ns}:{stat.st_size}:'
+            f'frame-run-v3:{source_path}:{stat.st_mtime_ns}:{stat.st_size}:'
             f'{frames.times[run_start]:.6f}:{run_stop - run_start}:{output_width}'
         )
         cache_key = hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:32]
@@ -1251,8 +1261,12 @@ class RecordingMediaRuntime:
             path = frame_path(number)
             if not self._recording_preview_ready(path, touch=True):
                 return None
-            # The run's first frame and times live as long as any frame of it.
-            self._recording_preview_ready(frame_path(0), touch=True)
+            # A run in use stays fresh as a whole, so the cache's oldest-first
+            # eviction takes runs together rather than a run's unused frames
+            # (which would cost the next step a decode).
+            for other in range(len(times)):
+                if other != number:
+                    self._recording_preview_ready(frame_path(other), touch=True)
             if abs(times[number] - target) > FRAME_TIME_TOLERANCE_SECONDS:
                 # The decoder did not produce this frame (a damaged or
                 # truncated stream): never stand another frame in for it.
@@ -1322,10 +1336,7 @@ class RecordingMediaRuntime:
                 # The times last: a run without them is never served.
                 metadata_path.write_text(json.dumps({'times': times}, separators=(',', ':')), encoding='utf-8')
                 if len(times) != run_stop - run_start:
-                    LOGGER.warning(
-                        'recording frame run for %s decoded %d of %d frames',
-                        source_path.name, len(times), run_stop - run_start,
-                    )
+                    self._warn_short_frame_run(source_path, len(times), run_stop - run_start)
             finally:
                 self.recording_frame_run_build_limiter.release()
             # Runs are large (up to 30 frames): held-down stepping can write
@@ -1337,7 +1348,7 @@ class RecordingMediaRuntime:
                 if force:
                     self.recording_frame_bytes_since_maintenance = 0
             if force:
-                self.recording_preview_last_maintenance = 0.0
+                self.recording_preview_last_maintenance = float('-inf')
             self._maintain_recording_preview_cache(frame_path(0))
             found = cached()
             if found is None:
@@ -1421,9 +1432,14 @@ class RecordingMediaRuntime:
                 stdout_reader=(lambda stream: raw_bgr_frames(stream, size)) if size else read_bmp_frames,
             )
             warn_decoder_errors('frame_step', source_path, plan.backend, result.stderr)
-            if result.ok and result.output:
+            if result.ok and result.output and (not on_gpu or len(result.output) >= count):
                 break
             if on_gpu:
+                if result.ok or result.failure in STREAM_FAILURES:
+                    # Frames missing, or a problem with this file: the CPU
+                    # tries it, and the GPU stays in use for other files.
+                    warn_decoder_failure('frame_step', source_path, result)
+                    continue
                 # A broken or hung GPU must not cost every run its timeout.
                 self.recording_strip_hardware_retry_at = time.monotonic() + RECORDING_STRIP_HARDWARE_RETRY_SECONDS
                 LOGGER.warning(
@@ -1447,6 +1463,22 @@ class RecordingMediaRuntime:
             LOGGER.warning('recording frame run for %s reported no frame times', source_path.name)
             raise HTTPException(status_code=500, detail='recording frame failed')
         return decoded
+
+    def _warn_short_frame_run(self, source_path: Path, decoded: int, expected: int) -> None:
+        """A run with frames missing, at most once a minute (stepping repeats)."""
+        now = time.monotonic()
+        with self.recording_frame_list_lock:
+            if now - self.recording_frame_short_warned_at < 60.0:
+                self.recording_frame_short_suppressed += 1
+                return
+            suppressed = self.recording_frame_short_suppressed
+            self.recording_frame_short_warned_at = now
+            self.recording_frame_short_suppressed = 0
+        LOGGER.warning(
+            'recording frame run for %s decoded %d of %d frames%s',
+            source_path.name, decoded, expected,
+            f' (suppressed={suppressed})' if suppressed else '',
+        )
 
     @staticmethod
     def _recording_preview_timestamp(path: Path) -> tuple[float | None, str]:

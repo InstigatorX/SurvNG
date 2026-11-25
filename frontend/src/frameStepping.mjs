@@ -100,6 +100,7 @@ export function createFrameStepper({
   let imageRequest = null; // { key, controller, prefetch }
   let failures = new Map();
   let retryTimer = null;
+  let retryKey = null;
   let closed = false;
   let snapshotValue = { active: false };
 
@@ -266,10 +267,12 @@ export function createFrameStepper({
   function wantImage() {
     const epoch = wantedEpoch();
     if (epoch === null) { publish(); return; }
-    // A wait to retry a frame no longer wanted does not hold up this one.
-    if (retryTimer !== null) {
+    // A wait to retry another frame does not hold up this one; stepping
+    // back onto the failed frame keeps its wait.
+    if (retryTimer !== null && retryKey !== keyOf(epoch)) {
       cancel(retryTimer);
       retryTimer = null;
+      retryKey = null;
     }
     const cached = images.get(keyOf(epoch));
     if (cached) {
@@ -360,7 +363,8 @@ export function createFrameStepper({
           publish();
           return;
         }
-        retryTimer = schedule(() => { retryTimer = null; pump(); }, FRAME_STEP_RETRY_MS[count - 1]);
+        retryKey = key;
+        retryTimer = schedule(() => { retryTimer = null; retryKey = null; pump(); }, FRAME_STEP_RETRY_MS[count - 1]);
       });
   }
 
@@ -371,6 +375,7 @@ export function createFrameStepper({
     imageRequest = null;
     if (retryTimer !== null) cancel(retryTimer);
     retryTimer = null;
+    retryKey = null;
   }
 
   return {

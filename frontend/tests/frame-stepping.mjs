@@ -263,6 +263,18 @@ assert.equal(acceptRepeatedStep(1000, 1090), true);
   assert.deepEqual(h.openImages(), [first.frames[7]]);
 }
 
+// A wait to retry one frame does not hold up the next frame wanted.
+{
+  const h = harness();
+  h.stepper.step(1, first.frames[5]);
+  await h.answerListing();
+  await h.answerImage({ fail: true }); // frame 6 failed: a 500 ms wait
+  assert.deepEqual(h.openImages(), []);
+  h.stepper.step(1);
+  await h.flush();
+  assert.deepEqual(h.openImages(), [first.frames[7]], "the next frame is asked for at once, not after the wait");
+}
+
 // Leaving stops everything and takes the frame down; images stay cached.
 {
   const h = harness();

@@ -146,14 +146,18 @@ If the decoder does not produce that frame (a damaged stream), the answer is
   recorded-frame decoder. The whole run is kept in the preview cache, so the
   other frames of that GOP are served without decoding.
 - As for preview strips, a run is decoded and scaled on the GPU through VAAPI
-  where hardware acceleration is not `off` and VAAPI works. If that fails or
-  takes more than 5 s, the CPU decodes the run, and neither runs nor strips
-  try the GPU again, for any camera, for five minutes. A frame of unknown size
-  is always decoded on the CPU.
+  where hardware acceleration is not `off` and VAAPI works. If the GPU fails
+  or takes more than 5 s, the CPU decodes the run, and neither runs nor strips
+  try the GPU again, for any camera, for five minutes. A failure that is about
+  the file (missing, unreadable, a damaged stream), or a GPU run with frames
+  missing, also goes to the CPU but leaves the GPU in use. A frame of unknown
+  size is always decoded on the CPU.
 - One run is built at a time. Each holds a preview-process media session
   (shared with preview strips), not one of the transcode slots that event
   clips, exports and HomeKit use. A busy generator answers `429` with
   `Retry-After`.
 - Runs count against the preview cache's size and age limits like any other
   preview image; every 32 MB of new runs brings the cache's maintenance pass
-  forward. A run's files are kept or dropped together.
+  forward. Serving any frame of a run refreshes all of its files, so the
+  oldest-first eviction tends to take a run as a whole; if part of a run is
+  evicted anyway, the next request for it decodes the run again.

@@ -180,15 +180,15 @@ async function open(at, { viewport = { width: 1440, height: 1000 }, ...options }
 }
 
 // Wait for a seek to finish, then pause the player if it is playing.
+// A play() still pending reads as paused, so wait a while for it to start.
 async function pauseWhenSettled(page) {
-  await page.waitForTimeout(400);
   await page.waitForFunction(() => {
     const state = window.timelineFixture.snapshot();
     return state.readyState >= 2 && !state.seeking;
   });
-  if (!(await page.evaluate(() => window.timelineFixture.snapshot().paused))) {
-    await page.hud.getByRole("button", { name: "Pause", exact: true }).click();
-  }
+  const playing = await page.waitForFunction(() => !window.timelineFixture.snapshot().paused, null, { timeout: 1500 })
+    .then(() => true, () => false);
+  if (playing) await page.hud.getByRole("button", { name: "Pause", exact: true }).click();
   await page.waitForFunction(() => window.timelineFixture.snapshot().paused);
 }
 
@@ -409,13 +409,8 @@ async function run() {
     await page.getByRole("option", { name: /Yard/ }).click();
     await page.waitForFunction(() => window.timelineFixture.snapshot().context?.camera_id === "yard");
     assert.equal(await page.overlay(), null, "another camera takes the stepped frame down");
-    await page.waitForFunction(() => {
-      const state = window.timelineFixture.snapshot();
-      return state.readyState >= 2 && !state.seeking;
-    });
-    if (!(await page.evaluate(() => window.timelineFixture.snapshot().paused))) {
-      await page.hud.getByRole("button", { name: "Pause", exact: true }).click();
-    }
+    // Switching camera starts playback.
+    await pauseWhenSettled(page);
     await page.keyboard.press(".");
     await page.waitForSelector(".recording-frame-step[data-drawn=true]");
     assert.ok(frameLog.filter((entry) => entry.camera === "yard").length > listsBefore, "the new camera's frames are asked for");

@@ -1303,7 +1303,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
     enabled: frameStepEnabled,
     // While a seek or a window load is under way the player's own time is
     // not yet the time asked for (a new window starts at 0): step from that.
-    currentEpoch: () => (Number.isFinite(pendingSeekEpochRef.current) ? pendingSeekEpochRef.current : currentPlaybackEpoch()),
+    currentEpoch: () => (heroSeeking && Number.isFinite(pendingSeekEpochRef.current) ? pendingSeekEpochRef.current : currentPlaybackEpoch()),
     onSettle: (epoch) => seekToSteppedFrame(epoch, false),
     measure: () => heroMediaRef.current?.clientWidth,
   });
@@ -3170,7 +3170,12 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
           {playbackError ? <div className="recordings-v2-error"><span>{playbackError}</span><button type="button" onClick={retryRecordingPlayback}><RefreshCcw size={14} />Retry</button></div> : null}
           {playbackNotice && !playbackError ? <div className="recordings-v2-notice">{playbackNotice}</div> : null}
           {!isAllCameras && playbackBlocked && !playbackError ? (
-            <button type="button" className="recordings-v2-play" onClick={() => requestRecordingPlay(videoRef.current)}>
+            <button type="button" className="recordings-v2-play" onClick={() => {
+              // From a stepped frame, as the HUD's Play does.
+              const stepped = frameStep.resume();
+              if (Number.isFinite(stepped)) seekToSteppedFrame(stepped, true);
+              else requestRecordingPlay(videoRef.current);
+            }}>
               <Play size={22} fill="currentColor" />
               Play recording
             </button>

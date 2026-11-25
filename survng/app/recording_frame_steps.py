@@ -31,7 +31,8 @@ FRAME_RUN_MAX_FRAMES = 30
 # frame interval.
 FRAME_TIME_TOLERANCE_SECONDS = 0.0005
 
-_SHOWINFO_PTS = re.compile(rb"Parsed_showinfo[^\r\n]*\bpts_time:\s*([-+0-9.eE]+)")
+_SHOWINFO_TIME_BASE = re.compile(rb"Parsed_showinfo[^\r\n]*config in time_base:\s*(\d+)/(\d+)")
+_SHOWINFO_FRAME = re.compile(rb"Parsed_showinfo[^\r\n]*\bn:\s*\d+\s+pts:\s*(-?\d+)\s+pts_time:\s*([-+0-9.eE]+)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,8 +110,19 @@ def frame_run(frames: SegmentFrames, index: int, max_frames: int = FRAME_RUN_MAX
 
 
 def showinfo_times(stderr: bytes) -> list[float]:
-    """Frame times FFmpeg's ``showinfo`` reported, in output order."""
-    return [float(match) for match in _SHOWINFO_PTS.findall(stderr or b"")]
+    """Frame times FFmpeg's ``showinfo`` reported, in output order.
+
+    From the integer PTS and the filter's time base: the printed
+    ``pts_time`` has six significant digits, so past 100 s into a file it is
+    only good to a millisecond.
+    """
+    stderr = stderr or b""
+    base = _SHOWINFO_TIME_BASE.search(stderr)
+    numerator, denominator = (int(base.group(1)), int(base.group(2))) if base else (0, 0)
+    times = []
+    for pts, pts_time in _SHOWINFO_FRAME.findall(stderr):
+        times.append(int(pts) * numerator / denominator if denominator > 0 else float(pts_time))
+    return times
 
 
 def scaled_size(source: tuple[int, int] | None, width: int) -> tuple[int, int] | None:

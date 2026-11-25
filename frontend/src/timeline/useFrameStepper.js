@@ -78,10 +78,21 @@ export function useFrameStepper({ cameraId, source, enabled, currentEpoch, onSet
     });
     const stepper = createFrameStepper({
       loadFrames: async (epoch, signal) => {
-        const response = await fetchWithTimeout(recordingFramesUrl(cameraId, epoch, source), signal);
-        if (response.status === 404) return null;
-        if (!response.ok) throw new Error(`Frame list failed (${response.status})`);
-        return response.json();
+        // A busy server (429) is asked again after its Retry-After, twice.
+        for (let attempt = 0; ; attempt += 1) {
+          const response = await fetchWithTimeout(recordingFramesUrl(cameraId, epoch, source), signal);
+          if (response.status === 404) return null;
+          if (response.ok) return response.json();
+          if (response.status !== 429 || attempt >= 2) throw new Error(`Frame list failed (${response.status})`);
+          const wait = Math.min(5, Math.max(0.5, Number(response.headers.get("Retry-After")) || 1)) * 1000;
+          await new Promise((done, fail) => {
+            const timer = window.setTimeout(done, wait);
+            signal.addEventListener("abort", () => {
+              window.clearTimeout(timer);
+              fail(Object.assign(new Error("Frame list withdrawn"), { name: "AbortError" }));
+            }, { once: true });
+          });
+        }
       },
       loadImage: async (epoch, signal) => {
         const response = await fetchWithTimeout(recordingFrameUrl(cameraId, epoch, source, width()), signal);
