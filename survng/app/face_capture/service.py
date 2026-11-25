@@ -85,7 +85,9 @@ class FaceCaptureService:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
-        self._last_prune = 0.0
+        # None: the first check is due. A 0.0 start compared against
+        # time.monotonic() skipped pruning until the host had been up 6 h.
+        self._last_prune: float | None = None
         self._last_error_log = 0.0
         # event id -> (deferrals, monotonic time it may be tried again); failed
         # events are held here too, with no deferrals counted.
@@ -521,7 +523,7 @@ class FaceCaptureService:
 
     def _prune_if_due(self) -> None:
         now = time.monotonic()
-        if now - self._last_prune < PRUNE_INTERVAL_SECONDS:
+        if self._last_prune is not None and now - self._last_prune < PRUNE_INTERVAL_SECONDS:
             return
         self._last_prune = now
         captured = self.store.captured_event_ids()

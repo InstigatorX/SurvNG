@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from unittest.mock import Mock, patch
 
 from survng.app.config import DetectorConfig
 from survng.app.face_capture import service as service_module
@@ -137,7 +138,10 @@ def test_faces_of_events_removed_by_retention_are_forgotten(tmp_path):
         service.store.record(event_id=event_id, camera_id="gate", event_epoch=0.0,
                              result=CaptureResult(faces=[face]), embedding_model="m", seconds=1.0)
     crop = Path(service.store.faces(99)[0]["crop_path"])
-    service._prune_if_due()
+    # Due on the first check even on a host up for less than the interval
+    # (a fresh CI runner): monotonic time starts near boot.
+    with patch("survng.app.face_capture.service.time.monotonic", return_value=60.0):
+        service._prune_if_due()
     assert service.store.captured_event_ids() == [1]
     assert not crop.exists()
 
