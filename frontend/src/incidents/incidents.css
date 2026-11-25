@@ -394,6 +394,14 @@
   padding: 10px;
 }
 
+.incident-inspector-open {
+  justify-self: start;
+  color: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .incident-inspector-head strong {
   font-size: var(--text-sm);
   font-weight: 620;

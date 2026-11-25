@@ -106,6 +106,10 @@ export function IncidentRecordingPlayer({
   onAnalysisStats,
   onEnded,
   onClose,
+  // Optional: open at this moment inside [startEpoch, endEpoch] instead of
+  // its start, and report the playhead so a caller can follow it.
+  initialEpoch = null,
+  onPlayhead = null,
 }) {
   const videoRef = useRef(null);
   const [selectedSource, setSelectedSource] = useState(() => source || preferredStreamSource());
@@ -113,7 +117,11 @@ export function IncidentRecordingPlayer({
   const failedSourcesRef = useRef(new Set());
   const endedRef = useRef(false);
   const scrubbingRef = useRef(false);
-  const appliedSeekRef = useRef(startEpoch);
+  const safeInitial = (Number.isFinite(Number(initialEpoch)) && Number(initialEpoch) > startEpoch
+    && Number(initialEpoch) < (Number.isFinite(endEpoch) ? endEpoch : startEpoch + 1)) ? Number(initialEpoch) : startEpoch;
+  const appliedSeekRef = useRef(safeInitial);
+  const onPlayheadRef = useRef(onPlayhead);
+  onPlayheadRef.current = onPlayhead;
   const readySourceRef = useRef("");
   const ignorePauseRef = useRef(0);
   const [nativeHls] = useState(supportsNativeRecordingHls);
@@ -126,8 +134,8 @@ export function IncidentRecordingPlayer({
   const [transport, setTransport] = useState(initialTransport);
   const [startNeedsPlay, setStartNeedsPlay] = useState(false);
   const [loaded, setLoaded] = useState(null);
-  const [targetEpoch, setTargetEpoch] = useState(startEpoch);
-  const [playhead, setPlayhead] = useState(startEpoch);
+  const [targetEpoch, setTargetEpoch] = useState(safeInitial);
+  const [playhead, setPlayhead] = useState(safeInitial);
   const [playing, setPlaying] = useState(autoPlay);
   const [muted, setMuted] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -143,14 +151,18 @@ export function IncidentRecordingPlayer({
     endedRef.current = false;
     readySourceRef.current = "";
     ignorePauseRef.current = performance.now() + 1500;
-    appliedSeekRef.current = startEpoch;
-    setTargetEpoch(startEpoch);
-    setPlayhead(startEpoch);
+    appliedSeekRef.current = safeInitial;
+    setTargetEpoch(safeInitial);
+    setPlayhead(safeInitial);
     setPlaying(autoPlay);
     setError("");
     setStartNeedsPlay(false);
     setTransport(initialTransport());
-  }, [autoPlay, cameraId, endEpoch, nativeHls, source, startEpoch]);
+  }, [autoPlay, cameraId, endEpoch, nativeHls, source, startEpoch, safeInitial]);
+
+  useEffect(() => {
+    if (Number.isFinite(playhead)) onPlayheadRef.current?.(playhead);
+  }, [playhead]);
 
   useEffect(() => {
     if (!cameraId || !Number.isFinite(startEpoch)) return undefined;
