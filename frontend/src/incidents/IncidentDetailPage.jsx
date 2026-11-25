@@ -145,6 +145,7 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
     setMissing(false); setError("");
     currentIdRef.current = currentId;
     setSelectedId(null); setCorrecting(false); setFrameRef(null); setCursor(null); setPlayback(null); setNotice(null); setReviewError(""); setSelectedFrame(null);
+    setFaceNames([]); // the next incident's faces are looked up afresh
   }, [currentId]);
 
   useEffect(() => {

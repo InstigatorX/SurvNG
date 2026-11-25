@@ -213,4 +213,7 @@ def test_faces_by_event_list_who_was_seen_in_an_incident(setup):
     with pytest.raises(HTTPException) as error:
         endpoint(ids="1,x")
     assert error.value.status_code == 400
+    with pytest.raises(HTTPException) as error:
+        endpoint(ids=str(2**64))  # beyond SQLite's integers
+    assert error.value.status_code == 400
     assert required_api_scope("GET", "/api/face-captures/by-events") == "admin"

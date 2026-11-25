@@ -159,6 +159,8 @@ def create_face_capture_router(deps: FaceCaptureRouteDependencies) -> APIRouter:
             event_ids = [int(part) for part in ids.split(",") if part.strip()]
         except ValueError:
             raise HTTPException(status_code=400, detail="ids must be comma-separated event ids") from None
+        if any(not 0 < event_id < 2**63 for event_id in event_ids):
+            raise HTTPException(status_code=400, detail="ids must be positive event ids")
         return groups().for_events(event_ids)
 
     @router.get("/api/face-captures/{face_id}/image")

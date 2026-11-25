@@ -513,4 +513,4 @@
 .incident-people-name { display: inline-flex; gap: 0.3rem; align-items: center; font-weight: 600; }
 .incident-people-unnamed { display: grid; gap: 0.35rem; }
 .incident-people-unnamed button { justify-self: start; display: inline-flex; gap: 0.3rem; align-items: center; }
-.people-visit-links { display: inline-flex; gap: 0.6rem; align-items: center; }
+.people-visits li .people-visit-links { display: inline-flex; gap: 0.6rem; align-items: center; }

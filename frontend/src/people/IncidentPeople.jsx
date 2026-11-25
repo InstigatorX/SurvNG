@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { EyeOff, UserCheck } from "lucide-react";
 import { appUrl, fetch } from "../shared/api.js";
 
@@ -9,12 +9,31 @@ function faceUrl(faceId) {
   return appUrl(`/api/face-captures/${faceId}/image`);
 }
 
+const MAX_EVENT_IDS = 500; // the API's largest batch
+
 export async function fetchFacesForEvents(eventIds, signal) {
   const ids = [...new Set((eventIds || []).map(Number).filter((id) => Number.isInteger(id) && id > 0))];
   if (!ids.length) return { events: {}, groups: [] };
-  const response = await fetch(`/api/face-captures/by-events?ids=${ids.slice(0, 500).join(",")}`, { signal });
-  if (!response.ok) return null; // not an admin, or face capture unavailable
-  return response.json();
+  // A page of busy incidents can hold more events than one request takes.
+  const chunks = [];
+  for (let start = 0; start < ids.length; start += MAX_EVENT_IDS) chunks.push(ids.slice(start, start + MAX_EVENT_IDS));
+  const parts = await Promise.all(chunks.map(async (chunk) => {
+    const response = await fetch(`/api/face-captures/by-events?ids=${chunk.join(",")}`, { signal });
+    return response.ok ? response.json() : null; // not an admin, or face capture unavailable
+  }));
+  if (parts.some((part) => !part)) return null;
+  if (parts.length === 1) return parts[0];
+  const events = {};
+  const groups = new Map();
+  for (const part of parts) {
+    Object.assign(events, part.events);
+    for (const group of part.groups || []) {
+      const seen = groups.get(group.id);
+      if (seen) seen.incident_faces = [...new Set([...(seen.incident_faces || []), ...(group.incident_faces || [])])];
+      else groups.set(group.id, { ...group });
+    }
+  }
+  return { events, groups: [...groups.values()] };
 }
 
 /** Named people seen in each incident: { [incidentKey]: ["Name", ...] }. */
@@ -67,9 +86,12 @@ export function IncidentPeople({ eventIds, onNames }) {
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState("");
   const idsKey = (eventIds || []).join(",");
+  const signalRef = useRef(null);
 
   const load = useCallback(async (signal) => {
     const next = await fetchFacesForEvents(eventIds, signal).catch(() => null);
+    // A newer lookup, or another incident after navigation, owns the state now.
+    if (signal.aborted) return;
     setFound(next);
     onNames?.((next?.groups || []).filter((group) => group.person_name && !group.ignored).map((group) => group.person_name));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -77,6 +99,7 @@ export function IncidentPeople({ eventIds, onNames }) {
 
   useEffect(() => {
     const controller = new AbortController();
+    signalRef.current = controller.signal;
     void load(controller.signal);
     return () => controller.abort();
   }, [load]);
@@ -92,7 +115,7 @@ export function IncidentPeople({ eventIds, onNames }) {
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : "That did not work.");
-      await load();
+      await load(signalRef.current);
       return true;
     } catch (reason) {
       setError(reason.message);
