@@ -36,9 +36,11 @@ TRACK_MATCH_IOU = 0.1
 TRACK_MATCH_SECONDS = 1.0
 # Second-pass tracks matched to no first-pass track are numbered from here.
 UNMATCHED_TRACK_BASE = 1000
-# Candidates held per event (the highest norms), each as a JPEG crop: a
-# busy 4K event cannot grow memory beyond a few megabytes.
-MAX_CANDIDATES = 300
+# Candidates are held as JPEG crops (tens of kilobytes each) within this
+# budget per event; past it the lowest norms go first. A count limit was far
+# stricter than memory needs and could crowd a quieter person out of a busy
+# event before the per-person limit applied.
+MAX_CANDIDATE_BYTES = 64 * 1024 * 1024
 CANDIDATE_JPEG_QUALITY = 95
 
 FrameSource = Callable[[float, float], Iterable[tuple[float, np.ndarray]]]
@@ -237,6 +239,7 @@ def capture_event(
     # Pass two: the main stream around those moments.
     # Only the padded face crop is kept, never the whole frame.
     found: list[tuple[float, int, float, Box, dict[str, Any], bytes]] = []  # heap by norm
+    held = 0  # JPEG bytes in found
     people_by_frame: list[tuple[float, list[Box]]] = []
     for low, high in merge_windows(result.moments, settings.moment_radius_seconds):
         try:
@@ -266,10 +269,12 @@ def capture_event(
                             continue
                         entry = {**face, "box": box, "landmarks": landmarks,
                                  "embedding": np.asarray(face["embedding"], dtype=np.float32)}
+                        jpeg = encoded.tobytes()
                         heapq.heappush(found, (float(face["norm"]), len(found) + result.candidates, offset,
-                                               person, entry, encoded.tobytes()))
-                        if len(found) > MAX_CANDIDATES:
-                            heapq.heappop(found)
+                                               person, entry, jpeg))
+                        held += len(jpeg)
+                        while held > MAX_CANDIDATE_BYTES and len(found) > 1:
+                            held -= len(heapq.heappop(found)[5])
         except (OSError, RuntimeError) as error:
             if _transient(error):
                 raise

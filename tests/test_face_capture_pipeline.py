@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 import pytest
 
@@ -129,7 +130,9 @@ def test_skipped_main_stream_segments_are_reported_as_main_stream_errors():
 def test_held_candidates_are_bounded_to_the_highest_norms_and_kept_crops_decode(monkeypatch):
     from survng.app.face_capture import pipeline
 
-    monkeypatch.setattr(pipeline, "MAX_CANDIDATES", 3)
+    crop_bytes = len(cv2.imencode(".jpg", np.zeros((84, 84, 3), np.uint8),
+                                  [cv2.IMWRITE_JPEG_QUALITY, pipeline.CANDIDATE_JPEG_QUALITY])[1])
+    monkeypatch.setattr(pipeline, "MAX_CANDIDATE_BYTES", 3 * crop_bytes)
     norms = iter(range(14, 200))
     result = capture_event(
         plan_offsets=[0.0], main_frames=_frames(), detect_people=lambda frame: [PERSON],

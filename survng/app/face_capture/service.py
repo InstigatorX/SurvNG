@@ -272,7 +272,9 @@ class FaceCaptureService:
             reach = settings.moment_radius_seconds + 1.0
             window_rows = rows_for_window(rows, epoch + low - reach, epoch + high + reach)
             main_rows = window_rows("main", epoch + low, epoch + high)
-            main_size = mp4_video_dimensions(Path(main_rows[0]["path"])) if main_rows else None
+            main_size = next(
+                (size for row in main_rows if (size := mp4_video_dimensions(Path(row["path"])))), None,
+            )
             with self._events_connection() as connection:
                 stored = stored_people(connection, event_id, epoch, main_size)
             with cancellable_evidence_work(self._stop.is_set, optional=True, source="face_capture"):
