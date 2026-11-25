@@ -252,6 +252,27 @@ stay on the CPU. FP16 GPU inference moves person boxes slightly, which can
 change which frames the old search would have picked, so compare runs made on
 the same device.
 
+`--embeddings FILE.npz` also saves the AdaFace unit embedding of every face
+that aligned, keyed by the face `id` in `--json` (which also records each face's
+box and each event's epoch), for offline matching against confirmed faces.
+
+`--embeddings FILE.npz` also writes each aligned face's AdaFace embedding; the
+ids match the `id` of each face in `--json`, which also carries its box.
+
+### Findings on this host (2026-11-24, 60 events on six cameras)
+
+- Searching every frame instead of the old ~8 roughly doubles the events with
+  a usable face; most of the gain is inside the window the old search already
+  covered.
+- The 300 px detector's false hits (heads, torsos, leaves) make "biggest
+  face" the wrong selection rule. YuNet finds more real faces (front-door
+  goes from none to five events) but also has false hits; neither is clean.
+- Faces of one event embed close together: the median cosine of an event's
+  recognisable faces to their mean is 0.79 (current detector) and 0.73
+  (YuNet), so an event's faces can be grouped before anyone is named.
+- Existing named people and confirmed faces in the face store came from the
+  previous pipeline and are not used as ground truth for the rebuild.
+
 The tool opens
 the database and recording index read-only, loads its own CPU copies of the
 models with the OpenVINO cache off (`--threads` sets the CPU threads), and does
