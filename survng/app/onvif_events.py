@@ -30,8 +30,6 @@ LOGGER = logging.getLogger("uvicorn.error")
 MOTION_WORDS = ("motion", "cellmotion", "person", "vehicle", "animal", "alarm")
 RETRY_INITIAL_SECONDS = 2.0
 RETRY_MAX_SECONDS = 60.0
-# A camera whose ONVIF endpoint cannot be reached at all backs off further.
-UNREACHABLE_RETRY_MAX_SECONDS = 300.0
 POLL_RETRY_SECONDS = 2.0
 PULL_TIMEOUT_SECONDS = 5
 # A LAN camera completes a TCP handshake in milliseconds; 3 s still allows
@@ -511,6 +509,9 @@ class OnvifEventListener:
                 )
                 if stop_event.is_set() or not self._generation_matches(generation):
                     return
+                # This worker's own raw-response capture: a retired worker
+                # can run beside the next one and must not touch its buffer.
+                capture = self._pullmessages_capture
                 if self.last_connected_at:
                     self.resubscriptions += 1
                 # A release missed while disconnected must not hide the next
@@ -543,10 +544,7 @@ class OnvifEventListener:
                 # Jitter keeps cameras that failed together from retrying in step.
                 if stop_event.wait(retry_delay * random.uniform(0.9, 1.1)):
                     return
-                retry_delay = min(
-                    UNREACHABLE_RETRY_MAX_SECONDS if unreachable else RETRY_MAX_SECONDS,
-                    retry_delay * 2,
-                )
+                retry_delay = min(RETRY_MAX_SECONDS, retry_delay * 2)
                 continue
 
             failures = 0
@@ -570,13 +568,13 @@ class OnvifEventListener:
                     )
                     if overlapped is not None:
                         pullpoint = overlapped
+                        capture = self._pullmessages_capture
                         failures = 0
                         retry_delay = RETRY_INITIAL_SECONDS
                         continue
                     planned_resubscription = True
                     break
                 try:
-                    capture = self._pullmessages_capture
                     if capture is not None:
                         capture.clear()
                     response = pullpoint.PullMessages(
@@ -713,11 +711,10 @@ class OnvifEventListener:
                                 received_at,
                             )
                 except Exception as exc:
-                    capture = self._pullmessages_capture
-                    if capture is not None:
-                        capture.clear()
                     if stop_event.is_set() or not self._generation_matches(generation):
                         return
+                    if capture is not None:
+                        capture.clear()
                     error_text = self._error_text(exc)
                     self.last_poll_error = error_text
                     self.last_poll_error_at = datetime.now(timezone.utc).isoformat()
@@ -834,7 +831,8 @@ class OnvifEventListener:
                 self.camera.id,
                 exc_info=True,
             )
-        if not adopted:
+        if not adopted or stop_event.is_set() or not self._generation_matches(generation):
+            # Retired meanwhile: do not install a capture the next worker uses.
             raise RuntimeError("ONVIF subscription generation stopped")
         pullpoint = camera.create_pullpoint_service()
         self._enable_pullmessages_capture(pullpoint)

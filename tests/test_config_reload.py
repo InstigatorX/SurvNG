@@ -355,7 +355,7 @@ class ConfigReloadTest(unittest.TestCase):
             effective, result = main.apply_config_update(incoming)
 
         clear.assert_called_once_with()
-        reload.assert_called_once_with(incoming, assign_ids=False, persist=True)
+        reload.assert_called_once_with(incoming, assign_ids=False, persist=True, keep_unapplied=False)
         active.reconfigure_recorders.assert_not_called()
         self.assertTrue(result["camera_workers_restarted"])
 
@@ -407,7 +407,7 @@ class ConfigReloadTest(unittest.TestCase):
             runtime.recording_cache_status_cached_at = previous_at
             runtime.recording_cache_status_cached_inventory = previous_inventory
 
-    def test_failed_replacement_restores_previous_manager_and_its_saved_configuration(self) -> None:
+    def test_failed_replacement_restores_previous_manager_without_persisting(self) -> None:
         active = Mock()
         active.runtime_preferences.return_value = {
             "recording_enabled": {"gate": False},
@@ -440,11 +440,7 @@ class ConfigReloadTest(unittest.TestCase):
             active.runtime_preferences.return_value,
             persist=True,
         )
-        # Saved before the cutover, then put back once the new one failed.
-        self.assertEqual(
-            [call.args[0].base_path for call in save.call_args_list],
-            ["/new", "/old"],
-        )
+        save.assert_not_called()
         self.assertIs(main.manager, recovery)
         self.assertEqual(main.config.base_path, "/old")
 
@@ -480,7 +476,7 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertIs(main.manager, active)
         self.assertEqual(main.config.base_path, "/old")
 
-    def test_successful_replacement_persists_before_cutover_and_swaps_after_start(self) -> None:
+    def test_successful_replacement_starts_before_atomic_persistence_and_swap(self) -> None:
         actions: list[str] = []
         active = Mock()
         active.runtime_preferences.return_value = {
@@ -505,24 +501,16 @@ class ConfigReloadTest(unittest.TestCase):
                 "survng.app.main.save_config",
                 side_effect=lambda *_args, **_kwargs: actions.append("save"),
             ),
-            patch.object(
-                main.CONFIG_CHANGE_LOG,
-                "record",
-                side_effect=lambda *_args: actions.append("history"),
-            ) as record,
         ):
-            previous = main.config
             effective = main.reload_manager(AppConfig(base_path="/new"))
 
-        # History is written once the change runs, not when it is saved early.
-        self.assertEqual(actions, ["save", "old-stop", "new-start", "history"])
-        record.assert_called_once_with(previous, effective)
+        self.assertEqual(actions, ["old-stop", "new-start", "save"])
         candidate.wait_for_camera_startup.assert_not_called()
         self.assertIs(main.manager, candidate)
         self.assertIs(main.config, effective)
         self.assertEqual(main.config.base_path, "/new")
 
-    def test_persistence_failure_leaves_the_active_manager_running(self) -> None:
+    def test_persistence_failure_stops_candidate_and_restores_previous_manager(self) -> None:
         active = Mock()
         active.runtime_preferences.return_value = {
             "recording_enabled": {"removed": False},
@@ -544,15 +532,17 @@ class ConfigReloadTest(unittest.TestCase):
             patch("survng.app.main._recording_media_runtime._start_recording_prewarmer"),
             patch("survng.app.main.save_config", side_effect=OSError("disk full")),
         ):
-            with self.assertRaisesRegex(RuntimeError, "before the active manager was stopped"):
+            with self.assertRaisesRegex(RuntimeError, "previous configuration was restored"):
                 main.reload_manager(AppConfig(base_path="/new"))
 
-        # Nothing irreversible happened: the save failed first.
-        active.stop_all_with_runtime_preferences.assert_not_called()
-        candidate.start_all.assert_not_called()
+        candidate.start_all.assert_called_once_with()
         candidate.stop_all.assert_called_once_with()
-        recovery.start_all.assert_not_called()
-        self.assertIs(main.manager, active)
+        recovery.start_all.assert_called_once_with()
+        recovery.apply_runtime_preferences.assert_called_once_with(
+            active.runtime_preferences.return_value,
+            persist=True,
+        )
+        self.assertIs(main.manager, recovery)
         self.assertEqual(main.config.base_path, "/old")
 
     def test_app_only_settings_hot_apply_without_restarting_cameras(self) -> None:
@@ -619,44 +609,49 @@ class ConfigReloadTest(unittest.TestCase):
         incoming = current.model_copy(update={"capture_rtsp_transport": "udp"})
         pending = ManagerReloadRestartPending("stuck; restarting", persisted=True)
 
-        with patch("survng.app.main.reload_manager", side_effect=pending):
+        with patch("survng.app.main.reload_manager", side_effect=pending) as reload:
             _effective, result = main.apply_config_update(incoming, allow_restart_pending=True)
 
+        self.assertTrue(reload.call_args.kwargs["keep_unapplied"])
         self.assertEqual(result["apply_mode"], "restart_pending")
         self.assertTrue(result["persisted"])
         self.assertFalse(result["applied"])
         self.assertEqual(result["instance_id"], main.PROCESS_INSTANCE_ID)
 
-        # Not restarting by itself: the saved change waits for a manual restart.
+        # Without a supervisor the saved change waits for a manual restart.
         manual = ManagerReloadRestartPending("stuck", persisted=True, restarting=False)
-        with (
-            patch("survng.app.main.reload_manager", side_effect=manual),
-            patch("survng.app.main.save_config") as save,
-        ):
+        with patch("survng.app.main.reload_manager", side_effect=manual):
             _effective, result = main.apply_config_update(incoming, allow_restart_pending=True)
         self.assertEqual(result["apply_mode"], "restart_required")
-        self.assertTrue(result["persisted"])
-        save.assert_not_called()
 
-    def test_callers_that_cannot_report_a_pending_restart_keep_the_running_config_on_disk(self) -> None:
-        from survng.app.manager_reload import ManagerReloadRestartPending
+        # Callers that cannot report it never ask for the change to be kept.
+        unsaved = ManagerReloadRestartPending("stuck; restarting", persisted=False)
+        with (
+            patch("survng.app.main.reload_manager", side_effect=unsaved) as reload,
+            self.assertRaises(ManagerReloadRestartPending),
+        ):
+            main.apply_config_update(incoming)
+        self.assertFalse(reload.call_args.kwargs["keep_unapplied"])
+
+    def test_no_change_is_applied_while_surviving_a_restart_to_apply_a_saved_one(self) -> None:
+        from fastapi import HTTPException
 
         active = Mock()
         current = AppConfig(base_path="/old")
         active.config = current
         main.config = current
         main.manager = active
-        incoming = current.model_copy(update={"capture_rtsp_transport": "udp"})
-        pending = ManagerReloadRestartPending("stuck; restarting", persisted=True)
-
-        with (
-            patch("survng.app.main.reload_manager", side_effect=pending),
-            patch("survng.app.main.save_config") as save,
-            self.assertRaisesRegex(RuntimeError, "the change was not saved"),
-        ):
-            main.apply_config_update(incoming)
-        save.assert_called_once()
-        self.assertIs(save.call_args.args[0], current)
+        main.APPLICATION_STOPPING.set()
+        try:
+            with (
+                patch("survng.app.main.save_config") as save,
+                self.assertRaises(HTTPException) as raised,
+            ):
+                main.apply_config_update(current.model_copy(update={"base_path": "/new"}))
+        finally:
+            main.APPLICATION_STOPPING.clear()
+        self.assertEqual(raised.exception.status_code, 503)
+        save.assert_not_called()
 
     def test_image_storage_change_hot_applies_without_restarting_cameras(self) -> None:
         active = Mock()
@@ -932,7 +927,7 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             effective, result = main.apply_config_update(incoming)
 
-        reload.assert_called_once_with(incoming, assign_ids=False, persist=True)
+        reload.assert_called_once_with(incoming, assign_ids=False, persist=True, keep_unapplied=False)
         active.reconfigure_object_tracking.assert_not_called()
         self.assertIs(effective, incoming)
         self.assertEqual(result["apply_mode"], "manager_reload")
@@ -1266,7 +1261,7 @@ class ConfigReloadTest(unittest.TestCase):
         with patch("survng.app.main.reload_manager", return_value=effective) as reload:
             result_config, result = main.apply_config_update(replacement)
 
-        reload.assert_called_once_with(effective, assign_ids=False, persist=True)
+        reload.assert_called_once_with(effective, assign_ids=False, persist=True, keep_unapplied=False)
         self.assertIs(result_config, effective)
         self.assertEqual(result["apply_mode"], "manager_reload")
         self.assertTrue(result["camera_workers_restarted"])

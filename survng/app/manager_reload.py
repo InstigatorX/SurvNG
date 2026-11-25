@@ -43,10 +43,6 @@ class ManagerReloadHooks:
     # Asked to stop the process when this generation cannot recover in-process;
     # returns True when the supervisor will restart SurvNG.
     request_supervisor_restart: Callable[[str], bool] = lambda _reason: False
-    # Records a change in configuration history once it takes effect (now, or
-    # at the restart that applies it). save_config itself records nothing,
-    # so a change that is saved and then rolled back leaves no history.
-    record_change: Callable[[AppConfig, AppConfig], None] = lambda _previous, _current: None
 
 
 class ManagerGenerationLifecycle:
@@ -94,20 +90,16 @@ class ManagerGenerationLifecycle:
             restarting=restarting,
         )
 
-    def _record_change(self, previous_config: AppConfig, effective_config: AppConfig) -> None:
+    def _save_unapplied(self, effective_config: AppConfig) -> bool:
+        """Save a change the old generation kept from running; True when saved."""
         try:
-            self._hooks.record_change(previous_config, effective_config)
-        except Exception:
-            LOGGER.exception("could not record the configuration change")
-
-    def _restore_saved(self, previous_config: AppConfig) -> None:
-        """Put the configuration that is running back on disk."""
-        try:
-            self._hooks.save_config(previous_config, assign_ids=False)
+            self._hooks.save_config(effective_config, assign_ids=False)
         except Exception:
             LOGGER.exception(
-                "failed to restore the persisted configuration after a reload failure"
+                "could not save the configuration change for the restart to apply"
             )
+            return False
+        return True
 
     def reload(
         self,
@@ -116,7 +108,16 @@ class ManagerGenerationLifecycle:
         effective_config: AppConfig,
         *,
         persist: bool,
+        keep_unapplied: bool = False,
     ) -> None:
+        """Replace the manager generation with one built from ``effective_config``.
+
+        The configuration is saved once the new generation has started, so a
+        process that dies mid-cutover restarts with what last ran. When the
+        old generation will not stop, the new configuration has never run
+        and the process must restart; with ``keep_unapplied`` (the caller can
+        tell the user so) it is saved first and the restart applies it.
+        """
         with self._lock:
             if self._stopping.is_set():
                 raise RuntimeError(
@@ -131,7 +132,6 @@ class ManagerGenerationLifecycle:
             candidate = self._manager_factory(effective_config)
             previous_stop_attempted = False
             previous_stopped = False
-            persisted = False
             try:
                 preferences = previous_manager.runtime_preferences()
                 self._hooks.stop_prewarmer()
@@ -139,18 +139,14 @@ class ManagerGenerationLifecycle:
                     raise RuntimeError(
                         "configuration reload timed out waiting for active API requests"
                     )
-                # Persist the request before anything irreversible: when this
-                # process cannot finish the cutover, its restart must start
-                # with what was asked for rather than silently drop it.
-                if persist:
-                    self._hooks.save_config(effective_config, assign_ids=False)
-                    persisted = True
                 previous_stop_attempted = True
                 previous_manager.stop_all_with_runtime_preferences()
                 previous_stopped = True
                 candidate.apply_runtime_preferences(preferences)
                 candidate.start_all()
                 candidate.apply_runtime_preferences(preferences, persist=True)
+                if persist:
+                    self._hooks.save_config(effective_config, assign_ids=False)
             except BaseException as reload_error:
                 cleanup_error = None
                 try:
@@ -161,22 +157,19 @@ class ManagerGenerationLifecycle:
                         "failed to clean up replacement manager after reload failure"
                     )
                 if previous_stop_attempted and not previous_stopped:
-                    # The new configuration was never tried; the old
-                    # generation would not stop. Keep the request on disk so
-                    # the restart applies it.
+                    # The old generation would not stop, so the new
+                    # configuration never ran. Save it, when the caller can
+                    # report that, so the restart applies it.
                     self._stopping.set()
                     self._hooks.publish_runtime(previous_config, previous_manager)
-                    if persisted:
-                        self._record_change(previous_config, effective_config)
+                    persisted = bool(
+                        persist and keep_unapplied and self._save_unapplied(effective_config)
+                    )
                     raise self._unrecoverable(
                         "configuration reload aborted because previous manager shutdown is "
                         "still active",
                         persisted=persisted,
                     ) from None
-                if persisted:
-                    # The new configuration was tried and failed, or the
-                    # cutover never began: what runs is the previous one.
-                    self._restore_saved(previous_config)
                 if cleanup_error is not None:
                     self._stopping.set()
                     if previous_stopped:
@@ -218,8 +211,6 @@ class ManagerGenerationLifecycle:
                     "configuration reload failed; the previous configuration was restored"
                 ) from reload_error
 
-            if persisted:
-                self._record_change(previous_config, effective_config)
             self._hooks.publish_runtime(effective_config, candidate)
             self._hooks.refresh_runtime_caches()
             if prewarmer_was_running:

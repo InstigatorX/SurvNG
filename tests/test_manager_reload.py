@@ -50,17 +50,14 @@ class ManagerGenerationLifecycleTest(unittest.TestCase):
         previous.stop_all_with_runtime_preferences.assert_not_called()
         hooks.publish_runtime.assert_not_called()
 
-    def test_success_persists_first_and_publishes_only_after_candidate_is_started(self) -> None:
+    def test_success_publishes_only_after_candidate_is_started_and_persisted(self) -> None:
         order: list[str] = []
         previous = Mock()
         previous.runtime_preferences.return_value = {"camera_enabled": {}}
         previous.stop_all_with_runtime_preferences.side_effect = lambda: order.append("stop-old")
         candidate = Mock()
         candidate.start_all.side_effect = lambda: order.append("start-new")
-        hooks = replace(
-            self.hooks(),
-            record_change=Mock(side_effect=lambda *_args: order.append("record")),
-        )
+        hooks = self.hooks()
         hooks.save_config.side_effect = lambda *_args, **_kwargs: order.append("save")
         hooks.publish_runtime.side_effect = lambda *_args: order.append("publish")
 
@@ -68,7 +65,7 @@ class ManagerGenerationLifecycleTest(unittest.TestCase):
             AppConfig(), previous, AppConfig(base_path="/new"), persist=True
         )
 
-        self.assertEqual(order, ["save", "stop-old", "start-new", "record", "publish"])
+        self.assertEqual(order, ["stop-old", "start-new", "save", "publish"])
         hooks.refresh_runtime_caches.assert_called_once_with()
 
     def test_active_generation_requests_drain_before_previous_manager_stops(self) -> None:
@@ -113,11 +110,11 @@ class ManagerGenerationLifecycleTest(unittest.TestCase):
         previous = Mock()
         previous.runtime_preferences.return_value = {}
         candidate = Mock()
-        candidate.start_all.side_effect = RuntimeError("camera failed to start")
         candidate.stop_all.side_effect = RuntimeError("worker still alive")
         recovery = Mock()
         factory = Mock(side_effect=[candidate, recovery])
         hooks = self.hooks()
+        hooks.save_config.side_effect = OSError("configuration disk unavailable")
         lifecycle = self.lifecycle(factory, hooks)
         effective = AppConfig(base_path="/new")
         with self.assertRaisesRegex(RuntimeError, "replacement manager.*restart"):
@@ -219,36 +216,41 @@ class ManagerGenerationLifecycleTest(unittest.TestCase):
                 if "publish" in order:
                     self.assertLess(order.index("publish"), order.index("restart"))
 
-    def test_a_restart_keeps_the_saved_change_only_when_it_was_never_tried(self) -> None:
-        for kind, kept in (
-            # The old generation would not stop: the new config never ran,
-            # so the restart applies it.
-            ("previous_shutdown", True),
-            # The new config ran and failed: what is on disk is the old one.
-            ("candidate_cleanup", False),
-            ("recovery", False),
+    def test_a_change_the_old_generation_kept_from_running_is_saved_only_when_asked(self) -> None:
+        for kind, keep, saved in (
+            # The old generation would not stop: the new config never ran.
+            ("previous_shutdown", True, True),
+            ("previous_shutdown", False, False),
+            # The new config ran and failed: nothing is saved either way.
+            ("candidate_cleanup", True, False),
+            ("recovery", True, False),
         ):
-            with self.subTest(kind=kind):
-                hooks = replace(
-                    self.hooks(),
-                    request_supervisor_restart=Mock(return_value=True),
-                    record_change=Mock(),
-                )
+            with self.subTest(kind=kind, keep=keep):
+                hooks = replace(self.hooks(), request_supervisor_restart=Mock(return_value=True))
                 previous, factory, original = self._dead_end(kind)
                 requested = AppConfig(base_path="/new")
                 with self.assertRaises(ManagerReloadRestartPending) as raised:
-                    self.lifecycle(factory, hooks).reload(original, previous, requested, persist=True)
-                self.assertIs(raised.exception.persisted, kept)
+                    self.lifecycle(factory, hooks).reload(
+                        original, previous, requested, persist=True, keep_unapplied=keep,
+                    )
+                self.assertIs(raised.exception.persisted, saved)
                 self.assertTrue(raised.exception.restarting)
-                saved = [call.args[0] for call in hooks.save_config.call_args_list]
-                self.assertEqual(saved, [requested] if kept else [requested, original])
-                # History shows only a change that runs, now or after the restart.
-                if kept:
-                    hooks.record_change.assert_called_once_with(original, requested)
-                else:
-                    hooks.record_change.assert_not_called()
-                if kept:
+                if saved:
+                    hooks.save_config.assert_called_once_with(requested, assign_ids=False)
                     self.assertIn("to apply the saved configuration", str(raised.exception))
+                else:
+                    hooks.save_config.assert_not_called()
+
+    def test_a_failed_save_of_the_unapplied_change_is_reported_as_not_saved(self) -> None:
+        hooks = replace(self.hooks(), request_supervisor_restart=Mock(return_value=False))
+        hooks.save_config.side_effect = OSError("disk full")
+        previous, factory, original = self._dead_end("previous_shutdown")
+        with self.assertRaises(ManagerReloadRestartPending) as raised:
+            self.lifecycle(factory, hooks).reload(
+                original, previous, AppConfig(base_path="/new"), persist=True, keep_unapplied=True,
+            )
+        self.assertFalse(raised.exception.persisted)
+        self.assertFalse(raised.exception.restarting)
 
     def test_without_a_managed_server_the_error_asks_for_a_manual_restart(self) -> None:
         hooks = replace(self.hooks(), request_supervisor_restart=Mock(return_value=False))

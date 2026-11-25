@@ -789,6 +789,7 @@ def reload_manager(
     *,
     assign_ids: bool = False,
     persist: bool = True,
+    keep_unapplied: bool = False,
 ) -> AppConfig:
     """Replace the active manager through the generation lifecycle owner."""
     effective = normalize_config(
@@ -823,13 +824,7 @@ def reload_manager(
             prewarmer_running=_recording_media_runtime.prewarmer_running,
             stop_prewarmer=_recording_media_runtime._stop_recording_prewarmer,
             start_prewarmer=_recording_media_runtime._start_recording_prewarmer,
-            # History is recorded once the change takes effect (record_change),
-            # not when it is saved ahead of the cutover.
-            save_config=lambda next_config, assign_ids=False: save_config(
-                next_config,
-                assign_ids=assign_ids,
-            ),
-            record_change=CONFIG_CHANGE_LOG.record,
+            save_config=save_config_with_history,
             publish_runtime=publish_runtime,
             refresh_runtime_caches=refresh_runtime_caches,
             storage_error=StorageTasksActiveError,
@@ -852,6 +847,7 @@ def reload_manager(
             previous_manager,
             effective,
             persist=persist,
+            keep_unapplied=keep_unapplied,
         )
     return effective
 
@@ -883,9 +879,9 @@ def apply_config_update(
     """Apply configuration through the dedicated transaction owner.
 
     ``allow_restart_pending``: the caller can report a change that is saved
-    but applies only when the supervisor restarts SurvNG. Other callers keep
-    the all-or-nothing contract: the running configuration is put back on
-    disk and the failure is raised.
+    but applies only when SurvNG restarts (the old manager generation would
+    not stop). Other callers keep the all-or-nothing contract: the change is
+    not saved and the failure is raised.
     """
     global config
     application = TargetedConfigApplication(
@@ -900,45 +896,43 @@ def apply_config_update(
     # lock allowed a concurrent update to leave global and manager config on
     # different commits.
     with MANAGER_RELOAD_LOCK:
+        if APPLICATION_STOPPING.is_set():
+            # Shutting down, or restarting to apply a saved change. Applying
+            # another change to the old in-memory configuration now would
+            # overwrite that saved change on disk.
+            raise HTTPException(
+                status_code=503,
+                detail="SurvNG is restarting; change settings again once it is back",
+            )
         current = config
         previous_ffmpeg_path = current.ffmpeg_path
         if manager_owned_config(current) != manager_owned_config(effective):
             if effective.ffmpeg_path != previous_ffmpeg_path:
                 _recording_media_runtime.clear_hardware_probe_caches()
             try:
-                applied = reload_manager(effective, assign_ids=False, persist=persist)
+                applied = reload_manager(
+                    effective,
+                    assign_ids=False,
+                    persist=persist,
+                    keep_unapplied=allow_restart_pending,
+                )
             except ManagerReloadRestartPending as pending:
                 if not pending.persisted:
                     raise
-                if allow_restart_pending:
-                    # Saved, but this process cannot finish the cutover. With
-                    # a supervisor it restarts with the saved configuration;
-                    # without one, someone has to restart SurvNG.
-                    return effective, {
-                        "apply_mode": (
-                            "restart_pending" if pending.restarting else "restart_required"
-                        ),
-                        "persisted": True,
-                        "applied": False,
-                        "camera_workers_restarted": True,
-                        "subsystems_restarted": ["process"],
-                        "instance_id": PROCESS_INSTANCE_ID,
-                        "message": str(pending),
-                    }
-                try:
-                    save_config(current, assign_ids=False)
-                except Exception:
-                    logging.getLogger(__name__).exception(
-                        "failed to restore the persisted configuration after an unfinished reload"
-                    )
-                raise RuntimeError(
-                    "configuration reload could not finish and the change was not saved; "
-                    + (
-                        "SurvNG is restarting through its supervisor"
-                        if pending.restarting
-                        else "restart SurvNG through its supervisor"
-                    )
-                ) from pending
+                # Saved, but this process cannot finish the cutover. With a
+                # supervisor it restarts with the saved configuration; without
+                # one, someone has to restart SurvNG.
+                return effective, {
+                    "apply_mode": (
+                        "restart_pending" if pending.restarting else "restart_required"
+                    ),
+                    "persisted": True,
+                    "applied": False,
+                    "camera_workers_restarted": True,
+                    "subsystems_restarted": ["process"],
+                    "instance_id": PROCESS_INSTANCE_ID,
+                    "message": str(pending),
+                }
             prepare_bootstrap_token(applied)
             return applied, {
                 "apply_mode": "manager_reload",
