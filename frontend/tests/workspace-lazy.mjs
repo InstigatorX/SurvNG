@@ -14,7 +14,7 @@ for (const specifier of [
   "./incidents/IncidentsPage.jsx",
   "./timeline/TimelinePages.jsx",
   "./admin/ConfigPage.jsx",
-  "./people/FacesPage.jsx",
+  "./people/PeoplePage.jsx",
 ]) {
   assert.doesNotMatch(
     appSource,

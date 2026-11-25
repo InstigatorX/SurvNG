@@ -78,6 +78,7 @@ from .motion_pipeline import (
 )
 from .motion_pipeline.recorded_decode_budget import RecordedDecodeBudget
 from .database_retention import DatabaseRetention
+from .face_capture.service import FaceCaptureService
 from .evidence_projection import EvidenceProjection
 from .motion_analysis import FairMotionAnalysisLimiter
 from .recording_lifecycle import RecordingLifecycle
@@ -389,6 +390,13 @@ class AppManager:
         self.evidence_projection = EvidenceProjection(
             self.events, lambda: self.semantic_search, self.state_events,
             self._refresh_incident_notification,
+        )
+        # Idle unless detector.face_capture_enabled; reads the config each pass.
+        self.face_capture = FaceCaptureService(
+            config=lambda: self.config,
+            events_db_path=self.events.db_path,
+            inference=lambda: self.detector,
+            recording_rows=lambda *args, **kwargs: self.recorder.recording_rows_between(*args, **kwargs),
         )
         self.database_retention = DatabaseRetention(
             self.events, lambda: self.config.database_retention,
@@ -873,6 +881,8 @@ class AppManager:
                 self.evidence_projection.start()
                 if getattr(self, "database_retention", None) is not None:
                     self.database_retention.start()
+                if getattr(self, "face_capture", None) is not None:
+                    self.face_capture.start()
                 self.camera_fleet.start_admission(
                     startup_tasks,
                     on_complete=self._camera_startup_completed,
@@ -1105,6 +1115,8 @@ class AppManager:
         attempt("runtime monitor", self.runtime_monitor.stop)
         if getattr(self, "database_retention", None) is not None:
             attempt("database retention", self.database_retention.stop)
+        if getattr(self, "face_capture", None) is not None:
+            attempt("face capture", self.face_capture.stop)
         speech = getattr(self, "speech", None)
         if speech is not None:
             LOGGER.info("SurvNG shutdown: stopping speech listeners")

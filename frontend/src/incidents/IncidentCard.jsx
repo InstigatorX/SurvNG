@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { FaceNameChips } from "../people/IncidentPeople.jsx";
 import { IncidentSpeechBadge, IncidentSpeechPanel } from "./IncidentSpeech.jsx";
 import {
   Activity,
@@ -127,7 +128,7 @@ function EvidenceTimeline({ incident, hero, timeline, timeZone, stripRef, onSele
   );
 }
 
-export function IncidentCard({ incident, scenePlayback, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, zones = null, analysisMode = "clean", depthLayer = "both", replayRequest = 0, observationPreviewRequest = null, selectedObjectIndex = null, onSelectObject = null, onReturnToSelected = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
+export function IncidentCard({ incident, faceNames = null, scenePlayback, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, zones = null, analysisMode = "clean", depthLayer = "both", replayRequest = 0, observationPreviewRequest = null, selectedObjectIndex = null, onSelectObject = null, onReturnToSelected = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
   const rawEvents = incident.events || [];
   const motionObservations = incident.motion_observations || [];
   const [selectedPreview, setSelectedPreview] = useState(null);
@@ -472,6 +473,7 @@ export function IncidentCard({ incident, scenePlayback, timeZone, expanded, sele
                 <div className="pill-row compact incident-labels">
                   <IncidentObjectBadges labels={labels} />
                   <IncidentSpeechBadge speech={incident.speech} />
+                  <FaceNameChips names={faceNames} />
                 </div>
               </div>
             ) : null}
@@ -963,7 +965,8 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
   return (
     <aside ref={inspectorRef} id="incident-inspector" className={`incident-inspector${open ? " open" : ""}`} role={open ? "dialog" : undefined} aria-modal={open ? "true" : undefined} aria-labelledby={open ? "incident-inspector-title" : undefined}>
       <div className="incident-inspector-head">
-        <div><strong id="incident-inspector-title">{cameraNameById.get(incident.camera_id) || incident.camera_id}</strong><time>{formatDateTime(eventCoverTime(inspectedEvent, incident.created_at), timeZone)}</time></div>
+        <div><strong id="incident-inspector-title">{cameraNameById.get(incident.camera_id) || incident.camera_id}</strong><time>{formatDateTime(eventCoverTime(inspectedEvent, incident.created_at), timeZone)}</time>
+          {/^incident-/.test(String(incident.incident_id || "")) ? <a className="incident-inspector-open" href={appUrl(`/incidents/${encodeURIComponent(incident.incident_id)}`)}>Open incident</a> : null}</div>
         {onClose ? <button type="button" className="incident-inspector-close" onClick={onClose} aria-label="Close incident details"><X size={17} /></button> : null}
       </div>
       <IncidentSpeechPanel incident={incident} timeZone={timeZone} />

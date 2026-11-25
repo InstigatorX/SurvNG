@@ -34,6 +34,7 @@ from .scene_admission import EventStoreSceneAdmissionMixin
 from .scene_review import EventStoreSceneReviewMixin
 from .scene_tracking import EventStoreSceneTrackingMixin
 from .scene_context import EventStoreSceneContextMixin
+from .incident_reviews import EventStoreIncidentReviewMixin
 
 LOGGER = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ class EventStore(
     EventStoreCalibrationMixin,
     EventStoreMotionIntelligenceMixin,
     EventStoreSceneContextMixin,
+    EventStoreIncidentReviewMixin,
 ):
     SNAPSHOT_SIZE_WRITE_BATCH = 50
     SNAPSHOT_REFERENCE_WRITE_BATCH = 50
@@ -120,6 +122,7 @@ class EventStore(
         self._init_scene_acquisition_db()
         self._init_gallery_db()
         self._init_scene_db()
+        self._init_incident_review_db()
         with self._connect() as conn:
             self._init_scene_tracking_schema(conn)
         self._recover_snapshot_deletion_claims()

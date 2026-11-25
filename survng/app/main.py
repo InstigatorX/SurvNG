@@ -106,6 +106,7 @@ from .motion_pipeline import build_builtin_motion_registry
 from .system_routes import SystemRouteDependencies, create_system_router
 from .tls_routes import TlsRouteDependencies, create_tls_router
 from .speech_routes import SpeechRouteDependencies, create_speech_router
+from .face_capture.routes import FaceCaptureRouteDependencies, create_face_capture_router
 from .training_routes import TrainingRouteDependencies, create_training_router
 from .proxy import apply_trusted_proxy_headers, request_is_secure, scope_header
 from .security import (
@@ -1279,6 +1280,7 @@ app.include_router(
 )
 app.include_router(create_onvif_inspector_router())
 app.include_router(create_speech_router(SpeechRouteDependencies(get_manager=get_manager)))
+app.include_router(create_face_capture_router(FaceCaptureRouteDependencies(get_manager=get_manager)))
 
 _semantic_route_bundle = create_semantic_router(
     SemanticRouteDependencies(
@@ -1465,6 +1467,20 @@ _recording_route_bundle = create_recording_router(
         ),
         recording_preview_strip=lambda active_manager, *args, **kwargs: (
             _recording_media_runtime._recording_preview_strip(
+                *args,
+                active_manager=active_manager,
+                **kwargs,
+            )
+        ),
+        recording_segment_frames=lambda active_manager, *args, **kwargs: (
+            _recording_media_runtime._recording_segment_frames(
+                *args,
+                active_manager=active_manager,
+                **kwargs,
+            )
+        ),
+        recording_step_frame=lambda active_manager, *args, **kwargs: (
+            _recording_media_runtime._recording_step_frame(
                 *args,
                 active_manager=active_manager,
                 **kwargs,

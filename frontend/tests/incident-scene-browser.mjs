@@ -100,8 +100,11 @@ try {
   assert.equal(await page.locator(".incident-desktop-focus .snapshot-zone-layer polygon").count(), 1);
   await zoneButton.click();
   assert.equal(await page.locator(".incident-desktop-focus .snapshot-zone-layer").count(), 0);
+  // The new detail page keeps the full scene panel in its details section.
+  const openDetails = () => page.getByText("All activity, alert policy and corrections", { exact: true }).click();
   await page.goto(`http://127.0.0.1:${server.address().port}/survng/incidents/incident-scene-1`);
-  const panel = page.locator(".incident-detail-page .incident-scene-panel");
+  await openDetails();
+  const panel = page.locator(".incident-story-page .incident-scene-panel");
   await panel.getByText("Person and car observed at Gate.", { exact: true }).waitFor();
   await panel.getByText("Activity established", { exact: true }).waitFor();
   assert.equal(await panel.getByText("supported movement", { exact: true }).isVisible(), false);
@@ -160,7 +163,7 @@ try {
     await owner.getByRole("button", { name: "Stop scene playback", exact: true }).click();
     assert.equal(clipRequests.length, 0, "incident playback does not build a clip");
   }
-  await verifyScenePlayback(panel, ".incident-detail-player .incident-recording-player");
+  await verifyScenePlayback(panel, ".incident-story-page .incident-recording-player");
   await panel.getByRole("button", { name: /^person Observed/ }).click();
   const observationButtons = panel.locator(".incident-observation-list button");
   await observationButtons.first().click();
@@ -222,9 +225,10 @@ try {
   assert.equal(await mobilePanel.locator(".inspector-detection").count(), 2, "mobile deep links retain the same whole-scene inventory");
   await verifyScenePlayback(mobilePanel, ".event-overlay .incident-recording-player");
   await page.goto(`http://127.0.0.1:${server.address().port}/survng/incidents/incident-scene-1`);
-  const detailPanel = page.locator(".incident-detail-page .incident-scene-panel");
+  await openDetails();
+  const detailPanel = page.locator(".incident-story-page .incident-scene-panel");
   await detailPanel.getByText("Observed objects", { exact: true }).waitFor();
-  await verifyScenePlayback(detailPanel, ".incident-detail-page .incident-recording-player");
+  await verifyScenePlayback(detailPanel, ".incident-story-page .incident-recording-player");
   const longStart = Date.parse(first.created_at) / 1000;
   second.created_at = new Date((longStart + 7260) * 1000).toISOString();
   incident = { ...incident, revision: incident.revision + 1, episodes: [
@@ -232,20 +236,22 @@ try {
     { ...incident.episodes[1], start_at: second.created_at, end_at: new Date((longStart + 7272) * 1000).toISOString() },
   ] };
   await page.reload();
+  await openDetails();
   await detailPanel.getByRole("button", { name: "Play whole incident", exact: true }).click();
   for (let part = 0; part < 8; part += 1) {
     const expected = longStart + part * 900;
-    await page.waitForFunction((start) => Number(document.querySelector(".incident-detail-page .incident-recording-player")?.getAttribute("data-start-epoch")) === start, expected);
-    const player = page.locator(".incident-detail-page .incident-recording-player");
+    await page.waitForFunction((start) => Number(document.querySelector(".incident-story-page .incident-recording-player")?.getAttribute("data-start-epoch")) === start, expected);
+    const player = page.locator(".incident-story-page .incident-recording-player");
     assert.equal(await player.getAttribute("data-camera-id"), "gate");
     assert.equal(Number(await player.getAttribute("data-end-epoch")) - expected, 900);
-    await page.locator(".incident-detail-page .incident-recording-player video").first().dispatchEvent("ended");
+    await page.locator(".incident-story-page .incident-recording-player video").first().dispatchEvent("ended");
   }
-  await page.waitForFunction(() => document.querySelector(".incident-detail-page .incident-recording-player")?.getAttribute("data-camera-id") === "driveway");
+  await page.waitForFunction(() => document.querySelector(".incident-story-page .incident-recording-player")?.getAttribute("data-camera-id") === "driveway");
   assert.equal(await detailPanel.locator(".inspector-detection").count(), 2);
   await detailPanel.getByRole("button", { name: "Stop scene playback", exact: true }).click();
   incident = { ...incident, establishment: { status: "not_established", reason: "candidate_churn_only", supporting_observation_ids: [], policy_version: 1 } };
   await page.reload();
+  await openDetails();
   await detailPanel.getByText("Activity was not established", { exact: true }).waitFor();
   assert.equal(await detailPanel.locator(".incident-scene-summary").count(), 0, "unsupported historical record must not repeat its old confident scene summary");
   assert.equal(await detailPanel.locator(".inspector-detection").count(), 2, "legacy review retains all evidence");
@@ -271,6 +277,7 @@ try {
     assert.equal(await button.getAttribute("aria-pressed"), "true", "different images of the same event remain selectable");
   }
   await page.goto(`http://127.0.0.1:${server.address().port}/survng/incidents/incident-scene-1`);
+  await page.getByText(/^Evidence images/).click();
   for (const i of [1, 2]) {
     const image = page.locator(`.incident-detail-frames img[src*="/evidence/gallery-${i}/snapshot"]`);
     await image.waitFor();

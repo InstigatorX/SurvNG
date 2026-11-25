@@ -60,3 +60,30 @@ assert.equal(peopleRecognitionLabel({ recognition: { enabled: true }, recognitio
 assert.equal(peopleRecognitionLabel(null), "Needs attention");
 
 console.log("people workspace tests passed");
+
+// The People workspace shows captured faces grouped by person (face capture).
+const appSourceForPeople = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+const peoplePageSource = readFileSync(new URL("../src/people/PeoplePage.jsx", import.meta.url), "utf8");
+assert.match(appSourceForPeople, /import\("\.\/people\/PeoplePage\.jsx"\), "PeoplePage"/);
+assert.match(appSourceForPeople, /<PeoplePage timeZone=\{timeZone\} \/>/);
+for (const path of ["/api/face-groups?status=", "/api/face-people", "/api/face-captures/", "/name", "/ignore", "/remove", "/unname"]) {
+  assert.ok(peoplePageSource.includes(path), `PeoplePage uses ${path}`);
+}
+assert.match(peoplePageSource, /This is \{group\.suggestion\.name\}\?/);
+
+// Faces captured in an incident show on its page and as name chips on its card.
+const incidentPeopleSource = readFileSync(new URL("../src/people/IncidentPeople.jsx", import.meta.url), "utf8");
+const incidentDetailSource = readFileSync(new URL("../src/incidents/IncidentDetailPage.jsx", import.meta.url), "utf8");
+const incidentCardSource = readFileSync(new URL("../src/incidents/IncidentCard.jsx", import.meta.url), "utf8");
+const incidentsPageSource = readFileSync(new URL("../src/incidents/IncidentsPage.jsx", import.meta.url), "utf8");
+assert.ok(incidentPeopleSource.includes("/api/face-captures/by-events?ids="));
+assert.match(incidentDetailSource, /<IncidentPeople incidentId=\{incident\.incident_id \|\| currentId\} eventIds=\{incident\.event_ids/);
+// Faces bound to a tracked person name that person's object card.
+assert.ok(incidentPeopleSource.includes("/api/face-captures/by-incident/"));
+assert.match(incidentDetailSource, /objectNames=\{faceObjects\}/);
+const storyObjectsSource = readFileSync(new URL("../src/incidents/IncidentStoryObjects.jsx", import.meta.url), "utf8");
+assert.match(storyObjectsSource, /objectNames\?\.\[object\.id\]/);
+assert.match(incidentDetailSource, /const people = \[\.\.\.new Set\(\[\.\.\.identityNames, \.\.\.faceNames\]\)\]/);
+assert.match(incidentCardSource, /<FaceNameChips names=\{faceNames\} \/>/);
+assert.match(incidentsPageSource, /faceNames=\{incidentFaceNames\[String\(incident\.id\)\]\}/);
+assert.ok(peoplePageSource.includes("/api/incidents/by-event/"), "visits open their incident");

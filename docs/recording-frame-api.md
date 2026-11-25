@@ -90,3 +90,74 @@ the camera columns and the day strip's loupe. After a
 scrub that ends in a seek, the released time keeps loading and its frame stays
 up until the player has seeked there and shows the exact full-resolution
 frame.
+
+## Frame stepping
+
+The Timeline's frame-by-frame controls use two endpoints. "One frame" means
+the next frame the file holds: cameras run at rates such as 19.84 or
+20.07 fps, so frame times are not a fixed grid.
+
+```text
+GET /api/cameras/{camera_id}/recordings/frames.json?epoch={unix_seconds}&source=main
+```
+
+Lists every frame of the recording segment that holds `epoch`:
+
+```json
+{
+  "source": "main",
+  "start": 1788955200.0,
+  "end": 1788955209.98,
+  "frames": [1788955200.013, 1788955200.063403, "…"],
+  "previous": 1788955199.999,
+  "next": 1788955209.98
+}
+```
+
+- `frames` are wall-clock times (Unix epoch, to the microsecond) in display
+  order, from the file's packet index; nothing is decoded. Only frames inside
+  `[start, end)` are listed: a frame the file holds past the indexed end
+  belongs to the next segment's span. A video track that starts after the
+  audio simply has its first frame later than `start`.
+- `previous` and `next` are times to ask about for the segment just before
+  and just after this one, or `null` where there is no recording to step
+  into: a neighbour counts only when its index times are within one second
+  of this segment's. A `next` of `null` on the newest segment can change once
+  the following segment is indexed; the response is not cached.
+- A time with no recording is `404`. Two lists are read at a time; a busy
+  server answers `429` with `Retry-After`.
+
+```text
+GET /api/cameras/{camera_id}/recordings/frame.jpg?epoch={unix_seconds}&source=main&width=1280
+```
+
+Returns the exact frame on screen at `epoch` (the last frame at or before it;
+the first frame if `epoch` precedes it), normally a time taken from
+`frames.json`. Headers as for `preview.jpg?exact=true`:
+`X-SurvNG-Requested-Timestamp`, `X-SurvNG-Actual-Timestamp` (the decoded
+frame's own time) and `X-SurvNG-Timestamp-Source: source_pts`. `width` is 320
+to 1920 and never enlarges the recording. A time with no recording is `404`.
+If the decoder does not produce that frame (a damaged stream), the answer is
+`500`: another frame is never served in its place.
+
+- Frames are decoded a run at a time: the GOP holding the frame (from its
+  keyframe to the next, at most 30 frames; a longer GOP is cut into slices of
+  30, each decoded from the keyframe) in one FFmpeg process, through the shared
+  recorded-frame decoder. The whole run is kept in the preview cache, so the
+  other frames of that GOP are served without decoding.
+- As for preview strips, a run is decoded and scaled on the GPU through VAAPI
+  where hardware acceleration is not `off` and VAAPI works. If the GPU fails
+  or takes more than 5 s, the CPU decodes the run, and neither runs nor strips
+  try the GPU again, for any camera, for five minutes. A failure that is about
+  the file (missing, unreadable, a damaged stream), or a GPU run with frames
+  missing, also goes to the CPU but leaves the GPU in use. A frame of unknown
+  size is always decoded on the CPU.
+- One run is built at a time. Each holds a preview-process media session
+  (shared with preview strips), not one of the transcode slots that event
+  clips, exports and HomeKit use. A busy generator answers `429` with
+  `Retry-After`.
+- Runs count against the preview cache's size and age limits like any other
+  preview image; every 32 MB of new runs brings the cache's maintenance pass
+  forward. Serving any frame of a run refreshes all of its files, so the
+  oldest-first eviction tends to take a run as a whole; if part of a run is
+  evicted anyway, the next request for it decodes the run again.

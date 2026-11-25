@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useIncidentFaceNames } from "../people/IncidentPeople.jsx";
 import {
   ChevronLeft,
   ChevronRight,
@@ -188,6 +189,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const incidentPageCount = Math.max(1, Math.ceil(displayedIncidentTotal / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
   const pagedIncidents = galleryIncidents;
+  const incidentFaceNames = useIncidentFaceNames(pagedIncidents);
   incidentPagingRef.current = {
     // The old page stays visible while the next request is in flight. Anchor
     // its actual offset if the user toggles the gallery before that load ends.
@@ -1078,6 +1080,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
               <IncidentCard
                 key={incident.id}
                 incident={incident}
+                faceNames={incidentFaceNames[String(incident.id)]}
                 timeZone={timeZone}
                 expanded={false}
                 thumbnailAnnotations={thumbnailAnnotations}

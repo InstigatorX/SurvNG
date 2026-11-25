@@ -49,6 +49,9 @@ STARTUP_DELAY_SECONDS = 600.0
 # Re-read the wall clock at least this often while waiting, so a clock step
 # (NTP sync after boot, host suspend) cannot delay the daily run by hours.
 MAX_WAIT_SECONDS = 900.0
+# A run_at this soon after a run (a catch-up or policy-change run just before
+# it) is skipped, so the job does not run twice in a row.
+MIN_RUN_GAP_SECONDS = 3600.0
 BATCH_ROWS = 500
 SCAN_ROWS = 5000
 BATCH_PAUSE_SECONDS = 0.05
@@ -225,7 +228,8 @@ class DatabaseRetention:
         self._thread = None
 
     def reschedule(self) -> None:
-        """Run again after the startup delay, e.g. after a policy change."""
+        """Re-plan after a config change: a policy change runs after the
+        startup delay; a change of ``run_at`` alone moves the next run."""
         self._wake.set()
 
     def status(self) -> dict[str, Any]:
@@ -245,8 +249,15 @@ class DatabaseRetention:
                 **dict(self._status),
             }
 
+    def _policy(self) -> dict[str, Any]:
+        """The pruning policy apart from when it runs."""
+        return self._config().model_dump(exclude={"run_at"})
+
     def _loop(self) -> None:
         due = self._first_due()
+        policy = self._policy()
+        # The loop's own last run, so a new run_at just after it is skipped.
+        last_run_end: float | None = None
         while True:
             with self._status_lock:
                 self._status["next_run_at"] = _iso(due)
@@ -255,7 +266,19 @@ class DatabaseRetention:
             if self._stop.is_set():
                 return
             if woken:
-                due = self._clock() + self._startup_delay_seconds
+                current = self._policy()
+                if current != policy:
+                    # A policy change (such as leaving dry run) runs soon.
+                    policy = current
+                    due = self._clock() + self._startup_delay_seconds
+                else:
+                    # Only run_at changed: keep to the new time instead of
+                    # running at a busy time of day.
+                    # A catch-up or policy run already due soon is kept.
+                    now = self._clock()
+                    earliest = now if last_run_end is None else max(now, last_run_end + MIN_RUN_GAP_SECONDS)
+                    scheduled = next_daily_run(earliest, self._config().run_at, self._tz)
+                    due = min(due, scheduled) if due - now <= self._startup_delay_seconds else scheduled
                 continue
             if self._clock() < due:
                 continue
@@ -267,7 +290,8 @@ class DatabaseRetention:
                     with self._status_lock:
                         self._running = False
                         self._status["last_error"] = type(error).__name__
-            due = next_daily_run(self._clock(), self._config().run_at, self._tz)
+            last_run_end = self._clock()
+            due = next_daily_run(last_run_end + MIN_RUN_GAP_SECONDS, self._config().run_at, self._tz)
 
     def _first_due(self) -> float:
         """Next ``run_at``, or a catch-up run soon if the last one is overdue.
@@ -367,7 +391,14 @@ class DatabaseRetention:
             self._log_motion_failures()
         if not result.get("interrupted"):
             # Startup uses this to tell a missed daily run from a recent one.
-            self._record_completed_run(now)
+            # The run itself succeeded: a busy database here costs at most an
+            # extra catch-up run after the next restart, not a failed run.
+            try:
+                self._record_completed_run(now)
+            except sqlite3.Error as error:
+                LOGGER.warning(
+                    "database retention could not record its completed run (%s)", type(error).__name__,
+                )
         LOGGER.info(
             "database retention %s: %s", "dry run" if dry else "run", result["steps"],
         )

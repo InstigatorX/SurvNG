@@ -179,3 +179,114 @@ denominator. The command never reads/writes the live gallery or changes settings
 Visit merge accuracy must also be checked on labeled camera sequences; this face
 corpus tool does not measure visit association. No real-camera accuracy claim is
 made until a suitable labeled corpus has been evaluated.
+
+## Face funnel report
+
+To see where faces are lost on each camera, run this on the SurvNG host as the
+service user, giving the directory that holds `survng.sqlite3`:
+
+```bash
+.venv/bin/python -m survng.app.face_funnel /path/to/database-dir --days 14
+```
+
+It opens the database read-only, loads no model and changes nothing. For each
+camera it counts the recorded person events that reached each stage: a person
+large enough for a face, a face found, kept, embedded, suggested and named. It
+also prints person and face sizes in pixels and the stored faces by outcome
+(`too_small`, `failed`, `embedded`). `--json` prints the same data as JSON.
+
+The "large enough" stage is an estimate from the person's height, assuming a
+face about 9% as wide as a standing person is tall. Stored faces are pruned at
+`face_max_observations`, so the later stages undercount for older events; the
+report says how far back stored faces reach.
+
+Events recorded from this version on also carry face-search counters, shown as
+"Search detail": people examined, people skipped over the per-frame cap, people
+too small to crop, crops searched, crops where the detector found no face, and
+faces found. A crop the detector could not search because inference was busy
+or failed counts as "no face"; the two are not yet told apart.
+
+## Every-frame face search comparison
+
+To measure how much the frame choice costs, run this on the SurvNG host as the
+service user. It is CPU-heavy, so keep it niced and bounded:
+
+```bash
+nice -n 19 ionice -c3 .venv/bin/python -m survng.app.face_frame_search \
+    runtime/database --cameras boiler,gate --events-per-camera 10 --margin 3
+```
+
+For the most recent recorded person events on each camera it decodes every
+frame of the event window from the main recording (software decode, full size,
+through the shared recorded-frame decoder), runs the configured person detector
+and the existing upper-body face search on each frame, and reports the best
+face per event three ways:
+
+- **old**: the refinement plan frames plus the face-evidence extras the old
+  search would have added around its best anchors. Every plan frame counts as
+  decoded and the face-evidence time budget is ignored, so this is an upper
+  bound for the old search.
+- **plan**: every frame in the window the old search could reach.
+- **all**: every frame including `--margin` seconds either side.
+
+A face is usable when its shorter side reaches `face_min_size`. Each result is
+given twice: for any detected face, and for recognisable faces only. The 300 px
+face detector also fires on the backs of heads, caps, torsos and leaves, and
+the five-point landmark model places points on all of them, so neither
+confidence nor landmark geometry separates them. Each face is instead aligned
+exactly as the live path aligns it and scored with the AdaFace feature norm,
+which on this host was 16-18 for real faces and 9-11 for those false hits. A
+face counts as recognisable from `--min-norm` (default 13); one that fails
+alignment scores 0. The norm comes from
+`models/face_model/adaface-ir50-webface4m/adaface-ir50-webface4m-norm.xml`, an
+OpenVINO export with both outputs made by `export_openvino_norm.py` in that
+directory (the embedding-only export drops the norm); it matches PyTorch to a
+cosine of 0.99999 and a norm within 0.1% on CPU at f32. `--sheets DIR` writes a contact sheet per camera with
+each event's best face under both rules, for checking the cut by eye.
+
+`--yunet` also runs the YuNet face detector (five built-in landmarks; model
+and provenance under `models/face_detector/yunet/`) on the same upper-body crops
+of the same frames, aligns its faces from its own landmarks, and reports and
+draws it separately, so the two detectors differ in nothing else.
+`--device GPU` runs the person and face detectors on the GPU and `--hw-decode`
+decodes with the configured `hardware_acceleration`; the AdaFace norm and YuNet
+stay on the CPU. FP16 GPU inference moves person boxes slightly, which can
+change which frames the old search would have picked, so compare runs made on
+the same device.
+
+`--embeddings FILE.npz` also saves the AdaFace unit embedding of every face
+that aligned, keyed by the face `id` in `--json` (which also records each face's
+box and each event's epoch), for offline matching against confirmed faces.
+
+`--embeddings FILE.npz` also writes each aligned face's AdaFace embedding; the
+ids match the `id` of each face in `--json`, which also carries its box.
+
+### Findings on this host (2026-11-24, 60 events on six cameras)
+
+- Searching every frame instead of the old ~8 roughly doubles the events with
+  a usable face; most of the gain is inside the window the old search already
+  covered.
+- The 300 px detector's false hits (heads, torsos, leaves) make "biggest
+  face" the wrong selection rule. YuNet finds more real faces (front-door
+  goes from none to five events) but also has false hits; neither is clean.
+- Faces of one event embed close together: the median cosine of an event's
+  recognisable faces to their mean is 0.79 (current detector) and 0.73
+  (YuNet), so an event's faces can be grouped before anyone is named.
+- Grouping events by face, with no labels (average linkage on each event's
+  mean embedding, checked by eye): the most frequent person forms one pure
+  cluster across four cameras (19 events with YuNet, 18 with the current
+  detector), and two visitors at the gate each form their own. At a cosine
+  threshold of 0.35 no cluster mixed two people; blurry and dim views of the
+  frequent person split into small clusters of their own, and false hits that
+  passed the norm cut grouped together. At 0.25 that junk cluster also took in
+  another person. Grouping works for good faces; it needs a stronger junk
+  filter and a way to rejoin split clusters (the visit or body track).
+- Existing named people and confirmed faces in the face store came from the
+  previous pipeline and are not used as ground truth for the rebuild.
+
+The tool opens
+the database and recording index read-only, loads its own CPU copies of the
+models with the OpenVINO cache off (`--threads` sets the CPU threads), and does
+not touch the service or its config. Zones are not evaluated offline, so anchor
+ranking treats a person at the alert confidence as eligible. `--json` also
+writes the per-event data, including every face's size, confidence and norm.

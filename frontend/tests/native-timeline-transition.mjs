@@ -14,6 +14,7 @@ for (const autoplay of [true, false]) {
   const calls = [];
   const warmWindow = { start: 110, end: 1010, rows: [{ start_epoch: 110, end_epoch: 120 }] };
   const context = vm.createContext({
+    frameStepSeekRef: { current: false }, frameStep: { leave() {} },
     Number, performance, recordingSegmentAt, snapToRecording: (value) => value,
     activeCameraId: "gate", isAllCameras: false, useSegmentPlayback: true,
     timelineView: { startEpoch: 0, endEpoch: 1010 },
@@ -42,6 +43,7 @@ for (const autoplay of [true, false]) {
 // The Pause button must cancel that intent rather than issue another play().
 const paused = [];
 const toggle = vm.createContext({
+  frameStep: { resume: () => null },
   videoRef: { current: { paused: true, pause: () => paused.push("pause") } },
   useSegmentPlayback: true, heroSeeking: true, autoplayRef: { current: true },
   setHeroPlaying: (value) => paused.push(value), requestRecordingPlay: () => paused.push("play"),

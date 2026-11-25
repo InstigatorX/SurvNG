@@ -115,6 +115,9 @@ jobs:
         run: |
           scripts/run-tests.sh \
             tests/test_scene_incidents.py \
+            tests/test_scene_visible_intervals.py \
+            tests/test_incident_reviews.py \
+            tests/test_incident_titles.py \
             tests/test_scene_history_extent.py \
             tests/test_evidence_gallery.py \
             tests/test_face_reference_retention.py \
@@ -145,6 +148,8 @@ jobs:
             tests/test_recorded_video_frames.py \
             tests/test_recorded_decoder.py \
             tests/test_recording_fragmented.py \
+            tests/test_recording_frame_steps.py \
+            tests/test_recording_frame_runs.py \
             tests/test_open_segment_refinement.py \
             tests/test_object_tracking_lifecycle.py \
             tests/test_tracking_frames.py \

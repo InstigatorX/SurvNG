@@ -19,6 +19,30 @@ While you scrub, the player shows the frame under the line. When you let go,
 playback resumes from that moment. The **15m / 1h / 6h / 24h** buttons zoom the
 rail.
 
+## Step frame by frame
+
+Scrubbing lands on the right second; frame stepping finds the exact frame in
+it, such as the one where a face turns to the camera or a licence plate is
+sharp.
+
+1. Pause the video.
+2. Use the **previous frame** and **next frame** buttons beside the ±10 s
+   buttons under the video, or press **,** (back) and **.** (forward) on a
+   keyboard. Hold a button or key to keep stepping.
+3. The time under the video shows the frame's time to the millisecond.
+4. Press **Play** to continue from that frame.
+
+Each step shows the exact recorded frame, decoded on the server, so it looks
+the same on an iPhone as on a desktop browser. The first step into a new
+second of video can take a moment while that second is decoded; steps within
+it are then immediate. When you hold a button and frames cannot keep up, the
+player jumps to the latest frame rather than replaying every one in between.
+
+Stepping continues across recording segments. Where the recording stops, the
+last frame stays up with **No recording after this frame** (or **before**).
+Scrubbing, jumping to another time, or changing camera, stream or day ends
+stepping. It is not available in the **All cameras** grid.
+
 ## Views
 
 - **Timeline**: the rail of events and time described above.
