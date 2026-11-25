@@ -435,7 +435,10 @@ class SecurityBoundaryMiddleware:
             and api_path.startswith("/api/")
             # Stopping without restarting (no supervisor): the restart is
             # how the operator gets out of it.
-            and not (RESTART_REQUIRED.is_set() and api_path == "/api/system/restart")
+            and not (
+                RESTART_REQUIRED.is_set()
+                and api_path in {"/api/system/restart", "/api/auth/login", "/api/auth/logout"}
+            )
         ):
             response = JSONResponse(
                 {
@@ -752,7 +755,9 @@ def _request_server_restart() -> dict[str, object]:
             APPLICATION_STOPPING.is_set() and not RESTART_REQUIRED.is_set()
         ):
             raise RuntimeError("SurvNG is already restarting or shutting down")
-        active_tasks = _active_storage_tasks(get_manager())
+        # A required restart cannot wait for storage work: the operator could
+        # not cancel it while settings are frozen.
+        active_tasks = [] if RESTART_REQUIRED.is_set() else _active_storage_tasks(get_manager())
         if active_tasks:
             raise RuntimeError(
                 "SurvNG cannot restart while storage work is active: "
@@ -877,7 +882,7 @@ RESTART_REQUIRED = threading.Event()
 def _settings_frozen_detail() -> str:
     if RESTART_REQUIRED.is_set():
         return "SurvNG needs a restart before settings can change again"
-    return "SurvNG is restarting; change settings again once it is back"
+    return "SurvNG is restarting or shutting down; configuration changes are temporarily unavailable"
 
 
 def save_settings_change(
