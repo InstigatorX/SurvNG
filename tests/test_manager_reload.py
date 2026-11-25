@@ -57,7 +57,10 @@ class ManagerGenerationLifecycleTest(unittest.TestCase):
         previous.stop_all_with_runtime_preferences.side_effect = lambda: order.append("stop-old")
         candidate = Mock()
         candidate.start_all.side_effect = lambda: order.append("start-new")
-        hooks = self.hooks()
+        hooks = replace(
+            self.hooks(),
+            record_change=Mock(side_effect=lambda *_args: order.append("record")),
+        )
         hooks.save_config.side_effect = lambda *_args, **_kwargs: order.append("save")
         hooks.publish_runtime.side_effect = lambda *_args: order.append("publish")
 
@@ -65,7 +68,7 @@ class ManagerGenerationLifecycleTest(unittest.TestCase):
             AppConfig(), previous, AppConfig(base_path="/new"), persist=True
         )
 
-        self.assertEqual(order, ["save", "stop-old", "start-new", "publish"])
+        self.assertEqual(order, ["save", "stop-old", "start-new", "record", "publish"])
         hooks.refresh_runtime_caches.assert_called_once_with()
 
     def test_active_generation_requests_drain_before_previous_manager_stops(self) -> None:
@@ -226,14 +229,24 @@ class ManagerGenerationLifecycleTest(unittest.TestCase):
             ("recovery", False),
         ):
             with self.subTest(kind=kind):
-                hooks = replace(self.hooks(), request_supervisor_restart=Mock(return_value=True))
+                hooks = replace(
+                    self.hooks(),
+                    request_supervisor_restart=Mock(return_value=True),
+                    record_change=Mock(),
+                )
                 previous, factory, original = self._dead_end(kind)
                 requested = AppConfig(base_path="/new")
                 with self.assertRaises(ManagerReloadRestartPending) as raised:
                     self.lifecycle(factory, hooks).reload(original, previous, requested, persist=True)
                 self.assertIs(raised.exception.persisted, kept)
+                self.assertTrue(raised.exception.restarting)
                 saved = [call.args[0] for call in hooks.save_config.call_args_list]
                 self.assertEqual(saved, [requested] if kept else [requested, original])
+                # History shows only a change that runs, now or after the restart.
+                if kept:
+                    hooks.record_change.assert_called_once_with(original, requested)
+                else:
+                    hooks.record_change.assert_not_called()
                 if kept:
                     self.assertIn("to apply the saved configuration", str(raised.exception))
 

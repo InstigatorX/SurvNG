@@ -43,6 +43,10 @@ class ManagerReloadHooks:
     # Asked to stop the process when this generation cannot recover in-process;
     # returns True when the supervisor will restart SurvNG.
     request_supervisor_restart: Callable[[str], bool] = lambda _reason: False
+    # Records a change in configuration history once it takes effect (now, or
+    # at the restart that applies it). save_config itself records nothing,
+    # so a change that is saved and then rolled back leaves no history.
+    record_change: Callable[[AppConfig, AppConfig], None] = lambda _previous, _current: None
 
 
 class ManagerGenerationLifecycle:
@@ -89,6 +93,12 @@ class ManagerGenerationLifecycle:
             persisted=persisted,
             restarting=restarting,
         )
+
+    def _record_change(self, previous_config: AppConfig, effective_config: AppConfig) -> None:
+        try:
+            self._hooks.record_change(previous_config, effective_config)
+        except Exception:
+            LOGGER.exception("could not record the configuration change")
 
     def _restore_saved(self, previous_config: AppConfig) -> None:
         """Put the configuration that is running back on disk."""
@@ -156,6 +166,8 @@ class ManagerGenerationLifecycle:
                     # the restart applies it.
                     self._stopping.set()
                     self._hooks.publish_runtime(previous_config, previous_manager)
+                    if persisted:
+                        self._record_change(previous_config, effective_config)
                     raise self._unrecoverable(
                         "configuration reload aborted because previous manager shutdown is "
                         "still active",
@@ -206,6 +218,8 @@ class ManagerGenerationLifecycle:
                     "configuration reload failed; the previous configuration was restored"
                 ) from reload_error
 
+            if persisted:
+                self._record_change(previous_config, effective_config)
             self._hooks.publish_runtime(effective_config, candidate)
             self._hooks.refresh_runtime_caches()
             if prewarmer_was_running:

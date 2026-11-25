@@ -505,10 +505,18 @@ class ConfigReloadTest(unittest.TestCase):
                 "survng.app.main.save_config",
                 side_effect=lambda *_args, **_kwargs: actions.append("save"),
             ),
+            patch.object(
+                main.CONFIG_CHANGE_LOG,
+                "record",
+                side_effect=lambda *_args: actions.append("history"),
+            ) as record,
         ):
+            previous = main.config
             effective = main.reload_manager(AppConfig(base_path="/new"))
 
-        self.assertEqual(actions, ["save", "old-stop", "new-start"])
+        # History is written once the change runs, not when it is saved early.
+        self.assertEqual(actions, ["save", "old-stop", "new-start", "history"])
+        record.assert_called_once_with(previous, effective)
         candidate.wait_for_camera_startup.assert_not_called()
         self.assertIs(main.manager, candidate)
         self.assertIs(main.config, effective)
@@ -624,9 +632,10 @@ class ConfigReloadTest(unittest.TestCase):
         with (
             patch("survng.app.main.reload_manager", side_effect=manual),
             patch("survng.app.main.save_config") as save,
-            self.assertRaises(ManagerReloadRestartPending),
         ):
-            main.apply_config_update(incoming, allow_restart_pending=True)
+            _effective, result = main.apply_config_update(incoming, allow_restart_pending=True)
+        self.assertEqual(result["apply_mode"], "restart_required")
+        self.assertTrue(result["persisted"])
         save.assert_not_called()
 
     def test_callers_that_cannot_report_a_pending_restart_keep_the_running_config_on_disk(self) -> None:
@@ -643,7 +652,7 @@ class ConfigReloadTest(unittest.TestCase):
         with (
             patch("survng.app.main.reload_manager", side_effect=pending),
             patch("survng.app.main.save_config") as save,
-            self.assertRaises(ManagerReloadRestartPending),
+            self.assertRaisesRegex(RuntimeError, "the change was not saved"),
         ):
             main.apply_config_update(incoming)
         save.assert_called_once()

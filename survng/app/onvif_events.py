@@ -422,15 +422,18 @@ class OnvifEventListener:
         """Retire a worker that is still blocked in camera I/O after its stop.
 
         Its stop event is set and its sockets were interrupted. Retiring its
-        generation fences every later write, callback and subscription it
-        could attempt, and its subscription and transport move out of the
+        generation fences its later callbacks, subscriptions and status
+        writes (counters it bumps on the way out are not fenced), and its subscription and transport move out of the
         listener so a new generation cannot overwrite them; the worker
         releases them itself when its blocking call returns. It is a daemon
         thread. Treating it as stopped keeps one unresponsive camera from
         failing a reload or shutdown.
         """
-        manager, transport = self._detach_subscription_resources(generation)
         with self._lifecycle_lock:
+            # One critical section: the worker's exit path pops its orphan
+            # entry under this lock after releasing what it still held, so it
+            # either finds these resources or released them itself.
+            manager, transport = self._detach_subscription_resources_locked(generation)
             if generation == self._generation:
                 self._generation += 1
                 self.connected = False
@@ -809,6 +812,7 @@ class OnvifEventListener:
         camera.xaddrs[PULLPOINT_NAMESPACE] = address
         if self._generation_matches(generation):
             self._record_subscription_times(subscription)
+        adopted = True
         try:
             events_service.zeep_client.plugins.append(_SubscriptionManagerAddressing())
             manager = events_service.zeep_client.create_service(
@@ -824,13 +828,14 @@ class OnvifEventListener:
                 # A retired worker's late subscription: release it on the
                 # camera rather than leave it until it expires.
                 self._release_detached_resources(manager, None)
-                raise RuntimeError("ONVIF subscription generation stopped")
         except Exception:
             LOGGER.debug(
                 "ONVIF subscription manager unavailable for %s",
                 self.camera.id,
                 exc_info=True,
             )
+        if not adopted:
+            raise RuntimeError("ONVIF subscription generation stopped")
         pullpoint = camera.create_pullpoint_service()
         self._enable_pullmessages_capture(pullpoint)
         if stop_event.is_set() or not self._generation_matches(generation):
@@ -925,6 +930,8 @@ class OnvifEventListener:
             self.last_error = ""
             return True
         except Exception as exc:
+            if stop_event.is_set() or not self._generation_matches(generation):
+                return False
             self.renewal_errors += 1
             self.last_error = f"renewal failed; re-subscribing: {self._error_text(exc)[:200]}"
             LOGGER.warning(
@@ -958,24 +965,29 @@ class OnvifEventListener:
         self, generation: int | None = None
     ) -> tuple[Any, Any]:
         with self._lifecycle_lock:
-            manager = (
-                self._subscription_manager
-                if generation is None
-                or self._subscription_generation in {None, generation}
-                else None
-            )
-            transport = (
-                self._transport
-                if generation is None
-                or self._transport_generation in {None, generation}
-                else None
-            )
-            if manager is not None:
-                self._subscription_manager = None
-                self._subscription_generation = None
-            if transport is not None:
-                self._transport = None
-                self._transport_generation = None
+            return self._detach_subscription_resources_locked(generation)
+
+    def _detach_subscription_resources_locked(
+        self, generation: int | None = None
+    ) -> tuple[Any, Any]:
+        manager = (
+            self._subscription_manager
+            if generation is None
+            or self._subscription_generation in {None, generation}
+            else None
+        )
+        transport = (
+            self._transport
+            if generation is None
+            or self._transport_generation in {None, generation}
+            else None
+        )
+        if manager is not None:
+            self._subscription_manager = None
+            self._subscription_generation = None
+        if transport is not None:
+            self._transport = None
+            self._transport_generation = None
         return manager, transport
 
     def _release_detached_resources(self, manager: Any, transport: Any) -> None:
@@ -1032,6 +1044,8 @@ class OnvifEventListener:
             )
         except Exception as exc:
             self._release_detached_resources(old_manager, old_transport)
+            if stop_event.is_set() or not self._generation_matches(generation):
+                return None
             self.last_error = (
                 f"overlap resubscribe failed: {self._error_text(exc)[:200]}"
             )
@@ -1042,6 +1056,8 @@ class OnvifEventListener:
             )
             return None
         self._release_detached_resources(old_manager, old_transport)
+        if stop_event.is_set() or not self._generation_matches(generation):
+            return None
         self.connected = True
         self.last_connected_at = datetime.now(timezone.utc).isoformat()
         self.last_error = ""

@@ -823,7 +823,13 @@ def reload_manager(
             prewarmer_running=_recording_media_runtime.prewarmer_running,
             stop_prewarmer=_recording_media_runtime._stop_recording_prewarmer,
             start_prewarmer=_recording_media_runtime._start_recording_prewarmer,
-            save_config=save_config_with_history,
+            # History is recorded once the change takes effect (record_change),
+            # not when it is saved ahead of the cutover.
+            save_config=lambda next_config, assign_ids=False: save_config(
+                next_config,
+                assign_ids=assign_ids,
+            ),
+            record_change=CONFIG_CHANGE_LOG.record,
             publish_runtime=publish_runtime,
             refresh_runtime_caches=refresh_runtime_caches,
             storage_error=StorageTasksActiveError,
@@ -905,13 +911,13 @@ def apply_config_update(
                 if not pending.persisted:
                     raise
                 if allow_restart_pending:
-                    if not pending.restarting:
-                        # Saved; applies at the next manual restart.
-                        raise
-                    # Saved, but this process cannot finish the cutover; its
-                    # supervisor restart starts with the saved configuration.
+                    # Saved, but this process cannot finish the cutover. With
+                    # a supervisor it restarts with the saved configuration;
+                    # without one, someone has to restart SurvNG.
                     return effective, {
-                        "apply_mode": "restart_pending",
+                        "apply_mode": (
+                            "restart_pending" if pending.restarting else "restart_required"
+                        ),
                         "persisted": True,
                         "applied": False,
                         "camera_workers_restarted": True,
@@ -920,12 +926,19 @@ def apply_config_update(
                         "message": str(pending),
                     }
                 try:
-                    save_config_with_history(current, assign_ids=False)
+                    save_config(current, assign_ids=False)
                 except Exception:
                     logging.getLogger(__name__).exception(
                         "failed to restore the persisted configuration after an unfinished reload"
                     )
-                raise
+                raise RuntimeError(
+                    "configuration reload could not finish and the change was not saved; "
+                    + (
+                        "SurvNG is restarting through its supervisor"
+                        if pending.restarting
+                        else "restart SurvNG through its supervisor"
+                    )
+                ) from pending
             prepare_bootstrap_token(applied)
             return applied, {
                 "apply_mode": "manager_reload",

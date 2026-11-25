@@ -803,8 +803,22 @@ export function CalibrationLab(props) {
   return <SystemReviewPanel {...props} />;
 }
 
-// A save the running process could not apply is on disk and applies when the
-// supervisor restarts SurvNG: wait for a new process, then reload the page.
+// A save the running process could not apply is on disk and applies at the
+// next start. Returns true when it handled such a result.
+async function handleUnappliedSave(payload, saved, setNotice) {
+  if (payload.apply_mode === "restart_pending") {
+    setNotice({ state: "saving", text: `${saved}. SurvNG is restarting to apply it...` });
+    await reloadAfterServerRestart(payload.instance_id, setNotice);
+    return true;
+  }
+  if (payload.apply_mode === "restart_required") {
+    setNotice({ state: "error", text: `${saved}, but SurvNG could not apply it while running. Restart SurvNG to apply it.` });
+    return true;
+  }
+  return false;
+}
+
+// The supervisor is restarting SurvNG: wait for a new process, then reload.
 async function reloadAfterServerRestart(previousInstance, setNotice) {
   const previous = String(previousInstance || "");
   const deadline = Date.now() + 120_000;
@@ -1805,13 +1819,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
         throw new Error(detail);
       }
       const payload = await response.json();
-      if (payload.apply_mode === "restart_pending") {
-        // Saved on disk; the service restarts to apply it. Reload the page
-        // once the new process answers so the form shows what is running.
-        setSaveNotice({ state: "saving", text: "Saved. SurvNG is restarting to apply it..." });
-        await reloadAfterServerRestart(payload.instance_id, setSaveNotice);
-        return true;
-      }
+      if (await handleUnappliedSave(payload, "Saved", setSaveNotice)) return true;
       const reloaded = await load();
       setSaveNotice(reloaded
         ? {
@@ -1907,11 +1915,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
         setBaselineRevision((current) => current + 1);
       }
       const saved = cameras.length > 1 ? `${cameras.length} cameras saved` : "Camera settings saved";
-      if (payload.apply_mode === "restart_pending") {
-        setSaveNotice({ state: "saving", text: `${saved}; SurvNG is restarting to apply them...` });
-        await reloadAfterServerRestart(payload.instance_id, setSaveNotice);
-        return savedById;
-      }
+      if (await handleUnappliedSave(payload, saved, setSaveNotice)) return savedById;
       setSaveNotice({
         state: "saved",
         text: payload.apply_mode === "manager_reload"
@@ -1971,11 +1975,13 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
     try {
       const response = await fetch(`/api/config/cameras/${encodeURIComponent(camera.id)}`, { method: "DELETE" });
       if (!response.ok) throw new Error(await response.text());
+      const payload = await response.json().catch(() => ({}));
       removeCamera(camera.id);
       if (baselineConfigRef.current) {
         baselineConfigRef.current.cameras = (baselineConfigRef.current.cameras || []).filter((item) => item.id !== camera.id);
         setBaselineRevision((current) => current + 1);
       }
+      if (await handleUnappliedSave(payload, "Camera removed", setSaveNotice)) return;
       setSaveNotice({ state: "saved", text: "Camera removed. Workers reloaded." });
       const statusResponse = await fetch("/api/cameras");
       if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
