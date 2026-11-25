@@ -152,3 +152,44 @@ def test_every_face_capture_route_needs_the_admin_scope():
     for method, path in (("GET", "/api/face-capture/status"), ("POST", "/api/face-capture/seeds"),
                          ("POST", "/api/face-capture/seeds/1/pause")):
         assert required_api_scope(method, path) == "admin"
+
+
+def test_a_seed_pass_resumes_below_the_last_event_and_rescans_before_finishing(tmp_path, monkeypatch):
+    rows = [(i, "gate", PERSON, _at(72 + i)) for i in range(1, 6)]
+    service, _ = _service(tmp_path, rows)
+    monkeypatch.setattr(service_module, "capture_event", lambda **k: CaptureResult(faces=[_face()], main_frames=5))
+    service.store.create_seed(
+        start_epoch=(NOW - timedelta(days=5)).timestamp(), end_epoch=(NOW - timedelta(days=1)).timestamp(),
+        cameras=[], total=5)
+    scans = []
+    real = service.seed_events
+    monkeypatch.setattr(service, "seed_events", lambda *a, **k: scans.append(k.get("before_id")) or real(*a, **k))
+    while service.run_once(NOW):
+        pass
+    # After the first full scan each pass resumes at the event last taken;
+    # only the final pass, which finds nothing below, rescans the whole range.
+    assert scans == [None, 6, 5, 4, 3, 2, None]
+    assert service.store.seeds(1)[0]["state"] == "done"
+
+
+def test_a_seed_paused_while_it_is_being_finished_is_left_paused(tmp_path, monkeypatch):
+    service, _ = _service(tmp_path, [])
+    seed_id = service.store.create_seed(
+        start_epoch=(NOW - timedelta(days=5)).timestamp(), end_epoch=(NOW - timedelta(days=4)).timestamp(),
+        cameras=[], total=0)
+    real = service.next_seed_event
+
+    def pause_meanwhile(seed, now=None):
+        service.store.set_seed_state(seed_id, "paused")
+        return real(seed, now)
+
+    monkeypatch.setattr(service, "next_seed_event", pause_meanwhile)
+    assert service.run_once(NOW) is False  # no SeedConflict out of the pass
+    assert service.store.seeds(1)[0]["state"] == "paused"
+
+
+def test_a_finished_seed_counts_every_event_in_its_range(tmp_path):
+    store = FaceCaptureStore(tmp_path)
+    seed = store.create_seed(start_epoch=0, end_epoch=10, cameras=[], total=5)
+    store.seed_progress(seed, faces=2)
+    assert store.set_seed_state(seed, "done")["processed"] == 5

@@ -303,6 +303,13 @@ class FaceCaptureStore:
                 "update face_capture_seeds set state = ?, updated_at = ?, finished_at = ? where id = ?",
                 (state, now, finished, int(seed_id)),
             )
+            if state == "done":
+                # Every event in the range is finished by then, including those
+                # the regular capture loop took; faces stay this seed's own.
+                connection.execute(
+                    "update face_capture_seeds set processed = max(processed, total) where id = ?",
+                    (int(seed_id),),
+                )
         return next(seed for seed in self.seeds(50) if seed["id"] == int(seed_id))
 
     def seed_progress(self, seed_id: int, *, faces: int = 0, failed: bool = False) -> None:

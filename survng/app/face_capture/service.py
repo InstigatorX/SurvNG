@@ -30,7 +30,7 @@ from .pipeline import (
     main_stream_source,
     sub_stream_source,
 )
-from .store import CAPTURE_VERSION, ClosingConnection, FaceCaptureStore
+from .store import CAPTURE_VERSION, ClosingConnection, FaceCaptureStore, SeedConflict
 
 LOGGER = logging.getLogger(__name__)
 
@@ -90,6 +90,9 @@ class FaceCaptureService:
         # of attempts) as of the last full scan.
         self._scan_floor = 0
         self._full_scan_due = 0.0
+        # (seed id, event id last taken from it): the next seed pass resumes
+        # there instead of re-reading every finished event above it.
+        self._seed_cursor: tuple[int, int] | None = None
         self.processed = 0
         self.failed = 0
         self.last_event_id: int | None = None
@@ -233,12 +236,12 @@ class FaceCaptureService:
         return now.timestamp() - settle, now.timestamp() - settle - MAX_WINDOW_SECONDS
 
     def seed_events(
-        self, start_epoch: float, end_epoch: float, cameras: list[str] | None,
+        self, start_epoch: float, end_epoch: float, cameras: list[str] | None, before_id: int | None = None,
     ) -> Iterator[tuple[int, str, float, dict[str, Any]]]:
-        """Recorded person events created in a range, newest first, paged."""
+        """Recorded person events created in a range, newest first, paged
+        (only ids below ``before_id`` when given)."""
         since = datetime.fromtimestamp(start_epoch, timezone.utc).isoformat()
         until = datetime.fromtimestamp(end_epoch, timezone.utc).isoformat()
-        before_id: int | None = None
         while True:
             with self._events_connection() as connection:
                 page = person_events(
@@ -287,14 +290,32 @@ class FaceCaptureService:
                 pending = pending or verdict == "wait"
             return None
 
-        for candidate in self.seed_events(float(seed["start_epoch"]), end, seed.get("cameras") or None):
-            batch.append(candidate)
-            if len(batch) >= CANDIDATE_BATCH:
-                if (chosen := decide()) is not None:
-                    return chosen, True
-                batch = []
-        if batch and (chosen := decide()) is not None:
+        def scan(below: int | None) -> tuple[int, str, float, dict[str, Any]] | None:
+            nonlocal batch
+            batch = []
+            for candidate in self.seed_events(
+                float(seed["start_epoch"]), end, seed.get("cameras") or None, before_id=below,
+            ):
+                batch.append(candidate)
+                if len(batch) >= CANDIDATE_BATCH:
+                    if (chosen := decide()) is not None:
+                        return chosen
+                    batch = []
+            return decide() if batch else None
+
+        # Events above the last one taken were finished or left waiting: a pass
+        # resumes at that event, and only a pass that finds nothing there
+        # rescans the whole range (retries due, events confirmed late), so a
+        # long seed does not re-read every finished event once per capture.
+        cursor = self._seed_cursor
+        chosen = scan(cursor[1] + 1) if cursor is not None and cursor[0] == seed["id"] else None
+        if chosen is None:
+            pending = False  # a resumed scan says nothing about events above it
+            chosen = scan(None)
+        if chosen is not None:
+            self._seed_cursor = (int(seed["id"]), chosen[0])
             return chosen, True
+        self._seed_cursor = None
         return None, pending or float(seed["end_epoch"]) > latest_created
 
     def run_once(self, now: datetime | None = None) -> bool:
@@ -318,7 +339,10 @@ class FaceCaptureService:
         candidate, more = self.next_seed_event(seed, now)
         if candidate is None:
             if not more:
-                self.store.set_seed_state(seed["id"], "done")
+                try:
+                    self.store.set_seed_state(seed["id"], "done")
+                except SeedConflict:
+                    pass  # paused or cancelled during this pass; resume rescans it
             return False
         failed = self.failed
         kept = self.capture(*candidate)
