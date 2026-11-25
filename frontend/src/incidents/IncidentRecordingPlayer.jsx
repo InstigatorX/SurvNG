@@ -209,7 +209,9 @@ export function IncidentRecordingPlayer({
         setLoaded(null);
         setLoading(false);
         setError("No recording window found");
-        if (!failed && candidates.length) onUnavailableRef.current?.();
+        // Skip only when this window covers the whole clip; a clip crossing a
+        // window boundary may have its recording in the next window.
+        if (!failed && candidates.length && startEpoch >= requested.start && safeEnd <= requested.end) onUnavailableRef.current?.();
       }
     }
     load().catch((loadError) => {

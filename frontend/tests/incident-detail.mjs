@@ -278,11 +278,12 @@ async function titleChecks() {
   let reply = { status: 200, json: { incident_id: "incident-story-1", status: "ready", title: "Car pulls in and a person walks to the front door", revision: 7, current: true } };
   const titleRequests = [];
   let ongoing = false;
+  let reviseTo = null;
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
     if (path.endsWith("/api/cameras")) return route.fulfill({ json: CAMERAS });
-    if (path.includes("/incidents/notification/")) return route.fulfill({ json: { incident: storyIncident(), notification: { state: ongoing ? "active" : "complete" }, camera_name: "Front Driveway" } });
+    if (path.includes("/incidents/notification/")) return route.fulfill({ json: { incident: { ...storyIncident(), ...(reviseTo ? { revision: reviseTo } : {}) }, notification: { state: ongoing ? "active" : "complete" }, camera_name: "Front Driveway" } });
     if (path.endsWith("/incident-story-1/title")) { titleRequests.push(path); return route.fulfill(reply); }
     return route.fulfill({ json: {} });
   });
@@ -305,6 +306,15 @@ async function titleChecks() {
   ongoing = true;
   await page.evaluate(() => window.dispatchEvent(new Event("online")));
   await page.getByRole("heading", { level: 1, name: "Car arrives, person walks to Front Door" }).waitFor();
+  // When it settles again with new evidence, the old wording does not come back.
+  ongoing = false;
+  reviseTo = 8;
+  reply = { status: 500, json: {} };
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await page.waitForTimeout(600);
+  assert.equal(await page.getByText("Car pulls in and a person walks to the front door").count(), 0);
+  reviseTo = null;
+  ongoing = true;
   // A growing incident keeps the built-in title and does not ask for an AI one.
   await page.waitForTimeout(500);
   const before = titleRequests.length;
