@@ -412,7 +412,8 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
   const people = notification?.people || (incident?.identities || []).map((item) => item?.name).filter(Boolean);
   const builtTitle = incident ? incidentStoryTitle(incident, { cameraName, objects, people, fallback: notification?.summary || "" }) : "";
   // Only a wording of the current evidence replaces the built-in title.
-  const providerTitle = aiTitle?.id === titleId && aiTitle?.status === "ready" && aiTitle.current !== false ? aiTitle.title : "";
+  // A reopened (ongoing again) incident goes back to the built-in title.
+  const providerTitle = titleSettled && aiTitle?.id === titleId && aiTitle?.status === "ready" && aiTitle.current !== false ? aiTitle.title : "";
   const title = providerTitle || builtTitle;
   const cardNames = cardIdentities(objects, incident?.identities);
   const cameraCount = new Set((incident?.episodes || []).map((episode) => episode.camera_id).concat(incident?.episodes?.length ? [] : [incident?.camera_id])).size;

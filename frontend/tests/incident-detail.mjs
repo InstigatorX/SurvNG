@@ -298,10 +298,17 @@ async function titleChecks() {
   await page.goto(url);
   await page.getByRole("heading", { level: 1, name: "Car arrives, person walks to Front Door" }).waitFor();
   assert.equal(await page.getByText("AI title unavailable").count(), 0);
+  // A completed incident that reopens goes back to the built-in title.
+  reply = { status: 200, json: { incident_id: "incident-story-1", status: "ready", title: "Car pulls in and a person walks to the front door", revision: 7, current: true } };
+  await page.goto(url);
+  await page.getByRole("heading", { level: 1, name: "Car pulls in and a person walks to the front door" }).waitFor();
+  ongoing = true;
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await page.getByRole("heading", { level: 1, name: "Car arrives, person walks to Front Door" }).waitFor();
   // A growing incident keeps the built-in title and does not ask for an AI one.
+  await page.waitForTimeout(500);
   const before = titleRequests.length;
   reply = { status: 200, json: { incident_id: "incident-story-1", status: "ready", title: "Should not show", revision: 7, current: true } };
-  ongoing = true;
   await page.goto(url);
   await page.getByRole("heading", { level: 1, name: "Car arrives, person walks to Front Door" }).waitFor();
   await page.waitForTimeout(500);
@@ -357,7 +364,8 @@ async function followThemeChecks() {
     if (path.endsWith("/title")) return route.fulfill({ json: { incident_id: "incident-story-1", status: "ready", title: "Old wording", revision: 6, current: false } });
     if (path.includes("/recordings/window")) {
       const start = Number(url.searchParams.get("start_epoch")), end = Number(url.searchParams.get("end_epoch"));
-      if (path.includes("/front-driveway/") && drivewayMode === "error") return route.fulfill({ status: 500, json: {} });
+      // The usual failure: main errors while the (unrecorded) sub stream answers empty.
+      if (path.includes("/front-driveway/") && drivewayMode === "error" && url.searchParams.get("source") !== "live") return route.fulfill({ status: 500, json: {} });
       const recordings = path.includes("/front-driveway/") ? [] : [{ start_epoch: start, end_epoch: end, duration_seconds: end - start, name: "segment" }];
       return route.fulfill({ json: { camera_id: "x", source: "main", start_epoch: start, end_epoch: end, recordings } });
     }

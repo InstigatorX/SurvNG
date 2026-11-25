@@ -178,15 +178,15 @@ export function IncidentRecordingPlayer({
     setLoading(true);
     setError("");
     async function load() {
-      // Only an answered request with no recording proves there is none.
-      let answeredEmpty = false;
+      // Only every source answering with no recording proves there is none;
+      // one failed source (often main, with the sub stream unrecorded) does not.
+      let failed = false;
       for (const candidate of candidates) {
         const response = await fetch(
           recordingWindowUrl(cameraId, requested.start, requested.end, candidate),
           { signal: controller.signal },
         );
-        if (!response.ok) continue;
-        answeredEmpty = true;
+        if (!response.ok) { failed = true; continue; }
         const payload = await response.json();
         const rows = rowsOverlapping(withMediaTimeline(payload.recordings || []), startEpoch, safeEnd);
         const playable = recordingPlayableEpoch(rows, fetchEpoch);
@@ -209,7 +209,7 @@ export function IncidentRecordingPlayer({
         setLoaded(null);
         setLoading(false);
         setError("No recording window found");
-        if (answeredEmpty) onUnavailableRef.current?.();
+        if (!failed && candidates.length) onUnavailableRef.current?.();
       }
     }
     load().catch((loadError) => {
