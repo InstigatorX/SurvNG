@@ -1819,6 +1819,11 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
         throw new Error(detail);
       }
       const payload = await response.json();
+      if (payload.apply_mode === "restart_pending" || payload.apply_mode === "restart_required") {
+        // Saved on disk; the running process still serves the old values.
+        baselineConfigRef.current = structuredClone(configToSave);
+        setBaselineRevision((current) => current + 1);
+      }
       if (await handleUnappliedSave(payload, "Saved", setSaveNotice)) return true;
       const reloaded = await load();
       setSaveNotice(reloaded
@@ -1915,7 +1920,9 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
         setBaselineRevision((current) => current + 1);
       }
       const saved = cameras.length > 1 ? `${cameras.length} cameras saved` : "Camera settings saved";
-      if (await handleUnappliedSave(payload, saved, setSaveNotice)) return savedById;
+      // Not applied: stop here so zone and order saves do not write the
+      // running (old) configuration over the change saved for the restart.
+      if (await handleUnappliedSave(payload, saved, setSaveNotice)) return null;
       setSaveNotice({
         state: "saved",
         text: payload.apply_mode === "manager_reload"

@@ -208,6 +208,13 @@ class _CancellableAdapter(HTTPAdapter):
         self.poolmanager.pool_classes_by_scheme = _pool_classes(self._survng_registry)
         self.poolmanager.key_fn_by_scheme = dict(self.poolmanager.key_fn_by_scheme)
 
+    def proxy_manager_for(self, proxy: str, **proxy_kwargs: Any) -> Any:
+        # An environment proxy (HTTP_PROXY) gets its own pool manager; it
+        # must register its sockets too.
+        manager = super().proxy_manager_for(proxy, **proxy_kwargs)
+        manager.pool_classes_by_scheme = _pool_classes(self._survng_registry)
+        return manager
+
 
 class CancellableSession(requests.Session):
     """A requests session whose in-flight sockets a stop can interrupt."""

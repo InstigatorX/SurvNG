@@ -739,7 +739,11 @@ def _request_server_restart() -> dict[str, object]:
     """Queue a supervisor-owned restart after the HTTP response can be sent."""
     global SERVER_RESTART_SCHEDULED
     with SERVER_RESTART_LOCK:
-        if SERVER_RESTART_SCHEDULED or APPLICATION_STOPPING.is_set():
+        # A saved change waiting for a manual restart leaves the process
+        # stopping without restarting; that restart is exactly what is asked.
+        if SERVER_RESTART_SCHEDULED or (
+            APPLICATION_STOPPING.is_set() and not RESTART_REQUIRED.is_set()
+        ):
             raise RuntimeError("SurvNG is already restarting or shutting down")
         active_tasks = _active_storage_tasks(get_manager())
         if active_tasks:
@@ -855,6 +859,31 @@ def reload_manager(
 CONFIG_CHANGE_LOG = ConfigChangeLog()
 
 
+# Set when a saved change needs a manual restart (no supervisor restarted us).
+RESTART_REQUIRED = threading.Event()
+
+
+def _settings_frozen_detail() -> str:
+    if RESTART_REQUIRED.is_set():
+        return "Restart SurvNG to apply the saved change before changing settings again"
+    return "SurvNG is restarting; change settings again once it is back"
+
+
+def save_settings_change(
+    next_config: AppConfig,
+    path: str | Path | None = None,
+    assign_ids: bool = True,
+) -> None:
+    """Save from a settings route; refused while a restart is pending.
+
+    The running configuration is stale then: saving it with one more change
+    would overwrite the change saved for the restart.
+    """
+    if APPLICATION_STOPPING.is_set():
+        raise HTTPException(status_code=503, detail=_settings_frozen_detail())
+    save_config_with_history(next_config, path, assign_ids)
+
+
 def save_config_with_history(
     next_config: AppConfig,
     path: str | Path | None = None,
@@ -900,10 +929,7 @@ def apply_config_update(
             # Shutting down, or restarting to apply a saved change. Applying
             # another change to the old in-memory configuration now would
             # overwrite that saved change on disk.
-            raise HTTPException(
-                status_code=503,
-                detail="SurvNG is restarting; change settings again once it is back",
-            )
+            raise HTTPException(status_code=503, detail=_settings_frozen_detail())
         current = config
         previous_ffmpeg_path = current.ffmpeg_path
         if manager_owned_config(current) != manager_owned_config(effective):
@@ -922,14 +948,16 @@ def apply_config_update(
                 # Saved, but this process cannot finish the cutover. With a
                 # supervisor it restarts with the saved configuration; without
                 # one, someone has to restart SurvNG.
+                if not pending.restarting:
+                    RESTART_REQUIRED.set()
                 return effective, {
                     "apply_mode": (
                         "restart_pending" if pending.restarting else "restart_required"
                     ),
                     "persisted": True,
                     "applied": False,
-                    "camera_workers_restarted": True,
-                    "subsystems_restarted": ["process"],
+                    "camera_workers_restarted": pending.restarting,
+                    "subsystems_restarted": ["process"] if pending.restarting else [],
                     "instance_id": PROCESS_INSTANCE_ID,
                     "message": str(pending),
                 }
@@ -1152,7 +1180,7 @@ app.include_router(
             publish_config=_publish_config_runtime,
             apply_config=apply_config_update,
             reload_manager=reload_manager,
-            save_config=save_config_with_history,
+            save_config=save_settings_change,
             validate_config=validate_manager_configuration,
             lock=MANAGER_RELOAD_LOCK,
             probe_limiter=CONFIG_PROBE_LIMITER,

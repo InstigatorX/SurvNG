@@ -293,3 +293,65 @@ def test_speech_is_replaced_in_place_and_not_after_shutdown_claimed_it():
     with patch.object(AppManager, "_build_speech", return_value=Mock()), pytest.raises(RuntimeError):
         manager.reconfigure_speech(Mock())
     assert manager.speech is new
+
+
+def test_an_environment_proxy_connection_can_be_interrupted_too():
+    with _blackhole() as port:
+        session = CancellableSession()
+        session.proxies = {"http": f"http://127.0.0.1:{port}"}
+        thread, result = _post_in_thread(session, "http://192.0.2.10/onvif/device_service", (10, 10))
+        time.sleep(0.3)
+        session.abort_connecting()
+        thread.join(2)
+        assert not thread.is_alive() and result["seconds"] < 1.5
+
+
+def test_a_worker_woken_by_the_interrupt_is_not_abandoned_on_a_spent_budget(tmp_path):
+    with _silent_server() as (port, _accepted):
+        listener = OnvifEventListener(_camera(), Mock())
+
+        def subscribe(*_args, generation=None, stop_event=None, **_kwargs):
+            session = CancellableSession()
+            with listener._lifecycle_lock:
+                listener._transport = SimpleNamespace(session=session)
+                listener._transport_generation = generation
+            # Established and waiting on a reply: only the interrupt wakes it.
+            session.post(f"http://127.0.0.1:{port}/", data=b"x", timeout=(3, 10))
+            return Mock()
+
+        with patch.object(listener, "_subscribe", side_effect=subscribe):
+            listener.start()
+            time.sleep(0.3)
+            assert listener.wait_stopped(0.0, listener.request_stop()) is True
+        assert listener.abandoned_workers == 0
+        assert not listener.running
+
+
+def test_settings_saves_are_refused_while_a_saved_change_waits_for_a_restart(monkeypatch):
+    from fastapi import HTTPException
+
+    from survng.app import main
+
+    save = Mock()
+    monkeypatch.setattr(main, "save_config_with_history", save)
+    main.APPLICATION_STOPPING.set()
+    try:
+        with pytest.raises(HTTPException) as raised:
+            main.save_settings_change(main.config, assign_ids=False)
+        assert raised.value.status_code == 503
+        save.assert_not_called()
+
+        # Without a supervisor the restart is manual, and the Restart button
+        # is exactly how to do it.
+        main.RESTART_REQUIRED.set()
+        with pytest.raises(HTTPException) as raised:
+            main.save_settings_change(main.config, assign_ids=False)
+        assert "Restart SurvNG" in raised.value.detail
+        monkeypatch.setattr(main, "get_manager", Mock())
+        monkeypatch.setattr(main, "_active_storage_tasks", lambda _manager: [])
+        monkeypatch.setattr(main.threading, "Thread", Mock())
+        assert main._request_server_restart()["status"] == "restart_scheduled"
+    finally:
+        main.APPLICATION_STOPPING.clear()
+        main.RESTART_REQUIRED.clear()
+        main.SERVER_RESTART_SCHEDULED = False

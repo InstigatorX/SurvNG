@@ -40,6 +40,9 @@ TRANSPORT_READ_TIMEOUT_SECONDS = 20.0
 TRANSPORT_TIMEOUT = (TRANSPORT_CONNECT_TIMEOUT_SECONDS, TRANSPORT_READ_TIMEOUT_SECONDS)
 STOP_GRACE_SECONDS = PULL_TIMEOUT_SECONDS + 2
 STOP_FORCE_SECONDS = 5
+# After its sockets are interrupted a worker returns in milliseconds; give it
+# this long even when the caller's budget is spent before calling it stuck.
+STOP_INTERRUPTED_MIN_SECONDS = 0.25
 MAX_POLL_FAILURES = 6
 TIMEOUT_WORDS = ("timed out", "timeout", "read timed out", "operation timed out")
 PULLPOINT_NAMESPACE = "http://www.onvif.org/ver10/events/wsdl/PullPointSubscription"
@@ -213,6 +216,9 @@ class OnvifEventListener:
         # An abandoned generation's subscription and transport, released by
         # that worker itself once its blocking call returns.
         self._orphan_resources: dict[int, tuple[Any, Any]] = {}
+        # A replaced subscription's transport while its worker releases it
+        # (overlap re-subscribe), so a stop can still interrupt that call.
+        self._releasing_transports: dict[int, Any] = {}
         self.connected = False
         # The camera's ONVIF endpoint refused or did not answer a connection.
         self.unreachable = False
@@ -336,23 +342,25 @@ class OnvifEventListener:
             # Bind the stop signal to the snapshotted generation atomically;
             # start() cannot replace this event until wait_stopped finalizes it.
             ticket.stop_event.set()
-            transport = (
+            transports = [
                 self._transport
                 if self._transport_generation in {None, ticket.generation}
-                else None
-            )
+                else None,
+                self._releasing_transports.get(ticket.generation),
+            ]
         # A connect still in progress cannot finish anything the stop needs;
         # abort it now. Established connections stay usable for Unsubscribe.
-        session = getattr(transport, "session", None)
-        if isinstance(session, CancellableSession):
-            try:
-                session.abort_connecting()
-            except Exception:
-                LOGGER.debug(
-                    "failed to abort ONVIF connects for %s",
-                    self.camera.id,
-                    exc_info=True,
-                )
+        for transport in transports:
+            session = getattr(transport, "session", None)
+            if isinstance(session, CancellableSession):
+                try:
+                    session.abort_connecting()
+                except Exception:
+                    LOGGER.debug(
+                        "failed to abort ONVIF connects for %s",
+                        self.camera.id,
+                        exc_info=True,
+                    )
         return ticket
 
     def wait_stopped(
@@ -384,7 +392,7 @@ class OnvifEventListener:
                 self._interrupt_transport(generation)
                 thread.join(timeout=min(
                     STOP_FORCE_SECONDS,
-                    max(0.0, deadline - time.monotonic()),
+                    max(STOP_INTERRUPTED_MIN_SECONDS, deadline - time.monotonic()),
                 ))
                 if thread.is_alive():
                     self._abandon(thread, generation)
@@ -410,6 +418,10 @@ class OnvifEventListener:
                 if self._transport_generation in {None, generation}
                 else None
             )
+            releasing = self._releasing_transports.get(generation)
+        releasing_session = getattr(releasing, "session", None)
+        if isinstance(releasing_session, CancellableSession):
+            releasing_session.interrupt()
         session = getattr(transport, "session", None)
         if isinstance(session, CancellableSession):
             session.interrupt()
@@ -1041,7 +1053,7 @@ class OnvifEventListener:
                 stop_event=stop_event,
             )
         except Exception as exc:
-            self._release_detached_resources(old_manager, old_transport)
+            self._release_replaced(generation, old_manager, old_transport)
             if stop_event.is_set() or not self._generation_matches(generation):
                 return None
             self.last_error = (
@@ -1053,7 +1065,7 @@ class OnvifEventListener:
                 self._error_text(exc),
             )
             return None
-        self._release_detached_resources(old_manager, old_transport)
+        self._release_replaced(generation, old_manager, old_transport)
         if stop_event.is_set() or not self._generation_matches(generation):
             return None
         self.connected = True
@@ -1061,6 +1073,17 @@ class OnvifEventListener:
         self.last_error = ""
         self.resubscriptions += 1
         return pullpoint
+
+    def _release_replaced(self, generation: int, manager: Any, transport: Any) -> None:
+        """Release a replaced subscription where a stop can interrupt it."""
+        with self._lifecycle_lock:
+            self._releasing_transports[generation] = transport
+        try:
+            self._release_detached_resources(manager, transport)
+        finally:
+            with self._lifecycle_lock:
+                if self._releasing_transports.get(generation) is transport:
+                    del self._releasing_transports[generation]
 
     def _unsubscribe(self, generation: int | None = None) -> None:
         with self._lifecycle_lock:
