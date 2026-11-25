@@ -330,7 +330,42 @@ async function viewerChecks() {
   await page.close();
 }
 
+// Follow skips a camera with no recording; Auto theme on a dark OS keeps dark ink;
+// an AI wording of an older revision does not replace the built-in title.
+async function followThemeChecks() {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
+  await page.addInitScript(() => localStorage.setItem("survng.theme", "auto"));
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("**/api/**", (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
+    if (path.endsWith("/api/cameras")) return route.fulfill({ json: CAMERAS });
+    if (path.includes("/incidents/notification/")) return route.fulfill({ json: { incident: storyIncident(), notification: { state: "complete" }, camera_name: "Front Driveway" } });
+    if (path.endsWith("/title")) return route.fulfill({ json: { incident_id: "incident-story-1", status: "ready", title: "Old wording", revision: 6, current: false } });
+    if (path.includes("/recordings/window")) {
+      const start = Number(url.searchParams.get("start_epoch")), end = Number(url.searchParams.get("end_epoch"));
+      const recordings = path.includes("/front-driveway/") ? [] : [{ start_epoch: start, end_epoch: end, duration_seconds: end - start, name: "segment" }];
+      return route.fulfill({ json: { camera_id: "x", source: "main", start_epoch: start, end_epoch: end, recordings } });
+    }
+    return route.fulfill({ json: {} });
+  });
+  await page.goto(`${origin}/survng/incidents/incident-story-1`);
+  await page.getByRole("heading", { level: 1, name: "Car arrives, person walks to Front Door" }).waitFor();
+  await page.waitForTimeout(300);
+  assert.equal(await page.getByText("Old wording").count(), 0);
+  assert.equal(await page.locator(".story-uncertain-tag").evaluate((el) => getComputedStyle(el).color), "rgb(196, 181, 253)");
+  await page.locator(".story-card", { hasText: "Person" }).click();
+  await page.getByRole("button", { name: "Follow Person" }).click();
+  await page.waitForFunction(() => document.querySelector(".story-frame .incident-recording-player")?.dataset.cameraId === "front-door");
+  assert.match(await page.locator(".story-frame [role=status]").innerText(), /No recording on Front Driveway; switched to Front Door/);
+  assert.deepEqual(errors, []);
+  await page.close();
+}
+
 try {
+  await followThemeChecks();
   await viewerChecks();
   await titleChecks();
   for (const width of [360, 390, 1440]) await legacyChecks(width);

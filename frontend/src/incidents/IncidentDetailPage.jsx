@@ -5,7 +5,7 @@ import { appUrl, fetch, recordingsHref } from "../shared/api.js";
 import { formatDateTime, formatTimeOnly } from "../shared/format.js";
 import { observationBoxStyle, canonicalIncidentHref, incidentEpisodeClips } from "../incidentScene.mjs";
 import {
-  epochOf, findObservation, followSegments, formatSpan, frameBoxes, incidentStoryTitle, nearestObservation,
+  cardIdentities, epochOf, findObservation, followSegments, formatSpan, frameBoxes, incidentStoryTitle, nearestObservation,
   objectBestObservation, objectName, observationSnapshotUrl, reviewKeyAction, reviewPosition, storyObjects, storyline,
 } from "../incidentStory.mjs";
 import { IncidentRecordingPlayer } from "./IncidentRecordingPlayer.jsx";
@@ -224,6 +224,9 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
           return;
         }
         setAiTitle({ ...result, id: titleId });
+        // A wording of an older revision is not shown; ask again once the
+        // server may reword it (at most once a minute).
+        if (result.status === "ready" && result.current === false && ++attempts < 6) timer = window.setTimeout(load, 65000);
       })
       .catch((failure) => { if (failure.name !== "AbortError") setAiTitle({ id: titleId, status: "failed", message: "AI title unavailable" }); });
     void load();
@@ -342,13 +345,15 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
     setCursor(null);
   }
 
-  function playbackEnded() {
+  function playbackEnded(skipped = false) {
     const current = playback;
     if (!current) return;
     const next = current.index + 1;
     if (next >= current.segments.length) { stopPlayback(); return; }
     const from = current.segments[current.index].cameraId;
-    if (from !== current.segments[next].cameraId) setNotice({ text: `Switched from ${cameraName(from)}`, key: Date.now() });
+    const to = current.segments[next].cameraId;
+    if (skipped) setNotice({ text: `No recording on ${cameraName(from)}; ${from !== to ? `switched to ${cameraName(to)}` : "moving on"}`, key: Date.now() });
+    else if (from !== to) setNotice({ text: `Switched from ${cameraName(from)}`, key: Date.now() });
     setPlayback({ ...current, index: next, initialEpoch: Math.max(current.segments[next].start, current.segments[current.index].end - 2), key: Date.now() });
   }
 
@@ -401,10 +406,10 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
   const ongoing = ["active", "new", "updated"].includes(notification?.state || incident?.state);
   const people = notification?.people || (incident?.identities || []).map((item) => item?.name).filter(Boolean);
   const builtTitle = incident ? incidentStoryTitle(incident, { cameraName, objects, people, fallback: notification?.summary || "" }) : "";
-  const providerTitle = aiTitle?.id === titleId && aiTitle?.status === "ready" ? aiTitle.title : "";
+  // Only a wording of the current evidence replaces the built-in title.
+  const providerTitle = aiTitle?.id === titleId && aiTitle?.status === "ready" && aiTitle.current !== false ? aiTitle.title : "";
   const title = providerTitle || builtTitle;
-  const personCount = objects.filter((object) => object.kind === "person").length;
-  const cardIdentities = personCount === 1 || !(incident?.identities || []).length ? (incident?.identities || []) : null;
+  const cardNames = cardIdentities(objects, incident?.identities);
   const cameraCount = new Set((incident?.episodes || []).map((episode) => episode.camera_id).concat(incident?.episodes?.length ? [] : [incident?.camera_id])).size;
   const hint = selected
     ? (selected.kind === "uncertain"
@@ -471,7 +476,7 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
                 <div className="story-frame-media">{/* Media alone in its slot: the player is remounted per camera. */}
                 {playback && segment ? <IncidentRecordingPlayer key={playback.key} cameraId={segment.cameraId} startEpoch={segment.start} endEpoch={segment.end}
                   initialEpoch={playback.initialEpoch} timeZone={zone} autoPlay onPlayhead={setCursor} onEnded={playbackEnded} onClose={stopPlayback}
-                  onUnavailable={() => { if (playback.index + 1 < playback.segments.length) { setNotice({ text: `No recording on ${cameraName(segment.cameraId)}; moving on`, key: Date.now() }); playbackEnded(); } }} />
+                  onUnavailable={() => { if (playback.index + 1 < playback.segments.length) playbackEnded(true); }} />
                   : <StillFrame src={stillSrc} anchor={anchor} boxes={boxes} selectedId={focusId} legacyBoxes={legacyBoxes} label={`Incident at ${cameraName(frameCamera)}`} />}
                 </div>
                 <div className="story-frame-chips">
@@ -487,7 +492,7 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
             </div>
             <aside className="story-aside" aria-label="Observed objects">
               <h2 className="story-aside-title">{objects.length} observed object{objects.length === 1 ? "" : "s"}</h2>
-              {objects.length ? <ObjectCards objects={objects} line={line} selectedId={focusId} cameraName={cameraName} identities={cardIdentities} onSelect={selectObject} />
+              {objects.length ? <ObjectCards objects={objects} line={line} selectedId={focusId} cameraName={cameraName} identities={cardNames} onSelect={selectObject} />
                 : <p className="story-muted">{incident.has_objects === false || !incident.labels?.length ? "Motion only. No objects were observed in the analyzed evidence." : "No object observations are available."}</p>}
               {!selected ? <WhyPanel incident={incident} cameraName={cameraName} />
                 : selected.kind === "uncertain" || correcting

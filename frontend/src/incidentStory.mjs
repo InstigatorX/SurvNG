@@ -175,6 +175,15 @@ function spanSeconds(intervals) {
   return Math.max(...intervals.map((item) => item.end)) - Math.min(...intervals.map((item) => item.start));
 }
 
+// Identities are recorded per incident, not per object, so names go on a
+// person card only when there is exactly one person. With none recognized,
+// every person card can say so.
+export function cardIdentities(objects, identities) {
+  const list = Array.isArray(identities) ? identities : [];
+  const people = (objects || []).filter((object) => object.kind === "person").length;
+  return people === 1 || !list.length ? list : null;
+}
+
 export function objectSummary(object, { cameraName, identities = null } = {}) {
   const intervals = object?.intervals || objectIntervals(object);
   const cameras = [...new Set(intervals.map((item) => item.camera_id))];

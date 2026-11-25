@@ -44,6 +44,13 @@ class VisibleIntervalTest(unittest.TestCase):
         states = [interval["state"] for interval in _scene_visible_intervals(evidence)]
         self.assertEqual(states, ["moving", "stationary"])
 
+    def test_a_one_sample_arrival_before_a_stationary_stretch_stays_visible(self):
+        evidence = [("ep-1", seen("a", 0, activity_role="active")), ("ep-1", seen("b", 5, activity_role="scene_context")),
+                    ("ep-1", seen("c", 10, activity_role="scene_context"))]
+        arrival, stationary = _scene_visible_intervals(evidence)
+        self.assertEqual((arrival["state"], arrival["start_at"], arrival["end_at"]), ("moving", at(0), at(0)))
+        self.assertEqual((stationary["state"], stationary["start_at"], stationary["end_at"]), ("stationary", at(0), at(10)))
+
     def test_long_silence_and_other_cameras_start_new_intervals(self):
         evidence = [("ep-1", seen("a", 0)), ("ep-1", seen("b", 200)),
                     ("ep-2", seen("c", 50, camera="front-door", zones=["Entry"])),

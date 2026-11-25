@@ -106,6 +106,30 @@ def test_merge_carries_the_verdict_to_the_survivor(store):
     assert [(item["incident_id"], item["verdict"]) for item in queue["items"]] == [(second, "nothing_here")]
 
 
+def test_merge_keeps_keep_for_later_from_either_side(store):
+    first = add_incident(store, 0)
+    second = add_incident(store, 3600, camera="front-door")
+    store.set_incident_review(first, "keep")
+    store.set_incident_review(second, "reviewed")
+    revisions = {item: store.scene_incident(item)["revision"] for item in (first, second)}
+    store.correct_scene_incident(second, revisions[second], {"operation": "merge", "incident_ids": [second, first], "expected_revisions": revisions})
+    assert store.incident_review(second)["verdict"] == "keep"
+
+
+def test_reviews_from_an_early_table_gain_the_evidence_mark(tmp_path):
+    early = EventStore(tmp_path)
+    incident_id = add_incident(early, 0)
+    with early._connect() as connection:
+        connection.execute("drop table scene_incident_reviews")
+        connection.execute("create table scene_incident_reviews (incident_id text primary key, verdict text not null, incident_revision integer not null, updated_epoch real not null)")
+        connection.execute("insert into scene_incident_reviews values(?, 'reviewed', 1, 0)", (incident_id,))
+    reopened = EventStore(tmp_path)
+    assert reopened.incident_review(incident_id)["changed_since_review"] is True
+    assert reopened.incident_review_queue(start_epoch=BASE - 10, end_epoch=BASE + 10)["items"][0]["verdict"] == "reviewed"
+    with reopened._connect() as conn:
+        assert conn.execute("select 1 from sqlite_master where name='scene_corrections_incident'").fetchone()
+
+
 def test_queue_follows_list_order_and_counts_what_is_left(store):
     first = add_incident(store, 0)
     second = add_incident(store, 3600, camera="front-door")

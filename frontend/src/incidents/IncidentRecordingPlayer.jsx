@@ -210,11 +210,11 @@ export function IncidentRecordingPlayer({
       }
     }
     load().catch((loadError) => {
+      // A failed request is not proof there is no recording; do not skip on it.
       if (!cancelled && loadError.name !== "AbortError") {
         setLoaded(null);
         setLoading(false);
         setError("No recording window found");
-        onUnavailableRef.current?.();
       }
     });
     return () => {

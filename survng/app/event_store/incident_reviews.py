@@ -15,6 +15,8 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
+from ..main_database import create_index_logged
+
 REVIEW_VERDICTS = ("reviewed", "keep", "nothing_here")
 REVIEW_QUEUE_LIMIT = 1000
 
@@ -44,10 +46,21 @@ class EventStoreIncidentReviewMixin:
                 " evidence_mark text not null,"
                 " updated_epoch real not null)"
             )
+            columns = {row[1] for row in conn.execute("pragma table_info(scene_incident_reviews)")}
+            if "evidence_mark" not in columns:
+                # Early tables lacked the mark; an empty mark reads as changed.
+                conn.execute("alter table scene_incident_reviews add column evidence_mark text not null default ''")
+            # The evidence mark counts an incident's corrections for every
+            # reviewed incident in the queue; without this it scans the table.
+            create_index_logged(
+                conn, "scene_corrections_incident",
+                "create index if not exists scene_corrections_incident on scene_corrections(incident_id)",
+            )
 
     @staticmethod
     def _carry_incident_review(conn, source, target):
-        """Keep a merged-away incident's verdict on the survivor when it has none.
+        """Keep a merged-away incident's verdict on the survivor when it has none,
+        and keep "keep for later" from either side.
 
         The carried mark no longer matches the merged evidence, so the survivor
         reads as changed since review. Called inside the merge transaction.
@@ -55,6 +68,12 @@ class EventStoreIncidentReviewMixin:
         conn.execute(
             "insert or ignore into scene_incident_reviews(incident_id,verdict,incident_revision,evidence_mark,updated_epoch) "
             "select ?,verdict,incident_revision,evidence_mark,updated_epoch from scene_incident_reviews where incident_id=?",
+            (target, source),
+        )
+        # "Keep for later" on either side survives: someone wanted to come back to it.
+        conn.execute(
+            "update scene_incident_reviews set verdict='keep' where incident_id=? and exists("
+            "select 1 from scene_incident_reviews where incident_id=? and verdict='keep')",
             (target, source),
         )
         conn.execute("delete from scene_incident_reviews where incident_id=?", (source,))

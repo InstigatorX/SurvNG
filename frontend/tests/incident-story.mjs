@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {
-  cardOrder, cropBackgroundStyle, establishmentReasonText, followSegments, formatSpan, frameBoxes, incidentStoryTitle,
+  cardIdentities, cardOrder, cropBackgroundStyle, establishmentReasonText, followSegments, formatSpan, frameBoxes, incidentStoryTitle,
   nearestObservation, objectKind, objectPath, objectSummary, reviewKeyAction, reviewPosition, storyObjects, storyline,
 } from "../src/incidentStory.mjs";
 import { BASE, CAMERAS, queueFor, storyIncident } from "./fixtures/incident-story.mjs";
@@ -29,6 +29,11 @@ assert.equal(formatSpan(102), "1 min 42 s");
 assert.equal(formatSpan(12), "12 s");
 assert.equal(objectSummary(byLabel.person, { cameraName, identities: [] }), "Not recognized · seen 1 min 21 s");
 assert.equal(objectSummary(byLabel.car, { cameraName }), "Arrived, then stationary · Front Driveway");
+const twoPeople = [{ kind: "person" }, { kind: "person" }, { kind: "vehicle" }];
+assert.deepEqual(cardIdentities([{ kind: "person" }], [{ name: "Alex" }]), [{ name: "Alex" }]);
+assert.equal(cardIdentities(twoPeople, [{ name: "Alex" }]), null, "one name is not put on two people");
+assert.deepEqual(cardIdentities(twoPeople, []), [], "nobody recognized holds for every person");
+assert.equal(objectSummary({ ...byLabel.person }, { cameraName, identities: null }), "Seen 1 min 21 s");
 assert.equal(objectSummary(byLabel.dog, { cameraName }), "Seen 13 s · Side Yard");
 
 // Storyline: one lane per episode, stationary continuation stays on the car's row.
