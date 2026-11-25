@@ -1038,7 +1038,8 @@ class RecordedMotionObjectDetector:
         if budget is not None:
             maximum_frames = refinement_frame_count(stages)
             if (self.detector.config.face_recognition_enabled
-                    and self.detector.config.face_evidence_enabled):
+                    and self.detector.config.face_evidence_enabled
+                    and not getattr(self.detector.config, "face_capture_enabled", False)):
                 maximum_frames += self.detector.config.face_evidence_max_extra_frames
             # A job reading a segment that is not indexed yet has no rows; without
             # the camera's last decoded size it would reserve the 36 MiB
@@ -1919,6 +1920,9 @@ class RecordedMotionObjectDetector:
         """
         config = self.detector.config
         if not config.face_recognition_enabled or not config.face_evidence_enabled:
+            return
+        # The deferred face capture job searches the whole person track instead.
+        if getattr(config, "face_capture_enabled", False):
             return
         started = time.monotonic()
         deadline = min(

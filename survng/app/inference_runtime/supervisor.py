@@ -80,7 +80,7 @@ class InferenceSupervisor:
             config,
             "face",
             self._base_face_status(),
-            start_enabled=bool(config.face_recognition_enabled),
+            start_enabled=config.face_worker_enabled(),
         )
         self._reid = _InferenceWorker(
             config,
@@ -478,7 +478,7 @@ class InferenceSupervisor:
                     return (
                         self._face,
                         self._base_face_status(),
-                        bool(self.config.face_recognition_enabled),
+                        self.config.face_worker_enabled(),
                     )
                 if role == "depth":
                     return (
@@ -956,6 +956,21 @@ class InferenceSupervisor:
         try:
             result = self._face.request("embed", frame=face, workload=workload)
             return np.asarray(result, dtype=np.float32)
+        finally:
+            self._leave_device_workload(workload)
+
+    def capture_faces(self, crop: np.ndarray) -> list[dict[str, Any]]:
+        """Faces in an upper-body crop with landmarks, AdaFace norm and embedding.
+
+        Optional enrichment: shed for incident inference (``InferenceUnavailable``).
+        """
+        if not self.config.face_capture_enabled:
+            raise InferenceUnavailable("Face capture is disabled.")
+        workload = InferenceWorkload.ENRICHMENT
+        if not self._enter_device_workload(workload, source="face_capture"):
+            raise InferenceUnavailable("face capture shed for incident inference")
+        try:
+            return list(self._face.request("capture_faces", frame=crop, workload=workload) or [])
         finally:
             self._leave_device_workload(workload)
 

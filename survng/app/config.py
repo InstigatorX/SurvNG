@@ -1048,6 +1048,24 @@ class DetectorConfig(BaseModel):
     face_auto_identify_margin: float = Field(default=0.12, ge=0.0, le=1.0)
     face_min_size: int = Field(default=48, ge=16, le=1024)
     face_max_references: int = Field(default=20, ge=1, le=200)
+    # Face capture: a deferred job per recorded person event that finds each
+    # person's closest moments on the sub-stream and keeps the best faces
+    # from the main stream around them (docs/face-capture-design.md).
+    face_capture_enabled: bool = False
+    face_capture_detector_model_path: str = Field(
+        default="models/face_detector/yunet/face_detection_yunet_2023mar.onnx", max_length=4096,
+    )
+    face_capture_embedding_model_path: str = Field(
+        default="models/face_model/adaface-ir50-webface4m/adaface-ir50-webface4m-norm.xml", max_length=4096,
+    )
+    face_capture_detection_threshold: float = Field(default=0.60, ge=0.05, le=0.99)
+    face_capture_min_norm: float = Field(default=13.0, ge=0.0, le=40.0)
+    face_capture_min_size: int = Field(default=48, ge=16, le=1024)
+    face_capture_moments_per_track: int = Field(default=4, ge=1, le=16)
+    face_capture_faces_per_track: int = Field(default=3, ge=1, le=16)
+    face_capture_margin_seconds: float = Field(default=3.0, ge=0.0, le=15.0)
+    face_capture_moment_radius_seconds: float = Field(default=0.5, ge=0.05, le=2.0)
+    face_capture_backfill_hours: float = Field(default=24.0, ge=0.0, le=720.0)
     confidence_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
     event_candidate_confidence_threshold: float = Field(default=0.25, ge=0.01, le=0.95)
     scene_discovery_enabled: bool = True
@@ -1253,6 +1271,10 @@ class DetectorConfig(BaseModel):
         ):
             self.object_worker_count = 2
         return self
+
+    def face_worker_enabled(self) -> bool:
+        """The isolated face worker runs for recognition or for face capture."""
+        return bool(self.face_recognition_enabled or self.face_capture_enabled)
 
     def effective_object_worker_count(self) -> int:
         """Worker processes actually spawned for object inference."""

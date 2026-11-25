@@ -1,4 +1,4 @@
-from survng.app.face_capture_trial import Track, choose_moments, link_tracks, merge_windows
+from survng.app.face_capture.moments import Track, choose_moments, link_tracks, merge_windows
 
 
 def _box(x, height):

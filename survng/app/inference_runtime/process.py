@@ -126,6 +126,7 @@ def _inference_worker_main(
             role=role,
             object_worker_count=config.effective_object_worker_count(),
         )
+        capture_engine = None
         if role == "object":
             from ..detector import OpenVinoDetector
 
@@ -136,6 +137,10 @@ def _inference_worker_main(
 
             engine = OpenVinoFaceRecognizer(config)
             face_detector = OpenVinoFaceDetector(config)
+            if config.face_capture_enabled:
+                from ..face_capture.engine import FaceCaptureEngine
+
+                capture_engine = FaceCaptureEngine(config)
         elif role == "reid":
             from ..person_reidentification import OpenVinoAppearanceReidentifier
 
@@ -149,6 +154,8 @@ def _inference_worker_main(
         engine_status = engine.status()
         if role == "face":
             engine_status["detector"] = face_detector.status()
+            if capture_engine is not None:
+                engine_status["capture"] = capture_engine.status()
         connection.send({
             "type": "ready",
             "pid": os.getpid(),
@@ -185,6 +192,7 @@ def _inference_worker_main(
                 if operation in {
                     "detect",
                     "detect_faces",
+                    "capture_faces",
                     "embed",
                     "embed_person",
                     "embed_reid",
@@ -211,6 +219,10 @@ def _inference_worker_main(
                         )
                     elif operation == "embed" and role == "face":
                         result = engine.embed(frame).astype(np.float32).tolist()
+                    elif operation == "capture_faces" and role == "face":
+                        if capture_engine is None:
+                            raise ValueError("face capture is disabled in the face worker")
+                        result = capture_engine.capture(frame)
                     elif operation == "detect_faces" and role == "face":
                         result = face_detector.detect(
                             frame,
@@ -247,6 +259,8 @@ def _inference_worker_main(
                     result = engine.status()
                     if role == "face":
                         result["detector"] = face_detector.status()
+                        if capture_engine is not None:
+                            result["capture"] = capture_engine.status()
                 elif operation == "probe_devices" and role == "object":
                     result = _openvino_devices()
                 elif operation == "inspect_model" and role == "object":
