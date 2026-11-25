@@ -872,8 +872,15 @@ def apply_config_update(
     *,
     assign_ids: bool = False,
     persist: bool = True,
+    allow_restart_pending: bool = False,
 ) -> tuple[AppConfig, dict[str, object]]:
-    """Apply configuration through the dedicated transaction owner."""
+    """Apply configuration through the dedicated transaction owner.
+
+    ``allow_restart_pending``: the caller can report a change that is saved
+    but applies only when the supervisor restarts SurvNG. Other callers keep
+    the all-or-nothing contract: the running configuration is put back on
+    disk and the failure is raised.
+    """
     global config
     application = TargetedConfigApplication(
         lock=MANAGER_RELOAD_LOCK,
@@ -897,16 +904,28 @@ def apply_config_update(
             except ManagerReloadRestartPending as pending:
                 if not pending.persisted:
                     raise
-                # Saved, but this process cannot finish the cutover; its
-                # supervisor restart starts with the saved configuration.
-                return effective, {
-                    "apply_mode": "restart_pending",
-                    "persisted": True,
-                    "applied": False,
-                    "camera_workers_restarted": True,
-                    "subsystems_restarted": ["process"],
-                    "message": str(pending),
-                }
+                if allow_restart_pending:
+                    if not pending.restarting:
+                        # Saved; applies at the next manual restart.
+                        raise
+                    # Saved, but this process cannot finish the cutover; its
+                    # supervisor restart starts with the saved configuration.
+                    return effective, {
+                        "apply_mode": "restart_pending",
+                        "persisted": True,
+                        "applied": False,
+                        "camera_workers_restarted": True,
+                        "subsystems_restarted": ["process"],
+                        "instance_id": PROCESS_INSTANCE_ID,
+                        "message": str(pending),
+                    }
+                try:
+                    save_config_with_history(current, assign_ids=False)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "failed to restore the persisted configuration after an unfinished reload"
+                    )
+                raise
             prepare_bootstrap_token(applied)
             return applied, {
                 "apply_mode": "manager_reload",

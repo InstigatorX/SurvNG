@@ -76,6 +76,31 @@ REOLINK_MOTION_TOPICS = frozenset({
 })
 
 
+# Workers abandoned after their stop, per camera, for the whole process: a
+# manager reload replaces the listener objects while these may still run.
+_ABANDONED_LOCK = threading.Lock()
+_ABANDONED: dict[str, list[threading.Thread]] = {}
+
+
+def _record_abandoned(camera_id: str, thread: threading.Thread) -> int:
+    with _ABANDONED_LOCK:
+        alive = [item for item in _ABANDONED.get(camera_id, []) if item.is_alive()]
+        alive.append(thread)
+        _ABANDONED[camera_id] = alive
+        return len(alive)
+
+
+def abandoned_onvif_workers(camera_id: str) -> int:
+    """Abandoned ONVIF workers of a camera still blocked in camera I/O."""
+    with _ABANDONED_LOCK:
+        alive = [item for item in _ABANDONED.get(camera_id, []) if item.is_alive()]
+        if alive:
+            _ABANDONED[camera_id] = alive
+        else:
+            _ABANDONED.pop(camera_id, None)
+        return len(alive)
+
+
 @dataclass(frozen=True, slots=True)
 class OnvifStopTicket:
     """Identity and resources owned by one listener stop transaction."""
@@ -187,9 +212,9 @@ class OnvifEventListener:
         self._subscription_manager: Any = None
         self._subscription_generation: int | None = None
         self._pullmessages_capture: _PullMessagesResponseCapture | None = None
-        # Workers that did not return after their stop and whose generation
-        # was retired; kept only to report them while they are still alive.
-        self._abandoned_threads: list[threading.Thread] = []
+        # An abandoned generation's subscription and transport, released by
+        # that worker itself once its blocking call returns.
+        self._orphan_resources: dict[int, tuple[Any, Any]] = {}
         self.connected = False
         # The camera's ONVIF endpoint refused or did not answer a connection.
         self.unreachable = False
@@ -248,11 +273,7 @@ class OnvifEventListener:
     @property
     def abandoned_workers(self) -> int:
         """Retired workers still blocked in camera I/O (they can do nothing more)."""
-        with self._lifecycle_lock:
-            self._abandoned_threads = [
-                thread for thread in self._abandoned_threads if thread.is_alive()
-            ]
-            return len(self._abandoned_threads)
+        return abandoned_onvif_workers(self.camera.id)
 
     def start(self) -> None:
         if not self.camera.onvif.enabled:
@@ -352,6 +373,7 @@ class OnvifEventListener:
                 return False
             thread = expected.thread
             generation = expected.generation
+        abandoned = False
         if thread is not None:
             # PullMessages has a short bounded timeout. Let the owning worker
             # return from it and send Unsubscribe while its transport is still
@@ -361,48 +383,61 @@ class OnvifEventListener:
                 max(0.0, deadline - time.monotonic()),
             ))
             if thread.is_alive():
-                self._close_transport(generation)
+                self._interrupt_transport(generation)
                 thread.join(timeout=min(
                     STOP_FORCE_SECONDS,
                     max(0.0, deadline - time.monotonic()),
                 ))
                 if thread.is_alive():
                     self._abandon(thread, generation)
+                    abandoned = True
         with self._lifecycle_lock:
-            stopped = (
-                thread is None
-                or not thread.is_alive()
-                or thread in self._abandoned_threads
-            )
+            stopped = abandoned or thread is None or not thread.is_alive()
             if self._thread is thread and stopped:
                 self._thread = None
             if generation == self._generation and stopped:
                 self.connected = False
+                self.unreachable = False
             if self._pending_stop is expected and stopped:
                 self._pending_stop = None
-        if stopped:
+        if stopped and not abandoned:
             self._close_transport(generation)
         return stopped
+
+    def _interrupt_transport(self, generation: int) -> None:
+        """Wake the worker's blocked call; it may still send Unsubscribe."""
+        with self._lifecycle_lock:
+            transport = (
+                self._transport
+                if self._transport_generation in {None, generation}
+                else None
+            )
+        session = getattr(transport, "session", None)
+        if isinstance(session, CancellableSession):
+            session.interrupt()
+        else:
+            self._close_transport(generation)
 
     def _abandon(self, thread: threading.Thread, generation: int) -> None:
         """Retire a worker that is still blocked in camera I/O after its stop.
 
-        The worker owns nothing shared: its stop event is set, its transport
-        is cancelled (new connections are refused), and retiring its
+        Its stop event is set and its sockets were interrupted. Retiring its
         generation fences every later write, callback and subscription it
-        could attempt. It is a daemon thread and ends when its blocking call
-        returns. Treating it as stopped keeps one unresponsive camera from
+        could attempt, and its subscription and transport move out of the
+        listener so a new generation cannot overwrite them; the worker
+        releases them itself when its blocking call returns. It is a daemon
+        thread. Treating it as stopped keeps one unresponsive camera from
         failing a reload or shutdown.
         """
+        manager, transport = self._detach_subscription_resources(generation)
         with self._lifecycle_lock:
             if generation == self._generation:
                 self._generation += 1
-            self._abandoned_threads = [
-                item for item in self._abandoned_threads if item.is_alive()
-            ]
-            self._abandoned_threads.append(thread)
-            self.connected = False
-            count = len(self._abandoned_threads)
+                self.connected = False
+                self.unreachable = False
+            if manager is not None or transport is not None:
+                self._orphan_resources[generation] = (manager, transport)
+        count = _record_abandoned(self.camera.id, thread)
         LOGGER.warning(
             "ONVIF worker for %s did not return after its stop; abandoned it "
             "(fenced, owns no subscription; %s still blocked)",
@@ -422,6 +457,10 @@ class OnvifEventListener:
         finally:
             self._unsubscribe(generation)
             self._close_transport(generation)
+            with self._lifecycle_lock:
+                orphaned = self._orphan_resources.pop(generation, None)
+            if orphaned is not None:
+                self._release_detached_resources(*orphaned)
             current = threading.current_thread()
             with self._lifecycle_lock:
                 if self._thread is current:
@@ -715,7 +754,8 @@ class OnvifEventListener:
 
             self._unsubscribe(generation)
             self._close_transport(generation)
-            self.connected = False
+            if self._generation_matches(generation):
+                self.connected = False
             if not stop_event.is_set() and self._generation_matches(generation):
                 if planned_resubscription:
                     retry_delay = RETRY_INITIAL_SECONDS

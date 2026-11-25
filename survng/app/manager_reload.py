@@ -17,12 +17,14 @@ class ManagerReloadRestartPending(RuntimeError):
     """The reload cannot finish in this process; the supervisor restarts it.
 
     ``persisted`` is true when the requested configuration is on disk, so the
-    restarted process starts with it.
+    restarted process starts with it; ``restarting`` is true when the
+    supervisor accepted the restart (otherwise someone must restart SurvNG).
     """
 
-    def __init__(self, message: str, *, persisted: bool) -> None:
+    def __init__(self, message: str, *, persisted: bool, restarting: bool = True) -> None:
         super().__init__(message)
         self.persisted = persisted
+        self.restarting = restarting
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +84,11 @@ class ManagerGenerationLifecycle:
         )
         if persisted:
             action += " to apply the saved configuration"
-        return ManagerReloadRestartPending(f"{problem}; {action}", persisted=persisted)
+        return ManagerReloadRestartPending(
+            f"{problem}; {action}",
+            persisted=persisted,
+            restarting=restarting,
+        )
 
     def _restore_saved(self, previous_config: AppConfig) -> None:
         """Put the configuration that is running back on disk."""

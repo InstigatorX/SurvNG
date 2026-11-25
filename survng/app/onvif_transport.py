@@ -7,12 +7,18 @@ timeout after it was told to stop. This session registers every socket it
 creates before connecting it; ``shutdown(SHUT_RDWR)`` on a registered socket
 wakes a thread blocked on it in connect, send or receive (Linux).
 
-Two levels of interruption:
+Three levels of interruption:
 - ``abort_connecting()`` aborts connects still in progress and leaves
   established connections alone, so a healthy camera can still be sent
   Unsubscribe while the worker winds down.
-- ``cancel()`` shuts every live socket and refuses new connections, for when
-  the worker did not wind down in its grace period.
+- ``interrupt()`` shuts every live socket, for a worker that did not wind
+  down in its grace period, and still allows a new connection so that
+  worker can release its subscription on the camera.
+- ``cancel()`` interrupts, refuses new connections and closes the session,
+  once the worker is done with it.
+
+For HTTPS the TLS socket is registered once its handshake completes; the
+handshake itself is bounded by the read timeout.
 """
 
 from __future__ import annotations
@@ -77,12 +83,21 @@ class SocketRegistry:
             sockets = list(self._connecting)
         _shutdown(sockets)
 
-    def cancel(self) -> None:
+    def add_open(self, sock: socket.socket) -> None:
+        """Track a socket that wraps a registered one (TLS)."""
         with self._lock:
-            self._cancelled = True
+            self._open.add(sock)
+
+    def interrupt(self) -> None:
+        with self._lock:
             self._connect_aborts += 1
             sockets = list(self._open)
         _shutdown(sockets)
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+        self.interrupt()
 
 
 def _shutdown(sockets: list[socket.socket]) -> None:
@@ -142,6 +157,14 @@ def _connect(registry: SocketRegistry, connection: HTTPConnection) -> socket.soc
 class _CancellableConnectionMixin:
     _survng_registry: SocketRegistry
 
+    def connect(self) -> None:
+        super().connect()  # type: ignore[misc]
+        # TLS replaces the registered raw socket with a wrapper that owns the
+        # descriptor; shutting the raw object down would do nothing.
+        sock = getattr(self, "sock", None)
+        if sock is not None:
+            self._survng_registry.add_open(sock)
+
     def _new_conn(self) -> socket.socket:  # type: ignore[override]
         try:
             return _connect(self._survng_registry, self)  # type: ignore[arg-type]
@@ -198,6 +221,10 @@ class CancellableSession(requests.Session):
 
     def abort_connecting(self) -> None:
         self.registry.abort_connecting()
+
+    def interrupt(self) -> None:
+        """Wake every blocked call; a new connection is still allowed."""
+        self.registry.interrupt()
 
     def cancel(self) -> None:
         """Interrupt every blocking call on this session and refuse new ones."""

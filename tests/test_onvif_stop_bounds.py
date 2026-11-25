@@ -139,6 +139,22 @@ def test_aborting_connects_leaves_an_established_request_alone_and_cancel_interr
         assert isinstance(result["error"], requests.exceptions.ConnectionError)
 
 
+def test_an_interrupt_wakes_a_blocked_read_and_still_allows_a_new_connection():
+    with _silent_server() as (port, accepted):
+        session = CancellableSession()
+        thread, result = _post_in_thread(session, f"http://127.0.0.1:{port}/", (3, 10))
+        deadline = time.monotonic() + 2
+        while not accepted and time.monotonic() < deadline:
+            time.sleep(0.02)
+        session.interrupt()
+        thread.join(2)
+        assert not thread.is_alive() and result["seconds"] < 1.5
+        # The woken worker can still open a connection to send Unsubscribe.
+        thread, result = _post_in_thread(session, f"http://127.0.0.1:{port}/", (3, 0.3))
+        thread.join(2)
+        assert len(accepted) == 2
+
+
 def test_a_cancelled_session_refuses_new_connections():
     with _silent_server() as (port, accepted):
         session = CancellableSession()
@@ -172,9 +188,18 @@ def test_a_worker_stuck_past_its_stop_is_abandoned_fenced_and_replaced():
     notification = SimpleNamespace(Topic="motion", Message="motion")
     pullpoint = Mock()
     pullpoint.PullMessages.return_value = SimpleNamespace(NotificationMessage=[notification])
+    old_manager, new_manager = Mock(), Mock()
+    old_transport = SimpleNamespace(session=Mock())
 
     def subscribe(*_args, generation=None, stop_event=None, **_kwargs):
         calls.append(generation)
+        with listener._lifecycle_lock:
+            if len(calls) == 1:
+                listener._transport, listener._transport_generation = old_transport, generation
+                listener._subscription_manager = old_manager
+            else:
+                listener._subscription_manager = new_manager
+            listener._subscription_generation = generation
         if len(calls) == 1:
             # I/O that neither the stop nor the transport close interrupts.
             release.wait(5)
@@ -195,6 +220,9 @@ def test_a_worker_stuck_past_its_stop_is_abandoned_fenced_and_replaced():
         assert time.monotonic() - started < 0.5
         assert not listener.running
         assert listener.abandoned_workers == 1
+        # The count belongs to the camera, not this listener object, so it
+        # survives a manager reload that replaces the listener.
+        assert OnvifEventListener(_camera(), Mock()).abandoned_workers == 1
 
         # The camera can start a new worker while the old one is still blocked.
         listener.start()
@@ -212,6 +240,10 @@ def test_a_worker_stuck_past_its_stop_is_abandoned_fenced_and_replaced():
         assert listener.notifications_received == 0
         assert listener.abandoned_workers == 0
         assert listener.running
+        # It released its own subscription, not the new worker's.
+        old_manager.Unsubscribe.assert_called_once_with()
+        new_manager.Unsubscribe.assert_not_called()
+        old_transport.session.close.assert_called()
 
         listener.stop()
         assert not listener.running

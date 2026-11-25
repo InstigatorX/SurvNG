@@ -612,18 +612,42 @@ class ConfigReloadTest(unittest.TestCase):
         pending = ManagerReloadRestartPending("stuck; restarting", persisted=True)
 
         with patch("survng.app.main.reload_manager", side_effect=pending):
-            _effective, result = main.apply_config_update(incoming)
+            _effective, result = main.apply_config_update(incoming, allow_restart_pending=True)
 
         self.assertEqual(result["apply_mode"], "restart_pending")
         self.assertTrue(result["persisted"])
         self.assertFalse(result["applied"])
+        self.assertEqual(result["instance_id"], main.PROCESS_INSTANCE_ID)
 
-        unsaved = ManagerReloadRestartPending("stuck; restarting", persisted=False)
+        # Not restarting by itself: the saved change waits for a manual restart.
+        manual = ManagerReloadRestartPending("stuck", persisted=True, restarting=False)
         with (
-            patch("survng.app.main.reload_manager", side_effect=unsaved),
+            patch("survng.app.main.reload_manager", side_effect=manual),
+            patch("survng.app.main.save_config") as save,
+            self.assertRaises(ManagerReloadRestartPending),
+        ):
+            main.apply_config_update(incoming, allow_restart_pending=True)
+        save.assert_not_called()
+
+    def test_callers_that_cannot_report_a_pending_restart_keep_the_running_config_on_disk(self) -> None:
+        from survng.app.manager_reload import ManagerReloadRestartPending
+
+        active = Mock()
+        current = AppConfig(base_path="/old")
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(update={"capture_rtsp_transport": "udp"})
+        pending = ManagerReloadRestartPending("stuck; restarting", persisted=True)
+
+        with (
+            patch("survng.app.main.reload_manager", side_effect=pending),
+            patch("survng.app.main.save_config") as save,
             self.assertRaises(ManagerReloadRestartPending),
         ):
             main.apply_config_update(incoming)
+        save.assert_called_once()
+        self.assertIs(save.call_args.args[0], current)
 
     def test_image_storage_change_hot_applies_without_restarting_cameras(self) -> None:
         active = Mock()
