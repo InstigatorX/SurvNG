@@ -6,7 +6,11 @@ from dataclasses import replace
 from unittest.mock import Mock
 
 from survng.app.config import AppConfig
-from survng.app.manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
+from survng.app.manager_reload import (
+    ManagerGenerationLifecycle,
+    ManagerReloadHooks,
+    ManagerReloadRestartPending,
+)
 
 
 class ManagerGenerationLifecycleTest(unittest.TestCase):
@@ -46,7 +50,7 @@ class ManagerGenerationLifecycleTest(unittest.TestCase):
         previous.stop_all_with_runtime_preferences.assert_not_called()
         hooks.publish_runtime.assert_not_called()
 
-    def test_success_publishes_only_after_candidate_is_started_and_persisted(self) -> None:
+    def test_success_persists_first_and_publishes_only_after_candidate_is_started(self) -> None:
         order: list[str] = []
         previous = Mock()
         previous.runtime_preferences.return_value = {"camera_enabled": {}}
@@ -61,7 +65,7 @@ class ManagerGenerationLifecycleTest(unittest.TestCase):
             AppConfig(), previous, AppConfig(base_path="/new"), persist=True
         )
 
-        self.assertEqual(order, ["stop-old", "start-new", "save", "publish"])
+        self.assertEqual(order, ["save", "stop-old", "start-new", "publish"])
         hooks.refresh_runtime_caches.assert_called_once_with()
 
     def test_active_generation_requests_drain_before_previous_manager_stops(self) -> None:
@@ -106,11 +110,11 @@ class ManagerGenerationLifecycleTest(unittest.TestCase):
         previous = Mock()
         previous.runtime_preferences.return_value = {}
         candidate = Mock()
+        candidate.start_all.side_effect = RuntimeError("camera failed to start")
         candidate.stop_all.side_effect = RuntimeError("worker still alive")
         recovery = Mock()
         factory = Mock(side_effect=[candidate, recovery])
         hooks = self.hooks()
-        hooks.save_config.side_effect = OSError("configuration disk unavailable")
         lifecycle = self.lifecycle(factory, hooks)
         effective = AppConfig(base_path="/new")
         with self.assertRaisesRegex(RuntimeError, "replacement manager.*restart"):
@@ -211,6 +215,27 @@ class ManagerGenerationLifecycleTest(unittest.TestCase):
                 self.assertTrue(lifecycle._stopping.is_set())
                 if "publish" in order:
                     self.assertLess(order.index("publish"), order.index("restart"))
+
+    def test_a_restart_keeps_the_saved_change_only_when_it_was_never_tried(self) -> None:
+        for kind, kept in (
+            # The old generation would not stop: the new config never ran,
+            # so the restart applies it.
+            ("previous_shutdown", True),
+            # The new config ran and failed: what is on disk is the old one.
+            ("candidate_cleanup", False),
+            ("recovery", False),
+        ):
+            with self.subTest(kind=kind):
+                hooks = replace(self.hooks(), request_supervisor_restart=Mock(return_value=True))
+                previous, factory, original = self._dead_end(kind)
+                requested = AppConfig(base_path="/new")
+                with self.assertRaises(ManagerReloadRestartPending) as raised:
+                    self.lifecycle(factory, hooks).reload(original, previous, requested, persist=True)
+                self.assertIs(raised.exception.persisted, kept)
+                saved = [call.args[0] for call in hooks.save_config.call_args_list]
+                self.assertEqual(saved, [requested] if kept else [requested, original])
+                if kept:
+                    self.assertIn("to apply the saved configuration", str(raised.exception))
 
     def test_without_a_managed_server_the_error_asks_for_a_manual_restart(self) -> None:
         hooks = replace(self.hooks(), request_supervisor_restart=Mock(return_value=False))

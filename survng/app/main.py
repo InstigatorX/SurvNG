@@ -64,7 +64,11 @@ from .media_sessions import MediaSessionManager
 from .homekit_routes import HomeKitRouteDependencies, create_homekit_router
 from .manager_access import ManagerAccessCoordinator
 from .config_changes import ConfigChangeActorMiddleware, ConfigChangeLog
-from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
+from .manager_reload import (
+    ManagerGenerationLifecycle,
+    ManagerReloadHooks,
+    ManagerReloadRestartPending,
+)
 from . import process_exit
 from .local_observability import LocalObservabilityServer, build_runtime_status
 from .perf_samples import SlowSiteTable, TimedLock
@@ -888,7 +892,21 @@ def apply_config_update(
         if manager_owned_config(current) != manager_owned_config(effective):
             if effective.ffmpeg_path != previous_ffmpeg_path:
                 _recording_media_runtime.clear_hardware_probe_caches()
-            applied = reload_manager(effective, assign_ids=False, persist=persist)
+            try:
+                applied = reload_manager(effective, assign_ids=False, persist=persist)
+            except ManagerReloadRestartPending as pending:
+                if not pending.persisted:
+                    raise
+                # Saved, but this process cannot finish the cutover; its
+                # supervisor restart starts with the saved configuration.
+                return effective, {
+                    "apply_mode": "restart_pending",
+                    "persisted": True,
+                    "applied": False,
+                    "camera_workers_restarted": True,
+                    "subsystems_restarted": ["process"],
+                    "message": str(pending),
+                }
             prepare_bootstrap_token(applied)
             return applied, {
                 "apply_mode": "manager_reload",

@@ -407,7 +407,7 @@ class ConfigReloadTest(unittest.TestCase):
             runtime.recording_cache_status_cached_at = previous_at
             runtime.recording_cache_status_cached_inventory = previous_inventory
 
-    def test_failed_replacement_restores_previous_manager_without_persisting(self) -> None:
+    def test_failed_replacement_restores_previous_manager_and_its_saved_configuration(self) -> None:
         active = Mock()
         active.runtime_preferences.return_value = {
             "recording_enabled": {"gate": False},
@@ -440,7 +440,11 @@ class ConfigReloadTest(unittest.TestCase):
             active.runtime_preferences.return_value,
             persist=True,
         )
-        save.assert_not_called()
+        # Saved before the cutover, then put back once the new one failed.
+        self.assertEqual(
+            [call.args[0].base_path for call in save.call_args_list],
+            ["/new", "/old"],
+        )
         self.assertIs(main.manager, recovery)
         self.assertEqual(main.config.base_path, "/old")
 
@@ -476,7 +480,7 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertIs(main.manager, active)
         self.assertEqual(main.config.base_path, "/old")
 
-    def test_successful_replacement_starts_before_atomic_persistence_and_swap(self) -> None:
+    def test_successful_replacement_persists_before_cutover_and_swaps_after_start(self) -> None:
         actions: list[str] = []
         active = Mock()
         active.runtime_preferences.return_value = {
@@ -504,13 +508,13 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             effective = main.reload_manager(AppConfig(base_path="/new"))
 
-        self.assertEqual(actions, ["old-stop", "new-start", "save"])
+        self.assertEqual(actions, ["save", "old-stop", "new-start"])
         candidate.wait_for_camera_startup.assert_not_called()
         self.assertIs(main.manager, candidate)
         self.assertIs(main.config, effective)
         self.assertEqual(main.config.base_path, "/new")
 
-    def test_persistence_failure_stops_candidate_and_restores_previous_manager(self) -> None:
+    def test_persistence_failure_leaves_the_active_manager_running(self) -> None:
         active = Mock()
         active.runtime_preferences.return_value = {
             "recording_enabled": {"removed": False},
@@ -532,17 +536,15 @@ class ConfigReloadTest(unittest.TestCase):
             patch("survng.app.main._recording_media_runtime._start_recording_prewarmer"),
             patch("survng.app.main.save_config", side_effect=OSError("disk full")),
         ):
-            with self.assertRaisesRegex(RuntimeError, "previous configuration was restored"):
+            with self.assertRaisesRegex(RuntimeError, "before the active manager was stopped"):
                 main.reload_manager(AppConfig(base_path="/new"))
 
-        candidate.start_all.assert_called_once_with()
+        # Nothing irreversible happened: the save failed first.
+        active.stop_all_with_runtime_preferences.assert_not_called()
+        candidate.start_all.assert_not_called()
         candidate.stop_all.assert_called_once_with()
-        recovery.start_all.assert_called_once_with()
-        recovery.apply_runtime_preferences.assert_called_once_with(
-            active.runtime_preferences.return_value,
-            persist=True,
-        )
-        self.assertIs(main.manager, recovery)
+        recovery.start_all.assert_not_called()
+        self.assertIs(main.manager, active)
         self.assertEqual(main.config.base_path, "/old")
 
     def test_app_only_settings_hot_apply_without_restarting_cameras(self) -> None:
@@ -572,6 +574,56 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertFalse(result["camera_workers_restarted"])
         self.assertIs(main.config, effective)
         self.assertIs(active.config, effective)
+
+    def test_speech_changes_replace_speech_alone_without_a_manager_reload(self) -> None:
+        active = Mock()
+        current = AppConfig.model_validate({
+            "speech": {"enabled": True},
+            "cameras": [{"id": "foyer", "name": "Foyer", "stream_url": "rtsp://example.invalid/foyer",
+                         "speech": {"enabled": True}}],
+        })
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.cameras[0].speech.enabled = False
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_speech.assert_called_once_with(effective)
+        active.reconfigure_motion.assert_not_called()
+        self.assertFalse(result["camera_workers_restarted"])
+        self.assertIn("speech", result["subsystems_restarted"])
+
+    def test_a_reload_this_process_cannot_finish_reports_the_change_saved(self) -> None:
+        from survng.app.manager_reload import ManagerReloadRestartPending
+
+        active = Mock()
+        current = AppConfig(base_path="/old")
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(update={"capture_rtsp_transport": "udp"})
+        pending = ManagerReloadRestartPending("stuck; restarting", persisted=True)
+
+        with patch("survng.app.main.reload_manager", side_effect=pending):
+            _effective, result = main.apply_config_update(incoming)
+
+        self.assertEqual(result["apply_mode"], "restart_pending")
+        self.assertTrue(result["persisted"])
+        self.assertFalse(result["applied"])
+
+        unsaved = ManagerReloadRestartPending("stuck; restarting", persisted=False)
+        with (
+            patch("survng.app.main.reload_manager", side_effect=unsaved),
+            self.assertRaises(ManagerReloadRestartPending),
+        ):
+            main.apply_config_update(incoming)
 
     def test_image_storage_change_hot_applies_without_restarting_cameras(self) -> None:
         active = Mock()

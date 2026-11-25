@@ -13,6 +13,18 @@ from .manager import AppManager
 LOGGER = logging.getLogger(__name__)
 
 
+class ManagerReloadRestartPending(RuntimeError):
+    """The reload cannot finish in this process; the supervisor restarts it.
+
+    ``persisted`` is true when the requested configuration is on disk, so the
+    restarted process starts with it.
+    """
+
+    def __init__(self, message: str, *, persisted: bool) -> None:
+        super().__init__(message)
+        self.persisted = persisted
+
+
 @dataclass(frozen=True, slots=True)
 class ManagerReloadHooks:
     active_storage_tasks: Callable[[AppManager], list[str]]
@@ -47,7 +59,12 @@ class ManagerGenerationLifecycle:
         self._manager_factory = manager_factory
         self._hooks = hooks
 
-    def _unrecoverable(self, problem: str) -> RuntimeError:
+    def _unrecoverable(
+        self,
+        problem: str,
+        *,
+        persisted: bool = False,
+    ) -> ManagerReloadRestartPending:
         """Ask the supervisor to restart SurvNG and describe the failure.
 
         Called after the stopping flag is set and the surviving generation is
@@ -63,7 +80,18 @@ class ManagerGenerationLifecycle:
             if restarting
             else "restart SurvNG through its supervisor"
         )
-        return RuntimeError(f"{problem}; {action}")
+        if persisted:
+            action += " to apply the saved configuration"
+        return ManagerReloadRestartPending(f"{problem}; {action}", persisted=persisted)
+
+    def _restore_saved(self, previous_config: AppConfig) -> None:
+        """Put the configuration that is running back on disk."""
+        try:
+            self._hooks.save_config(previous_config, assign_ids=False)
+        except Exception:
+            LOGGER.exception(
+                "failed to restore the persisted configuration after a reload failure"
+            )
 
     def reload(
         self,
@@ -87,6 +115,7 @@ class ManagerGenerationLifecycle:
             candidate = self._manager_factory(effective_config)
             previous_stop_attempted = False
             previous_stopped = False
+            persisted = False
             try:
                 preferences = previous_manager.runtime_preferences()
                 self._hooks.stop_prewarmer()
@@ -94,14 +123,18 @@ class ManagerGenerationLifecycle:
                     raise RuntimeError(
                         "configuration reload timed out waiting for active API requests"
                     )
+                # Persist the request before anything irreversible: when this
+                # process cannot finish the cutover, its restart must start
+                # with what was asked for rather than silently drop it.
+                if persist:
+                    self._hooks.save_config(effective_config, assign_ids=False)
+                    persisted = True
                 previous_stop_attempted = True
                 previous_manager.stop_all_with_runtime_preferences()
                 previous_stopped = True
                 candidate.apply_runtime_preferences(preferences)
                 candidate.start_all()
                 candidate.apply_runtime_preferences(preferences, persist=True)
-                if persist:
-                    self._hooks.save_config(effective_config, assign_ids=False)
             except BaseException as reload_error:
                 cleanup_error = None
                 try:
@@ -112,12 +145,20 @@ class ManagerGenerationLifecycle:
                         "failed to clean up replacement manager after reload failure"
                     )
                 if previous_stop_attempted and not previous_stopped:
+                    # The new configuration was never tried; the old
+                    # generation would not stop. Keep the request on disk so
+                    # the restart applies it.
                     self._stopping.set()
                     self._hooks.publish_runtime(previous_config, previous_manager)
                     raise self._unrecoverable(
                         "configuration reload aborted because previous manager shutdown is "
-                        "still active"
+                        "still active",
+                        persisted=persisted,
                     ) from None
+                if persisted:
+                    # The new configuration was tried and failed, or the
+                    # cutover never began: what runs is the previous one.
+                    self._restore_saved(previous_config)
                 if cleanup_error is not None:
                     self._stopping.set()
                     if previous_stopped:

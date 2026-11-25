@@ -1784,6 +1784,11 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
         throw new Error(detail);
       }
       const payload = await response.json();
+      if (payload.apply_mode === "restart_pending") {
+        // Saved on disk; the service restarts to apply it, so do not reload now.
+        setSaveNotice({ state: "saved", text: "Saved. SurvNG is restarting to apply it." });
+        return true;
+      }
       const reloaded = await load();
       setSaveNotice(reloaded
         ? {
@@ -1881,7 +1886,9 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
       const saved = cameras.length > 1 ? `${cameras.length} cameras saved` : "Camera settings saved";
       setSaveNotice({
         state: "saved",
-        text: payload.apply_mode === "manager_reload"
+        text: payload.apply_mode === "restart_pending"
+          ? `${saved}; SurvNG is restarting to apply them.`
+          : payload.apply_mode === "manager_reload"
           ? `${saved}; all cameras restarted once to apply them.`
           : payload.camera_workers_restarted
             ? `${saved}; affected camera runtimes reloaded.`
