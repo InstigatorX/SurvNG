@@ -162,7 +162,7 @@ function GroupDetail({ groupId, cameras, names, timeZone, onClose, onChanged }) 
         {(group.faces_list || []).map((face) => <figure key={face.id}>
           <img src={faceUrl(face.id)} alt="" loading="lazy" />
           <figcaption>
-            <small>{formatDateTime(face.captured_epoch, timeZone)}</small>
+            <small>{formatDateTime(face.captured_epoch, timeZone)}{face.assignment === "named" ? " · named automatically" : ""}</small>
             <button type="button" className="link-button" disabled={busy || group.faces <= 1} onClick={() => act(`/api/face-captures/${face.id}/remove`)}>Not this person</button>
           </figcaption>
         </figure>)}
@@ -327,7 +327,7 @@ export function PeoplePage({ timeZone }) {
                 {person.cover ? <img src={faceUrl(person.cover)} alt="" loading="lazy" /> : <Users size={32} />}
               </button>
               <strong>{person.name}</strong>
-              <small>{person.faces} faces{person.last_epoch ? ` · last seen ${formatDateTime(person.last_epoch, timeZone)}` : ""}</small>
+              <small>{person.faces} faces{person.auto_named ? ` (${person.auto_named} named automatically)` : ""}{person.last_epoch ? ` · last seen ${formatDateTime(person.last_epoch, timeZone)}` : ""}</small>
             </article>)}
           </div> : <p className="settings-help">No one is named yet. Name a group in “To name”.</p>)
           : (listing.groups.length ? <div className="people-grid">

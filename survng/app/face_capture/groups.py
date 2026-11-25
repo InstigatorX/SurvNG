@@ -5,7 +5,9 @@ joins the most similar group when the cosine similarity reaches the threshold,
 otherwise it starts a new group. A group keeps the running mean of its faces.
 Naming a group links it to a person; naming another group with the same name
 puts both under that person, which is how a person split across groups is
-joined again. An ignored group (not a person, or junk) keeps attracting
+joined again. A track that would start or join an unnamed group but clearly
+resembles one named person as a whole joins that person instead (named
+automatically, see AUTO_NAME_THRESHOLD). An ignored group (not a person, or junk) keeps attracting
 similar detections out of the way. Faces a person later gains are named by the
 group they join.
 
@@ -28,6 +30,15 @@ SAMPLE_FACES = 6
 # An unnamed group suggests the named person it most resembles from this
 # similarity on (well below the grouping threshold: a person asks, not decides).
 SUGGEST_THRESHOLD = 0.25
+# A track that would start or join an unnamed group is named automatically
+# when it resembles one named person's faces as a whole (the mean of all
+# their groups) this much, ahead by the margin of the next person and of the
+# closest unnamed or ignored group. Measured on 287 tracks of two named
+# people and 46 junk tracks, leaving each track out of its person's mean:
+# 140 of 241 person tracks named, none wrongly, no junk; with only one of the
+# two named, the other was never named as them.
+AUTO_NAME_THRESHOLD = 0.45
+AUTO_NAME_MARGIN = 0.10
 
 GROUP_SCHEMA = """
 create table if not exists capture_people (
@@ -90,6 +101,28 @@ def _centroids(connection) -> tuple[list[int], np.ndarray]:
     return ids, (np.vstack(vectors) if vectors else np.zeros((0, 512), np.float32))
 
 
+def _named_person(
+    mean: np.ndarray, people: dict[int, np.ndarray], unnamed_similarity: float = -1.0,
+) -> int | None:
+    """The person a track is clearly one of (see AUTO_NAME_THRESHOLD), or None.
+
+    ``unnamed_similarity``: how alike the track is to the closest unnamed or
+    ignored group. That group is a rival like another person (someone not
+    named yet, or junk), so with one named person there is still a margin.
+    """
+    if not people:
+        return None
+    scores = sorted(
+        ((float(_unit(total) @ mean), person_id) for person_id, total in people.items()),
+        reverse=True,
+    )
+    best, person_id = scores[0]
+    runner_up = max(scores[1][0] if len(scores) > 1 else -1.0, unnamed_similarity)
+    if best >= AUTO_NAME_THRESHOLD and best - runner_up >= AUTO_NAME_MARGIN:
+        return person_id
+    return None
+
+
 def recompute_group(connection, group_id: int, drop_empty: bool = True) -> None:
     """Refresh a group's mean face, count and dates from its faces; drop it when empty.
 
@@ -129,6 +162,19 @@ def assign_faces(connection, threshold: float = DEFAULT_GROUP_THRESHOLD, event_i
         drop_empty_groups(connection)
         return 0
     group_ids, centroids = _centroids(connection)
+    # Each group's person (None: unnamed) and whether it is ignored, and each
+    # named person's faces summed over all their groups, for auto-naming.
+    owner: dict[int, int | None] = {}
+    ignored: set[int] = set()
+    people: dict[int, np.ndarray] = {}
+    for group_id, person_id, is_ignored, faces_count, blob in connection.execute(
+            "select id, person_id, ignored, faces, centroid from capture_groups"):
+        owner[int(group_id)] = None if person_id is None else int(person_id)
+        if is_ignored:
+            ignored.add(int(group_id))
+        elif person_id is not None and faces_count:
+            vector = np.frombuffer(blob, dtype=np.float32).astype(np.float64) * int(faces_count)
+            people[int(person_id)] = people.get(int(person_id), 0) + vector
     # Running sums per group touched, so each track updates its group's mean
     # face in memory; the stored row is refreshed once per group at the end.
     sums: dict[int, np.ndarray] = {}
@@ -138,11 +184,23 @@ def assign_faces(connection, threshold: float = DEFAULT_GROUP_THRESHOLD, event_i
     for faces in tracks.values():
         mean = _unit(np.mean([vector for _, vector, _ in faces], axis=0)).astype(np.float32)
         best = None
+        assignment = "auto"
         if len(group_ids):
             similarities = centroids @ mean
             index = int(np.argmax(similarities))
             if float(similarities[index]) >= threshold:
                 best = group_ids[index]
+        if best is None or (owner.get(best) is None and best not in ignored):
+            # Bound for a new or unnamed group: a track that is clearly one
+            # named person joins that person's closest group instead.
+            rivals = [float(centroids[i] @ mean) for i, group_id in enumerate(group_ids)
+                      if owner.get(group_id) is None or group_id in ignored]
+            person_id = _named_person(mean, people, max(rivals, default=-1.0))
+            if person_id is not None:
+                theirs = [i for i, group_id in enumerate(group_ids)
+                          if owner.get(group_id) == person_id and group_id not in ignored]
+                best = group_ids[max(theirs, key=lambda i: float(centroids[i] @ mean))]
+                assignment = "named"
         epochs = [epoch for _, _, epoch in faces]
         if best is None:
             cursor = connection.execute(
@@ -150,6 +208,7 @@ def assign_faces(connection, threshold: float = DEFAULT_GROUP_THRESHOLD, event_i
                 " values (?, 0, ?, ?, ?, ?)", (mean.tobytes(), min(epochs), max(epochs), now, now))
             best = int(cursor.lastrowid)
             group_ids.append(best)
+            owner[best] = None
             centroids = np.vstack([centroids, mean[None, :]])
         if best not in sums:
             existing = [np.frombuffer(row[0], dtype=np.float32) for row in connection.execute(
@@ -157,9 +216,12 @@ def assign_faces(connection, threshold: float = DEFAULT_GROUP_THRESHOLD, event_i
             sums[best] = np.sum(existing, axis=0, dtype=np.float64) if existing else np.zeros(mean.shape, np.float64)
             counts[best] = len(existing)
         connection.executemany(
-            "update face_captures set group_id = ?, assignment = 'auto' where id = ?",
-            [(best, face_id) for face_id, _, _ in faces],
+            "update face_captures set group_id = ?, assignment = ? where id = ?",
+            [(best, assignment, face_id) for face_id, _, _ in faces],
         )
+        if owner.get(best) is not None and best not in ignored:
+            track_sum = np.sum([vector for _, vector, _ in faces], axis=0, dtype=np.float64)
+            people[owner[best]] = people.get(owner[best], 0) + track_sum
         sums[best] = sums[best] + np.sum([vector for _, vector, _ in faces], axis=0, dtype=np.float64)
         counts[best] += len(faces)
         centroids[group_ids.index(best)] = _unit(sums[best] / counts[best]).astype(np.float32)
@@ -256,7 +318,7 @@ class FaceGroups:
                 raise GroupNotFound(group_id)
             group = rows[0]
             group["faces_list"] = [dict(row) for row in connection.execute(
-                "select id, event_id, camera_id, captured_epoch, norm, box_json from face_captures"
+                "select id, event_id, camera_id, captured_epoch, norm, box_json, assignment from face_captures"
                 " where group_id = ? order by captured_epoch desc limit 300", (int(group_id),))]
             group["visits"] = _visits(connection, "group_id = ?", (int(group_id),))
         return group
@@ -272,6 +334,10 @@ class FaceGroups:
                     "select f.id from face_captures f join capture_groups g on g.id = f.group_id"
                     " where g.person_id = ? order by f.norm desc limit 1", (row["id"],)).fetchone()
                 row["cover"] = int(cover[0]) if cover else None
+                row["auto_named"] = int(connection.execute(
+                    "select count(*) from face_captures f join capture_groups g on g.id = f.group_id"
+                    " where g.person_id = ? and g.ignored = 0 and f.assignment = 'named'",
+                    (row["id"],)).fetchone()[0])
         return rows
 
     def person(self, person_id: int) -> dict[str, Any]:

@@ -217,3 +217,39 @@ def test_faces_by_event_list_who_was_seen_in_an_incident(setup):
         endpoint(ids=str(2**64))  # beyond SQLite's integers
     assert error.value.status_code == 400
     assert required_api_scope("GET", "/api/face-captures/by-events") == "admin"
+
+
+def test_a_track_clearly_one_named_person_is_named_automatically(setup):
+    store, groups = setup
+    _capture(store, groups, 1, _face(ALICE))
+    [group] = groups.groups("unnamed")["groups"]
+    groups.name_group(group["id"], "Person A")
+    # A strict grouping threshold sends the next track to a new group; it
+    # resembles Person A as a whole, so it joins Person A instead.
+    store.record(event_id=2, camera_id="gate", event_epoch=1002.0,
+                 result=CaptureResult(faces=[_face(ALICE)]), embedding_model="m", seconds=1.0)
+    groups.assign(2, threshold=0.999)
+    assert groups.groups("unnamed")["total"] == 0
+    [person] = groups.people()
+    assert person["faces"] == 2 and person["auto_named"] == 1
+    faces = groups.group(group["id"])["faces_list"]
+    assert sorted(face["assignment"] for face in faces) == ["auto", "named"]
+
+
+def test_a_stranger_or_a_close_call_is_left_to_name(setup):
+    store, groups = setup
+    twin = ALICE + RNG.normal(size=512) * 0.05  # nearly Person A: no clear lead
+    _capture(store, groups, 1, _face(ALICE))
+    store.record(event_id=2, camera_id="gate", event_epoch=5000.0,
+                 result=CaptureResult(faces=[_face(twin)]), embedding_model="m", seconds=1.0)
+    groups.assign(2, threshold=0.999)  # its own group, though close to Person A
+    assert groups.groups("unnamed")["total"] == 2
+    for group, name in zip(groups.groups("unnamed")["groups"], ("Person A", "Person T")):
+        groups.name_group(group["id"], name)
+    for event_id, base in ((3, ALICE), (4, BOB)):
+        store.record(event_id=event_id, camera_id="gate", event_epoch=1000.0 + event_id,
+                     result=CaptureResult(faces=[_face(base)]), embedding_model="m", seconds=1.0)
+        groups.assign(event_id, threshold=0.999)
+    # Person A and Person T are too alike to tell; the stranger is no one.
+    assert groups.groups("unnamed")["total"] == 2
+    assert all(person["auto_named"] == 0 for person in groups.people())
