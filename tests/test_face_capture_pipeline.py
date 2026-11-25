@@ -99,3 +99,44 @@ def test_one_person_searched_in_separate_windows_keeps_one_track():
     second = [Track([(0.5, PERSON), (0.6, PERSON)]), Track([(5.0, PERSON)]),
               Track([(2.0, (900.0, 50.0, 1100.0, 650.0))])]  # someone else
     assert person_keys(first, second) == [0, 0, UNMATCHED_TRACK_BASE + 2]
+
+
+def test_two_people_the_first_pass_saw_as_one_keep_separate_tracks():
+    from survng.app.face_capture.moments import Track
+    from survng.app.face_capture.pipeline import UNMATCHED_TRACK_BASE, person_keys
+
+    merged = (100.0, 50.0, 500.0, 650.0)
+    first = [Track([(t / 5, merged) for t in range(0, 10)])]
+    left, right = (100.0, 50.0, 300.0, 650.0), (300.0, 50.0, 500.0, 650.0)
+    second = [Track([(0.5, left), (0.6, left), (0.7, left)]), Track([(0.5, right), (0.6, right)])]
+    assert person_keys(first, second) == [0, UNMATCHED_TRACK_BASE + 1]
+
+
+def test_skipped_main_stream_segments_are_reported_as_main_stream_errors():
+    source = _frames()
+
+    class Frames:
+        errors = ["0001.mp4 frames 0-8: decoder timed out"]
+
+        def __call__(self, start, end):
+            return source(start, end)
+
+    result = capture_event(plan_offsets=[0.0], main_frames=Frames(), detect_people=lambda frame: [],
+                           capture_faces=lambda crop: [], settings=SETTINGS)
+    assert result.errors == ["main stream 0001.mp4 frames 0-8: decoder timed out"]
+
+
+def test_held_candidates_are_bounded_to_the_highest_norms_and_kept_crops_decode(monkeypatch):
+    from survng.app.face_capture import pipeline
+
+    monkeypatch.setattr(pipeline, "MAX_CANDIDATES", 3)
+    norms = iter(range(14, 200))
+    result = capture_event(
+        plan_offsets=[0.0], main_frames=_frames(), detect_people=lambda frame: [PERSON],
+        capture_faces=lambda crop: [_face(float(next(norms)))],
+        settings=CaptureSettings(faces_per_track=10, moment_radius_seconds=0.5),
+    )
+    assert result.candidates > 3
+    assert len(result.faces) <= 3
+    assert min(f.norm for f in result.faces) >= result.candidates + 14 - 3 - 1
+    assert all(f.crop.ndim == 3 and f.crop.size for f in result.faces)

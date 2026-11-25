@@ -11,11 +11,13 @@ Decoding and inference are passed in, so the same core runs in the service
 """
 from __future__ import annotations
 
+import heapq
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 
 from ..face_candidates import _padded_crop
@@ -37,6 +39,10 @@ UNMATCHED_TRACK_BASE = 1000
 # Frames decoded together in one run. A 4K frame is about 25 MB; frame
 # stepping's 30-frame runs would hold 750 MB, too much beside the service.
 CAPTURE_RUN_MAX_FRAMES = 8
+# Candidates held per event (the highest norms), each as a JPEG crop: a
+# busy 4K event cannot grow memory beyond a few megabytes.
+MAX_CANDIDATES = 300
+CANDIDATE_JPEG_QUALITY = 95
 
 FrameSource = Callable[[float, float], Iterable[tuple[float, np.ndarray]]]
 """(start, end) seconds relative to the event -> (offset, BGR frame), in order."""
@@ -117,8 +123,8 @@ def _scaled(boxes: list[Box], frame: np.ndarray, size: tuple[int, int] | None) -
 def person_keys(first: list[Track], second: list[Track]) -> list[int]:
     """For each second-pass track, the first-pass track it continues (by majority of
     its samples), so one person searched in separate windows keeps one id."""
-    keys = []
-    for index, track in enumerate(second):
+    matched: list[tuple[int | None, int]] = []
+    for track in second:
         votes: dict[int, int] = {}
         for offset, box in track.samples:
             best, best_overlap = None, TRACK_MATCH_IOU
@@ -132,7 +138,23 @@ def person_keys(first: list[Track], second: list[Track]) -> list[int]:
                     best, best_overlap = number, overlap
             if best is not None:
                 votes[best] = votes.get(best, 0) + 1
-        keys.append(max(votes, key=votes.get) if votes else UNMATCHED_TRACK_BASE + index)
+        best_key = max(votes, key=votes.get) if votes else None
+        matched.append((best_key, votes[best_key] if best_key is not None else 0))
+    # One person per key at a time: of second-pass tracks that share a key at
+    # overlapping times (two people the first pass saw as one), the best
+    # matched keeps it and the others get keys of their own.
+    base = max(UNMATCHED_TRACK_BASE, len(first))
+    keys = [base + index for index in range(len(second))]
+    spans: dict[int, list[tuple[float, float]]] = {}
+    for index in sorted(range(len(second)), key=lambda i: -matched[i][1]):
+        key = matched[index][0]
+        samples = second[index].samples
+        if key is None or not samples:
+            continue
+        start, end = samples[0][0], samples[-1][0]
+        if all(end < low or start > high for low, high in spans.get(key, ())):
+            spans.setdefault(key, []).append((start, end))
+            keys[index] = key
     return keys
 
 
@@ -216,7 +238,7 @@ def capture_event(
 
     # Pass two: the main stream around those moments.
     # Only the padded face crop is kept, never the whole frame.
-    found: list[tuple[float, Box, dict[str, Any], np.ndarray]] = []
+    found: list[tuple[float, int, float, Box, dict[str, Any], bytes]] = []  # heap by norm
     people_by_frame: list[tuple[float, list[Box]]] = []
     for low, high in merge_windows(result.moments, settings.moment_radius_seconds):
         try:
@@ -241,21 +263,31 @@ def capture_event(
                         if cropped is None:
                             continue
                         landmarks = [[x + left, y + top] for x, y in face["landmarks"]]
-                        crop = np.ascontiguousarray(cropped[0]).copy()
-                        found.append((offset, person, {**face, "box": box, "landmarks": landmarks}, crop))
+                        ok, encoded = cv2.imencode(".jpg", cropped[0], [cv2.IMWRITE_JPEG_QUALITY, CANDIDATE_JPEG_QUALITY])
+                        if not ok:
+                            continue
+                        entry = {**face, "box": box, "landmarks": landmarks,
+                                 "embedding": np.asarray(face["embedding"], dtype=np.float32)}
+                        heapq.heappush(found, (float(face["norm"]), len(found) + result.candidates, offset,
+                                               person, entry, encoded.tobytes()))
+                        if len(found) > MAX_CANDIDATES:
+                            heapq.heappop(found)
         except (OSError, RuntimeError) as error:
             if _transient(error):
                 raise
             result.errors.append(f"main stream {low:+.1f}..{high:+.1f}: {error}")
 
-    result.errors.extend(getattr(main_frames, "errors", ()))
+    # Prefixed like the errors above, so a capture that kept no faces while
+    # main-stream segments failed is retried rather than recorded as done.
+    result.errors.extend(f"main stream {error}" for error in getattr(main_frames, "errors", ()))
     second_tracks = link_tracks(people_by_frame)
     track_of: dict[tuple[float, Box], int] = {}
     for key, track in zip(person_keys(first_tracks, second_tracks), second_tracks):
         for offset, box in track.samples:
             track_of[(offset, box)] = key
     candidates = []
-    for offset, person, face, crop in found:
+    jpegs: dict[int, bytes] = {}
+    for _, _, offset, person, face, jpeg in found:
         candidates.append(CapturedFace(
             track=track_of.get((offset, person), -1),
             offset=round(offset, 3),
@@ -264,9 +296,12 @@ def capture_event(
             confidence=float(face["confidence"]),
             norm=float(face["norm"]),
             embedding=np.asarray(face["embedding"], dtype=np.float32),
-            crop=crop,
+            crop=np.empty((0, 0, 3), np.uint8),
         ))
+        jpegs[id(candidates[-1])] = jpeg
     result.faces = keep_best(candidates, settings.faces_per_track)
+    for face in result.faces:
+        face.crop = cv2.imdecode(np.frombuffer(jpegs[id(face)], np.uint8), cv2.IMREAD_COLOR)
     return result
 
 

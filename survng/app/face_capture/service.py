@@ -13,13 +13,22 @@ import logging
 import sqlite3
 import threading
 import time
+import urllib.parse
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from .events import person_events, plan_offsets, stored_people
-from .pipeline import CaptureCancelled, CaptureSettings, capture_event, main_stream_source, sub_stream_source
+from .pipeline import (
+    MAX_WINDOW_SECONDS,
+    CaptureCancelled,
+    CaptureSettings,
+    capture_event,
+    event_window,
+    main_stream_source,
+    sub_stream_source,
+)
 from .store import CAPTURE_VERSION, ClosingConnection, FaceCaptureStore
 
 LOGGER = logging.getLogger(__name__)
@@ -33,6 +42,9 @@ SETTLE_SECONDS = 90.0
 SETTLE_SLACK_SECONDS = 60.0
 MAX_ATTEMPTS = 3
 CANDIDATE_BATCH = 200
+# After a full scan finds nothing to do, passes only look at newer events,
+# with a full rescan this often (retries, capture version changes).
+FULL_SCAN_SECONDS = 3600.0
 PRUNE_INTERVAL_SECONDS = 6 * 3600.0
 ERROR_LOG_INTERVAL_SECONDS = 300.0
 # A deferred event (inference shed, worker timed out or unavailable) waits
@@ -40,6 +52,10 @@ ERROR_LOG_INTERVAL_SECONDS = 300.0
 DEFER_BASE_SECONDS = IDLE_SECONDS
 DEFER_MAX_SECONDS = 3600.0
 MAX_TRACKED_DEFERRALS = 10_000
+# A failed event waits this long before its next attempt, so a passing cause
+# (a segment not indexed yet, a decoder timing out under load) does not use
+# up every attempt within a minute.
+FAILURE_RETRY_SECONDS = 600.0
 
 
 class FaceCaptureService:
@@ -61,8 +77,13 @@ class FaceCaptureService:
         self._thread: threading.Thread | None = None
         self._last_prune = 0.0
         self._last_error_log = 0.0
-        # event id -> (deferrals, monotonic time it may be tried again)
+        # event id -> (deferrals, monotonic time it may be tried again); failed
+        # events are held here too, with no deferrals counted.
         self._deferred: dict[int, tuple[int, float]] = {}
+        # Every event at or below this id is finished for good (done or out
+        # of attempts) as of the last full scan.
+        self._scan_floor = 0
+        self._full_scan_due = 0.0
         self.processed = 0
         self.failed = 0
         self.last_event_id: int | None = None
@@ -133,7 +154,15 @@ class FaceCaptureService:
         segment = float(getattr(self._config(), "recording_segment_seconds", 0.0) or 0.0)
         settle = max(SETTLE_SECONDS, segment + SETTLE_SLACK_SECONDS)
         until = (now - timedelta(seconds=settle)).isoformat()
+        # The window is anchored to the event epoch, which can be later than
+        # created_at: its recordings must have settled too.
+        settled_epoch = now.timestamp() - settle - MAX_WINDOW_SECONDS
         waiting = time.monotonic()
+        floor = self._scan_floor if waiting < self._full_scan_due else 0
+        if floor == 0:
+            self._full_scan_due = waiting + FULL_SCAN_SECONDS
+        pending: int | None = None  # lowest id that may still need work
+        newest = 0
         before_id: int | None = None
         # Page back through the backfill window, so events older than the
         # newest batch are still reached once that batch is captured.
@@ -143,19 +172,26 @@ class FaceCaptureService:
                     connection, since=since, until=until, limit=CANDIDATE_BATCH, before_id=before_id,
                 )
             seen = self.store.attempts(event_id for event_id, *_ in candidates)
+            reached_floor = False
             for candidate in candidates:
+                if candidate[0] <= floor:
+                    reached_floor = True
+                    break
+                newest = max(newest, candidate[0])
                 deferred = self._deferred.get(candidate[0])
-                if deferred is not None and deferred[1] > waiting:
+                if (deferred is not None and deferred[1] > waiting) or candidate[2] > settled_epoch:
+                    pending = candidate[0] if pending is None else min(pending, candidate[0])
                     continue
                 previous = seen.get(candidate[0])
                 if previous is None:
                     return candidate
                 state, attempts, version = previous
+                if version < CAPTURE_VERSION:
+                    return candidate  # attempts restart with the new version
                 if state == "failed" and attempts < MAX_ATTEMPTS:
                     return candidate
-                if version < CAPTURE_VERSION and state == "done":
-                    return candidate
-            if len(candidates) < CANDIDATE_BATCH:
+            if reached_floor or len(candidates) < CANDIDATE_BATCH:
+                self._scan_floor = pending - 1 if pending is not None else max(floor, newest)
                 return None
             before_id = candidates[-1][0]
 
@@ -202,13 +238,19 @@ class FaceCaptureService:
                 raise InferenceUnavailable(reason)
             # Inside the try: an event whose lookups fail is recorded as a
             # failed attempt instead of being picked again on every pass.
-            main_rows = rows("main", epoch - 1.0, epoch + 1.0)
+            plan = plan_offsets(config, qualification, epoch, camera_id)
+            settings = CaptureSettings.from_config(config)
+            # The main stream's size from any segment of the window, so the
+            # sub-stream and stored boxes are in main-stream pixels even when
+            # no segment covers the epoch itself.
+            low, high = event_window(plan, settings.margin_seconds)
+            main_rows = rows("main", epoch + low, epoch + high)
             main_size = mp4_video_dimensions(Path(main_rows[0]["path"])) if main_rows else None
             with self._events_connection() as connection:
                 stored = stored_people(connection, event_id, epoch, main_size)
             with cancellable_evidence_work(self._stop.is_set, optional=True, source="face_capture"):
                 result = capture_event(
-                    plan_offsets=plan_offsets(config, qualification, epoch, camera_id),
+                    plan_offsets=plan,
                     main_frames=main_stream_source(rows, epoch, ffmpeg, ffprobe, hardware),
                     sub_frames=sub_stream_source(rows, epoch, ffmpeg),
                     find_faces=lambda crop: inference.capture_faces(crop, embed=False),
@@ -216,7 +258,7 @@ class FaceCaptureService:
                     stored_people=stored,
                     detect_people=lambda frame: _people(inference, config, frame),
                     capture_faces=lambda crop: inference.capture_faces(crop),
-                    settings=CaptureSettings.from_config(config),
+                    settings=settings,
                     cancelled=self._stop.is_set,
                 )
         except CaptureCancelled:
@@ -244,28 +286,33 @@ class FaceCaptureService:
                 embedding_model=Path(config.face_capture_embedding_model_path).stem,
                 seconds=time.monotonic() - started,
             )
-        except (OSError, sqlite3.Error) as exc:
+        except Exception as exc:  # cv2 and encoding errors too: an attempt, not a crashed pass
             return self._fail(event_id, camera_id, epoch, f"storing faces failed: {exc}")
         self.processed += 1
         return kept
 
     def _fail(self, event_id: int, camera_id: str, epoch: float, error: str) -> int:
-        self._deferred.pop(event_id, None)
+        self._hold(event_id, 0, FAILURE_RETRY_SECONDS)
         self.failed += 1
         self.store.record_failure(event_id=event_id, camera_id=camera_id, event_epoch=epoch, error=error)
         self._log_error(f"face capture failed for event {event_id} on {camera_id}: {error}")
         return 0
 
     def _defer(self, event_id: int) -> None:
-        if len(self._deferred) >= MAX_TRACKED_DEFERRALS:
-            self._deferred.clear()
         count = self._deferred.get(event_id, (0, 0.0))[0]
         delay = min(DEFER_MAX_SECONDS, DEFER_BASE_SECONDS * (2 ** min(count, 16)))
-        self._deferred[event_id] = (count + 1, time.monotonic() + delay)
+        self._hold(event_id, count + 1, delay)
+
+    def _hold(self, event_id: int, count: int, delay: float) -> None:
+        if event_id not in self._deferred and len(self._deferred) >= MAX_TRACKED_DEFERRALS:
+            self._deferred.clear()
+        self._deferred[event_id] = (count, time.monotonic() + delay)
 
     def _events_connection(self) -> sqlite3.Connection:
+        # Quoted: a '?', '#' or '%' in the path would otherwise be read as URI syntax.
         return sqlite3.connect(
-            f"file:{self._events_db_path}?mode=ro", uri=True, timeout=10.0, factory=ClosingConnection,
+            f"file:{urllib.parse.quote(str(self._events_db_path))}?mode=ro",
+            uri=True, timeout=10.0, factory=ClosingConnection,
         )
 
     def _prune_if_due(self) -> None:

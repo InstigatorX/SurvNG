@@ -1,4 +1,5 @@
 import json
+import time
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -231,3 +232,58 @@ def test_a_malformed_stored_observation_is_skipped():
         (json.dumps({"label": "person", "box": {"x1": 0, "y1": 0, "x2": 10, "y2": 20}}), 11.0),
     ])
     assert stored_people(connection, 1, 10.0, None) == [(1.0, [(0.0, 0.0, 10.0, 20.0)])]
+
+
+def test_a_failed_event_waits_before_its_next_attempt(tmp_path, monkeypatch):
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(60)), (2, "gate", _person_event(), _at(30))])
+    monkeypatch.setattr(service_module, "capture_event", lambda **kwargs: CaptureResult(main_frames=0))
+    assert service.run_once(NOW) is False
+    assert service.store.attempts([2]) == {2: ("failed", 1, 1)}
+    assert service.next_event(NOW)[0] == 1
+
+
+def test_an_event_whose_epoch_has_not_settled_waits(tmp_path):
+    qualification = {"status": "motion_qualification", "motion_qualification": {
+        "evidence_frame_at_epoch": NOW.timestamp() - 30.0}}
+    objects = json.dumps([json.loads(_person_event())[0], qualification])
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(60)), (2, "gate", objects, _at(30))])
+    assert service.next_event(NOW)[0] == 1
+
+
+def test_a_new_capture_version_retries_events_that_used_their_attempts(tmp_path, monkeypatch):
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(30))])
+    for _ in range(MAX_ATTEMPTS):
+        service.store.record_failure(event_id=1, camera_id="gate", event_epoch=0.0, error="boom")
+    assert service.next_event(NOW) is None
+    monkeypatch.setattr(service_module, "CAPTURE_VERSION", 2)
+    service._full_scan_due = 0.0  # a new version arrives with a restart: a full scan
+    assert service.next_event(NOW)[0] == 1
+    from survng.app.face_capture import store as store_module
+
+    monkeypatch.setattr(store_module, "CAPTURE_VERSION", 2)
+    service.store.record_failure(event_id=1, camera_id="gate", event_epoch=0.0, error="boom")
+    assert service.store.attempts([1]) == {1: ("failed", 1, 2)}
+
+
+def test_after_a_full_scan_only_newer_events_are_read_but_waiting_ones_are_kept(tmp_path, monkeypatch):
+    rows = [(1, "gate", _person_event(), _at(90)), (2, "gate", _person_event(), _at(60))]
+    service = _service(tmp_path, rows)
+    for event_id in (1, 2):
+        service.store.record(event_id=event_id, camera_id="gate", event_epoch=0.0, result=CaptureResult(),
+                             embedding_model="m", seconds=1.0)
+    assert service.next_event(NOW) is None
+    assert service._scan_floor == 2
+    reads = []
+    real = service_module.person_events
+    monkeypatch.setattr(service_module, "person_events",
+                        lambda connection, **kw: reads.append(kw) or real(connection, **kw))
+    connection = sqlite3.connect(tmp_path / "survng.sqlite3")
+    connection.execute("insert into events values (3, 'gate', ?, ?)", (_person_event(), _at(30)))
+    connection.commit()
+    connection.close()
+    assert service.next_event(NOW)[0] == 3
+    assert len(reads) == 1  # one page, stopped at the floor
+    # A deferred event keeps the floor below it, so it is not skipped later.
+    service._deferred[3] = (1, time.monotonic() + 60)
+    assert service.next_event(NOW) is None
+    assert service._scan_floor == 2

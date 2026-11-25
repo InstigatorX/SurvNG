@@ -183,7 +183,9 @@ class FaceCaptureStore:
             " faces, candidates, moment_source, sub_frames, main_frames, seconds, error, updated_at)"
             " values (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)"
             " on conflict(event_id) do update set state = excluded.state,"
-            " attempts = face_capture_events.attempts + 1, faces = excluded.faces,"
+            # Attempts count per capture version, so a version bump retries afresh.
+            " attempts = case when face_capture_events.capture_version = excluded.capture_version"
+            " then face_capture_events.attempts + 1 else 1 end, faces = excluded.faces,"
             " candidates = excluded.candidates, moment_source = excluded.moment_source,"
             " sub_frames = excluded.sub_frames, main_frames = excluded.main_frames, seconds = excluded.seconds,"
             " error = excluded.error, capture_version = excluded.capture_version, updated_at = excluded.updated_at",
