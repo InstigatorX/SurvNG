@@ -44,7 +44,7 @@ const ExportCenterPage = lazyExport(() => import("./timeline/TimelinePages.jsx")
 const RecordingsPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "RecordingsPage");
 const SemanticSearchPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "SemanticSearchPage");
 const ConfigPage = lazyExport(() => import("./admin/ConfigPage.jsx"), "ConfigPage");
-const FacesPage = lazyExport(() => import("./people/FacesPage.jsx"), "FacesPage");
+const PeoplePage = lazyExport(() => import("./people/PeoplePage.jsx"), "PeoplePage");
 const PropertyPage = lazyExport(() => import("./property/PropertyPage.jsx"), "PropertyPage");
 
 function WorkspaceFallback() {
@@ -139,7 +139,7 @@ function App() {
                   : workspacePage === "incidents"
                   ? <IncidentsPage timeZone={timeZone} canCorrectIncident={!viewer} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
                   : workspacePage === "people"
-                    ? <FacesPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
+                    ? <PeoplePage timeZone={timeZone} />
                     : workspacePage === "property"
                       ? <PropertyPage canEdit={!viewer} />
                       : workspacePage === "live"
