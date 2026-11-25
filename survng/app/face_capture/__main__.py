@@ -109,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("database_dir", type=Path, help="directory holding survng.sqlite3")
     parser.add_argument("--recording-index", type=Path, default=Path("runtime/recording-index/recordings.sqlite3"))
     parser.add_argument("--config", type=Path, default=Path("config.json"))
-    parser.add_argument("--cameras", required=True, help="comma-separated camera ids")
+    parser.add_argument("--cameras", required=True, help="comma-separated camera ids, or all")
     parser.add_argument("--events-per-camera", type=int, default=5)
     parser.add_argument("--hours", type=float, default=72.0, help="look this far back for person events")
     parser.add_argument("--device", default="CPU", help="OpenVINO device for the person detector")
@@ -118,6 +118,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sheets", type=Path, help="write a contact sheet per camera here")
     parser.add_argument("--json", type=Path, help="write a per-event summary here")
     parser.add_argument("--store-dir", type=Path, help="also record the faces in a face capture store here")
+    parser.add_argument("--seed", action="store_true",
+                        help="process every person event in --hours, newest first, into --store-dir; events the "
+                             "store already finished are skipped, so a stopped run resumes")
     parser.add_argument("--reference", type=Path,
                         help="face_frame_search --json report (with --yunet) to compare against")
     args = parser.parse_args(argv)
@@ -141,19 +144,47 @@ def main(argv: list[str] | None = None) -> int:
     people = _People(config, args.device)
     settings = CaptureSettings.from_config(config)
     store = FaceCaptureStore(args.store_dir) if args.store_dir else None
+    if args.seed and store is None:
+        parser.error("--seed needs --store-dir")
     events = sqlite3.connect(f"file:{args.database_dir / 'survng.sqlite3'}?mode=ro", uri=True)
     now = datetime.now(timezone.utc)
-    cameras = [item.strip() for item in args.cameras.split(",") if item.strip()]
+    since = (now - timedelta(hours=args.hours)).isoformat()
+    until = (now - timedelta(seconds=90)).isoformat()
+    wanted = None if args.cameras.strip() == "all" else [c.strip() for c in args.cameras.split(",") if c.strip()]
+    if args.seed:
+        candidates = person_events(events, since=since, until=until, cameras=wanted, limit=1_000_000)
+        seen = store.attempts(event_id for event_id, *_ in candidates)
+        queue = [c for c in candidates if _needs_capture(seen.get(c[0]))]
+        print(f"seeding {len(queue)} of {len(candidates)} person events (the rest are already captured)", flush=True)
+        batches = [(None, queue)]
+    else:
+        cameras = wanted or sorted({c for _, c, _, _ in person_events(events, since=since, until=until)})
+        batches = [
+            (camera_id, person_events(events, since=since, until=until, cameras=[camera_id],
+                                      limit=args.events_per_camera))
+            for camera_id in cameras
+        ]
     summary: list[dict[str, Any]] = []
-    for camera_id in cameras:
-        chosen = person_events(
-            events, since=(now - timedelta(hours=args.hours)).isoformat(),
-            until=(now - timedelta(seconds=90)).isoformat(), cameras=[camera_id], limit=args.events_per_camera,
-        )
-        rows = _rows_reader(args.recording_index, camera_id)
+    readers: dict[str, Any] = {}
+    done = 0
+    seed_started = time.monotonic()
+    for camera_label, chosen in batches:
         results: list[tuple[int, CaptureResult]] = []
-        for event_id, _, epoch, qualification in chosen:
+        for event_id, camera_id, epoch, qualification in chosen:
+            rows = readers.setdefault(camera_id, _rows_reader(args.recording_index, camera_id))
             started = time.monotonic()
+            if args.seed:
+                try:
+                    _seed_one(store, engine, people, settings, config, events, rows, ffmpeg, ffprobe, hardware,
+                              event_id, camera_id, epoch, qualification)
+                except Exception as exc:  # one bad event must not stop seeding
+                    store.record_failure(event_id=event_id, camera_id=camera_id, event_epoch=epoch, error=str(exc))
+                    print(f"{camera_id} {event_id}: failed: {exc}", flush=True)
+                done += 1
+                rate = (time.monotonic() - seed_started) / done
+                print(f"[{done}/{len(chosen)}] {camera_id} {event_id} in {time.monotonic() - started:.1f} s; "
+                      f"about {rate * (len(chosen) - done) / 3600:.1f} h left", flush=True)
+                continue
             plan = plan_offsets(config, qualification, epoch, camera_id)
             low, high = event_window(plan, settings.margin_seconds)
             # Reaches past the window by the moment radius, as the service does.
@@ -193,13 +224,54 @@ def main(argv: list[str] | None = None) -> int:
                 f"{seconds:.1f} s)" + (f" errors: {'; '.join(result.errors)}" if result.errors else ""),
                 flush=True,
             )
-        if args.sheets and results:
-            print(f"contact sheet: {_sheet(camera_id, results, args.sheets)}", flush=True)
+        if args.sheets and results and camera_label:
+            print(f"contact sheet: {_sheet(camera_label, results, args.sheets)}", flush=True)
     if args.json:
         args.json.write_text(json.dumps(summary, indent=1))
     if args.reference:
         print(compare(summary, json.loads(args.reference.read_text()), float(settings.min_size)))
     return 0
+
+
+def _needs_capture(previous: tuple[str, int, int] | None) -> bool:
+    from .service import MAX_ATTEMPTS
+    from .store import CAPTURE_VERSION
+
+    if previous is None:
+        return True
+    state, attempts, version = previous
+    return version < CAPTURE_VERSION or (state == "failed" and attempts < MAX_ATTEMPTS)
+
+
+def _seed_one(store, engine, people, settings, config, events, rows, ffmpeg, ffprobe, hardware,
+              event_id, camera_id, epoch, qualification) -> None:
+    from ..recording_media import mp4_video_dimensions
+
+    started = time.monotonic()
+    plan = plan_offsets(config, qualification, epoch, camera_id)
+    low, high = event_window(plan, settings.margin_seconds)
+    reach = settings.moment_radius_seconds + 1.0
+    window_rows = rows_for_window(rows, epoch + low - reach, epoch + high + reach)
+    main_rows = window_rows("main", epoch + low, epoch + high)
+    main_size = next((size for row in main_rows if (size := mp4_video_dimensions(Path(row["path"])))), None)
+    result = capture_event(
+        plan_offsets=plan,
+        main_frames=main_stream_source(window_rows, epoch, ffmpeg, ffprobe, hardware),
+        sub_frames=sub_stream_source(window_rows, epoch, ffmpeg),
+        find_faces=lambda crop: engine.capture(crop, embed=False),
+        main_size=main_size,
+        stored_people=stored_people(events, event_id, epoch, main_size),
+        detect_people=people,
+        capture_faces=engine.capture,
+        settings=settings,
+    )
+    if not result.faces and (result.main_frames == 0 or any(e.startswith("main stream") for e in result.errors)):
+        # As the service does: no main-stream frames is a failed attempt, not "no faces".
+        store.record_failure(event_id=event_id, camera_id=camera_id, event_epoch=epoch,
+                             error="; ".join(result.errors)[:500] or "no main-stream frames")
+        return
+    store.record(event_id=event_id, camera_id=camera_id, event_epoch=epoch, result=result,
+                 embedding_model=engine.embedding_model, seconds=time.monotonic() - started)
 
 
 def compare(summary: list[dict[str, Any]], reference: dict[str, Any], minimum: float) -> str:
