@@ -95,6 +95,9 @@ class EventResult:
     baseline_offsets: list[float] = field(default_factory=list)
     # rule -> (side, offset, thumbnail) of the best face anywhere in the window
     thumbs: dict[str, tuple[float, float, Any]] = field(default_factory=dict)
+    # face id -> AdaFace unit embedding (float16), faces that aligned only
+    embeddings: dict[str, np.ndarray] = field(default_factory=dict)
+    face_count: int = 0
 
 
 def nearest_frame(frames: list[FrameResult], target: float, tolerance: float) -> FrameResult | None:
@@ -303,16 +306,18 @@ class FrameSearcher:
         self.recognizer, self.adaface = _quality_models(detector_config)
         self.yunet = yunet
 
-    def quality_norm(self, crop: np.ndarray) -> float:
-        """AdaFace feature norm of the face aligned as the live path aligns it."""
+    def quality_norm(self, crop: np.ndarray) -> tuple[float, np.ndarray | None]:
+        """AdaFace (norm, unit embedding) of the face aligned as the live path aligns it."""
         try:
             aligned = self.recognizer._align(crop)
         except ValueError:
-            return 0.0
+            return 0.0, None
         return self._norm(aligned)
 
-    def quality_norm_from_points(self, frame: np.ndarray, points: np.ndarray) -> float:
-        """AdaFace norm after aligning on a detector's own five landmarks."""
+    def quality_norm_from_points(
+        self, frame: np.ndarray, points: np.ndarray,
+    ) -> tuple[float, np.ndarray | None]:
+        """AdaFace (norm, unit embedding) after aligning on a detector's own landmarks."""
         import cv2
 
         target = self.recognizer._ARCFACE_TEMPLATE.copy()
@@ -320,22 +325,22 @@ class FrameSearcher:
         target[:, 1] *= self.recognizer.input_shape[1] / 112.0
         matrix, _ = cv2.estimateAffinePartial2D(points.astype(np.float32), target, method=cv2.LMEDS)
         if matrix is None or not np.all(np.isfinite(matrix)):
-            return 0.0
+            return 0.0, None
         aligned = cv2.warpAffine(
             frame, matrix, self.recognizer.input_shape,
             flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE,
         )
         return self._norm(aligned)
 
-    def _norm(self, aligned: np.ndarray) -> float:
+    def _norm(self, aligned: np.ndarray) -> tuple[float, np.ndarray]:
         import torch
 
         tensor = torch.from_numpy(
             ((aligned.astype(np.float32) - 127.5) / 127.5).transpose(2, 0, 1)[None].copy()
         )
         with torch.inference_mode():
-            _, norm = self.adaface(tensor)
-        return float(norm.reshape(-1)[0])
+            embedding, norm = self.adaface(tensor)
+        return float(norm.reshape(-1)[0]), embedding.numpy().reshape(-1).astype(np.float32)
 
     def search(self, frame: Any, offset: float) -> FrameResult:
         from .motion_pipeline.object_detection import RecordedMotionObjectDetector, _box
@@ -401,14 +406,16 @@ class FrameSearcher:
                 points = np.asarray(face["landmarks_from_box"], dtype=np.float32) + np.asarray(
                     [box[0], box[1]], dtype=np.float32
                 )
-                norm = self.quality_norm_from_points(frame, points)
+                norm, embedding = self.quality_norm_from_points(frame, points)
             else:
-                norm = self.quality_norm(crop)
+                norm, embedding = self.quality_norm(crop)
             measured.append({
                 "detector": face["detector"],
                 "side": round(min(box[2] - box[0], box[3] - box[1]), 1),
                 "confidence": round(float(face.get("confidence") or 0.0), 3),
                 "norm": round(norm, 2),
+                "box": [round(value, 1) for value in box],
+                "_embedding": embedding,
                 "_thumb": thumb,
             })
         return FrameResult(round(offset, 3), usefulness, measured, heights)
@@ -567,6 +574,11 @@ def search_event(
                 found = searcher.search(frame, float(segment_start) + pts - event_epoch)
                 for face in found.faces:
                     thumb = face.pop("_thumb")
+                    embedding = face.pop("_embedding", None)
+                    face["id"] = f"{event_id}:{result.face_count}"
+                    result.face_count += 1
+                    if embedding is not None:
+                        result.embeddings[face["id"]] = embedding.astype(np.float16)
                     for rule in RULES:
                         key = f"{face['detector']}/{rule}"
                         best = result.thumbs.get(key)
@@ -613,6 +625,7 @@ def summarize(results: list[EventResult], face_min_size: int) -> dict[str, Any]:
         plan = [frame for frame in result.frames if low <= frame.offset <= high]
         event: dict[str, Any] = {
             "event_id": result.event_id,
+            "event_epoch": result.event_epoch,
             "frames": len(result.frames),
             "baseline_frames": len(baseline),
             "baseline_offsets": result.baseline_offsets,
@@ -757,6 +770,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--yunet-model", type=Path, default=YUNET_MODEL)
     parser.add_argument("--yunet-threshold", type=float, default=0.6, help="YuNet score threshold")
     parser.add_argument("--json", type=Path, help="also write the full report here")
+    parser.add_argument("--embeddings", type=Path, help="write AdaFace embeddings (.npz, ids match face ids in --json)")
     parser.add_argument("--sheets", type=Path, help="write per-camera contact sheets of best faces here")
     args = parser.parse_args(argv)
 
@@ -810,6 +824,12 @@ def main(argv: list[str] | None = None) -> int:
     }
     if args.json:
         args.json.write_text(json.dumps({"detectors": reports}, indent=1))
+    if args.embeddings:
+        ids = [face_id for result in results for face_id in result.embeddings]
+        vectors = [vector for result in results for vector in result.embeddings.values()]
+        np.savez_compressed(
+            args.embeddings, ids=np.asarray(ids), vectors=np.asarray(vectors, dtype=np.float16).reshape(-1, 512)
+        )
     if args.sheets:
         for name in names:
             write_sheets(for_detector(results, name), args.sheets / name)
