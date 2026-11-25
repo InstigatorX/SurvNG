@@ -44,6 +44,8 @@ SETTLE_SECONDS = 90.0
 SETTLE_SLACK_SECONDS = 60.0
 MAX_ATTEMPTS = 3
 CANDIDATE_BATCH = 200
+# While a seed runs, every this-many-th capture is one of its events.
+SEED_EVERY = 4
 # After a full scan finds nothing to do, passes only look at newer events,
 # with a full rescan this often (retries, capture version changes).
 FULL_SCAN_SECONDS = 3600.0
@@ -88,6 +90,7 @@ class FaceCaptureService:
         # event id -> (deferrals, monotonic time it may be tried again); failed
         # events are held here too, with no deferrals counted.
         self._deferred: dict[int, tuple[int, float]] = {}
+        self._since_seed = 0  # captures since the last seed event
         # Every event at or below this id is finished for good (done or out
         # of attempts) as of the last full scan.
         self._scan_floor = 0
@@ -336,39 +339,64 @@ class FaceCaptureService:
     def run_once(self, now: datetime | None = None) -> bool:
         """Capture one event if one is due; True when an event was captured.
 
-        A deferred or failed capture returns False, so the loop waits the
-        idle interval before the next pass (and a failure's next attempt).
+        New events come first, but while a seed runs every ``SEED_EVERY``th
+        capture is one of its events, so a busy day cannot starve it. A
+        deferred or failed capture returns False, so the loop waits the idle
+        interval before the next pass (and a failure's next attempt).
         """
         if not self.enabled():
             return False
         self._prune_if_due()
         self._group(None)  # faces stored before grouping, or by the offline seed
-        candidate = self.next_event(now)
-        if candidate is not None:
-            failed = self.failed
-            # A capture deferred for incident work waits the idle interval.
-            return self.capture(*candidate) is not None and self.failed == failed
-        # Nothing new waits: work through a requested seed of past events.
         seed = self.store.active_seed()
-        if seed is None or seed["state"] != "running":
-            return False
-        candidate, more = self.next_seed_event(seed, now)
+        running = seed if seed is not None and seed["state"] == "running" else None
+        candidate = None
+        from_seed = False
+        if running is not None and self._since_seed >= SEED_EVERY - 1:
+            candidate, more = self._seed_turn(running, now)
+            from_seed = candidate is not None
         if candidate is None:
-            if not more:
-                try:
-                    self.store.set_seed_state(seed["id"], "done")
-                except SeedConflict:
-                    pass  # paused or cancelled during this pass; resume rescans it
+            candidate = self.next_event(now)
+        if candidate is None and running is not None and not from_seed:
+            candidate, more = self._seed_turn(running, now)
+            from_seed = candidate is not None
+        if candidate is None:
             return False
+        self._since_seed = 0 if from_seed else self._since_seed + 1
         failed = self.failed
         kept = self.capture(*candidate)
-        after = self.store.attempts([candidate[0]]).get(candidate[0])
-        if after is not None and after[2] == CAPTURE_VERSION:
-            if after[0] == "done" and kept is not None:
-                self.store.seed_progress(seed["id"], faces=kept)
-            elif after[0] == "failed" and after[1] >= MAX_ATTEMPTS and self.failed != failed:
-                self.store.seed_progress(seed["id"], failed=True)
+        self._count_toward_seed(seed, candidate, kept, failed)
+        # A capture deferred for incident work waits the idle interval.
         return kept is not None and self.failed == failed
+
+    def _seed_turn(self, seed: dict[str, Any], now: datetime | None):
+        candidate, more = self.next_seed_event(seed, now)
+        if candidate is None and not more:
+            try:
+                self.store.set_seed_state(seed["id"], "done")
+            except SeedConflict:
+                pass  # paused or cancelled during this pass; resume rescans it
+        return candidate, more
+
+    def _count_toward_seed(self, seed, candidate, kept, failed_before) -> None:
+        """An event in the active seed's range and cameras counts toward it when
+        it finishes (captured, or out of attempts), however it was picked: the
+        regular catch-up often reaches a seed's newest events first."""
+        if seed is None:
+            return
+        event_id, camera_id, epoch = candidate[0], candidate[1], float(candidate[2])
+        if seed.get("cameras") and camera_id not in seed["cameras"]:
+            return
+        # The range is by creation time; the event's epoch is within a minute of it.
+        if not float(seed["start_epoch"]) - 60.0 <= epoch <= float(seed["end_epoch"]) + 60.0:
+            return
+        after = self.store.attempts([event_id]).get(event_id)
+        if after is None or after[2] != CAPTURE_VERSION:
+            return
+        if after[0] == "done" and kept is not None:
+            self.store.seed_progress(seed["id"], faces=kept)
+        elif after[0] == "failed" and after[1] >= MAX_ATTEMPTS and self.failed != failed_before:
+            self.store.seed_progress(seed["id"], failed=True)
 
     def capture(self, event_id: int, camera_id: str, epoch: float, qualification: dict[str, Any]) -> int | None:
         """Capture one event; the number of faces kept, or None when deferred."""

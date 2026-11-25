@@ -193,3 +193,31 @@ def test_a_finished_seed_counts_every_event_in_its_range(tmp_path):
     seed = store.create_seed(start_epoch=0, end_epoch=10, cameras=[], total=5)
     store.seed_progress(seed, faces=2)
     assert store.set_seed_state(seed, "done")["processed"] == 5
+
+
+def test_events_the_regular_catch_up_captures_count_toward_the_seed(tmp_path, monkeypatch):
+    # Both events are inside the 24 h catch-up window and the seed's range.
+    service, _ = _service(tmp_path, [(1, "gate", PERSON, _at(5)), (2, "gate", PERSON, _at(3))])
+    monkeypatch.setattr(service_module, "capture_event", lambda **k: CaptureResult(faces=[_face()], main_frames=5))
+    start, end = (NOW - timedelta(hours=10)).timestamp(), (NOW - timedelta(hours=1)).timestamp()
+    seed_id = service.store.create_seed(start_epoch=start, end_epoch=end, cameras=[], total=2)
+    while service.run_once(NOW):
+        pass
+    service.run_once(NOW)
+    seed = service.store.seeds(1)[0]
+    assert (seed["id"], seed["processed"], seed["faces"], seed["state"]) == (seed_id, 2, 2, "done")
+
+
+def test_a_running_seed_gets_every_fourth_capture_while_new_events_wait(tmp_path, monkeypatch):
+    new = [(10 + i, "gate", PERSON, _at(1 + i * 0.1)) for i in range(8)]   # inside the 24 h catch-up
+    old = [(1, "foyer", PERSON, _at(72)), (2, "foyer", PERSON, _at(73))]   # only the seed reaches these
+    service, _ = _service(tmp_path, old + new)
+    monkeypatch.setattr(service_module, "capture_event", lambda **k: CaptureResult(faces=[_face()], main_frames=5))
+    service.store.create_seed(start_epoch=(NOW - timedelta(days=5)).timestamp(),
+                              end_epoch=(NOW - timedelta(days=2)).timestamp(), cameras=["foyer"], total=2)
+    order = []
+    real = service.capture
+    monkeypatch.setattr(service, "capture", lambda *c: order.append(c[0]) or real(*c))
+    for _ in range(8):
+        service.run_once(NOW)
+    assert [i for i, event in enumerate(order) if event in (1, 2)] == [3, 7]
