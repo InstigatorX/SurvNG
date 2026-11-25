@@ -89,6 +89,9 @@ class CapturedFace:
     norm: float
     embedding: np.ndarray
     crop: np.ndarray
+    # (width, height) of the main-stream frame the box is in; binds the face
+    # to a scene object whose boxes are in the detector's frame.
+    frame_size: tuple[int, int] | None = None
 
 
 @dataclass
@@ -268,7 +271,8 @@ def capture_event(
                         if not ok:
                             continue
                         entry = {**face, "box": box, "landmarks": landmarks,
-                                 "embedding": np.asarray(face["embedding"], dtype=np.float32)}
+                                 "embedding": np.asarray(face["embedding"], dtype=np.float32),
+                                 "frame_size": (int(width), int(height))}
                         jpeg = encoded.tobytes()
                         heapq.heappush(found, (float(face["norm"]), len(found) + result.candidates, offset,
                                                person, entry, jpeg))
@@ -300,6 +304,7 @@ def capture_event(
             norm=float(face["norm"]),
             embedding=np.asarray(face["embedding"], dtype=np.float32),
             crop=np.empty((0, 0, 3), np.uint8),
+            frame_size=face.get("frame_size"),
         ))
         jpegs[id(candidates[-1])] = jpeg
     result.faces = keep_best(candidates, settings.faces_per_track)

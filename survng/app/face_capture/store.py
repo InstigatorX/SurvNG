@@ -190,13 +190,15 @@ class FaceCaptureStore:
             connection.executemany(
                 "insert into face_captures (event_id, camera_id, track, offset_seconds, captured_epoch, box_json,"
                 " landmarks_json, detector, confidence, norm, embedding, embedding_model, crop_path,"
-                " capture_version, created_at) values (?, ?, ?, ?, ?, ?, ?, 'yunet', ?, ?, ?, ?, ?, ?, ?)",
+                " capture_version, created_at, frame_width, frame_height)"
+                " values (?, ?, ?, ?, ?, ?, ?, 'yunet', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         event_id, camera_id, face.track, face.offset, event_epoch + face.offset,
                         json.dumps(list(face.box)), json.dumps(face.landmarks), face.confidence, face.norm,
                         np.asarray(face.embedding, dtype=np.float32).tobytes(), embedding_model, path,
                         CAPTURE_VERSION, now,
+                        *(face.frame_size or (None, None)),
                     )
                     for face, path in written
                 ],

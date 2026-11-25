@@ -81,19 +81,38 @@ function NameBox({ busy, onName }) {
   </form>;
 }
 
-export function IncidentPeople({ eventIds, onNames }) {
+async function fetchFacesForIncident(incidentId, signal) {
+  const response = await fetch(`/api/face-captures/by-incident/${encodeURIComponent(incidentId)}`, { signal });
+  if (!response.ok) return null;
+  return response.json();
+}
+
+/** object id -> names of the people its faces were bound to ([] = seen, not named). */
+export function objectNames(found) {
+  const named = new Map((found?.groups || []).filter((group) => !group.ignored).map((group) => [group.id, group.person_name]));
+  const result = {};
+  for (const [objectId, groupIds] of Object.entries(found?.objects || {})) {
+    const live = groupIds.filter((id) => named.has(id));
+    if (!live.length) continue;
+    result[objectId] = [...new Set(live.map((id) => named.get(id)).filter(Boolean))];
+  }
+  return result;
+}
+
+export function IncidentPeople({ incidentId = null, eventIds, onNames, onObjects }) {
   const [found, setFound] = useState(null);
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState("");
-  const idsKey = (eventIds || []).join(",");
+  const idsKey = `${incidentId || ""}|${(eventIds || []).join(",")}`;
   const signalRef = useRef(null);
 
   const load = useCallback(async (signal) => {
-    const next = await fetchFacesForEvents(eventIds, signal).catch(() => null);
+    const next = await (incidentId ? fetchFacesForIncident(incidentId, signal) : fetchFacesForEvents(eventIds, signal)).catch(() => null);
     // A newer lookup, or another incident after navigation, owns the state now.
     if (signal.aborted) return;
     setFound(next);
     onNames?.((next?.groups || []).filter((group) => group.person_name && !group.ignored).map((group) => group.person_name));
+    onObjects?.(objectNames(next));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idsKey]);
 

@@ -52,6 +52,32 @@ def _epoch(value: str, name: str) -> float:
     return parsed.timestamp()
 
 
+def _main_sizes(manager: Any) -> Callable[[str], tuple[int, int] | None]:
+    """Main-stream frame size per camera, from its newest main recording (for
+    faces stored before their frame size was)."""
+    from ..recording_media import mp4_video_dimensions
+
+    cache: dict[str, tuple[int, int] | None] = {}
+
+    def size(camera_id: str) -> tuple[int, int] | None:
+        if camera_id not in cache:
+            cache[camera_id] = None
+            now = datetime.now(timezone.utc).timestamp()
+            try:
+                rows = manager.recorder.recording_rows_between(
+                    camera_id, now - 6 * 3600, now, "main", discover_missing=False)
+            except Exception:
+                rows = []
+            for row in reversed(rows or []):
+                found = mp4_video_dimensions(Path(row["path"]))
+                if found:
+                    cache[camera_id] = found
+                    break
+        return cache[camera_id]
+
+    return size
+
+
 def create_face_capture_router(deps: FaceCaptureRouteDependencies) -> APIRouter:
     router = APIRouter()
 
@@ -162,6 +188,14 @@ def create_face_capture_router(deps: FaceCaptureRouteDependencies) -> APIRouter:
         if any(not 0 < event_id < 2**63 for event_id in event_ids):
             raise HTTPException(status_code=400, detail="ids must be positive event ids")
         return groups().for_events(event_ids)
+
+    @router.get("/api/face-captures/by-incident/{incident_id}")
+    def faces_by_incident(incident_id: str) -> dict[str, Any]:
+        manager = deps.get_manager()
+        incident = manager.events.scene_incident(incident_id)
+        if not incident:
+            raise HTTPException(status_code=404, detail="incident not found")
+        return groups().for_incident(incident, _main_sizes(manager))
 
     @router.get("/api/face-captures/{face_id}/image")
     def face_image(face_id: int) -> FileResponse:

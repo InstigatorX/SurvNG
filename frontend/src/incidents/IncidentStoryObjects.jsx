@@ -27,7 +27,7 @@ function MiniBar({ object, line }) {
   })}</span>;
 }
 
-export function ObjectCards({ objects, line, selectedId, cameraName, identities, onSelect }) {
+export function ObjectCards({ objects, line, selectedId, cameraName, identities, objectNames = null, onSelect }) {
   return <div className="story-cards">
     {cardOrder(objects).map((object) => {
       const selected = String(object.id) === String(selectedId);
@@ -37,7 +37,11 @@ export function ObjectCards({ objects, line, selectedId, cameraName, identities,
         <ObjectThumb object={object} />
         <span className="story-card-body">
           <span className="story-card-title">{objectName(object)}{object.kind === "uncertain" ? <> <span className="story-uncertain-tag">uncertain</span></> : null}</span>
-          <span className="story-card-summary">{objectSummary(object, { cameraName, identities })}</span>
+          <span className="story-card-summary">{objectSummary(object, {
+            cameraName,
+            // A face bound to this tracked person names it; otherwise the incident's identities.
+            identities: objectNames?.[object.id] ? objectNames[object.id].map((name) => ({ name })) : identities,
+          })}</span>
           <MiniBar object={object} line={line} />
         </span>
       </button>;

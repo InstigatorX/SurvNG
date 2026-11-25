@@ -235,3 +235,26 @@ indoor cameras (downstairs 7 of 10, foyer 6 of 8), where faces show for one or
 two frames, and person detection on every main-stream frame is now most of
 the cost. Ranking moments by the face seen on the sub-stream instead of by
 person height lifted the kept share from 87% and fixed several indoor misses.
+
+## Binding faces to tracked people (2026-11-25)
+
+A captured face is tied to the incident's scene object (tracked person) whose
+box holds the face's centre on the same camera at the face's moment
+(`face_capture/binding.py`). Scene observations are sparse, a median of 1.7 s
+from a face, so the person's box is interpolated between two of its
+observations at most 4 s apart, or taken from its nearest observation within
+2 s; the same event is preferred. When no box holds the face but only one
+person was tracked on that camera in the incident, the face is theirs. Faces
+store the size of their main-stream frame (faces stored before that use the
+camera's newest main recording), because scene boxes are in the detector's
+frame.
+
+Binding is worked out when an incident is shown
+(`GET /api/face-captures/by-incident/{id}`), not stored: observations keep
+arriving while an incident is open. Each person card on the incident page shows
+the name of the faces bound to it, across every camera that scene object
+spans.
+
+Measured on this host's 173 captured faces in 13 incidents, 11 of them with
+more than one tracked person: 151 faces (87%) bound. A one-second
+nearest-observation rule bound 59%.

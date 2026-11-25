@@ -68,6 +68,10 @@ def ensure_group_schema(connection) -> None:
         # auto: placed by similarity; moved: placed by a person (kept on regroup)
         connection.execute("alter table face_captures add column assignment text not null default ''")
     connection.execute("create index if not exists face_captures_group on face_captures(group_id)")
+    # The frame the face box is in (faces stored before this have none).
+    if "frame_width" not in columns:
+        connection.execute("alter table face_captures add column frame_width integer")
+        connection.execute("alter table face_captures add column frame_height integer")
 
 
 def _centroids(connection) -> tuple[list[int], np.ndarray]:
@@ -296,6 +300,31 @@ class FaceGroups:
         for group in groups:
             group["incident_faces"] = faces[group["id"]]
         return {"events": {str(event): group_ids for event, group_ids in by_event.items()}, "groups": groups}
+
+    def for_incident(
+        self, incident: dict[str, Any], main_size: Any,
+    ) -> dict[str, Any]:
+        """``for_events`` for the incident's events, plus which scene object
+        (tracked person) each group's faces were bound to."""
+        from .binding import bind_faces
+
+        event_ids = incident.get("event_ids") or [event.get("id") for event in incident.get("events") or []]
+        found = self.for_events([int(i) for i in event_ids if i is not None])
+        ids = sorted({int(i) for i in event_ids if i is not None})[:500]
+        objects: dict[str, list[int]] = {}
+        if ids:
+            with self.store._connect() as connection:
+                rows = [dict(row) for row in connection.execute(
+                    f"select id, event_id, camera_id, captured_epoch, box_json, frame_width, frame_height, group_id"
+                    f" from face_captures where event_id in ({','.join('?' * len(ids))}) and group_id is not null",
+                    ids)]
+            bound = bind_faces(rows, incident.get("scene_objects") or [], main_size)
+            group_of = {row["id"]: row["group_id"] for row in rows}
+            for face_id, object_id in bound.items():
+                key = str(object_id)
+                if group_of[face_id] not in objects.setdefault(key, []):
+                    objects[key].append(group_of[face_id])
+        return {**found, "objects": objects}
 
     def face_crop_path(self, face_id: int) -> str | None:
         with self.store._connect() as connection:

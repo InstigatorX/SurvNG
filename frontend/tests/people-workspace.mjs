@@ -77,7 +77,12 @@ const incidentDetailSource = readFileSync(new URL("../src/incidents/IncidentDeta
 const incidentCardSource = readFileSync(new URL("../src/incidents/IncidentCard.jsx", import.meta.url), "utf8");
 const incidentsPageSource = readFileSync(new URL("../src/incidents/IncidentsPage.jsx", import.meta.url), "utf8");
 assert.ok(incidentPeopleSource.includes("/api/face-captures/by-events?ids="));
-assert.match(incidentDetailSource, /<IncidentPeople eventIds=\{incident\.event_ids/);
+assert.match(incidentDetailSource, /<IncidentPeople incidentId=\{incident\.incident_id \|\| currentId\} eventIds=\{incident\.event_ids/);
+// Faces bound to a tracked person name that person's object card.
+assert.ok(incidentPeopleSource.includes("/api/face-captures/by-incident/"));
+assert.match(incidentDetailSource, /objectNames=\{faceObjects\}/);
+const storyObjectsSource = readFileSync(new URL("../src/incidents/IncidentStoryObjects.jsx", import.meta.url), "utf8");
+assert.match(storyObjectsSource, /objectNames\?\.\[object\.id\]/);
 assert.match(incidentDetailSource, /const people = \[\.\.\.new Set\(\[\.\.\.identityNames, \.\.\.faceNames\]\)\]/);
 assert.match(incidentCardSource, /<FaceNameChips names=\{faceNames\} \/>/);
 assert.match(incidentsPageSource, /faceNames=\{incidentFaceNames\[String\(incident\.id\)\]\}/);
