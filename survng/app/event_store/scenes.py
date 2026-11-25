@@ -230,8 +230,11 @@ def _scene_visible_intervals(evidence):
         for previous, item in zip([None, *items], items):
             epoch = _epoch(item["captured_at"])
             if previous is None or epoch - _epoch(previous["captured_at"]) > VISIBLE_INTERVAL_MAX_GAP_SECONDS:
+                # A lone sighting is "observed" unless its attribution already
+                # says it was moving or stationary, so an arrival stays visible.
+                first_state = {"active": "moving", "scene_context": "stationary"}.get(item.get("activity_role"), "observed")
                 current = {"camera_id": camera_id, "episode_id": episode_id, "start_at": item["captured_at"],
-                           "end_at": item["captured_at"], "state": "observed", "observation_id": item["id"],
+                           "end_at": item["captured_at"], "state": first_state, "observation_id": item["id"],
                            "last_observation_id": item["id"], "observation_count": 1, "zones": list(item.get("zones") or [])}
                 intervals.append(current)
                 continue
@@ -1697,6 +1700,7 @@ class EventStoreSceneMixin:
                     conn.execute("insert or replace into scene_aliases values(?,?)",(source,incident_id))
                     conn.execute("update scene_aliases set incident_id=? where incident_id=?",(incident_id,source))
                     conn.execute("update scene_incidents set state='merged' where id=?",(source,))
+                    self._carry_incident_review(conn,source,incident_id)
                     conn.execute("delete from scene_notification_outbox where incident_id=?",(source,))
                     self._scene_merge_shared_objects(conn,incident_id)
                     other_event=matches[source]["event_id"]
@@ -1785,6 +1789,7 @@ class EventStoreSceneMixin:
                     conn.execute("insert or replace into scene_aliases values(?,?)",(source,incident_id))
                     conn.execute("update scene_aliases set incident_id=? where incident_id=?",(incident_id,source))
                     conn.execute("update scene_incidents set state='merged' where id=?",(source,))
+                    self._carry_incident_review(conn,source,incident_id)
                     conn.execute("delete from scene_notification_outbox where incident_id=?",(source,))
                 self._scene_merge_shared_objects(conn,incident_id)
             elif operation=="split":

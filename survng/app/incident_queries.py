@@ -454,11 +454,13 @@ class IncidentQueryService:
         day: str = "",
         time_zone: str = "America/New_York",
         camera_id: str = "",
-        event_type: str = "all",
+        event_type: str = "object",
         object_label: str = "",
         zone: str = "",
     ) -> dict[str, Any]:
-        """The day's listed incidents in list order, with review verdicts."""
+        """The day's listed incidents in list order, with review verdicts.
+
+        Defaults match the incident list's own defaults (objects only)."""
         day_start, day = _local_day_start(day, time_zone)
         day_end = day_start + timedelta(days=1)
         queue = manager.events.incident_review_queue(
@@ -700,7 +702,7 @@ def create_incident_query_router(
         day: str = "",
         time_zone: str = "America/New_York",
         camera_id: str = "",
-        event_type: str = "all",
+        event_type: str = "object",
         object_label: str = "",
         zone: str = "",
     ) -> dict[str, Any]:
@@ -883,12 +885,18 @@ def create_incident_query_router(
         # Opt-in provider wording. The incident page keeps its built-in title
         # unless this returns status "ready"; it never waits on this route.
         def snapshot(active):
+            ai = active.config.audit_ai
+            if not (ai.enabled and ai.incident_titles_enabled):
+                # Off by default: answer without building the incident payload.
+                return None, ai, {}
             incident = active.events.scene_incident(incident_id)
             if incident is None:
                 raise HTTPException(status_code=404, detail="incident was not found")
             names = {camera.id: camera.name or camera.id for camera in active.config.cameras}
             return incident, active.config.audit_ai.model_copy(), names
         incident, ai_config, names = with_manager(snapshot)
+        if incident is None:
+            return {"incident_id": incident_id, "status": "disabled", "title": None}
         # The provider call runs outside the manager lease.
         return titles.title(incident, ai_config, names)
 

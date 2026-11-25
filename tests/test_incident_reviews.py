@@ -74,6 +74,38 @@ def test_later_evidence_marks_a_verdict_as_changed_since_review(store):
     assert store.incident_review(incident_id)["changed_since_review"] is True
 
 
+def test_settling_is_not_a_change_since_review(store):
+    incident_id = add_incident(store, 0)
+    store.set_incident_review(incident_id, "reviewed")
+    before = store.scene_incident(incident_id)["revision"]
+    store.settle_scene_incidents(now=BASE + 1000)
+    assert store.scene_incident(incident_id)["revision"] > before, "settling advances the revision"
+    assert store.incident_review(incident_id)["changed_since_review"] is False
+    assert store.incident_review_queue(start_epoch=BASE - 10, end_epoch=BASE + 10)["items"][0]["changed_since_review"] is False
+
+
+def test_corrections_are_a_change_since_review(store):
+    incident_id = add_incident(store, 0)
+    store.set_incident_review(incident_id, "keep")
+    detail = store.scene_incident(incident_id)
+    store.correct_scene_incident(incident_id, detail["revision"], {"operation": "label", "object_id": detail["scene_objects"][0]["id"], "label": "cyclist"})
+    assert store.incident_review(incident_id)["changed_since_review"] is True
+
+
+def test_merge_carries_the_verdict_to_the_survivor(store):
+    first = add_incident(store, 0)
+    second = add_incident(store, 3600, camera="front-door")
+    store.set_incident_review(first, "nothing_here")
+    revisions = {item: store.scene_incident(item)["revision"] for item in (first, second)}
+    store.correct_scene_incident(second, revisions[second], {"operation": "merge", "incident_ids": [second, first], "expected_revisions": revisions})
+    merged = store.incident_review(second)
+    assert merged["verdict"] == "nothing_here"
+    assert merged["changed_since_review"] is True, "the merged evidence was not what was reviewed"
+    assert store.incident_review(first)["incident_id"] == second, "the old link resolves to the survivor"
+    queue = store.incident_review_queue(start_epoch=BASE - 10, end_epoch=BASE + 8000)
+    assert [(item["incident_id"], item["verdict"]) for item in queue["items"]] == [(second, "nothing_here")]
+
+
 def test_queue_follows_list_order_and_counts_what_is_left(store):
     first = add_incident(store, 0)
     second = add_incident(store, 3600, camera="front-door")
@@ -85,6 +117,9 @@ def test_queue_follows_list_order_and_counts_what_is_left(store):
     assert [item["verdict"] for item in queue["items"]] == ["keep", "reviewed", None]
     assert (queue["total"], queue["reviewed"], queue["kept"], queue["remaining"]) == (3, 1, 1, 1)
     assert store.incident_review_queue(start_epoch=BASE - 10, end_epoch=BASE + 8000, camera_id="front-door")["total"] == 1
+    # Like the incident list, the queue defaults to incidents with objects.
+    store.add_event("driveway", "motion", created_at=datetime.fromtimestamp(BASE + 7300, timezone.utc).isoformat(), objects_json="[]")
+    assert store.incident_review_queue(start_epoch=BASE - 10, end_epoch=BASE + 8000)["total"] == 3
 
 
 def test_review_routes(store):
