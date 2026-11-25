@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- New incident page: a plain-language title, a storyline with one lane per
+  camera episode and a bar per object's visible interval, object cards that
+  focus the player and follow an object across cameras, per-object
+  corrections, and a review mode with Reviewed / Keep for later / Nothing here
+  verdicts (keys E, F, X; J and K move without deciding). Scene objects now
+  carry `visible_intervals`; verdicts are stored per incident and served by
+  `GET /api/incidents/review-queue` and `GET`/`PUT /api/incidents/{id}/review`.
+  A verdict is feedback only and never changes evidence. See
+  `docs/guide/incidents.md`.
 - Database cleanup runs daily at `database_retention.run_at` (host local time,
   default `03:00`) instead of 10 minutes after every restart. A restart only
   starts a catch-up run when the last completed run began more than

@@ -184,6 +184,16 @@ object has supporting observations and visibility times. A selected cover is
 only a view of the evidence. Activity describes observed position/zone changes
 and the last retained sighting; it does not infer disappearance from missing footage.
 
+Each scene object also carries `visible_intervals`: runs of its observations per
+camera episode (`camera_id`, `episode_id`, `start_at`, `end_at`, `state`,
+`observation_id`, `last_observation_id`, `observation_count`, `zones`). A silence
+longer than 60 s starts a new interval, because sampling never establishes
+presence between sightings. `state` is `moving` or `stationary` from the
+activity attribution (`activity_role`), with box overlap only as a fallback for
+evidence without one, and `observed` for a single sighting. Intervals are
+computed before notification payloads trim observations, so the incident
+storyline draws lanes without reconstructing them in the client.
+
 Playback advances chronologically through camera episodes in 15-minute chunks.
 The existing event MP4/HLS routes accept `episode_id`, `start_epoch`, and
 `end_epoch`; the server verifies episode membership and bounds and uses a distinct
@@ -212,6 +222,17 @@ resizing; opening the original preserves its native resolution.
 one of `label`, `associate`, `separate`, `merge`, or `split`. Merge also requires
 expected revisions for its source incidents. Conflicts return 409. The existing
 API security boundary requires admin scope for these mutations.
+
+Review verdicts are operator feedback, not evidence. `PUT
+/api/incidents/{incident_id}/review` with `{"verdict": "reviewed" | "keep" |
+"nothing_here" | null}` records or clears one verdict per incident in
+`scene_incident_reviews`, with the incident revision it was given at; `GET` on the
+same path reads it, including `changed_since_review` once later evidence advances
+the revision. A verdict never changes observations, establishment, corrections or
+the incident list; "Nothing here" does not move an incident to Observations.
+`GET /api/incidents/review-queue?day=&time_zone=` lists the day's listed incidents
+in list order (newest first) with their verdicts and `total`, `reviewed`, `kept`
+and `remaining` counts. The PUT requires admin scope like corrections.
 
 Search, assistant investigation, recording views and notifications resolve the
 same canonical scene. Semantic and appearance indexes can reference retained

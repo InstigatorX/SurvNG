@@ -95,7 +95,7 @@ def test_review_routes(store):
     queue = endpoints[("/api/incidents/review-queue", "GET")]
     assert put(incident_id, {"verdict": "reviewed"})["verdict"] == "reviewed"
     assert get(incident_id)["verdict"] == "reviewed"
-    result = queue(day=DAY, time_zone="America/New_York", event_type="all")
+    result = queue(day=DAY, time_zone="America/New_York")
     assert (result["day"], result["total"], result["remaining"]) == (DAY, 1, 0)
     for body, status in (({}, 422), ({"verdict": "maybe"}, 422)):
         with pytest.raises(HTTPException) as error:

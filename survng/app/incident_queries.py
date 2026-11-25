@@ -453,7 +453,7 @@ class IncidentQueryService:
         day: str = "",
         time_zone: str = "America/New_York",
         camera_id: str = "",
-        event_type: str = "motion",
+        event_type: str = "all",
         object_label: str = "",
         zone: str = "",
     ) -> dict[str, Any]:
@@ -699,7 +699,7 @@ def create_incident_query_router(
         day: str = "",
         time_zone: str = "America/New_York",
         camera_id: str = "",
-        event_type: str = "motion",
+        event_type: str = "all",
         object_label: str = "",
         zone: str = "",
     ) -> dict[str, Any]:
