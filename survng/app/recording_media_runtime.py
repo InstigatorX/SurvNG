@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
-import numpy as np
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
@@ -41,18 +40,10 @@ from .media_sessions import (
 from .recording_media import RECORDING_FMP4_VERSION, concatenated_clip_timing, event_clip_window, mp4_video_dimensions, playback_segment_duration
 from .recording_mp4 import offset_fmp4_timestamps
 from .recorded_decoder import (
-    FAILURE_BITSTREAM,
-    FAILURE_MISSING_INPUT,
     FAILURE_TIMEOUT,
-    FAILURE_UNFINALIZED_INPUT,
-    FAILURE_UNREADABLE_INPUT,
     DecodePlan,
-    build_decode_command,
-    read_bmp_frames,
-    run_decoder,
-    warn_decoder_errors,
-    warn_decoder_failure,
 )
+from .recording_frame_runs import STREAM_FAILURES, FrameRunError, decode_frame_run, raw_bgr_frames  # noqa: F401
 from .recording_frame_steps import (
     FRAME_TIME_TOLERANCE_SECONDS,
     SegmentFrames,
@@ -60,7 +51,6 @@ from .recording_frame_steps import (
     frame_run,
     parse_packet_listing,
     scaled_size,
-    showinfo_times,
 )
 from .recording_routes import recording_source
 from .security import redact_secret_text
@@ -87,28 +77,6 @@ RECORDING_FRAME_MAINTENANCE_BYTES = 32 * 1024 * 1024
 # Frame lists probed at once (a demux each, on request threads).
 RECORDING_FRAME_LIST_PROBES = 2
 # Failures that are about the file, not the GPU: they do not turn it off.
-STREAM_FAILURES = frozenset({
-    FAILURE_BITSTREAM, FAILURE_MISSING_INPUT, FAILURE_UNFINALIZED_INPUT, FAILURE_UNREADABLE_INPUT,
-})
-
-
-def raw_bgr_frames(stream, size: tuple[int, int]) -> list[np.ndarray]:
-    """Whole bgr24 frames of ``size`` from a raw decoder pipe; a partial tail is dropped."""
-    width, height = size
-    frame_bytes = width * height * 3
-    frames: list[np.ndarray] = []
-    while True:
-        chunks: list[bytes] = []
-        remaining = frame_bytes
-        while remaining > 0:
-            chunk = stream.read(remaining)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        if remaining:
-            return frames
-        frames.append(np.frombuffer(b''.join(chunks), dtype=np.uint8).reshape(height, width, 3))
 
 
 class RecordingPrewarmCancelled(RuntimeError):
@@ -1399,61 +1367,28 @@ class RecordingMediaRuntime:
     ) -> list[tuple[float, bytes]]:
         """Decode frames ``[run_start, run_stop)`` once: (source pts, JPEG) each.
 
-        Goes through the shared recorded-frame decoder (thread limits,
-        process handling, failure classes), with the attempts from
-        ``_frame_run_plans``.
+        The shared run decoder does the work, with the attempts from
+        ``_frame_run_plans``; a GPU that fails for other than the file is
+        left alone for a while, as for strips.
         """
-        count = run_stop - run_start
-        # Accurate seek: decoding starts at the keyframe before this time and
-        # frames before it are dropped. FFmpeg seeks from the file's start
-        # time, and -copyts -start_at_zero reports each frame's PTS from it
-        # too: the same origin as the frame list (and preview.jpg).
-        seek = f'{max(0.0, frames.times[run_start] - FRAME_TIME_TOLERANCE_SECONDS):.6f}'
-        result = None
-        for plan in plans:
-            if plan.backend == 'cpu':
-                scale = f'scale={size[0]}:{size[1]}' if size else f"scale='min({width},iw)':-2"
-                video_filter = f'{scale},showinfo'
-            else:
-                video_filter = f'{plan.download_filter},showinfo'
-            command = build_decode_command(
-                ffmpeg_path, source_path, plan=plan, loglevel='info', seek=seek, copyts=True,
-                start_at_zero=True, first_video_stream=True, video_filter=video_filter,
-                passthrough_timestamps=True, frames=count,
-                # Raw frames of a known size skip a BMP encode and decode each.
-                transport='raw' if size else 'bmp',
+        try:
+            run = decode_frame_run(
+                ffmpeg_path, source_path, frames, run_start, run_stop, width,
+                size=size, plans=plans, consumer='frame_step',
+                hardware_timeout=RECORDING_STRIP_HARDWARE_TIMEOUT_SECONDS,
+                cpu_timeout=RECORDING_FRAME_RUN_TIMEOUT_SECONDS,
             )
-            on_gpu = plan.backend != 'cpu'
-            result = run_decoder(
-                command, backend=plan.backend,
-                # A run takes well under a second on the GPU; one that takes
-                # this long is hung, and the CPU still has its own budget.
-                timeout=RECORDING_STRIP_HARDWARE_TIMEOUT_SECONDS if on_gpu else RECORDING_FRAME_RUN_TIMEOUT_SECONDS,
-                stdout_reader=(lambda stream: raw_bgr_frames(stream, size)) if size else read_bmp_frames,
-            )
-            warn_decoder_errors('frame_step', source_path, plan.backend, result.stderr)
-            if result.ok and result.output and (not on_gpu or len(result.output) >= count):
-                break
-            if on_gpu:
-                if result.ok or result.failure in STREAM_FAILURES:
-                    # Frames missing, or a problem with this file: the CPU
-                    # tries it, and the GPU stays in use for other files.
-                    warn_decoder_failure('frame_step', source_path, result)
-                    continue
-                # A broken or hung GPU must not cost every run its timeout.
+        except FrameRunError as exc:
+            if exc.hardware_failed:
                 self.recording_strip_hardware_retry_at = time.monotonic() + RECORDING_STRIP_HARDWARE_RETRY_SECONDS
-                LOGGER.warning(
-                    'recording frame run: hardware decode failed for %s, using the CPU: %s',
-                    source_path.name, redact_secret_text(result.describe()),
-                )
-                continue
-            warn_decoder_failure('frame_step', source_path, result)
-        if result is None or not result.ok or not result.output:
-            if result is not None and result.failure == FAILURE_TIMEOUT:
-                raise HTTPException(status_code=504, detail='recording frame timed out')
-            raise HTTPException(status_code=500, detail='recording frame failed')
+            if exc.failure == FAILURE_TIMEOUT:
+                raise HTTPException(status_code=504, detail='recording frame timed out') from exc
+            raise HTTPException(status_code=500, detail='recording frame failed') from exc
+        if run.hardware_failed:
+            # A broken or hung GPU must not cost every run its timeout.
+            self.recording_strip_hardware_retry_at = time.monotonic() + RECORDING_STRIP_HARDWARE_RETRY_SECONDS
         decoded: list[tuple[float, bytes]] = []
-        for pts, image in zip(showinfo_times(result.stderr), result.output):
+        for pts, image in run.frames:
             ok, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, RECORDING_FRAME_JPEG_QUALITY])
             if not ok:
                 raise HTTPException(status_code=500, detail='recording frame failed')

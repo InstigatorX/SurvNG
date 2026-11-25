@@ -264,13 +264,14 @@ class FrameStepDecodeTest(unittest.TestCase):
 
     def test_the_gpu_decodes_and_scales_under_auto_and_the_cpu_takes_over(self) -> None:
         from survng.app import recording_media_runtime as runtime_module
+        from survng.app import recording_frame_runs as frame_runs_module
         from survng.app.recorded_decoder import FAILURE_HARDWARE_INIT, DecodeResult
 
         path = self.clip("gpu.mp4", seconds=1.0)
         row = {"path": str(path), "start_epoch": 1000.0, "end_epoch": 1001.0}
         frames = self.segment_frames(row)
         commands: list[list[str]] = []
-        real_run_decoder = runtime_module.run_decoder
+        real_run_decoder = frame_runs_module.run_decoder
 
         def run_decoder(command, **kwargs):
             commands.append(list(command))
@@ -288,14 +289,14 @@ class FrameStepDecodeTest(unittest.TestCase):
                     self.runtime, "_ffmpeg_vaapi_info",
                     return_value={"available": True, "device": "/dev/dri/renderD129"},
                 ),
-                patch.object(runtime_module, "run_decoder", side_effect=run_decoder),
+                patch.object(frame_runs_module, "run_decoder", side_effect=run_decoder),
                 patch.object(runtime_module, "mp4_video_dimensions", return_value=dimensions),
             ):
                 return self.runtime._recording_step_frame(row, epoch, width=320)
 
         self.addCleanup(setattr, self.runtime, "recording_strip_hardware_retry_at", 0.0)
         self.runtime.recording_strip_hardware_retry_at = 0.0
-        with self.assertLogs("survng.app.recording_media_runtime", level="WARNING"):
+        with self.assertLogs("survng.app.recording_frame_runs", level="WARNING"):
             image, actual = step(1000.0 + frames.times[3])
         # Tried on the GPU first, decoding and scaling there, then the CPU.
         self.assertEqual(len(commands), 2)
@@ -344,12 +345,13 @@ class FrameStepDecodeTest(unittest.TestCase):
 
     def test_a_short_or_failed_gpu_run_falls_back_without_turning_the_gpu_off(self) -> None:
         from survng.app import recording_media_runtime as runtime_module
+        from survng.app import recording_frame_runs as frame_runs_module
         from survng.app.recorded_decoder import FAILURE_BITSTREAM, DecodeResult
 
         path = self.clip("partial.mp4", seconds=1.0)
         row = {"path": str(path), "start_epoch": 1000.0, "end_epoch": 1001.0}
         frames = self.segment_frames(row)
-        real_run_decoder = runtime_module.run_decoder
+        real_run_decoder = frame_runs_module.run_decoder
         commands: list[list[str]] = []
 
         def gpu_as(outcome):
@@ -379,7 +381,7 @@ class FrameStepDecodeTest(unittest.TestCase):
                     patch.object(self.runtime, "_maintain_recording_preview_cache"),
                     patch.object(self.runtime, "_hardware_acceleration_mode", return_value="auto"),
                     patch.object(self.runtime, "_ffmpeg_vaapi_info", return_value={"available": True, "device": "/dev/dri/renderD128"}),
-                    patch.object(runtime_module, "run_decoder", side_effect=gpu_as(outcome)),
+                    patch.object(frame_runs_module, "run_decoder", side_effect=gpu_as(outcome)),
                     patch.object(runtime_module, "mp4_video_dimensions", return_value=(2560, 1920)),
                 ):
                     image, actual = self.runtime._recording_step_frame(row, 1000.0 + frames.times[index], width=320)
