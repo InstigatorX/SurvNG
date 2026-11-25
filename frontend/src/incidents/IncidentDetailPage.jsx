@@ -210,8 +210,11 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
   const [aiTitle, setAiTitle] = useState(null);
   const titleId = incident?.incident_id;
   useEffect(() => setAiTitle(null), [titleId]);
+  // A growing incident keeps its built-in title, which follows every change;
+  // the AI wording is asked for once the incident is no longer ongoing.
+  const titleSettled = Boolean(incident) && !["active", "new", "updated"].includes(notification?.state || incident?.state);
   useEffect(() => {
-    if (!titleId) return undefined;
+    if (!titleId || !titleSettled) return undefined;
     const controller = new AbortController();
     let timer = 0, attempts = 0;
     const load = () => fetch(`/api/incidents/${encodeURIComponent(titleId)}/title`, { signal: controller.signal })
@@ -226,12 +229,14 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
         setAiTitle({ ...result, id: titleId });
         // A wording of an older revision is not shown; ask again once the
         // server may reword it (at most once a minute).
-        if (result.status === "ready" && result.current === false && ++attempts < 6) timer = window.setTimeout(load, 65000);
+        if (result.status === "ready" && result.current === false && ++attempts < 6) {
+          timer = window.setTimeout(load, ["pending", "busy"].includes(result.refresh) ? 5000 : 65000);
+        }
       })
       .catch((failure) => { if (failure.name !== "AbortError") setAiTitle({ id: titleId, status: "failed", message: "AI title unavailable" }); });
     void load();
     return () => { controller.abort(); window.clearTimeout(timer); };
-  }, [titleId, incident?.revision]);
+  }, [titleId, incident?.revision, titleSettled]);
 
   const navigate = useCallback((id, nextReview = review) => {
     if (!id) return;

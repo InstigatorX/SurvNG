@@ -277,11 +277,12 @@ async function titleChecks() {
   page.on("pageerror", (error) => errors.push(error.message));
   let reply = { status: 200, json: { incident_id: "incident-story-1", status: "ready", title: "Car pulls in and a person walks to the front door", revision: 7, current: true } };
   const titleRequests = [];
+  let ongoing = false;
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
     if (path.endsWith("/api/cameras")) return route.fulfill({ json: CAMERAS });
-    if (path.includes("/incidents/notification/")) return route.fulfill({ json: { incident: storyIncident(), notification: { state: "complete" }, camera_name: "Front Driveway" } });
+    if (path.includes("/incidents/notification/")) return route.fulfill({ json: { incident: storyIncident(), notification: { state: ongoing ? "active" : "complete" }, camera_name: "Front Driveway" } });
     if (path.endsWith("/incident-story-1/title")) { titleRequests.push(path); return route.fulfill(reply); }
     return route.fulfill({ json: {} });
   });
@@ -297,12 +298,21 @@ async function titleChecks() {
   await page.goto(url);
   await page.getByRole("heading", { level: 1, name: "Car arrives, person walks to Front Door" }).waitFor();
   assert.equal(await page.getByText("AI title unavailable").count(), 0);
+  // A growing incident keeps the built-in title and does not ask for an AI one.
+  const before = titleRequests.length;
+  reply = { status: 200, json: { incident_id: "incident-story-1", status: "ready", title: "Should not show", revision: 7, current: true } };
+  ongoing = true;
+  await page.goto(url);
+  await page.getByRole("heading", { level: 1, name: "Car arrives, person walks to Front Door" }).waitFor();
+  await page.waitForTimeout(500);
+  assert.equal(titleRequests.length, before);
+  ongoing = false;
   reply = { status: 500, json: {} };
   await page.goto(url);
   await page.getByRole("heading", { level: 1, name: "Car arrives, person walks to Front Door" }).waitFor();
   // The title request follows the incident load; give the last one time to arrive.
-  for (let attempt = 0; attempt < 50 && titleRequests.length < 4; attempt += 1) await page.waitForTimeout(100);
-  assert.ok(titleRequests.length >= 4);
+  for (let attempt = 0; attempt < 50 && titleRequests.length < before + 1; attempt += 1) await page.waitForTimeout(100);
+  assert.ok(titleRequests.length >= before + 1);
   assert.deepEqual(errors, []);
   await page.close();
 }
@@ -335,6 +345,7 @@ async function viewerChecks() {
 async function followThemeChecks() {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
   await page.addInitScript(() => localStorage.setItem("survng.theme", "auto"));
+  let drivewayMode = "empty";
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.route("**/api/**", (route) => {
@@ -346,6 +357,7 @@ async function followThemeChecks() {
     if (path.endsWith("/title")) return route.fulfill({ json: { incident_id: "incident-story-1", status: "ready", title: "Old wording", revision: 6, current: false } });
     if (path.includes("/recordings/window")) {
       const start = Number(url.searchParams.get("start_epoch")), end = Number(url.searchParams.get("end_epoch"));
+      if (path.includes("/front-driveway/") && drivewayMode === "error") return route.fulfill({ status: 500, json: {} });
       const recordings = path.includes("/front-driveway/") ? [] : [{ start_epoch: start, end_epoch: end, duration_seconds: end - start, name: "segment" }];
       return route.fulfill({ json: { camera_id: "x", source: "main", start_epoch: start, end_epoch: end, recordings } });
     }
@@ -360,6 +372,14 @@ async function followThemeChecks() {
   await page.getByRole("button", { name: "Follow Person" }).click();
   await page.waitForFunction(() => document.querySelector(".story-frame .incident-recording-player")?.dataset.cameraId === "front-door");
   assert.match(await page.locator(".story-frame [role=status]").innerText(), /No recording on Front Driveway; switched to Front Door/);
+  // A failed request is not an empty recording: Follow stays on that camera.
+  drivewayMode = "error";
+  await page.reload();
+  await page.locator(".story-card", { hasText: "Person" }).click();
+  await page.getByRole("button", { name: "Follow Person" }).click();
+  await page.locator(".story-frame .incident-recording-player").getByText("No recording window found").waitFor();
+  await page.waitForTimeout(500);
+  assert.equal(await page.locator(".story-frame .incident-recording-player").getAttribute("data-camera-id"), "front-driveway");
   assert.deepEqual(errors, []);
   await page.close();
 }

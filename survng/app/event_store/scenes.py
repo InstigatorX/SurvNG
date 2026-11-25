@@ -442,6 +442,12 @@ class EventStoreSceneMixin:
                 conn, "scene_track_alias_object",
                 "create index if not exists scene_track_alias_object on scene_track_aliases(object_id)",
             )
+            # Review verdicts' evidence mark counts an incident's corrections
+            # for every reviewed incident in the queue.
+            create_index_logged(
+                conn, "scene_corrections_incident",
+                "create index if not exists scene_corrections_incident on scene_corrections(incident_id)",
+            )
             conn.execute(
                 "create index if not exists scene_observation_recording "
                 "on scene_observations(recording_path) where recording_path != ''"

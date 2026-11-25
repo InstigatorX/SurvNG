@@ -15,8 +15,6 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
-from ..main_database import create_index_logged
-
 REVIEW_VERDICTS = ("reviewed", "keep", "nothing_here")
 REVIEW_QUEUE_LIMIT = 1000
 
@@ -50,12 +48,6 @@ class EventStoreIncidentReviewMixin:
             if "evidence_mark" not in columns:
                 # Early tables lacked the mark; an empty mark reads as changed.
                 conn.execute("alter table scene_incident_reviews add column evidence_mark text not null default ''")
-            # The evidence mark counts an incident's corrections for every
-            # reviewed incident in the queue; without this it scans the table.
-            create_index_logged(
-                conn, "scene_corrections_incident",
-                "create index if not exists scene_corrections_incident on scene_corrections(incident_id)",
-            )
 
     @staticmethod
     def _carry_incident_review(conn, source, target):
