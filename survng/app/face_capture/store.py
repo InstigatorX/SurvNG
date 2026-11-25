@@ -59,6 +59,20 @@ create table if not exists face_captures (
     created_at text not null
 );
 create index if not exists face_captures_event on face_captures(event_id);
+create table if not exists face_capture_seeds (
+    id integer primary key autoincrement,
+    start_epoch real not null,
+    end_epoch real not null,
+    cameras_json text not null,
+    state text not null,
+    total integer not null,
+    processed integer not null default 0,
+    faces integer not null default 0,
+    failed integer not null default 0,
+    created_at text not null,
+    updated_at text not null,
+    finished_at text not null default ''
+);
 """
 
 
@@ -241,6 +255,66 @@ class FaceCaptureStore:
             return [dict(row) for row in connection.execute(
                 "select * from face_captures where event_id = ? order by track, offset_seconds", (event_id,))]
 
+    # Seeds: capturing a range of past events on request -------------------
+
+    def create_seed(self, *, start_epoch: float, end_epoch: float, cameras: list[str], total: int) -> int:
+        """A running seed over ``[start, end]`` (all cameras when ``cameras`` is
+        empty). Only one seed may be running or paused at a time."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as connection:
+            connection.execute("begin immediate")
+            if connection.execute(
+                "select 1 from face_capture_seeds where state in ('running', 'paused')"
+            ).fetchone() is not None:
+                raise SeedConflict("another seed is still running or paused")
+            cursor = connection.execute(
+                "insert into face_capture_seeds (start_epoch, end_epoch, cameras_json, state, total,"
+                " created_at, updated_at) values (?, ?, ?, 'running', ?, ?, ?)",
+                (float(start_epoch), float(end_epoch), json.dumps(sorted(cameras)), int(total), now, now),
+            )
+            return int(cursor.lastrowid)
+
+    def seeds(self, limit: int = 10) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = [dict(row) for row in connection.execute(
+                "select * from face_capture_seeds order by id desc limit ?", (int(limit),))]
+        for row in rows:
+            row["cameras"] = json.loads(row.pop("cameras_json") or "[]")
+        return rows
+
+    def active_seed(self) -> dict[str, Any] | None:
+        return next((seed for seed in self.seeds(5) if seed["state"] in ("running", "paused")), None)
+
+    def set_seed_state(self, seed_id: int, state: str) -> dict[str, Any]:
+        """pause (running), resume (paused), cancel (running or paused), done (running)."""
+        allowed = {"paused": ("running",), "running": ("paused",), "cancelled": ("running", "paused"),
+                   "done": ("running",)}
+        if state not in allowed:
+            raise ValueError(f"unknown seed state {state}")
+        now = datetime.now(timezone.utc).isoformat()
+        finished = now if state in ("cancelled", "done") else ""
+        with self._lock, self._connect() as connection:
+            row = connection.execute("select state from face_capture_seeds where id = ?", (int(seed_id),)).fetchone()
+            if row is None:
+                raise KeyError(seed_id)
+            if row[0] not in allowed[state]:
+                raise SeedConflict(f"a {row[0]} seed cannot become {state}")
+            connection.execute(
+                "update face_capture_seeds set state = ?, updated_at = ?, finished_at = ? where id = ?",
+                (state, now, finished, int(seed_id)),
+            )
+        return next(seed for seed in self.seeds(50) if seed["id"] == int(seed_id))
+
+    def seed_progress(self, seed_id: int, *, faces: int = 0, failed: bool = False) -> None:
+        """Count one seed event as finished (captured, or out of attempts)."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "update face_capture_seeds set processed = processed + 1, faces = faces + ?,"
+                " failed = failed + ?, updated_at = ? where id = ?",
+                (int(faces), 1 if failed else 0, now, int(seed_id)),
+            )
+
     def summary(self) -> dict[str, Any]:
         with self._connect() as connection:
             states = dict(connection.execute(
@@ -248,3 +322,6 @@ class FaceCaptureStore:
             faces = connection.execute("select count(*) from face_captures").fetchone()[0]
         return {"events": states, "faces": int(faces)}
 
+
+class SeedConflict(RuntimeError):
+    """A seed request that conflicts with the seed already running or paused."""

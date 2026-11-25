@@ -69,14 +69,18 @@ assert.equal(nextTabId(["one", "two", "three"], "two", "End"), "three");
 assert.equal(nextTabId(["one"], "one", "Tab"), null);
 
 const configPageSource = readFileSync(new URL("../src/admin/ConfigPage.jsx", import.meta.url), "utf8");
-const facesBlock = configPageSource.match(/detectionSection === "faces"[\s\S]*?: null\}/);
-assert.ok(facesBlock, "face detection settings block is present");
+assert.match(configPageSource, /detectionSection === "faces" \? <FaceCaptureSettings /);
+const faceCaptureSource = readFileSync(new URL("../src/admin/FaceCaptureSettings.jsx", import.meta.url), "utf8");
+assert.match(faceCaptureSource, /Face capture enabled/);
+assert.match(faceCaptureSource, /Process previous incidents/);
+const facesBlock = configPageSource.match(/detectionSection === "faces" \? <details[\s\S]*?: null\}/);
+assert.ok(facesBlock, "previous face detection settings block is present");
 assert.match(facesBlock[0], /Face detection enabled/);
 assert.match(facesBlock[0], /Face Detector Model/);
 assert.match(facesBlock[0], /Face Detection Confidence/);
 assert.doesNotMatch(facesBlock[0], /Embedding Model|Landmark Model|Suggestion Threshold|References Per Person|Automatically identify|visit_auto_link|Model input profile|Recognition enabled/);
 assert.doesNotMatch(configPageSource, /<h3>Face recognition<\/h3>/);
-assert.match(configPageSource, /\["faces", "Face detection"/);
+assert.match(configPageSource, /\["faces", "Faces"/);
 
 // Camera speech switches are edited on the Detection page and saved with it.
 assert.equal(cameraSpeechDirty([{ id: "gate", speech: { enabled: true } }], [{ id: "gate", speech: { enabled: false } }]), true);

@@ -82,6 +82,7 @@ import { cameraStatusSummary, formatStreamInfo } from "../adminOverview.mjs";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
 import { DetectionOccupancyCard } from "./DetectionOccupancyCard.jsx";
 import { SpeechSettings } from "./SpeechSettings.jsx";
+import { FaceCaptureSettings } from "./FaceCaptureSettings.jsx";
 
 export const ADMIN_DESTINATION_ICONS = {
   home: LayoutDashboard,
@@ -4392,7 +4393,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       {section === "detection" ? (
         <div className="detection-settings subsection-workspace">
           <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="Intelligence and detection settings">
-            {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["depth", "Depth Estimation", Layers], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face detection", ScanFace], ["speech", "Speech", Mic]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
+            {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["depth", "Depth Estimation", Layers], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Faces", ScanFace], ["speech", "Speech", Mic]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
           </nav>
           <div className="detection-settings-content">
           {detectionSection === "speech" ? <SpeechSettings config={config} updateConfig={updateConfig} /> : null}
@@ -4701,8 +4702,9 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </div>
           </details> : null}
 
-          {detectionSection === "faces" ? <details className="detection-settings-card detection-feature-card wide-card" open>
-            <summary><span className="detection-settings-card-icon"><ScanFace size={18} /></span><span><strong>Face detection</strong><small>Run the face detector on upper-body person crops.</small></span></summary>
+          {detectionSection === "faces" ? <FaceCaptureSettings config={config} updateConfig={updateConfig} /> : null}
+          {detectionSection === "faces" ? <details className="detection-settings-card detection-feature-card wide-card">
+            <summary><span className="detection-settings-card-icon"><ScanFace size={18} /></span><span><strong>Previous face detection</strong><small>The earlier face pipeline (off). Face capture above replaces it.</small></span></summary>
             <div className="detection-feature-body detection-field-grid">
               <label className="compact-toggle"><input type="checkbox" checked={config.detector?.face_recognition_enabled ?? false} onChange={(event) => updateConfig(["detector", "face_recognition_enabled"], event.target.checked)} /><span>Face detection enabled</span></label>
               <label>Face Detector Model<input value={config.detector?.face_detection_model_path || ""} onChange={(event) => updateConfig(["detector", "face_detection_model_path"], event.target.value)} placeholder="face_detector/model.xml" /><small>OpenVINO XML. Score a candidate on People before replacing a model that is already running.</small></label>

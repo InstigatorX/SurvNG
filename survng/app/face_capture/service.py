@@ -14,7 +14,7 @@ import sqlite3
 import threading
 import time
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -188,34 +188,114 @@ class FaceCaptureService:
                     reached_floor = True
                     break
                 newest = max(newest, candidate[0])
-                deferred = self._deferred.get(candidate[0])
-                if (deferred is not None and deferred[1] > waiting) or candidate[2] > settled_epoch:
+                verdict = self._judge(candidate, seen.get(candidate[0]), waiting, settled_epoch)
+                if verdict == "take":
+                    return candidate
+                if verdict == "wait":
                     pending = candidate[0] if pending is None else min(pending, candidate[0])
-                    continue
-                previous = seen.get(candidate[0])
-                if previous is None:
-                    return candidate
-                state, attempts, version = previous
-                if version < CAPTURE_VERSION:
-                    return candidate  # attempts restart with the new version
-                if state == "failed" and attempts < MAX_ATTEMPTS:
-                    if deferred is None:
-                        # No hold in memory (this service started after the
-                        # failure, e.g. a manager reload): space the retry from
-                        # the stored failure time instead of retrying at once.
-                        failed_at = self.store.failed_at(candidate[0])
-                        wait = 0.0 if failed_at is None else failed_at + FAILURE_RETRY_SECONDS - time.time()
-                        if wait > 0:
-                            self._hold(candidate[0], 0, wait)
-                            pending = candidate[0] if pending is None else min(pending, candidate[0])
-                            continue
-                    return candidate
             if reached_floor or len(candidates) < CANDIDATE_BATCH:
                 self._scan_floor = pending - 1 if pending is not None else max(floor, newest)
                 if floor == 0:
                     self._full_scan_due = waiting + FULL_SCAN_SECONDS
                 return None
             before_id = candidates[-1][0]
+
+    def _judge(
+        self, candidate: tuple[int, str, float, dict[str, Any]], previous: tuple[str, int, int] | None,
+        waiting: float, settled_epoch: float,
+    ) -> str:
+        """take (capture it now), wait (may need work later) or skip (finished)."""
+        deferred = self._deferred.get(candidate[0])
+        if (deferred is not None and deferred[1] > waiting) or candidate[2] > settled_epoch:
+            return "wait"
+        if previous is None:
+            return "take"
+        state, attempts, version = previous
+        if version < CAPTURE_VERSION:
+            return "take"  # attempts restart with the new version
+        if state == "failed" and attempts < MAX_ATTEMPTS:
+            if deferred is None:
+                # No hold in memory (this service started after the failure,
+                # e.g. a manager reload): space the retry from the stored
+                # failure time instead of retrying at once.
+                failed_at = self.store.failed_at(candidate[0])
+                wait = 0.0 if failed_at is None else failed_at + FAILURE_RETRY_SECONDS - time.time()
+                if wait > 0:
+                    self._hold(candidate[0], 0, wait)
+                    return "wait"
+            return "take"
+        return "skip"
+
+    def _settle(self, now: datetime) -> tuple[float, float]:
+        """(latest created_at epoch, latest event epoch) whose recordings have settled."""
+        segment = float(getattr(self._config(), "recording_segment_seconds", 0.0) or 0.0)
+        settle = max(SETTLE_SECONDS, segment + SETTLE_SLACK_SECONDS)
+        return now.timestamp() - settle, now.timestamp() - settle - MAX_WINDOW_SECONDS
+
+    def seed_events(
+        self, start_epoch: float, end_epoch: float, cameras: list[str] | None,
+    ) -> Iterator[tuple[int, str, float, dict[str, Any]]]:
+        """Recorded person events created in a range, newest first, paged."""
+        since = datetime.fromtimestamp(start_epoch, timezone.utc).isoformat()
+        until = datetime.fromtimestamp(end_epoch, timezone.utc).isoformat()
+        before_id: int | None = None
+        while True:
+            with self._events_connection() as connection:
+                page = person_events(
+                    connection, since=since, until=until, cameras=cameras or None,
+                    limit=CANDIDATE_BATCH, before_id=before_id,
+                )
+            yield from page
+            if len(page) < CANDIDATE_BATCH:
+                return
+            before_id = page[-1][0]
+
+    def count_seed_events(self, start_epoch: float, end_epoch: float, cameras: list[str] | None) -> int:
+        """How many person events in the range still need capturing."""
+        total = 0
+        batch: list[tuple[int, str, float, dict[str, Any]]] = []
+
+        def flush() -> int:
+            seen = self.store.attempts(c[0] for c in batch)
+            return sum(1 for c in batch if self._judge(c, seen.get(c[0]), float("-inf"), float("inf")) != "skip")
+
+        for candidate in self.seed_events(start_epoch, end_epoch, cameras):
+            batch.append(candidate)
+            if len(batch) >= CANDIDATE_BATCH:
+                total += flush()
+                batch = []
+        return total + (flush() if batch else 0)
+
+    def next_seed_event(
+        self, seed: dict[str, Any], now: datetime | None = None,
+    ) -> tuple[tuple[int, str, float, dict[str, Any]] | None, bool]:
+        """(the seed's next event to capture, whether any of its events may still need work)."""
+        now = now or datetime.now(timezone.utc)
+        latest_created, settled_epoch = self._settle(now)
+        end = min(float(seed["end_epoch"]), latest_created)
+        waiting = time.monotonic()
+        pending = False
+        batch: list[tuple[int, str, float, dict[str, Any]]] = []
+
+        def decide() -> tuple[int, str, float, dict[str, Any]] | None:
+            nonlocal pending
+            seen = self.store.attempts(c[0] for c in batch)
+            for candidate in batch:
+                verdict = self._judge(candidate, seen.get(candidate[0]), waiting, settled_epoch)
+                if verdict == "take":
+                    return candidate
+                pending = pending or verdict == "wait"
+            return None
+
+        for candidate in self.seed_events(float(seed["start_epoch"]), end, seed.get("cameras") or None):
+            batch.append(candidate)
+            if len(batch) >= CANDIDATE_BATCH:
+                if (chosen := decide()) is not None:
+                    return chosen, True
+                batch = []
+        if batch and (chosen := decide()) is not None:
+            return chosen, True
+        return None, pending or float(seed["end_epoch"]) > latest_created
 
     def run_once(self, now: datetime | None = None) -> bool:
         """Capture one event if one is due; True when an event was captured.
@@ -227,11 +307,28 @@ class FaceCaptureService:
             return False
         self._prune_if_due()
         candidate = self.next_event(now)
+        if candidate is not None:
+            failed = self.failed
+            # A capture deferred for incident work waits the idle interval.
+            return self.capture(*candidate) is not None and self.failed == failed
+        # Nothing new waits: work through a requested seed of past events.
+        seed = self.store.active_seed()
+        if seed is None or seed["state"] != "running":
+            return False
+        candidate, more = self.next_seed_event(seed, now)
         if candidate is None:
+            if not more:
+                self.store.set_seed_state(seed["id"], "done")
             return False
         failed = self.failed
-        # A capture deferred for incident work waits the idle interval.
-        return self.capture(*candidate) is not None and self.failed == failed
+        kept = self.capture(*candidate)
+        after = self.store.attempts([candidate[0]]).get(candidate[0])
+        if after is not None and after[2] == CAPTURE_VERSION:
+            if after[0] == "done" and kept is not None:
+                self.store.seed_progress(seed["id"], faces=kept)
+            elif after[0] == "failed" and after[1] >= MAX_ATTEMPTS and self.failed != failed:
+                self.store.seed_progress(seed["id"], failed=True)
+        return kept is not None and self.failed == failed
 
     def capture(self, event_id: int, camera_id: str, epoch: float, qualification: dict[str, Any]) -> int | None:
         """Capture one event; the number of faces kept, or None when deferred."""
@@ -380,6 +477,7 @@ class FaceCaptureService:
             "failed": self.failed,
             "last_event_id": self.last_event_id,
             "last_error": self.last_error,
+            "seeds": self._store.seeds(10) if self._store is not None else [],
             **(self._store.summary() if self._store is not None else {"events": {}, "faces": 0}),
         }
 
