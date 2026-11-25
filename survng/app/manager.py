@@ -422,17 +422,11 @@ class AppManager:
         self.faces.set_identity_event_publisher(
             self._publish_identity_update
         )
+        # Serializes replacing speech against final shutdown stopping it.
+        self._speech_swap_lock = threading.Lock()
+        self._speech_closed = False
         # Construction is inert (no database, model, or process) until start.
-        self.speech = SpeechLifecycle(
-            config,
-            database_dir=self.database_dir,
-            camera_enabled=self._speech_camera_active,
-            audio_available=self._speech_audio_available,
-            publish=self.mqtt.publish,
-            episode_windows=lambda camera_id, start, end: self.events.scene_episode_windows_overlapping(camera_id, start, end),
-            recording_ranges=self._speech_recording_ranges,
-            request_incident_check=self._speech_incident_check,
-        )
+        self.speech = self._build_speech(config)
         self._process_started_monotonic = time.monotonic()
         self._process_started_at = datetime.now(timezone.utc).isoformat()
         self._lifecycle_lock = threading.RLock()
@@ -919,6 +913,40 @@ class AppManager:
                 self._started = False
                 raise
 
+    def _build_speech(self, config: AppConfig) -> SpeechLifecycle:
+        return SpeechLifecycle(
+            config,
+            database_dir=self.database_dir,
+            camera_enabled=self._speech_camera_active,
+            audio_available=self._speech_audio_available,
+            publish=self.mqtt.publish,
+            episode_windows=lambda camera_id, start, end: self.events.scene_episode_windows_overlapping(camera_id, start, end),
+            recording_ranges=self._speech_recording_ranges,
+            request_incident_check=self._speech_incident_check,
+        )
+
+    def reconfigure_speech(self, config: AppConfig) -> None:
+        """Replace speech listening alone; cameras and recorders keep running."""
+        with self._lifecycle_lock:
+            if self._stopping or self._closed:
+                raise RuntimeError("application manager is stopping")
+            running = self._started
+        with self._speech_swap_lock:
+            if self._speech_closed:
+                raise RuntimeError("application manager is stopping")
+            previous = getattr(self, "speech", None)
+            replacement = self._build_speech(config)
+            if previous is not None:
+                previous.stop()
+            self.speech = replacement
+            if running:
+                self._start_speech()
+        try:
+            # Home Assistant shows speech entities only for listening cameras.
+            self._mqtt_connected()
+        except Exception:
+            LOGGER.exception("MQTT discovery refresh failed after speech reconfiguration")
+
     def _start_speech(self) -> None:
         speech = getattr(self, "speech", None)
         if speech is None:
@@ -1117,7 +1145,14 @@ class AppManager:
             attempt("database retention", self.database_retention.stop)
         if getattr(self, "face_capture", None) is not None:
             attempt("face capture", self.face_capture.stop)
-        speech = getattr(self, "speech", None)
+        speech_swap_lock = getattr(self, "_speech_swap_lock", None)
+        if speech_swap_lock is not None:
+            # Waits for a replacement in progress, then stops whichever runs.
+            with speech_swap_lock:
+                self._speech_closed = True
+                speech = getattr(self, "speech", None)
+        else:
+            speech = getattr(self, "speech", None)
         if speech is not None:
             LOGGER.info("SurvNG shutdown: stopping speech listeners")
             attempt("speech listeners", speech.stop)

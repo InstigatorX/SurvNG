@@ -573,6 +573,31 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertIs(main.config, effective)
         self.assertIs(active.config, effective)
 
+    def test_speech_changes_replace_speech_alone_without_a_manager_reload(self) -> None:
+        active = Mock()
+        current = AppConfig.model_validate({
+            "speech": {"enabled": True},
+            "cameras": [{"id": "foyer", "name": "Foyer", "stream_url": "rtsp://example.invalid/foyer",
+                         "speech": {"enabled": True}}],
+        })
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.cameras[0].speech.enabled = False
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_speech.assert_called_once_with(effective)
+        active.reconfigure_motion.assert_not_called()
+        self.assertFalse(result["camera_workers_restarted"])
+        self.assertIn("speech", result["subsystems_restarted"])
+
     def test_a_reload_this_process_cannot_finish_reports_the_change_saved(self) -> None:
         from survng.app.manager_reload import ManagerReloadRestartPending
 

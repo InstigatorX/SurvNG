@@ -281,6 +281,32 @@ def test_unreachable_endpoints_are_told_apart_from_camera_faults():
     assert not OnvifEventListener._is_unreachable_error(fault)
 
 
+def test_speech_is_replaced_in_place_and_not_after_shutdown_claimed_it():
+    from survng.app.manager import AppManager
+
+    manager = AppManager.__new__(AppManager)
+    manager._lifecycle_lock = threading.RLock()
+    manager._stopping = False
+    manager._closed = False
+    manager._started = True
+    manager._speech_swap_lock = threading.Lock()
+    manager._speech_closed = False
+    old, new = Mock(), Mock()
+    manager.speech = old
+    manager._mqtt_connected = Mock()
+    with patch.object(AppManager, "_build_speech", return_value=new):
+        manager.reconfigure_speech(Mock())
+    old.stop.assert_called_once_with()
+    new.start.assert_called_once_with()
+    assert manager.speech is new
+    manager._mqtt_connected.assert_called_once_with()
+
+    manager._speech_closed = True
+    with patch.object(AppManager, "_build_speech", return_value=Mock()), pytest.raises(RuntimeError):
+        manager.reconfigure_speech(Mock())
+    assert manager.speech is new
+
+
 def test_an_environment_proxy_connection_can_be_interrupted_too():
     with _blackhole() as port:
         session = CancellableSession()
