@@ -272,6 +272,15 @@ ids match the `id` of each face in `--json`, which also carries its box.
 - Faces of one event embed close together: the median cosine of an event's
   recognisable faces to their mean is 0.79 (current detector) and 0.73
   (YuNet), so an event's faces can be grouped before anyone is named.
+- Grouping events by face, with no labels (average linkage on each event's
+  mean embedding, checked by eye): the most frequent person forms one pure
+  cluster across four cameras (19 events with YuNet, 18 with the current
+  detector), and two visitors at the gate each form their own. At a cosine
+  threshold of 0.35 no cluster mixed two people; blurry and dim views of the
+  frequent person split into small clusters of their own, and false hits that
+  passed the norm cut grouped together. At 0.25 that junk cluster also took in
+  another person. Grouping works for good faces; it needs a stronger junk
+  filter and a way to rejoin split clusters (the visit or body track).
 - Existing named people and confirmed faces in the face store came from the
   previous pipeline and are not used as ground truth for the rebuild.
 
