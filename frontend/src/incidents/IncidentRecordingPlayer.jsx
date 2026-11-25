@@ -110,6 +110,8 @@ export function IncidentRecordingPlayer({
   // its start, and report the playhead so a caller can follow it.
   initialEpoch = null,
   onPlayhead = null,
+  // Optional: told once when this window has no recording, so a caller can move on.
+  onUnavailable = null,
 }) {
   const videoRef = useRef(null);
   const [selectedSource, setSelectedSource] = useState(() => source || preferredStreamSource());
@@ -122,6 +124,8 @@ export function IncidentRecordingPlayer({
   const appliedSeekRef = useRef(safeInitial);
   const onPlayheadRef = useRef(onPlayhead);
   onPlayheadRef.current = onPlayhead;
+  const onUnavailableRef = useRef(onUnavailable);
+  onUnavailableRef.current = onUnavailable;
   const readySourceRef = useRef("");
   const ignorePauseRef = useRef(0);
   const [nativeHls] = useState(supportsNativeRecordingHls);
@@ -202,6 +206,7 @@ export function IncidentRecordingPlayer({
         setLoaded(null);
         setLoading(false);
         setError("No recording window found");
+        onUnavailableRef.current?.();
       }
     }
     load().catch((loadError) => {
@@ -209,6 +214,7 @@ export function IncidentRecordingPlayer({
         setLoaded(null);
         setLoading(false);
         setError("No recording window found");
+        onUnavailableRef.current?.();
       }
     });
     return () => {

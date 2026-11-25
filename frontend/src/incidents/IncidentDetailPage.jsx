@@ -52,7 +52,7 @@ function StillFrame({ src, anchor, boxes, selectedId, legacyBoxes, label }) {
   const width = Number(anchor?.detection_frame_width || legacyBoxes?.[0]?.detection_frame_width) || 16;
   const height = Number(anchor?.detection_frame_height || legacyBoxes?.[0]?.detection_frame_height) || 9;
   if (!src || failed) return <span className="incident-detail-image-empty story-frame-empty"><ImageOff size={28} />Image unavailable</span>;
-  return <div className="story-frame-image" style={{ aspectRatio: `${width} / ${height}` }}>
+  return <div className="story-frame-image" style={{ aspectRatio: `${width} / ${height}`, "--frame-w": width, "--frame-h": height }}>
     <img src={appUrl(src)} alt={label} onError={() => setFailed(true)} />
     {boxes.map(({ object, observation }) => {
       const style = observationBoxStyle(observation);
@@ -79,10 +79,14 @@ function dayLabel(epoch, timeZone) {
   return new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short", month: "short", day: "numeric" }).format(new Date(epoch * 1000));
 }
 
+export function safeDecode(value) {
+  try { return decodeURIComponent(value); } catch { return value; }
+}
+
 function routeState() {
   const params = new URLSearchParams(window.location.search);
   const match = window.location.pathname.match(/\/incidents\/(incident-[^/]+)\/?$/);
-  return { id: match ? decodeURIComponent(match[1]) : null, review: params.get("review") === "1" };
+  return { id: match ? safeDecode(match[1]) : null, review: params.get("review") === "1" };
 }
 
 export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = false }) {
@@ -98,6 +102,8 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
   const updateIncident = (detail, forId) => setLoaded((current) => (current && current.id === forId
     ? { ...current, payload: { ...current.payload, incident: { ...current.payload.incident, ...detail } } } : current));
   const currentIdRef = useRef(incidentId);
+  const titleRef = useRef(null);
+  const focusTitleRef = useRef(false);
   const [error, setError] = useState("");
   const [missing, setMissing] = useState(false);
   const [retry, setRetry] = useState(0);
@@ -184,6 +190,8 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
   const objects = useMemo(() => storyObjects(incident), [incident]);
   const line = useMemo(() => storyline(incident, objects), [incident, objects]);
   const selected = objects.find((object) => String(object.id) === String(selectedId)) || null;
+  // A correction or a refresh can remove the selected object; then nothing is selected.
+  const focusId = selected ? selectedId : null;
   const startEpoch = epochOf(incident?.start_at) || Number(incident?.start_epoch) || line.start;
   const endEpoch = epochOf(incident?.end_at) || Number(incident?.last_epoch) || line.end;
   const day = incident && Number.isFinite(startEpoch) && startEpoch > 0 ? localDay(startEpoch, zone) : "";
@@ -201,21 +209,32 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
   // built-in title shows immediately and stays when this is off or fails.
   const [aiTitle, setAiTitle] = useState(null);
   const titleId = incident?.incident_id;
+  useEffect(() => setAiTitle(null), [titleId]);
   useEffect(() => {
-    setAiTitle(null);
     if (!titleId) return undefined;
     const controller = new AbortController();
-    fetch(`/api/incidents/${encodeURIComponent(titleId)}/title`, { signal: controller.signal })
+    let timer = 0, attempts = 0;
+    const load = () => fetch(`/api/incidents/${encodeURIComponent(titleId)}/title`, { signal: controller.signal })
       .then((response) => response.ok ? response.json() : null)
-      .then((result) => { if (result) setAiTitle({ ...result, id: titleId }); })
+      .then((result) => {
+        if (!result) return;
+        // Keep a shown wording while a newer one is pending or busy.
+        if (["pending", "busy"].includes(result.status)) {
+          if (++attempts < 6) timer = window.setTimeout(load, 5000);
+          return;
+        }
+        setAiTitle({ ...result, id: titleId });
+      })
       .catch((failure) => { if (failure.name !== "AbortError") setAiTitle({ id: titleId, status: "failed", message: "AI title unavailable" }); });
-    return () => controller.abort();
+    void load();
+    return () => { controller.abort(); window.clearTimeout(timer); };
   }, [titleId, incident?.revision]);
 
   const navigate = useCallback((id, nextReview = review) => {
     if (!id) return;
     const url = appUrl(`/incidents/${encodeURIComponent(id)}${nextReview ? "?review=1" : ""}`);
     window.history.pushState(null, "", url);
+    focusTitleRef.current = true;
     setReview(nextReview);
     setCurrentId(id);
   }, [review]);
@@ -237,18 +256,21 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
       });
       if (!response.ok) throw new Error(response.status === 403 ? "Only an administrator can record a verdict." : "Could not save the verdict. Try again.");
       setQueueRevision((value) => value + 1);
-      if (!queue) { setReviewError("Verdict saved. The review queue is unavailable; use Next to continue."); return; }
-      const updated = { ...queue, items: queue.items.map((item) => item.incident_id === incident.incident_id ? { ...item, verdict } : item) };
-      setQueue(updated);
-      // Only advance if the person is still on the incident they decided.
-      if (currentIdRef.current !== requestedFor) return;
+      const updated = queue && { ...queue, items: queue.items.map((item) => item.incident_id === incident.incident_id ? { ...item, verdict } : item) };
+      if (updated) setQueue(updated);
+      // Only act if the person is still reviewing the incident they decided.
+      if (currentIdRef.current !== requestedFor || !reviewRef.current) return;
+      if (!updated) { setReviewError("Verdict saved. The review queue is unavailable; use Next to continue."); return; }
       const target = reviewPosition(updated, incident.incident_id).nextUndecided;
       if (target) navigate(target, true);
       else setReviewError("Every incident on this day has a verdict.");
-    } catch (failure) { setReviewError(failure.message); }
-    finally { setReviewBusy(false); }
+    } catch (failure) {
+      if (currentIdRef.current === requestedFor) setReviewError(failure.message);
+    } finally { setReviewBusy(false); }
   }
 
+  const reviewRef = useRef(review);
+  reviewRef.current = review;
   const keyHandler = useRef(null);
   keyHandler.current = (event) => {
     if (!review) return;
@@ -297,6 +319,15 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
       .map((episode) => ({ cameraId: episode.camera_id, episodeId: episode.episode_id, start: episode.clip.start_epoch, end: episode.clip.last_epoch }));
   }
   const canPlay = segmentsFor(selected).length > 0;
+
+  // Play from the moment pinned on the storyline when there is one.
+  function startFollowing() {
+    const segments = segmentsFor(selected);
+    const pinnedAt = pinned ? epochOf(pinned.observation.captured_at) : NaN;
+    const index = Number.isFinite(pinnedAt)
+      ? segments.findIndex((item) => item.cameraId === pinned.observation.camera_id && pinnedAt >= item.start && pinnedAt <= item.end) : -1;
+    startPlayback(segments, Math.max(0, index), index >= 0 ? pinnedAt : null, null);
+  }
 
   function startPlayback(segments, index = 0, initialEpoch = null, from = null) {
     if (!segments.length) return;
@@ -372,6 +403,8 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
   const builtTitle = incident ? incidentStoryTitle(incident, { cameraName, objects, people, fallback: notification?.summary || "" }) : "";
   const providerTitle = aiTitle?.id === titleId && aiTitle?.status === "ready" ? aiTitle.title : "";
   const title = providerTitle || builtTitle;
+  const personCount = objects.filter((object) => object.kind === "person").length;
+  const cardIdentities = personCount === 1 || !(incident?.identities || []).length ? (incident?.identities || []) : null;
   const cameraCount = new Set((incident?.episodes || []).map((episode) => episode.camera_id).concat(incident?.episodes?.length ? [] : [incident?.camera_id])).size;
   const hint = selected
     ? (selected.kind === "uncertain"
@@ -381,6 +414,15 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
   const crumbDay = Number.isFinite(startEpoch) ? dayLabel(startEpoch, zone) : "";
   const timelineHref = recordingsHref({ cameraId: frameCamera, epoch: Number.isFinite(shownEpoch) ? shownEpoch : startEpoch, source: "main" });
   const segment = playback?.segments[playback.index];
+
+  useEffect(() => {
+    if (!title) return;
+    document.title = `${title} · SurvNG`;
+    if (focusTitleRef.current) {
+      focusTitleRef.current = false;
+      titleRef.current?.focus();
+    }
+  }, [title, titleId]);
 
   return <main className="incident-story-page">
     {error ? <div className="incident-detail-notice" role="alert"><span>{error}{data ? " Showing the last received details." : ""}</span><button onClick={() => setRetry((value) => value + 1)}><RefreshCw size={16} />Retry</button></div> : null}
@@ -393,7 +435,7 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
                 {review ? <span>Review mode{position.index >= 0 ? ` · ${position.index + 1} of ${position.total}` : ""} · {crumbDay}</span>
                   : <><a href={appUrl("/incidents")}>Incidents</a><span aria-hidden="true"> / </span><span>{crumbDay}</span></>}
               </nav>
-              <h1 title={providerTitle ? `AI-worded title. Built-in: ${builtTitle}` : undefined}>{title}</h1>
+              <h1 ref={titleRef} tabIndex={-1} title={providerTitle ? `AI-worded title. Built-in: ${builtTitle}` : undefined}>{title}</h1>
               <p className="story-meta">
                 <time dateTime={incident.start_at}>{formatTimeOnly(startEpoch, zone)}</time> – <time dateTime={incident.end_at}>{formatTimeOnly(endEpoch, zone)}</time>
                 {` · ${formatSpan(endEpoch - startEpoch)} · ${cameraCount} camera${cameraCount === 1 ? "" : "s"} · ${objects.length} observed object${objects.length === 1 ? "" : "s"}`}
@@ -428,8 +470,9 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
               <section className={`story-frame${playback ? " playing" : ""}`} aria-label="Incident evidence">
                 <div className="story-frame-media">{/* Media alone in its slot: the player is remounted per camera. */}
                 {playback && segment ? <IncidentRecordingPlayer key={playback.key} cameraId={segment.cameraId} startEpoch={segment.start} endEpoch={segment.end}
-                  initialEpoch={playback.initialEpoch} timeZone={zone} autoPlay onPlayhead={setCursor} onEnded={playbackEnded} onClose={stopPlayback} />
-                  : <StillFrame src={stillSrc} anchor={anchor} boxes={boxes} selectedId={selectedId} legacyBoxes={legacyBoxes} label={`Incident at ${cameraName(frameCamera)}`} />}
+                  initialEpoch={playback.initialEpoch} timeZone={zone} autoPlay onPlayhead={setCursor} onEnded={playbackEnded} onClose={stopPlayback}
+                  onUnavailable={() => { if (playback.index + 1 < playback.segments.length) { setNotice({ text: `No recording on ${cameraName(segment.cameraId)}; moving on`, key: Date.now() }); playbackEnded(); } }} />
+                  : <StillFrame src={stillSrc} anchor={anchor} boxes={boxes} selectedId={focusId} legacyBoxes={legacyBoxes} label={`Incident at ${cameraName(frameCamera)}`} />}
                 </div>
                 <div className="story-frame-chips">
                   <span className="story-frame-chip strong">{cameraName(frameCamera)}</span>
@@ -437,19 +480,25 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
                 </div>
                 <span className="sr-only" role="status" aria-live="polite">{notice?.text || ""}</span>
                 {notice ? <div key={notice.key} className="story-switched" aria-hidden="true">{notice.text}</div> : null}
-                {!playback ? <button type="button" className="story-play" disabled={!canPlay} onClick={() => startPlayback(segmentsFor(selected), 0, null, null)}>
+                {!playback ? <button type="button" className="story-play" disabled={!canPlay} onClick={() => startFollowing()}>
                   <Play size={16} fill="currentColor" />{selected ? `Follow ${objectName(selected)}` : "Play incident"}</button> : null}
               </section>
-              <IncidentStoryline line={line} cameraName={cameraName} selectedId={selectedId} cursor={Number.isFinite(shownEpoch) ? shownEpoch : null} timeZone={zone} hint={hint} onBar={jumpToBar} />
+              <IncidentStoryline line={line} cameraName={cameraName} selectedId={focusId} cursor={Number.isFinite(shownEpoch) ? shownEpoch : null} timeZone={zone} hint={hint} onBar={jumpToBar} />
             </div>
             <aside className="story-aside" aria-label="Observed objects">
               <h2 className="story-aside-title">{objects.length} observed object{objects.length === 1 ? "" : "s"}</h2>
-              {objects.length ? <ObjectCards objects={objects} line={line} selectedId={selectedId} cameraName={cameraName} identities={incident.identities} onSelect={selectObject} />
+              {objects.length ? <ObjectCards objects={objects} line={line} selectedId={focusId} cameraName={cameraName} identities={cardIdentities} onSelect={selectObject} />
                 : <p className="story-muted">{incident.has_objects === false || !incident.labels?.length ? "Motion only. No objects were observed in the analyzed evidence." : "No object observations are available."}</p>}
               {!selected ? <WhyPanel incident={incident} cameraName={cameraName} />
                 : selected.kind === "uncertain" || correcting
                   ? <CorrectPanel incident={incident} object={selected} objects={objects} cameraName={cameraName} canCorrect={canCorrectIncident}
-                    timeZone={zone} onCorrected={(detail) => { if (currentIdRef.current === currentId) setCorrecting(true); updateIncident(detail, currentId); }} onDone={() => setCorrecting(false)} />
+                    timeZone={zone} onCorrected={(detail, keepId) => {
+                      if (currentIdRef.current === currentId) {
+                        setCorrecting(true);
+                        if (keepId) { setSelectedId(keepId); setNotice({ text: "Objects associated", key: Date.now() }); }
+                      }
+                      updateIncident(detail, currentId);
+                    }} onDone={() => setCorrecting(false)} />
                   : <PathPanel object={selected} cameraName={cameraName} timeZone={zone} activeCameraId={frameCamera} canCorrect={canCorrectIncident}
                     onCorrect={() => setCorrecting(true)} onOpenEvent={async (eventId) => {
                       if (!eventId) return;

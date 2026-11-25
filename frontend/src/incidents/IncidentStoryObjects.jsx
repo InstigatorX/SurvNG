@@ -121,7 +121,7 @@ export function CorrectPanel({ incident, object, objects, cameraName, timeZone, 
   const cameras = [...new Set(object.intervals.map((interval) => cameraName(interval.camera_id)))];
   const count = object.observation_count || object.observations?.length || 0;
   const others = objects.filter((item) => item.id !== object.id);
-  async function submit(body, done) {
+  async function submit(body, done, keepId = null) {
     setBusy(true); setError(""); setNotice("");
     try {
       const response = await fetch(`/api/incidents/${encodeURIComponent(incident.incident_id)}/corrections`, {
@@ -131,7 +131,7 @@ export function CorrectPanel({ incident, object, objects, cameraName, timeZone, 
       if (!response.ok) throw new Error("Could not save the correction. The evidence has not been changed.");
       const detail = await response.json();
       setMode(""); setNotice(done);
-      onCorrected?.(detail);
+      onCorrected?.(detail, keepId);
     } catch (failure) { setError(failure.message); }
     finally { setBusy(false); }
   }
@@ -149,7 +149,7 @@ export function CorrectPanel({ incident, object, objects, cameraName, timeZone, 
         <label>New label<input value={label} maxLength={100} onChange={(event) => setLabel(event.target.value)} required /></label>
         <button type="submit" disabled={busy}>{busy ? "Saving…" : "Save label"}</button>
       </form> : null}
-      {mode === "associate" ? <form className="story-correct-form" onSubmit={(event) => { event.preventDefault(); if (other) void submit({ operation: "associate", object_ids: [other, object.id] }, "Objects associated."); }}>
+      {mode === "associate" ? <form className="story-correct-form" onSubmit={(event) => { event.preventDefault(); if (other) void submit({ operation: "associate", object_ids: [other, object.id] }, "Objects associated.", other); }}>
         <label>Same object as<select value={other} onChange={(event) => setOther(event.target.value)} required>
           <option value="">Choose an object</option>
           {others.map((item) => <option key={item.id} value={item.id}>{objectName(item)} · {formatTimeOnly(item.intervals[0]?.start, timeZone)}</option>)}

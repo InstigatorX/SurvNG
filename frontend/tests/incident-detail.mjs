@@ -101,6 +101,10 @@ async function legacyChecks(width) {
   status = 404;
   await page.evaluate(() => window.dispatchEvent(new Event("online")));
   await page.getByRole("heading", { name: "Incident unavailable" }).waitFor();
+  if (width > 500) {
+    await page.goto(`${origin}/survng/incidents/incident-%E0`);
+    await page.getByRole("heading", { name: "Incident unavailable" }).waitFor();
+  }
   assert.deepEqual(errors, []);
   await page.close();
 }
@@ -135,6 +139,13 @@ async function storyChecks(width) {
     }
     if (path.endsWith("/corrections")) {
       const body = route.request().postDataJSON(); corrections.push(body);
+      if (body.operation === "associate") {
+        const [keep, ...others] = body.object_ids;
+        const folded = incident.scene_objects.filter((object) => others.includes(object.id));
+        incident = { ...incident, revision: incident.revision + 1, scene_objects: incident.scene_objects.filter((object) => !others.includes(object.id)).map((object) => object.id === keep
+          ? { ...object, observations: [...object.observations, ...folded.flatMap((item) => item.observations)], visible_intervals: [...object.visible_intervals, ...folded.flatMap((item) => item.visible_intervals)] } : object) };
+        return route.fulfill({ json: incident });
+      }
       incident = { ...incident, revision: incident.revision + 1, scene_objects: incident.scene_objects.map((object) => object.id === body.object_id ? { ...object, label: body.label, certainty: "observed" } : object) };
       return route.fulfill({ json: incident });
     }
@@ -163,7 +174,13 @@ async function storyChecks(width) {
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   // Shortcuts are review-mode only.
   await page.keyboard.press("e");
+  await page.waitForTimeout(300);
   assert.equal(verdicts.length, 0);
+  // The evidence frame is contained in its box at every width (no cropped side).
+  const frameBox = await page.locator(".story-frame").boundingBox();
+  const imageBox = await page.locator(".story-frame-image").boundingBox();
+  assert.ok(imageBox.x >= frameBox.x - 1 && imageBox.x + imageBox.width <= frameBox.x + frameBox.width + 1, `image ${JSON.stringify(imageBox)} inside frame ${JSON.stringify(frameBox)}`);
+  assert.ok(imageBox.y >= frameBox.y - 1 && imageBox.y + imageBox.height <= frameBox.y + frameBox.height + 1);
   // 2 · Pick an object.
   await page.locator(".story-card", { hasText: "Person" }).click();
   await page.getByRole("heading", { name: "Person · path across cameras" }).waitFor();
@@ -181,10 +198,14 @@ async function storyChecks(width) {
   assert.match(await page.locator(".story-path li.active").innerText(), /Front Door/);
   await page.getByRole("button", { name: "Follow Person" }).click();
   await page.locator(".story-frame .incident-recording-player").waitFor();
-  assert.ok(requests.some((item) => item.includes("/cameras/front-driveway/recordings/window")));
+  // Follow starts from the moment pinned on the storyline (Front Door), not the first camera.
+  await page.waitForFunction(() => document.querySelector(".story-frame .incident-recording-player")?.dataset.cameraId === "front-door");
+  assert.ok(requests.some((item) => item.includes("/cameras/front-door/recordings/window")));
   // A bar click during playback re-targets the player to that camera.
-  await page.mouse.click(bar.x + bar.width * 0.5, bar.y + bar.height / 2);
-  await page.waitForFunction(() => document.querySelector(".story-frame-chip.strong")?.textContent === "Front Door");
+  const drivewayBar = await page.locator(".story-lane").nth(0).locator(".story-bar.person").boundingBox();
+  await page.mouse.click(drivewayBar.x + drivewayBar.width * 0.5, drivewayBar.y + drivewayBar.height / 2);
+  await page.waitForFunction(() => document.querySelector(".story-frame .incident-recording-player")?.dataset.cameraId === "front-driveway");
+  assert.equal(await page.locator(".story-frame-chip.strong").innerText(), "Front Driveway");
   await page.getByRole("button", { name: "Close playback" }).click();
   // 4 · Correct the uncertain object.
   await page.locator(".story-card", { hasText: "Dog" }).click();
@@ -193,19 +214,22 @@ async function storyChecks(width) {
   assert.equal(await page.locator(".story-box.uncertain").count(), 1);
   await page.getByRole("button", { name: "Change label" }).click();
   await page.getByLabel("New label").fill("cat");
-  // Typing never triggers review shortcuts.
-  await page.getByLabel("New label").press("x");
-  await page.getByLabel("New label").fill("cat");
   await page.getByRole("button", { name: "Save label" }).click();
   await page.getByText("Label corrected.").waitFor();
   assert.deepEqual(corrections.at(-1), { expected_revision: 7, operation: "label", object_id: "object-dog", label: "cat" });
   await page.locator(".story-card", { hasText: "Person" }).click();
   await page.getByRole("button", { name: "Correct this object" }).click();
   await page.getByRole("button", { name: "Same as another object" }).click();
-  assert.ok(await page.getByLabel("Same object as").isVisible());
-  await page.getByRole("button", { name: "Back to path" }).click();
-  await page.locator(".story-card", { hasText: "Person" }).click();
+  await page.getByLabel("Same object as").selectOption("object-car");
+  await page.getByRole("button", { name: "Associate", exact: true }).click();
+  // The person was folded into the car: the car stays selected, nothing is orphaned-dimmed.
+  await page.waitForFunction(() => document.querySelectorAll(".story-card").length === 2);
+  assert.deepEqual(corrections.at(-1).object_ids, ["object-car", "object-person"]);
+  assert.equal(await page.locator(".story-card[aria-pressed=true]").innerText().then((text) => text.startsWith("Car")), true);
+  assert.equal(await page.locator(".story-card.dimmed").count(), 1);
+  await page.locator(".story-card", { hasText: "Car" }).click();
   await page.getByRole("heading", { name: "Why this is an incident" }).waitFor();
+  assert.equal(await page.locator(".story-card.dimmed, .story-bar.dimmed").count(), 0);
   // 5 · Review mode: one bar, verdicts by key, then the next undecided incident.
   await page.getByRole("button", { name: "Review mode" }).click();
   assert.match(page.url(), /review=1/);
@@ -214,10 +238,21 @@ async function storyChecks(width) {
   assert.match(await reviewBar.innerText(), /21 left/);
   assert.match(await page.locator(".story-crumb").innerText(), /Review mode · 5 of 25/);
   for (const name of ["Reviewed", "Keep for later", "Nothing here"]) assert.ok(await reviewBar.getByRole("button", { name: new RegExp(name) }).isVisible());
+  // Typing in a field never triggers review shortcuts, even in review mode.
+  await page.locator(".story-card", { hasText: "Cat" }).click();
+  await page.getByRole("button", { name: "Correct this object" }).click();
+  await page.getByRole("button", { name: "Change label" }).click();
+  await page.getByLabel("New label").pressSequentially("exfjk");
+  await page.waitForTimeout(300);
+  assert.equal(verdicts.length, 0);
+  assert.match(page.url(), /incident-story-1\?review=1/);
+  await page.evaluate(() => document.activeElement.blur());
   const atUrl = (pattern) => page.waitForFunction((source) => new RegExp(source).test(location.href), pattern.source).catch((error) => { throw new Error(`${pattern} not reached; at ${page.url()}; ${error.message}`); });
   await page.keyboard.press("e");
   await atUrl(/incident-q-5\?review=1/);
   assert.deepEqual(verdicts, [["incident-story-1", "reviewed"]]);
+  await page.waitForFunction(() => document.activeElement?.matches(".story-heading h1"));
+  assert.match(await page.title(), /SurvNG$/);
   await page.getByRole("region", { name: "Review" }).waitFor();
   await page.keyboard.press("j");
   await atUrl(/incident-q-6\?review=1/);
@@ -229,6 +264,7 @@ async function storyChecks(width) {
   await page.getByRole("button", { name: "Exit review" }).click();
   assert.equal(await page.getByRole("region", { name: "Review" }).count(), 0);
   await page.keyboard.press("e");
+  await page.waitForTimeout(300);
   assert.equal(verdicts.length, 1);
   assert.deepEqual(errors, []);
   await page.close();
@@ -264,6 +300,8 @@ async function titleChecks() {
   reply = { status: 500, json: {} };
   await page.goto(url);
   await page.getByRole("heading", { level: 1, name: "Car arrives, person walks to Front Door" }).waitFor();
+  // The title request follows the incident load; give the last one time to arrive.
+  for (let attempt = 0; attempt < 50 && titleRequests.length < 4; attempt += 1) await page.waitForTimeout(100);
   assert.ok(titleRequests.length >= 4);
   assert.deepEqual(errors, []);
   await page.close();
