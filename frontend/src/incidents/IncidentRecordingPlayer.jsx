@@ -206,12 +206,17 @@ export function IncidentRecordingPlayer({
         return;
       }
       if (!cancelled) {
+        // An empty window before the clip's end: look in the next window
+        // (targetEpoch only moves forward and stops at the clip's end).
+        if (!failed && candidates.length && safeEnd > requested.end) {
+          setTargetEpoch(requested.end);
+          return;
+        }
         setLoaded(null);
         setLoading(false);
         setError("No recording window found");
-        // Skip only when this window covers the whole clip; a clip crossing a
-        // window boundary may have its recording in the next window.
-        if (!failed && candidates.length && startEpoch >= requested.start && safeEnd <= requested.end) onUnavailableRef.current?.();
+        // Every window from here to the clip's end answered empty.
+        if (!failed && candidates.length) onUnavailableRef.current?.();
       }
     }
     load().catch((loadError) => {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { chromium } from "playwright";
-import { CAMERAS, queueFor, sceneSvg, storyIncident } from "./fixtures/incident-story.mjs";
+import { BASE, CAMERAS, queueFor, sceneSvg, storyIncident } from "./fixtures/incident-story.mjs";
 
 const root = process.env.SURVNG_FRONTEND_BUILD ? new URL(`file://${process.env.SURVNG_FRONTEND_BUILD.replace(/\/$/, "")}/`) : new URL("../../survng/static/", import.meta.url);
 const server = createServer(async (req, res) => {
@@ -310,8 +310,12 @@ async function titleChecks() {
   ongoing = false;
   reviseTo = 8;
   reply = { status: 500, json: {} };
+  const settledRequests = titleRequests.length;
   await page.evaluate(() => window.dispatchEvent(new Event("online")));
-  await page.waitForTimeout(600);
+  // Wait until the settled page has asked again (and been refused).
+  for (let attempt = 0; attempt < 50 && titleRequests.length <= settledRequests; attempt += 1) await page.waitForTimeout(100);
+  assert.ok(titleRequests.length > settledRequests, "the settled incident asked for a new wording");
+  await page.waitForTimeout(200);
   assert.equal(await page.getByText("Car pulls in and a person walks to the front door").count(), 0);
   reviseTo = null;
   ongoing = true;
@@ -363,6 +367,17 @@ async function followThemeChecks() {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
   await page.addInitScript(() => localStorage.setItem("survng.theme", "auto"));
   let drivewayMode = "empty";
+  const windowStarts = [];
+  // 15-minute windows: the story's Front Door interval is moved to cross one.
+  const BOUNDARY = Math.ceil((BASE + 60) / 900) * 900;
+  const crossing = storyIncident();
+  const door = crossing.scene_objects.find((object) => object.id === "object-person").visible_intervals[1];
+  door.start_at = new Date((BOUNDARY - 30) * 1000).toISOString();
+  door.end_at = new Date((BOUNDARY + 40) * 1000).toISOString();
+  crossing.end_at = door.end_at; crossing.last_epoch = BOUNDARY + 40;
+  crossing.episodes[1].end_at = door.end_at;
+  const doorSightings = crossing.scene_objects.find((object) => object.id === "object-person").observations.filter((item) => item.camera_id === "front-door");
+  doorSightings.forEach((item, index) => { item.captured_at = new Date((BOUNDARY - 25 + index * 25) * 1000).toISOString(); });
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.route("**/api/**", (route) => {
@@ -370,12 +385,18 @@ async function followThemeChecks() {
     const path = url.pathname;
     if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
     if (path.endsWith("/api/cameras")) return route.fulfill({ json: CAMERAS });
-    if (path.includes("/incidents/notification/")) return route.fulfill({ json: { incident: storyIncident(), notification: { state: "complete" }, camera_name: "Front Driveway" } });
+    if (path.includes("/incidents/notification/")) return route.fulfill({ json: { incident: drivewayMode === "boundary" ? crossing : storyIncident(), notification: { state: "complete" }, camera_name: "Front Driveway" } });
     if (path.endsWith("/title")) return route.fulfill({ json: { incident_id: "incident-story-1", status: "ready", title: "Old wording", revision: 6, current: false } });
     if (path.includes("/recordings/window")) {
       const start = Number(url.searchParams.get("start_epoch")), end = Number(url.searchParams.get("end_epoch"));
       // The usual failure: main errors while the (unrecorded) sub stream answers empty.
       if (path.includes("/front-driveway/") && drivewayMode === "error" && url.searchParams.get("source") !== "live") return route.fulfill({ status: 500, json: {} });
+      // A clip crossing a window boundary, recorded only in the later window.
+      if (drivewayMode === "boundary" && path.includes("/front-door/")) {
+        windowStarts.push(start);
+        const rows = start >= BOUNDARY ? [{ start_epoch: start, end_epoch: end, duration_seconds: end - start, name: "segment" }] : [];
+        return route.fulfill({ json: { camera_id: "front-door", source: "main", start_epoch: start, end_epoch: end, recordings: rows } });
+      }
       const recordings = path.includes("/front-driveway/") ? [] : [{ start_epoch: start, end_epoch: end, duration_seconds: end - start, name: "segment" }];
       return route.fulfill({ json: { camera_id: "x", source: "main", start_epoch: start, end_epoch: end, recordings } });
     }
@@ -398,6 +419,18 @@ async function followThemeChecks() {
   await page.locator(".story-frame .incident-recording-player").getByText("No recording window found").waitFor();
   await page.waitForTimeout(500);
   assert.equal(await page.locator(".story-frame .incident-recording-player").getAttribute("data-camera-id"), "front-driveway");
+  // Following into a clip that crosses a window boundary finds the later recording.
+  drivewayMode = "boundary";
+  await page.reload();
+  await page.locator(".story-card", { hasText: "Person" }).click();
+  const doorBar = await page.locator(".story-lane").nth(1).locator(".story-bar").first().boundingBox();
+  await page.mouse.click(doorBar.x + 2, doorBar.y + doorBar.height / 2);
+  await page.getByRole("button", { name: "Follow Person" }).click();
+  await page.waitForFunction(() => document.querySelector(".story-frame .incident-recording-player")?.dataset.cameraId === "front-door");
+  for (let attempt = 0; attempt < 50 && !windowStarts.includes(BOUNDARY); attempt += 1) await page.waitForTimeout(100);
+  assert.ok(windowStarts.includes(BOUNDARY - 900) && windowStarts.includes(BOUNDARY), JSON.stringify(windowStarts));
+  // (The fixture's segment has no real media, so playback itself is not checked here.)
+  assert.equal(await page.locator(".story-frame .incident-recording-player").getAttribute("data-camera-id"), "front-door");
   assert.deepEqual(errors, []);
   await page.close();
 }
