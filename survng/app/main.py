@@ -1017,6 +1017,7 @@ def _record_process_lifecycle(kind: str) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     APPLICATION_STOPPING.clear()
+    RESTART_REQUIRED.clear()
     loop = asyncio.get_running_loop()
     early_onvif_thread: threading.Thread | None = None
     early_onvif_lock = threading.Lock()

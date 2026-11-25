@@ -17,6 +17,18 @@ from survng.app.onvif_events import OnvifEventListener
 from survng.app.onvif_transport import CancellableSession
 
 
+@pytest.fixture(autouse=True)
+def _fresh_abandoned_registry():
+    """Abandoned-worker counts are per process; start each test from none."""
+    from survng.app import onvif_events
+
+    with onvif_events._ABANDONED_LOCK:
+        onvif_events._ABANDONED.clear()
+    yield
+    with onvif_events._ABANDONED_LOCK:
+        onvif_events._ABANDONED.clear()
+
+
 def _camera(host: str = "example.invalid", port: int = 80) -> CameraConfig:
     return CameraConfig.model_validate({
         "id": "gate",
