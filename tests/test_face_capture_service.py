@@ -392,3 +392,82 @@ def test_shedding_for_incident_work_never_counts_toward_failure(tmp_path, monkey
         assert service.capture(*service.next_event(NOW)) is None
         service._deferred[1] = (service._deferred[1][0], 0.0)  # the hold has passed
     assert service.store.attempts([1]) == {}
+
+
+def test_moments_another_event_of_the_visit_captured_are_skipped(tmp_path, monkeypatch):
+    """Overlapping events of one visit share frames; a covered moment is not captured twice."""
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(60)), (2, "gate", _person_event(), _at(60))])
+    with sqlite3.connect(service._events_db_path) as connection:
+        connection.executescript(
+            "create table scene_event_membership (event_id integer primary key, episode_id text);"
+            "insert into scene_event_membership values (1, 'visit'), (2, 'visit');")
+    face = CapturedFace(0, 0.5, (0, 0, 60, 60), [], 0.9, 17.0, np.ones(512, np.float32), np.zeros((20, 20, 3), np.uint8))
+    event_epoch = (NOW - timedelta(minutes=60)).timestamp()
+    # Event 1 decoded the moment at +0.5 s.
+    service.store.record(event_id=1, camera_id="gate", event_epoch=event_epoch,
+                         result=CaptureResult(faces=[face], moments=[0.5], decoded_moments=[0.5]),
+                         embedding_model="m", seconds=1.0)
+    seen = {}
+
+    def fake_capture(**kwargs):
+        covered = kwargs["covered"]
+        # The same moment (within 0.25 s) is covered; a nearby other one is not.
+        seen["covered"] = (covered(0.5), covered(0.6), covered(1.0))
+        # Every moment it chose was covered: nothing decoded, nothing failed.
+        return CaptureResult(covered_moments=2)
+
+    monkeypatch.setattr(service_module, "capture_event", fake_capture)
+    service.capture(2, "gate", event_epoch, {})
+    assert seen["covered"] == (True, True, False)
+    assert service.store.attempts([2])[2][0] == "done"
+    assert service.store.faces(2) == []
+
+
+def test_without_an_episode_nothing_counts_as_covered(tmp_path):
+    from survng.app.face_capture.events import same_visit_events
+
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(60))])
+    with sqlite3.connect(service._events_db_path) as connection:
+        assert same_visit_events(connection, 1) == []  # no scene tables at all
+
+
+def test_a_recapture_that_no_longer_decodes_a_moment_recaptures_who_skipped_it(tmp_path):
+    from survng.app.face_capture.store import FaceCaptureStore
+
+    store = FaceCaptureStore(tmp_path)
+    store.record(event_id=1, camera_id="gate", event_epoch=100.0,
+                 result=CaptureResult(moments=[0.5], decoded_moments=[0.5]), embedding_model="m", seconds=1.0)
+    store.record(event_id=2, camera_id="gate", event_epoch=100.0, result=CaptureResult(covered_moments=1),
+                 embedding_model="m", seconds=1.0, covered_by=[1])
+    store.record(event_id=1, camera_id="gate", event_epoch=100.0,
+                 result=CaptureResult(moments=[0.5], decoded_moments=[]), embedding_model="m", seconds=1.0)
+    assert store.attempts([2])[2][2] == 0
+
+
+def test_an_event_that_skipped_a_removed_events_moments_is_captured_again(tmp_path):
+    from survng.app.face_capture.store import FaceCaptureStore
+
+    store = FaceCaptureStore(tmp_path)
+    face = CapturedFace(0, 0.5, (0, 0, 60, 60), [], 0.9, 17.0, np.ones(512, np.float32), np.zeros((20, 20, 3), np.uint8))
+    store.record(event_id=1, camera_id="gate", event_epoch=100.0,
+                 result=CaptureResult(faces=[face], moments=[0.5], decoded_moments=[0.5]),
+                 embedding_model="m", seconds=1.0)
+    store.record(event_id=2, camera_id="gate", event_epoch=100.0, result=CaptureResult(covered_moments=1),
+                 embedding_model="m", seconds=1.0, covered_by=[1])
+    assert store.decoded_moments("gate", [1], 0, 1000) == [(1, 100.5)]
+    store.forget_events([1])
+    state, attempts, version = store.attempts([2])[2]
+    assert version == 0 and attempts == 0  # taken again, as after a version change
+    assert store.decoded_moments("gate", [1], 0, 1000) == []
+
+
+def test_events_reset_for_recapture_are_reached_before_the_next_full_scan(tmp_path):
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(60)), (2, "gate", _person_event(), _at(60))])
+    service.store.record(event_id=1, camera_id="gate", event_epoch=100.0,
+                         result=CaptureResult(moments=[0.5], decoded_moments=[0.5]), embedding_model="m", seconds=1.0)
+    service.store.record(event_id=2, camera_id="gate", event_epoch=100.0, result=CaptureResult(covered_moments=1),
+                         embedding_model="m", seconds=1.0, covered_by=[1])
+    assert service.next_event(NOW) is None  # both done; the floor moves past them
+    service.store.forget_events([1])
+    candidate = service.next_event(NOW)
+    assert candidate is not None and candidate[0] == 2

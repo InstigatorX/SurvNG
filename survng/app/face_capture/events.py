@@ -126,3 +126,19 @@ def stored_people(
             continue
         by_time.setdefault(offset, []).append(scaled)
     return sorted(by_time.items())
+
+
+def same_visit_events(connection: sqlite3.Connection, event_id: int) -> list[int]:
+    """Other events of the event's scene episode (one visit on one camera).
+
+    Overlapping events of a visit cover the same frames; none without an
+    episode yet.
+    """
+    try:
+        return [int(row[0]) for row in connection.execute(
+            "select other.event_id from scene_event_membership own"
+            " join scene_event_membership other on other.episode_id = own.episode_id"
+            " where own.event_id = ? and other.event_id != ?", (int(event_id), int(event_id)))]
+    except sqlite3.OperationalError:
+        # A database without scene tables (older stores, tests).
+        return []

@@ -143,3 +143,38 @@ def test_held_candidates_are_bounded_to_the_highest_norms_and_kept_crops_decode(
     assert len(result.faces) <= 3
     assert min(f.norm for f in result.faces) >= result.candidates + 14 - 3 - 1
     assert all(f.crop.ndim == 3 and f.crop.size for f in result.faces)
+
+
+def test_covered_moments_are_not_decoded_again():
+    decoded = []
+
+    def frames(start, end):
+        decoded.append((start, end))
+        return iter(())
+
+    result = capture_event(plan_offsets=[0.0, 2.0], main_frames=frames, detect_people=lambda frame: [PERSON],
+                           capture_faces=lambda crop: [], settings=SETTINGS, covered=lambda moment: moment == 0.0)
+    assert result.covered_moments == 1 and result.moments == [2.0]
+    assert decoded and all(start > 0.5 for start, _ in decoded)
+
+
+def test_only_moments_whose_window_was_read_count_as_decoded():
+    frame = np.zeros((720, 1280, 3), np.uint8)
+
+    def frames(start, end):
+        # Recorded up to +0.1 s only: the window around 0.0 is read, and a
+        # window that ends before its moment, or has no recording, is not.
+        at = start
+        while at <= min(end, 0.1):
+            yield at, frame
+            at += 0.2
+
+    result = capture_event(plan_offsets=[0.0, 5.0], main_frames=frames, detect_people=lambda frame: [],
+                           capture_faces=lambda crop: [], settings=SETTINGS)
+    assert result.moments == [0.0, 5.0]
+    assert result.decoded_moments == [0.0]
+    wide = CaptureSettings(min_norm=13.0, min_size=48.0, faces_per_track=2, margin_seconds=1.0,
+                           moment_radius_seconds=0.5)
+    cut_short = capture_event(plan_offsets=[0.5], main_frames=frames, detect_people=lambda frame: [],
+                              capture_faces=lambda crop: [], settings=wide)
+    assert cut_short.main_frames > 0 and cut_short.decoded_moments == []

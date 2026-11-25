@@ -26,6 +26,8 @@ from .moments import Box, Track, choose_moments, iou, link_tracks, merge_windows
 
 # The old face-evidence step reached 0.8 s past the outermost plan offsets.
 PLAN_REACH_SECONDS = 0.9
+# A frame this close to a moment shows its window was read there.
+DECODED_MOMENT_SECONDS = 0.25
 MAX_WINDOW_SECONDS = 30.0
 SUB_SAMPLE_FPS = 5.0
 # Kept faces of one person are at least this far apart in time.
@@ -103,6 +105,11 @@ class CaptureResult:
     sub_frames: int = 0
     main_frames: int = 0
     candidates: int = 0
+    # Moments another event of the same visit already captured (skipped).
+    covered_moments: int = 0
+    # Moments whose main-stream window was read (frames, no error): what
+    # another event of the visit may skip.
+    decoded_moments: list[float] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
@@ -186,6 +193,7 @@ def capture_event(
     main_size: tuple[int, int] | None = None,
     stored_people: Iterable[tuple[float, list[Box]]] = (),
     cancelled: Callable[[], bool] = lambda: False,
+    covered: Callable[[float], bool] = lambda _offset: False,
 ) -> CaptureResult:
     plan = list(plan_offsets)
     result = CaptureResult(window=event_window(plan, settings.margin_seconds))
@@ -238,6 +246,11 @@ def capture_event(
     if not result.moments:
         result.moments = sorted(round(o, 3) for o in plan)
         result.moment_source = "plan offsets"
+    # Overlapping events of one visit share frames: a moment another of them
+    # already captured would only store the same faces again.
+    uncovered = [moment for moment in result.moments if not covered(moment)]
+    result.covered_moments = len(result.moments) - len(uncovered)
+    result.moments = uncovered
 
     # Pass two: the main stream around those moments.
     # Only the padded face crop is kept, never the whole frame.
@@ -245,6 +258,7 @@ def capture_event(
     held = 0  # JPEG bytes in found
     people_by_frame: list[tuple[float, list[Box]]] = []
     for low, high in merge_windows(result.moments, settings.moment_radius_seconds):
+        read_at: list[float] = []  # offsets of the frames this window yielded
         try:
             for offset, frame in main_frames(low, high):
                 check()
@@ -279,10 +293,19 @@ def capture_event(
                         held += len(jpeg)
                         while held > MAX_CANDIDATE_BYTES and len(found) > 1:
                             held -= len(heapq.heappop(found)[5])
+                # Only a frame searched to the end counts as read.
+                read_at.append(offset)
         except (OSError, RuntimeError) as error:
             if _transient(error):
                 raise
             result.errors.append(f"main stream {low:+.1f}..{high:+.1f}: {error}")
+        # A moment counts as decoded only if frames at it were read: a window
+        # cut short (recording not indexed yet, a gap) leaves later moments
+        # for the visit's other events to capture.
+        result.decoded_moments.extend(
+            moment for moment in result.moments
+            if low <= moment <= high and any(abs(at - moment) <= DECODED_MOMENT_SECONDS for at in read_at)
+        )
 
     # Prefixed like the errors above, so a capture that kept no faces while
     # main-stream segments failed is retried rather than recorded as done.
