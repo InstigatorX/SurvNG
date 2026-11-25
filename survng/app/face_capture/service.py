@@ -25,6 +25,7 @@ from .pipeline import (
     CaptureCancelled,
     CaptureSettings,
     capture_event,
+    rows_for_window,
     event_window,
     main_stream_source,
     sub_stream_source,
@@ -244,15 +245,17 @@ class FaceCaptureService:
             # sub-stream and stored boxes are in main-stream pixels even when
             # no segment covers the epoch itself.
             low, high = event_window(plan, settings.margin_seconds)
-            main_rows = rows("main", epoch + low, epoch + high)
+            # One recording-index lookup per source for the whole event.
+            window_rows = rows_for_window(rows, epoch + low - 1.0, epoch + high + 1.0)
+            main_rows = window_rows("main", epoch + low, epoch + high)
             main_size = mp4_video_dimensions(Path(main_rows[0]["path"])) if main_rows else None
             with self._events_connection() as connection:
                 stored = stored_people(connection, event_id, epoch, main_size)
             with cancellable_evidence_work(self._stop.is_set, optional=True, source="face_capture"):
                 result = capture_event(
                     plan_offsets=plan,
-                    main_frames=main_stream_source(rows, epoch, ffmpeg, ffprobe, hardware),
-                    sub_frames=sub_stream_source(rows, epoch, ffmpeg),
+                    main_frames=main_stream_source(window_rows, epoch, ffmpeg, ffprobe, hardware),
+                    sub_frames=sub_stream_source(window_rows, epoch, ffmpeg),
                     find_faces=lambda crop: inference.capture_faces(crop, embed=False),
                     main_size=main_size,
                     stored_people=stored,

@@ -166,6 +166,18 @@ isolated face worker), `events` (person events, timing, stored boxes), `store`
 `service` (background loop) and `__main__` (offline run with contact sheets).
 The frame-run decode is shared through `recording_frame_runs`.
 
+Decoding: the proposal reused frame stepping's GOP runs, but runs suit a
+stepping player, not a consumer that wants every frame of a window. Each run
+restarts the decoder at its GOP's keyframe and holds the whole run in memory
+(30 frames of 4K is 750 MB), so capture streams instead:
+`recording_frame_runs.stream_frames` decodes one window per segment from its
+keyframe through the window end, one frame held at a time (the same shared
+decoder pieces; the timeline keeps its runs). The sub-stream uses it too,
+thinned to 5 frames a second by time. Each event looks its recordings up once
+per source (`rows_for_window`); an unbounded `start_epoch + duration > ?`
+lookup in the recording index took 7 s per call and was most of the early
+cost.
+
 Deviations from the proposal, on purpose:
 
 - The job is a dedicated loop with its own state table
@@ -203,3 +215,23 @@ then works through the last `face_capture_backfill_hours` of recorded person
 events, newest first, one at a time. Progress is in
 `face-captures.sqlite3` (`face_capture_events`, `face_captures`) and the crops
 in `face-captures/` under the database directory.
+
+### Measured on this host (2026-11-25)
+
+Offline run of the pipeline on the same 60 events as the every-frame report
+(six cameras, YuNet, GPU person detection and decode, 2.5 GB memory cap):
+
+| | Two-pass capture | Every frame |
+|---|---|---|
+| Events with a usable face (recognisable, >= 48 px) | 40 of 45 kept (89%) | 45 |
+| Main-stream frames decoded | 5,599 (24%) | 22,954 |
+| Time | 591 s (median 10.9 s an event, longest 20 s) | 2,207 s* |
+| Peak memory (offline, models included) | 786 MB | |
+
+\* The every-frame run paid about 7 s an event for the slow recording lookup,
+so a fair time ratio is nearer a third. The pass condition set before
+building (90% at under 15%) is not fully met: all misses are on the two
+indoor cameras (downstairs 7 of 10, foyer 6 of 8), where faces show for one or
+two frames, and person detection on every main-stream frame is now most of
+the cost. Ranking moments by the face seen on the sub-stream instead of by
+person height lifted the kept share from 87% and fixed several indoor misses.

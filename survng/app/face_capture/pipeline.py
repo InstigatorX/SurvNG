@@ -36,9 +36,6 @@ TRACK_MATCH_IOU = 0.1
 TRACK_MATCH_SECONDS = 1.0
 # Second-pass tracks matched to no first-pass track are numbered from here.
 UNMATCHED_TRACK_BASE = 1000
-# Frames decoded together in one run. A 4K frame is about 25 MB; frame
-# stepping's 30-frame runs would hold 750 MB, too much beside the service.
-CAPTURE_RUN_MAX_FRAMES = 8
 # Candidates held per event (the highest norms), each as a JPEG crop: a
 # busy 4K event cannot grow memory beyond a few megabytes.
 MAX_CANDIDATES = 300
@@ -222,6 +219,7 @@ def capture_event(
             if _transient(error):
                 raise
             result.errors.append(f"sub-stream: {error}")
+        result.errors.extend(f"sub-stream {error}" for error in getattr(sub_frames, "errors", ()))
         first_tracks = link_tracks(samples)
         result.moments = choose_moments(
             first_tracks, per_track=settings.moments_per_track, face_sizes=face_sizes,
@@ -305,97 +303,111 @@ def capture_event(
     return result
 
 
+class _StreamSource:
+    """Frames of one recording source over event-relative windows.
+
+    Each segment covering a window is decoded once from its keyframe through
+    the window (``recording_frame_runs.stream_frames``), one frame held at a
+    time. ``fps`` thins the frames by time (the sub-stream's moment pass);
+    without it every frame comes through. A segment that cannot be decoded is
+    skipped and noted in ``errors``; the window's other segments still run. A
+    GPU that fails for other than the file is not used again for this event.
+    """
+
+    def __init__(self, source, rows, event_epoch, ffmpeg_path, hardware_acceleration, fps=None):
+        self.source = source
+        self.rows = rows
+        self.event_epoch = event_epoch
+        self.ffmpeg_path = ffmpeg_path
+        self.hardware = hardware_acceleration
+        self.interval = 1.0 / fps if fps else 0.0
+        self.errors: list[str] = []
+        self._sizes: dict[str, tuple[int, int] | None] = {}
+
+    def _size(self, path: Path) -> tuple[int, int] | None:
+        from ..recorded_video_frames import _ffprobe_video_metadata
+        from ..recording_media import mp4_video_dimensions
+
+        key = str(path)
+        if key not in self._sizes:
+            size = mp4_video_dimensions(path)
+            if size is None:
+                width, height, *_ = _ffprobe_video_metadata(path, self.ffmpeg_path)
+                size = (width, height) if width > 0 and height > 0 else None
+            self._sizes[key] = size
+        return self._sizes[key]
+
+    def _gpu_failed(self) -> None:
+        self.hardware = None
+
+    def __call__(self, start: float, end: float) -> Iterator[tuple[float, np.ndarray]]:
+        from ..recording_frame_runs import FrameRunError, stream_frames
+
+        epoch = self.event_epoch
+        next_due = start
+        for row in self.rows(self.source, epoch + start, epoch + end):
+            path = Path(row["path"])
+            segment_start = float(row["start_epoch"])
+            local_start = max(0.0, epoch + start - segment_start)
+            local_end = epoch + end - segment_start
+            if local_end - local_start <= 0.02:
+                continue
+            try:
+                size = self._size(path)
+                if size is None:
+                    raise FrameRunError("unreadable_input", f"{path.name} has no video size")
+                for pts, frame in stream_frames(
+                    self.ffmpeg_path, path, local_start, local_end, size=size,
+                    hardware_acceleration=self.hardware, consumer="face_capture",
+                    on_hardware_failure=self._gpu_failed,
+                ):
+                    if pts is None:
+                        continue
+                    offset = segment_start + pts - epoch
+                    if self.interval:
+                        if offset < next_due:
+                            continue
+                        next_due = offset + self.interval
+                    yield offset, frame
+            except (FrameRunError, OSError) as error:
+                self.errors.append(f"{path.name}: {error}")
+
+
+def rows_for_window(
+    rows: Callable[[str, float, float], list[dict[str, Any]]], start_epoch: float, end_epoch: float,
+) -> Callable[[str, float, float], list[dict[str, Any]]]:
+    """``rows`` with one index lookup per source for the whole event window,
+    filtered in memory for each moment window after that."""
+    fetched: dict[str, list[dict[str, Any]]] = {}
+
+    def cached(source: str, start: float, end: float) -> list[dict[str, Any]]:
+        if source not in fetched:
+            fetched[source] = list(rows(source, start_epoch, end_epoch))
+        return [
+            row for row in fetched[source]
+            if float(row["start_epoch"]) < end and float(row["start_epoch"]) + float(row["duration_seconds"]) > start
+        ]
+
+    return cached
+
+
 def sub_stream_source(
     rows: Callable[[str, float, float], list[dict[str, Any]]],
     event_epoch: float,
     ffmpeg_path: str,
     fps: float = SUB_SAMPLE_FPS,
+    hardware_acceleration: str | None = None,
 ) -> FrameSource:
-    """Sub-stream (``live`` recording) frames sampled at ``fps`` through the shared sampler."""
-    from ..recorded_video_frames import sampled_video_frames
-
-    def frames(start: float, end: float) -> Iterator[tuple[float, np.ndarray]]:
-        for row in rows("live", event_epoch + start, event_epoch + end):
-            segment_start, duration = float(row["start_epoch"]), float(row["duration_seconds"])
-            local_start = max(event_epoch + start, segment_start) - segment_start
-            local_end = min(event_epoch + end, segment_start + duration) - segment_start
-            if local_end - local_start <= 0.1:
-                continue
-            for decoded in sampled_video_frames(
-                Path(row["path"]), start_epoch=segment_start + local_start, sample_fps=fps,
-                duration_seconds=local_end - local_start, ffmpeg_path=ffmpeg_path,
-                maximum_width=4096, start_offset_seconds=local_start,
-            ):
-                yield decoded.captured_at - event_epoch, decoded.frame
-
-    return frames
+    """Sub-stream (``live`` recording) frames, about ``fps`` a second."""
+    return _StreamSource("live", rows, event_epoch, ffmpeg_path, hardware_acceleration, fps)
 
 
 def main_stream_source(
     rows: Callable[[str, float, float], list[dict[str, Any]]],
     event_epoch: float,
     ffmpeg_path: str,
-    ffprobe_path: str,
+    ffprobe_path: str = "",
     hardware_acceleration: str | None = None,
 ) -> FrameSource:
-    """Every main-stream frame in a window, decoded a GOP run at a time (frame stepping's decoder)."""
-    from ..recorded_decoder import recorded_decode_plans
-    from ..recording_frame_runs import FrameRunError, decode_frame_run, list_segment_frames
-    from ..recording_frame_steps import frame_run
-    from ..recording_media import mp4_video_dimensions
-
-    listed: dict[str, Any] = {}
-    # A hardware decode that failed for other than the file is not tried
-    # again for this event, so a broken GPU costs one timeout, not one a run.
-    decoder = {"hardware": hardware_acceleration}
-
-    class Frames:
-        """The frame source; a segment that cannot be listed or decoded is
-        skipped and noted in ``errors``, and the window's other segments
-        are still searched."""
-
-        def __init__(self) -> None:
-            self.errors: list[str] = []
-
-        def __call__(self, start: float, end: float) -> Iterator[tuple[float, np.ndarray]]:
-            for row in rows("main", event_epoch + start, event_epoch + end):
-                path = Path(row["path"])
-                segment_start = float(row["start_epoch"])
-                local_start, local_end = event_epoch + start - segment_start, event_epoch + end - segment_start
-                if str(path) not in listed:
-                    try:
-                        listed[str(path)] = list_segment_frames(ffprobe_path, path)
-                    except FrameRunError as error:
-                        listed[str(path)] = error
-                        self.errors.append(f"{path.name}: {error}")
-                segment = listed[str(path)]
-                if isinstance(segment, FrameRunError):
-                    continue
-                wanted = [i for i, t in enumerate(segment.times) if local_start <= t <= local_end]
-                if not wanted:
-                    continue
-                size = mp4_video_dimensions(path)
-                runs = sorted({frame_run(segment, index, CAPTURE_RUN_MAX_FRAMES) for index in wanted})
-                for run_start, run_stop in runs:
-                    plans = (
-                        recorded_decode_plans(decoder["hardware"], scale=size) if size
-                        else recorded_decode_plans(None)
-                    )
-                    try:
-                        run = decode_frame_run(
-                            ffmpeg_path, path, segment, run_start, run_stop, size[0] if size else 100_000,
-                            size=size, plans=plans, consumer="face_capture",
-                            hardware_timeout=5.0, cpu_timeout=20.0,
-                        )
-                    except FrameRunError as error:
-                        if error.hardware_failed:
-                            decoder["hardware"] = None
-                        self.errors.append(f"{path.name} frames {run_start}-{run_stop}: {error}")
-                        continue
-                    if run.hardware_failed:
-                        decoder["hardware"] = None
-                    for pts, image in run.frames:
-                        if local_start <= pts <= local_end:
-                            yield segment_start + pts - event_epoch, image
-
-    return Frames()
+    """Every main-stream frame in a window, streamed a segment at a time."""
+    return _StreamSource("main", rows, event_epoch, ffmpeg_path, hardware_acceleration)

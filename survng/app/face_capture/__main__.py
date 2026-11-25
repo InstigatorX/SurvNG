@@ -23,7 +23,15 @@ import cv2
 import numpy as np
 
 from .events import person_events, plan_offsets, stored_people
-from .pipeline import CaptureResult, CaptureSettings, capture_event, main_stream_source, sub_stream_source
+from .pipeline import (
+    CaptureResult,
+    CaptureSettings,
+    capture_event,
+    event_window,
+    main_stream_source,
+    rows_for_window,
+    sub_stream_source,
+)
 
 THUMB_HEIGHT = 112
 
@@ -36,8 +44,10 @@ def _rows_reader(index_path: Path, camera_id: str):
             {"path": path, "start_epoch": begin, "duration_seconds": duration}
             for path, begin, duration in connection.execute(
                 "select path, start_epoch, duration_seconds from recordings where camera_id = ? and source = ?"
-                " and start_epoch < ? and start_epoch + duration_seconds > ? order by start_epoch",
-                (camera_id, source, end, start),
+                " and start_epoch < ? and start_epoch > ? and end_epoch > ? order by start_epoch",
+                # The lower bound on start_epoch lets the range index work:
+                # no segment is anywhere near an hour long.
+                (camera_id, source, end, start - 3600.0, start),
             )
         ]
 
@@ -144,12 +154,15 @@ def main(argv: list[str] | None = None) -> int:
         results: list[tuple[int, CaptureResult]] = []
         for event_id, _, epoch, qualification in chosen:
             started = time.monotonic()
-            main_rows = rows("main", epoch - 1.0, epoch + 1.0)
+            plan = plan_offsets(config, qualification, epoch, camera_id)
+            low, high = event_window(plan, settings.margin_seconds)
+            window_rows = rows_for_window(rows, epoch + low - 1.0, epoch + high + 1.0)
+            main_rows = window_rows("main", epoch + low, epoch + high)
             main_size = mp4_video_dimensions(Path(main_rows[0]["path"])) if main_rows else None
             result = capture_event(
-                plan_offsets=plan_offsets(config, qualification, epoch, camera_id),
-                main_frames=main_stream_source(rows, epoch, ffmpeg, ffprobe, hardware),
-                sub_frames=sub_stream_source(rows, epoch, ffmpeg),
+                plan_offsets=plan,
+                main_frames=main_stream_source(window_rows, epoch, ffmpeg, ffprobe, hardware),
+                sub_frames=sub_stream_source(window_rows, epoch, ffmpeg),
                 find_faces=lambda crop: engine.capture(crop, embed=False),
                 main_size=main_size,
                 stored_people=stored_people(events, event_id, epoch, main_size),

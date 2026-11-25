@@ -38,7 +38,6 @@ import os
 import re
 import sqlite3
 import sys
-import threading
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -441,98 +440,21 @@ def every_frame(
     ffmpeg_path: str,
     hardware_acceleration: str | None = None,
 ) -> Iterator[tuple[float | None, np.ndarray]]:
-    """Every presented frame in ``[start, end)`` of one file, full size.
+    """Every presented frame in ``[start, end)`` of one file, full size, streamed.
 
-    ``hardware_acceleration`` follows recorded-frame policy (explicit ``qsv``
-    or ``vaapi`` decodes on the GPU); a hardware attempt that fails before its
-    first frame is retried in software.
-
-    Same command shape as the timeline frame-step decoder (PR 370): accurate
-    seek with -copyts -start_at_zero, so ``showinfo`` reports file-relative
-    PTS. Frames are streamed, not buffered. A frame whose showinfo line was
-    lost or torn is yielded with ``None`` rather than a neighbour's time.
+    See ``recording_frame_runs.stream_frames``; a frame whose time was lost
+    comes with ``None``.
     """
-    from .recorded_decoder import recorded_decode_plans
     from .recorded_video_frames import _ffprobe_video_metadata
+    from .recording_frame_runs import stream_frames
 
     width, height, *_ = _ffprobe_video_metadata(path, ffmpeg_path)
     if width <= 0 or height <= 0:
         raise RuntimeError("video dimensions are unavailable")
-    plans = recorded_decode_plans(hardware_acceleration)
-    for attempt, plan in enumerate(plans):
-        yielded = False
-        try:
-            for item in _every_frame_with_plan(path, start_seconds, end_seconds, ffmpeg_path, plan, width, height):
-                yielded = True
-                yield item
-            return
-        except (OSError, RuntimeError):
-            if yielded or attempt == len(plans) - 1:
-                raise
-
-
-def _every_frame_with_plan(
-    path: Path,
-    start_seconds: float,
-    end_seconds: float,
-    ffmpeg_path: str,
-    plan: Any,
-    width: int,
-    height: int,
-) -> Iterator[tuple[float | None, np.ndarray]]:
-    from .recorded_decoder import StreamingDecode, build_decode_command, warn_decoder_errors
-
-    times: dict[int, float] = {}
-    arrived = threading.Condition()
-
-    def on_line(line: bytes) -> bool:
-        match = _SHOWINFO_FRAME.search(line)
-        if match is None:
-            return b"Parsed_showinfo" in line
-        with arrived:
-            times[int(match.group(1))] = float(match.group(2))
-            arrived.notify_all()
-        return True
-
-    def on_end() -> None:
-        with arrived:
-            times[-1] = 0.0
-            arrived.notify_all()
-
-    # Hardware frames are brought to system memory before showinfo.
-    download = f"{plan.download_filter}," if plan.download_filter else ""
-    command = build_decode_command(
-        ffmpeg_path, path, plan=plan, loglevel="info",
-        seek=f"{max(0.0, start_seconds - 0.001):.6f}", copyts=True, start_at_zero=True,
-        first_video_stream=True,
-        video_filter=f"trim=start={start_seconds:.6f}:end={end_seconds:.6f},{download}showinfo",
-        passthrough_timestamps=True, transport="raw",
+    yield from stream_frames(
+        ffmpeg_path, path, start_seconds, end_seconds, size=(width, height),
+        hardware_acceleration=hardware_acceleration, consumer="face_frame_search",
     )
-    frame_bytes = width * height * 3
-    decoder = StreamingDecode(
-        command, backend=plan.backend, buffer_bytes=frame_bytes * 2,
-        on_stderr_line=on_line, on_stderr_end=on_end,
-    )
-    try:
-        index = 0
-        while True:
-            payload = decoder.read_exact(frame_bytes)
-            if decoder.stalled or not payload:
-                break
-            if len(payload) != frame_bytes:
-                raise RuntimeError("decoder returned a partial frame")
-            with arrived:
-                arrived.wait_for(lambda: index in times or -1 in times, timeout=5.0)
-                pts = times.pop(index, None)
-            frame = np.frombuffer(payload, dtype=np.uint8).reshape((height, width, 3))
-            yield pts, frame
-            index += 1
-        result = decoder.finish()
-        warn_decoder_errors("face_frame_search", path, plan.backend, result.stderr)
-        if not result.ok:
-            raise RuntimeError(f"decoder failed ({result.describe()})")
-    finally:
-        decoder.close()
 
 
 def search_event(
@@ -560,9 +482,9 @@ def search_event(
     started = time.monotonic()
     rows = recordings.execute(
         "select path, start_epoch, duration_seconds from recordings "
-        "where camera_id = ? and source = 'main' and start_epoch < ? "
-        "and start_epoch + duration_seconds > ? order by start_epoch",
-        (camera_id, event_epoch + end, event_epoch + start),
+        "where camera_id = ? and source = 'main' and start_epoch < ? and start_epoch > ? "
+        "and end_epoch > ? order by start_epoch",
+        (camera_id, event_epoch + end, event_epoch + start - 3600.0, event_epoch + start),
     ).fetchall()
     if not rows:
         result.decode_errors.append("no main recording covers the window")

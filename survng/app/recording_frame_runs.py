@@ -9,7 +9,11 @@ handling and failure classes.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
+import threading
+from collections import deque
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,7 +28,9 @@ from .recorded_decoder import (
     FAILURE_UNFINALIZED_INPUT,
     FAILURE_UNREADABLE_INPUT,
     DecodePlan,
+    StreamingDecode,
     build_decode_command,
+    recorded_decode_plans,
     read_bmp_frames,
     run_decoder,
     warn_decoder_errors,
@@ -46,6 +52,8 @@ STREAM_FAILURES = frozenset({
     FAILURE_BITSTREAM, FAILURE_MISSING_INPUT, FAILURE_UNFINALIZED_INPUT, FAILURE_UNREADABLE_INPUT,
 })
 FRAME_LIST_TIMEOUT_SECONDS = 8.0
+# Decoded frames held while their times are read from stderr.
+STREAM_PENDING_BYTES = 64 * 1024 * 1024
 
 
 class FrameRunError(RuntimeError):
@@ -183,3 +191,125 @@ def decode_frame_run(
         )
     decoded = list(zip(showinfo_times(result.stderr), result.output))
     return FrameRun(decoded, hardware_failed)
+
+
+_SHOWINFO_FRAME = re.compile(rb"Parsed_showinfo[^\r\n]*\bn:\s*(\d+)[^\r\n]*\bpts_time:\s*([-+0-9.eE]+)")
+
+
+def stream_frames(
+    ffmpeg_path: str,
+    source_path: Path,
+    start_seconds: float,
+    end_seconds: float,
+    *,
+    size: tuple[int, int],
+    hardware_acceleration: str | None = None,
+    consumer: str,
+    on_hardware_failure: Callable[[], None] | None = None,
+) -> Iterator[tuple[float | None, np.ndarray]]:
+    """Every presented frame in ``[start, end)`` of one file at its full ``size``, streamed.
+
+    One decoder runs from the keyframe before ``start`` through ``end``, so
+    each GOP is decoded once and only one frame is held at a time; frame runs
+    suit a stepping player, this suits a consumer that wants every frame of a
+    window. Times are seconds from the file's start time (accurate seek with
+    -copyts -start_at_zero). A frame whose showinfo line was lost or torn
+    comes with ``None``, never a neighbour's time. Explicit ``qsv`` or
+    ``vaapi`` decodes on the GPU; a GPU attempt that fails before its first
+    frame is retried on the CPU (``on_hardware_failure`` is told when the
+    failure was not the file's).
+    """
+    plans = recorded_decode_plans(hardware_acceleration)
+    for attempt, plan in enumerate(plans):
+        yielded = False
+        try:
+            for item in _stream_with_plan(ffmpeg_path, source_path, start_seconds, end_seconds, size, plan, consumer):
+                yielded = True
+                yield item
+            return
+        except FrameRunError as error:
+            if yielded or attempt == len(plans) - 1:
+                raise
+            if error.failure not in STREAM_FAILURES and on_hardware_failure is not None:
+                on_hardware_failure()
+
+
+def _stream_with_plan(
+    ffmpeg_path: str, source_path: Path, start_seconds: float, end_seconds: float,
+    size: tuple[int, int], plan: DecodePlan, consumer: str,
+) -> Iterator[tuple[float | None, np.ndarray]]:
+    width, height = size
+    times: dict[int, float] = {}
+    arrived = threading.Condition()
+
+    def on_line(line: bytes) -> bool:
+        match = _SHOWINFO_FRAME.search(line)
+        if match is None:
+            return b"Parsed_showinfo" in line
+        with arrived:
+            times[int(match.group(1))] = float(match.group(2))
+            arrived.notify_all()
+        return True
+
+    def on_end() -> None:
+        with arrived:
+            times[-1] = 0.0
+            arrived.notify_all()
+
+    # Hardware frames are brought to system memory before showinfo.
+    download = f"{plan.download_filter}," if plan.download_filter else ""
+    command = build_decode_command(
+        ffmpeg_path, source_path, plan=plan, loglevel="info",
+        seek=f"{max(0.0, start_seconds - FRAME_TIME_TOLERANCE_SECONDS):.6f}", copyts=True, start_at_zero=True,
+        first_video_stream=True,
+        video_filter=f"trim=start={start_seconds:.6f}:end={end_seconds:.6f},{download}showinfo",
+        passthrough_timestamps=True, transport="raw",
+    )
+    frame_bytes = width * height * 3
+    try:
+        decoder = StreamingDecode(
+            command, backend=plan.backend, buffer_bytes=frame_bytes * 2,
+            on_stderr_line=on_line, on_stderr_end=on_end,
+        )
+    except OSError as exc:
+        raise FrameRunError("spawn", f"decoder for {source_path.name} failed to start") from exc
+    # A frame's time arrives on stderr, read by another thread. Waiting for it
+    # frame by frame costs a thread handoff each (milliseconds); instead frames
+    # wait in a short queue until their time is in, bounded by bytes.
+    pending: deque[tuple[int, np.ndarray]] = deque()
+    pending_limit = max(1, STREAM_PENDING_BYTES // frame_bytes)
+
+    def ready(index: int) -> bool:
+        return index in times or -1 in times
+
+    def release(force: bool) -> Iterator[tuple[float | None, np.ndarray]]:
+        while pending:
+            index, frame = pending[0]
+            with arrived:
+                if not ready(index):
+                    if not force and len(pending) < pending_limit:
+                        return
+                    arrived.wait_for(lambda: ready(index), timeout=5.0)
+                pts = times.pop(index, None)
+            pending.popleft()
+            yield pts, frame
+
+    try:
+        index = 0
+        while True:
+            payload = decoder.read_exact(frame_bytes)
+            if decoder.stalled or not payload:
+                break
+            if len(payload) != frame_bytes:
+                raise FrameRunError(FAILURE_OTHER, f"decoder returned a partial frame of {source_path.name}")
+            pending.append((index, np.frombuffer(payload, dtype=np.uint8).reshape((height, width, 3))))
+            index += 1
+            yield from release(force=False)
+        yield from release(force=True)
+        result = decoder.finish()
+        warn_decoder_errors(consumer, source_path, plan.backend, result.stderr)
+        if not result.ok:
+            warn_decoder_failure(consumer, source_path, result)
+            raise FrameRunError(result.failure or FAILURE_OTHER, f"decoding {source_path.name} failed")
+    finally:
+        decoder.close()
