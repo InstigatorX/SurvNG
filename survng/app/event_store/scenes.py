@@ -1332,7 +1332,8 @@ class EventStoreSceneMixin:
         where,args=self._scene_query_where(start_epoch=start_epoch,end_epoch=end_epoch)
         with self._connect() as conn:
             if start_epoch is not None or end_epoch is not None:
-                # Drive from the day's incidents. A scan of scene_objects, or of
+                # Drive from the day's incidents (CROSS JOIN fixes the order). A
+                # scan of scene_objects or scene_observation_zones, or of
                 # observation JSON, reads the whole history before the date applies.
                 scope=("with scoped as materialized (select i.id from scene_incidents i where "+where+") , "
                        "episodes as materialized (select p.id,p.camera_id from scoped cross join scene_episodes p on p.incident_id=scoped.id) ")
@@ -1343,7 +1344,7 @@ class EventStoreSceneMixin:
                     "where coalesce(nullif(s.label_override,''), nullif(s.facet_label,''))!='' order by 1", args) if r[0]]
                 zones=[r[0] for r in conn.execute(
                     scope+"select distinct z.zone from episodes p "
-                    "join scene_observation_zones z on z.episode_id=p.id "
+                    "cross join scene_observation_zones z on z.episode_id=p.id "
                     "where z.zone!='' order by z.zone", args) if r[0]]
                 return {"camera_ids":cameras,"labels":labels,"zones":zones}
             cameras=[r[0] for r in conn.execute("select value from scene_facet_cameras order by value") if r[0]]
