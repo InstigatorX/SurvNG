@@ -677,6 +677,9 @@ class EventStoreJobsMixin:
                 (now, camera_id),
             ).fetchone()[0]
         with polling_connection(self.db_path) as conn:
+            # CROSS JOIN keeps event_cover_requirements first, so SQLite starts
+            # from its few pending rows (idx_cover_requirements_due) instead of
+            # walking every event the camera ever recorded (about 100 ms).
             main = conn.execute(
                 """select min(due_at) from (
                     select max(min(available_at_epoch,deadline_epoch),
@@ -687,7 +690,7 @@ class EventStoreJobsMixin:
                     select max(case when attempts>=3 then 0
                                     else min(r.available_at_epoch,r.deadline_epoch) end,
                                coalesce(r.lease_expires_at_epoch,0)) as due_at
-                    from event_cover_requirements r join events e on e.id=r.event_id
+                    from event_cover_requirements r cross join events e on e.id=r.event_id
                     where e.camera_id=? and r.state='pending'
                 )""",
                 (camera_id, camera_id),
