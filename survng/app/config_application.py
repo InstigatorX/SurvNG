@@ -43,6 +43,7 @@ class ConfigurableRuntime(Protocol):
     def reconfigure_inference(self, config: Any, roles: set[str], *, refresh_tracking: bool) -> None: ...
     def reconfigure_object_tracking(self, config: Any) -> None: ...
     def reconfigure_detector_policy(self, config: AppConfig) -> None: ...
+    def reconfigure_speech(self, config: AppConfig) -> None: ...
     def reconfigure_motion(
         self,
         config: AppConfig,
@@ -74,7 +75,10 @@ def manager_owned_config(config: AppConfig) -> dict:
         camera.pop("object_activity_attribution", None)
         camera.pop("stationary_subject_presence", None)
         camera.pop("motion_qualification", None)
+        # Speech listening is replaced on its own (reconfigure_speech).
+        camera.pop("speech", None)
     payload.pop("motion_qualification", None)
+    payload.pop("speech", None)
     payload["detector"] = _without_fields(payload.get("detector", {}), DETECTOR_HOT_POLICY_FIELDS | DETECTOR_OBJECT_ENGINE_FIELDS | DETECTOR_FACE_ENGINE_FIELDS | DETECTOR_SHARED_ENGINE_FIELDS)
     tracking = payload["detector"].get("tracking")
     if isinstance(tracking, dict):
@@ -177,6 +181,12 @@ def motion_config_changes(
     return restart, hot
 
 
+def speech_config_changed(current: AppConfig, incoming: AppConfig) -> bool:
+    return current.speech != incoming.speech or {
+        camera.id: camera.speech for camera in current.cameras
+    } != {camera.id: camera.speech for camera in incoming.cameras}
+
+
 def hot_config_changes(current: AppConfig, incoming: AppConfig) -> list[str]:
     changed = [field for field in sorted(HOT_CONFIG_FIELDS) if getattr(current, field) != getattr(incoming, field)]
     if {c.id: c.retention for c in current.cameras} != {c.id: c.retention for c in incoming.cameras} and "retention" not in changed:
@@ -207,6 +217,7 @@ class TargetedConfigApplication:
             database_retention_changed = "database_retention" in changes
             image_changed = "image_storage" in changes
             semantic_changed = "semantic_search" in changes
+            speech_changed = speech_config_changed(current, incoming)
             policy_changed = any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_HOT_POLICY_FIELDS)
             policy_changed = policy_changed or any(
                 getattr(current.detector.depth, f) != getattr(incoming.detector.depth, f)
@@ -265,6 +276,7 @@ class TargetedConfigApplication:
                     (database_retention_changed, "database_retention", runtime.reconfigure_database_retention, runtime.reconfigure_database_retention),
                     (image_changed, "image_storage", lambda c: runtime.reconfigure_image_storage(c.image_storage), lambda c: runtime.reconfigure_image_storage(c.image_storage)),
                     (semantic_changed, "semantic_search", lambda c: runtime.reconfigure_semantic_search(c.semantic_search), lambda c: runtime.reconfigure_semantic_search(c.semantic_search)),
+                    (speech_changed, "speech", runtime.reconfigure_speech, runtime.reconfigure_speech),
                     (bool(roles), "inference", lambda c: runtime.reconfigure_inference(c.detector, roles, refresh_tracking=refresh), lambda c: runtime.reconfigure_inference(c.detector, roles, refresh_tracking=refresh)),
                     (tracking_changed and not refresh, "tracking", lambda c: runtime.reconfigure_object_tracking(c.detector), lambda c: runtime.reconfigure_object_tracking(c.detector)),
                     (policy_changed, "policy", runtime.reconfigure_detector_policy, runtime.reconfigure_detector_policy),
@@ -299,7 +311,7 @@ class TargetedConfigApplication:
                     try: self._save(current, assign_ids=False)
                     except Exception: LOGGER.exception("failed to restore persisted configuration after targeted apply failure")
                 raise
-            restarted = [name for name, changed in (("recorders", bool(recorder_changes)), ("mqtt", mqtt_changed), ("semantic_search", semantic_changed), ("tracking_sessions", tracking_changed or refresh)) if changed]
+            restarted = [name for name, changed in (("recorders", bool(recorder_changes)), ("mqtt", mqtt_changed), ("semantic_search", semantic_changed), ("speech", speech_changed), ("tracking_sessions", tracking_changed or refresh)) if changed]
             restarted.extend(f"{role}_inference" for role in ("object", "face", "reid", "depth") if role in roles)
             hot = changes + recorder_changes + (["detector_policy"] if policy_changed else [])
             if motion_hot_ids:

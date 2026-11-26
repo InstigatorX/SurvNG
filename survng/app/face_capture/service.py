@@ -14,12 +14,12 @@ import sqlite3
 import threading
 import time
 import urllib.parse
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .events import person_events, plan_offsets, stored_people
+from .events import person_events, plan_offsets, same_visit_events, stored_people
 from .pipeline import (
     MAX_WINDOW_SECONDS,
     CaptureCancelled,
@@ -34,6 +34,10 @@ from .groups import FaceGroups
 from .store import CAPTURE_VERSION, ClosingConnection, FaceCaptureStore, SeedConflict
 
 LOGGER = logging.getLogger(__name__)
+# How often a capture pass looks for names queued elsewhere.
+SYNC_CHECK_SECONDS = 60.0
+# A moment this close to one another event of the visit decoded covers it.
+COVER_TOLERANCE_SECONDS = 0.25
 
 IDLE_SECONDS = 30.0
 BETWEEN_EVENTS_SECONDS = 1.0
@@ -75,9 +79,19 @@ class FaceCaptureService:
         events_db_path: Path,
         inference: Callable[[], Any],
         recording_rows: Callable[..., list[dict[str, Any]]],
+        on_identities: Callable[[int, str, float], None] | None = None,
+        on_sync_queued: Callable[[], None] | None = None,
     ) -> None:
         self._config = config
+        # Told (event id, camera, event time) once an event's faces are
+        # grouped, so names reach incidents and scene identities.
+        self._on_identities = on_identities
+        # Called now and then so names queued elsewhere (the offline seed, a
+        # failed hand-off) are recorded without waiting for a restart.
+        self._on_sync_queued = on_sync_queued
+        self._last_sync_check = 0.0
         self._events_db_path = Path(events_db_path)
+        self._create_lock = threading.Lock()
         self._store: FaceCaptureStore | None = None
         self._groups: FaceGroups | None = None
         self._inference = inference
@@ -85,7 +99,9 @@ class FaceCaptureService:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
-        self._last_prune = 0.0
+        # None: the first check is due. A 0.0 start compared against
+        # time.monotonic() skipped pruning until the host had been up 6 h.
+        self._last_prune: float | None = None
         self._last_error_log = 0.0
         # event id -> (deferrals, monotonic time it may be tried again); failed
         # events are held here too, with no deferrals counted.
@@ -153,23 +169,70 @@ class FaceCaptureService:
 
     @property
     def store(self) -> FaceCaptureStore:
-        """Created on first use, so a disabled capture leaves nothing on disk."""
+        """Created on first use, so a disabled capture leaves nothing on disk.
+
+        Under a lock: requests, event refreshes and the capture thread reach it,
+        and two stores would each hold their own write lock.
+        """
         if self._store is None:
-            self._store = FaceCaptureStore(self._events_db_path.parent)
+            with self._create_lock:
+                if self._store is None:
+                    self._store = FaceCaptureStore(self._events_db_path.parent)
         return self._store
 
     @property
     def groups(self) -> FaceGroups:
         if self._groups is None:
-            self._groups = FaceGroups(self.store)
+            store = self.store
+            with self._create_lock:
+                if self._groups is None:
+                    self._groups = FaceGroups(store)
         return self._groups
 
-    def _group(self, event_id: int | None) -> None:
-        """Group new faces by person; a failure leaves them for the next pass."""
+    def has_store(self) -> bool:
+        """Whether faces were ever captured here (the store exists on disk)."""
+        return self._store is not None or (self._events_db_path.parent / FaceCaptureStore.DATABASE_NAME).exists()
+
+    def _group(self, event_id: int | None) -> set[int] | None:
+        """Group new faces by person; the events grouped, or None when it failed
+        (the faces wait for the next pass)."""
+        grouped: set[int] = set()
         try:
-            self.groups.assign(event_id, float(self._config().detector.face_group_threshold))
+            self.groups.assign(event_id, float(self._config().detector.face_group_threshold), grouped)
         except Exception as exc:
             self._log_error(f"grouping faces failed: {exc}")
+            return None
+        return grouped
+
+    def _check_sync_queue(self) -> None:
+        now = time.monotonic()
+        if self._on_sync_queued is None or now - self._last_sync_check < SYNC_CHECK_SECONDS:
+            return
+        self._last_sync_check = now
+        try:
+            if self.store.identity_sync_pending():
+                self._on_sync_queued()
+        except Exception:
+            LOGGER.exception("could not check queued face name syncs")
+
+    def _hand_off(self, event_ids: Iterable[int]) -> None:
+        """Tell the manager about events whose faces were grouped (names changed)."""
+        event_ids = list(event_ids)
+        if self._on_identities is None or not event_ids:
+            return
+        try:
+            places = self.store.event_places(event_ids)
+        except Exception:
+            # The names are stored; the name sync records them later.
+            LOGGER.exception("face capture could not look up events to publish their names; queued")
+            self.store.queue_identity_sync(event_ids)
+            return
+        for event_id, (camera_id, epoch) in sorted(places.items()):
+            try:
+                self._on_identities(event_id, camera_id, epoch)
+            except Exception:
+                # The faces are stored and grouped; only the hand-off failed.
+                LOGGER.exception("face capture could not publish the names of event %s", event_id)
 
     def enabled(self) -> bool:
         return bool(self._config().detector.face_capture_enabled)
@@ -188,6 +251,9 @@ class FaceCaptureService:
         # Passes stay full scans until one reaches the end of the window: a
         # full scan that returns a newer candidate first has not yet reached
         # older events (e.g. confirmed after a newer one was scanned).
+        if self.store.take_dependents_reset():
+            # Events below the floor were reset to be captured again.
+            self._full_scan_due = 0.0
         floor = self._scan_floor if waiting < self._full_scan_due else 0
         pending: int | None = None  # lowest id that may still need work
         newest = 0
@@ -347,7 +413,10 @@ class FaceCaptureService:
         if not self.enabled():
             return False
         self._prune_if_due()
-        self._group(None)  # faces stored before grouping, or by the offline seed
+        self._check_sync_queue()
+        # Faces stored before grouping, by the offline seed, or left by a
+        # failed grouping: their events' names reach incidents now.
+        self._hand_off(self._group(None) or ())
         seed = self.store.active_seed()
         running = seed if seed is not None and seed["state"] == "running" else None
         candidate = None
@@ -442,6 +511,22 @@ class FaceCaptureService:
             )
             with self._events_connection() as connection:
                 stored = stored_people(connection, event_id, epoch, main_size)
+                visit_events = same_visit_events(connection, event_id)
+            # Moments other events of the visit decoded. Overlapping events
+            # pick the same moments from the same sub-stream frames, so a
+            # moment within the tolerance of one of them decodes the same
+            # window again; a nearby but different moment does not count.
+            decoded = self.store.decoded_moments(
+                camera_id, visit_events, epoch + low - COVER_TOLERANCE_SECONDS, epoch + high + COVER_TOLERANCE_SECONDS,
+            )
+            covered_by: set[int] = set()
+
+            def covered(moment: float) -> bool:
+                # The visit's other event holds those faces; its incident (the
+                # same one, as a rule) shows their names.
+                sources = {other for other, at in decoded if abs(at - (epoch + moment)) <= COVER_TOLERANCE_SECONDS}
+                covered_by.update(sources)
+                return bool(sources)
             with cancellable_evidence_work(self._stop.is_set, optional=True, source="face_capture"):
                 result = capture_event(
                     plan_offsets=plan,
@@ -454,6 +539,7 @@ class FaceCaptureService:
                     capture_faces=lambda crop: inference.capture_faces(crop),
                     settings=settings,
                     cancelled=self._stop.is_set,
+                    covered=covered,
                 )
         except CaptureCancelled:
             return None
@@ -479,20 +565,25 @@ class FaceCaptureService:
             # Main-stream decoding or the face models failed and nothing was
             # kept: an attempt to retry, not an event with no faces.
             return self._fail(event_id, camera_id, epoch, "; ".join(result.errors))
-        if not result.faces and not result.main_frames:
+        all_covered = result.covered_moments > 0 and not result.moments
+        if not result.faces and not result.main_frames and not all_covered:
             # No main-stream recording of the window (not indexed yet, or
-            # missing): an attempt to retry, not an event with no faces.
+            # missing): an attempt to retry, not an event with no faces. An
+            # event whose moments were all covered by the visit's other
+            # events decoded nothing and is done.
             return self._fail(event_id, camera_id, epoch, "no main-stream frames in the event window")
         try:
             kept = self.store.record(
                 event_id=event_id, camera_id=camera_id, event_epoch=epoch, result=result,
                 embedding_model=Path(config.face_capture_embedding_model_path).stem,
-                seconds=time.monotonic() - started,
+                seconds=time.monotonic() - started, covered_by=covered_by,
             )
         except Exception as exc:  # cv2 and encoding errors too: an attempt, not a crashed pass
             return self._fail(event_id, camera_id, epoch, f"storing faces failed: {exc}")
         self.processed += 1
-        self._group(event_id)
+        if self._group(event_id) is not None:
+            # Even with no faces: a recapture can take names away.
+            self._hand_off([event_id])
         return kept
 
     def _fail(self, event_id: int, camera_id: str, epoch: float, error: str) -> int:
@@ -521,7 +612,7 @@ class FaceCaptureService:
 
     def _prune_if_due(self) -> None:
         now = time.monotonic()
-        if now - self._last_prune < PRUNE_INTERVAL_SECONDS:
+        if self._last_prune is not None and now - self._last_prune < PRUNE_INTERVAL_SECONDS:
             return
         self._last_prune = now
         captured = self.store.captured_event_ids()

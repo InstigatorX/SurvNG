@@ -41,17 +41,17 @@ class EventApiSerializationTest(unittest.TestCase):
             {"id": "incident-gate-7", "events": [{"id": 7}]},
             {"id": "incident-gate-8", "events": [{"id": 8}]},
         ]
-        faces = SimpleNamespace(for_event_ids=Mock(return_value=[
+        observations = Mock(return_value=[
             {"event_id": 7, "person_id": 42},
             {"event_id": 8, "person_id": None},
-        ]))
+        ])
 
         filtered = _filter_incidents_by_person(
-            SimpleNamespace(faces=faces), incidents, 42
+            SimpleNamespace(face_identity_observations=observations), incidents, 42
         )
 
         self.assertEqual(filtered, [incidents[0]])
-        faces.for_event_ids.assert_called_once_with([7, 8])
+        observations.assert_called_once_with([7, 8])
 
     def test_semantic_search_deduplicates_evidence_by_event(self) -> None:
         hits = [
@@ -995,12 +995,6 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertIn("event: camera_state", payloads[4])
         self.assertIn('"running":true', payloads[4])
 
-    def test_face_crop_rejects_non_finite_padding_before_storage_access(self) -> None:
-        with self.assertRaises(HTTPException) as invalid:
-            main._face_route_bundle.handlers["face_crop"](1, padding=float("nan"))
-
-        self.assertEqual(invalid.exception.status_code, 422)
-
     def test_event_thumbnail_rejects_non_finite_aspect_before_storage_access(self) -> None:
         for aspect_w, aspect_h in ((float("nan"), 9.0), (16.0, float("inf"))):
             with self.subTest(aspect_w=aspect_w, aspect_h=aspect_h):
@@ -1229,33 +1223,6 @@ class EventApiSerializationTest(unittest.TestCase):
             self.assertNotIn("content-disposition", inline.headers)
             self.assertIn("event.webp", downloaded.headers["content-disposition"])
 
-    def test_face_crop_is_cached_locally(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            snapshot = root / "snapshots" / "gate" / "1.jpg"
-            snapshot.parent.mkdir(parents=True)
-            frame = np.zeros((300, 400, 3), dtype=np.uint8)
-            self.assertTrue(cv2.imwrite(str(snapshot), frame))
-            fake_manager = SimpleNamespace(
-                image_cache=LocalImageCache(root / "cache"),
-                faces=SimpleNamespace(
-                    snapshot_path=lambda _observation_id: (
-                        snapshot,
-                        {"x1": 100, "y1": 50, "x2": 200, "y2": 150},
-                    )
-                ),
-            )
-
-            with patch.object(main, "manager", fake_manager):
-                first = main._face_route_bundle.handlers["face_crop"](7, padding=0.2)
-                with patch.object(cv2, "imread", side_effect=AssertionError("cache miss")):
-                    second = main._face_route_bundle.handlers["face_crop"](7, padding=0.2)
-
-            crop = cv2.imread(str(first.path))
-            self.assertIsNotNone(crop)
-            self.assertEqual(crop.shape[:2], (140, 140))
-            self.assertEqual(first.path, second.path)
-
     def test_incident_search_rejects_unsafe_timezone_paths(self) -> None:
         with self.assertRaises(HTTPException) as invalid:
             main._incident_query_bundle.handlers["incident_search"](time_zone="../../etc/passwd")
@@ -1434,7 +1401,7 @@ class EventApiSerializationTest(unittest.TestCase):
                 get_many=lambda event_ids: [row for row in rows if row["id"] in event_ids],
                 motion_audits_for_related_events=lambda _event_ids: [],
             ),
-            faces=SimpleNamespace(for_event_ids=lambda _event_ids: []),
+            face_identity_observations=lambda _event_ids: [],
         )
 
         with patch.object(main, "manager", fake_manager):

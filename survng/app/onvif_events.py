@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import random
 import re
 import threading
 import time
@@ -16,6 +17,7 @@ from xml.etree import ElementTree
 from .config import CameraConfig
 from .security import redact_secret_text
 from .onvif_inspector import ONVIF_INSPECTOR
+from .onvif_transport import CancellableSession
 from .motion_topics import normalize_motion_topic, semantic_motion_kind
 from .camera_semantics import (
     active_camera_semantic_kind,
@@ -30,9 +32,18 @@ RETRY_INITIAL_SECONDS = 2.0
 RETRY_MAX_SECONDS = 60.0
 POLL_RETRY_SECONDS = 2.0
 PULL_TIMEOUT_SECONDS = 5
-TRANSPORT_OPERATION_TIMEOUT_SECONDS = 45
+# A LAN camera completes a TCP handshake in milliseconds; 3 s still allows
+# SYN retransmits. The read timeout stays generous for slow cameras and long
+# polls: a stop interrupts sockets directly instead of waiting it out.
+TRANSPORT_CONNECT_TIMEOUT_SECONDS = 3.0
+TRANSPORT_READ_TIMEOUT_SECONDS = 45.0
+TRANSPORT_TIMEOUT = (TRANSPORT_CONNECT_TIMEOUT_SECONDS, TRANSPORT_READ_TIMEOUT_SECONDS)
 STOP_GRACE_SECONDS = PULL_TIMEOUT_SECONDS + 2
 STOP_FORCE_SECONDS = 5
+# After its sockets are interrupted a worker returns in milliseconds; give it
+# this long even when the caller's budget is spent before calling it stuck.
+# Small, because fleet stops wait on cameras one after another.
+STOP_INTERRUPTED_MIN_SECONDS = 0.05
 MAX_POLL_FAILURES = 6
 TIMEOUT_WORDS = ("timed out", "timeout", "read timed out", "operation timed out")
 PULLPOINT_NAMESPACE = "http://www.onvif.org/ver10/events/wsdl/PullPointSubscription"
@@ -48,6 +59,16 @@ EFFECTIVENESS_MINIMUM_OBSERVATIONS = 3
 EFFECTIVENESS_DEGRADED_MISMATCH_RATIO = 0.8
 UNKNOWN_NOTIFICATION_SAMPLE_LIMIT = 5
 EFFECTIVENESS_OBSERVATION_LIMIT = 512
+UNREACHABLE_WORDS = (
+    "connecttimeout",
+    "newconnectionerror",
+    "failed to establish a new connection",
+    "connection refused",
+    "no route to host",
+    "network is unreachable",
+    "host is unreachable",
+    "nameresolutionerror",
+)
 REOLINK_MOTION_TOPICS = frozenset({
     "videosource/motionalarm",
     "ruleengine/myruledetector/vehicledetect",
@@ -55,6 +76,31 @@ REOLINK_MOTION_TOPICS = frozenset({
     "ruleengine/myruledetector/peopledetect",
     "ruleengine/myruledetector/facedetect",
 })
+
+
+# Workers abandoned after their stop, per camera, for the whole process: a
+# manager reload replaces the listener objects while these may still run.
+_ABANDONED_LOCK = threading.Lock()
+_ABANDONED: dict[str, list[threading.Thread]] = {}
+
+
+def _record_abandoned(camera_id: str, thread: threading.Thread) -> int:
+    with _ABANDONED_LOCK:
+        alive = [item for item in _ABANDONED.get(camera_id, []) if item.is_alive()]
+        alive.append(thread)
+        _ABANDONED[camera_id] = alive
+        return len(alive)
+
+
+def abandoned_onvif_workers(camera_id: str) -> int:
+    """Abandoned ONVIF workers of a camera still blocked in camera I/O."""
+    with _ABANDONED_LOCK:
+        alive = [item for item in _ABANDONED.get(camera_id, []) if item.is_alive()]
+        if alive:
+            _ABANDONED[camera_id] = alive
+        else:
+            _ABANDONED.pop(camera_id, None)
+        return len(alive)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,7 +214,15 @@ class OnvifEventListener:
         self._subscription_manager: Any = None
         self._subscription_generation: int | None = None
         self._pullmessages_capture: _PullMessagesResponseCapture | None = None
+        # An abandoned generation's subscription and transport, released by
+        # that worker itself once its blocking call returns.
+        self._orphan_resources: dict[int, tuple[Any, Any]] = {}
+        # A replaced subscription's transport while its worker releases it
+        # (overlap re-subscribe), so a stop can still interrupt that call.
+        self._releasing_transports: dict[int, Any] = {}
         self.connected = False
+        # The camera's ONVIF endpoint refused or did not answer a connection.
+        self.unreachable = False
         self.last_event_at = ""
         self.last_camera_event_at = ""
         self.last_motion_event_at = ""
@@ -220,6 +274,11 @@ class OnvifEventListener:
     def running(self) -> bool:
         with self._lifecycle_lock:
             return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def abandoned_workers(self) -> int:
+        """Retired workers still blocked in camera I/O (they can do nothing more)."""
+        return abandoned_onvif_workers(self.camera.id)
 
     def start(self) -> None:
         if not self.camera.onvif.enabled:
@@ -284,7 +343,27 @@ class OnvifEventListener:
             # Bind the stop signal to the snapshotted generation atomically;
             # start() cannot replace this event until wait_stopped finalizes it.
             ticket.stop_event.set()
-            return ticket
+            transports = [
+                self._transport
+                if self._transport_generation in {None, ticket.generation}
+                else None,
+            ]
+        # A connect still in progress for subscribing or polling cannot finish
+        # anything the stop needs; abort it now. Unsubscribe calls protect
+        # their connects (_send_unsubscribe), and established connections
+        # stay usable.
+        for transport in transports:
+            session = getattr(transport, "session", None)
+            if isinstance(session, CancellableSession):
+                try:
+                    session.abort_connecting()
+                except Exception:
+                    LOGGER.debug(
+                        "failed to abort ONVIF connects for %s",
+                        self.camera.id,
+                        exc_info=True,
+                    )
+        return ticket
 
     def wait_stopped(
         self,
@@ -302,6 +381,7 @@ class OnvifEventListener:
                 return False
             thread = expected.thread
             generation = expected.generation
+        abandoned = False
         if thread is not None:
             # PullMessages has a short bounded timeout. Let the owning worker
             # return from it and send Unsubscribe while its transport is still
@@ -311,24 +391,74 @@ class OnvifEventListener:
                 max(0.0, deadline - time.monotonic()),
             ))
             if thread.is_alive():
-                self._close_transport(generation)
+                self._interrupt_transport(generation)
                 thread.join(timeout=min(
                     STOP_FORCE_SECONDS,
-                    max(0.0, deadline - time.monotonic()),
+                    max(STOP_INTERRUPTED_MIN_SECONDS, deadline - time.monotonic()),
                 ))
                 if thread.is_alive():
-                    LOGGER.error("ONVIF worker did not stop for %s", self.camera.id)
+                    self._abandon(thread, generation)
+                    abandoned = True
         with self._lifecycle_lock:
-            stopped = thread is None or not thread.is_alive()
+            stopped = abandoned or thread is None or not thread.is_alive()
             if self._thread is thread and stopped:
                 self._thread = None
             if generation == self._generation and stopped:
                 self.connected = False
+                self.unreachable = False
             if self._pending_stop is expected and stopped:
                 self._pending_stop = None
-        if stopped:
+        if stopped and not abandoned:
             self._close_transport(generation)
         return stopped
+
+    def _interrupt_transport(self, generation: int) -> None:
+        """Wake the worker's blocked call; it may still send Unsubscribe."""
+        with self._lifecycle_lock:
+            transport = (
+                self._transport
+                if self._transport_generation in {None, generation}
+                else None
+            )
+            releasing = self._releasing_transports.get(generation)
+        releasing_session = getattr(releasing, "session", None)
+        if isinstance(releasing_session, CancellableSession):
+            releasing_session.interrupt()
+        session = getattr(transport, "session", None)
+        if isinstance(session, CancellableSession):
+            session.interrupt()
+        else:
+            self._close_transport(generation)
+
+    def _abandon(self, thread: threading.Thread, generation: int) -> None:
+        """Retire a worker that is still blocked in camera I/O after its stop.
+
+        Its stop event is set and its sockets were interrupted. Retiring its
+        generation fences its later callbacks, subscriptions and status
+        writes (counters it bumps on the way out are not fenced), and its subscription and transport move out of the
+        listener so a new generation cannot overwrite them; the worker
+        releases them itself when its blocking call returns. It is a daemon
+        thread. Treating it as stopped keeps one unresponsive camera from
+        failing a reload or shutdown.
+        """
+        with self._lifecycle_lock:
+            # One critical section: the worker's exit path pops its orphan
+            # entry under this lock after releasing what it still held, so it
+            # either finds these resources or released them itself.
+            manager, transport = self._detach_subscription_resources_locked(generation)
+            if generation == self._generation:
+                self._generation += 1
+                self.connected = False
+                self.unreachable = False
+            if manager is not None or transport is not None:
+                self._orphan_resources[generation] = (manager, transport)
+        count = _record_abandoned(self.camera.id, thread)
+        LOGGER.warning(
+            "ONVIF worker for %s did not return after its stop; abandoned it "
+            "(fenced, owns no subscription; %s still blocked)",
+            self.camera.id,
+            count,
+        )
 
     def _run(
         self,
@@ -342,6 +472,10 @@ class OnvifEventListener:
         finally:
             self._unsubscribe(generation)
             self._close_transport(generation)
+            with self._lifecycle_lock:
+                orphaned = self._orphan_resources.pop(generation, None)
+            if orphaned is not None:
+                self._release_detached_resources(*orphaned)
             current = threading.current_thread()
             with self._lifecycle_lock:
                 if self._thread is current:
@@ -389,6 +523,9 @@ class OnvifEventListener:
                 )
                 if stop_event.is_set() or not self._generation_matches(generation):
                     return
+                # This worker's own raw-response capture: a retired worker
+                # can run beside the next one and must not touch its buffer.
+                capture = self._capture_of(pullpoint)
                 if self.last_connected_at:
                     self.resubscriptions += 1
                 # A release missed while disconnected must not hide the next
@@ -399,19 +536,27 @@ class OnvifEventListener:
                 self.connected = True
                 self.last_connected_at = datetime.now(timezone.utc).isoformat()
                 self.last_error = ""
+                self.unreachable = False
             except Exception as exc:
-                self.connected = False
-                self.retry_attempts += 1
-                self.last_error = f"subscription failed: {self._error_text(exc)[:200]}"
                 self._unsubscribe(generation)
                 self._close_transport(generation)
+                if stop_event.is_set() or not self._generation_matches(generation):
+                    # A stop interrupted the attempt; nothing failed.
+                    return
+                unreachable = self._is_unreachable_error(exc)
+                self.connected = False
+                self.unreachable = unreachable
+                self.retry_attempts += 1
+                self.last_error = f"subscription failed: {self._error_text(exc)[:200]}"
                 LOGGER.warning(
-                    "failed to subscribe to ONVIF events for %s, retrying in %.0fs: %s",
+                    "failed to subscribe to ONVIF events for %s%s, retrying in %.0fs: %s",
                     self.camera.id,
+                    " (endpoint unreachable)" if unreachable else "",
                     retry_delay,
                     self._error_text(exc),
                 )
-                if stop_event.wait(retry_delay):
+                # Jitter keeps cameras that failed together from retrying in step.
+                if stop_event.wait(retry_delay * random.uniform(0.9, 1.1)):
                     return
                 retry_delay = min(RETRY_MAX_SECONDS, retry_delay * 2)
                 continue
@@ -437,13 +582,13 @@ class OnvifEventListener:
                     )
                     if overlapped is not None:
                         pullpoint = overlapped
+                        capture = self._capture_of(pullpoint)
                         failures = 0
                         retry_delay = RETRY_INITIAL_SECONDS
                         continue
                     planned_resubscription = True
                     break
                 try:
-                    capture = self._pullmessages_capture
                     if capture is not None:
                         capture.clear()
                     response = pullpoint.PullMessages(
@@ -473,6 +618,9 @@ class OnvifEventListener:
                         raw_notifications,
                     )
                     for notification, raw_notification in notification_inputs:
+                        # A stopped (or retired) worker delivers nothing more.
+                        if stop_event.is_set() or not self._generation_matches(generation):
+                            return
                         topic, message = self._extract_event(
                             notification, raw_notification
                         )
@@ -577,11 +725,10 @@ class OnvifEventListener:
                                 received_at,
                             )
                 except Exception as exc:
-                    capture = self._pullmessages_capture
-                    if capture is not None:
-                        capture.clear()
                     if stop_event.is_set() or not self._generation_matches(generation):
                         return
+                    if capture is not None:
+                        capture.clear()
                     error_text = self._error_text(exc)
                     self.last_poll_error = error_text
                     self.last_poll_error_at = datetime.now(timezone.utc).isoformat()
@@ -621,7 +768,8 @@ class OnvifEventListener:
 
             self._unsubscribe(generation)
             self._close_transport(generation)
-            self.connected = False
+            if self._generation_matches(generation):
+                self.connected = False
             if not stop_event.is_set() and self._generation_matches(generation):
                 if planned_resubscription:
                     retry_delay = RETRY_INITIAL_SECONDS
@@ -646,11 +794,13 @@ class OnvifEventListener:
         cache_path = self._cache_dir / f"onvif-zeep-{self.camera.id}.sqlite3"
         transport = Transport(
             cache=SqliteCache(path=str(cache_path)),
-            operation_timeout=TRANSPORT_OPERATION_TIMEOUT_SECONDS,
+            timeout=TRANSPORT_TIMEOUT,
+            operation_timeout=TRANSPORT_TIMEOUT,
+            session=CancellableSession(),
         )
         with self._lifecycle_lock:
             if generation != self._generation or stop_event.is_set():
-                transport.session.close()
+                self._cancel_session(transport)
                 raise RuntimeError("ONVIF subscription generation stopped")
             self._transport = transport
             self._transport_generation = generation
@@ -671,7 +821,9 @@ class OnvifEventListener:
         if not address:
             raise RuntimeError("ONVIF subscription did not return a PullPoint address")
         camera.xaddrs[PULLPOINT_NAMESPACE] = address
-        self._record_subscription_times(subscription)
+        if self._generation_matches(generation):
+            self._record_subscription_times(subscription)
+        adopted = True
         try:
             events_service.zeep_client.plugins.append(_SubscriptionManagerAddressing())
             manager = events_service.zeep_client.create_service(
@@ -679,15 +831,23 @@ class OnvifEventListener:
                 address,
             )
             with self._lifecycle_lock:
-                if generation == self._generation:
+                adopted = generation == self._generation
+                if adopted:
                     self._subscription_manager = manager
                     self._subscription_generation = generation
+            if not adopted:
+                # A retired worker's late subscription: release it on the
+                # camera rather than leave it until it expires.
+                self._release_detached_resources(manager, None)
         except Exception:
             LOGGER.debug(
                 "ONVIF subscription manager unavailable for %s",
                 self.camera.id,
                 exc_info=True,
             )
+        if not adopted or stop_event.is_set() or not self._generation_matches(generation):
+            # Retired meanwhile: do not install a capture the next worker uses.
+            raise RuntimeError("ONVIF subscription generation stopped")
         pullpoint = camera.create_pullpoint_service()
         self._enable_pullmessages_capture(pullpoint)
         if stop_event.is_set() or not self._generation_matches(generation):
@@ -782,6 +942,8 @@ class OnvifEventListener:
             self.last_error = ""
             return True
         except Exception as exc:
+            if stop_event.is_set() or not self._generation_matches(generation):
+                return False
             self.renewal_errors += 1
             self.last_error = f"renewal failed; re-subscribing: {self._error_text(exc)[:200]}"
             LOGGER.warning(
@@ -815,30 +977,46 @@ class OnvifEventListener:
         self, generation: int | None = None
     ) -> tuple[Any, Any]:
         with self._lifecycle_lock:
-            manager = (
-                self._subscription_manager
-                if generation is None
-                or self._subscription_generation in {None, generation}
-                else None
-            )
-            transport = (
-                self._transport
-                if generation is None
-                or self._transport_generation in {None, generation}
-                else None
-            )
-            if manager is not None:
-                self._subscription_manager = None
-                self._subscription_generation = None
-            if transport is not None:
-                self._transport = None
-                self._transport_generation = None
+            return self._detach_subscription_resources_locked(generation)
+
+    def _detach_subscription_resources_locked(
+        self, generation: int | None = None
+    ) -> tuple[Any, Any]:
+        manager = (
+            self._subscription_manager
+            if generation is None
+            or self._subscription_generation in {None, generation}
+            else None
+        )
+        transport = (
+            self._transport
+            if generation is None
+            or self._transport_generation in {None, generation}
+            else None
+        )
+        if manager is not None:
+            self._subscription_manager = None
+            self._subscription_generation = None
+        if transport is not None:
+            self._transport = None
+            self._transport_generation = None
         return manager, transport
+
+    @staticmethod
+    def _send_unsubscribe(manager: Any) -> None:
+        """Unsubscribe, shielded from the early connect abort of a stop."""
+        transport = getattr(getattr(manager, "_client", None), "transport", None)
+        session = getattr(transport, "session", None)
+        if isinstance(session, CancellableSession):
+            with session.registry.protected():
+                manager.Unsubscribe()
+        else:
+            manager.Unsubscribe()
 
     def _release_detached_resources(self, manager: Any, transport: Any) -> None:
         if manager is not None:
             try:
-                manager.Unsubscribe()
+                self._send_unsubscribe(manager)
                 LOGGER.info("released ONVIF subscription for %s", self.camera.id)
             except Exception:
                 LOGGER.debug(
@@ -847,14 +1025,22 @@ class OnvifEventListener:
                     exc_info=True,
                 )
         if transport is not None:
-            try:
-                transport.session.close()
-            except Exception:
-                LOGGER.debug(
-                    "failed to close ONVIF transport for %s",
-                    self.camera.id,
-                    exc_info=True,
-                )
+            self._cancel_session(transport)
+
+    def _cancel_session(self, transport: Any) -> None:
+        """Interrupt the transport's in-flight calls and refuse new ones."""
+        session = getattr(transport, "session", None)
+        try:
+            if isinstance(session, CancellableSession):
+                session.cancel()
+            elif session is not None:
+                session.close()
+        except Exception:
+            LOGGER.debug(
+                "failed to close ONVIF transport for %s",
+                self.camera.id,
+                exc_info=True,
+            )
 
     def _overlap_resubscribe(
         self,
@@ -880,7 +1066,9 @@ class OnvifEventListener:
                 stop_event=stop_event,
             )
         except Exception as exc:
-            self._release_detached_resources(old_manager, old_transport)
+            self._release_replaced(generation, old_manager, old_transport)
+            if stop_event.is_set() or not self._generation_matches(generation):
+                return None
             self.last_error = (
                 f"overlap resubscribe failed: {self._error_text(exc)[:200]}"
             )
@@ -890,12 +1078,25 @@ class OnvifEventListener:
                 self._error_text(exc),
             )
             return None
-        self._release_detached_resources(old_manager, old_transport)
+        self._release_replaced(generation, old_manager, old_transport)
+        if stop_event.is_set() or not self._generation_matches(generation):
+            return None
         self.connected = True
         self.last_connected_at = datetime.now(timezone.utc).isoformat()
         self.last_error = ""
         self.resubscriptions += 1
         return pullpoint
+
+    def _release_replaced(self, generation: int, manager: Any, transport: Any) -> None:
+        """Release a replaced subscription where a stop can interrupt it."""
+        with self._lifecycle_lock:
+            self._releasing_transports[generation] = transport
+        try:
+            self._release_detached_resources(manager, transport)
+        finally:
+            with self._lifecycle_lock:
+                if self._releasing_transports.get(generation) is transport:
+                    del self._releasing_transports[generation]
 
     def _unsubscribe(self, generation: int | None = None) -> None:
         with self._lifecycle_lock:
@@ -910,7 +1111,7 @@ class OnvifEventListener:
         if manager is None:
             return
         try:
-            manager.Unsubscribe()
+            self._send_unsubscribe(manager)
             LOGGER.info("released ONVIF subscription for %s", self.camera.id)
         except Exception:
             LOGGER.debug(
@@ -931,14 +1132,7 @@ class OnvifEventListener:
             self._transport_generation = None
         if transport is None:
             return
-        try:
-            transport.session.close()
-        except Exception:
-            LOGGER.debug(
-                "failed to close ONVIF transport for %s",
-                self.camera.id,
-                exc_info=True,
-            )
+        self._cancel_session(transport)
 
     def _generation_matches(self, generation: int) -> bool:
         with self._lifecycle_lock:
@@ -1067,6 +1261,18 @@ class OnvifEventListener:
             self._unknown_notification_samples.append(sample)
 
 
+    @staticmethod
+    def _is_unreachable_error(exc: Exception) -> bool:
+        """The endpoint refused or never answered a connection (not a SOAP fault)."""
+        text = f"{type(exc).__name__} {exc}".lower()
+        current: BaseException | None = exc
+        for _ in range(8):
+            if current is None:
+                break
+            text += " " + " ".join(item.__name__.lower() for item in type(current).__mro__)
+            current = current.__cause__ or current.__context__
+        return any(word in text for word in UNREACHABLE_WORDS)
+
     def _is_timeout_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
         exception_types = " ".join(
@@ -1120,7 +1326,18 @@ class OnvifEventListener:
             return
         capture = _PullMessagesResponseCapture()
         plugins.append(capture)
+        # The worker reads the capture from its own pullpoint, never from
+        # this shared slot, which a retired worker may still write.
+        try:
+            pullpoint._survng_pullmessages_capture = capture
+        except AttributeError:
+            pass
         self._pullmessages_capture = capture
+
+    @staticmethod
+    def _capture_of(pullpoint: Any) -> _PullMessagesResponseCapture | None:
+        capture = getattr(pullpoint, "_survng_pullmessages_capture", None)
+        return capture if isinstance(capture, _PullMessagesResponseCapture) else None
 
     @staticmethod
     def _notification_inputs(

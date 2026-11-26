@@ -1332,7 +1332,8 @@ class EventStoreSceneMixin:
         where,args=self._scene_query_where(start_epoch=start_epoch,end_epoch=end_epoch)
         with self._connect() as conn:
             if start_epoch is not None or end_epoch is not None:
-                # Drive from the day's incidents. A scan of scene_objects, or of
+                # Drive from the day's incidents (CROSS JOIN fixes the order). A
+                # scan of scene_objects or scene_observation_zones, or of
                 # observation JSON, reads the whole history before the date applies.
                 scope=("with scoped as materialized (select i.id from scene_incidents i where "+where+") , "
                        "episodes as materialized (select p.id,p.camera_id from scoped cross join scene_episodes p on p.incident_id=scoped.id) ")
@@ -1343,7 +1344,7 @@ class EventStoreSceneMixin:
                     "where coalesce(nullif(s.label_override,''), nullif(s.facet_label,''))!='' order by 1", args) if r[0]]
                 zones=[r[0] for r in conn.execute(
                     scope+"select distinct z.zone from episodes p "
-                    "join scene_observation_zones z on z.episode_id=p.id "
+                    "cross join scene_observation_zones z on z.episode_id=p.id "
                     "where z.zone!='' order by z.zone", args) if r[0]]
                 return {"camera_ids":cameras,"labels":labels,"zones":zones}
             cameras=[r[0] for r in conn.execute("select value from scene_facet_cameras order by value") if r[0]]
@@ -1618,6 +1619,12 @@ class EventStoreSceneMixin:
                 "select * from scene_observations where snapshot_path!='' and id>? "
                 + ("and event_id=? " if event_id is not None else "") + "order by id limit ?",
                 (after_id, *((event_id,) if event_id is not None else ()), max(1,min(int(limit),1000))))]
+
+    def scene_identities_of(self,event_id):
+        """The accepted identities the event's scene identities hold now."""
+        with self._connect() as conn:
+            row=conn.execute("select payload_json from scene_identities where event_id=?",(int(event_id),)).fetchone()
+        return list(json.loads(row[0])) if row and row[0] else []
 
     def update_scene_identities(self,event_id,identities,*,routes=()):
         """Attach accepted identity evidence and conservatively connect episodes.

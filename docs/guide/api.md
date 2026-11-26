@@ -268,29 +268,33 @@ Roadmap: [Forensic visual search](../forensic-visual-search.md).
 
 ## People and faces
 
+Faces are captured from recorded person events and grouped by person; a group
+is named once on the People page. Every route here needs the admin role except
+`/api/face-names`.
+
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/faces/status` | Face subsystem status |
-| GET | `/api/faces/people` | Known people |
-| POST | `/api/faces/people` | Create person |
-| DELETE | `/api/faces/people/{person_id}` | Delete person |
-| GET | `/api/faces/people/{person_id}/history` | Sighting history |
-| GET | `/api/faces/people/{person_id}/representation` | Gallery representation |
-| GET | `/api/faces/observations` | Face observations |
-| GET | `/api/faces/observations/{observation_id}` | One observation |
-| PUT | `/api/faces/observations/{observation_id}` | Update / assign observation |
-| GET | `/api/faces/observations/{observation_id}/crop.jpg` | Face crop |
-| PUT | `/api/faces/observations/{observation_id}/reference` | Pin reference |
-| GET | `/api/faces/review/queue` | Review queue |
-| GET | `/api/faces/review/confirmed` | Confirmed reviews |
-| POST | `/api/faces/review/bulk` | Bulk review actions |
-| GET | `/api/faces/unknown-clusters` | Unknown clusters |
-| GET | `/api/faces/unknown-clusters/{cluster_id}/members` | Cluster members |
-| POST | `/api/faces/unknown-clusters/rebuild` | Rebuild clusters |
-| GET | `/api/faces/benchmark` | Recognition benchmark summaries |
-| GET | `/api/faces/calibration` | Calibration status helpers |
-| POST | `/api/faces/people/{person_id}/gallery/optimize` | Optimize gallery |
-| POST | `/api/faces/people/{person_id}/gallery/enrich` | Enrich gallery |
+| GET | `/api/face-capture/status` | Capture status, counts and runs over previous incidents |
+| POST | `/api/face-capture/seeds` | Start one (`start`, `end`, optional `cameras`) |
+| POST | `/api/face-capture/seeds/{seed_id}/{pause\|resume\|cancel}` | Control a run |
+| GET | `/api/face-groups?status=unnamed\|named\|ignored` | Groups of faces |
+| GET | `/api/face-groups/{group_id}` | One group, its faces and visits |
+| POST | `/api/face-groups/{group_id}/name` | Name it (`name`; an existing name joins that person) |
+| POST | `/api/face-groups/{group_id}/unname` | Remove its name |
+| POST | `/api/face-groups/{group_id}/ignore` | Ignore it (`ignored`) |
+| POST | `/api/face-groups/{group_id}/merge` | Merge it into another (`into`) |
+| POST | `/api/face-captures/{face_id}/remove` | Take a face out of its group |
+| GET | `/api/face-captures/{face_id}/image` | Face crop |
+| GET | `/api/face-captures/by-events?ids=` | Groups seen in events |
+| GET | `/api/face-captures/by-incident/{incident_id}` | Groups seen in an incident, by tracked person |
+| GET | `/api/face-people` | Named people |
+| GET | `/api/face-people/{person_id}` | One person, groups and visits |
+| POST | `/api/face-people/{person_id}/rename` | Rename (an existing name joins them) |
+| DELETE | `/api/face-people/{person_id}` | Forget the name |
+| GET | `/api/face-names` | Named people, id and name only (read role) |
+
+Names also reach incidents (`identities`), search results and MQTT
+`events/identity`.
 
 ---
 

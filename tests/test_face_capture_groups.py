@@ -217,3 +217,127 @@ def test_faces_by_event_list_who_was_seen_in_an_incident(setup):
         endpoint(ids=str(2**64))  # beyond SQLite's integers
     assert error.value.status_code == 400
     assert required_api_scope("GET", "/api/face-captures/by-events") == "admin"
+
+
+def test_a_track_clearly_one_named_person_is_named_automatically(setup):
+    store, groups = setup
+    _capture(store, groups, 1, _face(ALICE))
+    [group] = groups.groups("unnamed")["groups"]
+    groups.name_group(group["id"], "Person A")
+    # A strict grouping threshold sends the next track to a new group; it
+    # resembles Person A as a whole, so it joins Person A instead.
+    store.record(event_id=2, camera_id="gate", event_epoch=1002.0,
+                 result=CaptureResult(faces=[_face(ALICE)]), embedding_model="m", seconds=1.0)
+    groups.assign(2, threshold=0.999)
+    assert groups.groups("unnamed")["total"] == 0
+    [person] = groups.people()
+    assert person["faces"] == 2 and person["auto_named"] == 1
+    faces = groups.group(group["id"])["faces_list"]
+    assert sorted(face["assignment"] for face in faces) == ["auto", "named"]
+
+
+def test_a_stranger_or_a_close_call_is_left_to_name(setup):
+    store, groups = setup
+    twin = ALICE + RNG.normal(size=512) * 0.05  # nearly Person A: no clear lead
+    _capture(store, groups, 1, _face(ALICE))
+    store.record(event_id=2, camera_id="gate", event_epoch=5000.0,
+                 result=CaptureResult(faces=[_face(twin)]), embedding_model="m", seconds=1.0)
+    groups.assign(2, threshold=0.999)  # its own group, though close to Person A
+    assert groups.groups("unnamed")["total"] == 2
+    for group, name in zip(groups.groups("unnamed")["groups"], ("Person A", "Person T")):
+        groups.name_group(group["id"], name)
+    for event_id, base in ((3, ALICE), (4, BOB)):
+        store.record(event_id=event_id, camera_id="gate", event_epoch=1000.0 + event_id,
+                     result=CaptureResult(faces=[_face(base)]), embedding_model="m", seconds=1.0)
+        groups.assign(event_id, threshold=0.999)
+    # Person A and Person T are too alike to tell; the stranger is no one.
+    assert groups.groups("unnamed")["total"] == 2
+    assert all(person["auto_named"] == 0 for person in groups.people())
+
+
+def test_named_faces_reach_incidents_as_identity_observations(setup):
+    store, groups = setup
+    _capture(store, groups, 1, _face(ALICE), _face(BOB, track=1))
+    _capture(store, groups, 2, _face(ALICE))
+    alice_group = groups.groups("unnamed")["groups"][0]
+    groups.name_group(alice_group["id"], "Person A")
+    bob_group = groups.groups("unnamed")["groups"][0]
+    groups.ignore_group(bob_group["id"], True)
+    rows = groups.identity_observations([1, 2, 3])
+    assert [(row["event_id"], row["person_name"]) for row in rows] == [(1, "Person A"), (2, "Person A")]
+    assert all(row["auto_identified"] and row["review_status"] == "auto_identified" for row in rows)
+    assert all(0.0 <= row["match_confidence"] <= 1.0 for row in rows)
+    assert groups.event_ids_of(group_ids=[alice_group["id"]]) == [1, 2]
+    assert groups.event_ids_of(person_ids=[rows[0]["person_id"]]) == [1, 2]
+    assert groups.event_ids_of(face_ids=[rows[1]["observation_id"]]) == [2]
+
+
+def test_group_edits_hand_their_events_to_the_identity_sync(setup):
+    store, groups = setup
+    _capture(store, groups, 1, _face(ALICE))
+    _capture(store, groups, 2, _face(ALICE))
+    [group] = groups.groups("unnamed")["groups"]
+    synced = []
+    manager = SimpleNamespace(
+        face_capture=SimpleNamespace(store=store, groups=groups, enabled=lambda: True),
+        config=SimpleNamespace(cameras=[]),
+        sync_face_identities=lambda events: synced.append(sorted(events)),
+    )
+    router = create_face_capture_router(FaceCaptureRouteDependencies(get_manager=lambda: manager))
+    endpoint = next(r.endpoint for r in router.routes if r.path == "/api/face-groups/{group_id}/name")
+    endpoint(group["id"], NameRequest(name="Person A"))
+    assert synced == [[1, 2]]
+
+
+def test_the_read_role_gets_names_only_for_the_person_filter(setup):
+    store, groups = setup
+    _capture(store, groups, 1, _face(ALICE))
+    [group] = groups.groups("unnamed")["groups"]
+    groups.name_group(group["id"], "Person A")
+    from survng.app.manager import AppManager
+
+    manager = AppManager.__new__(AppManager)
+    manager.face_capture = SimpleNamespace(store=store, groups=groups, enabled=lambda: True, has_store=lambda: True)
+    manager.faces = SimpleNamespace(people=lambda: [{"id": 9, "name": "Previous", "notes": "x"}])
+    manager.config = SimpleNamespace(cameras=[], detector=SimpleNamespace(
+        face_capture_enabled=True, face_recognition_enabled=False))
+    router = create_face_capture_router(FaceCaptureRouteDependencies(get_manager=lambda: manager))
+    endpoint = next(r.endpoint for r in router.routes if r.path == "/api/face-names")
+    [person] = endpoint()["people"]
+    assert set(person) == {"id", "name"} and person["name"] == "Person A"
+    assert required_api_scope("GET", "/api/face-names") == "read"
+    # Only the previous recognizer on: its people, as they name the incidents.
+    manager.config.detector = SimpleNamespace(face_capture_enabled=False, face_recognition_enabled=True)
+    assert endpoint()["people"] == [{"id": 9, "name": "Previous"}]
+
+
+def test_an_unnamed_lookalike_group_keeps_a_track_from_the_only_named_person(setup):
+    store, groups = setup
+    relative = ALICE + RNG.normal(size=512) * 0.6  # like Person A, but someone else
+    for event_id, base in ((1, ALICE), (2, relative)):
+        store.record(event_id=event_id, camera_id="gate", event_epoch=1000.0 + event_id,
+                     result=CaptureResult(faces=[_face(base)]), embedding_model="m", seconds=1.0)
+        groups.assign(event_id, threshold=0.999)  # each their own group
+    alice_group = next(g for g in groups.groups("unnamed")["groups"] if g["samples"] and
+                       groups.event_ids_of(group_ids=[g["id"]]) == [1])
+    groups.name_group(alice_group["id"], "Person A")
+    for event_id in (3, 4):
+        store.record(event_id=event_id, camera_id="gate", event_epoch=1000.0 + event_id,
+                     result=CaptureResult(faces=[_face(relative)]), embedding_model="m", seconds=1.0)
+        groups.assign(event_id)
+    # The relative's own unnamed group is a closer rival than Person A.
+    [person] = groups.people()
+    assert person["auto_named"] == 0 and person["faces"] == 1
+    assert groups.groups("unnamed")["total"] == 1
+
+
+def test_merging_groups_confirms_no_one_and_removing_a_face_does(setup):
+    store, groups = setup
+    _capture(store, groups, 1, _face(ALICE))
+    store.record(event_id=2, camera_id="gate", event_epoch=1002.0,
+                 result=CaptureResult(faces=[_face(ALICE)]), embedding_model="m", seconds=1.0)
+    groups.assign(2, threshold=0.999)
+    first, second = (g["id"] for g in groups.groups("unnamed")["groups"])
+    groups.name_group(first, "Person A")
+    groups.merge_groups(second, first)
+    assert all(row["auto_identified"] for row in groups.identity_observations([1, 2]))

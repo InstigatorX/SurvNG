@@ -902,7 +902,7 @@ export function CrossCameraTracePanel({
   );
 }
 
-export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, visualAnchorEventId = anchorEventId, appearanceAnchorEventId = anchorEventId, selectedRelatedEventId, relatedLoadingEventId, relatedError = "", cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", depthLayer = "both", analysisStats, analysisPanel = null, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onDepthLayerChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
+export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, visualAnchorEventId = anchorEventId, appearanceAnchorEventId = anchorEventId, selectedRelatedEventId, relatedLoadingEventId, relatedError = "", cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", depthLayer = "both", analysisStats, analysisPanel = null, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onDepthLayerChange, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
   const inspectorRef = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -943,7 +943,6 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
   const analyzedSeconds = incidentTracking?.analyzed_through
     ? Date.parse(incidentTracking.analyzed_through) / 1000 - Number(incidentTracking.window_start_epoch) : 0;
 
-  const faces = faceEvent?.faces || [];
   const eventId = Number(inspectedEvent.representative_event_id || inspectedEvent.id);
   const findSimilarAnchorId = Number(
     anchorEventId
@@ -1018,15 +1017,6 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
             {analysisStats.heatmapRange ? ` · ${formatDepthMeters(analysisStats.heatmapRange.min_m)}–${formatDepthMeters(analysisStats.heatmapRange.max_m)}` : ""}
           </small>
         ) : null}
-      </section>
-      <section>
-        <h3>Faces</h3>
-        {faces.length ? faces.map((face, index) => (
-          <button type="button" className={`inspector-face ${face.status || "unknown"}`} key={`${face.status}-${face.name}-${index}`} onClick={() => onFaceOpen(face)}>
-            <strong>{face.name || "Unknown"}</strong>
-            <span>{face.status === "automatic" ? "Automatic · " : ""}{Math.round(Number(face.confidence || 0) * 100)}%{Number(face.candidate_count || 0) > 1 ? ` · ${face.candidate_count} frames` : ""}</span>
-          </button>
-        )) : <p>No recognized faces.</p>}
       </section>
       {analysisPanel ? <section className="incident-inspector-extra-analysis">
         {analysisPanel}

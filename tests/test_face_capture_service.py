@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from unittest.mock import Mock, patch
 
 from survng.app.config import DetectorConfig
 from survng.app.face_capture import service as service_module
@@ -137,7 +138,10 @@ def test_faces_of_events_removed_by_retention_are_forgotten(tmp_path):
         service.store.record(event_id=event_id, camera_id="gate", event_epoch=0.0,
                              result=CaptureResult(faces=[face]), embedding_model="m", seconds=1.0)
     crop = Path(service.store.faces(99)[0]["crop_path"])
-    service._prune_if_due()
+    # Due on the first check even on a host up for less than the interval
+    # (a fresh CI runner): monotonic time starts near boot.
+    with patch("survng.app.face_capture.service.time.monotonic", return_value=60.0):
+        service._prune_if_due()
     assert service.store.captured_event_ids() == [1]
     assert not crop.exists()
 
@@ -388,3 +392,283 @@ def test_shedding_for_incident_work_never_counts_toward_failure(tmp_path, monkey
         assert service.capture(*service.next_event(NOW)) is None
         service._deferred[1] = (service._deferred[1][0], 0.0)  # the hold has passed
     assert service.store.attempts([1]) == {}
+
+
+def test_moments_another_event_of_the_visit_captured_are_skipped(tmp_path, monkeypatch):
+    """Overlapping events of one visit share frames; a covered moment is not captured twice."""
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(60)), (2, "gate", _person_event(), _at(60))])
+    with sqlite3.connect(service._events_db_path) as connection:
+        connection.executescript(
+            "create table scene_event_membership (event_id integer primary key, episode_id text);"
+            "insert into scene_event_membership values (1, 'visit'), (2, 'visit');")
+    face = CapturedFace(0, 0.5, (0, 0, 60, 60), [], 0.9, 17.0, np.ones(512, np.float32), np.zeros((20, 20, 3), np.uint8))
+    event_epoch = (NOW - timedelta(minutes=60)).timestamp()
+    # Event 1 decoded the moment at +0.5 s.
+    service.store.record(event_id=1, camera_id="gate", event_epoch=event_epoch,
+                         result=CaptureResult(faces=[face], moments=[0.5], decoded_moments=[0.5]),
+                         embedding_model="m", seconds=1.0)
+    seen = {}
+
+    def fake_capture(**kwargs):
+        covered = kwargs["covered"]
+        # The same moment (within 0.25 s) is covered; a nearby other one is not.
+        seen["covered"] = (covered(0.5), covered(0.6), covered(1.0))
+        # Every moment it chose was covered: nothing decoded, nothing failed.
+        return CaptureResult(covered_moments=2)
+
+    monkeypatch.setattr(service_module, "capture_event", fake_capture)
+    service.capture(2, "gate", event_epoch, {})
+    assert seen["covered"] == (True, True, False)
+    assert service.store.attempts([2])[2][0] == "done"
+    assert service.store.faces(2) == []
+
+
+def test_faces_grouped_on_a_later_pass_still_hand_their_names_on(tmp_path):
+    handed = []
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(30))])
+    service._on_identities = lambda *args: handed.append(args)
+    face = CapturedFace(0, 0.5, (0, 0, 60, 60), [], 0.9, 17.0, np.ones(512, np.float32), np.zeros((20, 20, 3), np.uint8))
+    service.store.record(event_id=1, camera_id="gate", event_epoch=123.0,
+                         result=CaptureResult(faces=[face]), embedding_model="m", seconds=1.0)
+    # A failed grouping hands nothing on (it would record no names).
+    with patch.object(type(service.groups), "assign", side_effect=RuntimeError("database is locked")):
+        assert service._group(1) is None
+    assert handed == []
+    service._hand_off(service._group(None) or ())
+    assert handed == [(1, "gate", 123.0)]
+
+
+def test_without_an_episode_nothing_counts_as_covered(tmp_path):
+    from survng.app.face_capture.events import same_visit_events
+
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(60))])
+    with sqlite3.connect(service._events_db_path) as connection:
+        assert same_visit_events(connection, 1) == []  # no scene tables at all
+
+
+def _manager_for_identities(faces, recorded=()):
+    from survng.app.manager import AppManager
+
+    manager = AppManager.__new__(AppManager)
+    manager._event_identity_faces = lambda event_id: faces
+    manager.events = SimpleNamespace(update_scene_identities=Mock(), scene_identities_of=Mock(return_value=list(recorded)))
+    manager.config = SimpleNamespace(detector=SimpleNamespace(tracking=SimpleNamespace(camera_transition_routes=[])))
+    manager.state_events = SimpleNamespace(publish=Mock())
+    manager.mqtt = SimpleNamespace(publish=Mock())
+    manager._refresh_incident_notification = Mock()
+    return manager
+
+
+FACE_A = {"observation_id": 5, "person_id": 1, "name": "Person A", "confidence": 0.7,
+          "status": "automatic", "review_status": "auto_identified", "origin": "face_capture"}
+
+
+def test_names_a_live_event_gains_are_announced_once_and_refresh_its_incident():
+    manager = _manager_for_identities([FACE_A])
+    manager._face_capture_identities(9, "gate", time.time() - 60)
+    manager.mqtt.publish.assert_called_once()
+    topic, payload = manager.mqtt.publish.call_args.args
+    assert topic == "events/identity" and payload["action"] == "assigned" and payload["name"] == "Person A"
+    manager._refresh_incident_notification.assert_called_once_with("gate", 9)
+    # Handed off again (a recapture) with the same names: nothing to announce.
+    again = _manager_for_identities([FACE_A], recorded=[{**FACE_A, "identity_id": 1_000_000_001}])
+    again._face_capture_identities(9, "gate", time.time() - 60)
+    again.mqtt.publish.assert_not_called()
+    again._refresh_incident_notification.assert_not_called()
+
+
+def test_a_name_a_live_event_lost_is_announced_cleared():
+    manager = _manager_for_identities([], recorded=[{**FACE_A, "identity_id": 1_000_000_001}])
+    manager._face_capture_identities(9, "gate", time.time())
+    assert manager.events.update_scene_identities.call_args.args[:2] == (9, [])
+    payload = manager.mqtt.publish.call_args.args[1]
+    assert payload["action"] == "cleared" and payload["active"] is False and payload["person_id"] == 1
+    manager._refresh_incident_notification.assert_called_once_with("gate", 9)
+
+
+def test_names_of_a_past_event_are_recorded_without_notifying_again():
+    manager = _manager_for_identities([FACE_A])
+    manager._face_capture_identities(9, "gate", time.time() - 7 * 24 * 3600)
+    manager.events.update_scene_identities.assert_called_once()
+    manager.mqtt.publish.assert_not_called()
+    manager._refresh_incident_notification.assert_not_called()
+
+
+def test_a_failed_hand_off_is_queued_for_the_name_sync(tmp_path):
+    from survng.app.face_capture.store import FaceCaptureStore
+
+    manager = _manager_for_identities([FACE_A])
+    manager.events.update_scene_identities.side_effect = RuntimeError("database is locked")
+    manager.face_capture = SimpleNamespace(store=FaceCaptureStore(tmp_path))
+    manager._start_identity_sync = Mock()
+    manager._face_capture_identities(9, "gate", time.time())
+    assert manager.face_capture.store.identity_sync_batch() == [(9, 1)]
+    manager._start_identity_sync.assert_called_once()
+    manager.mqtt.publish.assert_not_called()
+
+
+def test_people_page_edits_sync_names_through_one_worker_with_the_latest_names(tmp_path):
+    import threading as threading_module
+
+    from survng.app.face_capture.store import FaceCaptureStore
+
+    manager = _manager_for_identities([])
+    store = FaceCaptureStore(tmp_path)
+    manager.face_capture = SimpleNamespace(store=store, has_store=lambda: True)
+    names = {"current": [{"name": "first"}]}
+    manager._event_identity_faces = lambda event_id: names["current"]
+    manager._identity_sync_lock = threading_module.Lock()
+    manager._identity_sync_running = False
+    manager._stopping = manager._closed = False
+    started = []
+    with patch("survng.app.manager.threading.Thread",
+               lambda target, **_kw: SimpleNamespace(start=lambda: started.append(target))):
+        manager.sync_face_identities([7, 8])
+        manager.sync_face_identities([7])  # a second edit before the worker ran
+        assert len(started) == 1  # one worker
+        names["current"] = [{"name": "second"}]  # the later edit's names
+        started[0]()
+    written = {call.args[0]: call.args[1] for call in manager.events.update_scene_identities.call_args_list}
+    assert written == {7: [{"name": "second"}], 8: [{"name": "second"}]}
+    # One notice for the batch.
+    assert manager.state_events.publish.call_count == 1
+    assert manager.state_events.publish.call_args.args[1]["event_ids"] == [7, 8]
+    manager.mqtt.publish.assert_not_called()
+    assert manager._identity_sync_running is False and not store.identity_sync_pending()
+
+
+def test_queued_name_syncs_survive_a_reload_and_resume_at_start(tmp_path):
+    import threading as threading_module
+
+    from survng.app.face_capture.store import FaceCaptureStore
+
+    store = FaceCaptureStore(tmp_path)
+    store.queue_identity_sync([3])  # left by a generation that stopped
+    manager = _manager_for_identities([])
+    manager.face_capture = SimpleNamespace(store=store, has_store=lambda: True)
+    manager._identity_sync_lock = threading_module.Lock()
+    manager._identity_sync_running = False
+    manager._stopping = manager._closed = False
+    started = []
+    with patch("survng.app.manager.threading.Thread",
+               lambda target, **_kw: SimpleNamespace(start=lambda: started.append(target))):
+        manager._resume_identity_sync()
+        started[0]()
+    assert manager.events.update_scene_identities.call_args.args[0] == 3
+    assert not store.identity_sync_pending()
+
+
+def test_a_failed_name_sync_stays_queued_for_a_later_try(tmp_path):
+    import threading as threading_module
+
+    from survng.app.face_capture.store import FaceCaptureStore
+
+    store = FaceCaptureStore(tmp_path)
+    manager = _manager_for_identities([])
+    manager.events.update_scene_identities.side_effect = RuntimeError("database is locked")
+    manager.face_capture = SimpleNamespace(store=store, has_store=lambda: True)
+    manager._identity_sync_lock = threading_module.Lock()
+    manager._identity_sync_running = False
+    manager._stopping = manager._closed = False
+    started, retries = [], []
+    with patch("survng.app.manager.threading.Thread",
+               lambda target, **_kw: SimpleNamespace(start=lambda: started.append(target))), \
+            patch("survng.app.manager.threading.Timer",
+                  lambda seconds, function: SimpleNamespace(start=lambda: retries.append((seconds, function)))):
+        manager.sync_face_identities([4])
+        started[0]()
+    assert store.identity_sync_batch() == [(4, 1)]  # still queued
+    assert manager._identity_sync_running is False and len(started) == 1  # stopped, not respun
+    # ... and tries again by itself a minute later.
+    assert [seconds for seconds, _ in retries] == [60.0]
+
+
+def test_a_sync_done_for_an_older_version_keeps_the_newer_queueing(tmp_path):
+    from survng.app.face_capture.store import FaceCaptureStore
+
+    store = FaceCaptureStore(tmp_path)
+    store.queue_identity_sync([5])
+    [(event_id, version)] = store.identity_sync_batch()
+    store.queue_identity_sync([5])  # an edit while the worker had it
+    store.identity_sync_done(event_id, version)
+    assert store.identity_sync_batch() == [(5, 2)]
+
+
+def test_a_recapture_that_no_longer_decodes_a_moment_recaptures_who_skipped_it(tmp_path):
+    from survng.app.face_capture.store import FaceCaptureStore
+
+    store = FaceCaptureStore(tmp_path)
+    store.record(event_id=1, camera_id="gate", event_epoch=100.0,
+                 result=CaptureResult(moments=[0.5], decoded_moments=[0.5]), embedding_model="m", seconds=1.0)
+    store.record(event_id=2, camera_id="gate", event_epoch=100.0, result=CaptureResult(covered_moments=1),
+                 embedding_model="m", seconds=1.0, covered_by=[1])
+    store.record(event_id=1, camera_id="gate", event_epoch=100.0,
+                 result=CaptureResult(moments=[0.5], decoded_moments=[]), embedding_model="m", seconds=1.0)
+    assert store.attempts([2])[2][2] == 0
+
+
+def test_names_come_from_face_capture_unless_only_the_previous_recognizer_is_on():
+    from survng.app.manager import FACE_CAPTURE_IDENTITY_OFFSET, AppManager
+
+    manager = AppManager.__new__(AppManager)
+    capture_rows = [{"event_id": 9, "person_id": 3, "person_name": "Person A", "source": "face_capture",
+                     "auto_identified": True, "review_status": "auto_identified", "match_confidence": 0.6}]
+    manager.face_capture = SimpleNamespace(groups=SimpleNamespace(identity_observations=lambda ids: capture_rows),
+                                           has_store=lambda: True)
+    manager.faces = SimpleNamespace(for_event_ids=lambda ids: [{"event_id": 9, "person_id": 3, "person_name": "Old"}])
+    for capture_on, recognition_on, source in ((True, False, "capture"), (False, False, "capture"),
+                                                (True, True, "capture"), (False, True, "previous")):
+        manager.config = SimpleNamespace(detector=SimpleNamespace(
+            face_capture_enabled=capture_on, face_recognition_enabled=recognition_on))
+        rows = manager.face_identity_observations([9])
+        assert (rows[0]["person_name"] == "Person A") == (source == "capture")
+    # Everywhere a person keeps their id; only scene identities, which join
+    # episodes by id, give face capture's people ids of their own.
+    manager.config = SimpleNamespace(detector=SimpleNamespace(
+        face_capture_enabled=True, face_recognition_enabled=False,
+        tracking=SimpleNamespace(camera_transition_routes=[])))
+    [face] = manager._event_identity_faces(9)
+    assert face["identity_id"] == 3 and face["person_id"] == 3
+    manager.events = SimpleNamespace(update_scene_identities=Mock())
+    manager._record_scene_identities(9, [face])
+    [recorded] = manager.events.update_scene_identities.call_args.args[1]
+    assert recorded["identity_id"] == FACE_CAPTURE_IDENTITY_OFFSET + 3
+
+
+def test_an_event_that_skipped_a_removed_events_moments_is_captured_again(tmp_path):
+    from survng.app.face_capture.store import FaceCaptureStore
+
+    store = FaceCaptureStore(tmp_path)
+    face = CapturedFace(0, 0.5, (0, 0, 60, 60), [], 0.9, 17.0, np.ones(512, np.float32), np.zeros((20, 20, 3), np.uint8))
+    store.record(event_id=1, camera_id="gate", event_epoch=100.0,
+                 result=CaptureResult(faces=[face], moments=[0.5], decoded_moments=[0.5]),
+                 embedding_model="m", seconds=1.0)
+    store.record(event_id=2, camera_id="gate", event_epoch=100.0, result=CaptureResult(covered_moments=1),
+                 embedding_model="m", seconds=1.0, covered_by=[1])
+    assert store.decoded_moments("gate", [1], 0, 1000) == [(1, 100.5)]
+    store.forget_events([1])
+    state, attempts, version = store.attempts([2])[2]
+    assert version == 0 and attempts == 0  # taken again, as after a version change
+    assert store.decoded_moments("gate", [1], 0, 1000) == []
+
+
+def test_events_reset_for_recapture_are_reached_before_the_next_full_scan(tmp_path):
+    service = _service(tmp_path, [(1, "gate", _person_event(), _at(60)), (2, "gate", _person_event(), _at(60))])
+    service.store.record(event_id=1, camera_id="gate", event_epoch=100.0,
+                         result=CaptureResult(moments=[0.5], decoded_moments=[0.5]), embedding_model="m", seconds=1.0)
+    service.store.record(event_id=2, camera_id="gate", event_epoch=100.0, result=CaptureResult(covered_moments=1),
+                         embedding_model="m", seconds=1.0, covered_by=[1])
+    assert service.next_event(NOW) is None  # both done; the floor moves past them
+    service.store.forget_events([1])
+    candidate = service.next_event(NOW)
+    assert candidate is not None and candidate[0] == 2
+
+
+def test_names_queued_elsewhere_are_noticed_by_the_capture_pass(tmp_path):
+    noticed = []
+    service = _service(tmp_path, [])
+    service._on_sync_queued = lambda: noticed.append(True)
+    service.store.queue_identity_sync([3])  # e.g. by the offline seed
+    service._check_sync_queue()
+    service._check_sync_queue()  # within the minute: not again
+    assert noticed == [True]

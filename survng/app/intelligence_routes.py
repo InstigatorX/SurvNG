@@ -1631,9 +1631,10 @@ class IntelligenceService:
         return {'ok': True, 'rollback': rollback, 'conflicts': conflicts}
 
     def _assistant_catalog(self, active_config: AppConfig, active_manager: AppManager) -> dict[str, Any]:
-        face_store = getattr(active_manager, 'faces', None)
+        # The names incidents carry (face capture's, or the previous recognizer's).
+        identity_people = getattr(active_manager, 'identity_people', None)
         try:
-            people = face_store.people() if face_store is not None else []
+            people = identity_people() if callable(identity_people) else []
         except Exception:
             LOGGER.warning('assistant catalog could not read recognized face names')
             people = []

@@ -260,3 +260,29 @@ spans.
 Measured on this host's captured faces (13 incidents, 11 of them with more
 than one tracked person): 84% of 205 faces bound with these rules, against
 59% of 173 for a one-second nearest-observation rule.
+
+## Tuning after the first seed (2026-11-25)
+
+Measured on 917 faces from the 1-day seed, with the groups named and ignored
+on the People page as labels (two people, 46 junk tracks):
+
+- **Duplicates.** 408 faces (44%) repeated a face another event of the same
+  visit had stored: overlapping events of one scene episode cover the same
+  frames (169 of 176 such event pairs shared an episode). Capture now skips
+  moments another event of the episode already captured.
+- **Grouping threshold.** Kept at 0.40. Lowering it joins a person's groups
+  (0.30: 8 and 5 groups for the two people instead of 14 and 17) only by
+  mixing more tracks into the wrong group (25 instead of 15). Faces of one
+  person are only weakly alike here (median track-to-track cosine 0.24).
+- **Automatic naming.** A track is compared with each named person's faces as
+  a whole. At 0.45 with a 0.10 lead over the next person, 157 of 241 person
+  tracks were named, none wrongly, and 1 of 46 junk tracks; at 0.40, 189
+  named, 1 wrongly, 2 junk. 0.45 is used.
+- **Quality cut-off.** Not changed: junk and real faces overlap in norm (a
+  minimum of 15 would keep 69% of person tracks and still 36% of junk).
+
+Names reach incidents, search, the person filter and scene identities
+(which join one person's episodes across cameras) through
+`AppManager.face_identity_observations`. A live event's names refresh its
+incident and are announced on MQTT `events/identity`; a seeded one's are only
+recorded.

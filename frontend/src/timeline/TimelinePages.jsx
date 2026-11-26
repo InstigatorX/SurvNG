@@ -1082,11 +1082,17 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
 
   useAppEvents(({ type, data }) => {
     if (type !== "identity_update") return;
-    const eventId = Number(data?.event_id);
-    if (!Number.isInteger(eventId) || eventId <= 0) return;
-    const invalidatedCacheIds = invalidateTimelineIdentityCache(selectedIncidentIdentityCacheRef.current, eventId);
-    const selectedCacheInvalidated = invalidatedCacheIds.includes(selectedIdentityEventId);
-    if (selectedCacheInvalidated || timelineIncidentIncludesEvent(selectedEventBase, eventId)) {
+    // One event, or a batch (names changed on the People page).
+    const eventIds = (Array.isArray(data?.event_ids) ? data.event_ids : [data?.event_id])
+      .map(Number).filter((eventId) => Number.isInteger(eventId) && eventId > 0);
+    let affected = false;
+    for (const eventId of eventIds) {
+      // Every event's cached names go, not only up to the first that matters.
+      const invalidatedCacheIds = invalidateTimelineIdentityCache(selectedIncidentIdentityCacheRef.current, eventId);
+      affected = affected || invalidatedCacheIds.includes(selectedIdentityEventId)
+        || timelineIncidentIncludesEvent(selectedEventBase, eventId);
+    }
+    if (affected) {
       setSelectedIncidentIdentity(null);
       setSelectedIdentityRevision((revision) => revision + 1);
     }

@@ -129,6 +129,7 @@ jobs:
             tests/test_ema*.py \
             tests/test_adaptive_motion.py \
             tests/test_capture_protocols.py \
+            tests/test_onvif_stop_bounds.py \
             tests/test_onvif_inspector.py \
             tests/test_onvif_addressing.py \
             tests/test_recorded_object_detection.py \

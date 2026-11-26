@@ -346,6 +346,8 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
         "detection_enabled": bool(raw.get("detection_enabled")),
         "detection_cleanup_required": bool(lifecycle.get("detection_cleanup_required")),
         "onvif_connected": bool(raw.get("onvif_connected")),
+        "onvif_unreachable": bool(raw.get("onvif_unreachable")),
+        "onvif_abandoned_workers": int(_number(raw.get("onvif_abandoned_workers"))),
         "lifecycle_generation": _optional_number(lifecycle.get("generation")),
         "motion": _motion_snapshot(raw.get("motion_qualification"), tracking),
         "spatial_alignment": {

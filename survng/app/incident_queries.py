@@ -106,7 +106,7 @@ def _filter_incidents_by_person(
     ]
     matching_event_ids = {
         int(observation["event_id"])
-        for observation in manager.faces.for_event_ids(event_ids)
+        for observation in manager.face_identity_observations(event_ids)
         if int(observation.get("person_id") or 0) == person_id
     }
     return [
@@ -193,7 +193,7 @@ class IncidentQueryService:
             if str(event.get("id", "")).isdigit()
         ]
         observations_by_event: dict[int, list[dict[str, Any]]] = {}
-        for observation in manager.faces.for_event_ids(event_ids):
+        for observation in manager.face_identity_observations(event_ids):
             observations_by_event.setdefault(
                 int(observation["event_id"]), []
             ).append(observation)

@@ -80,7 +80,7 @@ def test_stale_membership_is_hidden_consistently(clustered_faces, state_change):
             assert item["unknown_cluster_id"] is None
 
     incidents = [{"events": [{"id": 41}, {"id": 42}]}]
-    IncidentQueryService.with_faces(SimpleNamespace(faces=store), incidents)
+    IncidentQueryService.with_faces(SimpleNamespace(face_identity_observations=store.for_event_ids), incidents)
     first_event, second_event = incidents[0]["events"]
     assert all(face["unknown_cluster_id"] is None for face in first_event["faces"])
     assert second_event["faces"][0]["name"] == f"Unknown Person {cluster_id}"

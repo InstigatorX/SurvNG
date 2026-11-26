@@ -299,32 +299,3 @@ def test_enrichment_rechecks_concurrent_explicit_pin(tmp_path):
     assert result["selected_observation_ids"] == []
     assert faces.observation(face_id)["reference_pinned"]
     assert not faces.observation(face_id)["reference_auto_pinned"]
-
-
-@pytest.mark.parametrize("mutation", ["create", "pin"])
-def test_reference_retention_conflicts_reach_http_boundary(tmp_path, mutation):
-    from fastapi import HTTPException
-    from survng.app.face_routes import (
-        FacePersonCreate, FaceReferenceUpdate, FaceRouteDependencies, create_face_router,
-    )
-
-    events, faces = stores(tmp_path)
-    person = None if mutation == "create" else faces.create_person("Alice")["id"]
-    face_id, _path = event_face(events, faces, person_id=person)
-    with faces._connect() as connection:
-        connection.execute(
-            """insert into media_deletion_claims (path, role, claimed_at)
-            select snapshot_path, 'snapshot', ? from face_observations where id = ?""",
-            (NEW, face_id),
-        )
-    bundle = create_face_router(FaceRouteDependencies(
-        get_manager=lambda: SimpleNamespace(faces=faces), manager_lock=threading.RLock(),
-        start_observation_sync=lambda: None,
-    ))
-    with pytest.raises(HTTPException) as error:
-        if mutation == "create":
-            bundle.handlers["create_face_person"](FacePersonCreate(name="Alice", observation_id=face_id))
-        else:
-            bundle.handlers["update_face_reference"](face_id, FaceReferenceUpdate(pinned=True))
-    assert error.value.status_code == 409
-    assert "being removed" in error.value.detail

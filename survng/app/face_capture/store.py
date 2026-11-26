@@ -74,7 +74,43 @@ create table if not exists face_capture_seeds (
     updated_at text not null,
     finished_at text not null default ''
 );
+-- The moments an event's capture decoded (absolute epochs): another event of
+-- the same visit skips a moment one of these already covers.
+create table if not exists face_capture_moments (
+    event_id integer not null,
+    camera_id text not null,
+    epoch real not null
+);
+create index if not exists face_capture_moments_time on face_capture_moments(camera_id, epoch);
+create index if not exists face_capture_moments_event on face_capture_moments(event_id);
+-- Which event's decoded moments an event skipped: when that event is removed,
+-- the one that skipped them is captured again.
+create table if not exists face_capture_covered (
+    event_id integer not null,
+    source_event_id integer not null,
+    primary key (event_id, source_event_id)
+);
+create index if not exists face_capture_covered_source on face_capture_covered(source_event_id);
+-- Events whose names changed on the People page and still have to be
+-- recorded as scene identities (kept across reloads and restarts).
+-- Counters other processes (the offline seed) raise for the service to see.
+create table if not exists face_capture_state (
+    key text primary key,
+    value integer not null
+);
+create table if not exists face_identity_sync (
+    event_id integer primary key,
+    -- Raised on every queueing: a sync done for an older version leaves the
+    -- row for the newer one.
+    version integer not null default 1
+);
 """
+
+
+def _count_reset(connection) -> None:
+    connection.execute(
+        "insert into face_capture_state (key, value) values ('dependents_reset', 1)"
+        " on conflict(key) do update set value = value + 1")
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -88,10 +124,14 @@ class ClosingConnection(sqlite3.Connection):
 
 
 class FaceCaptureStore:
+    DATABASE_NAME = "face-captures.sqlite3"
+
     def __init__(self, database_dir: Path) -> None:
-        self.path = Path(database_dir) / "face-captures.sqlite3"
+        self.path = Path(database_dir) / self.DATABASE_NAME
         self.crop_dir = Path(database_dir) / "face-captures"
         self._lock = threading.Lock()
+        # The reset counter last seen (see take_dependents_reset).
+        self._resets_seen: int | None = None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(SCHEMA)
@@ -140,8 +180,12 @@ class FaceCaptureStore:
         result: CaptureResult,
         embedding_model: str,
         seconds: float,
+        covered_by: Iterable[int] = (),
     ) -> int:
-        """Replace the event's captured faces with ``result``'s; returns the number kept."""
+        """Replace the event's captured faces with ``result``'s; returns the number kept.
+
+        ``covered_by``: the visit's events whose decoded moments this capture skipped.
+        """
         now = datetime.now(timezone.utc).isoformat()
         written: list[tuple[CapturedFace, str]] = []
         day = datetime.fromtimestamp(event_epoch, timezone.utc).strftime("%Y-%m-%d")
@@ -161,6 +205,7 @@ class FaceCaptureStore:
             old = self._replace_faces(
                 event_id=event_id, camera_id=camera_id, event_epoch=event_epoch, result=result,
                 embedding_model=embedding_model, seconds=seconds, written=written, now=now,
+                covered_by=sorted({int(i) for i in covered_by if int(i) != int(event_id)}),
             )
         except BaseException:
             # Any failure (a cv2.error on a bad crop too): no row points at
@@ -175,7 +220,7 @@ class FaceCaptureStore:
         return len(written)
 
     def _replace_faces(
-        self, *, event_id, camera_id, event_epoch, result, embedding_model, seconds, written, now,
+        self, *, event_id, camera_id, event_epoch, result, embedding_model, seconds, written, now, covered_by=(),
     ) -> list[str]:
         """Swap the event's rows for ``written`` in one transaction; the replaced crop paths."""
         with self._lock, self._connect() as connection:
@@ -202,6 +247,30 @@ class FaceCaptureStore:
                     )
                     for face, path in written
                 ],
+            )
+            previous = sorted(round(float(row[0]), 3) for row in connection.execute(
+                "select epoch from face_capture_moments where event_id = ?", (event_id,)))
+            current = sorted(round(event_epoch + float(moment), 3) for moment in result.decoded_moments)
+            if previous != current:
+                # Events that skipped moments this event no longer decodes
+                # would keep no faces there: capture them again.
+                dependents = [int(row[0]) for row in connection.execute(
+                    "select event_id from face_capture_covered where source_event_id = ?", (event_id,))]
+                connection.executemany(
+                    "update face_capture_events set capture_version = 0, attempts = 0 where event_id = ?",
+                    [(dependent,) for dependent in dependents])
+                if dependents:
+                    _count_reset(connection)
+                connection.execute("delete from face_capture_covered where source_event_id = ?", (event_id,))
+            connection.execute("delete from face_capture_moments where event_id = ?", (event_id,))
+            connection.executemany(
+                "insert into face_capture_moments (event_id, camera_id, epoch) values (?, ?, ?)",
+                [(event_id, camera_id, event_epoch + float(moment)) for moment in result.decoded_moments],
+            )
+            connection.execute("delete from face_capture_covered where event_id = ?", (event_id,))
+            connection.executemany(
+                "insert or ignore into face_capture_covered (event_id, source_event_id) values (?, ?)",
+                [(event_id, source) for source in covered_by],
             )
             self._upsert_event(
                 connection, event_id=event_id, camera_id=camera_id, event_epoch=event_epoch, state="done",
@@ -238,6 +307,53 @@ class FaceCaptureStore:
             ),
         )
 
+    def take_dependents_reset(self) -> bool:
+        """Whether events were reset to be captured again since the last call
+        (by this process or another one, such as the offline seed)."""
+        with self._connect() as connection:
+            row = connection.execute("select value from face_capture_state where key = 'dependents_reset'").fetchone()
+        count = int(row[0]) if row else 0
+        with self._lock:
+            changed = self._resets_seen is not None and count != self._resets_seen
+            self._resets_seen = count
+        return changed
+
+    def queue_identity_sync(self, event_ids: Iterable[int]) -> None:
+        with self._lock, self._connect() as connection:
+            connection.executemany(
+                "insert into face_identity_sync (event_id) values (?)"
+                " on conflict(event_id) do update set version = version + 1",
+                [(int(event_id),) for event_id in event_ids])
+
+    def identity_sync_pending(self) -> bool:
+        with self._connect() as connection:
+            return connection.execute("select exists(select 1 from face_identity_sync)").fetchone()[0] == 1
+
+    def identity_sync_batch(self, limit: int = 100) -> list[tuple[int, int]]:
+        """Queued (event, version), oldest event first; rows stay until done."""
+        with self._connect() as connection:
+            return [(int(row[0]), int(row[1])) for row in connection.execute(
+                "select event_id, version from face_identity_sync order by event_id limit ?", (int(limit),))]
+
+    def identity_sync_done(self, event_id: int, version: int) -> None:
+        """Done for this version; an edit that queued the event again since keeps it."""
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "delete from face_identity_sync where event_id = ? and version = ?", (int(event_id), int(version)))
+
+    def event_places(self, event_ids: Iterable[int]) -> dict[int, tuple[str, float]]:
+        """event -> (camera, event time) for captured events."""
+        ids = sorted({int(event_id) for event_id in event_ids})
+        found: dict[int, tuple[str, float]] = {}
+        with self._connect() as connection:
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                for event_id, camera_id, epoch in connection.execute(
+                        "select event_id, camera_id, event_epoch from face_capture_events"
+                        f" where event_id in ({','.join('?' * len(chunk))})", chunk):
+                    found[int(event_id)] = (str(camera_id), float(epoch))
+        return found
+
     def captured_event_ids(self) -> list[int]:
         with self._connect() as connection:
             return [int(row[0]) for row in connection.execute("select event_id from face_capture_events")]
@@ -257,11 +373,37 @@ class FaceCaptureStore:
                 for group_id in old_groups:
                     recompute_group(connection, group_id, drop_empty=False)
                 drop_empty_groups(connection)  # and the names only those groups had
+                connection.execute(f"delete from face_capture_moments where event_id in ({marks})", chunk)
+                # Events that skipped these events' moments have no faces
+                # there now: capture them again (as after a version change).
+                dependents = [int(row[0]) for row in connection.execute(
+                    f"select event_id from face_capture_covered where source_event_id in ({marks})", chunk)]
+                if dependents:
+                    connection.execute(
+                        f"update face_capture_events set capture_version = 0, attempts = 0"
+                        f" where event_id in ({','.join('?' * len(dependents))})", dependents)
+                    _count_reset(connection)
+                connection.execute(
+                    f"delete from face_capture_covered where event_id in ({marks}) or source_event_id in ({marks})",
+                    (*chunk, *chunk))
                 removed += connection.execute(
                     f"delete from face_capture_events where event_id in ({marks})", chunk).rowcount
             for path in paths:
                 Path(path).unlink(missing_ok=True)
         return removed
+
+    def decoded_moments(
+        self, camera_id: str, event_ids: Iterable[int], low: float, high: float,
+    ) -> list[tuple[int, float]]:
+        """(event, epoch) of the moments these events decoded on a camera within [low, high]."""
+        ids = sorted({int(event_id) for event_id in event_ids})
+        if not ids:
+            return []
+        with self._connect() as connection:
+            return [(int(row[0]), float(row[1])) for row in connection.execute(
+                "select event_id, epoch from face_capture_moments where camera_id = ? and epoch between ? and ?"
+                f" and event_id in ({','.join('?' * len(ids))})",
+                (camera_id, float(low), float(high), *ids))]
 
     def faces(self, event_id: int) -> list[dict[str, Any]]:
         with self._connect() as connection:

@@ -153,8 +153,7 @@ def create_semantic_router(deps: SemanticRouteDependencies) -> SemanticRouteBund
             for row in active_manager.events.get_many(list(best_by_event))
         }
         observations_by_event: dict[int, list[dict[str, Any]]] = {}
-        face_store = getattr(active_manager, "faces", None)
-        for_event_ids = getattr(face_store, "for_event_ids", None)
+        for_event_ids = getattr(active_manager, "face_identity_observations", None)
         if callable(for_event_ids):
             for observation in for_event_ids(list(best_by_event)):
                 observations_by_event.setdefault(
