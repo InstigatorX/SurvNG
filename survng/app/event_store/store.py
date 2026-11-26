@@ -610,7 +610,13 @@ class EventStore(
         bounded_hours = max(1, min(int(hours), 24 * 31))
         bucket_seconds = max(60, min(int(bucket_minutes), 60) * 60)
         start = current - timedelta(hours=bounded_hours)
-        query = "select camera_id, created_at, objects_json from events where created_at >= ?"
+        # Few events carry tracking; matching the key's text in SQLite skips
+        # building and parsing a week of other events' JSON (about 30 KB each).
+        # Every row the loop below keeps contains it.
+        query = (
+            "select camera_id, created_at, objects_json from events where created_at >= ? "
+            "and instr(objects_json, '\"object_tracking\"') > 0"
+        )
         parameters: list[Any] = [start.isoformat()]
         if camera_id:
             query += " and camera_id = ?"
