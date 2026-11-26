@@ -16,6 +16,7 @@ from survng.app.event_store import EventStore
 from survng.app.event_store.jobs import (
     PRUNE_EXPIRED_DISCOVERY_JOBS_SQL,
     PRUNE_EXPIRED_JOBS_SQL,
+    _UNFINISHED_SPEECH_LOOK_SQL,
 )
 
 
@@ -36,6 +37,34 @@ def test_discovery_prune_walks_only_its_partial_index(tmp_path: Path) -> None:
         "SEARCH detection_jobs USING INDEX idx_detection_jobs_discovery_terminal (updated_at<?)"
     ]
     assert any("idx_detection_jobs_terminal" in step for step in expired), expired
+
+
+def test_failed_speech_looks_read_only_open_obligations(tmp_path: Path) -> None:
+    """Run every few seconds per camera; must not parse each failed payload."""
+    store = EventStore(tmp_path)
+    connection = sqlite3.connect(store.jobs_db_path)
+    try:
+        plan = [row[3] for row in connection.execute(
+            "explain query plan select id from detection_jobs "
+            "INDEXED BY idx_detection_jobs_unfinished_speech_look where camera_id=? and "
+            + _UNFINISHED_SPEECH_LOOK_SQL, ("gate",)
+        )]
+    finally:
+        connection.close()
+    assert plan == [
+        "SEARCH detection_jobs USING INDEX idx_detection_jobs_unfinished_speech_look (camera_id=?)"
+    ]
+
+    store.enqueue_detection_job(
+        job_id="open", camera_id="gate", dedupe_key="intent:open",
+        payload={"event_at": "2026-08-01T12:00:00+00:00",
+                 "qualification": {"trigger_source": "speech"}, "existing_event_id": 5},
+    )
+    with store._connect_jobs() as connection:
+        connection.execute("update detection_jobs set state='failed' where id='open'")
+    assert [job["id"] for job in store.failed_speech_looks("gate")] == ["open"]
+    store.finish_speech_look_job("open")
+    assert store.failed_speech_looks("gate") == []
 
 
 def test_prune_keeps_the_same_rows_as_before(tmp_path: Path) -> None:

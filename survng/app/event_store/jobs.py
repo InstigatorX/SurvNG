@@ -52,6 +52,13 @@ _DISCOVERY_TERMINAL_WHERE = (
     "state in ('completed','failed') "
     "and json_extract(payload_json, '$.qualification.scene_discovery') = 1"
 )
+# Failed jobs keep their full payload (about 16 KB); reading every camera's
+# failed rows to parse it cost 2-22 ms per camera every few seconds. This
+# index holds only the obligations still open, usually none.
+_UNFINISHED_SPEECH_LOOK_INDEX_SQL = (
+    "create index if not exists idx_detection_jobs_unfinished_speech_look "
+    f"on detection_jobs(camera_id, updated_at) where {_UNFINISHED_SPEECH_LOOK_SQL}"
+)
 _DISCOVERY_TERMINAL_INDEX_SQL = (
     "create index if not exists idx_detection_jobs_discovery_terminal "
     f"on detection_jobs(updated_at) where {_DISCOVERY_TERMINAL_WHERE}"
@@ -239,6 +246,9 @@ class EventStoreJobsMixin:
             )
             create_index_logged(
                 conn, "idx_detection_jobs_discovery_terminal", _DISCOVERY_TERMINAL_INDEX_SQL,
+            )
+            create_index_logged(
+                conn, "idx_detection_jobs_unfinished_speech_look", _UNFINISHED_SPEECH_LOOK_INDEX_SQL,
             )
             conn.execute(
                 """
@@ -1029,7 +1039,8 @@ class EventStoreJobsMixin:
         with self._connect_jobs() as conn:
             return [dict(row) for row in conn.execute(
                 "select job.id, json_extract(job.payload_json, '$.existing_event_id') event_id "
-                f"from detection_jobs job where job.camera_id=? and {_UNFINISHED_SPEECH_LOOK_SQL} "
+                "from detection_jobs job INDEXED BY idx_detection_jobs_unfinished_speech_look "
+                f"where job.camera_id=? and {_UNFINISHED_SPEECH_LOOK_SQL} "
                 "and not exists(select 1 from detection_jobs active "
                 "where active.camera_id=job.camera_id and active.state in ('queued','running') "
                 "and json_extract(active.payload_json, '$.existing_event_id')="
