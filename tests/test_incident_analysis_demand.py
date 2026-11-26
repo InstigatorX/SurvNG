@@ -329,3 +329,31 @@ def test_detection_off_drain_does_not_truncate_requested_evidence(tmp_path):
     job = store.claim_scene_tracking("gate", "drain", end_limit=1010)
     assert job["end_epoch"] == 1020
     assert job["end_limit_epoch"] is None
+
+
+def test_lapsed_unstarted_demand_returns_to_deferred(tmp_path, monkeypatch):
+    now = [20000.0]
+    monkeypatch.setattr("survng.app.event_store.scene_tracking.time.time", lambda: now[0])
+    store = EventStore(tmp_path)
+    _, first_job, first = bookmark(store)
+    _, second_job, second = bookmark(store, 3000)
+    _, third_job, third = bookmark(store, 5000)
+
+    def state(job):
+        with store._connect() as conn:
+            return conn.execute("select state from scene_analysis_jobs where episode_id=?",
+                                (job["episode_id"],)).fetchone()[0]
+
+    # A viewer clicks through two incidents; neither chunk starts.
+    store.request_incident_analysis(first)
+    store.request_incident_analysis(second)
+    now[0] += 61
+    store.request_incident_analysis(third)
+    assert (state(first_job), state(second_job), state(third_job)) == ("deferred", "deferred", "queued")
+    # Reopening resumes it like any deferred episode.
+    assert store.request_incident_analysis(first)["status"] == "queued"
+    assert store.claim_scene_tracking("gate", "worker")["episode_id"] == first_job["episode_id"]
+
+    now[0] += 61
+    EventStore(tmp_path)  # a restart tidies the ones nobody reopened
+    assert state(third_job) == "deferred"

@@ -61,6 +61,19 @@ class EventStoreSceneTrackingMixin:
         conn.execute("create index if not exists scene_analysis_jobs_camera on scene_analysis_jobs(camera_id,state,retry_at)")
         conn.execute("create index if not exists scene_analysis_jobs_demand_running "
                      "on scene_analysis_jobs(lease_expires) where admission='demand' and state='running'")
+        EventStoreSceneTrackingMixin._defer_lapsed_demand(conn, time.time())
+
+    @staticmethod
+    def _defer_lapsed_demand(conn, now):
+        """Return queued demand work nobody is viewing any more to deferred.
+
+        Claims and status already ignore it once its view lapses; a chunk that
+        finishes after the lapse is deferred the same way. This also covers
+        work that never started (viewers clicking through several incidents)
+        or stopped between chunks, so it does not read as queued.
+        """
+        conn.execute("update scene_analysis_jobs set state='deferred' "
+                     "where admission='demand' and state='queued' and requested_until<=?", (now,))
 
     def enqueue_scene_tracking(self, event_id, start_epoch, end_epoch, *, deferred=False):
         if not (math.isfinite(start_epoch) and math.isfinite(end_epoch) and start_epoch < end_epoch):
@@ -181,6 +194,8 @@ class EventStoreSceneTrackingMixin:
                 conn.execute("update scene_analysis_jobs set admission='demand',requested_until=?,"
                              "request_end_epoch=?,state=? where episode_id=?",
                              (now + DEMAND_VIEW_SECONDS, target, state, job["episode_id"]))
+            # After renewing this incident, so its own lapsed work resumes as before.
+            self._defer_lapsed_demand(conn, now)
             return self._incident_analysis_status(conn, incident_id)
 
     def claim_scene_tracking(self, camera_id, lease_owner, lease_seconds=60.0, end_limit=None,
