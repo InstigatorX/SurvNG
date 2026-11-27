@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useIncidentFaceNames } from "../people/IncidentPeople.jsx";
 import {
   ChevronLeft,
@@ -16,7 +16,7 @@ import {
 import { loadRelatedIncident } from "../relatedIncidents.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { incidentReplayTracking, incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
-import { incidentDetailQuery, incidentFocusStep, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryColumns, incidentGalleryWanted, INCIDENT_GALLERY_CHUNK, incidentFilterValues, toggleIncidentFilterValue, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
+import { incidentDetailQuery, incidentFocusStep, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryColumns, incidentGalleryWanted, INCIDENT_GALLERY_CHUNK, incidentFilterValues, keepIncidentIdentity, mergeIncidentHead, toggleIncidentFilterValue, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
 import { APP_BASE_PATH, appUrl, incidentRecordingContext, fetch } from "../shared/api.js";
 import { eventThumbnailUrl, thumbnailWidthFor } from "../shared/mediaUrls.js";
@@ -33,6 +33,8 @@ import { useIncidentPlayback } from "./useIncidentPlayback.js";
 import "./mobile-incidents.css";
 
 const NO_INCIDENTS = Object.freeze([]);
+// A long gallery re-renders often, and most tiles have not changed.
+const IncidentTile = memo(IncidentListItem);
 const FILTER_PANE_WIDTH = 264;
 
 // One multi-select filter: any checked value matches, and nothing checked means all.
@@ -133,6 +135,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   // The next chunk, fetched before it is needed: { key, token, offset, limit, promise }.
   const galleryAheadRef = useRef(null);
   const warmedImagesRef = useRef([]);
+  // Whether the next refresh must re-read everything shown, or only the newest incidents.
+  const galleryFullRefreshRef = useRef(true);
+  const refreshPollCountRef = useRef(0);
   const [viewportWidth, setViewportWidth] = useState(() => (typeof window !== "undefined" ? window.innerWidth : 1440));
   const [incidentPageSize, setIncidentPageSize] = useState(12);
   const retainedGallerySelectionRef = useRef(null);
@@ -247,6 +252,10 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     offset: semanticIncidentActive ? incidentPage * incidentsPerPage : Number(new URLSearchParams(incidentLoadedQueryRef.current).get("offset")) || 0,
     pageSize: incidentsPerPage, items: visibleIncidents, selectedId: focusedIncident?.id,
   };
+  // Tiles are memoized, so they get handlers that never change identity.
+  const tileHandlersRef = useRef({});
+  const selectTile = useCallback((incident) => tileHandlersRef.current.select(incident), []);
+  const previewTile = useCallback((incident) => tileHandlersRef.current.preview(incident), []);
   galleryGrowthRef.current = { count: visibleIncidents.length, total: displayedIncidentTotal, wanted: galleryWanted };
   // Ask for pictures near the size they are shown at, not one large size for every layout.
   const tileCssWidth = galleryMode
@@ -423,7 +432,8 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     refreshIncidentEvidence();
   }
 
-  function refreshIncidentEvidence() {
+  function refreshIncidentEvidence(full = true) {
+    if (full !== false) galleryFullRefreshRef.current = true;
     const sequence = ++incidentEvidenceRefreshSequence.current;
     incidentDetailCacheRef.current.clear();
     setIncidentRefreshToken((value) => value + 1);
@@ -565,7 +575,8 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     incidentEventRefreshTimer.current = window.setTimeout(
       () => {
         incidentEventRefreshTimer.current = null;
-        refreshIncidentEvidence();
+        // A new incident elsewhere only changes the top of the list.
+        refreshIncidentEvidence(type === "resync" || forceReconcile || affectsVisibleEvidence);
       },
       1000,
     );
@@ -577,7 +588,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   }, []);
 
   useVisiblePolling(
-    refreshIncidentEvidence,
+    // The fallback poll re-reads the newest incidents; every fourth one re-reads
+    // everything shown, in case an event about an older incident was missed.
+    () => refreshIncidentEvidence((refreshPollCountRef.current += 1) % 4 === 0),
     INCIDENT_REFRESH_FALLBACK_MS,
     true,
     { immediate: false },
@@ -636,6 +649,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       const loaded = galleryLoadedRef.current;
       const sameList = loaded.key === baseKey && loaded.token === incidentRefreshToken;
       if (sameList && loaded.items.length >= galleryWanted) return;
+      const previous = loaded.key === baseKey ? loaded.items : [];
       const foregroundLoad = loaded.key !== baseKey;
       if (foregroundLoad) {
         setIncidentLoading(true);
@@ -643,11 +657,23 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       }
       setGalleryMoreError("");
       try {
-        // Scrolling adds to the end. A refresh or a filter change reads again from the top.
+        // Scrolling adds to the end. A filter change reads again from the top. A
+        // routine refresh re-reads the newest incidents and keeps the rest.
         let items = sameList ? loaded.items : [];
         let offset = items.length;
         let payload = null;
+        if (!sameList && previous.length && !galleryFullRefreshRef.current) {
+          const head = await searchPage(filters, INCIDENT_GALLERY_CHUNK, 0);
+          if (cancelled) return;
+          const merged = mergeIncidentHead(previous, head.items || []);
+          if (merged) {
+            payload = head;
+            items = merged;
+            offset = items.length;
+          }
+        }
         while (items.length < galleryWanted) {
+          if (payload && offset >= Number(payload.total || 0)) break;
           const limit = Math.min(100, galleryWanted - items.length);
           const ahead = galleryAheadRef.current;
           const prepared = ahead && ahead.key === baseKey && ahead.token === incidentRefreshToken && ahead.offset === offset && ahead.limit === limit
@@ -661,6 +687,10 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
           if (page.length < limit || offset >= Number(payload.total || 0)) break;
         }
         if (!payload) return;
+        if (!sameList) {
+          items = keepIncidentIdentity(previous, items);
+          galleryFullRefreshRef.current = false;
+        }
         galleryLoadedRef.current = { key: baseKey, token: incidentRefreshToken, items };
         incidentLoadedQueryRef.current = `${baseKey}&offset=0`;
         setIncidents(items);
@@ -861,6 +891,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   function selectGalleryIncident(incident) {
     toggleIncident(incident.id);
   }
+  tileHandlersRef.current = { select: galleryExpanded ? openIncidentOverlay : selectGalleryIncident, preview: openIncidentOverlay };
 
   function changeIncidentPage(page, { scroll = true } = {}) {
     retainedGallerySelectionRef.current = null;
@@ -1086,7 +1117,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                 {displayedIncidentLoading && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
                 {!galleryIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
                 {galleryIncidents.length ? pagedIncidents.map((incident) => (
-                  <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} thumbnailWidth={tileThumbnailWidth} hud={galleryExpanded || incidentDensity === "comfortable"} onSelect={galleryExpanded ? openIncidentOverlay : selectGalleryIncident} onOpenOverlay={openIncidentOverlay} />
+                  <IncidentTile key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} thumbnailWidth={tileThumbnailWidth} hud={galleryExpanded || incidentDensity === "comfortable"} onSelect={selectTile} onOpenOverlay={previewTile} />
                 )) : null}
                 {!displayedIncidentLoading && !displayedIncidentError && !galleryIncidents.length ? (
                   <div className="empty-state">

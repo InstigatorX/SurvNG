@@ -130,17 +130,32 @@ try {
   await toEnd();
   await status.getByText("Could not load more incidents.").waitFor();
   assert.equal(await tiles.count(), 2 * INCIDENT_GALLERY_CHUNK);
-  assert.deepEqual([searches.at(-1).limit, searches.at(-1).offset], [INCIDENT_GALLERY_CHUNK, 2 * INCIDENT_GALLERY_CHUNK],
+  // (A background refresh re-reads from offset 0 and may land at any moment.)
+  const deeper = () => searches.filter((search) => search.offset > 0);
+  assert.deepEqual([deeper().at(-1).limit, deeper().at(-1).offset], [INCIDENT_GALLERY_CHUNK, 2 * INCIDENT_GALLERY_CHUNK],
     "reaching the end asks for the incidents after the ones shown");
   failMore = false;
   await status.getByRole("button", { name: "Retry" }).click();
   await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length === count, TOTAL);
   assert.equal(await tiles.first().locator(".incident-hud-where b").innerText(), "Front Door", "earlier tiles stay");
   assert.match(await status.innerText(), new RegExp(`All ${TOTAL} incidents`));
-  const settled = searches.length;
+  const settled = deeper().length;
   await toEnd();
   await page.waitForTimeout(400);
-  assert.equal(searches.length, settled, "nothing more to ask for at the end");
+  assert.equal(deeper().length, settled, "nothing more to ask for at the end");
+
+  // The background refresh re-reads only the newest incidents, however many are
+  // shown, and leaves the pictures already loaded alone.
+  await tiles.nth(100).evaluate((element) => { element.dataset.kept = "yes"; });
+  const before = { searches: searches.length, images: images.length };
+  for (let waited = 0; searches.length === before.searches && waited < 20000; waited += 250) await page.waitForTimeout(250);
+  await page.waitForTimeout(500);
+  const refreshes = searches.slice(before.searches);
+  assert.ok(refreshes.length >= 1, "the gallery refreshes in the background");
+  assert.ok(refreshes.every((search) => search.offset === 0 && search.limit === INCIDENT_GALLERY_CHUNK), `one small read per refresh, got ${JSON.stringify(refreshes)}`);
+  assert.equal(await tiles.count(), TOTAL);
+  assert.equal(await tiles.nth(100).getAttribute("data-kept"), "yes");
+  assert.equal(images.length, before.images, "no picture is requested again");
 
   // Confidence threshold and object choice go to the search and reset the list.
   await page.getByRole("slider", { name: "Confidence threshold" }).fill("80");
