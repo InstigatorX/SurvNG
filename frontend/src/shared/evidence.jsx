@@ -162,7 +162,7 @@ export function objectBoxes(event) {
     .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
 }
 
-export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, objectFocusMode = null, objectFocusZoom = 1, objectFocusAspect = { width: 16, height: 9 }, objectFocusControls = true, showAnnotations = true, showTracking = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, zones = null, zonesVisible = false, selectedObjectIndex = null, onSelectObject = null, onRequestFullResolution, onImageSize, children }) {
+export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, objectFocusMode = null, objectFocusZoom = 1, objectFocusAspect = { width: 16, height: 9 }, objectFocusControls = true, showAnnotations = true, showTracking = false, thumbnail = false, thumbnailWidth = null, progressive = false, fullResolution = false, highQualityZoom = false, zones = null, zonesVisible = false, selectedObjectIndex = null, onSelectObject = null, onRequestFullResolution, onImageSize, children }) {
   const boxes = objectBoxes(event);
   const tracks = showTracking ? snapshotTrackOverview(event, eventCoverEpoch(event)) : [];
   const boxCoordinateSize = incidentDetectionFrameSize(event);
@@ -218,7 +218,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
       aspectWidth: focusAspect?.width,
       aspectHeight: focusAspect?.height,
     })
-    : eventThumbnailUrl(event);
+    : eventThumbnailUrl(event, thumbnailWidth || undefined);
   const focusImageKey = `${progressiveImageKey}:object-focus:${focusThumbnailWidth}:${focusZoom}:${focusAspect?.width || 0}x${focusAspect?.height || 0}`;
   const imageReady = loadedImageKey === progressiveImageKey
     || (useServerObjectCrop && loadedImageKey === focusImageKey);
@@ -634,7 +634,7 @@ function liveActivityLabel(incident) {
   return text.charAt(0).toUpperCase() + text.slice(1) + (labels.length > names.length ? ` +${labels.length - names.length}` : "");
 }
 
-export function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, onSelect, onOpenOverlay, livePreview = false, hud = false }) {
+export function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, onSelect, onOpenOverlay, livePreview = false, hud = false, thumbnailWidth = null }) {
   const labels = incidentLabels(incident);
   const trigger = incidentTriggerLabel(incident);
   const eventId = liveActivityEventId(incident);
@@ -645,7 +645,7 @@ export function IncidentListItem({ incident, cameraName, timeZone, selected, thu
     <article className={`live-activity-item${livePreview ? " live-preview-row" : ""}${hud ? " with-hud" : ""}${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
       <button type="button" className="live-activity-select" onClick={() => onSelect(incident)} aria-label={livePreview
         ? `Preview ${liveActivityLabel(incident)} in ${cameraName} at ${fullTime}` : `Open ${cameraName} activity at ${fullTime}`}>
-        <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusControls={false} showAnnotations={thumbnailAnnotations} showTracking={false} />
+        <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail thumbnailWidth={thumbnailWidth} objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusControls={false} showAnnotations={thumbnailAnnotations} showTracking={false} />
           {hud ? <>
             <span className="incident-hud incident-hud-where"><b>{cameraName}</b><time dateTime={time} title={fullTime}>{formatHudDateTime(time, timeZone)}</time></span>
             <span className="incident-hud incident-hud-objects"><IncidentObjectBadges labels={labels} /><IncidentSpeechBadge speech={incident.speech} /></span>

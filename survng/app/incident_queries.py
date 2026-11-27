@@ -13,9 +13,9 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, HTTPException, Body
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Body, Request
 from .event_store.scenes import SceneConflict
+from .image_cache import revalidated_image_response
 from .incident_utils import snapshot_media_type
 
 from .audit_ai import motion_audit_interpretation
@@ -779,7 +779,7 @@ def create_incident_query_router(
             status=status, limit=limit, offset=offset))
 
     @router.get("/api/observations/{sample_id}/snapshot")
-    def observation_sample_snapshot(sample_id: str):
+    def observation_sample_snapshot(sample_id: str, request: Request = None):
         def resolve(active):
             sample = active.events.scene_sample(sample_id)
             if sample is None or not sample.get("snapshot_path"):
@@ -788,7 +788,7 @@ def create_incident_query_router(
                 path = event_snapshot_path(active.storage_dir, sample, active.media_storage)
             except (FileNotFoundError, PermissionError):
                 raise HTTPException(status_code=404, detail="supporting image expired")
-            return FileResponse(path, media_type=snapshot_media_type(path), headers={"Cache-Control":"private, no-cache"})
+            return revalidated_image_response(path, snapshot_media_type(path), request)
         return with_manager(resolve)
 
     @router.get("/api/observations/{record_id}")
@@ -808,6 +808,7 @@ def create_incident_query_router(
         aspect_w: float = 16.0,
         aspect_h: float = 9.0,
         focus_bbox: str = "",
+        request: Request = None,
     ):
         def resolve(active):
             observation = (active.events.scene_evidence_image(observation_id)
@@ -861,8 +862,8 @@ def create_incident_query_router(
                         )
                     return _jpeg_thumbnail(frame, safe_width, safe_quality)
                 cached = active.image_cache.get_or_create("observations", identity, build)
-                return FileResponse(cached, media_type="image/jpeg", headers={"Cache-Control":"private, no-cache"})
-            return FileResponse(path, media_type=snapshot_media_type(path), headers={"Cache-Control": "private, no-cache"})
+                return revalidated_image_response(cached, "image/jpeg", request)
+            return revalidated_image_response(path, snapshot_media_type(path), request)
         return with_manager(resolve)
 
     @router.get("/api/incidents/{incident_id}")

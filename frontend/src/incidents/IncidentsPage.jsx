@@ -19,6 +19,7 @@ import { incidentReplayTracking, incidentTrackingSource, storedObjectTracks } fr
 import { incidentDetailQuery, incidentFocusStep, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryColumns, incidentGalleryWanted, INCIDENT_GALLERY_CHUNK, incidentFilterValues, toggleIncidentFilterValue, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
 import { APP_BASE_PATH, appUrl, incidentRecordingContext, fetch } from "../shared/api.js";
+import { eventThumbnailUrl, thumbnailWidthFor } from "../shared/mediaUrls.js";
 import { INCIDENT_REFRESH_FALLBACK_MS } from "../shared/constants.js";
 import { dateKeyForTimeZone, addDaysToDateKey, zonedDateSecondToEpoch } from "../shared/datetime.js";
 import { useStoredState, isMobileViewport } from "../shared/hooks.js";
@@ -30,6 +31,9 @@ import { IncidentCard, IncidentInspector } from "./IncidentCard.jsx";
 import { IncidentAnalysisStatus } from "./IncidentAnalysisStatus.jsx";
 import { useIncidentPlayback } from "./useIncidentPlayback.js";
 import "./mobile-incidents.css";
+
+const NO_INCIDENTS = Object.freeze([]);
+const FILTER_PANE_WIDTH = 264;
 
 // One multi-select filter: any checked value matches, and nothing checked means all.
 function IncidentFilterChecks({ title, options, filter, onChange, columns = false, empty }) {
@@ -126,6 +130,10 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   // 0: nothing to reveal. Infinity: waiting for the gallery to hold the open
   // incident. Otherwise the time until which a layout change repeats the scroll.
   const galleryRevealRef = useRef(0);
+  // The next chunk, fetched before it is needed: { key, token, offset, limit, promise }.
+  const galleryAheadRef = useRef(null);
+  const warmedImagesRef = useRef([]);
+  const [viewportWidth, setViewportWidth] = useState(() => (typeof window !== "undefined" ? window.innerWidth : 1440));
   const [incidentPageSize, setIncidentPageSize] = useState(12);
   const retainedGallerySelectionRef = useRef(null);
   const galleryPageAnchorRef = useRef(null);
@@ -231,7 +239,8 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const incidentPageCount = Math.max(1, Math.ceil(displayedIncidentTotal / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
   const pagedIncidents = galleryIncidents;
-  const incidentFaceNames = useIncidentFaceNames(pagedIncidents);
+  // Only the phone layout shows names on its cards.
+  const incidentFaceNames = useIncidentFaceNames(mobileView ? pagedIncidents : NO_INCIDENTS);
   incidentPagingRef.current = {
     // The old page stays visible while the next request is in flight. Anchor
     // its actual offset if the user toggles the gallery before that load ends.
@@ -239,6 +248,13 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     pageSize: incidentsPerPage, items: visibleIncidents, selectedId: focusedIncident?.id,
   };
   galleryGrowthRef.current = { count: visibleIncidents.length, total: displayedIncidentTotal, wanted: galleryWanted };
+  // Ask for pictures near the size they are shown at, not one large size for every layout.
+  const tileCssWidth = galleryMode
+    ? (viewportWidth - FILTER_PANE_WIDTH - 16 - 8 * (galleryColumns - 1)) / galleryColumns
+    : 160;
+  const tileThumbnailWidth = thumbnailWidthFor(tileCssWidth, typeof window !== "undefined" ? window.devicePixelRatio : 1);
+  const tileImageRef = useRef({});
+  tileImageRef.current = { width: tileThumbnailWidth, columns: galleryColumns, plain: thumbnailObjectFocus === "off" };
   useEffect(() => {
     if (!displayedIncident && tabletInspectorOpen) setTabletInspectorOpen(false);
   }, [displayedIncident, tabletInspectorOpen]);
@@ -332,6 +348,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       if (rect.width <= 0 || rect.height <= 0) return;
       const width = rect.width;
       const height = rect.height;
+      setViewportWidth(window.innerWidth);
       if (galleryExpanded) {
         // The gallery has no pages; a taller or wider list may need more rows.
         galleryPageAnchorRef.current = null;
@@ -381,7 +398,8 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     if (!rail || !galleryModeRef.current) return;
     // Fewer shown than asked for means a load is in flight or has failed.
     if (growth.count >= growth.total || growth.count < growth.wanted) return;
-    if (rail.scrollHeight - rail.scrollTop - rail.clientHeight > 600) return;
+    // Start early: the next incidents are already fetched, so appending them is immediate.
+    if (rail.scrollHeight - rail.scrollTop - rail.clientHeight > Math.max(600, rail.clientHeight * 1.5)) return;
     setGalleryWanted((wanted) => (wanted === growth.wanted ? wanted + INCIDENT_GALLERY_CHUNK : wanted));
   }
 
@@ -585,6 +603,34 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
 
   useEffect(() => {
     let cancelled = false;
+    async function searchPage(filters, limit, offset) {
+      const query = new URLSearchParams(filters);
+      query.set("limit", String(limit));
+      query.set("offset", String(offset));
+      const response = await fetch(`/api/incidents/search?${query}`);
+      if (!response.ok) throw new Error("Unable to load incidents");
+      return response.json();
+    }
+    // Keep one chunk in hand so reaching the end shows more at once, and start
+    // the pictures of its first rows. A failure here is silent: the same
+    // request is made again, and reported, when the incidents are needed.
+    function fetchAhead(filters, baseKey, offset) {
+      const current = galleryAheadRef.current;
+      if (current && current.key === baseKey && current.token === incidentRefreshToken && current.offset === offset) return;
+      const promise = searchPage(filters, INCIDENT_GALLERY_CHUNK, offset).then((payload) => {
+        const tile = tileImageRef.current;
+        if (tile.plain && galleryAheadRef.current?.promise === promise) {
+          warmedImagesRef.current = (payload.items || []).slice(0, tile.columns * 2).map((incident) => {
+            const image = new Image();
+            image.decoding = "async";
+            image.src = eventThumbnailUrl(incident, tile.width);
+            return image;
+          });
+        }
+        return payload;
+      }).catch(() => null);
+      galleryAheadRef.current = { key: baseKey, token: incidentRefreshToken, offset, limit: INCIDENT_GALLERY_CHUNK, promise };
+    }
     async function loadGallery(filters) {
       const baseKey = `gallery:${filters}`;
       const loaded = galleryLoadedRef.current;
@@ -603,12 +649,10 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
         let payload = null;
         while (items.length < galleryWanted) {
           const limit = Math.min(100, galleryWanted - items.length);
-          const query = new URLSearchParams(filters);
-          query.set("limit", String(limit));
-          query.set("offset", String(offset));
-          const response = await fetch(`/api/incidents/search?${query}`);
-          if (!response.ok) throw new Error("Unable to load incidents");
-          payload = await response.json();
+          const ahead = galleryAheadRef.current;
+          const prepared = ahead && ahead.key === baseKey && ahead.token === incidentRefreshToken && ahead.offset === offset && ahead.limit === limit
+            ? await ahead.promise : null;
+          payload = prepared || await searchPage(filters, limit, offset);
           if (cancelled) return;
           const page = payload.items || [];
           const seen = new Set(items.map((item) => String(item.id)));
@@ -623,6 +667,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
         setIncidentTotal(Math.max(Number(payload.total || 0), items.length));
         setIncidentFacets(payload.facets || { camera_ids: [], labels: [], zones: [] });
         setIncidentLoadError("");
+        if (offset < Number(payload.total || 0)) fetchAhead(filters, baseKey, offset);
       } catch (error) {
         if (cancelled) return;
         if (foregroundLoad) {
@@ -1041,7 +1086,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                 {displayedIncidentLoading && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
                 {!galleryIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
                 {galleryIncidents.length ? pagedIncidents.map((incident) => (
-                  <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} hud={galleryExpanded || incidentDensity === "comfortable"} onSelect={galleryExpanded ? openIncidentOverlay : selectGalleryIncident} onOpenOverlay={openIncidentOverlay} />
+                  <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} thumbnailWidth={tileThumbnailWidth} hud={galleryExpanded || incidentDensity === "comfortable"} onSelect={galleryExpanded ? openIncidentOverlay : selectGalleryIncident} onOpenOverlay={openIncidentOverlay} />
                 )) : null}
                 {!displayedIncidentLoading && !displayedIncidentError && !galleryIncidents.length ? (
                   <div className="empty-state">

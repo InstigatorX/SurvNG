@@ -8,6 +8,9 @@ import time
 import weakref
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
+
+from fastapi.responses import FileResponse, Response
 
 
 class LocalImageCache:
@@ -84,3 +87,23 @@ class LocalImageCache:
                 path.unlink()
             except OSError:
                 continue
+
+
+def revalidated_image_response(
+    path: Path, media_type: str, request: Any = None, filename: str | None = None,
+) -> Response:
+    """Serve an interface image that the browser must revalidate on every use.
+
+    Evidence can change behind a URL, so the response stays ``no-cache``. The
+    validator lets an unchanged image answer with 304 and no body instead of
+    being sent again each time a page shows it.
+    """
+    stat = path.stat()
+    etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+    headers = {"Cache-Control": "private, no-cache", "ETag": etag}
+    presented = request.headers.get("if-none-match", "") if request is not None else ""
+    if filename is None and presented:
+        candidates = {item.strip().removeprefix("W/") for item in presented.split(",")}
+        if etag in candidates or "*" in candidates:
+            return Response(status_code=304, headers=headers)
+    return FileResponse(path, media_type=media_type, filename=filename, headers=headers)

@@ -17,6 +17,17 @@ export function eventSnapshotDownloadUrl(event) {
   return `${path}${path.includes("?") ? "&" : "?"}download=true${hash == null ? "" : `#${hash}`}`;
 }
 
+// Thumbnail widths come from a short list so that nearby tile sizes share one
+// stored image. The pixel density is capped at 2: beyond that the extra detail
+// is not visible at tile size and the image is several times heavier.
+export const THUMBNAIL_WIDTHS = Object.freeze([240, 320, 480, 640, 960]);
+
+export function thumbnailWidthFor(cssWidth, devicePixelRatio = 1) {
+  const density = Math.max(1, Math.min(2, Number(devicePixelRatio) || 1));
+  const needed = Math.max(1, Number(cssWidth) || 0) * density;
+  return THUMBNAIL_WIDTHS.find((width) => width >= needed) || THUMBNAIL_WIDTHS[THUMBNAIL_WIDTHS.length - 1];
+}
+
 export function eventThumbnailUrl(event, width = 720, quality = 82, options = {}) {
   if (event?.snapshot_url) {
     if (!event.snapshot_observation_id && !event.snapshot_evidence_id) return appUrl(event.snapshot_url);

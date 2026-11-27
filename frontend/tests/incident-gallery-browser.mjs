@@ -40,11 +40,13 @@ try {
   page.setDefaultTimeout(10000);
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  const searches = [];
+  const searches = [], requests = [], images = [];
   let failMore = false;
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
+    requests.push(path);
+    if (path.includes("thumbnail.jpg")) images.push(path + url.search);
     if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
     if (path.endsWith("/api/cameras")) return route.fulfill({ json: CAMERAS });
     if (path.endsWith("/face-names")) return route.fulfill({ json: { people: [{ id: 7, name: "Alex" }, { id: 9, name: "Sam" }] } });
@@ -73,7 +75,16 @@ try {
   await tiles.first().waitFor();
   assert.equal(await page.locator(".gallery-expanded").count(), 1);
   assert.equal(await tiles.count(), INCIDENT_GALLERY_CHUNK);
-  assert.deepEqual(searches.map(({ limit, offset }) => [limit, offset]), [[INCIDENT_GALLERY_CHUNK, 0]]);
+  // The next incidents are fetched ahead of need, but not shown yet.
+  await page.waitForFunction(() => true);
+  await page.waitForTimeout(300);
+  assert.deepEqual(searches.map(({ limit, offset }) => [limit, offset]), [[INCIDENT_GALLERY_CHUNK, 0], [INCIDENT_GALLERY_CHUNK, INCIDENT_GALLERY_CHUNK]]);
+  assert.equal(await tiles.count(), INCIDENT_GALLERY_CHUNK);
+  assert.ok(!requests.some((path) => path.includes("face-captures")), "the desktop gallery does not look up names it never shows");
+  // Pictures are requested near the size they are shown at: four per row at 1440 wide is about 280 px.
+  assert.match(await tiles.first().locator("img").getAttribute("src"), /thumbnail\.jpg\?width=320&/);
+  const warmed = images.filter((url) => /events\/10[6-9]\d\/thumbnail\.jpg\?width=320&/.test(url));
+  assert.equal(warmed.length, 8, "the first two rows of the next chunk start loading before they are shown");
   assert.equal(new URL(page.url()).search, "");
   assert.equal(await page.locator(".incident-pager").count(), 0, "the gallery has no pages");
   assert.match(await status.innerText(), new RegExp(`Showing ${INCIDENT_GALLERY_CHUNK} of ${TOTAL}`));
@@ -109,19 +120,20 @@ try {
     assert.ok(listBox.width - (boxes[columns - 1].x + boxes[columns - 1].width - listBox.x) < 28, "the row fills the width");
     const picture = await tiles.first().locator(".live-activity-thumb").boundingBox();
     assert.ok(Math.abs(picture.width - boxes[0].width) < 4, "the picture fills its tile");
+    const asked = Number(new URL(await tiles.first().locator("img").getAttribute("src"), origin).searchParams.get("width"));
+    assert.ok(asked >= picture.width && asked <= picture.width * 2, `a ${Math.round(picture.width)} px picture asks for a near size, not ${asked}`);
   }
   assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("survng.incidentGalleryColumns.v1"))), 4);
 
-  // A failed load keeps what is shown and offers a retry.
+  // A failed load keeps what is shown and offers a retry. The chunk fetched
+  // ahead was appended without a request; the one after it fails.
   await toEnd();
   await status.getByText("Could not load more incidents.").waitFor();
-  assert.equal(await tiles.count(), INCIDENT_GALLERY_CHUNK);
-  assert.deepEqual(searches.at(-1), { limit: INCIDENT_GALLERY_CHUNK, offset: INCIDENT_GALLERY_CHUNK, floor: 0, label: null, type: "object", camera: null, zone: null, person: null },
-    "scrolling near the end asks for the incidents after the ones shown");
+  assert.equal(await tiles.count(), 2 * INCIDENT_GALLERY_CHUNK);
+  assert.deepEqual([searches.at(-1).limit, searches.at(-1).offset], [INCIDENT_GALLERY_CHUNK, 2 * INCIDENT_GALLERY_CHUNK],
+    "reaching the end asks for the incidents after the ones shown");
   failMore = false;
   await status.getByRole("button", { name: "Retry" }).click();
-  await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length === count, 2 * INCIDENT_GALLERY_CHUNK);
-  await toEnd();
   await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length === count, TOTAL);
   assert.equal(await tiles.first().locator(".incident-hud-where b").innerText(), "Front Door", "earlier tiles stay");
   assert.match(await status.innerText(), new RegExp(`All ${TOTAL} incidents`));
@@ -134,7 +146,7 @@ try {
   await page.getByRole("slider", { name: "Confidence threshold" }).fill("80");
   await page.waitForFunction(() => document.querySelectorAll("#incident-results .live-activity-item").length === 60);
   assert.equal(searches.at(-1).floor, 0.8);
-  assert.equal(searches.at(-1).offset, 0);
+  assert.equal(searches.findLast((search) => search.offset === 0).floor, 0.8, "a filter change reads again from the top");
   assert.match(await pane.locator(".incident-filter-confidence-readout").innerText(), /75 results\s+80%/);
   await page.getByRole("checkbox", { name: "Person" }).check();
   await page.waitForFunction(() => document.querySelectorAll("#incident-results .live-activity-item").length === 50);

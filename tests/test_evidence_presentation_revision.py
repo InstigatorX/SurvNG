@@ -75,6 +75,42 @@ def test_current_image_alias_revalidates_and_rejects_stale_revision(tmp_path, en
     assert routes[endpoint](7, v="2").status_code == 200
 
 
+@pytest.mark.parametrize("endpoint", ["event_snapshot", "event_thumbnail"])
+def test_unchanged_image_revalidates_without_resending_it(tmp_path, endpoint):
+    routes, event = _routes(tmp_path)
+    first = routes[endpoint](7, v="1")
+    etag = first.headers["etag"]
+    def asking(value):
+        return SimpleNamespace(headers={"if-none-match": value})
+    again = routes[endpoint](7, v="1", request=asking(etag))
+    assert again.status_code == 304 and again.body == b""
+    assert again.headers["cache-control"] == "private, no-cache" and again.headers["etag"] == etag
+    assert routes[endpoint](7, v="1", request=asking(f'W/{etag}, "other"')).status_code == 304
+    assert routes[endpoint](7, v="1", request=asking('"other"')).status_code == 200
+    assert routes[endpoint](7, v="1", request=asking("")).status_code == 200
+    # A changed revision is still refused, whatever the browser holds.
+    event["evidence_revision"] = 2
+    with pytest.raises(HTTPException) as stale:
+        routes[endpoint](7, v="1", request=asking(etag))
+    assert stale.value.status_code == 409
+
+
+def test_a_different_thumbnail_size_is_a_different_image(tmp_path):
+    routes, _event = _routes(tmp_path)
+    small = routes["event_thumbnail"](7, v="1", width=160)
+    large = routes["event_thumbnail"](7, v="1", width=240)
+    assert small.headers["etag"] != large.headers["etag"]
+    asked = SimpleNamespace(headers={"if-none-match": small.headers["etag"]})
+    assert routes["event_thumbnail"](7, v="1", width=240, request=asked).status_code == 200
+
+
+def test_a_download_is_always_sent(tmp_path):
+    routes, _event = _routes(tmp_path)
+    etag = routes["event_snapshot"](7, v="1").headers["etag"]
+    asked = SimpleNamespace(headers={"if-none-match": etag})
+    assert routes["event_snapshot"](7, download=True, v="1", request=asked).status_code == 200
+
+
 def test_object_crop_cache_changes_when_annotations_change_on_same_image(tmp_path):
     routes, event = _routes(tmp_path)
     event["objects_json"] = json.dumps([{

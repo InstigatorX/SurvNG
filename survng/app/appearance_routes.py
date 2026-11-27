@@ -11,10 +11,11 @@ from typing import Any
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import Response
 
 from .camera_routes import match_camera_route
+from .image_cache import revalidated_image_response
 from .incident_utils import event_snapshot_path, snapshot_media_type
 from .manager import AppManager
 from .manager_access import ManagerAccessCoordinator
@@ -327,8 +328,8 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
             return operation(active)
 
     @router.get("/api/events/{event_id}/snapshot.jpg")
-    def event_snapshot(event_id: int, download: bool = False, v: str = "") -> FileResponse:
-        def response(active_manager: AppManager) -> FileResponse:
+    def event_snapshot(event_id: int, download: bool = False, v: str = "", request: Request = None) -> Response:
+        def response(active_manager: AppManager) -> Response:
             event = active_manager.events.get(event_id)
             if event is None:
                 raise HTTPException(status_code=404, detail="event not found")
@@ -343,11 +344,11 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             except PermissionError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
-            return FileResponse(
+            return revalidated_image_response(
                 snapshot_path,
-                media_type=snapshot_media_type(snapshot_path),
+                snapshot_media_type(snapshot_path),
+                request,
                 filename=snapshot_path.name if download else None,
-                headers={"Cache-Control": "private, no-cache"},
             )
 
         return with_manager(response)
@@ -364,7 +365,8 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
         aspect_h: float = 0.0,
         focus_bbox: str = "",
         v: str = "",
-    ) -> FileResponse:
+        request: Request = None,
+    ) -> Response:
         safe_width = max(160, min(int(width), 2560))
         safe_quality = max(50, min(int(quality), 95))
         focus_enabled = bool(object_focus)
@@ -390,7 +392,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
         if parsed_focus_bbox is not None and (focus_aspect_w <= 0 or focus_aspect_h <= 0):
             focus_aspect_w, focus_aspect_h = 16.0, 11.0
 
-        def response(active_manager: AppManager) -> FileResponse:
+        def response(active_manager: AppManager) -> Response:
             event = active_manager.events.get(event_id)
             if event is None:
                 raise HTTPException(status_code=404, detail="event not found")
@@ -438,11 +440,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
             cached = active_manager.image_cache.get_or_create(
                 "events", identity, build
             )
-            return FileResponse(
-                cached,
-                media_type="image/jpeg",
-                headers={"Cache-Control": "private, no-cache"},
-            )
+            return revalidated_image_response(cached, "image/jpeg", request)
 
         return with_manager(response)
 
