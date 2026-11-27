@@ -31,8 +31,6 @@ import { IncidentAnalysisStatus } from "./IncidentAnalysisStatus.jsx";
 import { useIncidentPlayback } from "./useIncidentPlayback.js";
 import "./mobile-incidents.css";
 
-// The list runs on from the chosen day into this many days before it.
-const INCIDENT_DAYS_BACK = 30;
 const REVIEWED_VERDICTS = new Set(["reviewed", "nothing_here"]);
 // A long gallery re-renders often, and most tiles have not changed.
 const IncidentTile = memo(IncidentListItem);
@@ -287,21 +285,6 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   }
   const reviewTile = useCallback((incident, checked) => tileHandlersRef.current.review(incident, checked), []);
 
-  // Day headings where the list crosses into an earlier day.
-  const dayHeadings = useMemo(() => {
-    const headings = new Map();
-    let previous = incidentDay || today;
-    for (const incident of visibleIncidents) {
-      const epoch = new Date(incident.start_at || incident.created_at || 0).getTime();
-      if (!Number.isFinite(epoch) || epoch <= 0) continue;
-      const key = dateKeyForTimeZone(epoch, timeZone);
-      if (key !== previous) {
-        headings.set(String(incident.id), new Intl.DateTimeFormat("en-US", { timeZone, weekday: "long", month: "short", day: "numeric" }).format(new Date(epoch)));
-        previous = key;
-      }
-    }
-    return headings;
-  }, [visibleIncidents, incidentDay, today, timeZone]);
   useEffect(() => {
     if (!displayedIncident && tabletInspectorOpen) setTabletInspectorOpen(false);
   }, [displayedIncident, tabletInspectorOpen]);
@@ -638,6 +621,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       || Number(incident?.representative_event_id) === affectedId
       || Number(incident?.id) === affectedId
       || incident?.events?.some((event) => Number(event.id) === affectedId)
+      || incident?.event_ids?.some((eventId) => Number(eventId) === affectedId)
     ));
     if (type !== "resync" && !forceReconcile && !affectsVisibleEvidence && (incidentDay !== today || incidentPage !== 0)) return;
     if (incidentEventRefreshTimer.current) return;
@@ -794,8 +778,11 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       if (incidentZoneFilter !== "all") filters.set("zone", incidentZoneFilter);
       if (incidentPersonFilter !== "all") filters.set("person_id", incidentPersonFilter);
       if (confidenceApplies && incidentMinConfidence > 0) filters.set("min_confidence", String(incidentMinConfidence / 100));
-      filters.set("days_back", String(INCIDENT_DAYS_BACK));
-      if (galleryMode) return loadGallery(filters);
+      if (galleryMode) {
+        // Gallery tiles do not draw the per-event list, which is most of a busy incident's card.
+        filters.set("compact", "true");
+        return loadGallery(filters);
+      }
       galleryLoadedRef.current = { key: "", token: -1, items: [] };
       const query = new URLSearchParams(filters);
       query.set("limit", String(incidentsPerPage));
@@ -1119,22 +1106,29 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
 
   const tileHud = galleryMode || incidentDensity === "comfortable";
   function renderTile(incident) {
-    const heading = galleryMode ? dayHeadings.get(String(incident.id)) : null;
-    const tile = <IncidentTile key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone}
+    return <IncidentTile key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone}
       selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus}
       thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} thumbnailWidth={tileThumbnailWidth} hud={tileHud}
       reviewed={tileHud ? isReviewed(incident) : null} reviewDisabled={!canCorrectIncident} onReviewChange={reviewTile}
       onSelect={selectTile} onOpenOverlay={previewTile} />;
-    return heading ? <React.Fragment key={incident.id}><h3 className="incident-day-heading">{heading}</h3>{tile}</React.Fragment> : tile;
+  }
+  // The list covers one day. Its end offers the day before, one step away.
+  const earlierDay = addDaysToDateKey(incidentDay || today, -1);
+  const earlierDayLabel = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "long", month: "short", day: "numeric" }).format(new Date(`${earlierDay}T12:00:00Z`));
+  const dayComplete = !semanticIncidentActive && !displayedIncidentLoading && !displayedIncidentError && visibleIncidents.length >= displayedIncidentTotal;
+  function openEarlierDay() {
+    setIncidentDay(earlierDay);
+    if (incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
+    else window.scrollTo(0, 0);
   }
   const galleryStatus = (
     <div className="incident-gallery-status" role="status">
       {reviewError ? <span className="incident-gallery-error">{reviewError}</span> : null}
       {galleryMoreError ? <><span>{galleryMoreError}</span><button type="button" onClick={() => setIncidentRefreshToken((value) => value + 1)}>Retry</button></>
-        : !visibleIncidents.length ? null
-        : visibleIncidents.length < displayedIncidentTotal ? <span>Showing {visibleIncidents.length} of {displayedIncidentTotal}. Scroll for more.</span>
-        : semanticIncidentActive ? <span>All {displayedIncidentTotal} {displayedIncidentTotal === 1 ? "match" : "matches"}.</span>
-        : <span>All {displayedIncidentTotal} {displayedIncidentTotal === 1 ? "incident" : "incidents"} from this day and the {INCIDENT_DAYS_BACK} days before it.</span>}
+        : visibleIncidents.length && visibleIncidents.length < displayedIncidentTotal ? <span>Showing {visibleIncidents.length} of {displayedIncidentTotal}. Scroll for more.</span>
+        : visibleIncidents.length && semanticIncidentActive ? <span>All {displayedIncidentTotal} {displayedIncidentTotal === 1 ? "match" : "matches"}.</span>
+        : visibleIncidents.length ? <span>All {displayedIncidentTotal} {displayedIncidentTotal === 1 ? "incident" : "incidents"} for this day.</span> : null}
+      {dayComplete ? <button type="button" className="incident-earlier-day" onClick={openEarlierDay}>Earlier: {earlierDayLabel}</button> : null}
     </div>
   );
   const confidenceControl = (

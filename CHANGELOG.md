@@ -3,12 +3,12 @@
 ## Unreleased
 
 - Incidents opens on a gallery in place of the viewer. It loads as it is
-  scrolled, from the selected day into the 30 days before it, with a slider for
-  incidents per row. Each picture shows its camera and time, object icons and a
+  scrolled, a day at a time with a step to the day before at its end, with a
+  slider for incidents per row. Each picture shows its camera and time, object icons and a
   review mark, and opens the incident overlay used by Live. Filters move to a
   left pane: cameras, object types, zones and known people are multi-select, and
   a confidence threshold is new. The phone layout uses the same gallery and
-  filters. `/api/incidents/search` gains `min_confidence` and `days_back`, takes
+  filters. `/api/incidents/search` gains `min_confidence` and `compact`, takes
   comma-separated `camera_id`, `object_label`, `zone` and `person_id`, and
   returns `review_verdict` and `image_version` per item. See
   `docs/guide/incidents.md`.
@@ -20,7 +20,8 @@
   requests answer 304 when unchanged. Large snapshots are decoded at reduced
   size for thumbnails, the interface's scripts and styles are served compressed
   with long-lived caching, and the periodic refresh re-reads only the newest
-  incidents.
+  incidents. The zone filter no longer walks every row of a zone for each
+  incident, which took over a second per day of incidents.
 - Admin → General has a per-browser **Font** setting beside Text size: Inter
   (default), Figtree, Manrope, DM Sans, Source Sans or the system font. All are
   bundled; none is fetched from another site.

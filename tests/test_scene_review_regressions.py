@@ -144,37 +144,33 @@ def test_camera_zone_and_person_filters_take_several_values(tmp_path):
     assert people('') == 3 and people(0) == 3
 
 
-def test_search_runs_on_into_earlier_days_when_asked(tmp_path):
+def test_zone_filter_starts_from_each_incidents_own_episodes(tmp_path):
     store = EventStore(tmp_path)
-    day = 86400
-    base = 1780000000 - (1780000000 % day)                  # midnight UTC
-    for offset in (3600, -day + 3600, -2 * day + 3600, -40 * day + 3600):
-        add(store, base + offset, [observation(base + offset, temporal_observations=2)])
+    add(store, 1000, [observation(1000, zones=['Road'], temporal_observations=2)])
+    where, args = store._scene_query_where(zone='Road,Porch')
+    with store._connect() as conn:
+        plan = [row[3] for row in conn.execute('explain query plan select count(*) from scene_incidents i where ' + where, args)]
+    # The zone rows are looked up by episode. Looked up by zone name alone, every
+    # row of that zone is visited once per incident.
+    zone_step = next(step for step in plan if step.startswith('SEARCH z '))
+    assert 'episode_id=?' in zone_step, plan
+    assert store.count_scene_incidents(zone='Road') == 1 and store.count_scene_incidents(zone='Porch') == 0
+
+
+def test_compact_search_leaves_out_the_per_event_list(tmp_path):
+    store = EventStore(tmp_path)
+    for step in range(6):                                   # one incident, six events
+        add(store, 1000 + step * 8, [observation(1000 + step * 8, temporal_observations=2)])
     manager = SimpleNamespace(events=store)
-    today = datetime.fromtimestamp(base, timezone.utc).strftime('%Y-%m-%d')
-    def found(**extra):
-        return IncidentQueryService.search(manager, day=today, time_zone='UTC', event_type='all', limit=10, **extra)
-    assert found()['total'] == 1 and found()['days_back'] == 0
-    assert found(days_back=1)['total'] == 2
-    back = found(days_back=2)
-    assert back['total'] == 3
-    # Newest first across the day boundary, with one offset running through all of it.
-    starts = [item['start_at'] for item in back['items']]
-    assert starts == sorted(starts, reverse=True)
-    assert found(days_back=2, offset=2)['items'][0]['id'] == back['items'][2]['id']
-    # The reach is bounded, and nonsense is treated as no reach.
-    assert found(days_back=400)['total'] == 3 and found(days_back=400)['days_back'] == 31
-    assert found(days_back=-5)['total'] == 1
-    assert back['start_at'] == datetime.fromtimestamp(base - 2 * day, timezone.utc).isoformat()
-
-
-def test_search_runs_back_whole_local_days_across_a_clock_change(tmp_path):
-    store = EventStore(tmp_path)
-    # 2026-11-01 is the day US clocks go back: that local day is 25 hours long.
-    result = IncidentQueryService.search(SimpleNamespace(events=store), day='2026-11-02', time_zone='America/New_York',
-                                         event_type='all', days_back=2)
-    assert result['start_at'] == '2026-10-31T04:00:00+00:00'
-    assert result['end_at'] == '2026-11-03T05:00:00+00:00'
+    day = datetime.fromtimestamp(1000, timezone.utc).strftime('%Y-%m-%d')
+    full = IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='all', limit=10)['items'][0]
+    compact = IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='all', limit=10, compact=True)['items'][0]
+    assert len(full['events']) == 6 and 'events' not in compact
+    # Everything a gallery tile draws, and the event membership, is still there.
+    assert compact['event_ids'] == full['event_ids'] and len(compact['event_ids']) == 6
+    for key in ('id', 'incident_id', 'revision', 'camera_id', 'start_at', 'labels', 'objects', 'representative_event_id', 'review_verdict'):
+        assert compact[key] == full[key], key
+    assert len(json.dumps(compact)) < len(json.dumps(full)) / 2
 
 
 def test_cards_carry_the_review_verdict(tmp_path):

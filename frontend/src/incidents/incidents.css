@@ -974,12 +974,10 @@
   max-width: calc(100% - 52px);
 }
 
-.incident-day-heading {
-  grid-column: 1 / -1;
-  margin: 10px 2px 0;
-  color: var(--ink);
-  font-size: var(--text-sm);
-  font-weight: 650;
+.incident-earlier-day {
+  min-height: 28px;
+  padding: 2px 10px;
+  font-size: var(--text-xs);
 }
 
 .incident-gallery-error {
@@ -1116,4 +1114,8 @@
 .mobile-incidents .incident-gallery-status {
   flex-wrap: wrap;
   padding: 6px 10px;
+}
+
+.mobile-incidents .incident-earlier-day {
+  min-height: 44px;
 }

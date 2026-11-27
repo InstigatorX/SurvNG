@@ -1331,8 +1331,11 @@ class EventStoreSceneMixin:
             args.append(floor)
         zones=chosen(zone)
         if zones:
-            clauses.append("exists(select 1 from scene_observation_zones z "
-                           "join scene_episodes p on p.id=z.episode_id "
+            # Start from this incident's episodes (CROSS JOIN fixes the order).
+            # Left to choose, the planner walks every row of the zone for each
+            # incident, which took over a second per day of incidents.
+            clauses.append("exists(select 1 from scene_episodes p "
+                           "cross join scene_observation_zones z on z.episode_id=p.id "
                            "where p.incident_id=i.id and z.zone in ("+",".join("?"*len(zones))+"))")
             args.extend(zones)
         return " and ".join(clauses),args

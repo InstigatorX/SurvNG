@@ -139,9 +139,6 @@ def _filter_incidents_by_person(
     ]
 
 
-MAX_SEARCH_DAYS_BACK = 31
-
-
 def _person_ids(value: int | str) -> set[int]:
     ids: set[int] = set()
     for part in str(value or "").split(","):
@@ -440,15 +437,11 @@ class IncidentQueryService:
         offset: int = 0,
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
         min_confidence: float = 0.0,
-        days_back: int = 0,
+        compact: bool = False,
     ) -> dict[str, Any]:
         day_start, day = _local_day_start(day, time_zone)
         day_end = day_start + timedelta(days=1)
-        # The list can run on from the chosen day into the days before it.
-        # Whole local days are subtracted, so a clock change does not shift the bound.
-        earlier = max(0, min(int(days_back), MAX_SEARCH_DAYS_BACK))
-        range_start = datetime.combine(day_start.date() - timedelta(days=earlier), datetime.min.time(), day_start.tzinfo)
-        bounds = {"start_epoch":range_start.timestamp(), "end_epoch":day_end.timestamp()}
+        bounds = {"start_epoch":day_start.timestamp(), "end_epoch":day_end.timestamp()}
         facets = manager.events.scene_incident_facets(**bounds)
         filters = {**bounds, "event_type":event_type, "camera_id":camera_id, "object_label":object_label, "zone":zone}
         if math.isfinite(min_confidence) and min_confidence > 0:
@@ -476,15 +469,21 @@ class IncidentQueryService:
         else:
             total = manager.events.count_scene_incidents(**filters)
             page_summaries = manager.events.list_scene_incident_cards(**filters,limit=bounded_limit,offset=bounded_offset)
+        items = _with_image_versions(manager, _with_speech(manager, [_incident_list_payload(item) for item in page_summaries]))
+        if compact:
+            # A picture gallery shows the cover, labels and time. The per-event
+            # list is most of a busy incident's card and none of it is drawn;
+            # event_ids still says which events belong.
+            for item in items:
+                item.pop("events", None)
         return {
-            "items": _with_image_versions(manager, _with_speech(manager, [_incident_list_payload(item) for item in page_summaries])),
+            "items": items,
             "total": total,
             "limit": bounded_limit,
             "offset": bounded_offset,
             "day": day,
-            "days_back": earlier,
             "time_zone": time_zone,
-            "start_at": range_start.astimezone(timezone.utc).isoformat(),
+            "start_at": day_start.astimezone(timezone.utc).isoformat(),
             "end_at": day_end.astimezone(timezone.utc).isoformat(),
             "facets": facets,
         }
@@ -723,7 +722,7 @@ def create_incident_query_router(
         offset: int = 0,
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
         min_confidence: float = 0.0,
-        days_back: int = 0,
+        compact: bool = False,
     ) -> dict[str, Any]:
         return with_manager(
             lambda active: service.search(
@@ -739,7 +738,7 @@ def create_incident_query_router(
                 offset=offset,
                 gap_seconds=gap_seconds,
                 min_confidence=min_confidence,
-                days_back=days_back,
+                compact=compact,
             )
         )
 

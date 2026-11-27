@@ -17,16 +17,16 @@ was sent.
 
 ## Browse incidents
 
-**Incidents** opens on a gallery that starts at the selected day and runs on
-into the 30 days before it. Each picture carries the camera name and the date
+**Incidents** opens on a gallery of the selected day. Each picture carries the camera name and the date
 and time at its upper left, icons for the observed objects at its lower left,
 and a review mark at its upper right.
 
 - **Per row** sets how many incidents share a row, from 2 to 8. Pictures grow or
   shrink to fill the row, and SurvNG remembers the setting in this browser.
-- There are no pages. Scroll down and the next incidents load as you approach
-  the end, with a heading where each earlier day begins. The footer says how
-  many are shown. To look further back than 30 days, pick an earlier day.
+- There are no pages. Scroll down and the next incidents of the day load as you
+  approach the end. The footer says how many are shown, and at the end of the
+  day offers **Earlier** to step to the day before.
+- Arrow keys move between pictures; Enter opens the one in focus.
 - Check the mark on a picture when you have looked at the incident; uncheck it
   to clear. It records the same **Reviewed** verdict as review mode, is shared
   by everyone, and needs an administrator. An incident kept for later stays
@@ -46,15 +46,15 @@ you scroll, and opens an incident's own page when you select a picture.
 Filters sit in a pane left of the gallery:
 
 - **Objects** or **Motion**
-- Search (describe what you are looking for; a search covers the selected day only)
-- Day (the newest day shown)
+- Search (describe what you are looking for)
+- Day
 - Cameras, object types, zones and known people. Each is a list of checkboxes:
   check any number, and an incident matches when it has any checked value.
   Nothing checked in a list means all of them. Different lists narrow each
   other, so two cameras and one zone shows that zone on either camera.
 - **Confidence threshold**: keep incidents with at least one detection at or
   above the chosen confidence. With object types checked, one of those objects
-  must reach it. It does not apply to motion-only incidents or to search matches.
+  must reach it. It does not apply to motion-only incidents.
 
 In the viewer the pane is hidden to leave room for the picture; **Filters** in
 the list header shows it again.

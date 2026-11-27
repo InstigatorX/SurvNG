@@ -44,7 +44,7 @@ try {
   const searches = [], requests = [], images = [], reviews = [];
   let failReview = false;
   let failMore = false;
-  const daysBack = new Set();
+  const days = [];
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
@@ -61,7 +61,7 @@ try {
       const limit = Number(url.searchParams.get("limit")), offset = Number(url.searchParams.get("offset"));
       const floor = Number(url.searchParams.get("min_confidence") || 0), label = url.searchParams.get("object_label");
       const camera = url.searchParams.get("camera_id");
-      daysBack.add(url.searchParams.get("days_back"));
+      days.push(url.searchParams.get("day"));
       searches.push({ limit, offset, floor, label, type: url.searchParams.get("event_type"), camera, zone: url.searchParams.get("zone"), person: url.searchParams.get("person_id") });
       if (failMore && offset > 0) return route.fulfill({ status: 500, json: {} });
       const wanted = label ? label.split(",") : [];
@@ -93,8 +93,9 @@ try {
   assert.match(await tiles.first().locator("img").getAttribute("src"), /thumbnail\.jpg\?width=320&/);
   // The picture's version is named, so the browser may keep it without asking again.
   assert.match(await tiles.first().locator("img").getAttribute("src"), /[?&]s=v0(&|$)/);
-  // The list reaches into earlier days, with a heading where each begins.
-  assert.deepEqual([...daysBack], ["30"]);
+  // One day per request: counting and listing a month at once made the first load slow.
+  assert.equal(new Set(days).size, 1);
+  assert.match(days[0], /^\d{4}-\d{2}-\d{2}$/);
   const warmed = images.filter((url) => /events\/10[6-9]\d\/thumbnail\.jpg\?width=320&/.test(url));
   assert.equal(warmed.length, 8, "the first two rows of the next chunk start loading before they are shown");
   assert.equal(new URL(page.url()).search, "");
@@ -195,13 +196,7 @@ try {
   // Off-screen tiles are not rendered, so read their text from the document.
   assert.equal(await tiles.first().locator(".incident-hud-where b").textContent(), "Front Door", "earlier tiles stay");
   assert.equal(await tiles.first().evaluate((element) => getComputedStyle(element).contentVisibility), "auto");
-  assert.match(await status.innerText(), new RegExp(`All ${TOTAL} incidents from this day and the 30 days before it`));
-  // 150 incidents 25 minutes apart cross two midnights in the app's time zone,
-  // and none of them is on the day selected (today), so the first has a heading too.
-  const headings = await page.locator(".incident-day-heading").allTextContents();
-  assert.equal(headings.length, 3, `a heading where each day begins, got ${JSON.stringify(headings)}`);
-  assert.equal(new Set(headings).size, 3);
-  assert.ok(headings.every((text) => /^[A-Z][a-z]+day, [A-Z][a-z]{2} \d{1,2}$/.test(text)), JSON.stringify(headings));
+  assert.match(await status.innerText(), new RegExp(`All ${TOTAL} incidents for this day`));
   const settled = deeper().length;
   await toEnd();
   await page.waitForTimeout(400);
@@ -220,9 +215,22 @@ try {
   assert.equal(await tiles.nth(100).getAttribute("data-kept"), "yes");
   assert.equal(images.length, before.images, "no picture is requested again");
 
+  // The end of the day offers the day before, one step away.
+  const dayInput = page.getByLabel("Incident day");
+  const shownDay = await dayInput.inputValue();
+  const earlier = status.getByRole("button", { name: /^Earlier: [A-Z][a-z]+day, [A-Z][a-z]{2} \d{1,2}$/ });
+  await earlier.click();
+  const dayBefore = new Date(Date.parse(`${shownDay}T12:00:00Z`) - 86400000).toISOString().slice(0, 10);
+  await page.waitForFunction((value) => document.querySelector('input[aria-label="Incident day"]').value === value, dayBefore);
+  await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length === count, INCIDENT_GALLERY_CHUNK);
+  assert.equal(days.at(-1), dayBefore);
+  assert.equal(await list.evaluate((element) => element.scrollTop), 0, "the earlier day starts at its top");
+  assert.equal(await earlier.count(), 0, "offered again only at the end of that day");
+
   // Confidence threshold and object choice go to the search and reset the list.
   await page.getByRole("slider", { name: "Confidence threshold" }).fill("80");
-  await page.waitForFunction(() => document.querySelectorAll("#incident-results .live-activity-item").length === 60);
+  for (let waited = 0; searches.at(-1).floor !== 0.8 && waited < 5000; waited += 100) await page.waitForTimeout(100);
+  await page.waitForFunction(() => document.querySelector(".incident-gallery-status").innerText.includes("of 75"));
   assert.equal(searches.at(-1).floor, 0.8);
   assert.equal(searches.findLast((search) => search.offset === 0).floor, 0.8, "a filter change reads again from the top");
   assert.match(await pane.locator(".incident-filter-confidence-readout").innerText(), /75 results\s+80%/);
