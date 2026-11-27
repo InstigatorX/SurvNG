@@ -4,7 +4,7 @@ import { formatTimeOnly } from "../shared/format.js";
 import { recordingPreviewUrl } from "../shared/mediaUrls.js";
 import { sceneEstablishmentText } from "../incidentScene.mjs";
 import {
-  cardOrder, cropBackgroundStyle, epochOf, establishmentReasonText, objectBestObservation, objectName, objectPath,
+  cardOrder, coverageChips, cropBackgroundStyle, epochOf, establishmentReasonText, objectBestObservation, objectName, objectPath,
   objectSummary, observationSnapshotUrl,
 } from "../incidentStory.mjs";
 import { VisualSimilarIncidents } from "./IncidentCard.jsx";
@@ -72,13 +72,15 @@ export function WhyPanel({ incident, cameraName, hasSightings }) {
   const motionOnly = !hasSightings && (incident.has_objects === false || !incident.labels?.length);
   const heading = status && status !== "established" ? establishment.title : motionOnly ? "Motion only" : "Why this is an incident";
   const alert = alertChip(incident?.alert_decisions);
+  const coverage = coverageChips(incident, cameraName);
   const hasGaps = incident?.coverage?.gaps?.length || incident?.episodes?.some((episode) => episode.coverage?.gaps?.length);
   return <section className="story-context" aria-label={heading}>
     <h2>{heading}</h2>
     {reason ? <p>{reason}</p> : null}
-    {alert || hasGaps ? <div className="story-chips">
+    {alert || hasGaps || coverage.length ? <div className="story-chips">
       {alert ? <span className={`story-chip ${alert.tone}`}>{alert.text}</span> : null}
-      {hasGaps ? <span className="story-chip warn">Recording analysis has gaps</span> : null}
+      {coverage.map((chip) => <span key={chip.text} className={`story-chip ${chip.tone}`}>{chip.text}</span>)}
+      {hasGaps && !coverage.length ? <span className="story-chip warn">Recording analysis has gaps</span> : null}
     </div> : null}
     {status && status !== "established" ? <a className="story-link" href={appUrl("/observations")}>Review observations</a> : null}
     <IncidentAnalysisStatus hideComplete key={incident.incident_id || incident.id} incidentId={incident.incident_id || incident.id} />

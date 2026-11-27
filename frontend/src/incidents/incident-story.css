@@ -110,6 +110,7 @@
 .story-box.person { border-color: var(--story-person); } .story-box.person > span { background: var(--story-person); }
 .story-box.vehicle { border-color: var(--story-vehicle); } .story-box.vehicle > span { background: var(--story-vehicle); }
 .story-box.uncertain { border-style: dashed; border-color: var(--story-uncertain); } .story-box.uncertain > span { background: var(--story-uncertain); }
+.story-box.estimated { border-style: dashed; }
 .story-box.dimmed { opacity: .3; }
 
 .story-storyline, .story-context { background: var(--panel-solid); border: 1px solid var(--line); border-radius: 6px; }

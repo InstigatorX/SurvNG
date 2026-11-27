@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {
-  cardIdentities, cardOrder, cropBackgroundStyle, establishmentReasonText, followSegments, formatSpan, frameBoxes, incidentStoryTitle,
+  cardIdentities, cardOrder, coverageChips, cropBackgroundStyle, estimatedBox, establishmentReasonText, followSegments, formatSpan, frameBoxes, incidentStoryTitle,
   layoutStoryLane, nearestObservation, objectKind, objectPath, objectSummary, reviewKeyAction, reviewPosition, storyObjects, storyline,
 } from "../src/incidentStory.mjs";
 import { BASE, CAMERAS, queueFor, storyIncident } from "./fixtures/incident-story.mjs";
@@ -103,4 +103,20 @@ assert.equal(key("e", { tagName: "INPUT" }), null);
 assert.equal(key("e", { tagName: "DIV", isContentEditable: true }), null);
 assert.equal(key("e", { tagName: "BODY" }, { ctrlKey: true }), null);
 assert.equal(key("q"), null);
+
+// A followed object keeps a box on recording frames between analysed frames.
+const doorEstimate = estimatedBox(byLabel.person, "front-door", BASE + 82);
+assert.equal(doorEstimate.estimated, true);
+assert.deepEqual(doorEstimate.box, { x1: 526, y1: 147, x2: 751, y2: 661 }, "halfway between the 62 s and 102 s boxes");
+assert.equal(estimatedBox(byLabel.person, "front-door", BASE + 47.5).box.x1 > 470, true);
+assert.equal(estimatedBox(byLabel.person, "side-yard", BASE + 82), null, "never borrowed from another camera");
+assert.equal(estimatedBox({ ...byLabel.person, intervals: [] }, "front-door", BASE + 82), null, "a 40 s gap outside one sighting is not bridged");
+assert.equal(estimatedBox(byLabel.dog, "side-yard", BASE + 100), null, "a lone observation far away is not reused");
+assert.equal(estimatedBox(byLabel.person, "front-door", Number.NaN), null);
+
+// Unfinished camera views are named; finished ones are not.
+assert.deepEqual(coverageChips(incident, cameraName), [{ tone: "warn", text: "Side Yard analysis pending" }]);
+assert.deepEqual(coverageChips({ episodes: [{ camera_id: "side-yard", coverage: { state: "incomplete", gaps: [{}] } }] }, cameraName), [{ tone: "warn", text: "Side Yard analysis incomplete" }]);
+assert.deepEqual(coverageChips({ episodes: [{ camera_id: "front-door", coverage: { state: "sampled" } }] }, cameraName), []);
+
 console.log("incident story helpers passed");
