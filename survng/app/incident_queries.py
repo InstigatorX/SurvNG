@@ -830,6 +830,7 @@ def create_incident_query_router(
                     _bbox_focus_thumbnail_frame,
                     _clamp_object_focus_zoom,
                     _jpeg_thumbnail,
+                    _read_frame_for_width,
                 )
                 safe_width, safe_quality = max(160, min(2560, width or 960)), max(50, min(95, quality))
                 focus_zoom = _clamp_object_focus_zoom(zoom)
@@ -849,7 +850,7 @@ def create_incident_query_router(
                     f"{focus_bbox}:{focus_zoom:.3f}:{focus_aspect_w:.3f}:{focus_aspect_h:.3f}"
                 )
                 def build():
-                    frame = cv2.imread(str(path))
+                    frame = _read_frame_for_width(path, safe_width) if parsed_focus_bbox is None else cv2.imread(str(path))
                     if frame is None:
                         raise HTTPException(status_code=404, detail="supporting image unavailable")
                     if parsed_focus_bbox is not None:
