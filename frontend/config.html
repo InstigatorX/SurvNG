@@ -37,6 +37,12 @@
             root.dataset.textSize = textSize;
           }
         } catch {}
+        // Interface font (keep in sync with src/interfaceFont.mjs).
+        const fonts = ["figtree", "manrope", "dm-sans", "source-sans", "system"];
+        try {
+          const font = localStorage.getItem("survng.font");
+          if (fonts.includes(font)) root.dataset.font = font;
+        } catch {}
       })();
     </script>
     <link rel="manifest" href="/manifest.webmanifest">

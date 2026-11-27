@@ -39,6 +39,9 @@ Most frontend packages are MIT, ISC, Apache-2.0, or BSD-3-Clause. See
 font licenses (for example OFL-1.1) and documentation assets (for example
 CC-BY-4.0); retain those notices when redistributing the corresponding files.
 
+The interface bundles these typefaces from the `@fontsource-variable` packages,
+each under OFL-1.1: Inter, Figtree, Manrope, DM Sans and Source Sans 3.
+
 ## Optional / external tools
 
 The optional HKSV3 protocol lab has a separate `homekit-worker/package-lock.json`.
