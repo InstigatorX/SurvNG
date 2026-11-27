@@ -467,12 +467,17 @@ class RecordingMediaRuntime:
             self.media_exports = replacement
             return True
 
-    def _probe_video_codec(self, path: Path) -> str:
+    def _probe_video_stream(self, path: Path) -> tuple[str, str]:
+        """Lower-case ``(codec, pixel format)`` of the first video stream."""
         try:
-            result = subprocess.run([self.deps.ffprobe_path(), '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name', '-of', 'default=nw=1:nk=1', str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=8)
-            return (result.stdout or '').strip().lower()
+            result = subprocess.run([self.deps.ffprobe_path(), '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,pix_fmt', '-of', 'default=nw=1', str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=8)
         except Exception:
-            return ''
+            return '', ''
+        fields = dict(line.strip().lower().partition('=')[::2] for line in (result.stdout or '').splitlines() if '=' in line)
+        return fields.get('codec_name', ''), fields.get('pix_fmt', '')
+
+    def _probe_video_codec(self, path: Path) -> str:
+        return self._probe_video_stream(path)[0]
 
     def _event_clip_vaapi_enabled(self, source_codec: str) -> bool:
         mode = self._hardware_acceleration_mode()
@@ -503,10 +508,15 @@ class RecordingMediaRuntime:
     def _event_clip_cpu_command(self, concat_path: Path, local_start: float, duration: float, tmp_path: Path) -> list[str]:
         return [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-f', 'concat', '-safe', '0', '-i', str(concat_path), '-ss', f'{local_start:.3f}', '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-vf', 'format=yuv420p', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', str(tmp_path)]
 
-    def _event_clip_vaapi_command(self, source_codec: str, concat_path: Path, local_start: float, duration: float, tmp_path: Path) -> list[str]:
+    def _event_clip_vaapi_command(self, source_codec: str, concat_path: Path, local_start: float, duration: float, tmp_path: Path, *, hardware_decode: bool=True) -> list[str]:
         info = self._ffmpeg_vaapi_info()
         device = str(info.get('device') or '/dev/dri/renderD128')
-        return [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-vaapi_device', device, '-f', 'concat', '-safe', '0', '-i', str(concat_path), '-ss', f'{local_start:.3f}', '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-vf', 'format=nv12,hwupload', '-c:v', 'h264_vaapi', '-qp', '23', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', str(tmp_path)]
+        # With hardware decode the frames reach the encoder as VAAPI surfaces.
+        # format=nv12|vaapi,hwupload also accepts frames from a decoder that
+        # fell back to software inside FFmpeg.
+        decode_args = ['-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi'] if hardware_decode else []
+        video_filter = 'format=nv12|vaapi,hwupload' if hardware_decode else 'format=nv12,hwupload'
+        return [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-vaapi_device', device, *decode_args, '-f', 'concat', '-safe', '0', '-i', str(concat_path), '-ss', f'{local_start:.3f}', '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-vf', video_filter, '-c:v', 'h264_vaapi', '-qp', '23', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', str(tmp_path)]
 
     def _event_clip_qsv_command(self, source_codec: str, concat_path: Path, local_start: float, duration: float, tmp_path: Path) -> list[str]:
         decoder = 'hevc_qsv' if source_codec == 'hevc' else 'h264_qsv'
@@ -1837,10 +1847,15 @@ class RecordingMediaRuntime:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         concat_path = self._write_concat_file(selected, active_manager=selected_manager)
         tmp_path = output_path.with_name(f'.{output_path.stem}.{os.getpid()}.tmp.mp4')
-        source_codec = self._probe_video_codec(Path(str(selected[0]['path'])))
+        source_codec, source_pix_fmt = self._probe_video_stream(Path(str(selected[0]['path'])))
         commands: list[tuple[str, list[str]]] = []
         if self._event_clip_vaapi_enabled(source_codec):
-            commands.append(('vaapi', self._event_clip_vaapi_command(source_codec, concat_path, local_start, duration, tmp_path)))
+            # Decoded 10-bit surfaces cannot go straight into the 8-bit H.264
+            # encoder; the software-decode command converts them first.
+            if '10' not in source_pix_fmt and '12' not in source_pix_fmt:
+                commands.append(('vaapi', self._event_clip_vaapi_command(source_codec, concat_path, local_start, duration, tmp_path)))
+            # The previous software-decode command stays as the next attempt.
+            commands.append(('vaapi-encode', self._event_clip_vaapi_command(source_codec, concat_path, local_start, duration, tmp_path, hardware_decode=False)))
         if self._event_clip_qsv_enabled(source_codec):
             commands.append(('qsv', self._event_clip_qsv_command(source_codec, concat_path, local_start, duration, tmp_path)))
         commands.append(('cpu', self._event_clip_cpu_command(concat_path, local_start, duration, tmp_path)))
@@ -1849,13 +1864,25 @@ class RecordingMediaRuntime:
             for backend, command in commands:
                 tmp_path.unlink(missing_ok=True)
                 clip_timeout = max(60.0, min(600.0, duration * 2.0))
-                result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=clip_timeout)
+                if backend == 'vaapi':
+                    # Hardware decode and encode that cannot keep up with real
+                    # time is stalled; leave the time for the next attempts.
+                    clip_timeout = max(30.0, min(clip_timeout, duration))
+                try:
+                    result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=clip_timeout)
+                except subprocess.TimeoutExpired:
+                    # A stalled hardware attempt must not hide the software one.
+                    if backend == 'cpu':
+                        raise
+                    last_error = f'event clip generation timed out using {backend}'
+                    logging.getLogger(__name__).warning('%s event clip generation timed out for %s, falling back to next backend', backend.upper(), output_path.name)
+                    continue
                 if result.returncode == 0 and tmp_path.exists() and (tmp_path.stat().st_size > 0):
                     tmp_path.replace(output_path)
                     logging.getLogger(__name__).info('built event clip %s using %s acceleration (source codec %s)', output_path.name, backend, source_codec or 'unknown')
                     return
                 last_error = (result.stderr or f'event clip generation failed using {backend}').strip()[-500:]
-                if backend in {'vaapi', 'qsv'}:
+                if backend != 'cpu':
                     logging.getLogger(__name__).warning('%s event clip generation failed for %s, falling back to next backend: %s', backend.upper(), output_path.name, last_error)
             logging.getLogger(__name__).error('event clip generation failed for %s: %s', output_path.name, redact_secret_text(last_error))
             raise HTTPException(status_code=500, detail='event clip generation failed')
