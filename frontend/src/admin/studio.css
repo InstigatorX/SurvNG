@@ -222,7 +222,7 @@
   .camera-studio-stream b {
     margin-right: 4px;
     color: var(--ink);
-    font-family: Inter, system-ui, sans-serif;
+    font-family: var(--font-ui);
     font-size: var(--text-xs);
     font-weight: 600;
     letter-spacing: .04em;
