@@ -208,7 +208,10 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
   // Phones cap density at 2x and use the card thumbnail quality: a 3x, q90
   // crop is several times larger than the plain card image for little gain.
   const phoneThumbnail = typeof window !== "undefined" && window.matchMedia?.("(max-width: 760px)").matches;
-  const focusThumbnailWidth = Math.max(320, Math.min(1280, Math.ceil((frameSize?.width || 160) * (phoneThumbnail ? Math.min(2, devicePixelRatio) : devicePixelRatio))));
+  // A caller that knows the tile's size names a listed width: it is known before
+  // the tile is measured, so the crop is requested once, and nearby sizes share it.
+  const focusThumbnailWidth = thumbnailWidth
+    || Math.max(320, Math.min(1280, Math.ceil((frameSize?.width || 160) * (phoneThumbnail ? Math.min(2, devicePixelRatio) : devicePixelRatio))));
   const focusThumbnailQuality = phoneThumbnail ? 82 : 90;
   const focusAspect = incidentObjectFocusAspect(objectFocusAspect, useServerObjectCrop);
   const thumbnailSrc = useServerObjectCrop

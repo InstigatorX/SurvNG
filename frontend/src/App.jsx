@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { CircleAlert } from "lucide-react";
 
 import "./typeScale.css";
+import "./fonts.css";
 import "./styles.css";
 import "./shell/shell.css";
 import "./timeline/timeline.css";

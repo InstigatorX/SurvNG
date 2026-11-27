@@ -158,6 +158,28 @@ try {
   }
   assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("survng.incidentGalleryColumns.v1"))), 4);
 
+  // Arrow keys move between pictures: sideways by one, up and down by a row.
+  const focused = () => page.evaluate(() => [...document.querySelectorAll("#incident-results .live-activity-select")].indexOf(document.activeElement));
+  await tiles.first().locator(".live-activity-select").focus();
+  await page.keyboard.press("ArrowRight");
+  assert.equal(await focused(), 1);
+  await page.keyboard.press("ArrowDown");
+  assert.equal(await focused(), 5, "four per row");
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowUp");
+  assert.equal(await focused(), 0);
+  await page.keyboard.press("ArrowUp");
+  assert.equal(await focused(), 0, "stays on the first picture");
+  await page.keyboard.press("End");
+  assert.equal(await focused(), await tiles.count() - 1);
+  await page.keyboard.press("Home");
+  assert.equal(await focused(), 0);
+  assert.equal(await page.getByRole("dialog").count(), 0, "moving does not open anything");
+  // Arrow keys on a review mark are left to the checkbox.
+  await tiles.first().getByRole("checkbox").focus();
+  await page.keyboard.press("ArrowRight");
+  assert.equal(await focused(), -1);
+
   // A failed load keeps what is shown and offers a retry. The chunk fetched
   // ahead was appended without a request; the one after it fails.
   await toEnd();

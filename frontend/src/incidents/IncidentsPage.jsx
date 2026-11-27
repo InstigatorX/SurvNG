@@ -439,6 +439,21 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     chosen.scrollIntoView({ block: "center" });
   }
 
+  // Arrow keys move between pictures in the gallery; Enter or Space opens one as usual.
+  function onGalleryKeyDown(event) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    const current = event.target instanceof HTMLElement ? event.target.closest(".live-activity-select") : null;
+    if (!current || !galleryModeRef.current) return;
+    const columns = mobileView ? 1 : galleryColumns;
+    const tiles = [...event.currentTarget.querySelectorAll(".live-activity-select")];
+    const index = tiles.indexOf(current);
+    const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -columns, ArrowDown: columns }[event.key];
+    const target = event.key === "Home" ? 0 : event.key === "End" ? tiles.length - 1 : step == null ? null : index + step;
+    if (target == null || index < 0) return;
+    event.preventDefault();
+    tiles[Math.max(0, Math.min(tiles.length - 1, target))]?.focus();
+  }
+
   function loadMoreGalleryIfNearEnd() {
     // The desktop gallery scrolls inside its own list. On a phone the list
     // scrolls too when the layout bounds it, and otherwise the page does.
@@ -570,7 +585,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
         };
       });
       if (semanticIncidentRequestRef.current !== controller) return;
-      setSemanticIncidentResults(rankSemanticIncidentDetails(hydrated, incidentZoneFilter));
+      setSemanticIncidentResults(rankSemanticIncidentDetails(hydrated, incidentZoneFilter, {
+        minConfidence: incidentMinConfidence / 100, labels: incidentFilterValues(incidentObjectFilter),
+      }));
     } catch (error) {
       if (error?.name !== "AbortError") setSemanticIncidentError(error.message || "Semantic incident search failed");
     } finally {
@@ -608,7 +625,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   useEffect(() => {
     if (!semanticIncidentActiveQuery) return;
     runSemanticIncidentSearch(null, semanticIncidentActiveQuery);
-  }, [incidentCameraFilter, incidentDay, incidentObjectFilter, incidentZoneFilter]);
+  }, [incidentCameraFilter, incidentDay, incidentObjectFilter, incidentZoneFilter, incidentMinConfidence]);
 
   useAppEvents(({ type, data }) => {
     if (document.hidden || (type !== "incident" && type !== "resync")) return;
@@ -1128,8 +1145,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
         <span>{displayedIncidentTotal} {displayedIncidentTotal === 1 ? "result" : "results"}</span>
         <output>{confidenceApplies && confidenceDraft > 0 ? `${confidenceDraft}%` : "Any"}</output>
       </div>
-      {!confidenceApplies ? <small>Motion-only incidents have no detection confidence.</small>
-        : semanticIncidentActive ? <small>Search matches are not filtered by confidence.</small> : null}
+      {!confidenceApplies ? <small>Motion-only incidents have no detection confidence.</small> : null}
     </section>
   );
   const filterLists = (
@@ -1195,7 +1211,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                   <button type="button" className={incidentDensity === "comfortable" ? "active" : ""} aria-pressed={incidentDensity === "comfortable"} onClick={() => setIncidentDensity("comfortable")} title="Grid view" aria-label="Grid view"><Grid2X2 size={15} /></button>
                 </div>
               </div>
-              <div id="incident-results" className="incident-rail-list" ref={incidentRailListRef} aria-label="Incidents" onScroll={galleryExpanded ? loadMoreGalleryIfNearEnd : undefined} onWheel={() => { galleryRevealRef.current = 0; }} onPointerDown={() => { galleryRevealRef.current = 0; }} style={galleryExpanded ? { "--incident-gallery-columns": galleryColumns } : undefined}>
+              <div id="incident-results" className="incident-rail-list" ref={incidentRailListRef} aria-label="Incidents" onKeyDown={galleryExpanded ? onGalleryKeyDown : undefined} onScroll={galleryExpanded ? loadMoreGalleryIfNearEnd : undefined} onWheel={() => { galleryRevealRef.current = 0; }} onPointerDown={() => { galleryRevealRef.current = 0; }} style={galleryExpanded ? { "--incident-gallery-columns": galleryColumns } : undefined}>
                 {displayedIncidentLoading && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
                 {!galleryIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
                 {galleryIncidents.length ? pagedIncidents.map(renderTile) : null}
@@ -1358,7 +1374,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
           </div>
           <div className="mobile-filter-lists">{filterLists}</div>
         </div> : null}
-        <div id="incident-results" className="incident-gallery incident-phone-gallery" aria-label="Incidents">
+        <div id="incident-results" className="incident-gallery incident-phone-gallery" aria-label="Incidents" onKeyDown={onGalleryKeyDown}>
           {displayedIncidentLoading && !visibleIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
           {!visibleIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
           {visibleIncidents.length ? pagedIncidents.map(renderTile) : null}

@@ -188,6 +188,10 @@ jobs:
       - name: Install FFmpeg
         run: |
           mkdir -p ~/apt-archives/partial
+          # FFmpeg comes from Ubuntu's own archive. The runner image also lists
+          # Microsoft's package source, and a refusal from that host failed
+          # "apt-get update" before any test ran; this job needs nothing from it.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-archives" ffmpeg
           sudo chown -R "$(id -u):$(id -g)" ~/apt-archives

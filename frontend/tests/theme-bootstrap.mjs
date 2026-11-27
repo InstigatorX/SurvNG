@@ -19,8 +19,11 @@ for (const entry of ["index.html", "recordings.html", "config.html"]) {
   assert.ok(bootStart !== -1 && moduleStart !== -1 && bootStart < moduleStart, `${entry} applies the theme before the application module`);
 }
 
-const styles = readFileSync(join(frontendRoot, "src", "styles.css"), "utf8");
+// The typefaces live in their own stylesheet, shared with the ONVIF inspector.
+const styles = readFileSync(join(frontendRoot, "src", "fonts.css"), "utf8");
 assert.ok(styles.includes("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2"), "Inter Latin is bundled by the stylesheet");
 assert.ok(styles.includes('font-family: "Inter Variable"'), "the bundled variable font is the primary family");
+assert.match(styles, /:root \{[^}]*--font-ui: "Inter Variable"/, "and the default font stack starts with it");
+assert.ok(readFileSync(join(frontendRoot, "src", "App.jsx"), "utf8").includes('import "./fonts.css";'), "the app loads the typefaces");
 
 console.log("theme bootstrap tests passed");
