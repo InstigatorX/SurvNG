@@ -20,7 +20,9 @@ assert.match(incidentCard, /visualAnchorEventId=\{visualAnchorEventId\}/);
 assert.match(incidentCard, /appearanceAnchorEventId=\{appearanceAnchorEventId\}/);
 assert.match(incidentsPage, /visualAnchorEventId=\{visualFindSimilarEventId\}/);
 assert.match(incidentsPage, /appearanceAnchorEventId=\{findSimilarEventId\}/);
-assert.match(incidentCard, /<h3>Faces<\/h3>[\s\S]*incident-inspector-extra-analysis[\s\S]*<RelatedAppearanceIncidents anchorEventId=\{anchorEventId\}/);
+assert.match(incidentCard, /incident-inspector-extra-analysis[\s\S]*<RelatedAppearanceIncidents anchorEventId=\{anchorEventId\}/);
+// Names are on the object cards and the People section now, not an inspector box.
+assert.doesNotMatch(incidentCard, /<h3>Faces<\/h3>/);
 assert.match(incidentsPage, /analysisPanel=\{!galleryExpanded[\s\S]*<IncidentAnalysisStatus[\s\S]*embedded/);
 assert.doesNotMatch(incidentsPage, /<IncidentCard[\s\S]*\/>\{!galleryExpanded && displayedIncident\.incident_id \? <IncidentAnalysisStatus/);
 assert.doesNotMatch(incidentCard, /<RelatedAppearanceIncidents[^>]*\bactive=/);

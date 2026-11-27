@@ -48,14 +48,6 @@ from .detection_routes import (
     DetectionRouteDependencies,
     create_detection_router,
 )
-from .face_detection_routes import (
-    FaceDetectionRouteDependencies,
-    create_face_detection_router,
-)
-from .face_routes import (
-    FaceRouteDependencies,
-    create_face_router,
-)
 from .frontend_routes import FrontendRouteDependencies, create_frontend_router
 from .help_docs import HelpRouteDependencies, create_help_router
 from .onvif_inspector_routes import create_onvif_inspector_router
@@ -64,7 +56,11 @@ from .media_sessions import MediaSessionManager
 from .homekit_routes import HomeKitRouteDependencies, create_homekit_router
 from .manager_access import ManagerAccessCoordinator
 from .config_changes import ConfigChangeActorMiddleware, ConfigChangeLog
-from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
+from .manager_reload import (
+    ManagerGenerationLifecycle,
+    ManagerReloadHooks,
+    ManagerReloadRestartPending,
+)
 from . import process_exit
 from .local_observability import LocalObservabilityServer, build_runtime_status
 from .perf_samples import SlowSiteTable, TimedLock
@@ -106,6 +102,7 @@ from .motion_pipeline import build_builtin_motion_registry
 from .system_routes import SystemRouteDependencies, create_system_router
 from .tls_routes import TlsRouteDependencies, create_tls_router
 from .speech_routes import SpeechRouteDependencies, create_speech_router
+from .face_capture.routes import FaceCaptureRouteDependencies, create_face_capture_router
 from .training_routes import TrainingRouteDependencies, create_training_router
 from .proxy import apply_trusted_proxy_headers, request_is_secure, scope_header
 from .security import (
@@ -428,9 +425,19 @@ class SecurityBoundaryMiddleware:
             and APPLICATION_STOPPING.is_set()
             and str(scope.get("method") or "GET").upper() not in {"GET", "HEAD", "OPTIONS"}
             and api_path.startswith("/api/")
+            # Stopping without restarting (no supervisor): the restart is
+            # how the operator gets out of it.
+            and not (
+                RESTART_REQUIRED.is_set()
+                and api_path in {"/api/system/restart", "/api/auth/login", "/api/auth/logout"}
+            )
         ):
             response = JSONResponse(
-                {"detail": "SurvNG is shutting down; configuration changes are temporarily unavailable"},
+                {
+                    "detail": _settings_frozen_detail()
+                    if RESTART_REQUIRED.is_set()
+                    else "SurvNG is shutting down; configuration changes are temporarily unavailable"
+                },
                 status_code=503,
                 headers={"Cache-Control": "no-store", "Retry-After": "10"},
             )
@@ -734,14 +741,21 @@ def _request_server_restart() -> dict[str, object]:
     """Queue a supervisor-owned restart after the HTTP response can be sent."""
     global SERVER_RESTART_SCHEDULED
     with SERVER_RESTART_LOCK:
-        if SERVER_RESTART_SCHEDULED or APPLICATION_STOPPING.is_set():
+        # A saved change waiting for a manual restart leaves the process
+        # stopping without restarting; that restart is exactly what is asked.
+        if SERVER_RESTART_SCHEDULED or (
+            APPLICATION_STOPPING.is_set() and not RESTART_REQUIRED.is_set()
+        ):
             raise RuntimeError("SurvNG is already restarting or shutting down")
-        active_tasks = _active_storage_tasks(get_manager())
+        # A required restart cannot wait for storage work: the operator could
+        # not cancel it while settings are frozen.
+        active_tasks = [] if RESTART_REQUIRED.is_set() else _active_storage_tasks(get_manager())
         if active_tasks:
             raise RuntimeError(
                 "SurvNG cannot restart while storage work is active: "
                 f"{', '.join(active_tasks)}. Wait for it to finish or cancel it from Maintenance."
             )
+        already_stopping = APPLICATION_STOPPING.is_set()
         SERVER_RESTART_SCHEDULED = True
         APPLICATION_STOPPING.set()
 
@@ -765,7 +779,10 @@ def _request_server_restart() -> dict[str, object]:
             )
             with SERVER_RESTART_LOCK:
                 SERVER_RESTART_SCHEDULED = False
-                APPLICATION_STOPPING.clear()
+                # A process that was already stopping (a change waiting for
+                # this restart) must stay frozen; only undo our own stop.
+                if not already_stopping:
+                    APPLICATION_STOPPING.clear()
 
     threading.Thread(
         target=restart_from_supervisor,
@@ -784,6 +801,7 @@ def reload_manager(
     *,
     assign_ids: bool = False,
     persist: bool = True,
+    keep_unapplied: bool = False,
 ) -> AppConfig:
     """Replace the active manager through the generation lifecycle owner."""
     effective = normalize_config(
@@ -841,11 +859,37 @@ def reload_manager(
             previous_manager,
             effective,
             persist=persist,
+            keep_unapplied=keep_unapplied,
         )
     return effective
 
 
 CONFIG_CHANGE_LOG = ConfigChangeLog()
+
+
+# Set when a saved change needs a manual restart (no supervisor restarted us).
+RESTART_REQUIRED = threading.Event()
+
+
+def _settings_frozen_detail() -> str:
+    if RESTART_REQUIRED.is_set():
+        return "SurvNG needs a restart before settings can change again"
+    return "SurvNG is restarting or shutting down; configuration changes are temporarily unavailable"
+
+
+def save_settings_change(
+    next_config: AppConfig,
+    path: str | Path | None = None,
+    assign_ids: bool = True,
+) -> None:
+    """Save from a settings route; refused while a restart is pending.
+
+    The running configuration is stale then: saving it with one more change
+    would overwrite the change saved for the restart.
+    """
+    if APPLICATION_STOPPING.is_set():
+        raise HTTPException(status_code=503, detail=_settings_frozen_detail())
+    save_config_with_history(next_config, path, assign_ids)
 
 
 def save_config_with_history(
@@ -867,8 +911,15 @@ def apply_config_update(
     *,
     assign_ids: bool = False,
     persist: bool = True,
+    allow_restart_pending: bool = False,
 ) -> tuple[AppConfig, dict[str, object]]:
-    """Apply configuration through the dedicated transaction owner."""
+    """Apply configuration through the dedicated transaction owner.
+
+    ``allow_restart_pending``: the caller can report a change that is saved
+    but applies only when SurvNG restarts (the old manager generation would
+    not stop). Other callers keep the all-or-nothing contract: the change is
+    not saved and the failure is raised.
+    """
     global config
     application = TargetedConfigApplication(
         lock=MANAGER_RELOAD_LOCK,
@@ -882,12 +933,43 @@ def apply_config_update(
     # lock allowed a concurrent update to leave global and manager config on
     # different commits.
     with MANAGER_RELOAD_LOCK:
+        if APPLICATION_STOPPING.is_set():
+            # Shutting down, or restarting to apply a saved change. Applying
+            # another change to the old in-memory configuration now would
+            # overwrite that saved change on disk.
+            raise HTTPException(status_code=503, detail=_settings_frozen_detail())
         current = config
         previous_ffmpeg_path = current.ffmpeg_path
         if manager_owned_config(current) != manager_owned_config(effective):
             if effective.ffmpeg_path != previous_ffmpeg_path:
                 _recording_media_runtime.clear_hardware_probe_caches()
-            applied = reload_manager(effective, assign_ids=False, persist=persist)
+            try:
+                applied = reload_manager(
+                    effective,
+                    assign_ids=False,
+                    persist=persist,
+                    keep_unapplied=allow_restart_pending,
+                )
+            except ManagerReloadRestartPending as pending:
+                if not pending.restarting:
+                    # The process stays stopping until someone restarts it.
+                    RESTART_REQUIRED.set()
+                if not pending.persisted:
+                    raise
+                # Saved, but this process cannot finish the cutover. With a
+                # supervisor it restarts with the saved configuration; without
+                # one, someone has to restart SurvNG.
+                return effective, {
+                    "apply_mode": (
+                        "restart_pending" if pending.restarting else "restart_required"
+                    ),
+                    "persisted": True,
+                    "applied": False,
+                    "camera_workers_restarted": pending.restarting,
+                    "subsystems_restarted": ["process"] if pending.restarting else [],
+                    "instance_id": PROCESS_INSTANCE_ID,
+                    "message": str(pending),
+                }
             prepare_bootstrap_token(applied)
             return applied, {
                 "apply_mode": "manager_reload",
@@ -932,6 +1014,7 @@ def _record_process_lifecycle(kind: str) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     APPLICATION_STOPPING.clear()
+    RESTART_REQUIRED.clear()
     loop = asyncio.get_running_loop()
     early_onvif_thread: threading.Thread | None = None
     early_onvif_lock = threading.Lock()
@@ -1107,7 +1190,7 @@ app.include_router(
             publish_config=_publish_config_runtime,
             apply_config=apply_config_update,
             reload_manager=reload_manager,
-            save_config=save_config_with_history,
+            save_config=save_settings_change,
             validate_config=validate_manager_configuration,
             lock=MANAGER_RELOAD_LOCK,
             probe_limiter=CONFIG_PROBE_LIMITER,
@@ -1279,6 +1362,7 @@ app.include_router(
 )
 app.include_router(create_onvif_inspector_router())
 app.include_router(create_speech_router(SpeechRouteDependencies(get_manager=get_manager)))
+app.include_router(create_face_capture_router(FaceCaptureRouteDependencies(get_manager=get_manager)))
 
 _semantic_route_bundle = create_semantic_router(
     SemanticRouteDependencies(
@@ -1415,25 +1499,6 @@ app.include_router(
 )
 
 
-_face_route_bundle = create_face_router(
-    FaceRouteDependencies(
-        get_manager=get_manager,
-        manager_lock=MANAGER_RELOAD_LOCK,
-        start_observation_sync=_start_face_observation_sync,
-        manager_access=MANAGER_ACCESS,
-    )
-)
-app.include_router(_face_route_bundle.router)
-app.include_router(
-    create_face_detection_router(
-        FaceDetectionRouteDependencies(
-            get_manager=get_manager,
-            get_config=lambda: config,
-        )
-    )
-)
-
-
 # Assemble the recording HTTP boundary after its legacy media helpers exist.
 # Route ownership lives in recording_routes; tests call its handlers through
 # _recording_route_bundle.handlers.
@@ -1465,6 +1530,20 @@ _recording_route_bundle = create_recording_router(
         ),
         recording_preview_strip=lambda active_manager, *args, **kwargs: (
             _recording_media_runtime._recording_preview_strip(
+                *args,
+                active_manager=active_manager,
+                **kwargs,
+            )
+        ),
+        recording_segment_frames=lambda active_manager, *args, **kwargs: (
+            _recording_media_runtime._recording_segment_frames(
+                *args,
+                active_manager=active_manager,
+                **kwargs,
+            )
+        ),
+        recording_step_frame=lambda active_manager, *args, **kwargs: (
+            _recording_media_runtime._recording_step_frame(
                 *args,
                 active_manager=active_manager,
                 **kwargs,

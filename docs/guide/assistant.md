@@ -30,6 +30,20 @@ Under **Admin → Detection → AI analysis & assistant**:
 
 The same provider settings serve Motion Audit image analysis and the assistant.
 
+### AI incident titles (optional)
+
+**AI incident titles** in the same section is off by default. When it is on,
+the incident page asks the provider to word its title. Only scene facts are
+sent: object labels and whether they are uncertain, camera and zone names,
+moving/stationary state and times relative to the incident start. No images,
+recognized names or identifiers leave SurvNG. Each incident is worded once per
+change, at most once a minute while it is still growing.
+
+The built-in title (from objects, cameras and zones) appears immediately and
+stays if the option is off, the provider is not configured, or a request fails.
+A failure shows "AI title unavailable" beside the incident time and is logged
+on the server.
+
 ## Example questions
 
 - “Which cameras are offline?”

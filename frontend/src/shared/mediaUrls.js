@@ -80,6 +80,23 @@ export function recordingPreviewStripUrl(cameraId, epoch, source, width = 320) {
   return appUrl(`/api/cameras/${cameraId}/recordings/preview-strip.jpg?${params.toString()}`);
 }
 
+// Frame stepping: every frame time of the segment holding `epoch`, and the
+// exact frame on screen at a time from that list (to the microsecond, as the
+// list gives it, so the server finds the same frame).
+export function recordingFramesUrl(cameraId, epoch, source) {
+  const params = new URLSearchParams({ epoch: epoch.toFixed(6), source });
+  return appUrl(`/api/cameras/${cameraId}/recordings/frames.json?${params.toString()}`);
+}
+
+export function recordingFrameUrl(cameraId, epoch, source, width = 1280) {
+  const params = new URLSearchParams({
+    epoch: epoch.toFixed(6),
+    source,
+    width: String(Math.max(320, Math.min(1920, Math.round(width)))),
+  });
+  return appUrl(`/api/cameras/${cameraId}/recordings/frame.jpg?${params.toString()}`);
+}
+
 export function recordingUpdatesUrl(cameraId, startEpoch, endEpoch, afterEpoch, source, includeIdentities = true) {
   const params = new URLSearchParams({
     start_epoch: startEpoch.toFixed(3),

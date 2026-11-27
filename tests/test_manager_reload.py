@@ -6,7 +6,11 @@ from dataclasses import replace
 from unittest.mock import Mock
 
 from survng.app.config import AppConfig
-from survng.app.manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
+from survng.app.manager_reload import (
+    ManagerGenerationLifecycle,
+    ManagerReloadHooks,
+    ManagerReloadRestartPending,
+)
 
 
 class ManagerGenerationLifecycleTest(unittest.TestCase):
@@ -211,6 +215,42 @@ class ManagerGenerationLifecycleTest(unittest.TestCase):
                 self.assertTrue(lifecycle._stopping.is_set())
                 if "publish" in order:
                     self.assertLess(order.index("publish"), order.index("restart"))
+
+    def test_a_change_the_old_generation_kept_from_running_is_saved_only_when_asked(self) -> None:
+        for kind, keep, saved in (
+            # The old generation would not stop: the new config never ran.
+            ("previous_shutdown", True, True),
+            ("previous_shutdown", False, False),
+            # The new config ran and failed: nothing is saved either way.
+            ("candidate_cleanup", True, False),
+            ("recovery", True, False),
+        ):
+            with self.subTest(kind=kind, keep=keep):
+                hooks = replace(self.hooks(), request_supervisor_restart=Mock(return_value=True))
+                previous, factory, original = self._dead_end(kind)
+                requested = AppConfig(base_path="/new")
+                with self.assertRaises(ManagerReloadRestartPending) as raised:
+                    self.lifecycle(factory, hooks).reload(
+                        original, previous, requested, persist=True, keep_unapplied=keep,
+                    )
+                self.assertIs(raised.exception.persisted, saved)
+                self.assertTrue(raised.exception.restarting)
+                if saved:
+                    hooks.save_config.assert_called_once_with(requested, assign_ids=False)
+                    self.assertIn("to apply the saved configuration", str(raised.exception))
+                else:
+                    hooks.save_config.assert_not_called()
+
+    def test_a_failed_save_of_the_unapplied_change_is_reported_as_not_saved(self) -> None:
+        hooks = replace(self.hooks(), request_supervisor_restart=Mock(return_value=False))
+        hooks.save_config.side_effect = OSError("disk full")
+        previous, factory, original = self._dead_end("previous_shutdown")
+        with self.assertRaises(ManagerReloadRestartPending) as raised:
+            self.lifecycle(factory, hooks).reload(
+                original, previous, AppConfig(base_path="/new"), persist=True, keep_unapplied=True,
+            )
+        self.assertFalse(raised.exception.persisted)
+        self.assertFalse(raised.exception.restarting)
 
     def test_without_a_managed_server_the_error_asks_for_a_manual_restart(self) -> None:
         hooks = replace(self.hooks(), request_supervisor_restart=Mock(return_value=False))

@@ -29,6 +29,7 @@ from .incident_utils import (
     event_snapshot_path,
 )
 from .identity_projection import apply_incident_identities
+from .incident_titles import IncidentTitleGenerator
 from .manager import AppManager
 from .manager_access import ManagerAccessCoordinator, manager_generation_lease
 
@@ -105,7 +106,7 @@ def _filter_incidents_by_person(
     ]
     matching_event_ids = {
         int(observation["event_id"])
-        for observation in manager.faces.for_event_ids(event_ids)
+        for observation in manager.face_identity_observations(event_ids)
         if int(observation.get("person_id") or 0) == person_id
     }
     return [
@@ -116,6 +117,24 @@ def _filter_incidents_by_person(
             for event in incident.get("events", [])
         )
     ]
+
+
+def _local_day_start(day: str, time_zone: str) -> tuple[datetime, str]:
+    try:
+        selected_zone = ZoneInfo(time_zone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="unknown timezone") from exc
+    if day:
+        try:
+            selected_date = datetime.strptime(day, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail="day must use YYYY-MM-DD"
+            ) from exc
+    else:
+        selected_date = datetime.now(selected_zone).date()
+        day = selected_date.isoformat()
+    return datetime.combine(selected_date, datetime.min.time(), selected_zone), day
 
 
 class IncidentQueryService:
@@ -174,7 +193,7 @@ class IncidentQueryService:
             if str(event.get("id", "")).isdigit()
         ]
         observations_by_event: dict[int, list[dict[str, Any]]] = {}
-        for observation in manager.faces.for_event_ids(event_ids):
+        for observation in manager.face_identity_observations(event_ids):
             observations_by_event.setdefault(
                 int(observation["event_id"]), []
             ).append(observation)
@@ -389,21 +408,7 @@ class IncidentQueryService:
         offset: int = 0,
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
     ) -> dict[str, Any]:
-        try:
-            selected_zone = ZoneInfo(time_zone)
-        except (ZoneInfoNotFoundError, ValueError) as exc:
-            raise HTTPException(status_code=422, detail="unknown timezone") from exc
-        if day:
-            try:
-                selected_date = datetime.strptime(day, "%Y-%m-%d").date()
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=422, detail="day must use YYYY-MM-DD"
-                ) from exc
-        else:
-            selected_date = datetime.now(selected_zone).date()
-            day = selected_date.isoformat()
-        day_start = datetime.combine(selected_date, datetime.min.time(), selected_zone)
+        day_start, day = _local_day_start(day, time_zone)
         day_end = day_start + timedelta(days=1)
         bounds = {"start_epoch":day_start.timestamp(), "end_epoch":day_end.timestamp()}
         facets = manager.events.scene_incident_facets(**bounds)
@@ -441,6 +446,27 @@ class IncidentQueryService:
             "end_at": day_end.astimezone(timezone.utc).isoformat(),
             "facets": facets,
         }
+
+    @staticmethod
+    def review_queue(
+        manager: AppManager,
+        *,
+        day: str = "",
+        time_zone: str = "America/New_York",
+        camera_id: str = "",
+        event_type: str = "object",
+        object_label: str = "",
+        zone: str = "",
+    ) -> dict[str, Any]:
+        """The day's listed incidents in list order, with review verdicts.
+
+        Defaults match the incident list's own defaults (objects only)."""
+        day_start, day = _local_day_start(day, time_zone)
+        day_end = day_start + timedelta(days=1)
+        queue = manager.events.incident_review_queue(
+            start_epoch=day_start.timestamp(), end_epoch=day_end.timestamp(), camera_id=camera_id,
+            event_type=event_type, object_label=object_label, zone=zone)
+        return {**queue, "day": day, "time_zone": time_zone}
 
     def resolve_event(
         self, manager: AppManager, event_id: int
@@ -671,6 +697,19 @@ def create_incident_query_router(
             )
         )
 
+    @router.get("/api/incidents/review-queue")
+    def incident_review_queue(
+        day: str = "",
+        time_zone: str = "America/New_York",
+        camera_id: str = "",
+        event_type: str = "object",
+        object_label: str = "",
+        zone: str = "",
+    ) -> dict[str, Any]:
+        return with_manager(lambda active: service.review_queue(
+            active, day=day, time_zone=time_zone, camera_id=camera_id,
+            event_type=event_type, object_label=object_label, zone=zone))
+
     @router.get("/api/incidents/notification/{incident_id}")
     def notification_incident(incident_id: str) -> dict[str, Any]:
         return with_manager(lambda active: service.notification_detail(active, incident_id))
@@ -838,6 +877,54 @@ def create_incident_query_router(
             })
             return service.with_faces(active, [result])[0]
         return with_manager(correct)
+
+    titles = IncidentTitleGenerator()
+
+    @router.get("/api/incidents/{incident_id}/title")
+    def incident_title(incident_id: str) -> dict[str, Any]:
+        # Opt-in provider wording. The incident page keeps its built-in title
+        # unless this returns status "ready"; it never waits on this route.
+        def snapshot(active):
+            ai = active.config.audit_ai
+            if not (ai.enabled and ai.incident_titles_enabled):
+                # Off by default: answer without building the incident payload.
+                return None, ai, {}
+            incident = active.events.scene_incident(incident_id)
+            if incident is None:
+                raise HTTPException(status_code=404, detail="incident was not found")
+            names = {camera.id: camera.name or camera.id for camera in active.config.cameras}
+            return incident, active.config.audit_ai.model_copy(), names
+        incident, ai_config, names = with_manager(snapshot)
+        if incident is None:
+            return {"incident_id": incident_id, "status": "disabled", "title": None}
+        # The provider call runs outside the manager lease.
+        return titles.title(incident, ai_config, names)
+
+    @router.get("/api/incidents/{incident_id}/review")
+    def incident_review(incident_id: str):
+        def resolve(active):
+            try:
+                return active.events.incident_review(incident_id)
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return with_manager(resolve)
+
+    @router.put("/api/incidents/{incident_id}/review")
+    def review_incident(incident_id: str, review: dict[str, Any] = Body(...)):
+        # A verdict is operator feedback, not evidence: it never changes the
+        # scene, so it needs no expected revision. Admin scope (the default
+        # for mutating routes) because it is shared household state.
+        if "verdict" not in review:
+            raise HTTPException(status_code=422, detail="verdict is required")
+        def record(active):
+            try:
+                result = active.events.set_incident_review(incident_id, review["verdict"])
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            return result
+        return with_manager(record)
 
     @router.get("/api/incidents/{incident_id}/analysis")
     def incident_analysis(incident_id: str):

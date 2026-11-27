@@ -13,6 +13,20 @@ from .manager import AppManager
 LOGGER = logging.getLogger(__name__)
 
 
+class ManagerReloadRestartPending(RuntimeError):
+    """The reload cannot finish in this process; the supervisor restarts it.
+
+    ``persisted`` is true when the requested configuration is on disk, so the
+    restarted process starts with it; ``restarting`` is true when the
+    supervisor accepted the restart (otherwise someone must restart SurvNG).
+    """
+
+    def __init__(self, message: str, *, persisted: bool, restarting: bool = True) -> None:
+        super().__init__(message)
+        self.persisted = persisted
+        self.restarting = restarting
+
+
 @dataclass(frozen=True, slots=True)
 class ManagerReloadHooks:
     active_storage_tasks: Callable[[AppManager], list[str]]
@@ -47,7 +61,12 @@ class ManagerGenerationLifecycle:
         self._manager_factory = manager_factory
         self._hooks = hooks
 
-    def _unrecoverable(self, problem: str) -> RuntimeError:
+    def _unrecoverable(
+        self,
+        problem: str,
+        *,
+        persisted: bool = False,
+    ) -> ManagerReloadRestartPending:
         """Ask the supervisor to restart SurvNG and describe the failure.
 
         Called after the stopping flag is set and the surviving generation is
@@ -63,7 +82,24 @@ class ManagerGenerationLifecycle:
             if restarting
             else "restart SurvNG through its supervisor"
         )
-        return RuntimeError(f"{problem}; {action}")
+        if persisted:
+            action += " to apply the saved configuration"
+        return ManagerReloadRestartPending(
+            f"{problem}; {action}",
+            persisted=persisted,
+            restarting=restarting,
+        )
+
+    def _save_unapplied(self, effective_config: AppConfig) -> bool:
+        """Save a change the old generation kept from running; True when saved."""
+        try:
+            self._hooks.save_config(effective_config, assign_ids=False)
+        except Exception:
+            LOGGER.exception(
+                "could not save the configuration change for the restart to apply"
+            )
+            return False
+        return True
 
     def reload(
         self,
@@ -72,7 +108,16 @@ class ManagerGenerationLifecycle:
         effective_config: AppConfig,
         *,
         persist: bool,
+        keep_unapplied: bool = False,
     ) -> None:
+        """Replace the manager generation with one built from ``effective_config``.
+
+        The configuration is saved once the new generation has started, so a
+        process that dies mid-cutover restarts with what last ran. When the
+        old generation will not stop, the new configuration has never run
+        and the process must restart; with ``keep_unapplied`` (the caller can
+        tell the user so) it is saved first and the restart applies it.
+        """
         with self._lock:
             if self._stopping.is_set():
                 raise RuntimeError(
@@ -112,11 +157,18 @@ class ManagerGenerationLifecycle:
                         "failed to clean up replacement manager after reload failure"
                     )
                 if previous_stop_attempted and not previous_stopped:
+                    # The old generation would not stop, so the new
+                    # configuration never ran. Save it, when the caller can
+                    # report that, so the restart applies it.
                     self._stopping.set()
                     self._hooks.publish_runtime(previous_config, previous_manager)
+                    persisted = bool(
+                        persist and keep_unapplied and self._save_unapplied(effective_config)
+                    )
                     raise self._unrecoverable(
                         "configuration reload aborted because previous manager shutdown is "
-                        "still active"
+                        "still active",
+                        persisted=persisted,
                     ) from None
                 if cleanup_error is not None:
                     self._stopping.set()

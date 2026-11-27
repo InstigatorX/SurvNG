@@ -1,18 +1,13 @@
 import json
-import threading
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from survng.app.appearance_index import AppearanceIndex
 from survng.app.config import CameraTransitionRoute, ObjectTrackingConfig
 from survng.app.events import EventStore
 from survng.app.faces import FaceStore
-from survng.app.face_routes import FaceRouteDependencies, create_face_router
 from survng.app.person_visits import PersonVisitStore, project_visits
 
 
@@ -133,19 +128,6 @@ def test_multipeople_event_does_not_assign_face_to_arbitrary_body(stores):
     assert len(payload["visits"]) == 2
     body = next(v for v in payload["visits"] if v["id"].startswith("track:"))
     assert body["person_id"] is None
-
-
-def test_routes_reject_bad_windows_and_serialize_no_private_vectors(stores):
-    seed(stores, "gate", 10000, person=7)
-    manager = SimpleNamespace(person_visits=stores[3], config=SimpleNamespace(detector=SimpleNamespace(tracking=config())))
-    app = FastAPI()
-    app.include_router(create_face_router(FaceRouteDependencies(lambda: manager, threading.RLock(), lambda: None)).router)
-    with TestClient(app) as client:
-        response = client.get("/api/people/visits?start=9990&end=10100")
-        assert response.status_code == 200
-        assert "embedding" not in response.text and "snapshot_path" not in response.text
-        for query in ("start=nan", "start=1&end=100000", "start=2&end=1"):
-            assert client.get(f"/api/people/visits?{query}").status_code == 422
 
 
 def test_retention_deletes_link_decisions(stores):

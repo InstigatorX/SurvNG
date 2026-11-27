@@ -44,7 +44,7 @@ const ExportCenterPage = lazyExport(() => import("./timeline/TimelinePages.jsx")
 const RecordingsPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "RecordingsPage");
 const SemanticSearchPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "SemanticSearchPage");
 const ConfigPage = lazyExport(() => import("./admin/ConfigPage.jsx"), "ConfigPage");
-const FacesPage = lazyExport(() => import("./people/FacesPage.jsx"), "FacesPage");
+const PeoplePage = lazyExport(() => import("./people/PeoplePage.jsx"), "PeoplePage");
 const PropertyPage = lazyExport(() => import("./property/PropertyPage.jsx"), "PropertyPage");
 
 function WorkspaceFallback() {
@@ -120,7 +120,11 @@ function App() {
   }
   const detailMatch = pathname.match(/^\/incidents\/(incident-[^/]+)\/?$/);
   if (detailMatch) {
-    return <Suspense fallback={<WorkspaceFallback />}><IncidentDetailPage incidentId={detailMatch[1]} timeZone={timeZone} canCorrectIncident={!viewer} /></Suspense>;
+    // The incident detail lives inside the workspace shell (top navigation,
+    // Incidents active) but without the assistant panel.
+    return <RuntimeStateProvider><Shell page="incidents" theme={theme} textSize={textSize} recordingContext={recordingContext} session={session} onSignOut={() => void signOut()}>
+      <Suspense fallback={<WorkspaceFallback />}><IncidentDetailPage incidentId={(() => { try { return decodeURIComponent(detailMatch[1]); } catch { return detailMatch[1]; } })()} timeZone={timeZone} canCorrectIncident={!viewer} /></Suspense>
+    </Shell></RuntimeStateProvider>;
   }
   const workspacePage = viewer && page === "admin" ? "live" : page;
   return (
@@ -139,11 +143,11 @@ function App() {
                   : workspacePage === "incidents"
                   ? <IncidentsPage timeZone={timeZone} canCorrectIncident={!viewer} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
                   : workspacePage === "people"
-                    ? <FacesPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
+                    ? <PeoplePage timeZone={timeZone} />
                     : workspacePage === "property"
                       ? <PropertyPage canEdit={!viewer} />
                       : workspacePage === "live"
-                      ? <LivePage timeZone={timeZone} canCorrectIncident={!viewer} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
+                      ? <LivePage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
                       : <main className="workspace-not-found"><CircleAlert size={30} /><h2>Page not found</h2><p>This SurvNG workspace does not exist.</p><a className="nav-button" href={appUrl("/")}>Return to Live</a></main>}
       </Suspense>
       {viewer ? null : <AssistantPanel pageContext={{ ...assistantContext, page: workspacePage }} timeZone={timeZone} askRequest={assistantAsk} onAskRequestHandled={() => setAssistantAsk(null)} />}

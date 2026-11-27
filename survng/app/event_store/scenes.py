@@ -191,6 +191,68 @@ def _overlap(a, b):
         return 0.0
 
 
+# A visible interval is a run of one object's observations on one camera
+# episode. Sampling is sparse, so a longer silence starts a new interval rather
+# than drawing presence nobody observed. Consecutive boxes that barely move are
+# a stationary stretch of the same interval.
+VISIBLE_INTERVAL_MAX_GAP_SECONDS = 60.0
+STATIONARY_BOX_OVERLAP = 0.7
+
+
+def _visible_state(previous, item):
+    # The activity attribution already decided whether this sighting was
+    # active or stationary scene context; geometry only fills in when it
+    # did not (legacy or indeterminate evidence).
+    role = item.get("activity_role")
+    if role == "scene_context":
+        return "stationary"
+    if role == "active":
+        return "moving"
+    if previous.get("box") and item.get("box") and _overlap(previous, item) >= STATIONARY_BOX_OVERLAP:
+        return "stationary"
+    return "moving"
+
+
+def _scene_visible_intervals(evidence):
+    """Return per-camera visible intervals for one object.
+
+    ``evidence`` is ``[(episode_id, observation)]`` in capture order; each
+    observation carries ``id``, ``camera_id``, ``captured_at`` and optionally
+    ``box``/``zones``. States: ``moving``, ``stationary``, or ``observed`` for a
+    single sighting whose motion cannot be judged.
+    """
+    runs = {}
+    for episode_id, observation in evidence:
+        runs.setdefault((observation["camera_id"], episode_id), []).append(observation)
+    intervals = []
+    for (camera_id, episode_id), items in runs.items():
+        current = None
+        for previous, item in zip([None, *items], items):
+            epoch = _epoch(item["captured_at"])
+            if previous is None or epoch - _epoch(previous["captured_at"]) > VISIBLE_INTERVAL_MAX_GAP_SECONDS:
+                # A lone sighting is "observed" unless its attribution already
+                # says it was moving or stationary, so an arrival stays visible.
+                first_state = {"active": "moving", "scene_context": "stationary"}.get(item.get("activity_role"), "observed")
+                current = {"camera_id": camera_id, "episode_id": episode_id, "start_at": item["captured_at"],
+                           "end_at": item["captured_at"], "state": first_state, "observation_id": item["id"],
+                           "last_observation_id": item["id"], "observation_count": 1, "zones": list(item.get("zones") or [])}
+                intervals.append(current)
+                continue
+            state = _visible_state(previous, item)
+            if current["state"] not in {"observed", state}:
+                # The state changed: the new stretch continues from the last
+                # shared sighting, so the bar has no hole between them.
+                current = {"camera_id": camera_id, "episode_id": episode_id, "start_at": previous["captured_at"],
+                           "end_at": previous["captured_at"], "state": state, "observation_id": previous["id"],
+                           "last_observation_id": previous["id"], "observation_count": 1, "zones": list(previous.get("zones") or [])}
+                intervals.append(current)
+            current.update(state=state, end_at=item["captured_at"], last_observation_id=item["id"],
+                           observation_count=current["observation_count"] + 1)
+            current["zones"].extend(zone for zone in item.get("zones") or [] if zone not in current["zones"])
+    intervals.sort(key=lambda interval: (_epoch(interval["start_at"]), interval["camera_id"]))
+    return intervals
+
+
 class EventStoreSceneMixin:
 
     def _init_scene_db(self):
@@ -379,6 +441,12 @@ class EventStoreSceneMixin:
             create_index_logged(
                 conn, "scene_track_alias_object",
                 "create index if not exists scene_track_alias_object on scene_track_aliases(object_id)",
+            )
+            # Review verdicts' evidence mark counts an incident's corrections
+            # for every reviewed incident in the queue.
+            create_index_logged(
+                conn, "scene_corrections_incident",
+                "create index if not exists scene_corrections_incident on scene_corrections(incident_id)",
             )
             conn.execute(
                 "create index if not exists scene_observation_recording "
@@ -954,6 +1022,20 @@ class EventStoreSceneMixin:
             subject["observations"]=[max(evidence,key=lambda o:(o.get("snapshot_available",False),o.get("confidence",0)))] if evidence else []
         return payload
 
+    @staticmethod
+    def _pending_zone_alerts(conn, incident_id):
+        alerts = conn.execute(
+            "select a.*, p.camera_id from scene_episodes p join scene_zone_alerts a on a.episode_id=p.id "
+            "where p.incident_id=? and a.published=0 order by a.confirmed_epoch, a.episode_id, a.zone, a.label",
+            (incident_id,),
+        )
+        return [{
+            "alert_id": a["alert_id"],
+            "camera_id": a["camera_id"], "zone": a["zone"], "label": a["label"],
+            "observed_at": _iso(a["observed_epoch"]), "confirmed_at": _iso(a["confirmed_epoch"]),
+            "notifications_enabled": bool(a["notifications_enabled"]),
+        } for a in alerts]
+
     def _scene_payload(self, conn, incident_id):
         from ..incident_presenter import _event_row, _incident_row
         incident_id = self._scene_resolve(conn,incident_id)
@@ -987,8 +1069,10 @@ class EventStoreSceneMixin:
                 subject.update(confidence=float(item["confidence"]),source_event_id=row["event_id"],object_index=row["object_index"])
             if row["label_override"] or item.get("historical_track_confirmed") or (item.get("confidence_provenance") != "track_summary" and float(item.get("confidence") or 0)>=float(item.get("scene_confirmation_threshold", .45)) and int(item.get("temporal_observations") or item.get("track_observations") or 1)>=2):
                 subject["certainty"] = "observed"
+        episode_by_observation = {row["id"]: row["episode_id"] for row in observations}
         for subject in grouped.values():
             subject["observation_count"]=len(subject["observations"])
+            subject["visible_intervals"]=_scene_visible_intervals([(episode_by_observation[o["id"]], o) for o in subject["observations"]])
             strong_times = {o["captured_at"] for o in subject["observations"] if o.get("confidence_provenance") != "track_summary" and float(o.get("confidence") or 0)>=float(o.get("scene_confirmation_threshold", .45))}
             if len(strong_times)>=2:
                 subject["certainty"]="observed"
@@ -1262,7 +1346,8 @@ class EventStoreSceneMixin:
         where,args=self._scene_query_where(start_epoch=start_epoch,end_epoch=end_epoch)
         with self._connect() as conn:
             if start_epoch is not None or end_epoch is not None:
-                # Drive from the day's incidents. A scan of scene_objects, or of
+                # Drive from the day's incidents (CROSS JOIN fixes the order). A
+                # scan of scene_objects or scene_observation_zones, or of
                 # observation JSON, reads the whole history before the date applies.
                 scope=("with scoped as materialized (select i.id from scene_incidents i where "+where+") , "
                        "episodes as materialized (select p.id,p.camera_id from scoped cross join scene_episodes p on p.incident_id=scoped.id) ")
@@ -1273,7 +1358,7 @@ class EventStoreSceneMixin:
                     "where coalesce(nullif(s.label_override,''), nullif(s.facet_label,''))!='' order by 1", args) if r[0]]
                 zones=[r[0] for r in conn.execute(
                     scope+"select distinct z.zone from episodes p "
-                    "join scene_observation_zones z on z.episode_id=p.id "
+                    "cross join scene_observation_zones z on z.episode_id=p.id "
                     "where z.zone!='' order by z.zone", args) if r[0]]
                 return {"camera_ids":cameras,"labels":labels,"zones":zones}
             cameras=[r[0] for r in conn.execute("select value from scene_facet_cameras order by value") if r[0]]
@@ -1549,6 +1634,12 @@ class EventStoreSceneMixin:
                 + ("and event_id=? " if event_id is not None else "") + "order by id limit ?",
                 (after_id, *((event_id,) if event_id is not None else ()), max(1,min(int(limit),1000))))]
 
+    def scene_identities_of(self,event_id):
+        """The accepted identities the event's scene identities hold now."""
+        with self._connect() as conn:
+            row=conn.execute("select payload_json from scene_identities where event_id=?",(int(event_id),)).fetchone()
+        return list(json.loads(row[0])) if row and row[0] else []
+
     def update_scene_identities(self,event_id,identities,*,routes=()):
         """Attach accepted identity evidence and conservatively connect episodes.
 
@@ -1636,6 +1727,7 @@ class EventStoreSceneMixin:
                     conn.execute("insert or replace into scene_aliases values(?,?)",(source,incident_id))
                     conn.execute("update scene_aliases set incident_id=? where incident_id=?",(incident_id,source))
                     conn.execute("update scene_incidents set state='merged' where id=?",(source,))
+                    self._carry_incident_review(conn,source,incident_id)
                     conn.execute("delete from scene_notification_outbox where incident_id=?",(source,))
                     self._scene_merge_shared_objects(conn,incident_id)
                     other_event=matches[source]["event_id"]
@@ -1674,6 +1766,9 @@ class EventStoreSceneMixin:
                     if payload is None:
                         orphaned.append((incident_id, int(row["revision"])))
                         continue
+                    zone_alerts = self._pending_zone_alerts(conn, incident_id)
+                    if zone_alerts:
+                        payload = {**payload, "zone_alerts": zone_alerts}
                     entries.append({"incident_id": incident_id, "revision": int(payload["revision"]), "payload": payload})
             finally:
                 conn.rollback()
@@ -1681,8 +1776,15 @@ class EventStoreSceneMixin:
             self.acknowledge_scene_notification(incident_id, revision)
         return entries
 
-    def acknowledge_scene_notification(self,incident_id,revision):
+    def acknowledge_scene_notification(self, incident_id, revision, *, zone_alert_ids=()):
         with self._lock,self._connect() as conn:
+            if zone_alert_ids:
+                # The exact facts that were published can now belong to a
+                # different incident after an episode merge or split.
+                conn.execute(
+                    "update scene_zone_alerts set published=1 where alert_id in (select value from json_each(?))",
+                    (_json(zone_alert_ids),),
+                )
             conn.execute(
                 "delete from scene_notification_outbox where incident_id=? and revision<=? and payload_json=''",
                 (incident_id, revision),
@@ -1724,6 +1826,7 @@ class EventStoreSceneMixin:
                     conn.execute("insert or replace into scene_aliases values(?,?)",(source,incident_id))
                     conn.execute("update scene_aliases set incident_id=? where incident_id=?",(incident_id,source))
                     conn.execute("update scene_incidents set state='merged' where id=?",(source,))
+                    self._carry_incident_review(conn,source,incident_id)
                     conn.execute("delete from scene_notification_outbox where incident_id=?",(source,))
                 self._scene_merge_shared_objects(conn,incident_id)
             elif operation=="split":

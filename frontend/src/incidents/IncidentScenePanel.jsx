@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { appUrl, fetch, mediaUrl, recordingsHref } from "../shared/api.js";
-import { formatDateTime } from "../shared/format.js";
+import { formatDateTime, formatTimeOnly } from "../shared/format.js";
 import { incidentEpisodeClips, incidentSceneObjects, observationBoxStyle, observationImageDescription, sceneActivityText, sceneCoverageText, sceneEstablishmentText, sceneNotificationSummary, sceneObjectLabel } from "../incidentScene.mjs";
 import "./incident-scene.css";
 
@@ -28,7 +28,7 @@ export function ObservationImage({ observation, timeZone }) {
   </div>;
 }
 
-export function IncidentScenePanel({ incident, timeZone, canCorrectIncident = false, cameraNameById = new Map(), onSelectObservation, onSelectEpisode, onPlayScene, activeEpisodeId, onNextEpisode, onStopPlayback, onFindSimilar, onChanged }) {
+export function IncidentScenePanel({ incident, timeZone, compact = false, canCorrectIncident = false, cameraNameById = new Map(), onSelectObservation, onSelectEpisode, onPlayScene, activeEpisodeId, onNextEpisode, onStopPlayback, onFindSimilar, onChanged }) {
   const [corrected, setCorrected] = useState(null);
   const [selectedObjectId, setSelectedObjectId] = useState(null);
   const [selectedObservationId, setSelectedObservationId] = useState(null);
@@ -49,6 +49,7 @@ export function IncidentScenePanel({ incident, timeZone, canCorrectIncident = fa
   const objects = incidentSceneObjects(scene);
   const establishment = sceneEstablishmentText(scene?.establishment);
   const establishmentEvidence = objects.flatMap((object) => (object.observations || []).filter((observation) => scene?.establishment?.supporting_observation_ids?.includes(observation.id)).map((observation) => ({ object, observation })));
+  const hasEstablishmentDetails = scene?.establishment?.reason || establishmentEvidence.length > 0;
   const episodes = incidentEpisodeClips(scene);
   const activity = [...(scene?.activity || [])].sort((left, right) => Date.parse(left.captured_at) - Date.parse(right.captured_at));
   const selectedObject = objects.find((object) => String(object.id) === String(selectedObjectId));
@@ -59,6 +60,13 @@ export function IncidentScenePanel({ incident, timeZone, canCorrectIncident = fa
   const correctionItems = operation === "split" ? (scene?.episodes || []).map((episode) => ({ id: episode.id, label: `${cameraName(episode.camera_id)} · ${date(episode.start_at)}` }))
     : operation === "separate" ? observations.map((observation) => ({ id: observation.id, label: `${cameraName(observation.camera_id)} · ${date(observation.captured_at)}` })).filter((item) => item.id != null)
       : objects.map((object) => ({ id: object.id, label: `${object.label} · ${date(object.first_seen_at)}` }));
+  function selectObject(object, observation = null) {
+    setSelectedObjectId(object?.id ?? null);
+    setSelectedObservationId(observation?.id ?? null);
+    setSelectedIds([]);
+    setLabel(object?.label || "");
+    if (observation) onSelectObservation?.(observation);
+  }
   async function correct(event) {
     event.preventDefault(); setBusy(true); setError(""); setNotice("");
     try {
@@ -93,18 +101,18 @@ export function IncidentScenePanel({ incident, timeZone, canCorrectIncident = fa
     finally { setBusy(false); }
   }
   return <section className="incident-scene-panel" aria-label="Incident scene">
-    {establishment ? <section className={`incident-establishment ${establishment.status}`} aria-label="Activity establishment">
-      <strong>{establishment.title}</strong>
-      {establishment.status !== "established" ? <p>{establishment.explanation}</p> : null}
-      {establishment.status !== "established" ? <a href={appUrl("/observations")}>Review observations</a> : null}
-      {scene.establishment.reason || establishmentEvidence.length ? <details><summary>Establishment evidence</summary>
+    {establishment && (!compact || hasEstablishmentDetails) ? <section className={`incident-establishment ${establishment.status}`} aria-label="Activity establishment">
+      {!compact ? <strong>{establishment.title}</strong> : null}
+      {!compact && establishment.status !== "established" ? <p>{establishment.explanation}</p> : null}
+      {!compact && establishment.status !== "established" ? <a href={appUrl("/observations")}>Review observations</a> : null}
+      {hasEstablishmentDetails ? <details><summary>Establishment evidence</summary>
         {establishment.status === "established" ? <p>{establishment.explanation}</p> : null}
         {establishment.summary ? <p>{establishment.summary}</p> : null}
         {scene.establishment.reason ? <p>{String(scene.establishment.reason).replaceAll("_", " ")}</p> : null}
-        {establishmentEvidence.map(({ object, observation }) => <button key={observation.id} type="button" onClick={() => { setSelectedObjectId(object.id); setSelectedObservationId(observation.id); setSelectedIds([]); setLabel(object.label); onSelectObservation?.(observation); }}>{sceneObjectLabel(object)} · {cameraName(observation.camera_id)} · {date(observation.captured_at)}</button>)}
+        {establishmentEvidence.map(({ object, observation }) => <button key={observation.id} type="button" onClick={() => selectObject(object, observation)}>{sceneObjectLabel(object)} · {cameraName(observation.camera_id)} · {date(observation.captured_at)}</button>)}
       </details> : null}
     </section> : null}
-    {scene?.summary && (!establishment || establishment.status === "established") ? <p className="incident-scene-summary">{scene.summary}</p> : null}
+    {!compact && scene?.summary && (!establishment || establishment.status === "established") ? <p className="incident-scene-summary">{scene.summary}</p> : null}
     {onPlayScene && episodes.some((episode) => episode.clip) ? <button type="button" onClick={onPlayScene}>{episodes.every((episode) => episode.clip) ? "Play whole incident" : "Play available episodes"}</button> : null}
     {episodes.length ? <details className="incident-scene-disclosure incident-scene-recordings"><summary>Camera recordings</summary><div className="incident-episode-strip" aria-label="Camera episodes">{episodes.filter((episode) => !episode.part_index).map((episode) => <div key={episode.id}>
       <strong>{cameraName(episode.camera_id)}</strong><span>{date(episode.start_at)} — {date(episode.end_at)}</span>
@@ -118,10 +126,15 @@ export function IncidentScenePanel({ incident, timeZone, canCorrectIncident = fa
       {scene?.coverage?.analyzed_through ? <small>Analyzed through {date(scene.coverage.analyzed_through)}</small> : null}
       {scene?.coverage?.gaps?.length ? <ul>{scene.coverage.gaps.map((gap, index) => <li key={index}>{typeof gap === "string" ? gap : `${date(gap.start_at)} — ${date(gap.end_at)}${gap.reason ? ` · ${String(gap.reason).replaceAll("_", " ")}` : ""}`}</li>)}</ul> : null}
     </details>
-    <details className="incident-scene-disclosure incident-scene-objects"><summary>Observed objects</summary>
+    {compact ? (objects.length ? <label className="story-observation-picker">Inspect sighting
+      <select value={selectedObject?.id ?? ""} onChange={(event) => selectObject(objects.find((object) => String(object.id) === event.target.value))}>
+        <option value="">Select a sighting</option>
+        {objects.map((object) => <option key={object.id} value={object.id}>{sceneObjectLabel(object)} · {cameraName(object.observations?.[0]?.camera_id || scene.camera_id)} · {formatTimeOnly(object.first_seen_at, timeZone)}</option>)}
+      </select>
+    </label> : null) : <details className="incident-scene-disclosure incident-scene-objects"><summary>Observed objects</summary>
     {scene?.continuity_uncertain ? <p className="incident-scene-continuity">Some sightings may show the same subject. The list does not establish a count of unique identities.</p> : null}
     <div className="incident-summary-objects">{objects.map((object) => <div className={`inspector-detection summary${String(selectedObjectId) === String(object.id) ? " selected" : ""}`} key={object.id}>
-      <button type="button" className="incident-scene-object" aria-pressed={String(selectedObjectId) === String(object.id)} onClick={() => { setSelectedObjectId(object.id); setSelectedObservationId(null); setSelectedIds([]); setLabel(object.label); }}>
+      <button type="button" className="incident-scene-object" aria-pressed={String(selectedObjectId) === String(object.id)} onClick={() => selectObject(object)}>
         <strong>{sceneObjectLabel(object)}</strong><span>{object.certainty === "uncertain" || object.certainty === "possible" ? "Uncertain observation" : "Observed"}</span>
         {object.continuity_uncertain ? <small className="incident-object-continuity">May be the same {object.label === "person" ? "person" : "object"} as another sighting</small> : null}
         <small>{date(object.first_seen_at)}{object.last_seen_at && object.last_seen_at !== object.first_seen_at ? ` — ${date(object.last_seen_at)}` : ""}</small>
@@ -129,14 +142,14 @@ export function IncidentScenePanel({ incident, timeZone, canCorrectIncident = fa
       {onFindSimilar && object.source_event_id && Number.isInteger(object.object_index) ? <button type="button" onClick={() => onFindSimilar({ eventId: object.source_event_id, objectIndex: object.object_index, label: object.label, trackId: object.track_id ?? null })}>Find similar</button> : null}
     </div>)}</div>
     {!objects.length ? <p>No object observations are available in the analyzed evidence.</p> : null}
-    </details>
+    </details>}
     <details className="incident-scene-disclosure incident-scene-activity" aria-label="Scene activity"><summary>Activity</summary>
       {activity.length ? <ol>{(allActivity ? activity : activity.slice(0, 20)).map((entry, index) => {
         const subject = objects.find((object) => String(object.id) === String(entry.object_id));
         const observation = subject?.observations?.find((item) => String(item.id) === String(entry.observation_id));
         return <li key={`${entry.kind}-${entry.observation_id}-${index}`}>
           <strong>{sceneActivityText({ ...entry, label: subject ? sceneObjectLabel(subject) : entry.label })}</strong><small>{cameraName(entry.camera_id)} · {date(entry.captured_at)}</small>
-          {observation ? <button type="button" onClick={() => { setSelectedObjectId(subject.id); setSelectedObservationId(observation.id); setSelectedIds([]); setLabel(subject.label); onSelectObservation?.(observation); }}>View supporting observation</button> : null}
+          {observation ? <button type="button" onClick={() => selectObject(subject, observation)}>View supporting observation</button> : null}
         </li>;
       })}</ol> : <p>No activity changes have been established from the available observations.</p>}
       {activity.length > 20 ? <button type="button" onClick={() => setAllActivity((current) => !current)}>{allActivity ? "Show fewer activity changes" : `Show all ${activity.length} activity changes`}</button> : null}

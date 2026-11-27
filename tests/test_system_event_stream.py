@@ -1,4 +1,6 @@
 import asyncio
+import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -195,6 +197,51 @@ def test_motion_filter_applies_to_recovery_snapshot():
     chunks = asyncio.run(read_chunks(stream_handler(manager, Mock()), request, 3))
     assert '"incident_id":"motion"' not in chunks[1]
     assert '"incident_id":"person"' in chunks[1]
+
+
+def test_native_zone_alert_uses_its_own_camera_mute_and_survives_snapshot_race():
+    from survng.app.config import CameraConfig, DetectionZone
+
+    manager = notification_manager()
+    zone = DetectionZone(name="Driveway")
+    manager.config.cameras = [
+        CameraConfig(id="lower-garage", name="Lower Garage", stream_url="rtsp://example", zones=[zone]),
+        CameraConfig(id="gate", name="Gate", stream_url="rtsp://example", incident_notifications_enabled=False),
+    ]
+    confirmed_at = datetime(2026, 11, 27, 16, 0, 1, tzinfo=timezone.utc)
+
+    alert = {"alert_id": "alert-driveway", "camera_id": "lower-garage", "zone": "Driveway", "label": "car",
+             "observed_at": confirmed_at.isoformat(), "confirmed_at": confirmed_at.isoformat(),
+             "notifications_enabled": True}
+    payload = {"schema_version": 3, "revision": 4, "state": "active", "camera_id": "gate",
+               "incident_id": "new-driveway", "zone_alerts": [alert]}
+
+    manager.incidents.snapshot = lambda: [{key: value for key, value in payload.items() if key != "zone_alerts"}]
+    request = StreamRequest()
+    request.query_params["incidents_only"] = "1"
+
+    async def connect():
+        response = await stream_handler(manager, Mock())(request)
+        iterator = response.body_iterator
+        try:
+            retry = await anext(iterator)
+            manager.state_events.publish("incident_lifecycle", payload)
+            following = [await asyncio.wait_for(anext(iterator), 1) for _ in range(3)]
+            return [retry, *following]
+        finally:
+            await iterator.aclose()
+
+    chunks = asyncio.run(connect())
+    assert '"incidents":[]' in chunks[1]
+    assert "event: incident_lifecycle" in chunks[3]
+    update = json.loads(chunks[3].split("data: ", 1)[1])
+    assert update["notifications_enabled"] is False
+    assert update["zone_alerts"] == [alert]
+
+    manager.config.cameras[0].zones[0].notifications_enabled = False
+    request.headers["last-event-id"] = f"{manager.state_events.instance_id}:0"
+    chunks = asyncio.run(read_chunks(stream_handler(manager, Mock()), request, 2))
+    assert "alert-driveway" not in "".join(chunks)
 
 
 def test_native_stream_forwards_zone_occupancy_snapshots():

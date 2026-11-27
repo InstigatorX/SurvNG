@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from survng.app.events import EventStore
+from survng.app.incident_lifecycle import IncidentLifecycle
 from survng.app.motion_pipeline import MotionDecisionHandler
 from survng.app.motion_pipeline.object_detection import RecordedDetectionResult
 from survng.app.scene_zone_admission import evaluate_scene_establishment
@@ -217,3 +218,89 @@ def test_pending_evidence_can_establish_later_without_noise_prolonging_it(tmp_pa
         assert after == before
         verdict = conn.execute("select d.verdict from scene_activity_decisions d join scene_event_establishment x on x.decision_id=d.id where x.event_id=?", (noise["id"],)).fetchone()[0]
         assert verdict != "supported"
+
+
+def zone_alert_detection(epoch, name, *, eligible=True, frame_source="live_fast_path"):
+    detected = evidence(movement=0.06)[1]["observations"][0]
+    return {**detected, "captured_at_epoch": epoch, "frame_source": frame_source,
+            "alert_eligible": eligible, "zones": [name]}
+
+
+def zone_alert_objects(detected, *, historical=False):
+    qualification = {
+        "trigger_source": "visual_backup",
+        "features": notice()["features"],
+        "notice_activity_policy": notice()["activity_policy"],
+        "establishment_zone_policy": policy(zone(detected["zones"][0], "incident", 0.5, 1)),
+        "historical": historical,
+    }
+    return json.dumps([
+        detected, {"status": "scene_observations", "observations": [detected]},
+        {"status": "motion_qualification", "motion_qualification": qualification},
+    ])
+
+
+def test_confirmed_zone_alert_is_queued_without_tracking(tmp_path):
+    store = EventStore(tmp_path, zone_alert_rules=lambda camera_id: {"Driveway": True})
+    at = datetime.fromtimestamp(1001, timezone.utc)
+    detected = zone_alert_detection(1001, "Driveway")
+    store.add_event("gate", "motion", created_at=at.isoformat(), objects_json=zone_alert_objects(detected))
+    [entry] = store.scene_pending_notifications()
+    [alert] = entry["payload"]["zone_alerts"]
+    assert alert["camera_id"] == "gate"
+    assert alert["zone"] == "Driveway"
+    assert alert["label"] == "car"
+    assert alert["observed_at"] == at.isoformat()
+    assert alert["notifications_enabled"] is True
+    restarted = EventStore(tmp_path, zone_alert_rules=lambda camera_id: {"Driveway": True})
+    assert restarted.scene_pending_notifications()[0]["payload"]["zone_alerts"] == [alert]
+    published = []
+    lifecycle = IncidentLifecycle(restarted, published.append)
+    assert not lifecycle.snapshot()[0].get("zone_alerts")
+    assert lifecycle.run_once() == 1
+    assert published[0]["zone_alerts"] == [alert]
+    assert not restarted.scene_pending_notifications()
+
+    refined = zone_alert_detection(1002, "Driveway", frame_source="recorded_main")
+    restarted.refine_event_evidence(entry["payload"]["event_ids"][0], snapshot_path="", recording_path="",
+                                   objects_json=zone_alert_objects(refined))
+    assert lifecycle.run_once() == 1
+    assert "zone_alerts" not in published[1]
+
+
+def test_automatic_refinement_adds_zone_alert_but_tracking_and_historical_detection_do_not(tmp_path):
+    store = EventStore(tmp_path, zone_alert_rules=lambda camera_id: {"Driveway": True, "Road": True})
+    at = datetime.fromtimestamp(1001, timezone.utc)
+    detected = zone_alert_detection(1001, "Driveway", eligible=False)
+    event = store.add_event("gate", "motion", created_at=at.isoformat(), objects_json=zone_alert_objects(detected))
+    [entry] = store.scene_pending_notifications()
+    assert "zone_alerts" not in entry["payload"]
+
+    reviewed = zone_alert_detection(1002, "Road", frame_source="recorded_main")
+    store.update_object_tracking(event["id"], {"scene_observations": [reviewed]})
+    assert "zone_alerts" not in store.scene_pending_notifications()[0]["payload"]
+
+    refined = zone_alert_detection(1003, "Driveway", frame_source="recorded_main")
+    store.refine_event_evidence(event["id"], snapshot_path="", recording_path="", objects_json=zone_alert_objects(refined))
+    [alert] = store.scene_pending_notifications()[0]["payload"]["zone_alerts"]
+    assert alert["zone"] == "Driveway"
+
+    other_at = datetime.fromtimestamp(1100, timezone.utc)
+    historical = zone_alert_detection(1100, "Road")
+    store.add_event("gate", "motion", created_at=other_at.isoformat(), objects_json=zone_alert_objects(historical, historical=True))
+    assert [fact for entry in store.scene_pending_notifications() for fact in entry["payload"].get("zone_alerts", [])] == [alert]
+
+
+def test_zone_alert_keeps_original_mute_and_id_when_reconfirmed(tmp_path):
+    rules = {"Driveway": False}
+    store = EventStore(tmp_path, zone_alert_rules=lambda camera_id: rules)
+    at = datetime.fromtimestamp(1001, timezone.utc)
+    detected = zone_alert_detection(1001, "Driveway")
+    event = store.add_event("gate", "motion", created_at=at.isoformat(), objects_json=zone_alert_objects(detected))
+    [alert] = store.scene_pending_notifications()[0]["payload"]["zone_alerts"]
+    assert alert["notifications_enabled"] is False
+
+    rules["Driveway"] = True
+    refined = zone_alert_detection(1002, "Driveway", frame_source="recorded_main")
+    store.refine_event_evidence(event["id"], snapshot_path="", recording_path="", objects_json=zone_alert_objects(refined))
+    assert store.scene_pending_notifications()[0]["payload"]["zone_alerts"] == [alert]

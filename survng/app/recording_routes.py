@@ -15,7 +15,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
@@ -48,6 +48,7 @@ from .growing_playlists import (
 )
 from .media_exports import MediaExportManager
 from .manager_access import ManagerAccessCoordinator, guard_manager_generation
+from .recording_frame_steps import FRAME_STEP_CONTIGUOUS_SECONDS
 from .recording_media import (
     RECORDING_FMP4_VERSION,
     hls_map_transition,
@@ -103,6 +104,8 @@ class RecordingRouteDependencies:
     ensure_event_clip: Callable[..., Path]
     manager_lock: threading.RLock | None = None
     recording_preview_strip: Callable[..., tuple[Path, dict]] | None = None
+    recording_segment_frames: Callable[..., Any] | None = None
+    recording_step_frame: Callable[..., tuple[Path, float]] | None = None
     manager_access: ManagerAccessCoordinator | None = None
     encoded_fragment_source: (
         Callable[[Any], EncodedFragmentSource] | None
@@ -188,8 +191,7 @@ def _identity_hydrated_recording_incidents(
     incidents.sort(key=lambda item: item["start_epoch"], reverse=True)
     if not include_identities:
         return incidents
-    face_store = getattr(active_manager, "faces", None)
-    if face_store is None or not hasattr(face_store, "for_event_ids"):
+    if not callable(getattr(active_manager, "face_identity_observations", None)):
         return incidents
     from .incident_queries import IncidentQueryService
     return IncidentQueryService.with_faces(active_manager, incidents)
@@ -1026,6 +1028,115 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             preview_path,
             media_type="image/jpeg",
             headers=headers,
+        )
+
+    def _recording_row_at(active_manager: Any, camera_id: str, epoch: float, source: str) -> dict | None:
+        rows = active_manager.recorder.recording_rows_between(
+            camera_id, epoch - 0.001, epoch + 0.001, source, discover_missing=False,
+        )
+        return next(
+            (
+                candidate for candidate in rows
+                if float(candidate.get("start_epoch") or 0) <= epoch
+                < float(candidate.get("end_epoch") or 0)
+            ),
+            None,
+        )
+
+    @router.get("/api/cameras/{camera_id}/recordings/frames.json")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
+    def recording_frames(camera_id: str, epoch: float, source: str = "main") -> JSONResponse:
+        """Every frame time of the segment holding ``epoch``, for frame stepping.
+
+        Also says where the recording continues on either side: a time to
+        ask about in the segment just before and just after this one, or
+        null where there is no recording to step into.
+        """
+        active_manager = _require_recording_camera(deps, camera_id)
+        if deps.recording_segment_frames is None or deps.recording_step_frame is None:
+            raise HTTPException(status_code=404, detail="recording frame stepping is unavailable")
+        if not math.isfinite(epoch) or epoch <= 0:
+            raise HTTPException(status_code=400, detail="invalid recording frame time")
+        selected_source = recording_source(source)
+        row = _recording_row_at(active_manager, camera_id, epoch, selected_source)
+        if row is None:
+            raise HTTPException(status_code=404, detail="no recording exists at this time")
+        start = float(row["start_epoch"])
+        end = float(row["end_epoch"])
+        frames = deps.recording_segment_frames(active_manager, row)
+        # Only times this segment answers for: frame.jpg finds a frame by
+        # the segment that holds its time.
+        times = [
+            round(start + offset, 6) for offset in frames.times
+            if start <= start + offset < end
+        ]
+        if not times:
+            # The video lies outside the indexed span: show its first frame.
+            times = [round(start + max(0.0, min(frames.times[0], end - start - 0.001)), 6)]
+        previous = None
+        following = None
+        for nearby in active_manager.recorder.recording_rows_between(
+            camera_id,
+            start - FRAME_STEP_CONTIGUOUS_SECONDS - 0.001,
+            end + FRAME_STEP_CONTIGUOUS_SECONDS + 0.001,
+            selected_source,
+            discover_missing=False,
+        ):
+            nearby_start = float(nearby.get("start_epoch") or 0)
+            nearby_end = float(nearby.get("end_epoch") or 0)
+            if nearby_end <= nearby_start or (nearby_start == start and nearby_end == end):
+                continue
+            if nearby_start < start and start - FRAME_STEP_CONTIGUOUS_SECONDS <= nearby_end <= end:
+                # A time inside it, just before where this one takes over.
+                candidate = min(nearby_end, start) - 0.001
+                if nearby_start <= candidate and (previous is None or candidate > previous):
+                    previous = candidate
+            if nearby_end > end and start < nearby_start <= end + FRAME_STEP_CONTIGUOUS_SECONDS:
+                candidate = max(nearby_start, end)
+                if candidate < nearby_end and (following is None or candidate < following):
+                    following = candidate
+        return JSONResponse(
+            {
+                "source": selected_source,
+                "start": start,
+                "end": end,
+                "frames": times,
+                "previous": round(previous, 6) if previous is not None else None,
+                "next": round(following, 6) if following is not None else None,
+            },
+            # The segment after the newest one is indexed seconds later.
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @router.get("/api/cameras/{camera_id}/recordings/frame.jpg")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
+    def recording_frame(
+        camera_id: str,
+        epoch: float,
+        source: str = "main",
+        width: int = 1280,
+    ) -> FileResponse:
+        """The exact frame on screen at ``epoch`` (a time from frames.json)."""
+        active_manager = _require_recording_camera(deps, camera_id)
+        if deps.recording_step_frame is None:
+            raise HTTPException(status_code=404, detail="recording frame stepping is unavailable")
+        if not math.isfinite(epoch) or epoch <= 0:
+            raise HTTPException(status_code=400, detail="invalid recording frame time")
+        if width < 320 or width > 1920:
+            raise HTTPException(status_code=400, detail="invalid recording frame width")
+        row = _recording_row_at(active_manager, camera_id, epoch, recording_source(source))
+        if row is None:
+            raise HTTPException(status_code=404, detail="no recording exists at this time")
+        path, actual_epoch = deps.recording_step_frame(active_manager, row, epoch, width=width)
+        return FileResponse(
+            path,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "private, max-age=3600",
+                "X-SurvNG-Requested-Timestamp": f"{epoch:.6f}",
+                "X-SurvNG-Actual-Timestamp": f"{actual_epoch:.6f}",
+                "X-SurvNG-Timestamp-Source": "source_pts",
+            },
         )
 
     @router.get("/api/cameras/{camera_id}/recordings/preview-strip.jpg")
@@ -1936,6 +2047,8 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                 recording_window,
                 recording_preview,
                 recording_preview_strip,
+                recording_frames,
+                recording_frame,
                 recording_updates,
                 recording_day_hls_playlist,
                 recording_day_hls_init,

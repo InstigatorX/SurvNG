@@ -33,6 +33,14 @@ mobile-device setup. If MQTT incident publishing is enabled, the same enriched
 lifecycle payloads are also published to `survng/events/incidents` (using the
 configured topic prefix). MQTT discovery remains independent of native entities.
 
+Supported Home Assistant integration versions expose `survng_zone_alert` for
+automations that react to confirmed zone activity. An alert identifies the
+camera, zone, and object class that qualified during incident detection or
+automatic confirmation. An alert can arrive after the first incident revision.
+This works with on-demand tracking and uses the existing native event stream.
+Camera and zone notification switches apply. Use a zone occupancy entity for
+automations that depend on current presence.
+
 ## MQTT and Home Assistant
 
 Enable MQTT under **Admin → Integrations**.

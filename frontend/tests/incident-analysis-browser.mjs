@@ -46,7 +46,7 @@ try {
   const analyze = inspector.getByRole("button", { name: "Analyze extra details" });
   await analyze.waitFor();
   await inspector.getByRole("progressbar", { name: "Extra analysis progress" }).waitFor();
-  assert.equal(await inspector.locator(".incident-inspector-extra-analysis").evaluate((section) => section.previousElementSibling?.querySelector("h3")?.textContent), "Faces");
+  assert.equal(await inspector.locator(".incident-inspector-extra-analysis").evaluate((section) => section.previousElementSibling?.querySelector("h3")?.textContent), "Replay analysis");
   assert.equal(posts, 0, "desktop selected feed preview never admits optional work");
   await analyze.click();
   await page.getByText("Extra details queued", { exact: true }).waitFor();
