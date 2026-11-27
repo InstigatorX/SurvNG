@@ -928,11 +928,62 @@
   filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .8));
 }
 
+/* The review mark takes the upper right; the source dot moves to the lower right. */
+.live-activity-item.with-hud .live-activity-trigger,
 .incident-rail.comfortable .live-activity-item.with-hud .live-activity-trigger,
 .gallery-expanded .incident-rail .live-activity-item.with-hud .live-activity-trigger {
-  top: 6px;
-  right: 6px;
-  bottom: auto;
+  top: auto;
+  right: 8px;
+  bottom: 8px;
+}
+
+.incident-hud-review {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(3, 4, 5, .34);
+  backdrop-filter: blur(3px);
+  cursor: pointer;
+}
+
+.incident-hud-review input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--good);
+  cursor: inherit;
+}
+
+.incident-hud-review:has(input:disabled) {
+  cursor: default;
+}
+
+.incident-hud-review:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Leave room for the review mark beside the camera name. */
+.live-activity-item.with-hud .incident-hud-where {
+  max-width: calc(100% - 52px);
+}
+
+.incident-day-heading {
+  grid-column: 1 / -1;
+  margin: 10px 2px 0;
+  color: var(--ink);
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+
+.incident-gallery-error {
+  color: var(--bad-ink);
 }
 
 @media (max-width: 1180px) {
@@ -1019,4 +1070,50 @@
 
 .gallery-expanded .incident-rail .live-activity-item.with-hud .live-activity-thumb {
   aspect-ratio: auto;
+}
+
+/* Phone gallery: the same tiles as the desktop gallery. */
+.incident-phone-gallery .live-activity-item.with-hud {
+  min-width: 0;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 350px auto 197px;
+}
+
+.incident-phone-gallery .live-activity-item.with-hud .live-activity-select,
+.incident-phone-gallery .live-activity-item.with-hud .live-activity-thumb {
+  height: 100%;
+}
+
+.incident-phone-gallery .live-activity-item.with-hud .live-activity-thumb {
+  aspect-ratio: auto;
+}
+
+.incident-phone-gallery .incident-hud-review {
+  width: 40px;
+  height: 40px;
+  top: 2px;
+  right: 2px;
+}
+
+.incident-phone-gallery .incident-hud-review input {
+  width: 20px;
+  height: 20px;
+}
+
+.mobile-incidents .mobile-filter-lists {
+  display: grid;
+  border-top: 1px solid var(--line);
+}
+
+.mobile-incidents .mobile-filter-lists .incident-filter-check {
+  min-height: 44px;
+}
+
+.mobile-incidents .incident-gallery-status {
+  flex-wrap: wrap;
+  padding: 6px 10px;
 }

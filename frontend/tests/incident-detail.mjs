@@ -45,16 +45,17 @@ async function legacyChecks(width) {
     return route.fulfill({ status: 404, json: {} });
   });
   if (width < 500) {
-    // The incident list stays as it was: on phones a card opens this page.
+    // On phones the list is the gallery, and a picture opens this page.
     await page.goto(`${origin}/survng/incidents`);
     const filters = page.getByRole("button", { name: "Filters", exact: true });
     await filters.waitFor();
     await filters.click();
-    await page.getByLabel("Incident camera", { exact: true }).selectOption("front-door");
+    await page.getByRole("checkbox", { name: "Front Door", exact: true }).check();
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await page.getByRole("button", { name: "Reset filters" }).click();
+    assert.equal(await page.getByRole("checkbox", { name: "Front Door", exact: true }).isChecked(), false);
     await page.getByRole("button", { name: "Done", exact: true }).click();
-    await page.locator(".incident-card-open").first().click();
+    await page.locator("#incident-results .live-activity-select").first().click();
     await page.waitForURL("**/survng/incidents/incident-front-door-41");
   } else {
     await page.goto(`${origin}/survng/incidents/incident-front-door-41`);

@@ -175,7 +175,9 @@ curl -s -G 'http://127.0.0.1:8088/api/incidents/search' \
   --data-urlencode 'limit=20' | python -m json.tool
 ```
 
-`min_confidence` (0 to 1) keeps incidents with a detection at or above that confidence; with `object_label` set, that object must reach it. `camera_id`, `object_label`, `zone` and `person_id` each accept several values separated by commas and match any of them; different filters narrow each other. `limit` is capped at 100; page with `offset`.
+`min_confidence` (0 to 1) keeps incidents with a detection at or above that confidence; with `object_label` set, that object must reach it. `camera_id`, `object_label`, `zone` and `person_id` each accept several values separated by commas and match any of them; different filters narrow each other. `days_back` (0 to 31) extends the search from `day` into the whole local days before it, newest first.
+
+Each item carries `review_verdict` (`reviewed`, `keep`, `nothing_here` or null) and, when its picture is on disk, `image_version`. Passing that value as `s=` to the item's thumbnail or snapshot URL lets the response be cached for good; without it the image is revalidated on every use. `limit` is capped at 100; page with `offset`.
 
 Exact query parameter names follow the live OpenAPI schema at `/docs` if your build adds filters.
 

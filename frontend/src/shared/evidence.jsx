@@ -634,7 +634,7 @@ function liveActivityLabel(incident) {
   return text.charAt(0).toUpperCase() + text.slice(1) + (labels.length > names.length ? ` +${labels.length - names.length}` : "");
 }
 
-export function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, onSelect, onOpenOverlay, livePreview = false, hud = false, thumbnailWidth = null }) {
+export function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, onSelect, onOpenOverlay, livePreview = false, hud = false, thumbnailWidth = null, reviewed = null, reviewDisabled = false, onReviewChange = null }) {
   const labels = incidentLabels(incident);
   const trigger = incidentTriggerLabel(incident);
   const eventId = liveActivityEventId(incident);
@@ -658,6 +658,9 @@ export function IncidentListItem({ incident, cameraName, timeZone, selected, thu
           <time dateTime={time} title={livePreview ? fullTime : undefined}>{livePreview ? formatTimeOnly(time, timeZone) : fullTime}</time>
         </span>}
       </button>
+      {hud && reviewed != null ? <label className="incident-hud-review" title={reviewed ? "Reviewed" : "Mark as reviewed"}>
+        <input type="checkbox" checked={reviewed} disabled={reviewDisabled} onChange={(changeEvent) => onReviewChange?.(incident, changeEvent.target.checked)} aria-label={`Reviewed: ${cameraName} at ${fullTime}`} />
+      </label> : null}
       {!livePreview ? <IncidentSourceDot trigger={trigger} className="live-activity-trigger" onClick={() => onOpenOverlay(incident)} ariaLabel={`Preview exact ${trigger} event`} title={`${trigger} trigger`} /> : null}
       {!livePreview && !eventId ? <span className="sr-only">No exact event link is available.</span> : null}
     </article>

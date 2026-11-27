@@ -15,29 +15,39 @@ required incident zones are configured; the notice alone is not enough. The
 incident explains which evidence established it, separately from why an alert
 was sent.
 
-![Incidents workspace with evidence viewer](images/incidents-workspace.png)
-
 ## Browse incidents
 
-**Incidents** opens on a gallery of the selected day. Each picture carries the
-camera name and the date and time at its upper left, and icons for the observed
-objects at its lower left.
+**Incidents** opens on a gallery that starts at the selected day and runs on
+into the 30 days before it. Each picture carries the camera name and the date
+and time at its upper left, icons for the observed objects at its lower left,
+and a review mark at its upper right.
 
 - **Per row** sets how many incidents share a row, from 2 to 8. Pictures grow or
   shrink to fill the row, and SurvNG remembers the setting in this browser.
-- There are no pages. Scroll down and the next incidents of the day load as you
-  approach the end; the footer says how many are shown and when the day is complete.
+- There are no pages. Scroll down and the next incidents load as you approach
+  the end, with a heading where each earlier day begins. The footer says how
+  many are shown. To look further back than 30 days, pick an earlier day.
+- Check the mark on a picture when you have looked at the incident; uncheck it
+  to clear. It records the same **Reviewed** verdict as review mode, is shared
+  by everyone, and needs an administrator. An incident kept for later stays
+  unchecked.
 - Select a picture to preview that incident in the same overlay the Live page
   uses: play it, open the full incident, or close it to return to the gallery.
 - **Open viewer** switches to the side-by-side viewer; **Gallery**, or `Esc`,
   returns with the viewer's incident marked. A link to one incident opens the
   viewer directly.
 
+![The side-by-side incident viewer](images/incidents-workspace.png)
+
+On a phone the gallery shows one picture per row with the same marks, loads as
+you scroll, and opens an incident's own page when you select a picture.
+**Filters** opens the same lists and the confidence threshold.
+
 Filters sit in a pane left of the gallery:
 
 - **Objects** or **Motion**
-- Search (describe what you are looking for)
-- Day
+- Search (describe what you are looking for; a search covers the selected day only)
+- Day (the newest day shown)
 - Cameras, object types, zones and known people. Each is a list of checkboxes:
   check any number, and an incident matches when it has any checked value.
   Nothing checked in a list means all of them. Different lists narrow each

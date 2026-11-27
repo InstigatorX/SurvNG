@@ -35,6 +35,8 @@ export function eventThumbnailUrl(event, width = 720, quality = 82, options = {}
       width: String(Math.max(160, Math.min(2560, Math.round(Number(width) || 720)))),
       quality: String(Math.max(50, Math.min(95, Math.round(Number(quality) || 82)))),
     });
+    // Naming the file version lets the browser keep the picture without asking again.
+    if (event.image_version) params.set("s", String(event.image_version));
     return appUrl(`${event.snapshot_url}${event.snapshot_url.includes("?") ? "&" : "?"}${params}`);
   }
   const eventId = Number(event?.representative_event_id || event?.id);
@@ -44,6 +46,7 @@ export function eventThumbnailUrl(event, width = 720, quality = 82, options = {}
     quality: String(Math.max(50, Math.min(95, Math.round(Number(quality) || 82)))),
   });
   if (event?.evidence_revision != null) params.set("v", String(event.evidence_revision));
+  if (event?.image_version) params.set("s", String(event.image_version));
   if (options?.objectFocus) {
     params.set("object_focus", "true");
     if (options.incidentEligibleOnly) params.set("incident_eligible_only", "true");

@@ -29,9 +29,10 @@ const START = Date.parse("2026-03-08T23:31:00Z");
 const incidents = Array.from({ length: TOTAL }, (_, index) => {
   const labels = LABELS[index % LABELS.length];
   const camera = CAMERAS[index % CAMERAS.length].id;
-  const at = new Date(START - index * 240000).toISOString();
+  // 25 minutes apart: 150 incidents reach back about two and a half days.
+  const at = new Date(START - index * 1500000).toISOString();
   return { id: `incident-${index}`, incident_id: `incident-${index}`, revision: 1, camera_id: camera, camera_ids: [camera], created_at: at, start_at: at, end_at: at,
-    duration_seconds: 20, representative_event_id: 1000 + index, event_ids: [1000 + index], labels, has_objects: true, zones: ["Entry"], snapshot_path: "cover.webp",
+    duration_seconds: 20, representative_event_id: 1000 + index, event_ids: [1000 + index], review_verdict: index === 1 ? "reviewed" : index === 2 ? "keep" : null, image_version: `v${index}`, labels, has_objects: true, zones: ["Entry"], snapshot_path: "cover.webp",
     objects: labels.map((label) => ({ label, confidence: index % 2 ? .9 : .6, box: { x1: 300, y1: 200, x2: 600, y2: 600 }, detection_frame_width: 1280, detection_frame_height: 720 })) };
 });
 
@@ -40,8 +41,10 @@ try {
   page.setDefaultTimeout(10000);
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  const searches = [], requests = [], images = [];
+  const searches = [], requests = [], images = [], reviews = [];
+  let failReview = false;
   let failMore = false;
+  const daysBack = new Set();
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
@@ -49,11 +52,16 @@ try {
     if (path.includes("thumbnail.jpg")) images.push(path + url.search);
     if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
     if (path.endsWith("/api/cameras")) return route.fulfill({ json: CAMERAS });
+    if (path.endsWith("/review")) {
+      reviews.push([decodeURIComponent(path.split("/").at(-2)), route.request().postDataJSON().verdict]);
+      return failReview ? route.fulfill({ status: 500, json: {} }) : route.fulfill({ json: {} });
+    }
     if (path.endsWith("/face-names")) return route.fulfill({ json: { people: [{ id: 7, name: "Alex" }, { id: 9, name: "Sam" }] } });
     if (path.endsWith("/incidents/search")) {
       const limit = Number(url.searchParams.get("limit")), offset = Number(url.searchParams.get("offset"));
       const floor = Number(url.searchParams.get("min_confidence") || 0), label = url.searchParams.get("object_label");
       const camera = url.searchParams.get("camera_id");
+      daysBack.add(url.searchParams.get("days_back"));
       searches.push({ limit, offset, floor, label, type: url.searchParams.get("event_type"), camera, zone: url.searchParams.get("zone"), person: url.searchParams.get("person_id") });
       if (failMore && offset > 0) return route.fulfill({ status: 500, json: {} });
       const wanted = label ? label.split(",") : [];
@@ -83,6 +91,10 @@ try {
   assert.ok(!requests.some((path) => path.includes("face-captures")), "the desktop gallery does not look up names it never shows");
   // Pictures are requested near the size they are shown at: four per row at 1440 wide is about 280 px.
   assert.match(await tiles.first().locator("img").getAttribute("src"), /thumbnail\.jpg\?width=320&/);
+  // The picture's version is named, so the browser may keep it without asking again.
+  assert.match(await tiles.first().locator("img").getAttribute("src"), /[?&]s=v0(&|$)/);
+  // The list reaches into earlier days, with a heading where each begins.
+  assert.deepEqual([...daysBack], ["30"]);
   const warmed = images.filter((url) => /events\/10[6-9]\d\/thumbnail\.jpg\?width=320&/.test(url));
   assert.equal(warmed.length, 8, "the first two rows of the next chunk start loading before they are shown");
   assert.equal(new URL(page.url()).search, "");
@@ -100,6 +112,27 @@ try {
   const thumb = await first.locator(".live-activity-thumb").boundingBox();
   assert.ok(hud.x - thumb.x < 12 && hud.y - thumb.y < 12, "where and when at the upper left");
   assert.ok(icons.x - thumb.x < 12 && thumb.y + thumb.height - (icons.y + icons.height) < 12, "objects at the lower left");
+
+  // Review marks sit at the upper right; the source dot moves to the lower right.
+  const mark = (index) => tiles.nth(index).getByRole("checkbox");
+  assert.deepEqual([await mark(0).isChecked(), await mark(1).isChecked(), await mark(2).isChecked()], [false, true, false], "kept-for-later is not reviewed");
+  const markBox = await tiles.first().locator(".incident-hud-review").boundingBox();
+  const dotBox = await tiles.first().locator(".live-activity-trigger").boundingBox();
+  assert.ok(thumb.x + thumb.width - (markBox.x + markBox.width) < 12 && markBox.y - thumb.y < 12, "review mark at the upper right");
+  assert.ok(dotBox.y > thumb.y + thumb.height / 2 && dotBox.x > thumb.x + thumb.width / 2, "source dot at the lower right");
+  await mark(0).check();
+  assert.deepEqual(reviews.at(-1), ["incident-0", "reviewed"]);
+  assert.equal(await page.getByRole("dialog").count(), 0, "marking does not open the incident");
+  await mark(1).uncheck();
+  assert.deepEqual(reviews.at(-1), ["incident-1", null]);
+  // A mark that could not be saved goes back, and says so.
+  failReview = true;
+  await mark(3).click();
+  await page.locator(".incident-gallery-error").waitFor();
+  assert.equal(await mark(3).isChecked(), false);
+  failReview = false;
+  // Leave the tile, which lifts slightly under the pointer.
+  await page.mouse.move(5, 5);
 
   // Filters sit in a pane left of the gallery.
   const pane = page.getByRole("complementary", { name: "Incident filters" });
@@ -140,7 +173,13 @@ try {
   // Off-screen tiles are not rendered, so read their text from the document.
   assert.equal(await tiles.first().locator(".incident-hud-where b").textContent(), "Front Door", "earlier tiles stay");
   assert.equal(await tiles.first().evaluate((element) => getComputedStyle(element).contentVisibility), "auto");
-  assert.match(await status.innerText(), new RegExp(`All ${TOTAL} incidents`));
+  assert.match(await status.innerText(), new RegExp(`All ${TOTAL} incidents from this day and the 30 days before it`));
+  // 150 incidents 25 minutes apart cross two midnights in the app's time zone,
+  // and none of them is on the day selected (today), so the first has a heading too.
+  const headings = await page.locator(".incident-day-heading").allTextContents();
+  assert.equal(headings.length, 3, `a heading where each day begins, got ${JSON.stringify(headings)}`);
+  assert.equal(new Set(headings).size, 3);
+  assert.ok(headings.every((text) => /^[A-Z][a-z]+day, [A-Z][a-z]{2} \d{1,2}$/.test(text)), JSON.stringify(headings));
   const settled = deeper().length;
   await toEnd();
   await page.waitForTimeout(400);
@@ -261,5 +300,64 @@ try {
   assert.equal(await page.locator(".gallery-expanded").count(), 0);
   assert.deepEqual(errors, []);
   await page.close();
-  console.log("Incident gallery: default view, scroll loading, per-row sizing, picture overlay, multi-select filters, confidence, incident preview and viewer round trip passed");
+
+  // Phone: the same gallery, scroll loading, multi-select filters and review marks.
+  const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  phone.setDefaultTimeout(10000);
+  const phoneErrors = [], phoneSearches = [], phoneReviews = [];
+  phone.on("pageerror", (error) => phoneErrors.push(error.message));
+  await phone.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
+    if (path.endsWith("/api/cameras")) return route.fulfill({ json: CAMERAS });
+    if (path.endsWith("/face-names")) return route.fulfill({ json: { people: [{ id: 7, name: "Alex" }] } });
+    if (path.endsWith("/review")) { phoneReviews.push([decodeURIComponent(path.split("/").at(-2)), route.request().postDataJSON().verdict]); return route.fulfill({ json: {} }); }
+    if (path.endsWith("/incidents/search")) {
+      const limit = Number(url.searchParams.get("limit")), offset = Number(url.searchParams.get("offset")), camera = url.searchParams.get("camera_id");
+      phoneSearches.push({ limit, offset, camera, floor: Number(url.searchParams.get("min_confidence") || 0) });
+      const matched = incidents.filter((item) => !camera || camera.split(",").includes(item.camera_id));
+      return route.fulfill({ json: { items: matched.slice(offset, offset + limit), total: matched.length, facets: { camera_ids: CAMERAS.map((item) => item.id), labels: ["car", "person"], zones: ["Entry"] } } });
+    }
+    if (path.endsWith(".jpg") || path.endsWith(".webp") || path.endsWith("/snapshot")) return route.fulfill({ contentType: "image/svg+xml", body: svg });
+    return route.fulfill({ json: {} });
+  });
+  await phone.goto(`${origin}/survng/incidents`);
+  const phoneTiles = phone.locator("#incident-results .live-activity-item");
+  await phoneTiles.first().waitFor();
+  assert.equal(await phoneTiles.count(), INCIDENT_GALLERY_CHUNK);
+  assert.equal(await phone.locator(".incident-pager").count(), 0, "no pages on the phone either");
+  assert.equal(await phoneTiles.first().locator(".incident-hud-where b").innerText(), "Front Door");
+  assert.equal(await phoneTiles.first().locator(".live-activity-copy").count(), 0);
+  assert.ok(await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "nothing overflows sideways");
+  const phoneTile = await phoneTiles.first().boundingBox();
+  const phoneMark = await phoneTiles.first().locator(".incident-hud-review").boundingBox();
+  assert.ok(phoneTile.width > 300, "one picture per row");
+  assert.ok(phoneMark.width >= 40 && phoneMark.height >= 40, "the review mark is large enough to tap");
+  await phoneTiles.first().getByRole("checkbox").check();
+  assert.deepEqual(phoneReviews, [["incident-0", "reviewed"]]);
+  assert.equal(new URL(phone.url()).pathname, "/survng/incidents", "marking does not open the incident");
+  // Scrolling to the end adds more, whichever element the layout scrolls.
+  await phone.evaluate(() => { const list = document.querySelector("#incident-results"); list.scrollTop = list.scrollHeight; window.scrollTo(0, document.documentElement.scrollHeight); });
+  await phone.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length >= count, 2 * INCIDENT_GALLERY_CHUNK);
+  await phone.evaluate(() => { document.querySelector("#incident-results").scrollTop = 0; window.scrollTo(0, 0); });
+  // The filter sheet has the same lists and the confidence threshold.
+  await phone.getByRole("button", { name: "Filters", exact: true }).click();
+  await phone.getByRole("checkbox", { name: "Front Driveway", exact: true }).check();
+  await phone.getByRole("checkbox", { name: "Front Door", exact: true }).check();
+  await phone.waitForFunction(() => document.querySelector(".incident-gallery-status")?.innerText.includes("of 150"));
+  assert.equal(phoneSearches.at(-1).camera, "driveway,front-door");
+  await phone.getByRole("checkbox", { name: "Front Door", exact: true }).uncheck();
+  await phone.waitForFunction(() => document.querySelector(".incident-gallery-status")?.innerText.includes("of 75"));
+  assert.equal(phoneSearches.at(-1).camera, "driveway");
+  await phone.getByRole("slider", { name: "Confidence threshold" }).fill("80");
+  await phone.waitForTimeout(700);
+  assert.equal(phoneSearches.at(-1).floor, 0.8);
+  await phone.getByRole("button", { name: "Done", exact: true }).click();
+  // A picture opens the incident's own page.
+  await phoneTiles.first().locator(".live-activity-select").click();
+  await phone.waitForURL("**/survng/incidents/incident-1");
+  assert.deepEqual(phoneErrors, []);
+  await phone.close();
+  console.log("Incident gallery: default view, scroll loading, per-row sizing, picture overlay, multi-select filters, confidence, review marks, earlier days, incident preview, viewer round trip and phone layout passed");
 } finally { await browser.close(); await new Promise((resolve) => server.close(resolve)); }

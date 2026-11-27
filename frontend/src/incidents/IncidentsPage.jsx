@@ -1,5 +1,4 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useIncidentFaceNames } from "../people/IncidentPeople.jsx";
 import {
   ChevronLeft,
   ChevronRight,
@@ -32,7 +31,9 @@ import { IncidentAnalysisStatus } from "./IncidentAnalysisStatus.jsx";
 import { useIncidentPlayback } from "./useIncidentPlayback.js";
 import "./mobile-incidents.css";
 
-const NO_INCIDENTS = Object.freeze([]);
+// The list runs on from the chosen day into this many days before it.
+const INCIDENT_DAYS_BACK = 30;
+const REVIEWED_VERDICTS = new Set(["reviewed", "nothing_here"]);
 // A long gallery re-renders often, and most tiles have not changed.
 const IncidentTile = memo(IncidentListItem);
 const FILTER_PANE_WIDTH = 264;
@@ -162,10 +163,11 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const tabletInspectorToggleRef = useRef(null);
   const relatedPreviewRequestRef = useRef(0);
   const mobileView = isMobileViewport();
-  const galleryMode = !mobileView && galleryExpanded;
+  // The phone layout is always the gallery; a tile there opens the incident's page.
+  const galleryMode = mobileView || galleryExpanded;
   const galleryModeRef = useRef(galleryMode);
   galleryModeRef.current = galleryMode;
-  const incidentsPerPage = mobileView ? 12 : galleryMode ? galleryWanted : incidentPageSize;
+  const incidentsPerPage = galleryMode ? galleryWanted : incidentPageSize;
   const cameraNameById = useMemo(() => new Map(cameras.map((camera) => [camera.id, camera.name || camera.id])), [cameras]);
   const incidentCameraOptions = incidentFacets.camera_ids || [];
   const incidentObjectOptions = incidentFacets.labels || [];
@@ -244,8 +246,6 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const incidentPageCount = Math.max(1, Math.ceil(displayedIncidentTotal / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
   const pagedIncidents = galleryIncidents;
-  // Only the phone layout shows names on its cards.
-  const incidentFaceNames = useIncidentFaceNames(mobileView ? pagedIncidents : NO_INCIDENTS);
   incidentPagingRef.current = {
     // The old page stays visible while the next request is in flight. Anchor
     // its actual offset if the user toggles the gallery before that load ends.
@@ -258,12 +258,50 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const previewTile = useCallback((incident) => tileHandlersRef.current.preview(incident), []);
   galleryGrowthRef.current = { count: visibleIncidents.length, total: displayedIncidentTotal, wanted: galleryWanted };
   // Ask for pictures near the size they are shown at, not one large size for every layout.
-  const tileCssWidth = galleryMode
-    ? (viewportWidth - FILTER_PANE_WIDTH - 16 - 8 * (galleryColumns - 1)) / galleryColumns
+  const pixelRatio = typeof window !== "undefined" ? window.devicePixelRatio : 1;
+  const tileCssWidth = mobileView ? viewportWidth - 40
+    : galleryMode ? (viewportWidth - FILTER_PANE_WIDTH - 16 - 8 * (galleryColumns - 1)) / galleryColumns
     : 160;
-  const tileThumbnailWidth = thumbnailWidthFor(tileCssWidth, typeof window !== "undefined" ? window.devicePixelRatio : 1);
+  // A phone shows one picture per row; past 1.5x the extra detail is not worth the bytes on a mobile link.
+  const tileThumbnailWidth = thumbnailWidthFor(tileCssWidth, mobileView ? Math.min(1.5, pixelRatio) : pixelRatio);
   const tileImageRef = useRef({});
-  tileImageRef.current = { width: tileThumbnailWidth, columns: galleryColumns, plain: thumbnailObjectFocus === "off" };
+  tileImageRef.current = { width: tileThumbnailWidth, columns: mobileView ? 2 : galleryColumns, plain: thumbnailObjectFocus === "off" };
+
+  // Review marks: the checkbox answers at once, then the server confirms.
+  const [reviewOverrides, setReviewOverrides] = useState({});
+  const [reviewError, setReviewError] = useState("");
+  const isReviewed = (incident) => reviewOverrides[String(incident.id)] ?? REVIEWED_VERDICTS.has(incident.review_verdict);
+  async function changeReview(incident, checked) {
+    const key = String(incident.id);
+    setReviewError("");
+    setReviewOverrides((current) => ({ ...current, [key]: checked }));
+    try {
+      const response = await fetch(`/api/incidents/${encodeURIComponent(incident.incident_id || incident.id)}/review`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ verdict: checked ? "reviewed" : null }),
+      });
+      if (!response.ok) throw new Error(response.status === 403 ? "Only an administrator can mark incidents as reviewed." : "Could not save the review mark. Try again.");
+    } catch (failure) {
+      setReviewOverrides((current) => { const next = { ...current }; delete next[key]; return next; });
+      setReviewError(failure.message || "Could not save the review mark. Try again.");
+    }
+  }
+  const reviewTile = useCallback((incident, checked) => tileHandlersRef.current.review(incident, checked), []);
+
+  // Day headings where the list crosses into an earlier day.
+  const dayHeadings = useMemo(() => {
+    const headings = new Map();
+    let previous = incidentDay || today;
+    for (const incident of visibleIncidents) {
+      const epoch = new Date(incident.start_at || incident.created_at || 0).getTime();
+      if (!Number.isFinite(epoch) || epoch <= 0) continue;
+      const key = dateKeyForTimeZone(epoch, timeZone);
+      if (key !== previous) {
+        headings.set(String(incident.id), new Intl.DateTimeFormat("en-US", { timeZone, weekday: "long", month: "short", day: "numeric" }).format(new Date(epoch)));
+        previous = key;
+      }
+    }
+    return headings;
+  }, [visibleIncidents, incidentDay, today, timeZone]);
   useEffect(() => {
     if (!displayedIncident && tabletInspectorOpen) setTabletInspectorOpen(false);
   }, [displayedIncident, tabletInspectorOpen]);
@@ -402,13 +440,17 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   }
 
   function loadMoreGalleryIfNearEnd() {
-    const rail = incidentRailListRef.current;
+    // The desktop gallery scrolls inside its own list. On a phone the list
+    // scrolls too when the layout bounds it, and otherwise the page does.
+    const list = incidentRailListRef.current || document.getElementById("incident-results");
+    const scroller = list && list.scrollHeight > list.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(list).overflowY)
+      ? list : document.scrollingElement;
     const growth = galleryGrowthRef.current;
-    if (!rail || !galleryModeRef.current) return;
+    if (!scroller || !galleryModeRef.current) return;
     // Fewer shown than asked for means a load is in flight or has failed.
     if (growth.count >= growth.total || growth.count < growth.wanted) return;
     // Start early: the next incidents are already fetched, so appending them is immediate.
-    if (rail.scrollHeight - rail.scrollTop - rail.clientHeight > Math.max(600, rail.clientHeight * 1.5)) return;
+    if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > Math.max(600, scroller.clientHeight * 1.5)) return;
     setGalleryWanted((wanted) => (wanted === growth.wanted ? wanted + INCIDENT_GALLERY_CHUNK : wanted));
   }
 
@@ -420,6 +462,16 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     });
     return () => window.cancelAnimationFrame(frame);
   }, [galleryMode, incidentResultSource, displayedIncidentTotal, galleryColumns, galleryWanted, semanticIncidentActive]);
+
+  useEffect(() => {
+    if (!mobileView) return undefined;
+    const onScroll = () => loadMoreGalleryIfNearEnd();
+    const onResize = () => setViewportWidth(window.innerWidth);
+    // Capture, so a scroll inside the list is heard as well as a page scroll.
+    window.addEventListener("scroll", onScroll, { passive: true, capture: true });
+    window.addEventListener("resize", onResize);
+    return () => { window.removeEventListener("scroll", onScroll, { capture: true }); window.removeEventListener("resize", onResize); };
+  }, [mobileView]);
 
   useEffect(() => {
     if (confidenceDraft === incidentMinConfidence) return undefined;
@@ -725,6 +777,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       if (incidentZoneFilter !== "all") filters.set("zone", incidentZoneFilter);
       if (incidentPersonFilter !== "all") filters.set("person_id", incidentPersonFilter);
       if (confidenceApplies && incidentMinConfidence > 0) filters.set("min_confidence", String(incidentMinConfidence / 100));
+      filters.set("days_back", String(INCIDENT_DAYS_BACK));
       if (galleryMode) return loadGallery(filters);
       galleryLoadedRef.current = { key: "", token: -1, items: [] };
       const query = new URLSearchParams(filters);
@@ -891,7 +944,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   function selectGalleryIncident(incident) {
     toggleIncident(incident.id);
   }
-  tileHandlersRef.current = { select: galleryExpanded ? openIncidentOverlay : selectGalleryIncident, preview: openIncidentOverlay };
+  tileHandlersRef.current = { select: !mobileView && galleryExpanded ? openIncidentOverlay : selectGalleryIncident, preview: openIncidentOverlay, review: changeReview };
 
   function changeIncidentPage(page, { scroll = true } = {}) {
     retainedGallerySelectionRef.current = null;
@@ -1047,6 +1100,52 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     </div>
   );
 
+  const tileHud = galleryMode || incidentDensity === "comfortable";
+  function renderTile(incident) {
+    const heading = galleryMode ? dayHeadings.get(String(incident.id)) : null;
+    const tile = <IncidentTile key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone}
+      selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus}
+      thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} thumbnailWidth={tileThumbnailWidth} hud={tileHud}
+      reviewed={tileHud ? isReviewed(incident) : null} reviewDisabled={!canCorrectIncident} onReviewChange={reviewTile}
+      onSelect={selectTile} onOpenOverlay={previewTile} />;
+    return heading ? <React.Fragment key={incident.id}><h3 className="incident-day-heading">{heading}</h3>{tile}</React.Fragment> : tile;
+  }
+  const galleryStatus = (
+    <div className="incident-gallery-status" role="status">
+      {reviewError ? <span className="incident-gallery-error">{reviewError}</span> : null}
+      {galleryMoreError ? <><span>{galleryMoreError}</span><button type="button" onClick={() => setIncidentRefreshToken((value) => value + 1)}>Retry</button></>
+        : !visibleIncidents.length ? null
+        : visibleIncidents.length < displayedIncidentTotal ? <span>Showing {visibleIncidents.length} of {displayedIncidentTotal}. Scroll for more.</span>
+        : semanticIncidentActive ? <span>All {displayedIncidentTotal} {displayedIncidentTotal === 1 ? "match" : "matches"}.</span>
+        : <span>All {displayedIncidentTotal} {displayedIncidentTotal === 1 ? "incident" : "incidents"} from this day and the {INCIDENT_DAYS_BACK} days before it.</span>}
+    </div>
+  );
+  const confidenceControl = (
+    <section className="incident-filter-section incident-filter-confidence">
+      <h3 id="incident-confidence-heading">Confidence threshold</h3>
+      <input type="range" min={0} max={95} step={5} value={confidenceApplies ? confidenceDraft : 0} disabled={!confidenceApplies} onChange={(event) => setConfidenceDraft(Number(event.target.value))} aria-labelledby="incident-confidence-heading" aria-valuetext={confidenceDraft > 0 ? `${confidenceDraft}% or higher` : "Any confidence"} style={{ "--fill": `${(confidenceApplies ? confidenceDraft : 0) / 95 * 100}%` }} />
+      <div className="incident-filter-confidence-readout">
+        <span>{displayedIncidentTotal} {displayedIncidentTotal === 1 ? "result" : "results"}</span>
+        <output>{confidenceApplies && confidenceDraft > 0 ? `${confidenceDraft}%` : "Any"}</output>
+      </div>
+      {!confidenceApplies ? <small>Motion-only incidents have no detection confidence.</small>
+        : semanticIncidentActive ? <small>Search matches are not filtered by confidence.</small> : null}
+    </section>
+  );
+  const filterLists = (
+    <>
+      <IncidentFilterChecks title="Cameras" filter={incidentCameraFilter} onChange={setIncidentCameraFilter}
+        options={incidentCameraOptions.map((id) => ({ value: id, label: cameraNameById.get(id) || id }))} empty="No cameras in this period." />
+      <IncidentFilterChecks title="Objects" filter={incidentObjectFilter} onChange={setIncidentObjectFilter} columns
+        options={incidentObjectOptions.map((label) => ({ value: label, label: label.replaceAll("_", " "), icon: <IncidentObjectIcon label={label} size={15} /> }))} empty="No objects in this period." />
+      {confidenceControl}
+      <IncidentFilterChecks title="Zones" filter={incidentZoneFilter} onChange={setIncidentZoneFilter}
+        options={incidentZoneOptions.map((zone) => ({ value: zone, label: zone }))} empty="No zones in this period." />
+      <IncidentFilterChecks title="People" filter={incidentPersonFilter} onChange={(next) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(next); }}
+        options={incidentPeople.map((person) => ({ value: String(person.id), label: person.name }))} empty="No named people yet." />
+    </>
+  );
+
   if (!mobileView) {
     return (
       <main className={`incidents-desktop-page with-inspector${galleryExpanded ? " gallery-expanded" : ""}`}>
@@ -1062,24 +1161,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                 {incidentDayControl()}
               </div>
               <div className="incident-filter-pane-scroll">
-                <IncidentFilterChecks title="Cameras" filter={incidentCameraFilter} onChange={setIncidentCameraFilter}
-                  options={incidentCameraOptions.map((id) => ({ value: id, label: cameraNameById.get(id) || id }))} empty="No cameras on this day." />
-                <IncidentFilterChecks title="Objects" filter={incidentObjectFilter} onChange={setIncidentObjectFilter} columns
-                  options={incidentObjectOptions.map((label) => ({ value: label, label: label.replaceAll("_", " "), icon: <IncidentObjectIcon label={label} size={15} /> }))} empty="No objects on this day." />
-                <section className="incident-filter-section incident-filter-confidence">
-                  <h3 id="incident-confidence-heading">Confidence threshold</h3>
-                  <input type="range" min={0} max={95} step={5} value={confidenceApplies ? confidenceDraft : 0} disabled={!confidenceApplies} onChange={(event) => setConfidenceDraft(Number(event.target.value))} aria-labelledby="incident-confidence-heading" aria-valuetext={confidenceDraft > 0 ? `${confidenceDraft}% or higher` : "Any confidence"} style={{ "--fill": `${(confidenceApplies ? confidenceDraft : 0) / 95 * 100}%` }} />
-                  <div className="incident-filter-confidence-readout">
-                    <span>{displayedIncidentTotal} {displayedIncidentTotal === 1 ? "result" : "results"}</span>
-                    <output>{confidenceApplies && confidenceDraft > 0 ? `${confidenceDraft}%` : "Any"}</output>
-                  </div>
-                  {!confidenceApplies ? <small>Motion-only incidents have no detection confidence.</small>
-                    : semanticIncidentActive ? <small>Search matches are not filtered by confidence.</small> : null}
-                </section>
-                <IncidentFilterChecks title="Zones" filter={incidentZoneFilter} onChange={setIncidentZoneFilter}
-                  options={incidentZoneOptions.map((zone) => ({ value: zone, label: zone }))} empty="No zones on this day." />
-                <IncidentFilterChecks title="People" filter={incidentPersonFilter} onChange={(next) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(next); }}
-                  options={incidentPeople.map((person) => ({ value: String(person.id), label: person.name }))} empty="No named people yet." />
+                {filterLists}
               </div>
               <div className="incident-filter-pane-foot incident-toolbar-summary" aria-label={`${activeIncidentFilterCount} active filters`}>
                 <button type="button" onClick={clearIncidentFilters} disabled={!activeIncidentFilterCount}>Clear filters{activeIncidentFilterCount ? ` (${activeIncidentFilterCount})` : ""}</button>
@@ -1116,9 +1198,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
               <div id="incident-results" className="incident-rail-list" ref={incidentRailListRef} aria-label="Incidents" onScroll={galleryExpanded ? loadMoreGalleryIfNearEnd : undefined} onWheel={() => { galleryRevealRef.current = 0; }} onPointerDown={() => { galleryRevealRef.current = 0; }} style={galleryExpanded ? { "--incident-gallery-columns": galleryColumns } : undefined}>
                 {displayedIncidentLoading && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
                 {!galleryIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
-                {galleryIncidents.length ? pagedIncidents.map((incident) => (
-                  <IncidentTile key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} thumbnailWidth={tileThumbnailWidth} hud={galleryExpanded || incidentDensity === "comfortable"} onSelect={selectTile} onOpenOverlay={previewTile} />
-                )) : null}
+                {galleryIncidents.length ? pagedIncidents.map(renderTile) : null}
                 {!displayedIncidentLoading && !displayedIncidentError && !galleryIncidents.length ? (
                   <div className="empty-state">
                     {linkedIncidentLoading
@@ -1130,12 +1210,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                 ) : null}
               </div>
               {galleryExpanded ? (
-                <div className="incident-gallery-status" role="status">
-                  {galleryMoreError ? <><span>{galleryMoreError}</span><button type="button" onClick={() => setIncidentRefreshToken((value) => value + 1)}>Retry</button></>
-                    : !galleryIncidents.length ? null
-                    : galleryIncidents.length < displayedIncidentTotal ? <span>Showing {galleryIncidents.length} of {displayedIncidentTotal}. Scroll for more.</span>
-                    : <span>All {displayedIncidentTotal} {displayedIncidentTotal === 1 ? "incident" : "incidents"} for this day.</span>}
-                </div>
+                galleryStatus
               ) : (
                 <div className={`incident-pager ${displayedIncidentTotal > incidentsPerPage ? "" : "placeholder"}`} aria-label="Incident pages" aria-hidden={displayedIncidentTotal <= incidentsPerPage}>
                   <button type="button" onClick={() => changeIncidentPage(Math.max(0, incidentPage - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
@@ -1275,69 +1350,21 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
           <div className="incident-filter-selects">
             <label><span>Activity</span><select value={eventFilter} aria-label="Incident type" onChange={(event) => { resetSemanticIncidentSearch(); setEventFilter(event.target.value); }}><option value="object">Objects</option><option value="motion">Motion</option></select></label>
             {incidentDayControl({ caption: true })}
-            <label>
-              <span>Camera</span>
-              <select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)} aria-label="Incident camera">
-                <option value="all">All cameras</option>
-                {incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}
-              </select>
-            </label>
-            <label>
-              <span>Object type</span>
-              <select value={incidentObjectFilter} onChange={(event) => setIncidentObjectFilter(event.target.value)} aria-label="Incident object">
-                <option value="all">All objects</option>
-                {incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}
-              </select>
-            </label>
-            <label>
-              <span>Zone</span>
-              <select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)} aria-label="Incident zone">
-                <option value="all">All zones</option>
-                {incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}
-              </select>
-            </label>
-            <label>
-              <span>Person</span>
-              <select value={incidentPersonFilter} onChange={(event) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(event.target.value); }} aria-label="Known person">
-                <option value="all">All people</option>
-                {incidentPeople.map((person) => <option value={person.id} key={person.id}>{person.name}</option>)}
-              </select>
-            </label>
           </div>
           {semanticIncidentControl}
           <div className="mobile-filter-actions">
             <button type="button" onClick={() => { clearIncidentFilters(); setIncidentDay(today); setEventFilter("object"); resetSemanticIncidentSearch(); }}>Reset filters</button>
             <button type="button" onClick={() => setMobileFiltersOpen(false)}>Done</button>
           </div>
+          <div className="mobile-filter-lists">{filterLists}</div>
         </div> : null}
-        <div className="incident-gallery">
-          {displayedIncidentLoading ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
-          {!displayedIncidentLoading && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
-          {!displayedIncidentLoading && !displayedIncidentError && visibleIncidents.length
-            ? pagedIncidents.map((incident) => (
-              <IncidentCard
-                key={incident.id}
-                incident={incident}
-                faceNames={incidentFaceNames[String(incident.id)]}
-                timeZone={timeZone}
-                expanded={false}
-                thumbnailAnnotations={thumbnailAnnotations}
-                thumbnailObjectFocus={thumbnailObjectFocus}
-                thumbnailObjectFocusZoom={thumbnailObjectFocusZoom}
-                onToggle={toggleIncident}
-                onSelect={() => toggleIncident(incident.id)}
-              />
-            ))
-            : null}
+        <div id="incident-results" className="incident-gallery incident-phone-gallery" aria-label="Incidents">
+          {displayedIncidentLoading && !visibleIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
+          {!visibleIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
+          {visibleIncidents.length ? pagedIncidents.map(renderTile) : null}
           {!displayedIncidentLoading && !displayedIncidentError && !visibleIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "No semantic matches for the selected filters." : "No incidents match the current filters."}</div> : null}
         </div>
-        {displayedIncidentTotal > incidentsPerPage ? (
-          <div className="incident-pager" aria-label="Incident pages">
-            <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
-            <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
-            <button type="button" onClick={() => setIncidentPage((page) => Math.min(incidentPageCount - 1, page + 1))} disabled={clampedIncidentPage >= incidentPageCount - 1}>Next</button>
-          </div>
-        ) : null}
+        {galleryStatus}
       </section>
       {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} canCorrectIncident={canCorrectIncident} onClose={closeOpenedIncident} onSelect={openIncidentOverlay} onRefresh={refresh} /> : null}
     </main>

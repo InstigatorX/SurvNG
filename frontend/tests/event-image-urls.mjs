@@ -41,4 +41,10 @@ for (const bad of [0, -5, Number.NaN, undefined]) assert.equal(thumbnailWidthFor
 assert.equal(thumbnailWidthFor(282, "bad"), 320);
 assert.match(eventThumbnailUrl({ id: 7, evidence_revision: 2 }, thumbnailWidthFor(282, 1)), /thumbnail\.jpg\?width=320&quality=82&v=2$/);
 
+// A card that names its picture's version carries it, so the browser may keep the picture.
+assert.match(eventThumbnailUrl({ id: 7, evidence_revision: 2, image_version: "ab12" }, 320), /thumbnail\.jpg\?width=320&quality=82&v=2&s=ab12$/);
+assert.match(eventThumbnailUrl({ snapshot_url: "/api/incidents/observations/obs-1/snapshot", snapshot_observation_id: "obs-1", image_version: "cd34" }, 320),
+  /observations\/obs-1\/snapshot\?width=320&quality=82&s=cd34$/);
+assert.doesNotMatch(eventThumbnailUrl({ id: 7, evidence_revision: 2 }, 320), /[?&]s=/);
+
 console.log("event image revision URL tests passed");
