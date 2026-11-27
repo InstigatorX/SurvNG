@@ -1,5 +1,7 @@
 /* Incident investigation */
 .incidents-desktop-page {
+  /* The gallery's own layers stay inside the page, under the top bar's menus. */
+  isolation: isolate;
   height: calc(100dvh - var(--topbar-height, 58px));
   min-height: 560px;
   background: var(--canvas);
@@ -105,7 +107,6 @@
   inset: 0 auto 0 0;
   z-index: 20;
   width: var(--incident-rail-width);
-  transition: width 320ms cubic-bezier(.22, .8, .25, 1);
 }
 
 .incidents-desktop-workspace > .incident-investigation {
@@ -151,7 +152,7 @@
 .gallery-expanded .incident-rail .live-activity-item {
   min-width: 0;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: 12px;
   overflow: hidden;
 }
 
@@ -199,12 +200,6 @@
 
 .gallery-expanded .incident-rail-list > .empty-state {
   grid-column: 1 / -1;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .incidents-desktop-workspace > .incident-rail {
-    transition: none;
-  }
 }
 
 .incident-investigation {
@@ -656,8 +651,56 @@
 
 .incident-filter-checks {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 2px 8px;
+  max-height: 232px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.incident-filter-checks.columns {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.incident-filter-group > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 24px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.incident-filter-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.incident-filter-group > summary::after {
+  content: "";
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin: 0 3px 3px 0;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(45deg);
+  transition: transform 160ms ease;
+}
+
+.incident-filter-group:not([open]) > summary::after {
+  transform: rotate(-45deg);
+  margin-bottom: 0;
+}
+
+.incident-filter-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.incident-filter-group:has(input:checked) .incident-filter-count {
+  color: var(--active-ink);
 }
 
 .incident-filter-check {
@@ -842,10 +885,12 @@
   flex-direction: column;
   gap: 1px;
   padding: 3px 7px 4px;
-  border-radius: 5px;
-  background: rgba(3, 4, 5, .72);
+  border-radius: 7px;
+  background: rgba(3, 4, 5, .34);
   color: #fff;
   line-height: 1.25;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .85);
+  backdrop-filter: blur(3px);
 }
 
 .incident-hud-where b,
@@ -861,7 +906,7 @@
 }
 
 .incident-hud-where time {
-  color: #d5dae0;
+  color: #eef1f4;
   font-size: var(--text-2xs);
   font-variant-numeric: tabular-nums;
 }
@@ -873,8 +918,14 @@
 }
 
 .incident-hud-objects .pill {
-  background: rgba(3, 4, 5, .72);
+  border-color: transparent;
+  background: rgba(3, 4, 5, .34);
   color: #fff;
+  backdrop-filter: blur(3px);
+}
+
+.incident-hud-objects .pill svg {
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .8));
 }
 
 .incident-rail.comfortable .live-activity-item.with-hud .live-activity-trigger,
@@ -898,4 +949,56 @@
 .incidents-desktop-page:not(.gallery-expanded) .incident-rail .live-activity-item.with-hud.selected {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
+}
+
+/* Switching between gallery and viewer fades the list in. Animating the list's
+ * width re-laid out every tile on every frame. */
+@keyframes incident-gallery-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes incident-rail-in {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: none; }
+}
+
+.incidents-desktop-page.gallery-expanded .incident-rail-list {
+  animation: incident-gallery-in 220ms cubic-bezier(.22, .8, .25, 1);
+}
+
+.incidents-desktop-page:not(.gallery-expanded) .incident-rail-list {
+  animation: incident-rail-in 220ms cubic-bezier(.22, .8, .25, 1);
+}
+
+.gallery-expanded .incident-rail .live-activity-item {
+  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.gallery-expanded .incident-rail .live-activity-item:hover,
+.gallery-expanded .incident-rail .live-activity-item:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .28);
+  transform: translateY(-2px);
+}
+
+.gallery-expanded .incident-rail .live-activity-select:hover,
+.gallery-expanded .incident-rail .live-activity-select:focus-visible {
+  outline-offset: -2px;
+  border-radius: 11px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .incidents-desktop-page .incident-rail-list {
+    animation: none;
+  }
+
+  .gallery-expanded .incident-rail .live-activity-item {
+    transition: none;
+  }
+
+  .gallery-expanded .incident-rail .live-activity-item:hover,
+  .gallery-expanded .incident-rail .live-activity-item:focus-within {
+    transform: none;
+  }
 }

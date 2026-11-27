@@ -110,6 +110,39 @@ def test_confidence_floor_filters_incident_search(tmp_path):
     assert IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='object', limit=10)['total'] == 3
 
 
+def test_camera_zone_and_person_filters_take_several_values(tmp_path):
+    store = EventStore(tmp_path)
+    def seen(camera, at, zone):
+        return store.add_event(camera, 'motion', created_at=datetime.fromtimestamp(at, timezone.utc).isoformat(),
+                               objects_json=json.dumps([observation(at, zones=[zone], temporal_observations=2)]))
+    gate, door, yard = seen('gate', 1000, 'Road'), seen('door', 2000, 'Porch'), seen('yard', 3000, 'Lawn')
+    assert store.count_scene_incidents() == 3
+    # Any chosen value matches within one filter; blanks and repeats are ignored.
+    assert store.count_scene_incidents(camera_id='gate') == 1
+    assert store.count_scene_incidents(camera_id='gate,door') == 2
+    assert store.count_scene_incidents(camera_id=' door , ,gate,door') == 2
+    assert store.count_scene_incidents(camera_id='gate,nowhere') == 1
+    assert store.count_scene_incidents(zone='Road,Lawn') == 2
+    assert store.count_scene_incidents(zone='Porch') == 1
+    # Different filters still narrow each other.
+    assert store.count_scene_incidents(camera_id='gate,door', zone='Porch,Lawn') == 1
+    assert len(store.list_scene_incident_cards(camera_id='gate,yard')) == 2
+    summaries = [{'camera_id': 'gate', 'zones': ['Road']}, {'camera_ids': ['door', 'yard'], 'zones': ['Porch']}, {'camera_id': 'yard', 'zones': []}]
+    assert len(_filter_incident_summaries(summaries, 'all', camera_id='gate,door')) == 2
+    assert len(_filter_incident_summaries(summaries, 'all', zone='Road,Porch')) == 2
+    assert len(_filter_incident_summaries(summaries, 'all', camera_id='yard', zone='Porch')) == 1
+
+    faces = [{'event_id': gate['id'], 'person_id': 7}, {'event_id': door['id'], 'person_id': 9}]
+    manager = SimpleNamespace(events=store, face_identity_observations=lambda ids: [face for face in faces if face['event_id'] in ids])
+    day = datetime.fromtimestamp(1000, timezone.utc).strftime('%Y-%m-%d')
+    def people(value):
+        return IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='all', person_id=value, limit=10)['total']
+    assert people(7) == 1 and people('7') == 1
+    assert people('7,9') == 2
+    assert people('9, ,bad,404') == 1
+    assert people('') == 3 and people(0) == 3
+
+
 def test_rare_filter_does_not_hydrate_unmatched_history(tmp_path):
     store=EventStore(tmp_path)
     for i in range(4):add(store,1000+i*100,[observation(1000+i*100)])

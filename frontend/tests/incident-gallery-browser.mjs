@@ -47,14 +47,16 @@ try {
     const path = url.pathname;
     if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
     if (path.endsWith("/api/cameras")) return route.fulfill({ json: CAMERAS });
-    if (path.endsWith("/face-names")) return route.fulfill({ json: { people: [] } });
+    if (path.endsWith("/face-names")) return route.fulfill({ json: { people: [{ id: 7, name: "Alex" }, { id: 9, name: "Sam" }] } });
     if (path.endsWith("/incidents/search")) {
       const limit = Number(url.searchParams.get("limit")), offset = Number(url.searchParams.get("offset"));
       const floor = Number(url.searchParams.get("min_confidence") || 0), label = url.searchParams.get("object_label");
-      searches.push({ limit, offset, floor, label, type: url.searchParams.get("event_type") });
+      const camera = url.searchParams.get("camera_id");
+      searches.push({ limit, offset, floor, label, type: url.searchParams.get("event_type"), camera, zone: url.searchParams.get("zone"), person: url.searchParams.get("person_id") });
       if (failMore && offset > 0) return route.fulfill({ status: 500, json: {} });
       const wanted = label ? label.split(",") : [];
-      const matched = incidents.filter((item) => (!wanted.length || item.labels.some((name) => wanted.includes(name))) && item.objects.some((object) => object.confidence >= floor));
+      const cameras = camera ? camera.split(",") : [];
+      const matched = incidents.filter((item) => (!wanted.length || item.labels.some((name) => wanted.includes(name))) && (!cameras.length || cameras.includes(item.camera_id)) && item.objects.some((object) => object.confidence >= floor));
       return route.fulfill({ json: { items: matched.slice(offset, offset + limit), total: matched.length, facets: { camera_ids: CAMERAS.map((camera) => camera.id), labels: ["car", "person"], zones: ["Entry"] } } });
     }
     if (path.endsWith("/incidents/detail")) return route.fulfill({ json: incidents.find((item) => item.id === url.searchParams.get("incident_id")) || incidents[0] });
@@ -114,7 +116,7 @@ try {
   await toEnd();
   await status.getByText("Could not load more incidents.").waitFor();
   assert.equal(await tiles.count(), INCIDENT_GALLERY_CHUNK);
-  assert.deepEqual(searches.at(-1), { limit: INCIDENT_GALLERY_CHUNK, offset: INCIDENT_GALLERY_CHUNK, floor: 0, label: null, type: "object" },
+  assert.deepEqual(searches.at(-1), { limit: INCIDENT_GALLERY_CHUNK, offset: INCIDENT_GALLERY_CHUNK, floor: 0, label: null, type: "object", camera: null, zone: null, person: null },
     "scrolling near the end asks for the incidents after the ones shown");
   failMore = false;
   await status.getByRole("button", { name: "Retry" }).click();
@@ -150,6 +152,24 @@ try {
   await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length === count, INCIDENT_GALLERY_CHUNK);
   assert.equal(await page.getByRole("slider", { name: "Confidence threshold" }).inputValue(), "0");
   assert.equal(await pane.getByRole("checkbox", { checked: true }).count(), 0);
+  // Cameras, zones and people are multi-select too, and each narrows the others.
+  await pane.getByRole("checkbox", { name: "Front Door" }).check();
+  await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length === count, INCIDENT_GALLERY_CHUNK);
+  await page.waitForFunction(() => document.querySelector(".incident-gallery-status").innerText.includes("of 75"));
+  assert.equal(searches.at(-1).camera, "front-door");
+  await pane.getByRole("checkbox", { name: "Front Driveway" }).check();
+  await page.waitForFunction(() => document.querySelector(".incident-gallery-status").innerText.includes("of 150"));
+  assert.equal(searches.at(-1).camera, "driveway,front-door");
+  await pane.getByRole("checkbox", { name: "Entry" }).check();
+  await pane.getByRole("checkbox", { name: "Alex" }).check();
+  await pane.getByRole("checkbox", { name: "Sam" }).check();
+  await page.waitForFunction(() => document.querySelector(".incident-filter-pane-foot button").innerText.includes("(3)"));
+  await page.waitForTimeout(300);
+  assert.deepEqual([searches.at(-1).camera, searches.at(-1).zone, searches.at(-1).person], ["driveway,front-door", "Entry", "7,9"]);
+  assert.deepEqual(await pane.locator(".incident-filter-count").allInnerTexts(), ["2 selected", "All", "1 selected", "2 selected"]);
+  await pane.getByRole("button", { name: "Clear filters (3)" }).click();
+  await page.waitForFunction(() => !document.querySelector(".incident-filter-pane input[type=checkbox]:checked"));
+  assert.deepEqual([searches.at(-1).camera, searches.at(-1).zone, searches.at(-1).person], [null, null, null]);
   // Motion-only incidents carry no detection confidence.
   await pane.getByRole("button", { name: "Motion" }).click();
   await page.waitForFunction(() => document.querySelector(".incident-filter-confidence input").disabled);
@@ -158,26 +178,46 @@ try {
   await pane.getByRole("button", { name: "Objects" }).click();
   await tiles.first().waitFor();
 
-  // A tile opens the viewer on that incident; Escape returns to the gallery with it marked.
-  await toEnd();
-  await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length === count, 2 * INCIDENT_GALLERY_CHUNK);
-  await tiles.nth(70).locator(".live-activity-select").click();
+  // A tile opens the same incident overlay as the Live page; the gallery stays behind it.
+  await tiles.nth(3).locator(".live-activity-select").click();
+  const preview = page.getByRole("dialog", { name: "Incident preview" });
+  await preview.waitFor();
+  assert.equal(await page.locator(".gallery-expanded").count(), 1);
+  assert.equal(new URL(page.url()).search, "", "previewing does not change the address");
+  assert.match(await preview.getByRole("link", { name: "Open incident" }).getAttribute("href"), /\/incidents\/incident-3$/);
+  await page.keyboard.press("Escape");
+  await preview.waitFor({ state: "detached" });
+  assert.equal(await page.locator(".gallery-expanded").count(), 1, "closing the preview returns to the gallery");
+
+  // The top bar's menus open above the gallery.
+  await page.locator(".topbar button").last().click();
+  const help = page.locator(".topbar").getByText("Help", { exact: true });
+  await help.waitFor();
+  const helpBox = await help.boundingBox();
+  assert.ok(await page.evaluate(([x, y]) => Boolean(document.elementFromPoint(x, y)?.closest(".topbar")), [helpBox.x + helpBox.width / 2, helpBox.y + helpBox.height / 2]), "the menu is not covered by the gallery");
+  await page.keyboard.press("Escape");
+  await page.mouse.click(10, 500);
+
+  // The viewer is one button away; Escape returns to the gallery with its incident marked and in view.
+  await page.getByRole("button", { name: "Open viewer" }).click();
   await page.waitForFunction(() => !document.querySelector(".gallery-expanded"));
-  await page.waitForFunction(() => new URLSearchParams(location.search).get("incident_id") === "incident-70");
   assert.equal(await pane.count(), 0, "the viewer keeps its width unless filters are asked for");
-  await page.locator(".incident-pager").waitFor();
-  await page.locator("#incident-results .live-activity-item.selected").waitFor();
+  const pager = page.locator(".incident-pager");
+  await pager.waitFor();
   await page.getByRole("button", { name: /^Filters/ }).click();
   await pane.waitFor();
   await page.getByRole("button", { name: /^Filters/ }).click();
+  for (const pageNumber of [2, 3]) {
+    await pager.getByRole("button", { name: "Next" }).click();
+    await page.waitForFunction((number) => document.querySelector(".incident-pager span").innerText.startsWith(`${number} /`), pageNumber);
+  }
+  await page.locator("#incident-results .live-activity-item").nth(1).locator(".live-activity-select").click();
+  await page.locator("#incident-results .live-activity-item.selected").waitFor();
+  const openId = await page.waitForFunction(() => new URLSearchParams(location.search).get("incident_id")).then((handle) => handle.jsonValue());
+  assert.notEqual(openId, "incident-0");
   await page.keyboard.press("Escape");
   await page.locator(".gallery-expanded").waitFor();
-  const chosen = page.locator("#incident-results .live-activity-item.selected");
-  await chosen.waitFor();
-  // The gallery reloads far enough to hold the open incident.
-  await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length >= count, 2 * INCIDENT_GALLERY_CHUNK);
-  // The list animates to full width, moving every row; the open incident must
-  // still be in view once that has settled, not only at some moment on the way.
+  await page.locator("#incident-results .live-activity-item.selected").waitFor();
   await page.waitForFunction(() => document.querySelector("#incident-results").getBoundingClientRect().width > 1000);
   await page.waitForTimeout(800);
   assert.ok(await page.evaluate(() => {
@@ -192,5 +232,5 @@ try {
   assert.equal(await page.locator(".gallery-expanded").count(), 0);
   assert.deepEqual(errors, []);
   await page.close();
-  console.log("Incident gallery: default view, scroll loading, per-row sizing, picture overlay, filter pane, confidence and viewer round trip passed");
+  console.log("Incident gallery: default view, scroll loading, per-row sizing, picture overlay, multi-select filters, confidence, incident preview and viewer round trip passed");
 } finally { await browser.close(); await new Promise((resolve) => server.close(resolve)); }

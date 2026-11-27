@@ -1304,8 +1304,14 @@ class EventStoreSceneMixin:
             clauses.append("i.end_epoch>=?"); args.append(start_epoch)
         if end_epoch is not None:
             clauses.append("i.start_epoch<?"); args.append(end_epoch)
-        if camera_id:
-            clauses.append("exists(select 1 from scene_episodes p where p.incident_id=i.id and p.camera_id=?)");args.append(camera_id)
+        # Cameras, labels and zones each take several values separated by commas;
+        # within one filter any value matches, and the filters combine with "and".
+        def chosen(value):
+            return list(dict.fromkeys(part.strip() for part in str(value or "").split(",") if part.strip()))
+        cameras=chosen(camera_id)
+        if cameras:
+            clauses.append("exists(select 1 from scene_episodes p where p.incident_id=i.id and p.camera_id in ("+",".join("?"*len(cameras))+"))")
+            args.extend(cameras)
         observed="select 1 from scene_observations o join scene_episodes p on p.id=o.episode_id where p.incident_id=i.id and " + _DISPLAY_CONFIDENCE_SQL
         if event_type in {"object","motion"}:
             clauses.append(("not " if event_type=="motion" else "")+"exists("+observed+")")
@@ -1313,8 +1319,7 @@ class EventStoreSceneMixin:
         # With labels selected, the same observation must satisfy both.
         floor=max(0.0,min(float(min_confidence or 0.0),1.0)) if event_type!="motion" else 0.0
         confident=" and cast(json_extract(o.payload_json,'$.confidence') as real)>=?" if floor>0 else ""
-        # Several labels may be given, separated by commas; any one of them matches.
-        labels=list(dict.fromkeys(part.strip() for part in str(object_label or "").split(",") if part.strip()))
+        labels=chosen(object_label)
         if labels:
             clauses.append("exists(select 1 from scene_observations o join scene_objects s on s.id=o.object_id "
                            "join scene_episodes p on p.id=o.episode_id where p.incident_id=i.id and "+_DISPLAY_CONFIDENCE_SQL+" and "+EventStoreSceneMixin._scene_label_sql()+" in ("+",".join("?"*len(labels))+")"+confident+")")
@@ -1324,11 +1329,12 @@ class EventStoreSceneMixin:
         elif floor>0:
             clauses.append("exists("+observed+confident+")")
             args.append(floor)
-        if zone:
+        zones=chosen(zone)
+        if zones:
             clauses.append("exists(select 1 from scene_observation_zones z "
                            "join scene_episodes p on p.id=z.episode_id "
-                           "where p.incident_id=i.id and z.zone=?)")
-            args.append(zone)
+                           "where p.incident_id=i.id and z.zone in ("+",".join("?"*len(zones))+"))")
+            args.extend(zones)
         return " and ".join(clauses),args
 
     @staticmethod

@@ -47,8 +47,8 @@ try {
     return route.fulfill({ json: {} });
   });
   await page.goto(`http://127.0.0.1:${server.address().port}/survng/incidents`);
-  // The page opens on the gallery; a tile opens the viewer.
-  await page.locator(".gallery-expanded .live-activity-select").first().click();
+  // The page opens on the gallery; the viewer is one button away.
+  await page.getByRole("button", { name: "Open viewer" }).click();
   const detections = page.locator(".incident-inspector .incident-observed-objects li");
   const excludedBox = page.locator(".object-box").filter({ hasText: "car" }).first();
   await detections.filter({ hasText: "car" }).waitFor();

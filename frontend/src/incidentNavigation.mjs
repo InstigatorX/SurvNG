@@ -606,13 +606,14 @@ export function incidentGalleryWanted(index, current = INCIDENT_GALLERY_CHUNK) {
   return Math.max(INCIDENT_GALLERY_CHUNK, Number(current) || 0, needed);
 }
 
-// The object filter is "all" or the chosen labels joined by commas, the form the search endpoint reads.
-export function incidentObjectLabels(filter) {
-  return filter && filter !== "all" ? [...new Set(String(filter).split(",").map((label) => label.trim()).filter(Boolean))] : [];
+// A multi-value filter is "all" or the chosen values joined by commas, the form the search endpoint reads.
+export function incidentFilterValues(filter) {
+  return filter && filter !== "all" ? [...new Set(String(filter).split(",").map((value) => value.trim()).filter(Boolean))] : [];
 }
 
-export function toggleIncidentObjectLabel(filter, label) {
-  const chosen = incidentObjectLabels(filter);
-  const next = chosen.includes(label) ? chosen.filter((item) => item !== label) : [...chosen, label];
+export function toggleIncidentFilterValue(filter, value) {
+  const chosen = incidentFilterValues(filter);
+  const key = String(value);
+  const next = chosen.includes(key) ? chosen.filter((item) => item !== key) : [...chosen, key];
   return next.length ? next.sort().join(",") : "all";
 }

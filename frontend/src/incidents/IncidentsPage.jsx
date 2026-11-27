@@ -16,7 +16,7 @@ import {
 import { loadRelatedIncident } from "../relatedIncidents.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { incidentReplayTracking, incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
-import { incidentDetailQuery, incidentFocusStep, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryColumns, incidentGalleryWanted, INCIDENT_GALLERY_CHUNK, incidentObjectLabels, toggleIncidentObjectLabel, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
+import { incidentDetailQuery, incidentFocusStep, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryColumns, incidentGalleryWanted, INCIDENT_GALLERY_CHUNK, incidentFilterValues, toggleIncidentFilterValue, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
 import { APP_BASE_PATH, appUrl, incidentRecordingContext, fetch } from "../shared/api.js";
 import { INCIDENT_REFRESH_FALLBACK_MS } from "../shared/constants.js";
@@ -30,6 +30,30 @@ import { IncidentCard, IncidentInspector } from "./IncidentCard.jsx";
 import { IncidentAnalysisStatus } from "./IncidentAnalysisStatus.jsx";
 import { useIncidentPlayback } from "./useIncidentPlayback.js";
 import "./mobile-incidents.css";
+
+// One multi-select filter: any checked value matches, and nothing checked means all.
+function IncidentFilterChecks({ title, options, filter, onChange, columns = false, empty }) {
+  const chosen = incidentFilterValues(filter);
+  // A choice made on another day stays listed so it can be cleared.
+  const known = new Set(options.map((option) => String(option.value)));
+  const listed = [...options, ...chosen.filter((value) => !known.has(value)).map((value) => ({ value, label: value }))];
+  return (
+    <details className="incident-filter-section incident-filter-group" open>
+      <summary><h3>{title}</h3><span className="incident-filter-count">{chosen.length ? `${chosen.length} selected` : "All"}</span></summary>
+      {listed.length ? (
+        <div className={`incident-filter-checks${columns ? " columns" : ""}`} role="group" aria-label={title}>
+          {listed.map((option) => (
+            <label className="incident-filter-check" key={option.value}>
+              <input type="checkbox" value={option.value} checked={chosen.includes(String(option.value))} onChange={() => onChange(toggleIncidentFilterValue(filter, option.value))} />
+              {option.icon || null}
+              <span>{option.label}</span>
+            </label>
+          ))}
+        </div>
+      ) : <small>{empty}</small>}
+    </details>
+  );
+}
 
 export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordingContextChange, onAssistantContextChange, onAskAssistant = null }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
@@ -70,6 +94,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     setIncidentDetails,
     selectedEvent,
     setSelectedEvent,
+    incidentPreviewLoading,
     openIncidentOverlay,
     closeIncidentOverlay,
   } = useIncidentDetails();
@@ -133,7 +158,6 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const incidentObjectOptions = incidentFacets.labels || [];
   const incidentZoneOptions = incidentFacets.zones || [];
   const semanticIncidentActive = Boolean(semanticIncidentActiveQuery);
-  const selectedObjectLabels = incidentObjectLabels(incidentObjectFilter);
   const confidenceApplies = eventFilter !== "motion";
   const activeIncidentFilterCount = [incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter].filter((value) => value !== "all").length
     + (confidenceApplies && incidentMinConfidence > 0 ? 1 : 0);
@@ -222,7 +246,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   useEffect(() => {
     onAssistantContextChange?.({
       page: "incidents",
-      camera_id: focusedIncident?.camera_id || (incidentCameraFilter === "all" ? "" : incidentCameraFilter),
+      camera_id: focusedIncident?.camera_id || (incidentFilterValues(incidentCameraFilter).length === 1 ? incidentCameraFilter : ""),
       incident_event_id: Number(focusedEvent?.representative_event_id || focusedEvent?.id) || null,
       filters: {
         day: incidentDay,
@@ -791,7 +815,6 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
 
   function selectGalleryIncident(incident) {
     toggleIncident(incident.id);
-    if (galleryExpanded) changeGallery(false, incident);
   }
 
   function changeIncidentPage(page, { scroll = true } = {}) {
@@ -963,25 +986,10 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                 {incidentDayControl()}
               </div>
               <div className="incident-filter-pane-scroll">
-                <section className="incident-filter-section">
-                  <h3>Camera</h3>
-                  <select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)} aria-label="Incident camera"><option value="all">All cameras</option>{incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}</select>
-                </section>
-                <section className="incident-filter-section">
-                  <h3 id="incident-object-filter-heading">Objects</h3>
-                  {incidentObjectOptions.length ? (
-                    <div className="incident-filter-checks" role="group" aria-labelledby="incident-object-filter-heading">
-                      {incidentObjectOptions.map((label) => (
-                        <label className="incident-filter-check" key={label}>
-                          <input type="checkbox" value={label} checked={selectedObjectLabels.includes(label)} onChange={() => setIncidentObjectFilter(toggleIncidentObjectLabel(incidentObjectFilter, label))} />
-                          <IncidentObjectIcon label={label} size={15} />
-                          <span>{label.replaceAll("_", " ")}</span>
-                        </label>
-                      ))}
-                    </div>
-                  ) : <small>No objects on this day.</small>}
-                  <small>{selectedObjectLabels.length ? "Showing incidents with any checked object." : "Nothing checked shows every object."}</small>
-                </section>
+                <IncidentFilterChecks title="Cameras" filter={incidentCameraFilter} onChange={setIncidentCameraFilter}
+                  options={incidentCameraOptions.map((id) => ({ value: id, label: cameraNameById.get(id) || id }))} empty="No cameras on this day." />
+                <IncidentFilterChecks title="Objects" filter={incidentObjectFilter} onChange={setIncidentObjectFilter} columns
+                  options={incidentObjectOptions.map((label) => ({ value: label, label: label.replaceAll("_", " "), icon: <IncidentObjectIcon label={label} size={15} /> }))} empty="No objects on this day." />
                 <section className="incident-filter-section incident-filter-confidence">
                   <h3 id="incident-confidence-heading">Confidence threshold</h3>
                   <input type="range" min={0} max={95} step={5} value={confidenceApplies ? confidenceDraft : 0} disabled={!confidenceApplies} onChange={(event) => setConfidenceDraft(Number(event.target.value))} aria-labelledby="incident-confidence-heading" aria-valuetext={confidenceDraft > 0 ? `${confidenceDraft}% or higher` : "Any confidence"} style={{ "--fill": `${(confidenceApplies ? confidenceDraft : 0) / 95 * 100}%` }} />
@@ -992,14 +1000,10 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                   {!confidenceApplies ? <small>Motion-only incidents have no detection confidence.</small>
                     : semanticIncidentActive ? <small>Search matches are not filtered by confidence.</small> : null}
                 </section>
-                <section className="incident-filter-section">
-                  <h3>Zone</h3>
-                  <select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)} aria-label="Incident zone"><option value="all">All zones</option>{incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}</select>
-                </section>
-                <section className="incident-filter-section">
-                  <h3>Person</h3>
-                  <select value={incidentPersonFilter} onChange={(event) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(event.target.value); }} aria-label="Known person"><option value="all">All people</option>{incidentPeople.map((person) => <option value={person.id} key={person.id}>{person.name}</option>)}</select>
-                </section>
+                <IncidentFilterChecks title="Zones" filter={incidentZoneFilter} onChange={setIncidentZoneFilter}
+                  options={incidentZoneOptions.map((zone) => ({ value: zone, label: zone }))} empty="No zones on this day." />
+                <IncidentFilterChecks title="People" filter={incidentPersonFilter} onChange={(next) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(next); }}
+                  options={incidentPeople.map((person) => ({ value: String(person.id), label: person.name }))} empty="No named people yet." />
               </div>
               <div className="incident-filter-pane-foot incident-toolbar-summary" aria-label={`${activeIncidentFilterCount} active filters`}>
                 <button type="button" onClick={clearIncidentFilters} disabled={!activeIncidentFilterCount}>Clear filters{activeIncidentFilterCount ? ` (${activeIncidentFilterCount})` : ""}</button>
@@ -1037,7 +1041,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                 {displayedIncidentLoading && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
                 {!galleryIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
                 {galleryIncidents.length ? pagedIncidents.map((incident) => (
-                  <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} hud={galleryExpanded || incidentDensity === "comfortable"} onSelect={selectGalleryIncident} onOpenOverlay={galleryExpanded ? selectGalleryIncident : openIncidentOverlay} />
+                  <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} hud={galleryExpanded || incidentDensity === "comfortable"} onSelect={galleryExpanded ? openIncidentOverlay : selectGalleryIncident} onOpenOverlay={openIncidentOverlay} />
                 )) : null}
                 {!displayedIncidentLoading && !displayedIncidentError && !galleryIncidents.length ? (
                   <div className="empty-state">
@@ -1173,6 +1177,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
             />
           </div>
         </section>
+        {/* The same incident overlay the Live page opens. */}
+        {selectedEvent ? <EventOverlay livePreview loading={incidentPreviewLoading} cameraNameById={cameraNameById} event={selectedEvent} events={visibleIncidents}
+          timeZone={timeZone} canCorrectIncident={canCorrectIncident} onClose={closeOpenedIncident} onSelect={openIncidentOverlay} onRefresh={refresh} /> : null}
       </main>
     );
   }

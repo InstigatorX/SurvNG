@@ -27,23 +27,24 @@ objects at its lower left.
   shrink to fill the row, and SurvNG remembers the setting in this browser.
 - There are no pages. Scroll down and the next incidents of the day load as you
   approach the end; the footer says how many are shown and when the day is complete.
-- Select a picture to open that incident in the viewer. **Gallery**, or `Esc`,
-  returns to the gallery with that incident still marked. A link to one incident
-  opens its viewer directly.
+- Select a picture to preview that incident in the same overlay the Live page
+  uses: play it, open the full incident, or close it to return to the gallery.
+- **Open viewer** switches to the side-by-side viewer; **Gallery**, or `Esc`,
+  returns with the viewer's incident marked. A link to one incident opens the
+  viewer directly.
 
 Filters sit in a pane left of the gallery:
 
 - **Objects** or **Motion**
 - Search (describe what you are looking for)
 - Day
-- Camera
-- Object types (person, car, and so on). Check any number; an incident matches
-  when it contains any checked type, and nothing checked shows every type.
+- Cameras, object types, zones and known people. Each is a list of checkboxes:
+  check any number, and an incident matches when it has any checked value.
+  Nothing checked in a list means all of them. Different lists narrow each
+  other, so two cameras and one zone shows that zone on either camera.
 - **Confidence threshold**: keep incidents with at least one detection at or
   above the chosen confidence. With object types checked, one of those objects
   must reach it. It does not apply to motion-only incidents or to search matches.
-- Zone
-- Known person
 
 In the viewer the pane is hidden to leave room for the picture; **Filters** in
 the list header shows it again.
