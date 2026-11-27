@@ -886,11 +886,12 @@
   gap: 1px;
   padding: 3px 7px 4px;
   border-radius: 7px;
-  background: rgba(3, 4, 5, .34);
+  /* No blur behind the label: it was repainted for every picture on every
+   * scrolled frame and made scrolling stutter. The shadow keeps the text readable. */
+  background: rgba(3, 4, 5, .42);
   color: #fff;
   line-height: 1.25;
   text-shadow: 0 1px 2px rgba(0, 0, 0, .85);
-  backdrop-filter: blur(3px);
 }
 
 .incident-hud-where b,
@@ -919,9 +920,8 @@
 
 .incident-hud-objects .pill {
   border-color: transparent;
-  background: rgba(3, 4, 5, .34);
+  background: rgba(3, 4, 5, .42);
   color: #fff;
-  backdrop-filter: blur(3px);
 }
 
 .incident-hud-objects .pill svg {
@@ -947,15 +947,19 @@
   width: 32px;
   height: 32px;
   border-radius: 8px;
-  background: rgba(3, 4, 5, .34);
-  backdrop-filter: blur(3px);
+  background: rgba(3, 4, 5, .42);
   cursor: pointer;
 }
 
 .incident-hud-review input {
+  /* The app's inputs have a minimum height; without clearing it the box is
+   * taller than it looks and the mark sits low in its outline. */
+  display: block;
   width: 18px;
   height: 18px;
+  min-height: 0;
   margin: 0;
+  padding: 0;
   accent-color: var(--good);
   cursor: inherit;
 }

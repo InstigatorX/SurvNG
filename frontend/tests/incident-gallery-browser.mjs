@@ -126,6 +126,12 @@ try {
   const dotBox = await tiles.first().locator(".live-activity-trigger").boundingBox();
   assert.ok(thumb.x + thumb.width - (markBox.x + markBox.width) < 12 && markBox.y - thumb.y < 12, "review mark at the upper right");
   assert.ok(dotBox.y > thumb.y + thumb.height / 2 && dotBox.x > thumb.x + thumb.width / 2, "source dot at the lower right");
+  const checkBox = await mark(0).boundingBox();
+  assert.ok(Math.abs((checkBox.x + checkBox.width / 2) - (markBox.x + markBox.width / 2)) < 1
+    && Math.abs((checkBox.y + checkBox.height / 2) - (markBox.y + markBox.height / 2)) < 1, "the checkbox sits in the middle of its outline");
+  // Blur behind the labels made scrolling stutter: every picture's was repainted on every frame.
+  assert.deepEqual(await tiles.first().evaluate((tile) => [...tile.querySelectorAll(".incident-hud, .incident-hud .pill, .incident-hud-review")]
+    .map((element) => getComputedStyle(element).backdropFilter).filter((value) => value !== "none")), []);
   await mark(0).check();
   assert.deepEqual(reviews.at(-1), ["incident-0", "reviewed"]);
   assert.equal(await page.getByRole("dialog").count(), 0, "marking does not open the incident");
