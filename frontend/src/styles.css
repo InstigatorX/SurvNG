@@ -2841,6 +2841,7 @@ button.status-pill.hud-toggle:disabled {
   padding: 8px;
 }
 
+.live-incident-preview > .live-overlay-backdrop,
 button.live-overlay-backdrop,
 button.live-overlay-backdrop:hover:not(:disabled),
 button.live-overlay-backdrop:active {

@@ -849,7 +849,7 @@ export function LiveCommandBar({ cameras = [], focusedCameraId = "", onFocusedCa
   );
 }
 
-export function LivePage({ timeZone, canCorrectIncident = false, onRecordingContextChange, onAssistantContextChange }) {
+export function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
   const liveStreamPresence = useLiveStreamPresence();
   const liveViewPaused = liveStreamPresence.documentVisible && !liveStreamPresence.active;
@@ -886,6 +886,8 @@ export function LivePage({ timeZone, canCorrectIncident = false, onRecordingCont
     incidentSelectionRequestRef,
     selectedEvent,
     setSelectedEvent,
+    incidentPreviewLoading,
+    invalidateIncidentSelection,
     openIncidentOverlay,
     closeIncidentOverlay,
   } = useIncidentDetails();
@@ -1425,7 +1427,7 @@ export function LivePage({ timeZone, canCorrectIncident = false, onRecordingCont
   }, [incidentsPerPage]);
 
   function refreshIncidents() {
-    incidentSelectionRequestRef.current += 1;
+    invalidateIncidentSelection();
     incidentFeedCacheRef.current.clear();
     incidentDetailCacheRef.current.clear();
     setIncidentDetails({});
@@ -1697,7 +1699,7 @@ export function LivePage({ timeZone, canCorrectIncident = false, onRecordingCont
                 thumbnailObjectFocus={thumbnailObjectFocus}
                 thumbnailObjectFocusZoom={thumbnailObjectFocusZoom}
                 onSelect={openIncidentOverlay}
-                onOpenOverlay={openIncidentOverlay}
+                livePreview
               />
             ))
             : null}
@@ -1712,7 +1714,8 @@ export function LivePage({ timeZone, canCorrectIncident = false, onRecordingCont
           <a href={appUrl("/incidents")}>View all incidents <ChevronRight size={14} /></a>
         </div>
       </section> : null}
-      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} canCorrectIncident={canCorrectIncident} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refreshIncidents} /> : null}
+      {selectedEvent ? <EventOverlay livePreview loading={incidentPreviewLoading} cameraNameById={cameraNameById} event={selectedEvent} events={visibleIncidents}
+        timeZone={timeZone} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refreshIncidents} /> : null}
       {expandedCamera ? (
         <LiveCameraOverlay
           camera={expandedCamera}

@@ -91,7 +91,11 @@ export function liveActivityEventId(incident) {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
-export function liveActivityIncidentHref(incident) {
+export function liveActivityIncidentHref(incident, { preferPage = false } = {}) {
+  if (preferPage) {
+    const id = [incident?.incident_id, incident?.id].find((value) => typeof value === "string" && /^incident-[^/]+$/.test(value));
+    if (id) return `/incidents/${encodeURIComponent(id)}`;
+  }
   const eventId = liveActivityEventId(incident);
   return eventId ? `/incidents?event_ids=${encodeURIComponent(eventId)}` : "/incidents";
 }

@@ -27,7 +27,9 @@ Both stay inside Live; they are not separate destinations in the main navigation
 
 - Select a camera tile to focus on it
 - Switch between main and sub preview when both streams exist
-- Open a recent incident from the side feed without leaving the monitoring mindset
+- Select a recent incident for a quick preview. Use **Play** to watch it or
+  **Open incident** for the full storyline, evidence, and corrections.
+- Open **Tools** in the preview for detection boxes, tracks, AI, and downloads.
 
 Live presentation settings (cropping/framing) only change how the browser shows the picture. They do **not** crop recordings, detection, or exports.
 

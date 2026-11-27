@@ -41,6 +41,8 @@ try {
   ];
   incident.alert_decisions = [{ event_id: 80913, eligible: false, objects: [{ label: "person", eligible: false, reasons: ["outside_incident_zone"], zones: [] }] }];
   let conflict = false;
+  const liveIncident = { ...incident, id: "incident-live-gate", incident_id: "incident-live-gate", speech: { windows: [{ camera_id: "gate", start_at: first.created_at, end_at: second.created_at }] } };
+  const missingRecordingCameras = new Set();
   const clipRequests = [];
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
@@ -53,7 +55,8 @@ try {
       const start = Number(url.searchParams.get("start_epoch"));
       const end = Number(url.searchParams.get("end_epoch"));
       const cameraId = decodeURIComponent(path.split("/cameras/")[1].split("/")[0]);
-      return route.fulfill({ json: { camera_id: cameraId, source: url.searchParams.get("source") || "main", start_epoch: start, end_epoch: end, recordings: [{ start_epoch: start, end_epoch: end, duration_seconds: Math.max(0.01, end - start), name: "segment" }] } });
+      const recordings = missingRecordingCameras.has(cameraId) ? [] : [{ start_epoch: start, end_epoch: end, duration_seconds: Math.max(0.01, end - start), name: "segment" }];
+      return route.fulfill({ json: { camera_id: cameraId, source: url.searchParams.get("source") || "main", start_epoch: start, end_epoch: end, recordings } });
     }
     if (path.endsWith("/event-clip/settings")) return route.fulfill({ json: { before_seconds: 5, after_seconds: 5 } });
     if (path.includes("/incidents/notification/")) return route.fulfill({ json: { incident, notification: { state: "active", revision: incident.revision }, camera_name: "Gate" } });
@@ -61,8 +64,12 @@ try {
     if (path.endsWith("/cameras")) return route.fulfill({ json: [{ id: "gate", name: "Gate" }] });
     if (path.endsWith("/config")) return route.fulfill({ json: { cameras: [{ id: "gate", zones: [{ name: "Road", enabled: true, behavior: "incident", color: "#22c55e", points: [{ x: 0.1, y: 0.2 }, { x: 0.8, y: 0.2 }, { x: 0.5, y: 0.9 }] }] }] } });
     if (path.endsWith("/faces/people")) return route.fulfill({ json: [] });
+    if (path.endsWith("/incidents/feed")) return route.fulfill({ json: { items: [liveIncident], facets: {} } });
     if (path.endsWith("/incidents/search")) return route.fulfill({ json: { items: [incident], total: 1 } });
-    if (path.endsWith("/incidents/detail")) return route.fulfill({ json: url.searchParams.get("incident_id") === "scene-2" ? { ...incident, id: "scene-2", incident_id: "scene-2", revision: 7 } : incident });
+    if (path.endsWith("/incidents/detail")) {
+      const id = url.searchParams.get("incident_id");
+      return route.fulfill({ json: id === liveIncident.id ? liveIncident : id === "scene-2" ? { ...incident, id: "scene-2", incident_id: "scene-2", revision: 7 } : incident });
+    }
     if (path.endsWith("/corrections")) {
       const body = route.request().postDataJSON(); corrections.push(body);
       if (conflict) return route.fulfill({ status: 409, json: {} });
@@ -74,6 +81,57 @@ try {
     if (path.endsWith("/snapshot") || path.endsWith(".jpg")) return route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800"><rect width="1280" height="800" fill="#30483d"/></svg>' });
     return route.fulfill({ json: {} });
   });
+  const previewRequests = [];
+  const recordPreviewRequests = (request) => previewRequests.push(new URL(request.url()).pathname);
+  page.on("request", recordPreviewRequests);
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await page.goto(`http://127.0.0.1:${server.address().port}/survng/live`);
+  const row = page.locator(".events-zone .live-activity-item");
+  await row.getByRole("button").first().click();
+  const preview = page.getByRole("dialog", { name: "Incident preview" });
+  const playPreview = preview.getByRole("button", { name: "Play", exact: true });
+  await playPreview.waitFor();
+  assert.equal(await row.locator("button").count(), 1, "the row has one preview action");
+  assert.match(await preview.getByRole("heading").innerText(), /Person and possible car · Gate/);
+  assert.equal(await preview.getByRole("link", { name: "Open incident" }).getAttribute("href"), "/survng/incidents/incident-live-gate");
+  assert.equal(await preview.locator(".incident-scene-panel, .incident-speech-panel, .object-box").count(), 0);
+  const playBounds = await playPreview.boundingBox();
+  assert.ok(playBounds.y >= 0 && playBounds.y + playBounds.height <= 768);
+  assert.equal(await preview.getByRole("button", { name: "AI overlay" }).count(), 0);
+  await preview.getByText("Tools", { exact: true }).click();
+  await preview.getByRole("button", { name: "AI overlay" }).waitFor();
+  await preview.getByRole("link", { name: "Download video" }).waitFor();
+  const boxes = preview.getByRole("button", { name: "Detection boxes" });
+  await boxes.click();
+  await preview.locator(".object-box").first().waitFor();
+  await boxes.click();
+  await preview.locator(".object-box").first().waitFor({ state: "detached" });
+  await preview.getByText("Tools", { exact: true }).click();
+  await playPreview.click();
+  await preview.locator(".incident-recording-player").waitFor();
+  assert.equal(await preview.locator(".incident-recording-player").getAttribute("data-camera-id"), "gate");
+  assert.equal(await preview.getByRole("button", { name: "Back to image" }).evaluate((button) => button === document.activeElement), true);
+  await preview.getByRole("button", { name: "Close playback" }).press("Space");
+  await playPreview.waitFor();
+  missingRecordingCameras.add("driveway");
+  await playPreview.click();
+  await preview.locator(".incident-recording-player video").first().waitFor();
+  await preview.locator(".incident-recording-player video").first().dispatchEvent("ended");
+  await preview.getByText("Some footage unavailable", { exact: true }).waitFor();
+  await playPreview.waitFor();
+  await page.keyboard.press("Escape");
+  await preview.waitFor({ state: "hidden" });
+  missingRecordingCameras.add("gate");
+  await row.getByRole("button").click();
+  await playPreview.click();
+  await preview.getByText("Recording unavailable", { exact: true }).waitFor();
+  assert.equal(await playPreview.count(), 0);
+  await page.keyboard.press("Escape");
+  await preview.waitFor({ state: "hidden" });
+  missingRecordingCameras.clear();
+  page.off("request", recordPreviewRequests);
+  assert.ok(!previewRequests.some((path) => path.endsWith("/analysis") || path.includes("/speech/segments")), "Live preview opens without requesting analysis or transcripts");
+  await page.setViewportSize({ width: 1600, height: 1000 });
   await page.goto(`http://127.0.0.1:${server.address().port}/survng/incidents?incident_id=scene-1`);
   const inspector = page.locator("#incident-inspector");
   await inspector.getByRole("heading", { name: "Observed objects" }).waitFor();
