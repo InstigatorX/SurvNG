@@ -19,12 +19,33 @@ was sent.
 
 ## Browse incidents
 
-Use filters to narrow the list:
+**Incidents** opens on a gallery of the selected day. Each picture carries the
+camera name and the date and time at its upper left, and icons for the observed
+objects at its lower left.
 
+- **Per row** sets how many incidents share a row, from 2 to 8. Pictures grow or
+  shrink to fill the row, and SurvNG remembers the setting in this browser.
+- There are no pages. Scroll down and the next incidents of the day load as you
+  approach the end; the footer says how many are shown and when the day is complete.
+- Select a picture to open that incident in the viewer. **Gallery**, or `Esc`,
+  returns to the gallery with that incident still marked. A link to one incident
+  opens its viewer directly.
+
+Filters sit in a pane left of the gallery:
+
+- **Objects** or **Motion**
+- Search (describe what you are looking for)
+- Day
 - Camera
-- Object label (person, car, and so on)
+- Object type (person, car, and so on), one at a time
+- **Confidence threshold**: keep incidents with at least one detection at or
+  above the chosen confidence. With an object type selected, that object must
+  reach it. It does not apply to motion-only incidents or to search matches.
 - Zone
-- Source or time range
+- Known person
+
+In the viewer the pane is hidden to leave room for the picture; **Filters** in
+the list header shows it again.
 
 Open an incident to see:
 
@@ -88,7 +109,7 @@ the incident is marked as changed since review.
 
 ## Focus vs mosaic
 
-Incidents can show one primary piece of evidence at a time (**Focus**) or a denser mosaic of thumbnails. Pick whichever helps you review faster; SurvNG remembers the preference for the session.
+Inside the viewer, an incident can show one primary piece of evidence at a time (**Focus**) or a denser mosaic of thumbnails. Pick whichever helps you review faster; SurvNG remembers the preference for the session.
 
 ## Progressive pictures
 

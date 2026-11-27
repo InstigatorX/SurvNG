@@ -4,8 +4,10 @@ import {
   ChevronLeft,
   ChevronRight,
   Grid2X2,
-  Maximize2,
-  Minimize2,
+  LayoutGrid,
+  PanelLeft,
+  Radar,
+  ScanSearch,
   Search,
   SlidersHorizontal,
   Rows3,
@@ -14,7 +16,7 @@ import {
 import { loadRelatedIncident } from "../relatedIncidents.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { incidentReplayTracking, incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
-import { incidentDetailQuery, incidentFocusStep, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryPageSize, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
+import { incidentDetailQuery, incidentFocusStep, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryColumns, incidentGalleryWanted, INCIDENT_GALLERY_CHUNK, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
 import { APP_BASE_PATH, appUrl, incidentRecordingContext, fetch } from "../shared/api.js";
 import { INCIDENT_REFRESH_FALLBACK_MS } from "../shared/constants.js";
@@ -23,7 +25,7 @@ import { useStoredState, isMobileViewport } from "../shared/hooks.js";
 import { clearLegacyIncidentFilterStorage } from "../shared/cameras.js";
 import { useAppEvents } from "../shared/events.js";
 import { usePollingData, useIncidentDetails } from "../shared/polling.js";
-import { IncidentListItem, EventOverlay } from "../shared/evidence.jsx";
+import { IncidentListItem, IncidentObjectIcon, EventOverlay } from "../shared/evidence.jsx";
 import { IncidentCard, IncidentInspector } from "./IncidentCard.jsx";
 import { IncidentAnalysisStatus } from "./IncidentAnalysisStatus.jsx";
 import { useIncidentPlayback } from "./useIncidentPlayback.js";
@@ -40,6 +42,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const [incidentObjectFilter, setIncidentObjectFilter] = useState("all");
   const [incidentZoneFilter, setIncidentZoneFilter] = useState("all");
   const [incidentPersonFilter, setIncidentPersonFilter] = useState("all");
+  // Percent. The slider moves the draft; the search follows once it settles.
+  const [incidentMinConfidence, setIncidentMinConfidence] = useState(0);
+  const [confidenceDraft, setConfidenceDraft] = useState(0);
   const [incidentPeople, setIncidentPeople] = useState([]);
   const [incidentDensity, setIncidentDensity] = useStoredState("survng.incidentDensity.v1", "compact");
   const today = dateKeyForTimeZone(Date.now(), timeZone);
@@ -83,9 +88,17 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const incidentRailListRef = useRef(null);
   const incidentPageEdgeRef = useRef(null);
   const incidentGalleryToggleRef = useRef(null);
-  const [galleryExpanded, setGalleryExpanded] = useState(false);
-  const [storedGalleryPageSize, setStoredGalleryPageSize] = useStoredState("survng.incidentGalleryPageSize.v1", 25);
-  const galleryPageSize = incidentGalleryPageSize(storedGalleryPageSize);
+  // The gallery is the page's home. A link to one incident opens its viewer.
+  const [galleryExpanded, setGalleryExpanded] = useState(() => !linkedIncidentBootRef.current);
+  const [storedGalleryColumns, setStoredGalleryColumns] = useStoredState("survng.incidentGalleryColumns.v1", 4);
+  const galleryColumns = incidentGalleryColumns(storedGalleryColumns);
+  // How many incidents the gallery has asked for. Scrolling near the end asks for more.
+  const [galleryWanted, setGalleryWanted] = useState(INCIDENT_GALLERY_CHUNK);
+  const [galleryMoreError, setGalleryMoreError] = useState("");
+  const [filtersPinned, setFiltersPinned] = useState(false);
+  const galleryLoadedRef = useRef({ key: "", token: -1, items: [] });
+  const galleryGrowthRef = useRef({ count: 0, total: 0, wanted: INCIDENT_GALLERY_CHUNK });
+  const galleryRevealRef = useRef(false);
   const [incidentPageSize, setIncidentPageSize] = useState(12);
   const retainedGallerySelectionRef = useRef(null);
   const galleryPageAnchorRef = useRef(null);
@@ -109,13 +122,18 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const tabletInspectorToggleRef = useRef(null);
   const relatedPreviewRequestRef = useRef(0);
   const mobileView = isMobileViewport();
-  const incidentsPerPage = mobileView ? 12 : incidentPageSize;
+  const galleryMode = !mobileView && galleryExpanded;
+  const galleryModeRef = useRef(galleryMode);
+  galleryModeRef.current = galleryMode;
+  const incidentsPerPage = mobileView ? 12 : galleryMode ? galleryWanted : incidentPageSize;
   const cameraNameById = useMemo(() => new Map(cameras.map((camera) => [camera.id, camera.name || camera.id])), [cameras]);
   const incidentCameraOptions = incidentFacets.camera_ids || [];
   const incidentObjectOptions = incidentFacets.labels || [];
   const incidentZoneOptions = incidentFacets.zones || [];
   const semanticIncidentActive = Boolean(semanticIncidentActiveQuery);
-  const activeIncidentFilterCount = [incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter].filter((value) => value !== "all").length;
+  const confidenceApplies = eventFilter !== "motion";
+  const activeIncidentFilterCount = [incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter].filter((value) => value !== "all").length
+    + (confidenceApplies && incidentMinConfidence > 0 ? 1 : 0);
   const incidentResultSource = semanticIncidentActive ? semanticIncidentResults : incidents;
   const displayedIncidentTotal = semanticIncidentActive ? semanticIncidentResults.length : incidentTotal;
   const displayedIncidentLoading = semanticIncidentActive ? semanticIncidentLoading : incidentLoading;
@@ -153,7 +171,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   // gallery row (that clobbers the deep link URL and can leave a blank investigation).
   const focusedSummary = mobileView
     ? explicitlyFocusedSummary
-    : (explicitlyFocusedSummary || (linkedIncidentBootRef.current ? null : visibleIncidents[0]) || null);
+    : (explicitlyFocusedSummary || (linkedIncidentBootRef.current || galleryMode ? null : visibleIncidents[0]) || null);
   const focusedDetailQuery = incidentDetailQuery(focusedSummary);
   const focusedIncident = focusedSummary ? incidentDetails[focusedDetailQuery] || focusedSummary : null;
   const focusedEvent = (focusedIncident?.events || []).find((event) => Number(event.id) === Number(focusedFaceEventId))
@@ -193,6 +211,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     offset: semanticIncidentActive ? incidentPage * incidentsPerPage : Number(new URLSearchParams(incidentLoadedQueryRef.current).get("offset")) || 0,
     pageSize: incidentsPerPage, items: visibleIncidents, selectedId: focusedIncident?.id,
   };
+  galleryGrowthRef.current = { count: visibleIncidents.length, total: displayedIncidentTotal, wanted: galleryWanted };
   useEffect(() => {
     if (!displayedIncident && tabletInspectorOpen) setTabletInspectorOpen(false);
   }, [displayedIncident, tabletInspectorOpen]);
@@ -286,9 +305,13 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       if (rect.width <= 0 || rect.height <= 0) return;
       const width = rect.width;
       const height = rect.height;
-      const pageSize = galleryExpanded
-        ? galleryPageSize
-        : incidentThumbnailPageSize({ width, height, density: incidentDensity,
+      if (galleryExpanded) {
+        // The gallery has no pages; a taller or wider list may need more rows.
+        galleryPageAnchorRef.current = null;
+        loadMoreGalleryIfNearEnd();
+        return;
+      }
+      const pageSize = incidentThumbnailPageSize({ width, height, density: incidentDensity,
           ...(incidentDensity === "comfortable" ? { columns: 2, gap: 6, horizontalPadding: 16 } : {}) });
       const paging = incidentPagingRef.current;
       if (paging.pageSize !== pageSize) {
@@ -309,7 +332,39 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     const observer = new ResizeObserver(scheduleResize);
     observer.observe(rail);
     return () => { observer.disconnect(); window.clearTimeout(resizeTimer); };
-  }, [mobileView, galleryExpanded, incidentDensity, galleryPageSize]);
+  }, [mobileView, galleryExpanded, incidentDensity]);
+
+  function loadMoreGalleryIfNearEnd() {
+    const rail = incidentRailListRef.current;
+    const growth = galleryGrowthRef.current;
+    if (!rail || !galleryModeRef.current) return;
+    // Fewer shown than asked for means a load is in flight or has failed.
+    if (growth.count >= growth.total || growth.count < growth.wanted) return;
+    if (rail.scrollHeight - rail.scrollTop - rail.clientHeight > 600) return;
+    setGalleryWanted((wanted) => (wanted === growth.wanted ? wanted + INCIDENT_GALLERY_CHUNK : wanted));
+  }
+
+  useEffect(() => {
+    if (!galleryMode) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      const rail = incidentRailListRef.current;
+      // Wait for the gallery's own list; until then the viewer's page is still shown.
+      const galleryLoaded = semanticIncidentActive || incidentLoadedQueryRef.current.startsWith("gallery:");
+      const chosen = galleryRevealRef.current && galleryLoaded ? rail?.querySelector(".live-activity-item.selected") : null;
+      if (chosen) {
+        galleryRevealRef.current = false;
+        chosen.scrollIntoView({ block: "center" });
+      }
+      loadMoreGalleryIfNearEnd();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [galleryMode, incidentResultSource, displayedIncidentTotal, galleryColumns, galleryWanted, semanticIncidentActive]);
+
+  useEffect(() => {
+    if (confidenceDraft === incidentMinConfidence) return undefined;
+    const timer = window.setTimeout(() => setIncidentMinConfidence(confidenceDraft), 300);
+    return () => window.clearTimeout(timer);
+  }, [confidenceDraft, incidentMinConfidence]);
 
   function refresh() {
     refreshBase();
@@ -360,6 +415,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     setSemanticIncidentLoading(true);
     setSemanticIncidentError("");
     setIncidentPage(0);
+    setGalleryWanted(INCIDENT_GALLERY_CHUNK);
     setEventFilter("object");
     try {
       const nextDay = addDaysToDateKey(incidentDay || today, 1);
@@ -429,6 +485,8 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     setIncidentObjectFilter("all");
     setIncidentZoneFilter("all");
     setIncidentPersonFilter("all");
+    setConfidenceDraft(0);
+    setIncidentMinConfidence(0);
   }
 
   useEffect(() => () => semanticIncidentRequestRef.current?.abort(), []);
@@ -493,19 +551,76 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
 
   useEffect(() => {
     let cancelled = false;
+    async function loadGallery(filters) {
+      const baseKey = `gallery:${filters}`;
+      const loaded = galleryLoadedRef.current;
+      const sameList = loaded.key === baseKey && loaded.token === incidentRefreshToken;
+      if (sameList && loaded.items.length >= galleryWanted) return;
+      const foregroundLoad = loaded.key !== baseKey;
+      if (foregroundLoad) {
+        setIncidentLoading(true);
+        setIncidentLoadError("");
+      }
+      setGalleryMoreError("");
+      try {
+        // Scrolling adds to the end. A refresh or a filter change reads again from the top.
+        let items = sameList ? loaded.items : [];
+        let offset = items.length;
+        let payload = null;
+        while (items.length < galleryWanted) {
+          const limit = Math.min(100, galleryWanted - items.length);
+          const query = new URLSearchParams(filters);
+          query.set("limit", String(limit));
+          query.set("offset", String(offset));
+          const response = await fetch(`/api/incidents/search?${query}`);
+          if (!response.ok) throw new Error("Unable to load incidents");
+          payload = await response.json();
+          if (cancelled) return;
+          const page = payload.items || [];
+          const seen = new Set(items.map((item) => String(item.id)));
+          items = [...items, ...page.filter((item) => !seen.has(String(item.id)))];
+          offset += page.length;
+          if (page.length < limit || offset >= Number(payload.total || 0)) break;
+        }
+        if (!payload) return;
+        galleryLoadedRef.current = { key: baseKey, token: incidentRefreshToken, items };
+        incidentLoadedQueryRef.current = `${baseKey}&offset=0`;
+        setIncidents(items);
+        setIncidentTotal(Math.max(Number(payload.total || 0), items.length));
+        setIncidentFacets(payload.facets || { camera_ids: [], labels: [], zones: [] });
+        setIncidentLoadError("");
+      } catch (error) {
+        if (cancelled) return;
+        if (foregroundLoad) {
+          galleryLoadedRef.current = { key: "", token: -1, items: [] };
+          setIncidents([]);
+          setIncidentTotal(0);
+          setIncidentLoadError(error.message || "Unable to load incidents");
+        } else if (sameList) {
+          // Keep what is shown; say that the rest did not arrive.
+          setGalleryMoreError("Could not load more incidents.");
+        }
+      } finally {
+        if (!cancelled && foregroundLoad) setIncidentLoading(false);
+      }
+    }
     async function loadIncidentPage() {
-      const query = new URLSearchParams({
+      const filters = new URLSearchParams({
         day: incidentDay || today,
         time_zone: timeZone,
         event_type: eventFilter,
-        limit: String(incidentsPerPage),
-        offset: String(incidentPage * incidentsPerPage),
         gap_seconds: "45",
       });
-      if (incidentCameraFilter !== "all") query.set("camera_id", incidentCameraFilter);
-      if (incidentObjectFilter !== "all") query.set("object_label", incidentObjectFilter);
-      if (incidentZoneFilter !== "all") query.set("zone", incidentZoneFilter);
-      if (incidentPersonFilter !== "all") query.set("person_id", incidentPersonFilter);
+      if (incidentCameraFilter !== "all") filters.set("camera_id", incidentCameraFilter);
+      if (incidentObjectFilter !== "all") filters.set("object_label", incidentObjectFilter);
+      if (incidentZoneFilter !== "all") filters.set("zone", incidentZoneFilter);
+      if (incidentPersonFilter !== "all") filters.set("person_id", incidentPersonFilter);
+      if (confidenceApplies && incidentMinConfidence > 0) filters.set("min_confidence", String(incidentMinConfidence / 100));
+      if (galleryMode) return loadGallery(filters);
+      galleryLoadedRef.current = { key: "", token: -1, items: [] };
+      const query = new URLSearchParams(filters);
+      query.set("limit", String(incidentsPerPage));
+      query.set("offset", String(incidentPage * incidentsPerPage));
       const queryKey = query.toString();
       const foregroundLoad = incidentLoadedQueryRef.current !== queryKey;
       if (foregroundLoad) {
@@ -543,13 +658,15 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     return () => {
       cancelled = true;
     };
-  }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentPage, incidentsPerPage, incidentRefreshToken]);
+  }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentMinConfidence, confidenceApplies, incidentPage, incidentsPerPage, incidentRefreshToken, galleryMode]);
 
   useEffect(() => {
     retainedGallerySelectionRef.current = null;
     galleryPageAnchorRef.current = null;
     setIncidentPage(0);
-  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentDay, incidentDensity]);
+    setGalleryWanted(INCIDENT_GALLERY_CHUNK);
+    if (galleryModeRef.current && incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
+  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentMinConfidence, incidentDay, incidentDensity]);
 
   useEffect(() => {
     if (incidentPage >= incidentPageCount) setIncidentPage(Math.max(0, incidentPageCount - 1));
@@ -627,12 +744,13 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   useEffect(() => {
     function onKey(keyEvent) {
       if (keyEvent.defaultPrevented || tabletInspectorOpen) return;
-      if (keyEvent.key === "Escape" && galleryExpanded && !selectedEvent) {
+      // Escape leaves the viewer for the gallery, the page's home.
+      if (keyEvent.key === "Escape" && !mobileView && !galleryExpanded && !selectedEvent) {
         keyEvent.preventDefault();
-        changeGallery(false);
+        changeGallery(true);
         return;
       }
-      if (keyEvent.key === "Escape" && expandedIncidentId && !selectedEvent) {
+      if (keyEvent.key === "Escape" && mobileView && expandedIncidentId && !selectedEvent) {
         keyEvent.preventDefault();
         setExpandedIncidentId(null);
       }
@@ -645,25 +763,25 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     retainedGallerySelectionRef.current = selectedIncident;
     const paging = incidentPagingRef.current;
     const index = paging.items.findIndex((item) => sameIncidentId(item.id, selectedIncident?.id));
-    galleryPageAnchorRef.current = paging.offset + Math.max(0, index);
+    const anchor = paging.offset + Math.max(0, index);
+    galleryPageAnchorRef.current = anchor;
     setTabletInspectorOpen(false);
+    if (expanded) {
+      // Load far enough to include the open incident, then bring it into view.
+      galleryRevealRef.current = index >= 0;
+      setGalleryWanted((wanted) => incidentGalleryWanted(anchor, wanted));
+      setIncidentPage(0);
+    } else {
+      setIncidentPage(Math.floor(anchor / Math.max(1, incidentPageSize)));
+      if (incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
+    }
     setGalleryExpanded(expanded);
-    if (incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
     incidentGalleryToggleRef.current?.focus({ preventScroll: true });
   }
 
   function selectGalleryIncident(incident) {
     toggleIncident(incident.id);
     if (galleryExpanded) changeGallery(false, incident);
-  }
-
-  function selectGalleryPageSize(value) {
-    retainedGallerySelectionRef.current = focusedIncident;
-    const paging = incidentPagingRef.current;
-    const index = paging.items.findIndex((item) => sameIncidentId(item.id, focusedIncident?.id));
-    galleryPageAnchorRef.current = paging.offset + Math.max(0, index);
-    setStoredGalleryPageSize(incidentGalleryPageSize(value));
-    if (incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
   }
 
   function changeIncidentPage(page, { scroll = true } = {}) {
@@ -824,54 +942,89 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     return (
       <main className={`incidents-desktop-page with-inspector${galleryExpanded ? " gallery-expanded" : ""}`}>
         <section className="bento-card incidents-desktop-shell">
-          <div className="incidents-desktop-toolbar">
-            <div className="incidents-command-primary">
-              <div className="incident-filter-toggle compact" role="group" aria-label="Incident type filter">
-                <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}>Objects</button>
-                <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion</button>
+          {galleryExpanded || filtersPinned ? (
+            <aside className="incident-filter-pane" aria-label="Incident filters">
+              <div className="incident-filter-pane-top">
+                <div className="incident-filter-toggle compact incident-filter-segments" role="group" aria-label="Incident type filter">
+                  <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}><ScanSearch size={15} aria-hidden="true" />Objects</button>
+                  <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}><Radar size={15} aria-hidden="true" />Motion</button>
+                </div>
+                {semanticIncidentControl}
+                {incidentDayControl()}
               </div>
-              {incidentDayControl()}
-              <div className="incident-filter-selects desktop">
-                <label><select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)} aria-label="Incident camera"><option value="all">All cameras</option>{incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}</select></label>
-                <label><select value={incidentObjectFilter} onChange={(event) => setIncidentObjectFilter(event.target.value)} aria-label="Incident object"><option value="all">All objects</option>{incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}</select></label>
-                <label><select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)} aria-label="Incident zone"><option value="all">All zones</option>{incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}</select></label>
-                <label><select value={incidentPersonFilter} onChange={(event) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(event.target.value); }} aria-label="Known person"><option value="all">All people</option>{incidentPeople.map((person) => <option value={person.id} key={person.id}>{person.name}</option>)}</select></label>
+              <div className="incident-filter-pane-scroll">
+                <section className="incident-filter-section">
+                  <h3>Camera</h3>
+                  <select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)} aria-label="Incident camera"><option value="all">All cameras</option>{incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}</select>
+                </section>
+                <section className="incident-filter-section">
+                  <h3 id="incident-object-filter-heading">Objects</h3>
+                  <div className="incident-filter-checks" role="radiogroup" aria-labelledby="incident-object-filter-heading">
+                    {["all", ...incidentObjectOptions].map((label) => (
+                      <label className="incident-filter-check" key={label}>
+                        <input type="radio" name="incident-object-filter" value={label} checked={incidentObjectFilter === label} onChange={() => setIncidentObjectFilter(label)} />
+                        {label === "all" ? null : <IncidentObjectIcon label={label} size={15} />}
+                        <span>{label === "all" ? "All objects" : label.replaceAll("_", " ")}</span>
+                      </label>
+                    ))}
+                  </div>
+                </section>
+                <section className="incident-filter-section incident-filter-confidence">
+                  <h3 id="incident-confidence-heading">Confidence threshold</h3>
+                  <input type="range" min={0} max={95} step={5} value={confidenceApplies ? confidenceDraft : 0} disabled={!confidenceApplies} onChange={(event) => setConfidenceDraft(Number(event.target.value))} aria-labelledby="incident-confidence-heading" aria-valuetext={confidenceDraft > 0 ? `${confidenceDraft}% or higher` : "Any confidence"} style={{ "--fill": `${(confidenceApplies ? confidenceDraft : 0) / 95 * 100}%` }} />
+                  <div className="incident-filter-confidence-readout">
+                    <span>{displayedIncidentTotal} {displayedIncidentTotal === 1 ? "result" : "results"}</span>
+                    <output>{confidenceApplies && confidenceDraft > 0 ? `${confidenceDraft}%` : "Any"}</output>
+                  </div>
+                  {!confidenceApplies ? <small>Motion-only incidents have no detection confidence.</small>
+                    : semanticIncidentActive ? <small>Search matches are not filtered by confidence.</small> : null}
+                </section>
+                <section className="incident-filter-section">
+                  <h3>Zone</h3>
+                  <select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)} aria-label="Incident zone"><option value="all">All zones</option>{incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}</select>
+                </section>
+                <section className="incident-filter-section">
+                  <h3>Person</h3>
+                  <select value={incidentPersonFilter} onChange={(event) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(event.target.value); }} aria-label="Known person"><option value="all">All people</option>{incidentPeople.map((person) => <option value={person.id} key={person.id}>{person.name}</option>)}</select>
+                </section>
               </div>
-              {semanticIncidentControl}
-              <div className="incident-toolbar-summary" aria-label={`${activeIncidentFilterCount} active filters`}>
-                {activeIncidentFilterCount ? <button type="button" onClick={clearIncidentFilters}>Clear</button> : null}
-                <span className="shown-bubble">{displayedIncidentTotal} {semanticIncidentActive ? "matches" : "shown"}</span>
+              <div className="incident-filter-pane-foot incident-toolbar-summary" aria-label={`${activeIncidentFilterCount} active filters`}>
+                <button type="button" onClick={clearIncidentFilters} disabled={!activeIncidentFilterCount}>Clear filters{activeIncidentFilterCount ? ` (${activeIncidentFilterCount})` : ""}</button>
               </div>
-            </div>
-          </div>
+            </aside>
+          ) : null}
 
           <div className="incidents-desktop-workspace">
             <aside className={`incident-rail ${incidentDensity}`}>
               <div className="incident-rail-head">
-                <button ref={incidentGalleryToggleRef} type="button" className="incident-gallery-toggle" aria-expanded={galleryExpanded} aria-controls="incident-results" onClick={() => changeGallery(!galleryExpanded)}>
-                  {galleryExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
-                  {galleryExpanded ? "Collapse gallery" : "Expand gallery"}
+                <button ref={incidentGalleryToggleRef} type="button" className="incident-gallery-toggle" aria-expanded={galleryExpanded} aria-controls="incident-results" title={galleryExpanded ? "Open the incident viewer" : "Back to the gallery (Esc)"} onClick={() => changeGallery(!galleryExpanded)}>
+                  {galleryExpanded ? <PanelLeft size={15} /> : <LayoutGrid size={15} />}
+                  {galleryExpanded ? "Open viewer" : "Gallery"}
                 </button>
                 {galleryExpanded ? (
-                  <label className="incident-gallery-page-size">
-                    <span>Images per page</span>
-                    <select aria-label="Gallery images per page" value={galleryPageSize} onChange={(event) => selectGalleryPageSize(event.target.value)}>
-                      <option value={25}>25</option>
-                      <option value={50}>50</option>
-                      <option value={100}>100</option>
-                    </select>
-                  </label>
-                ) : null}
+                  <>
+                    <span className="shown-bubble">{displayedIncidentTotal} {semanticIncidentActive ? "matches" : "shown"}</span>
+                    <label className="incident-gallery-columns">
+                      <span>Per row</span>
+                      <input type="range" min={2} max={8} step={1} value={galleryColumns} onChange={(event) => setStoredGalleryColumns(incidentGalleryColumns(event.target.value))} aria-label="Incidents per row" style={{ "--fill": `${(galleryColumns - 2) / 6 * 100}%` }} />
+                      <output>{galleryColumns}</output>
+                    </label>
+                  </>
+                ) : (
+                  <button type="button" className="incident-filter-pin" aria-pressed={filtersPinned} onClick={() => setFiltersPinned((pinned) => !pinned)}>
+                    <SlidersHorizontal size={15} />Filters{activeIncidentFilterCount ? ` (${activeIncidentFilterCount})` : ""}
+                  </button>
+                )}
                 <div className="density-control" aria-label="Thumbnail density" hidden={galleryExpanded}>
                   <button type="button" className={incidentDensity === "compact" ? "active" : ""} aria-pressed={incidentDensity === "compact"} onClick={() => setIncidentDensity("compact")} title="List view" aria-label="List view"><Rows3 size={15} /></button>
                   <button type="button" className={incidentDensity === "comfortable" ? "active" : ""} aria-pressed={incidentDensity === "comfortable"} onClick={() => setIncidentDensity("comfortable")} title="Grid view" aria-label="Grid view"><Grid2X2 size={15} /></button>
                 </div>
               </div>
-              <div id="incident-results" className="incident-rail-list" ref={incidentRailListRef} aria-label="Incidents">
+              <div id="incident-results" className="incident-rail-list" ref={incidentRailListRef} aria-label="Incidents" onScroll={galleryExpanded ? loadMoreGalleryIfNearEnd : undefined} style={galleryExpanded ? { "--incident-gallery-columns": galleryColumns } : undefined}>
                 {displayedIncidentLoading && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
                 {!galleryIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
                 {galleryIncidents.length ? pagedIncidents.map((incident) => (
-                  <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} onSelect={selectGalleryIncident} onOpenOverlay={galleryExpanded ? selectGalleryIncident : openIncidentOverlay} />
+                  <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} hud={galleryExpanded || incidentDensity === "comfortable"} onSelect={selectGalleryIncident} onOpenOverlay={galleryExpanded ? selectGalleryIncident : openIncidentOverlay} />
                 )) : null}
                 {!displayedIncidentLoading && !displayedIncidentError && !galleryIncidents.length ? (
                   <div className="empty-state">
@@ -883,11 +1036,20 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                   </div>
                 ) : null}
               </div>
-              <div className={`incident-pager ${displayedIncidentTotal > incidentsPerPage ? "" : "placeholder"}`} aria-label="Incident pages" aria-hidden={displayedIncidentTotal <= incidentsPerPage}>
-                <button type="button" onClick={() => changeIncidentPage(Math.max(0, incidentPage - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
-                <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
-                <button type="button" onClick={() => changeIncidentPage(Math.min(incidentPageCount - 1, incidentPage + 1))} disabled={clampedIncidentPage >= incidentPageCount - 1}>Next</button>
-              </div>
+              {galleryExpanded ? (
+                <div className="incident-gallery-status" role="status">
+                  {galleryMoreError ? <><span>{galleryMoreError}</span><button type="button" onClick={() => setIncidentRefreshToken((value) => value + 1)}>Retry</button></>
+                    : !galleryIncidents.length ? null
+                    : galleryIncidents.length < displayedIncidentTotal ? <span>Showing {galleryIncidents.length} of {displayedIncidentTotal}. Scroll for more.</span>
+                    : <span>All {displayedIncidentTotal} {displayedIncidentTotal === 1 ? "incident" : "incidents"} for this day.</span>}
+                </div>
+              ) : (
+                <div className={`incident-pager ${displayedIncidentTotal > incidentsPerPage ? "" : "placeholder"}`} aria-label="Incident pages" aria-hidden={displayedIncidentTotal <= incidentsPerPage}>
+                  <button type="button" onClick={() => changeIncidentPage(Math.max(0, incidentPage - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
+                  <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
+                  <button type="button" onClick={() => changeIncidentPage(Math.min(incidentPageCount - 1, incidentPage + 1))} disabled={clampedIncidentPage >= incidentPageCount - 1}>Next</button>
+                </div>
+              )}
             </aside>
 
             <section className="incident-investigation" inert={galleryExpanded} aria-hidden={galleryExpanded}>

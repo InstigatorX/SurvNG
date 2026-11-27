@@ -168,10 +168,14 @@ curl -s http://127.0.0.1:8088/api/config | python -m json.tool
 
 ```bash
 curl -s -G 'http://127.0.0.1:8088/api/incidents/search' \
-  --data-urlencode 'camera_ids=front-door' \
-  --data-urlencode 'object_labels=person' \
+  --data-urlencode 'event_type=object' \
+  --data-urlencode 'camera_id=front-door' \
+  --data-urlencode 'object_label=person' \
+  --data-urlencode 'min_confidence=0.8' \
   --data-urlencode 'limit=20' | python -m json.tool
 ```
+
+`min_confidence` (0 to 1) keeps incidents with a detection at or above that confidence; with `object_label` set, that object must reach it. `limit` is capped at 100; page with `offset`.
 
 Exact query parameter names follow the live OpenAPI schema at `/docs` if your build adds filters.
 

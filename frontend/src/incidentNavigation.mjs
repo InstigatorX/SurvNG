@@ -591,7 +591,17 @@ export function incidentThumbnailPageSize({ width, height, density, columns: req
   return Math.max(1, Math.floor((safeHeight + gap) / (rowHeight + gap)));
 }
 
-export function incidentGalleryPageSize(value) {
-  const size = Number(value);
-  return [25, 50, 100].includes(size) ? size : 25;
+// The gallery loads this many incidents at a time as it is scrolled.
+export const INCIDENT_GALLERY_CHUNK = 60;
+
+// Incidents per gallery row. Storage and range inputs hand back strings.
+export function incidentGalleryColumns(value) {
+  const columns = Math.round(Number(value));
+  return Number.isFinite(columns) && columns >= 2 && columns <= 8 ? columns : 4;
+}
+
+// How many incidents the gallery must hold to include the one at ``index``.
+export function incidentGalleryWanted(index, current = INCIDENT_GALLERY_CHUNK) {
+  const needed = Math.ceil((Math.max(0, Number(index) || 0) + 1) / INCIDENT_GALLERY_CHUNK) * INCIDENT_GALLERY_CHUNK;
+  return Math.max(INCIDENT_GALLERY_CHUNK, Number(current) || 0, needed);
 }

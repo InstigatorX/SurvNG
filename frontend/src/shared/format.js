@@ -73,3 +73,14 @@ export function formatCompactDuration(seconds) {
   if (seconds < 86400) return `${Math.round(seconds / 3600)}h`;
   return `${Math.round(seconds / 86400)}d`;
 }
+
+// Compact stamp for picture overlays: "Mar 8, 6:31pm".
+export function formatHudDateTime(value, timeZone) {
+  if (!value) return "--";
+  const date = typeof value === "number" ? new Date(value * 1000) : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone, month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true,
+  }).formatToParts(date).map((part) => [part.type, part.value]));
+  return `${parts.month} ${parts.day}, ${parts.hour}:${parts.minute}${String(parts.dayPeriod || "").toLowerCase()}`;
+}
