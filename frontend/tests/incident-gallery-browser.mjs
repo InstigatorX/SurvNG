@@ -137,7 +137,9 @@ try {
   failMore = false;
   await status.getByRole("button", { name: "Retry" }).click();
   await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length === count, TOTAL);
-  assert.equal(await tiles.first().locator(".incident-hud-where b").innerText(), "Front Door", "earlier tiles stay");
+  // Off-screen tiles are not rendered, so read their text from the document.
+  assert.equal(await tiles.first().locator(".incident-hud-where b").textContent(), "Front Door", "earlier tiles stay");
+  assert.equal(await tiles.first().evaluate((element) => getComputedStyle(element).contentVisibility), "auto");
   assert.match(await status.innerText(), new RegExp(`All ${TOTAL} incidents`));
   const settled = deeper().length;
   await toEnd();

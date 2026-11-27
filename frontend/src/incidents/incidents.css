@@ -1002,3 +1002,21 @@
     transform: none;
   }
 }
+
+/* A long day can hold hundreds of tiles. Each tile's height follows from its
+ * width alone, so the browser can skip laying out and painting the ones that
+ * are off screen without the scroll length changing. */
+.gallery-expanded .incident-rail .live-activity-item.with-hud {
+  aspect-ratio: 16 / 9;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px auto 180px;
+}
+
+.gallery-expanded .incident-rail .live-activity-item.with-hud .live-activity-select,
+.gallery-expanded .incident-rail .live-activity-item.with-hud .live-activity-thumb {
+  height: 100%;
+}
+
+.gallery-expanded .incident-rail .live-activity-item.with-hud .live-activity-thumb {
+  aspect-ratio: auto;
+}
