@@ -176,11 +176,15 @@ try {
   await chosen.waitFor();
   // The gallery reloads far enough to hold the open incident.
   await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length >= count, 2 * INCIDENT_GALLERY_CHUNK);
-  await page.waitForFunction(() => {
+  // The list animates to full width, moving every row; the open incident must
+  // still be in view once that has settled, not only at some moment on the way.
+  await page.waitForFunction(() => document.querySelector("#incident-results").getBoundingClientRect().width > 1000);
+  await page.waitForTimeout(800);
+  assert.ok(await page.evaluate(() => {
     const box = document.querySelector("#incident-results .live-activity-item.selected")?.getBoundingClientRect();
     const frame = document.querySelector("#incident-results").getBoundingClientRect();
-    return box && box.top >= frame.top && box.bottom <= frame.bottom;
-  });
+    return Boolean(box) && box.top >= frame.top && box.bottom <= frame.bottom;
+  }), "the open incident is in view after the gallery settles");
 
   // A link to one incident still opens its viewer.
   await page.goto(`${origin}/survng/incidents?incident_id=incident-3`);

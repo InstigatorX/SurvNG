@@ -98,7 +98,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const [filtersPinned, setFiltersPinned] = useState(false);
   const galleryLoadedRef = useRef({ key: "", token: -1, items: [] });
   const galleryGrowthRef = useRef({ count: 0, total: 0, wanted: INCIDENT_GALLERY_CHUNK });
-  const galleryRevealRef = useRef(false);
+  // 0: nothing to reveal. Infinity: waiting for the gallery to hold the open
+  // incident. Otherwise the time until which a layout change repeats the scroll.
+  const galleryRevealRef = useRef(0);
   const [incidentPageSize, setIncidentPageSize] = useState(12);
   const retainedGallerySelectionRef = useRef(null);
   const galleryPageAnchorRef = useRef(null);
@@ -309,6 +311,8 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       if (galleryExpanded) {
         // The gallery has no pages; a taller or wider list may need more rows.
         galleryPageAnchorRef.current = null;
+        // The list animates to full width, which moves every row.
+        revealChosenInGallery();
         loadMoreGalleryIfNearEnd();
         return;
       }
@@ -335,6 +339,18 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     return () => { observer.disconnect(); window.clearTimeout(resizeTimer); };
   }, [mobileView, galleryExpanded, incidentDensity]);
 
+  function revealChosenInGallery() {
+    const armed = galleryRevealRef.current;
+    if (!armed || !galleryModeRef.current) return;
+    if (armed !== Infinity && performance.now() > armed) { galleryRevealRef.current = 0; return; }
+    // Wait for the gallery's own list; until then the viewer's page is still shown.
+    if (!semanticIncidentActive && !incidentLoadedQueryRef.current.startsWith("gallery:")) return;
+    const chosen = incidentRailListRef.current?.querySelector(".live-activity-item.selected");
+    if (!chosen) return;
+    if (armed === Infinity) galleryRevealRef.current = performance.now() + 1000;
+    chosen.scrollIntoView({ block: "center" });
+  }
+
   function loadMoreGalleryIfNearEnd() {
     const rail = incidentRailListRef.current;
     const growth = galleryGrowthRef.current;
@@ -348,14 +364,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   useEffect(() => {
     if (!galleryMode) return undefined;
     const frame = window.requestAnimationFrame(() => {
-      const rail = incidentRailListRef.current;
-      // Wait for the gallery's own list; until then the viewer's page is still shown.
-      const galleryLoaded = semanticIncidentActive || incidentLoadedQueryRef.current.startsWith("gallery:");
-      const chosen = galleryRevealRef.current && galleryLoaded ? rail?.querySelector(".live-activity-item.selected") : null;
-      if (chosen) {
-        galleryRevealRef.current = false;
-        chosen.scrollIntoView({ block: "center" });
-      }
+      revealChosenInGallery();
       loadMoreGalleryIfNearEnd();
     });
     return () => window.cancelAnimationFrame(frame);
@@ -769,7 +778,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     setTabletInspectorOpen(false);
     if (expanded) {
       // Load far enough to include the open incident, then bring it into view.
-      galleryRevealRef.current = index >= 0;
+      galleryRevealRef.current = index >= 0 ? Infinity : 0;
       setGalleryWanted((wanted) => incidentGalleryWanted(anchor, wanted));
       setIncidentPage(0);
     } else {
@@ -1024,7 +1033,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                   <button type="button" className={incidentDensity === "comfortable" ? "active" : ""} aria-pressed={incidentDensity === "comfortable"} onClick={() => setIncidentDensity("comfortable")} title="Grid view" aria-label="Grid view"><Grid2X2 size={15} /></button>
                 </div>
               </div>
-              <div id="incident-results" className="incident-rail-list" ref={incidentRailListRef} aria-label="Incidents" onScroll={galleryExpanded ? loadMoreGalleryIfNearEnd : undefined} style={galleryExpanded ? { "--incident-gallery-columns": galleryColumns } : undefined}>
+              <div id="incident-results" className="incident-rail-list" ref={incidentRailListRef} aria-label="Incidents" onScroll={galleryExpanded ? loadMoreGalleryIfNearEnd : undefined} onWheel={() => { galleryRevealRef.current = 0; }} onPointerDown={() => { galleryRevealRef.current = 0; }} style={galleryExpanded ? { "--incident-gallery-columns": galleryColumns } : undefined}>
                 {displayedIncidentLoading && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
                 {!galleryIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
                 {galleryIncidents.length ? pagedIncidents.map((incident) => (
