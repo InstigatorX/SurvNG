@@ -285,6 +285,7 @@ class AppManager:
             database_dir=self.database_dir,
             media_storage=self.media_storage,
             database_write_lock=self.database_write_lock,
+            zone_alert_rules=self._zone_alert_rules,
         )
         self.ema_route_candidates = EmaRouteCandidateCache(
             self.database_dir / "ema-route-cache.sqlite3",
@@ -1788,9 +1789,29 @@ class AppManager:
             return False
         return any(self._scene_alert_enabled(decision, payload) for decision in payload.get("alert_decisions", []))
 
+    def _zone_alert_rules(self, camera_id: str) -> dict[str, bool]:
+        config = self.config
+        camera = next((item for item in config.cameras if item.id == camera_id), None)
+        if camera is None:
+            return {}
+        enabled = config.integration_notifications.enabled and camera.incident_notifications_enabled
+        return {zone.name: enabled and zone.notifications_enabled for zone in camera.zones
+                if zone.enabled and zone.behavior == "incident"}
+
     def incident_notification_payload(self, payload: dict) -> dict:
         camera = next((camera for camera in self.config.cameras if camera.id == payload.get("camera_id")), None)
         result = {**payload, "notifications_enabled": self.incident_notification_allowed(payload)}
+        if payload.get("zone_alerts"):
+            zone_alerts = payload["zone_alerts"]
+            rules = {camera_id: self._zone_alert_rules(camera_id)
+                     for camera_id in {alert["camera_id"] for alert in zone_alerts}}
+            result["zone_alerts"] = [{
+                **alert,
+                "notifications_enabled": (
+                    payload.get("schema_version") == 3 and not payload.get("historical")
+                    and alert["notifications_enabled"] and rules[alert["camera_id"]].get(alert["zone"], False)
+                ),
+            } for alert in zone_alerts]
         if camera is not None or payload.get("camera_id"):
             result["camera_name"] = camera.name if camera else payload["camera_id"]
         base_url = self.config.integration_notifications.base_url

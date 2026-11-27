@@ -10,7 +10,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..incident_utils import event_snapshot_path, portable_media_path, snapshot_deletion_claimed
 from ..main_database import (
@@ -90,9 +90,11 @@ class EventStore(
         database_dir: Path | None = None,
         media_storage: MediaStorageRegistry | None = None,
         database_write_lock: threading.RLock | None = None,
+        zone_alert_rules: Callable[[str], dict[str, bool]] | None = None,
     ) -> None:
         self.storage_dir = storage_dir
         self.media_storage = media_storage
+        self._zone_alert_rules = zone_alert_rules
         self.db_path = (database_dir or storage_dir) / "survng.sqlite3"
         self.jobs_db_path = self.db_path.parent / "detection-jobs.sqlite3"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1075,7 +1077,10 @@ class EventStore(
                     event_id,
                 ),
             )
-            updated = self._finish_evidence_commit(conn, event_id, row, reason="evidence_refined", cover_satisfied=bool(portable_snapshot and any(item.get("label") and item.get("frame_source") == "recorded_main" and item.get("snapshot_visible") is not False and item.get("incident_eligible") is not False for item in replacement)))
+            updated = self._finish_evidence_commit(
+                conn, event_id, row, reason="evidence_refined", zone_alert_objects=replacement,
+                cover_satisfied=bool(portable_snapshot and any(item.get("label") and item.get("frame_source") == "recorded_main" and item.get("snapshot_visible") is not False and item.get("incident_eligible") is not False for item in replacement)),
+            )
         if replaced_snapshot and replaced_snapshot != portable_snapshot:
             self._delete_snapshot_if_unreferenced(replaced_snapshot)
         return dict(updated) if updated is not None else None

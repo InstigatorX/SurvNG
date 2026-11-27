@@ -101,6 +101,16 @@ def _integration_camera_view(status: dict) -> tuple:
     return tuple(status.get(key) for key in INTEGRATION_CAMERA_FIELDS)
 
 
+def _native_incident_notification(manager, payload: dict) -> dict | None:
+    incident_allowed = manager.incident_notification_allowed(payload)
+    if not incident_allowed and not payload.get("zone_alerts"):
+        return None
+    result = manager.incident_notification_payload(payload)
+    if incident_allowed or any(alert["notifications_enabled"] for alert in result.get("zone_alerts", [])):
+        return result
+    return None
+
+
 def _incidents_stream_chunk(
     manager, event, *, camera_views: dict[str, tuple] | None = None,
 ) -> str | None:
@@ -118,13 +128,10 @@ def _incidents_stream_chunk(
             return None
         camera_views[camera_id] = view
         return _sse_message("camera_state", event.data, event.id)
-    if event.type != "incident_lifecycle" or not manager.incident_notification_allowed(event.data):
+    if event.type != "incident_lifecycle":
         return None
-    return _sse_message(
-        event.type,
-        manager.incident_notification_payload(event.data),
-        event.id,
-    )
+    payload = _native_incident_notification(manager, event.data)
+    return _sse_message(event.type, payload, event.id) if payload is not None else None
 
 
 def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
@@ -183,7 +190,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
 
         async def generate():
             active_manager = deps.get_manager()
-            subscriber = active_manager.state_events.subscribe()
+            subscriber, subscription_cursor = active_manager.state_events.subscribe_with_cursor()
             try:
                 yield "retry: 3000\n\n"
                 query_params = getattr(request, "query_params", {})
@@ -214,7 +221,9 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                 replayed_ids: set[str] = set()
                 snapshot_sequence: int | None = None
                 if replay is None:
-                    connection_cursor = active_manager.state_events.cursor
+                    # A native snapshot reconciles state without delivering
+                    # zone alerts. Keep events queued since subscription.
+                    connection_cursor = subscription_cursor if incidents_only else active_manager.state_events.cursor
                     snapshot_sequence = active_manager.state_events.sequence(connection_cursor)
                     if incidents_only:
                         yield _sse_message("incident_notifications_state", {

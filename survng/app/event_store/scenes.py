@@ -1022,6 +1022,20 @@ class EventStoreSceneMixin:
             subject["observations"]=[max(evidence,key=lambda o:(o.get("snapshot_available",False),o.get("confidence",0)))] if evidence else []
         return payload
 
+    @staticmethod
+    def _pending_zone_alerts(conn, incident_id):
+        alerts = conn.execute(
+            "select a.*, p.camera_id from scene_episodes p join scene_zone_alerts a on a.episode_id=p.id "
+            "where p.incident_id=? and a.published=0 order by a.confirmed_epoch, a.episode_id, a.zone, a.label",
+            (incident_id,),
+        )
+        return [{
+            "alert_id": a["alert_id"],
+            "camera_id": a["camera_id"], "zone": a["zone"], "label": a["label"],
+            "observed_at": _iso(a["observed_epoch"]), "confirmed_at": _iso(a["confirmed_epoch"]),
+            "notifications_enabled": bool(a["notifications_enabled"]),
+        } for a in alerts]
+
     def _scene_payload(self, conn, incident_id):
         from ..incident_presenter import _event_row, _incident_row
         incident_id = self._scene_resolve(conn,incident_id)
@@ -1752,6 +1766,9 @@ class EventStoreSceneMixin:
                     if payload is None:
                         orphaned.append((incident_id, int(row["revision"])))
                         continue
+                    zone_alerts = self._pending_zone_alerts(conn, incident_id)
+                    if zone_alerts:
+                        payload = {**payload, "zone_alerts": zone_alerts}
                     entries.append({"incident_id": incident_id, "revision": int(payload["revision"]), "payload": payload})
             finally:
                 conn.rollback()
@@ -1759,8 +1776,15 @@ class EventStoreSceneMixin:
             self.acknowledge_scene_notification(incident_id, revision)
         return entries
 
-    def acknowledge_scene_notification(self,incident_id,revision):
+    def acknowledge_scene_notification(self, incident_id, revision, *, zone_alert_ids=()):
         with self._lock,self._connect() as conn:
+            if zone_alert_ids:
+                # The exact facts that were published can now belong to a
+                # different incident after an episode merge or split.
+                conn.execute(
+                    "update scene_zone_alerts set published=1 where alert_id in (select value from json_each(?))",
+                    (_json(zone_alert_ids),),
+                )
             conn.execute(
                 "delete from scene_notification_outbox where incident_id=? and revision<=? and payload_json=''",
                 (incident_id, revision),

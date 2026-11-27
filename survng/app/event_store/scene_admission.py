@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import time
 
-from .scenes import _epoch, _json, _objects
+from .scenes import _display_confidence, _epoch, _json, _objects
 from ..incident_utils import DEFAULT_INCIDENT_GAP_SECONDS
 from ..scene_identity import analysis_observation_ids, observation_identity
 from ..scene_zone_admission import evaluate_scene_establishment
@@ -16,6 +16,14 @@ from ..scene_zone_admission import evaluate_scene_establishment
 
 def _identity(value):
     return hashlib.sha256(_json(value).encode()).hexdigest()[:32]
+
+
+def _event_observation_epoch(item, event_epoch):
+    absolute = item.get("captured_at_epoch", item.get("frame_captured_at_epoch", item.get("captured_at", item.get("snapshot_captured_at"))))
+    if absolute is None:
+        time_offset = item.get("offset_seconds", item.get("temporal_sample_offset_seconds", 0))
+        return event_epoch + float(time_offset or 0)
+    return _epoch(absolute, event_epoch)
 
 
 class EventStoreSceneAdmissionMixin:
@@ -32,6 +40,17 @@ class EventStoreSceneAdmissionMixin:
             -- Foreign-key checks on database-retention deletes look this up.
             create index if not exists scene_event_establishment_decision
                 on scene_event_establishment(decision_id);
+            create table if not exists scene_zone_alerts (
+                episode_id text not null references scene_episodes(id) on delete cascade,
+                zone text not null,
+                label text not null,
+                alert_id text not null unique,
+                observed_epoch real not null,
+                confirmed_epoch real not null,
+                notifications_enabled integer not null,
+                published integer not null default 0,
+                primary key(episode_id, zone, label)
+            );
             create table if not exists scene_context_projection_jobs (
                 episode_id text primary key references scene_episodes(id) on delete cascade,
                 anchor_event_id integer not null references events(id) on delete cascade,
@@ -51,8 +70,7 @@ class EventStoreSceneAdmissionMixin:
         groups = {}
         for index, original in candidates:
             item = dict(original)
-            absolute = item.get("captured_at_epoch", item.get("frame_captured_at_epoch", item.get("captured_at", item.get("snapshot_captured_at"))))
-            captured = _epoch(absolute, at) if absolute is not None else at + float(item.get("offset_seconds", item.get("temporal_sample_offset_seconds", 0)) or 0)
+            captured = _event_observation_epoch(item, at)
             item["captured_at_epoch"] = captured
             if index is not None and item.get("snapshot_visible") is not False:
                 item.setdefault("snapshot_path", row.get("snapshot_path") or "")
@@ -204,7 +222,51 @@ class EventStoreSceneAdmissionMixin:
             marked.append(sample)
         return marked
 
-    def _scene_ingest(self, conn, row, *, historical=False, notify=True, activity=True, force_revision=False, objects=None):
+    def _record_scene_zone_alerts(self, conn, row, episode_id, objects, evidence):
+        """Freeze alert facts from the detector input that supported this admission."""
+        supporting = set(evidence.get("supporting_observation_ids") or [])
+        if not supporting or self._zone_alert_rules is None:
+            return False
+        camera_id = row["camera_id"]
+        rules = self._zone_alert_rules(camera_id)
+        if not rules:
+            return False
+        detection_objects = [item for item in objects if item.get("status") != "object_tracking"]
+        _, candidates, presentation = self._scene_candidates(row, detection_objects)
+        at = _epoch(row["created_at"])
+        eligible = {}
+        for index, item in (*candidates, *presentation):
+            explicit = "alert_eligible" in item
+            if not explicit and (index is None or "incident_eligible" not in item):
+                continue
+            captured = _event_observation_epoch(item, at)
+            source_id = observation_identity(camera_id, captured, item)
+            if source_id not in supporting:
+                continue
+            previous = eligible.get(source_id)
+            if previous is None or explicit:
+                eligible[source_id] = (item, captured)
+
+        confirmed = time.time()
+        changed = False
+        for item, captured in sorted(eligible.values(), key=lambda hit: hit[1]):
+            if item.get("alert_eligible", item.get("incident_eligible")) is not True or not _display_confidence(item):
+                continue
+            for zone in item.get("zones") or []:
+                if isinstance(zone, str) and zone in rules:
+                    alert_id = "zone-alert-" + _identity([episode_id, zone, item["label"]])
+                    inserted = conn.execute(
+                        "insert into scene_zone_alerts "
+                        "(episode_id,zone,label,alert_id,observed_epoch,confirmed_epoch,notifications_enabled) "
+                        "values(?,?,?,?,?,?,?) "
+                        "on conflict(episode_id,zone,label) do nothing",
+                        (episode_id, zone, item["label"], alert_id, captured, confirmed, int(rules[zone])),
+                    )
+                    changed = bool(inserted.rowcount) or changed
+        return changed
+
+    def _scene_ingest(self, conn, row, *, historical=False, notify=True, activity=True, force_revision=False,
+                      objects=None, zone_alert_objects=None):
         """``objects`` is the decoded ``row["objects_json"]`` when the caller has it; it is only read."""
         from ..scene_activity import evaluate_scene_activity
 
@@ -349,9 +411,13 @@ class EventStoreSceneAdmissionMixin:
             )
         if alerts_pending:
             self._scene_refresh_alerts(conn, row["id"])
+        zone_alerts_added = False
+        if zone_alert_objects and supported and activity and notify and not historical and not qualification.get("historical"):
+            evidence = assessment if assessment["status"] == "supported" else decision["evidence"]
+            zone_alerts_added = self._record_scene_zone_alerts(conn, row, episode["id"], zone_alert_objects, evidence)
         self._refresh_scene_establishment(conn, incident_id)
         revision = conn.execute("select revision from scene_incidents where id=?", (incident_id,)).fetchone()[0]
-        if revision != previous_revision:
+        if zone_alerts_added or revision != previous_revision:
             self._scene_changed(conn, incident_id, notify=notify and supported)
         return incident_id
 
