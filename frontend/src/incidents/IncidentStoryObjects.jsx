@@ -4,7 +4,7 @@ import { formatTimeOnly } from "../shared/format.js";
 import { recordingPreviewUrl } from "../shared/mediaUrls.js";
 import { sceneEstablishmentText } from "../incidentScene.mjs";
 import {
-  cardOrder, cropBackgroundStyle, epochOf, establishmentReasonText, fraction, objectBestObservation, objectName, objectPath,
+  cardOrder, cropBackgroundStyle, epochOf, establishmentReasonText, objectBestObservation, objectName, objectPath,
   objectSummary, observationSnapshotUrl,
 } from "../incidentStory.mjs";
 import { VisualSimilarIncidents } from "./IncidentCard.jsx";
@@ -23,7 +23,7 @@ function ObjectThumb({ object }) {
   const index = error?.key === key ? error.index : 0;
   const src = urls[index];
   const tall = object.kind === "person";
-  const crop = src && src === still ? cropBackgroundStyle(observation, tall ? 52 / 68 : 52 / 40) : null;
+  const crop = src && src === still ? cropBackgroundStyle(observation, tall ? 36 / 42 : 36 / 34) : null;
   let style;
   if (crop) {
     const [width, height] = crop.backgroundSize.split(" ").map(parseFloat);
@@ -35,21 +35,12 @@ function ObjectThumb({ object }) {
   </span>;
 }
 
-function MiniBar({ object, line }) {
-  return <span className="story-minibar" aria-hidden="true">{object.intervals.map((interval, index) => {
-    const left = fraction(interval.start, line.start, line.end) * 100;
-    const width = Math.max(2, fraction(interval.end, line.start, line.end) * 100 - left);
-    return <span key={index} className={`${object.kind}${interval.state === "stationary" ? " stationary" : ""}`} style={{ left: `${Math.min(left, 100 - width)}%`, width: `${width}%` }} />;
-  })}</span>;
-}
-
-export function ObjectCards({ objects, line, selectedId, cameraName, identities, objectNames = null, onSelect }) {
+export function ObjectCards({ objects, selectedId, cameraName, timeZone, identities, objectNames = null, onSelect }) {
   return <div className="story-cards">
     {cardOrder(objects).map((object) => {
       const selected = String(object.id) === String(selectedId);
       const dimmed = selectedId != null && !selected;
-      // A face bound to this tracked person names it. Bound to no named group,
-      // the incident's identities still apply; with none, it is not recognized.
+      // Prefer a name bound to this track, then any unambiguous incident name.
       const bound = objectNames?.[object.id];
       const cardIdentities = bound?.length ? bound.map((name) => ({ name })) : bound ? (identities || []) : identities;
       return <button key={object.id} type="button" className={`story-card ${object.kind}${selected ? " selected" : ""}${dimmed ? " dimmed" : ""}`}
@@ -57,8 +48,7 @@ export function ObjectCards({ objects, line, selectedId, cameraName, identities,
         <ObjectThumb object={object} />
         <span className="story-card-body">
           <span className="story-card-title">{objectName(object)}{object.kind === "uncertain" ? <> <span className="story-uncertain-tag">uncertain</span></> : null}</span>
-          <span className="story-card-summary">{objectSummary(object, { cameraName, identities: cardIdentities })}</span>
-          <MiniBar object={object} line={line} />
+          <span className="story-card-summary">{objectSummary(object, { cameraName, timeZone, identities: cardIdentities })}</span>
         </span>
       </button>;
     })}
@@ -66,40 +56,32 @@ export function ObjectCards({ objects, line, selectedId, cameraName, identities,
 }
 
 function alertChip(decisions) {
-  if (!Array.isArray(decisions) || !decisions.length) return { tone: "neutral", text: "Alert policy not evaluated" };
+  if (!Array.isArray(decisions) || !decisions.length) return null;
   const eligible = decisions.flatMap((decision) => (decision.objects || []).filter((object) => object.eligible));
-  if (!eligible.length && !decisions.some((decision) => decision.eligible)) return { tone: "neutral", text: "No alert · criteria not met" };
+  if (!eligible.length && !decisions.some((decision) => decision.eligible)) return { tone: "neutral", text: "Alert criteria not met" };
   const first = eligible[0];
   const label = first ? `${objectName(first)}${first.zones?.length ? ` in ${first.zones[0]}` : ""}` : "";
   // Policy decisions do not confirm delivery, so say what was decided.
   return { tone: "info", text: `Met alert criteria${label ? ` · ${label}` : ""}` };
 }
 
-function coverageChips(incident, cameraName) {
-  const chips = [];
-  for (const episode of incident?.episodes || []) {
-    const state = episode.coverage?.state;
-    if (state && !["sampled", "historical"].includes(state)) chips.push({ tone: "warn", text: `${cameraName(episode.camera_id)} analysis ${episode.coverage?.gaps?.length ? "incomplete" : "pending"}` });
-  }
-  if (!chips.length && incident?.coverage?.state === "historical") chips.push({ tone: "neutral", text: "Historical evidence" });
-  return chips.filter((chip, index) => chips.findIndex((other) => other.text === chip.text) === index);
-}
-
-export function WhyPanel({ incident, cameraName }) {
+export function WhyPanel({ incident, cameraName, hasSightings }) {
   const establishment = sceneEstablishmentText(incident?.establishment);
   const reason = establishmentReasonText(incident, cameraName) || establishment?.explanation;
   const status = establishment?.status;
+  const motionOnly = !hasSightings && (incident.has_objects === false || !incident.labels?.length);
+  const heading = status && status !== "established" ? establishment.title : motionOnly ? "Motion only" : "Why this is an incident";
   const alert = alertChip(incident?.alert_decisions);
-  return <section className="story-context" aria-label="Why this is an incident">
-    <h2>Why this is an incident</h2>
-    <p>{reason}</p>
-    <div className="story-chips">
-      <span className={`story-chip ${status === "established" ? "good" : "warn"}`}>{status === "established" ? "Established" : establishment?.title || "Establishment unknown"}</span>
-      <span className={`story-chip ${alert.tone}`}>{alert.text}</span>
-      {coverageChips(incident, cameraName).map((chip) => <span key={chip.text} className={`story-chip ${chip.tone}`}>{chip.text}</span>)}
-    </div>
+  const hasGaps = incident?.coverage?.gaps?.length || incident?.episodes?.some((episode) => episode.coverage?.gaps?.length);
+  return <section className="story-context" aria-label={heading}>
+    <h2>{heading}</h2>
+    {reason ? <p>{reason}</p> : null}
+    {alert || hasGaps ? <div className="story-chips">
+      {alert ? <span className={`story-chip ${alert.tone}`}>{alert.text}</span> : null}
+      {hasGaps ? <span className="story-chip warn">Recording analysis has gaps</span> : null}
+    </div> : null}
     {status && status !== "established" ? <a className="story-link" href={appUrl("/observations")}>Review observations</a> : null}
-    <IncidentAnalysisStatus key={incident.incident_id || incident.id} incidentId={incident.incident_id || incident.id} />
+    <IncidentAnalysisStatus hideComplete key={incident.incident_id || incident.id} incidentId={incident.incident_id || incident.id} />
   </section>;
 }
 
@@ -109,19 +91,22 @@ export function PathPanel({ object, cameraName, timeZone, activeCameraId, canCor
   const steps = objectPath(object, cameraName);
   const activeIndex = Math.max(0, steps.findIndex((step) => step.cameraId === activeCameraId));
   const searchable = object.source_event_id && Number.isInteger(object.object_index);
-  return <section className="story-context" aria-label={`${objectName(object)} path across cameras`}>
-    <h2>{objectName(object)} · path across cameras</h2>
-    <ol className="story-path">
-      {steps.map((step, index) => <li key={`${step.cameraId}-${index}`} className={index === activeIndex ? "active" : ""} aria-current={index === activeIndex ? "step" : undefined}>
-        <div className="story-step"><span className="story-step-number">{step.number}</span>
-          <span className="story-step-text"><strong>{step.camera}</strong><small>{formatTimeOnly(step.start, timeZone)} – {formatTimeOnly(step.end, timeZone)}{step.zones.length ? ` · ${step.zones.join(", ")} zone` : ""}</small></span></div>
-        {step.note ? <p className="story-step-note">{step.note}</p> : null}
-      </li>)}
-    </ol>
-    <div className="story-actions">
+  const title = `${objectName(object)} ${steps.length > 1 ? "· path across cameras" : "sighting"}`;
+  const stepTime = (step) => `${formatTimeOnly(step.start, timeZone)}${step.end > step.start ? ` – ${formatTimeOnly(step.end, timeZone)}` : ""}${step.zones.length ? ` · ${step.zones.join(", ")} zone` : ""}`;
+  return <section className="story-context" aria-label={title}>
+    <h2>{title}</h2>
+    {searchable || canCorrect ? <div className="story-actions">
       {searchable ? <button type="button" aria-pressed={similar} onClick={() => setSimilar((current) => !current)}>Find similar</button> : null}
       {canCorrect ? <button type="button" onClick={onCorrect}>Correct this object</button> : null}
-    </div>
+    </div> : null}
+    {steps.length === 1 ? <p className="story-single-step">{steps[0].camera} · {stepTime(steps[0])}</p> : null}
+    {steps.length > 1 ? <ol className="story-path">
+      {steps.map((step, index) => <li key={`${step.cameraId}-${index}`} className={index === activeIndex ? "active" : ""} aria-current={index === activeIndex ? "step" : undefined}>
+        <div className="story-step"><span className="story-step-number">{step.number}</span>
+          <span className="story-step-text"><strong>{step.camera}</strong><small>{stepTime(step)}</small></span></div>
+        {step.note ? <p className="story-step-note">{step.note}</p> : null}
+      </li>)}
+    </ol> : null}
     {similar ? <VisualSimilarIncidents active anchorEventId={Number(object.source_event_id)} objectIndex={object.object_index} objectLabel={object.label}
       trackId={objectBestObservation(object)?.track_id ?? null} cameraNameById={{ get: cameraName }} timeZone={timeZone}
       onSelect={(row) => onOpenEvent?.(row?.id ?? row?.event_id)} onClear={() => setSimilar(false)} /> : null}

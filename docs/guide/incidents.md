@@ -54,20 +54,21 @@ titles instead; see [AI incident titles](assistant.md#ai-incident-titles-optiona
   dashed violet. A stationary stretch continues the same bar in a muted color. A
   gap in a bar means the object was not observed then, not that it left. Click a
   bar to jump to that camera and moment.
-- **Observed objects.** One card per object in the incident's inventory, including
-  stationary, ignored-zone and uncertain objects. Select a card to focus on it:
-  the other objects dim, the player follows it across cameras (announcing each
-  switch), and the panel below shows its path, how each hand-off was associated,
-  and **Find similar**. Select the card again to bring everything back.
+- **Sightings.** Cards show each track's first camera and time, including
+  stationary, ignored-zone and uncertain tracks. Select a card to focus the
+  frame and storyline. The selected sighting's details and actions sit beside
+  the player on desktop and directly below it on phones. Select **Clear selection**
+  to return to the full incident.
 - **Why this is an incident.** With nothing selected, the panel explains which
   evidence established the incident, whether the alert policy's criteria were
-  met (a policy decision, not proof of delivery), and any camera whose analysis is
-  still pending or incomplete.
+  met (a policy decision), and any known gaps in the recording analysis. Open
+  **Activity, alert policy and corrections** for per-camera coverage and the
+  observation picker.
 - **Corrections.** Selecting an uncertain object offers corrections for that
   object only: confirm its label, change it, or mark it as the same object as
   another one. Other objects offer the same through **Correct this object**. The
   full correction set, activity list and alert policy details remain under
-  **All activity, alert policy and corrections**.
+  **Activity, alert policy and corrections**.
 
 ### Review mode
 

@@ -18,7 +18,7 @@ function barLabel(bar, lane, lanes, cameraName) {
   return name;
 }
 
-export function IncidentStoryline({ line, cameraName, selectedId, cursor, timeZone, hint, onBar }) {
+export function IncidentStoryline({ line, cameraName, selectedId, cursor, timeZone, onBar }) {
   const { start, end, lanes } = line;
   const axis = useRef(null);
   const [trackWidth, setTrackWidth] = useState(0);
@@ -60,12 +60,11 @@ export function IncidentStoryline({ line, cameraName, selectedId, cursor, timeZo
                 onBar?.(bar, bar.start + (bar.end - bar.start) * ratio);
               }}>{label}</button>;
           })}
-          {!lane.bars.length ? <span className="story-lane-empty">No objects observed{lane.coverage?.state && lane.coverage.state !== "sampled" ? " · analysis incomplete" : ""}</span> : null}
+          {!lane.bars.length ? <span className="story-lane-empty">No sightings</span> : null}
           {showCursor ? <span className={`story-playhead${laneIndex === 0 ? " first" : ""}`} style={{ left: playLeft }} aria-hidden="true" /> : null}
         </div>
       </React.Fragment>;
       })}
     </div> : <p className="story-muted">No camera episodes are available for this incident.</p>}
-    <p className="story-hint">{hint}</p>
   </section>;
 }

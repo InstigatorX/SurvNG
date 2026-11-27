@@ -161,7 +161,9 @@ async function storyChecks(width) {
   await page.goto(base);
   // 1 · Open: best frame, full strength, nothing selected.
   await page.getByRole("heading", { level: 1, name: "Car arrives, person walks to Front Door" }).waitFor();
-  assert.match(await page.locator(".story-meta").innerText(), /1 min 42 s · 3 cameras · 3 observed objects/);
+  assert.match(await page.locator(".story-meta").innerText(), /1 min 42 s · 3 cameras/);
+  assert.equal(await page.getByRole("heading", { name: "Sightings (3)" }).count(), 1);
+  assert.equal(await page.getByText("Not recognized", { exact: false }).count(), 0);
   assert.match(await page.locator(".story-frame-chips").innerText(), /Front Driveway[\s\S]*Best frame/);
   assert.equal(await page.locator(".story-box").count(), 2);
   assert.equal(await page.locator(".story-bar.dimmed, .story-card.dimmed, .story-box.dimmed").count(), 0);
@@ -170,7 +172,7 @@ async function storyChecks(width) {
   assert.equal(await page.locator(".story-bar.uncertain").count(), 1);
   assert.deepEqual(await page.locator(".story-card-title").allInnerTexts(), ["Person", "Car", "Dog uncertain"]);
   await page.getByRole("heading", { name: "Why this is an incident" }).waitFor();
-  assert.match(await page.locator(".story-chips").innerText(), /Established[\s\S]*Person in Entry[\s\S]*Side Yard analysis pending/);
+  assert.equal(await page.locator(".story-chips").innerText(), "Met alert criteria · Person in Entry");
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   // Shortcuts are review-mode only.
   await page.keyboard.press("e");
@@ -239,7 +241,8 @@ async function storyChecks(width) {
   const reviewBar = page.getByRole("region", { name: "Review" });
   await reviewBar.waitFor();
   assert.match(await reviewBar.innerText(), /21 left/);
-  assert.match(await page.locator(".story-crumb").innerText(), /Review mode · 5 of 25/);
+  assert.match(await page.locator(".story-crumb").innerText(), /5 of 25/);
+  assert.ok(await page.getByRole("button", { name: "Exit review" }).isVisible());
   for (const name of ["Reviewed", "Keep for later", "Nothing here"]) assert.ok(await reviewBar.getByRole("button", { name: new RegExp(name) }).isVisible());
   // Typing in a field never triggers review shortcuts, even in review mode.
   await page.locator(".story-card", { hasText: "Cat" }).click();
@@ -485,7 +488,95 @@ async function stillEvidenceChecks() {
   await page.close();
 }
 
+async function reviewLayoutChecks() {
+  const page = await browser.newPage({ viewport: { width: 1366, height: 768 } });
+  const incident = storyIncident();
+  incident.continuity_uncertain = true;
+  let disconnected = false;
+  await page.route("**/api/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
+    if (path.endsWith("/cameras")) return route.fulfill({ json: CAMERAS });
+    if (path.includes("/incidents/notification/")) return disconnected
+      ? route.fulfill({ status: 503, json: {} })
+      : route.fulfill({ json: { incident, notification: { state: "complete" } } });
+    if (path.endsWith("/incidents/review-queue")) return route.fulfill({ json: queueFor(incident.incident_id) });
+    if (path.endsWith("/snapshot")) return route.fulfill({ contentType: "image/svg+xml", body: svg });
+    return route.fulfill({ json: {} });
+  });
+  await page.goto(`${origin}/survng/incidents/${incident.incident_id}?review=1`);
+  await page.getByRole("button", { name: "Reviewed", exact: true }).waitFor();
+  const storyline = page.getByRole("region", { name: "Storyline" });
+  async function checkDesktopColumns() {
+    const line = await storyline.boundingBox();
+    const layout = await page.locator(".story-layout").boundingBox();
+    const pane = await page.locator(".story-aside").boundingBox();
+    assert.ok(Math.abs(line.x - layout.x) <= 1 && Math.abs(line.width - layout.width) <= 1, "storyline spans the player and the right pane");
+    assert.ok(pane.width <= 320, `right pane should be at most 320 px, got ${pane.width}`);
+  }
+  const initial = await storyline.boundingBox();
+  assert.ok(initial.y + initial.height <= 768, "the player and storyline fit in desktop Review mode");
+  await checkDesktopColumns();
+  await page.setViewportSize({ width: 1000, height: 768 });
+  disconnected = true;
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await page.getByRole("button", { name: "Retry" }).waitFor();
+  await page.waitForFunction(() => document.querySelector(".story-storyline").getBoundingClientRect().bottom <= innerHeight);
+  disconnected = false;
+  await page.getByRole("button", { name: "Retry" }).click();
+  await page.getByRole("button", { name: "Retry" }).waitFor({ state: "detached" });
+  await page.getByRole("button", { name: "Exit review" }).click();
+  await page.setViewportSize({ width: 2560, height: 1440 });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await checkDesktopColumns();
+  async function checkTallViewport() {
+    const link = await page.getByRole("link", { name: "Open in the incident list" }).boundingBox();
+    const spaceBelow = 1440 - (link.y + link.height);
+    assert.ok(spaceBelow >= 0 && spaceBelow <= 48, `collapsed evidence controls should leave at most 48 px of bottom space, got ${spaceBelow}`);
+    const before = await page.locator(".story-frame").boundingBox();
+    await page.getByText(/Evidence images \(/).click();
+    assert.equal((await page.locator(".story-frame").boundingBox()).height, before.height, "expanding evidence should keep the player height");
+    await page.getByText(/Evidence images \(/).click();
+  }
+  await checkTallViewport();
+  incident.speech = { segments: 1 };
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await page.getByText("Speech", { exact: true }).waitFor();
+  await checkTallViewport();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForFunction(() => {
+    const card = document.querySelector(".story-card").getBoundingClientRect();
+    const bottomNav = document.querySelector(".mobile-workspace-nav").getBoundingClientRect();
+    return card.bottom <= bottomNav.top;
+  });
+  await page.locator(".story-card", { hasText: "Person" }).click();
+  const bounds = await page.evaluate(() => {
+    const frame = document.querySelector(".story-frame").getBoundingClientRect();
+    const context = document.querySelector(".story-context").getBoundingClientRect();
+    return { frameBottom: frame.bottom, contextTop: context.top, contextBottom: context.bottom };
+  });
+  assert.ok(bounds.contextTop >= bounds.frameBottom && bounds.contextTop - bounds.frameBottom <= 16, "selected sighting sits directly beneath the player on phones");
+  assert.ok(bounds.contextBottom <= 844, "selected sighting actions fit in the phone viewport");
+  assert.ok(await page.getByText("Some sightings may show the same subject.", { exact: true }).isVisible());
+  await page.getByRole("button", { name: "Clear selection" }).press("Enter");
+  assert.equal(await page.evaluate(() => document.activeElement.textContent), "Sightings (3)");
+  await page.evaluate(() => {
+    const frame = document.querySelector(".story-frame");
+    scrollTo(0, scrollY + frame.getBoundingClientRect().top + 100);
+  });
+  await page.locator(".story-bar.uncertain").press("Enter");
+  await page.waitForFunction(() => {
+    const frame = document.querySelector(".story-frame").getBoundingClientRect();
+    const topbar = document.querySelector(".topbar").getBoundingClientRect();
+    const actions = document.querySelector(".story-context .story-actions")?.getBoundingClientRect();
+    return frame.top >= topbar.bottom && actions?.bottom < innerHeight;
+  });
+  await page.close();
+}
+
 try {
+  await reviewLayoutChecks();
   await stillEvidenceChecks();
   await followThemeChecks();
   await viewerChecks();

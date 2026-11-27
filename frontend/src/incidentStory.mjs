@@ -2,6 +2,7 @@
 // cards, cross-camera paths and review-mode keys. Pure functions over the
 // scene payload, so the view and its tests share one source of truth.
 import { incidentSceneObjects } from "./incidentScene.mjs";
+import { formatTimeOnly } from "./shared/format.js";
 
 const VEHICLES = new Set(["car", "truck", "bus", "motorcycle", "van", "vehicle", "boat", "bicycle", "suv", "pickup"]);
 
@@ -178,36 +179,17 @@ export function objectPath(object, cameraName) {
   });
 }
 
-function spanSeconds(intervals) {
-  if (!intervals.length) return 0;
-  return Math.max(...intervals.map((item) => item.end)) - Math.min(...intervals.map((item) => item.start));
-}
-
-// Identities are recorded per incident, not per object, so names go on a
-// person card only when there is exactly one person. With none recognized,
-// every person card can say so.
+// Incident-level names only identify a card when it is the sole person sighting.
 export function cardIdentities(objects, identities) {
   const list = Array.isArray(identities) ? identities : [];
   const people = (objects || []).filter((object) => object.kind === "person").length;
   return people === 1 || !list.length ? list : null;
 }
 
-export function objectSummary(object, { cameraName, identities = null } = {}) {
-  const intervals = object?.intervals || objectIntervals(object);
-  const cameras = [...new Set(intervals.map((item) => item.camera_id))];
-  const where = cameras.length === 1 ? cameraLabel(cameras[0], cameraName) : `${cameras.length} cameras`;
-  const states = intervals.map((item) => item.state);
-  const seen = `seen ${formatSpan(spanSeconds(intervals))}`;
-  if (object?.kind === "person" || (!object?.kind && object?.label === "person")) {
-    const names = (identities || []).map((item) => item?.name).filter(Boolean);
-    const who = names.length ? `Recognized: ${names.join(", ")}` : Array.isArray(identities) ? "Not recognized" : "";
-    return [who, who ? seen : `Seen ${formatSpan(spanSeconds(intervals))}`].filter(Boolean).join(" · ");
-  }
-  let motion = "";
-  if (states.length > 1 && states[0] === "moving" && states[states.length - 1] === "stationary") motion = "Arrived, then stationary";
-  else if (states.length > 1 && states[0] === "stationary" && states[states.length - 1] === "moving") motion = "Stationary, then moved";
-  else if (states.length && states.every((state) => state === "stationary")) motion = "Stationary throughout";
-  return [motion || `Seen ${formatSpan(spanSeconds(intervals))}`, where].join(" · ");
+export function objectSummary(object, { cameraName, timeZone, identities = null } = {}) {
+  const [first] = object?.intervals || objectIntervals(object);
+  const names = object?.kind === "person" ? (identities || []).map((item) => item?.name).filter(Boolean) : [];
+  return [...names, first && cameraLabel(first.camera_id, cameraName), first && formatTimeOnly(first.start, timeZone)].filter(Boolean).join(" · ");
 }
 
 function clause(object, cameraName, person = "") {
@@ -232,8 +214,15 @@ export function incidentStoryTitle(incident, { cameraName, objects = storyObject
   const name = people.length === 1 && persons.length === 1 ? String(people[0]) : "";
   let text;
   if (certain.length) {
-    text = certain.slice(0, 2).map((object) => clause(object, cameraName, name)).join(", ");
-    if (certain.length > 2) text += ` and ${certain.length - 2} more`;
+    const labels = new Set(certain.map((object) => object.label));
+    const cameras = new Set(certain.flatMap((object) => object.intervals.map((interval) => interval.camera_id)));
+    if (certain.length > 1 && labels.size === 1 && cameras.size === 1) {
+      text = `${objectName(certain[0])} activity in ${cameraLabel(cameras.values().next().value, cameraName)}`;
+    } else {
+      const clauses = [...new Set(certain.map((object) => clause(object, cameraName, name)))];
+      text = clauses.slice(0, 2).join(", ");
+      if (clauses.length > 2) text += ` and ${clauses.length - 2} more`;
+    }
   } else if (objects.length) {
     const object = objects[0];
     const zone = object.intervals.flatMap((item) => item.zones || [])[0];

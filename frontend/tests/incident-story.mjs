@@ -25,16 +25,19 @@ assert.equal(incidentStoryTitle(incident, { cameraName, objects, people: ["Alex"
 assert.equal(incidentStoryTitle({ camera_id: "front-door", events: [] }, { cameraName }), "Motion at Front Door");
 assert.equal(incidentStoryTitle({ camera_id: "front-door", events: [] }, { cameraName, fallback: "Alex detected at Front Door." }), "Alex detected at Front Door.");
 assert.equal(incidentStoryTitle({ ...incident, scene_objects: [incident.scene_objects[2]] }, { cameraName }), "Possible dog in Lawn");
+const drivewayPerson = { ...byLabel.person, intervals: byLabel.person.intervals.slice(0, 1) };
+assert.equal(incidentStoryTitle(incident, { cameraName, objects: [drivewayPerson, { ...drivewayPerson, id: "second-track" }] }), "Person activity in Front Driveway");
 assert.equal(formatSpan(102), "1 min 42 s");
 assert.equal(formatSpan(12), "12 s");
-assert.equal(objectSummary(byLabel.person, { cameraName, identities: [] }), "Not recognized · seen 1 min 21 s");
-assert.equal(objectSummary(byLabel.car, { cameraName }), "Arrived, then stationary · Front Driveway");
+const timeZone = "America/New_York";
+assert.equal(objectSummary(byLabel.person, { cameraName, timeZone, identities: [] }), "Front Driveway · 10:24:41 AM");
+assert.equal(objectSummary(byLabel.car, { cameraName, timeZone }), "Front Driveway · 10:24:20 AM");
 const twoPeople = [{ kind: "person" }, { kind: "person" }, { kind: "vehicle" }];
 assert.deepEqual(cardIdentities([{ kind: "person" }], [{ name: "Alex" }]), [{ name: "Alex" }]);
 assert.equal(cardIdentities(twoPeople, [{ name: "Alex" }]), null, "one name is not put on two people");
 assert.deepEqual(cardIdentities(twoPeople, []), [], "nobody recognized holds for every person");
-assert.equal(objectSummary({ ...byLabel.person }, { cameraName, identities: null }), "Seen 1 min 21 s");
-assert.equal(objectSummary(byLabel.dog, { cameraName }), "Seen 13 s · Side Yard");
+assert.equal(objectSummary(byLabel.person, { cameraName, timeZone, identities: [{ name: "Alex" }] }), "Alex · Front Driveway · 10:24:41 AM");
+assert.equal(objectSummary(byLabel.dog, { cameraName, timeZone }), "Side Yard · 10:25:29 AM");
 
 // Storyline: one lane per episode, stationary continuation stays on the car's row.
 const line = storyline(incident, objects);
