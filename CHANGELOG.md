@@ -8,9 +8,11 @@
   review mark, and opens the incident overlay used by Live. Filters move to a
   left pane: cameras, object types, zones and known people are multi-select, and
   a confidence threshold is new. The phone layout uses the same gallery and
-  filters. `/api/incidents/search` gains `min_confidence` and `compact`, takes
+  filters. The gallery opens on unreviewed incidents, with a review filter and a
+  confirmed **Mark all shown**. `/api/incidents/search` gains `min_confidence`, `review` and `compact`, takes
   comma-separated `camera_id`, `object_label`, `zone` and `person_id`, and
-  returns `review_verdict` and `image_version` per item. See
+  returns `review_verdict` and `image_version` per item;
+  `PUT /api/incidents/reviews` marks several incidents at once. See
   `docs/guide/incidents.md`.
 - Incident detail: unfinished camera views are named again in "Why this is an
   incident", and a followed object keeps a box, drawn as an estimate, on

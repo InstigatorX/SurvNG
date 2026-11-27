@@ -44,7 +44,7 @@ try {
   const searches = [], requests = [], images = [], reviews = [];
   let failReview = false;
   let failMore = false;
-  const days = [];
+  const days = [], reviewParams = [], bulkReviews = [];
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
@@ -52,6 +52,10 @@ try {
     if (path.includes("thumbnail.jpg")) images.push(path + url.search);
     if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
     if (path.endsWith("/api/cameras")) return route.fulfill({ json: CAMERAS });
+    if (path.endsWith("/incidents/reviews")) {
+      bulkReviews.push(route.request().postDataJSON());
+      return route.fulfill({ json: {} });
+    }
     if (path.endsWith("/review")) {
       reviews.push([decodeURIComponent(path.split("/").at(-2)), route.request().postDataJSON().verdict]);
       return failReview ? route.fulfill({ status: 500, json: {} }) : route.fulfill({ json: {} });
@@ -62,6 +66,7 @@ try {
       const floor = Number(url.searchParams.get("min_confidence") || 0), label = url.searchParams.get("object_label");
       const camera = url.searchParams.get("camera_id");
       days.push(url.searchParams.get("day"));
+      reviewParams.push(url.searchParams.get("review"));
       searches.push({ limit, offset, floor, label, type: url.searchParams.get("event_type"), camera, zone: url.searchParams.get("zone"), person: url.searchParams.get("person_id") });
       if (failMore && offset > 0) return route.fulfill({ status: 500, json: {} });
       const wanted = label ? label.split(",") : [];
@@ -133,6 +138,40 @@ try {
   assert.equal(await mark(3).isChecked(), false);
   failReview = false;
   // Leave the tile, which lifts slightly under the pointer.
+  await page.mouse.move(5, 5);
+
+  // The page opens on what is still to look at; the filter can show the rest.
+  assert.deepEqual([...new Set(reviewParams)], ["unreviewed"]);
+  const reviewFilter = page.getByRole("group", { name: "Review filter" });
+  assert.equal(await reviewFilter.getByRole("button", { name: "Unreviewed", exact: true }).getAttribute("aria-pressed"), "true");
+  assert.ok(await tiles.nth(0).evaluate((element) => element.classList.contains("is-reviewed")), "a marked picture steps back");
+  // Mark everything shown, after a confirmation, in one request.
+  const bulk = page.getByRole("group", { name: "Mark all shown" });
+  assert.ok(await bulk.getByRole("button", { name: "Unreviewed", exact: true }).isDisabled(), "nothing shown is reviewed in this view");
+  await bulk.getByRole("button", { name: "Reviewed", exact: true }).click();
+  assert.match(await bulk.innerText(), new RegExp(`Mark ${INCIDENT_GALLERY_CHUNK} shown as reviewed\\?`));
+  assert.equal(bulkReviews.length, 0, "nothing is saved before confirming");
+  await bulk.getByRole("button", { name: "Cancel" }).click();
+  await bulk.getByRole("button", { name: "Reviewed", exact: true }).click();
+  await bulk.getByRole("button", { name: "Confirm" }).click();
+  await bulk.getByRole("button", { name: "Reviewed", exact: true }).waitFor();
+  assert.equal(bulkReviews.length, 1);
+  assert.equal(bulkReviews[0].verdict, "reviewed");
+  assert.equal(bulkReviews[0].incident_ids.length, INCIDENT_GALLERY_CHUNK);
+  assert.equal(bulkReviews[0].incident_ids[0], "incident-0");
+  await reviewFilter.getByRole("button", { name: "Reviewed", exact: true }).click();
+  for (let waited = 0; reviewParams.at(-1) !== "reviewed" && waited < 5000; waited += 100) await page.waitForTimeout(100);
+  assert.equal(reviewParams.at(-1), "reviewed");
+  await bulk.getByRole("button", { name: "Unreviewed", exact: true }).click();
+  await bulk.getByRole("button", { name: "Confirm" }).click();
+  await bulk.getByRole("button", { name: "Unreviewed", exact: true }).waitFor();
+  assert.equal(bulkReviews.at(-1).verdict, null);
+  await reviewFilter.getByRole("button", { name: "All", exact: true }).click();
+  for (let waited = 0; reviewParams.at(-1) !== null && waited < 5000; waited += 100) await page.waitForTimeout(100);
+  assert.equal(reviewParams.at(-1), null, "All sends no review filter");
+  await reviewFilter.getByRole("button", { name: "Unreviewed", exact: true }).click();
+  await page.waitForTimeout(600);
+  assert.equal(await page.getByLabel("Describe incidents to find").getAttribute("placeholder"), null);
   await page.mouse.move(5, 5);
 
   // Filters sit in a pane left of the gallery.
@@ -258,6 +297,10 @@ try {
   await pane.getByRole("checkbox", { name: "Front Driveway" }).check();
   await page.waitForFunction(() => document.querySelector(".incident-gallery-status").innerText.includes("of 150"));
   assert.equal(searches.at(-1).camera, "driveway,front-door");
+  // Zones and People start collapsed; opening one shows its list.
+  assert.equal(await pane.getByRole("checkbox", { name: "Entry" }).isVisible(), false);
+  await pane.locator("summary", { hasText: "Zones" }).click();
+  await pane.locator("summary", { hasText: "People" }).click();
   await pane.getByRole("checkbox", { name: "Entry" }).check();
   await pane.getByRole("checkbox", { name: "Alex" }).check();
   await pane.getByRole("checkbox", { name: "Sam" }).check();

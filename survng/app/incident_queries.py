@@ -438,7 +438,10 @@ class IncidentQueryService:
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
         min_confidence: float = 0.0,
         compact: bool = False,
+        review: str = "",
     ) -> dict[str, Any]:
+        if review not in {"", "all", "reviewed", "unreviewed"}:
+            raise HTTPException(status_code=422, detail="review must be reviewed, unreviewed or all")
         day_start, day = _local_day_start(day, time_zone)
         day_end = day_start + timedelta(days=1)
         bounds = {"start_epoch":day_start.timestamp(), "end_epoch":day_end.timestamp()}
@@ -446,6 +449,8 @@ class IncidentQueryService:
         filters = {**bounds, "event_type":event_type, "camera_id":camera_id, "object_label":object_label, "zone":zone}
         if math.isfinite(min_confidence) and min_confidence > 0:
             filters["min_confidence"] = min(float(min_confidence), 1.0)
+        if review in {"reviewed", "unreviewed"}:
+            filters["review"] = review
         # One id, or several separated by commas; an incident with any of them matches.
         selected_person_id = _person_ids(person_id)
         bounded_limit = max(1, min(limit, 100))
@@ -723,6 +728,7 @@ def create_incident_query_router(
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
         min_confidence: float = 0.0,
         compact: bool = False,
+        review: str = "",
     ) -> dict[str, Any]:
         return with_manager(
             lambda active: service.search(
@@ -739,6 +745,7 @@ def create_incident_query_router(
                 gap_seconds=gap_seconds,
                 min_confidence=min_confidence,
                 compact=compact,
+                review=review,
             )
         )
 
@@ -947,6 +954,20 @@ def create_incident_query_router(
             return {"incident_id": incident_id, "status": "disabled", "title": None}
         # The provider call runs outside the manager lease.
         return titles.title(incident, ai_config, names)
+
+    @router.put("/api/incidents/reviews")
+    def review_incidents(review: dict[str, Any] = Body(...)):
+        # One verdict for several incidents, saved together or not at all.
+        if "verdict" not in review or not isinstance(review.get("incident_ids"), list):
+            raise HTTPException(status_code=422, detail="verdict and incident_ids are required")
+        def record(active):
+            try:
+                return active.events.set_incident_reviews(review["incident_ids"], review["verdict"])
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return with_manager(record)
 
     @router.get("/api/incidents/{incident_id}/review")
     def incident_review(incident_id: str):

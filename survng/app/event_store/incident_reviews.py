@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 REVIEW_VERDICTS = ("reviewed", "keep", "nothing_here")
 REVIEW_QUEUE_LIMIT = 1000
+REVIEW_BULK_LIMIT = 500
 
 
 def _evidence_mark_sql(incident_column):
@@ -114,6 +115,36 @@ class EventStoreIncidentReviewMixin:
                 )
             row = conn.execute("select * from scene_incident_reviews where incident_id=?", (incident["id"],)).fetchone()
             return self._incident_review_payload(incident["id"], row, incident["revision"], incident["mark"])
+
+    def set_incident_reviews(self, incident_ids, verdict, *, now=None):
+        """Record (or with ``verdict=None`` clear) one verdict on several incidents at once.
+
+        All or nothing: an unknown incident fails the whole request, so the
+        caller never has to work out which marks were saved.
+        """
+        if verdict is not None and verdict not in REVIEW_VERDICTS:
+            raise ValueError(f"verdict must be one of {', '.join(REVIEW_VERDICTS)} or null")
+        wanted = list(dict.fromkeys(str(item) for item in incident_ids if str(item)))
+        if not wanted:
+            raise ValueError("incident_ids is required")
+        if len(wanted) > REVIEW_BULK_LIMIT:
+            raise ValueError(f"at most {REVIEW_BULK_LIMIT} incidents at a time")
+        stamp = time.time() if now is None else now
+        with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
+            incidents = [self._incident_for_review(conn, incident_id) for incident_id in wanted]
+            for incident in incidents:
+                if verdict is None:
+                    conn.execute("delete from scene_incident_reviews where incident_id=?", (incident["id"],))
+                else:
+                    conn.execute(
+                        "insert into scene_incident_reviews(incident_id,verdict,incident_revision,evidence_mark,updated_epoch) "
+                        "values(?,?,?,?,?) on conflict(incident_id) do update set verdict=excluded.verdict,"
+                        "incident_revision=excluded.incident_revision,evidence_mark=excluded.evidence_mark,"
+                        "updated_epoch=excluded.updated_epoch",
+                        (incident["id"], verdict, incident["revision"], incident["mark"], stamp),
+                    )
+            return {"verdict": verdict, "incident_ids": [incident["id"] for incident in incidents]}
 
     def incident_review_queue(self, *, start_epoch, end_epoch, camera_id="", event_type="object", object_label="", zone=""):
         """Listed incidents in a window, newest first (the incident list order), with verdicts."""

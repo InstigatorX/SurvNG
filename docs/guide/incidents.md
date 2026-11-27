@@ -31,6 +31,11 @@ and a review mark at its upper right.
   to clear. It records the same **Reviewed** verdict as review mode, is shared
   by everyone, and needs an administrator. An incident kept for later stays
   unchecked.
+- The gallery opens on **Unreviewed** incidents. A marked picture steps back and
+  leaves the list at the next refresh; switch the review filter to **Reviewed**
+  or **All** to see it again.
+- **Mark all shown** sets or clears the mark on every incident currently loaded
+  in the gallery, after a confirmation. Scroll first to include more.
 - Select a picture to preview that incident in the same overlay the Live page
   uses: play it, open the full incident, or close it to return to the gallery.
 - **Open viewer** switches to the side-by-side viewer; **Gallery**, or `Esc`,
@@ -46,12 +51,14 @@ you scroll, and opens an incident's own page when you select a picture.
 Filters sit in a pane left of the gallery:
 
 - **Objects** or **Motion**
+- **Unreviewed**, **Reviewed** or **All**
 - Search (describe what you are looking for)
 - Day
 - Cameras, object types, zones and known people. Each is a list of checkboxes:
   check any number, and an incident matches when it has any checked value.
   Nothing checked in a list means all of them. Different lists narrow each
-  other, so two cameras and one zone shows that zone on either camera.
+  other, so two cameras and one zone shows that zone on either camera. Zones
+  and People start collapsed; select a heading to open its list.
 - **Confidence threshold**: keep incidents with at least one detection at or
   above the chosen confidence. With object types checked, one of those objects
   must reach it. It does not apply to motion-only incidents.

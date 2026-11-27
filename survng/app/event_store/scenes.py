@@ -1297,7 +1297,7 @@ class EventStoreSceneMixin:
         return result
 
     @staticmethod
-    def _scene_query_where(*, start_epoch=None, end_epoch=None, camera_id="", event_type="all", object_label="", zone="", min_confidence=0.0):
+    def _scene_query_where(*, start_epoch=None, end_epoch=None, camera_id="", event_type="all", object_label="", zone="", min_confidence=0.0, review=""):
         clauses=["i.state != 'unconfirmed'", "exists(select 1 from scene_episodes p join scene_event_membership m on m.episode_id=p.id where p.incident_id=i.id)"]
         args=[]
         if start_epoch is not None:
@@ -1338,6 +1338,12 @@ class EventStoreSceneMixin:
                            "cross join scene_observation_zones z on z.episode_id=p.id "
                            "where p.incident_id=i.id and z.zone in ("+",".join("?"*len(zones))+"))")
             args.extend(zones)
+        # "reviewed" means a person recorded Reviewed or Nothing here; an incident
+        # kept for later still needs looking at.
+        if review in {"reviewed","unreviewed"}:
+            clauses.append(("" if review=="reviewed" else "not ")+
+                           "exists(select 1 from scene_incident_reviews r where r.incident_id=i.id "
+                           "and r.verdict in ('reviewed','nothing_here'))")
         return " and ".join(clauses),args
 
     @staticmethod
@@ -1395,13 +1401,13 @@ class EventStoreSceneMixin:
             return conn.execute("select count(*) from scene_incidents i where "+where,args).fetchone()[0]
 
     def list_scene_incidents(self,*,start_epoch=None,end_epoch=None,start_at=None,end_at=None,camera_id="",limit=200,offset=0,
-                             event_type="all",object_label="",zone="",summary_only=False,min_confidence=0.0):
+                             event_type="all",object_label="",zone="",summary_only=False,min_confidence=0.0,review=""):
         if start_at is not None:
             start_epoch=_epoch(start_at)
         if end_at is not None:
             end_epoch=_epoch(end_at)
         where,args=self._scene_query_where(start_epoch=start_epoch,end_epoch=end_epoch,camera_id=camera_id,
-                                          event_type=event_type,object_label=object_label,zone=zone,min_confidence=min_confidence)
+                                          event_type=event_type,object_label=object_label,zone=zone,min_confidence=min_confidence,review=review)
         with self._connect() as conn:
             ids=conn.execute("select i.id from scene_incidents i where "+where+" order by i.start_epoch desc,i.id limit ? offset ?",
                              (*args,max(1,min(int(limit),1000)),max(0,int(offset)))).fetchall()
@@ -1421,7 +1427,7 @@ class EventStoreSceneMixin:
             return [payload for payload in payloads if payload is not None]
 
     def list_scene_incident_cards(self,*,start_epoch=None,end_epoch=None,start_at=None,end_at=None,camera_id="",limit=200,offset=0,
-                                  event_type="all",object_label="",zone="",min_confidence=0.0):
+                                  event_type="all",object_label="",zone="",min_confidence=0.0,review=""):
         """Page rows for the incident rail: cover, labels, and time, without observation history."""
         from ..incident_presenter import _best_incident_event, _event_row
         if start_at is not None:
@@ -1429,7 +1435,7 @@ class EventStoreSceneMixin:
         if end_at is not None:
             end_epoch=_epoch(end_at)
         where,args=self._scene_query_where(start_epoch=start_epoch,end_epoch=end_epoch,camera_id=camera_id,
-                                          event_type=event_type,object_label=object_label,zone=zone,min_confidence=min_confidence)
+                                          event_type=event_type,object_label=object_label,zone=zone,min_confidence=min_confidence,review=review)
         with self._connect() as conn:
             ids=[row[0] for row in conn.execute(
                 "select i.id from scene_incidents i where "+where+" order by i.start_epoch desc,i.id limit ? offset ?",

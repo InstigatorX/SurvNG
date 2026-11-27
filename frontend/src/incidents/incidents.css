@@ -1119,3 +1119,111 @@
 .mobile-incidents .incident-earlier-day {
   min-height: 44px;
 }
+
+/* Review filter: three choices in the same segmented control as Objects / Motion. */
+.incident-filter-toggle.incident-filter-segments.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.mobile-incidents .incident-filter-toggle.incident-filter-segments {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.mobile-incidents .incident-filter-toggle.incident-filter-segments button {
+  min-height: 44px;
+}
+
+/* Mark every incident shown; a second step confirms. */
+.incident-bulk-review {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.incident-bulk-review button {
+  min-height: 28px;
+  padding: 2px 9px;
+  font-size: var(--text-xs);
+}
+
+.incident-bulk-review button.primary {
+  border-color: var(--good);
+  color: var(--ok-ink);
+}
+
+.mobile-incidents .incident-bulk-review {
+  display: flex;
+  padding: 6px 10px;
+}
+
+.mobile-incidents .incident-bulk-review button {
+  min-height: 44px;
+  padding-inline: 14px;
+}
+
+/* A reviewed incident's picture steps back, so what is left stands out. */
+.live-activity-item.with-hud.is-reviewed .live-activity-thumb .snapshot-frame {
+  opacity: .5;
+}
+
+/* Filter pane type a step larger, the day centred, and larger object icons. */
+.incident-filter-pane .incident-filter-section h3,
+.incident-filter-pane .incident-filter-check,
+.incident-filter-pane .incident-filter-section select,
+.incident-filter-pane .incident-filter-segments button,
+.incident-filter-pane .incident-semantic-search input,
+.incident-filter-pane .incident-day-stepper input[type="date"] {
+  font-size: var(--text-md);
+}
+
+.incident-filter-pane .incident-filter-count,
+.incident-filter-pane .incident-filter-confidence-readout,
+.incident-filter-pane .incident-filter-section small {
+  font-size: var(--text-sm);
+}
+
+.incident-filter-pane .incident-day-stepper input[type="date"],
+.mobile-incidents .incident-day-stepper input[type="date"] {
+  text-align: center;
+}
+
+.incident-filter-pane .incident-day-stepper input[type="date"]::-webkit-datetime-edit,
+.mobile-incidents .incident-day-stepper input[type="date"]::-webkit-datetime-edit {
+  flex: 1 1 auto;
+  text-align: center;
+}
+
+.incident-filter-check svg {
+  flex: 0 0 auto;
+}
+
+.incident-hud-objects .pill.object-icon-pill {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 4px;
+}
+
+.incident-hud-objects .pill.object-icon-pill svg {
+  width: 20px;
+  height: 20px;
+}
+
+.incident-filter-pane .incident-filter-toggle.incident-filter-segments.three button {
+  padding-inline: 2px;
+  font-size: var(--text-sm);
+}
+
+.incident-bulk-review button.primary {
+  background: var(--ok-bg);
+}
+
+/* The old list steps back the moment a filter changes, until the new one arrives. */
+#incident-results.updating {
+  opacity: .55;
+  transition: opacity 120ms ease;
+}

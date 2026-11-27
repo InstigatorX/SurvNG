@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+from fastapi import HTTPException
+
 from survng.app.events import EventStore
 from survng.app.incident_queries import IncidentQueryService, _filter_incident_summaries
 
@@ -187,6 +190,42 @@ def test_cards_carry_the_review_verdict(tmp_path):
     assert {item['id']: item['review_verdict'] for item in items} == by_id
     store.set_incident_review(reviewed, None)
     assert [card['review_verdict'] for card in store.list_scene_incident_cards()] == [None, None]
+
+
+def test_search_filters_by_review_state_and_marks_many_at_once(tmp_path):
+    store = EventStore(tmp_path)
+    ids = [store.scene_incident(event_id=add(store, 1000 * step, [observation(1000 * step, temporal_observations=2)])['id'])['id']
+           for step in range(1, 6)]
+    store.set_incident_review(ids[0], 'reviewed')
+    store.set_incident_review(ids[1], 'nothing_here')
+    store.set_incident_review(ids[2], 'keep')              # kept for later: still to look at
+    assert store.count_scene_incidents(review='reviewed') == 2
+    assert store.count_scene_incidents(review='unreviewed') == 3
+    assert store.count_scene_incidents(review='') == 5
+    assert {card['id'] for card in store.list_scene_incident_cards(review='unreviewed')} == set(ids[2:])
+    manager = SimpleNamespace(events=store)
+    day = datetime.fromtimestamp(1000, timezone.utc).strftime('%Y-%m-%d')
+    def total(**extra):
+        return IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='all', limit=10, **extra)['total']
+    assert (total(review='unreviewed'), total(review='reviewed'), total(review='all'), total()) == (3, 2, 5, 5)
+    with pytest.raises(HTTPException):
+        total(review='maybe')
+
+    marked = store.set_incident_reviews(ids[2:], 'reviewed')
+    assert marked == {'verdict': 'reviewed', 'incident_ids': ids[2:]}
+    assert store.count_scene_incidents(review='unreviewed') == 0
+    assert store.incident_review(ids[2])['verdict'] == 'reviewed'
+    store.set_incident_reviews([ids[0], ids[0], ids[4]], None)   # repeats are one request
+    assert store.count_scene_incidents(review='unreviewed') == 2
+    # All or nothing: one unknown incident leaves every mark as it was.
+    with pytest.raises(LookupError):
+        store.set_incident_reviews([ids[0], 'incident-missing'], 'reviewed')
+    assert store.incident_review(ids[0])['verdict'] is None
+    for bad in ([], [''], [f'incident-{n}' for n in range(501)]):
+        with pytest.raises(ValueError):
+            store.set_incident_reviews(bad, 'reviewed')
+    with pytest.raises(ValueError):
+        store.set_incident_reviews(ids[:1], 'maybe')
 
 
 def test_cards_name_the_version_of_their_picture(tmp_path):

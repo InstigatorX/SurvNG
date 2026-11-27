@@ -37,13 +37,15 @@ const IncidentTile = memo(IncidentListItem);
 const FILTER_PANE_WIDTH = 264;
 
 // One multi-select filter: any checked value matches, and nothing checked means all.
-function IncidentFilterChecks({ title, options, filter, onChange, columns = false, empty }) {
+function IncidentFilterChecks({ title, options, filter, onChange, columns = false, collapsed = false, empty }) {
   const chosen = incidentFilterValues(filter);
+  // A list that starts collapsed still opens when it already narrows the results.
+  const [open, setOpen] = useState(() => !collapsed || chosen.length > 0);
   // A choice made on another day stays listed so it can be cleared.
   const known = new Set(options.map((option) => String(option.value)));
   const listed = [...options, ...chosen.filter((value) => !known.has(value)).map((value) => ({ value, label: value }))];
   return (
-    <details className="incident-filter-section incident-filter-group" open>
+    <details className="incident-filter-section incident-filter-group" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary><h3>{title}</h3><span className="incident-filter-count">{chosen.length ? `${chosen.length} selected` : "All"}</span></summary>
       {listed.length ? (
         <div className={`incident-filter-checks${columns ? " columns" : ""}`} role="group" aria-label={title}>
@@ -74,6 +76,11 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   // Percent. The slider moves the draft; the search follows once it settles.
   const [incidentMinConfidence, setIncidentMinConfidence] = useState(0);
   const [confidenceDraft, setConfidenceDraft] = useState(0);
+  // Which incidents to list by review mark. The page opens on what is still to look at.
+  const [reviewFilter, setReviewFilter] = useState("unreviewed");
+  // "reviewed" or "unreviewed" while a mark-all is waiting to be confirmed.
+  const [bulkReview, setBulkReview] = useState(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
   const [incidentPeople, setIncidentPeople] = useState([]);
   const [incidentDensity, setIncidentDensity] = useStoredState("survng.incidentDensity.v1", "compact");
   const today = dateKeyForTimeZone(Date.now(), timeZone);
@@ -123,7 +130,18 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const [storedGalleryColumns, setStoredGalleryColumns] = useStoredState("survng.incidentGalleryColumns.v1", 4);
   const galleryColumns = incidentGalleryColumns(storedGalleryColumns);
   // How many incidents the gallery has asked for. Scrolling near the end asks for more.
-  const [galleryWanted, setGalleryWanted] = useState(INCIDENT_GALLERY_CHUNK);
+  // The count belongs to one set of filters. Under any other it starts over, in
+  // the same render as the filter change, so a change costs one search and not
+  // a first one for the old count followed by a second for the reset.
+  const galleryScope = [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter,
+    incidentMinConfidence, reviewFilter, incidentDay, semanticIncidentActiveQuery].join("\u0001");
+  const [galleryWantedState, setGalleryWantedState] = useState({ scope: galleryScope, count: INCIDENT_GALLERY_CHUNK });
+  const galleryWanted = galleryWantedState.scope === galleryScope ? galleryWantedState.count : INCIDENT_GALLERY_CHUNK;
+  const setGalleryWanted = (next) => setGalleryWantedState((current) => {
+    const base = current.scope === galleryScope ? current.count : INCIDENT_GALLERY_CHUNK;
+    const count = typeof next === "function" ? next(base) : next;
+    return count === base && current.scope === galleryScope ? current : { scope: galleryScope, count };
+  });
   const [galleryMoreError, setGalleryMoreError] = useState("");
   const [filtersPinned, setFiltersPinned] = useState(false);
   const galleryLoadedRef = useRef({ key: "", token: -1, items: [] });
@@ -284,6 +302,28 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     }
   }
   const reviewTile = useCallback((incident, checked) => tileHandlersRef.current.review(incident, checked), []);
+  // One verdict for every incident shown, saved together or not at all.
+  async function markAllShown(target) {
+    const shown = visibleIncidents.filter((incident) => incident.incident_id || incident.id);
+    if (!shown.length || bulkBusy) return;
+    const checked = target === "reviewed";
+    setBulkBusy(true);
+    setReviewError("");
+    try {
+      const response = await fetch("/api/incidents/reviews", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ incident_ids: shown.map((incident) => incident.incident_id || incident.id), verdict: checked ? "reviewed" : null }),
+      });
+      if (!response.ok) throw new Error(response.status === 403 ? "Only an administrator can mark incidents as reviewed." : "Could not save the review marks. Nothing was changed.");
+      setReviewOverrides((current) => ({ ...current, ...Object.fromEntries(shown.map((incident) => [String(incident.id), checked])) }));
+      refreshIncidentEvidence(true);
+    } catch (failure) {
+      setReviewError(failure.message || "Could not save the review marks. Nothing was changed.");
+    } finally {
+      setBulkBusy(false);
+      setBulkReview(null);
+    }
+  }
 
   useEffect(() => {
     if (!displayedIncident && tabletInspectorOpen) setTabletInspectorOpen(false);
@@ -527,7 +567,6 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     setSemanticIncidentLoading(true);
     setSemanticIncidentError("");
     setIncidentPage(0);
-    setGalleryWanted(INCIDENT_GALLERY_CHUNK);
     setEventFilter("object");
     try {
       const nextDay = addDaysToDateKey(incidentDay || today, 1);
@@ -669,11 +708,14 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
 
   useEffect(() => {
     let cancelled = false;
-    async function searchPage(filters, limit, offset) {
+    // A search that has been superseded is dropped, so it neither holds the
+    // server nor arrives after its replacement.
+    const superseded = new AbortController();
+    async function searchPage(filters, limit, offset, signal = superseded.signal) {
       const query = new URLSearchParams(filters);
       query.set("limit", String(limit));
       query.set("offset", String(offset));
-      const response = await fetch(`/api/incidents/search?${query}`);
+      const response = await fetch(`/api/incidents/search?${query}`, signal ? { signal } : undefined);
       if (!response.ok) throw new Error("Unable to load incidents");
       return response.json();
     }
@@ -683,7 +725,8 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     function fetchAhead(filters, baseKey, offset) {
       const current = galleryAheadRef.current;
       if (current && current.key === baseKey && current.token === incidentRefreshToken && current.offset === offset) return;
-      const promise = searchPage(filters, INCIDENT_GALLERY_CHUNK, offset).then((payload) => {
+      // Fetched for later use, so it outlives the load that asked for it.
+      const promise = searchPage(filters, INCIDENT_GALLERY_CHUNK, offset, null).then((payload) => {
         const tile = tileImageRef.current;
         if (tile.plain && galleryAheadRef.current?.promise === promise) {
           warmedImagesRef.current = (payload.items || []).slice(0, tile.columns * 2).map((incident) => {
@@ -778,6 +821,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       if (incidentZoneFilter !== "all") filters.set("zone", incidentZoneFilter);
       if (incidentPersonFilter !== "all") filters.set("person_id", incidentPersonFilter);
       if (confidenceApplies && incidentMinConfidence > 0) filters.set("min_confidence", String(incidentMinConfidence / 100));
+      if (reviewFilter !== "all") filters.set("review", reviewFilter);
       if (galleryMode) {
         // Gallery tiles do not draw the per-event list, which is most of a busy incident's card.
         filters.set("compact", "true");
@@ -794,7 +838,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
         setIncidentLoadError("");
       }
       try {
-        const response = await fetch(`/api/incidents/search?${query}`);
+        const response = await fetch(`/api/incidents/search?${query}`, { signal: superseded.signal });
         if (!response.ok) throw new Error("Unable to load incidents");
         const payload = await response.json();
         if (cancelled) return;
@@ -823,16 +867,16 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     loadIncidentPage();
     return () => {
       cancelled = true;
+      superseded.abort();
     };
-  }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentMinConfidence, confidenceApplies, incidentPage, incidentsPerPage, incidentRefreshToken, galleryMode]);
+  }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentMinConfidence, confidenceApplies, reviewFilter, incidentPage, incidentsPerPage, incidentRefreshToken, galleryMode]);
 
   useEffect(() => {
     retainedGallerySelectionRef.current = null;
     galleryPageAnchorRef.current = null;
     setIncidentPage(0);
-    setGalleryWanted(INCIDENT_GALLERY_CHUNK);
     if (galleryModeRef.current && incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
-  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentMinConfidence, incidentDay, incidentDensity]);
+  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentMinConfidence, reviewFilter, incidentDay, incidentDensity]);
 
   useEffect(() => {
     if (incidentPage >= incidentPageCount) setIncidentPage(Math.max(0, incidentPageCount - 1));
@@ -1096,7 +1140,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     <div className={`incident-semantic-search ${semanticIncidentActive ? "active" : ""} ${semanticIncidentError ? "error" : ""}`}>
       <form onSubmit={runSemanticIncidentSearch} role="search" aria-label="Semantic incident search">
         <Search size={15} aria-hidden="true" />
-        <input value={semanticIncidentQuery} onChange={(event) => setSemanticIncidentQuery(event.target.value)} placeholder="Search incidents…" aria-label="Describe incidents to find" disabled={semanticIncidentLoading} />
+        <input value={semanticIncidentQuery} onChange={(event) => setSemanticIncidentQuery(event.target.value)} aria-label="Describe incidents to find" disabled={semanticIncidentLoading} />
         {semanticIncidentActive ? <button type="button" className="secondary" onClick={resetSemanticIncidentSearch} aria-label="Reset semantic incident search">Reset</button> : null}
         <button type="submit" disabled={semanticIncidentLoading || !semanticIncidentQuery.trim()}>{semanticIncidentLoading ? "Searching…" : "Search"}</button>
       </form>
@@ -1121,20 +1165,46 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     if (incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
     else window.scrollTo(0, 0);
   }
+  // A list still on screen while its replacement loads: say so at once.
+  const listUpdating = Boolean(displayedIncidentLoading && visibleIncidents.length);
   const galleryStatus = (
     <div className="incident-gallery-status" role="status">
       {reviewError ? <span className="incident-gallery-error">{reviewError}</span> : null}
+      {listUpdating ? <span>Updating…</span> : null}
       {galleryMoreError ? <><span>{galleryMoreError}</span><button type="button" onClick={() => setIncidentRefreshToken((value) => value + 1)}>Retry</button></>
+        : listUpdating ? null
         : visibleIncidents.length && visibleIncidents.length < displayedIncidentTotal ? <span>Showing {visibleIncidents.length} of {displayedIncidentTotal}. Scroll for more.</span>
         : visibleIncidents.length && semanticIncidentActive ? <span>All {displayedIncidentTotal} {displayedIncidentTotal === 1 ? "match" : "matches"}.</span>
         : visibleIncidents.length ? <span>All {displayedIncidentTotal} {displayedIncidentTotal === 1 ? "incident" : "incidents"} for this day.</span> : null}
       {dayComplete ? <button type="button" className="incident-earlier-day" onClick={openEarlierDay}>Earlier: {earlierDayLabel}</button> : null}
     </div>
   );
+  const reviewFilterControl = (
+    <div className="incident-filter-toggle compact incident-filter-segments three" role="group" aria-label="Review filter">
+      {[["unreviewed", "Unreviewed"], ["reviewed", "Reviewed"], ["all", "All"]].map(([value, label]) => (
+        <button key={value} type="button" className={reviewFilter === value ? "active" : ""} aria-pressed={reviewFilter === value} onClick={() => setReviewFilter(value)}>{label}</button>
+      ))}
+    </div>
+  );
+  // Marking everything shown changes shared state for many incidents, so it asks first.
+  const shownCount = visibleIncidents.length;
+  const bulkReviewControl = semanticIncidentActive ? null : (
+    <div className="incident-bulk-review" role="group" aria-label="Mark all shown">
+      {bulkReview ? <>
+        <span>Mark {shownCount} shown as {bulkReview}?</span>
+        <button type="button" className="primary" disabled={bulkBusy} onClick={() => void markAllShown(bulkReview)}>{bulkBusy ? "Saving…" : "Confirm"}</button>
+        <button type="button" disabled={bulkBusy} onClick={() => setBulkReview(null)}>Cancel</button>
+      </> : <>
+        <span>Mark all shown</span>
+        <button type="button" disabled={!canCorrectIncident || !shownCount || reviewFilter === "reviewed"} onClick={() => setBulkReview("reviewed")}>Reviewed</button>
+        <button type="button" disabled={!canCorrectIncident || !shownCount || reviewFilter === "unreviewed"} onClick={() => setBulkReview("unreviewed")}>Unreviewed</button>
+      </>}
+    </div>
+  );
   const confidenceControl = (
     <section className="incident-filter-section incident-filter-confidence">
       <h3 id="incident-confidence-heading">Confidence threshold</h3>
-      <input type="range" min={0} max={95} step={5} value={confidenceApplies ? confidenceDraft : 0} disabled={!confidenceApplies} onChange={(event) => setConfidenceDraft(Number(event.target.value))} aria-labelledby="incident-confidence-heading" aria-valuetext={confidenceDraft > 0 ? `${confidenceDraft}% or higher` : "Any confidence"} style={{ "--fill": `${(confidenceApplies ? confidenceDraft : 0) / 95 * 100}%` }} />
+      <input type="range" min={0} max={95} step={5} value={confidenceApplies ? confidenceDraft : 0} disabled={!confidenceApplies} onChange={(event) => setConfidenceDraft(Number(event.target.value))} onPointerUp={(event) => setIncidentMinConfidence(Number(event.currentTarget.value))} onKeyUp={(event) => setIncidentMinConfidence(Number(event.currentTarget.value))} aria-labelledby="incident-confidence-heading" aria-valuetext={confidenceDraft > 0 ? `${confidenceDraft}% or higher` : "Any confidence"} style={{ "--fill": `${(confidenceApplies ? confidenceDraft : 0) / 95 * 100}%` }} />
       <div className="incident-filter-confidence-readout">
         <span>{displayedIncidentTotal} {displayedIncidentTotal === 1 ? "result" : "results"}</span>
         <output>{confidenceApplies && confidenceDraft > 0 ? `${confidenceDraft}%` : "Any"}</output>
@@ -1145,13 +1215,13 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const filterLists = (
     <>
       <IncidentFilterChecks title="Cameras" filter={incidentCameraFilter} onChange={setIncidentCameraFilter}
-        options={incidentCameraOptions.map((id) => ({ value: id, label: cameraNameById.get(id) || id }))} empty="No cameras in this period." />
+        options={incidentCameraOptions.map((id) => ({ value: id, label: cameraNameById.get(id) || id }))} empty="No cameras on this day." />
       <IncidentFilterChecks title="Objects" filter={incidentObjectFilter} onChange={setIncidentObjectFilter} columns
-        options={incidentObjectOptions.map((label) => ({ value: label, label: label.replaceAll("_", " "), icon: <IncidentObjectIcon label={label} size={15} /> }))} empty="No objects in this period." />
+        options={incidentObjectOptions.map((label) => ({ value: label, label: label.replaceAll("_", " "), icon: <IncidentObjectIcon label={label} size={19} /> }))} empty="No objects on this day." />
       {confidenceControl}
-      <IncidentFilterChecks title="Zones" filter={incidentZoneFilter} onChange={setIncidentZoneFilter}
-        options={incidentZoneOptions.map((zone) => ({ value: zone, label: zone }))} empty="No zones in this period." />
-      <IncidentFilterChecks title="People" filter={incidentPersonFilter} onChange={(next) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(next); }}
+      <IncidentFilterChecks title="Zones" collapsed filter={incidentZoneFilter} onChange={setIncidentZoneFilter}
+        options={incidentZoneOptions.map((zone) => ({ value: zone, label: zone }))} empty="No zones on this day." />
+      <IncidentFilterChecks title="People" collapsed filter={incidentPersonFilter} onChange={(next) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(next); }}
         options={incidentPeople.map((person) => ({ value: String(person.id), label: person.name }))} empty="No named people yet." />
     </>
   );
@@ -1167,6 +1237,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                   <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}><ScanSearch size={15} aria-hidden="true" />Objects</button>
                   <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}><Radar size={15} aria-hidden="true" />Motion</button>
                 </div>
+                {reviewFilterControl}
                 {semanticIncidentControl}
                 {incidentDayControl()}
               </div>
@@ -1189,6 +1260,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                 {galleryExpanded ? (
                   <>
                     <span className="shown-bubble">{displayedIncidentTotal} {semanticIncidentActive ? "matches" : "shown"}</span>
+                    {bulkReviewControl}
                     <label className="incident-gallery-columns">
                       <span>Per row</span>
                       <input type="range" min={2} max={8} step={1} value={galleryColumns} onChange={(event) => setStoredGalleryColumns(incidentGalleryColumns(event.target.value))} aria-label="Incidents per row" style={{ "--fill": `${(galleryColumns - 2) / 6 * 100}%` }} />
@@ -1205,7 +1277,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                   <button type="button" className={incidentDensity === "comfortable" ? "active" : ""} aria-pressed={incidentDensity === "comfortable"} onClick={() => setIncidentDensity("comfortable")} title="Grid view" aria-label="Grid view"><Grid2X2 size={15} /></button>
                 </div>
               </div>
-              <div id="incident-results" className="incident-rail-list" ref={incidentRailListRef} aria-label="Incidents" onKeyDown={galleryExpanded ? onGalleryKeyDown : undefined} onScroll={galleryExpanded ? loadMoreGalleryIfNearEnd : undefined} onWheel={() => { galleryRevealRef.current = 0; }} onPointerDown={() => { galleryRevealRef.current = 0; }} style={galleryExpanded ? { "--incident-gallery-columns": galleryColumns } : undefined}>
+              <div id="incident-results" className={`incident-rail-list${listUpdating ? " updating" : ""}`} aria-busy={listUpdating} ref={incidentRailListRef} aria-label="Incidents" onKeyDown={galleryExpanded ? onGalleryKeyDown : undefined} onScroll={galleryExpanded ? loadMoreGalleryIfNearEnd : undefined} onWheel={() => { galleryRevealRef.current = 0; }} onPointerDown={() => { galleryRevealRef.current = 0; }} style={galleryExpanded ? { "--incident-gallery-columns": galleryColumns } : undefined}>
                 {displayedIncidentLoading && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
                 {!galleryIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
                 {galleryIncidents.length ? pagedIncidents.map(renderTile) : null}
@@ -1361,6 +1433,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
             <label><span>Activity</span><select value={eventFilter} aria-label="Incident type" onChange={(event) => { resetSemanticIncidentSearch(); setEventFilter(event.target.value); }}><option value="object">Objects</option><option value="motion">Motion</option></select></label>
             {incidentDayControl({ caption: true })}
           </div>
+          {reviewFilterControl}
           {semanticIncidentControl}
           <div className="mobile-filter-actions">
             <button type="button" onClick={() => { clearIncidentFilters(); setIncidentDay(today); setEventFilter("object"); resetSemanticIncidentSearch(); }}>Reset filters</button>
@@ -1368,7 +1441,8 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
           </div>
           <div className="mobile-filter-lists">{filterLists}</div>
         </div> : null}
-        <div id="incident-results" className="incident-gallery incident-phone-gallery" aria-label="Incidents" onKeyDown={onGalleryKeyDown}>
+        {bulkReviewControl}
+        <div id="incident-results" className={`incident-gallery incident-phone-gallery${listUpdating ? " updating" : ""}`} aria-busy={listUpdating} aria-label="Incidents" onKeyDown={onGalleryKeyDown}>
           {displayedIncidentLoading && !visibleIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
           {!visibleIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
           {visibleIncidents.length ? pagedIncidents.map(renderTile) : null}

@@ -645,7 +645,7 @@ export function IncidentListItem({ incident, cameraName, timeZone, selected, thu
   const fullTime = formatDateTime(time, timeZone);
   const activityLabel = labels.length ? labels.join(", ") : "Motion only";
   return (
-    <article className={`live-activity-item${livePreview ? " live-preview-row" : ""}${hud ? " with-hud" : ""}${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
+    <article className={`live-activity-item${livePreview ? " live-preview-row" : ""}${hud ? " with-hud" : ""}${hud && reviewed ? " is-reviewed" : ""}${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
       <button type="button" className="live-activity-select" onClick={() => onSelect(incident)} aria-label={livePreview
         ? `Preview ${liveActivityLabel(incident)} in ${cameraName} at ${fullTime}` : `Open ${cameraName} activity at ${fullTime}`}>
         <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail thumbnailWidth={thumbnailWidth} objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusControls={false} showAnnotations={thumbnailAnnotations} showTracking={false} />
