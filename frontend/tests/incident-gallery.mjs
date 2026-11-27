@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { INCIDENT_GALLERY_CHUNK, incidentGalleryColumns, incidentGalleryWanted } from "../src/incidentNavigation.mjs";
+import { INCIDENT_GALLERY_CHUNK, incidentGalleryColumns, incidentGalleryWanted, incidentObjectLabels, toggleIncidentObjectLabel } from "../src/incidentNavigation.mjs";
 
 // Preferences read from browser storage and range inputs arrive as strings.
 for (const columns of [2, 3, 4, 5, 6, 7, 8]) {
@@ -18,5 +18,15 @@ assert.equal(incidentGalleryWanted(5, 3 * INCIDENT_GALLERY_CHUNK), 3 * INCIDENT_
 assert.equal(incidentGalleryWanted(-1), INCIDENT_GALLERY_CHUNK);
 assert.equal(incidentGalleryWanted("bad"), INCIDENT_GALLERY_CHUNK);
 assert.ok(INCIDENT_GALLERY_CHUNK <= 100, "one request per chunk: the search endpoint caps a page at 100");
+
+// Object choices are kept as the comma-joined form the search endpoint reads.
+assert.deepEqual(incidentObjectLabels("all"), []);
+assert.deepEqual(incidentObjectLabels(""), []);
+assert.deepEqual(incidentObjectLabels("person"), ["person"]);
+assert.deepEqual(incidentObjectLabels("car, person,,car"), ["car", "person"]);
+assert.equal(toggleIncidentObjectLabel("all", "person"), "person");
+assert.equal(toggleIncidentObjectLabel("person", "car"), "car,person");
+assert.equal(toggleIncidentObjectLabel("car,person", "car"), "person");
+assert.equal(toggleIncidentObjectLabel("person", "person"), "all", "nothing checked means every object");
 
 console.log("incident gallery tests passed");

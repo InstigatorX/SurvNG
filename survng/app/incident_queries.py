@@ -86,8 +86,9 @@ def _filter_incident_summaries(
     filtered = _filter_incidents_by_event_type(summaries, event_type)
     if camera_id:
         filtered = [item for item in filtered if camera_id in item.get("camera_ids", [item.get("camera_id")])]
-    if object_label:
-        filtered = [item for item in filtered if object_label in item.get("labels", [])]
+    wanted = {part.strip() for part in object_label.split(",") if part.strip()}
+    if wanted:
+        filtered = [item for item in filtered if wanted.intersection(item.get("labels", []))]
     if zone:
         filtered = [item for item in filtered if zone in item.get("zones", [])]
     return filtered

@@ -671,10 +671,6 @@
   cursor: pointer;
 }
 
-.incident-filter-check:first-child {
-  grid-column: 1 / -1;
-}
-
 .incident-filter-check input {
   flex: 0 0 auto;
   width: 16px;

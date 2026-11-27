@@ -37,10 +37,11 @@ Filters sit in a pane left of the gallery:
 - Search (describe what you are looking for)
 - Day
 - Camera
-- Object type (person, car, and so on), one at a time
+- Object types (person, car, and so on). Check any number; an incident matches
+  when it contains any checked type, and nothing checked shows every type.
 - **Confidence threshold**: keep incidents with at least one detection at or
-  above the chosen confidence. With an object type selected, that object must
-  reach it. It does not apply to motion-only incidents or to search matches.
+  above the chosen confidence. With object types checked, one of those objects
+  must reach it. It does not apply to motion-only incidents or to search matches.
 - Zone
 - Known person
 

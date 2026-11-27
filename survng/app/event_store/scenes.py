@@ -1310,13 +1310,15 @@ class EventStoreSceneMixin:
         if event_type in {"object","motion"}:
             clauses.append(("not " if event_type=="motion" else "")+"exists("+observed+")")
         # A confidence floor asks for one displayable observation at or above it.
-        # With a label selected, the same observation must satisfy both.
+        # With labels selected, the same observation must satisfy both.
         floor=max(0.0,min(float(min_confidence or 0.0),1.0)) if event_type!="motion" else 0.0
         confident=" and cast(json_extract(o.payload_json,'$.confidence') as real)>=?" if floor>0 else ""
-        if object_label:
+        # Several labels may be given, separated by commas; any one of them matches.
+        labels=list(dict.fromkeys(part.strip() for part in str(object_label or "").split(",") if part.strip()))
+        if labels:
             clauses.append("exists(select 1 from scene_observations o join scene_objects s on s.id=o.object_id "
-                           "join scene_episodes p on p.id=o.episode_id where p.incident_id=i.id and "+_DISPLAY_CONFIDENCE_SQL+" and "+EventStoreSceneMixin._scene_label_sql()+"=?"+confident+")")
-            args.append(object_label)
+                           "join scene_episodes p on p.id=o.episode_id where p.incident_id=i.id and "+_DISPLAY_CONFIDENCE_SQL+" and "+EventStoreSceneMixin._scene_label_sql()+" in ("+",".join("?"*len(labels))+")"+confident+")")
+            args.extend(labels)
             if floor>0:
                 args.append(floor)
         elif floor>0:

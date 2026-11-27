@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from survng.app.events import EventStore
-from survng.app.incident_queries import IncidentQueryService
+from survng.app.incident_queries import IncidentQueryService, _filter_incident_summaries
 
 
 def observation(at, label='person', **extra):
@@ -91,13 +91,23 @@ def test_confidence_floor_filters_incident_search(tmp_path):
     assert store.count_scene_incidents(object_label='car', min_confidence=.8) == 0
     assert len(store.list_scene_incident_cards(min_confidence=.8)) == 1
     assert len(store.list_scene_incidents(min_confidence=.8, summary_only=True)) == 1
+    # Several labels: any one of them matches, and blanks are ignored.
+    add(store, 4000, [observation(4000, 'dog', confidence=.7, temporal_observations=2)])
+    assert store.count_scene_incidents(object_label='car') == 2
+    assert store.count_scene_incidents(object_label='dog') == 1
+    assert store.count_scene_incidents(object_label='car,dog') == 3
+    assert store.count_scene_incidents(object_label=' dog , ,car,dog') == 3
+    assert store.count_scene_incidents(object_label='person,elephant') == 1
+    assert store.count_scene_incidents(object_label='car,dog', min_confidence=.65) == 1
+    assert len(store.list_scene_incident_cards(object_label='car,dog')) == 3
+    assert len(_filter_incident_summaries([{'labels': ['car']}, {'labels': ['dog']}, {'labels': ['person']}], 'all', object_label='car,dog')) == 2
     # Motion-only incidents have no detection to compare.
     assert store.count_scene_incidents(event_type='motion', min_confidence=.8) == store.count_scene_incidents(event_type='motion')
     manager = SimpleNamespace(events=store)
     day = datetime.fromtimestamp(1000, timezone.utc).strftime('%Y-%m-%d')
     found = IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='object', min_confidence=.8, limit=10)
     assert found['total'] == 1 and len(found['items']) == 1
-    assert IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='object', limit=10)['total'] == 2
+    assert IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='object', limit=10)['total'] == 3
 
 
 def test_rare_filter_does_not_hydrate_unmatched_history(tmp_path):

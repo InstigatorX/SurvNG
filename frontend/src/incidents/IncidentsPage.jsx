@@ -16,7 +16,7 @@ import {
 import { loadRelatedIncident } from "../relatedIncidents.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { incidentReplayTracking, incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
-import { incidentDetailQuery, incidentFocusStep, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryColumns, incidentGalleryWanted, INCIDENT_GALLERY_CHUNK, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
+import { incidentDetailQuery, incidentFocusStep, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryColumns, incidentGalleryWanted, INCIDENT_GALLERY_CHUNK, incidentObjectLabels, toggleIncidentObjectLabel, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
 import { APP_BASE_PATH, appUrl, incidentRecordingContext, fetch } from "../shared/api.js";
 import { INCIDENT_REFRESH_FALLBACK_MS } from "../shared/constants.js";
@@ -131,6 +131,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const incidentObjectOptions = incidentFacets.labels || [];
   const incidentZoneOptions = incidentFacets.zones || [];
   const semanticIncidentActive = Boolean(semanticIncidentActiveQuery);
+  const selectedObjectLabels = incidentObjectLabels(incidentObjectFilter);
   const confidenceApplies = eventFilter !== "motion";
   const activeIncidentFilterCount = [incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter].filter((value) => value !== "all").length
     + (confidenceApplies && incidentMinConfidence > 0 ? 1 : 0);
@@ -959,15 +960,18 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                 </section>
                 <section className="incident-filter-section">
                   <h3 id="incident-object-filter-heading">Objects</h3>
-                  <div className="incident-filter-checks" role="radiogroup" aria-labelledby="incident-object-filter-heading">
-                    {["all", ...incidentObjectOptions].map((label) => (
-                      <label className="incident-filter-check" key={label}>
-                        <input type="radio" name="incident-object-filter" value={label} checked={incidentObjectFilter === label} onChange={() => setIncidentObjectFilter(label)} />
-                        {label === "all" ? null : <IncidentObjectIcon label={label} size={15} />}
-                        <span>{label === "all" ? "All objects" : label.replaceAll("_", " ")}</span>
-                      </label>
-                    ))}
-                  </div>
+                  {incidentObjectOptions.length ? (
+                    <div className="incident-filter-checks" role="group" aria-labelledby="incident-object-filter-heading">
+                      {incidentObjectOptions.map((label) => (
+                        <label className="incident-filter-check" key={label}>
+                          <input type="checkbox" value={label} checked={selectedObjectLabels.includes(label)} onChange={() => setIncidentObjectFilter(toggleIncidentObjectLabel(incidentObjectFilter, label))} />
+                          <IncidentObjectIcon label={label} size={15} />
+                          <span>{label.replaceAll("_", " ")}</span>
+                        </label>
+                      ))}
+                    </div>
+                  ) : <small>No objects on this day.</small>}
+                  <small>{selectedObjectLabels.length ? "Showing incidents with any checked object." : "Nothing checked shows every object."}</small>
                 </section>
                 <section className="incident-filter-section incident-filter-confidence">
                   <h3 id="incident-confidence-heading">Confidence threshold</h3>

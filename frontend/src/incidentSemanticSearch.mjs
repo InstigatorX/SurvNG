@@ -2,7 +2,7 @@ export function semanticIncidentRequest({ query, cameraFilter, objectFilter, sta
   return {
     query: String(query || "").trim(),
     camera_ids: cameraFilter && cameraFilter !== "all" ? [cameraFilter] : [],
-    object_labels: objectFilter && objectFilter !== "all" ? [objectFilter] : [],
+    object_labels: objectFilter && objectFilter !== "all" ? String(objectFilter).split(",").map((label) => label.trim()).filter(Boolean) : [],
     start_at: String(startAt || ""),
     end_at: String(endAt || ""),
     limit: Math.max(1, Math.min(100, Number(limit) || 60)),

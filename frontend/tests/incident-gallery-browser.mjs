@@ -53,7 +53,8 @@ try {
       const floor = Number(url.searchParams.get("min_confidence") || 0), label = url.searchParams.get("object_label");
       searches.push({ limit, offset, floor, label, type: url.searchParams.get("event_type") });
       if (failMore && offset > 0) return route.fulfill({ status: 500, json: {} });
-      const matched = incidents.filter((item) => (!label || item.labels.includes(label)) && item.objects.some((object) => object.confidence >= floor));
+      const wanted = label ? label.split(",") : [];
+      const matched = incidents.filter((item) => (!wanted.length || item.labels.some((name) => wanted.includes(name))) && item.objects.some((object) => object.confidence >= floor));
       return route.fulfill({ json: { items: matched.slice(offset, offset + limit), total: matched.length, facets: { camera_ids: CAMERAS.map((camera) => camera.id), labels: ["car", "person"], zones: ["Entry"] } } });
     }
     if (path.endsWith("/incidents/detail")) return route.fulfill({ json: incidents.find((item) => item.id === url.searchParams.get("incident_id")) || incidents[0] });
@@ -133,13 +134,22 @@ try {
   assert.equal(searches.at(-1).floor, 0.8);
   assert.equal(searches.at(-1).offset, 0);
   assert.match(await pane.locator(".incident-filter-confidence-readout").innerText(), /75 results\s+80%/);
-  await page.getByRole("radio", { name: "Person" }).check();
+  await page.getByRole("checkbox", { name: "Person" }).check();
   await page.waitForFunction(() => document.querySelectorAll("#incident-results .live-activity-item").length === 50);
   assert.deepEqual([searches.at(-1).label, searches.at(-1).floor], ["person", 0.8]);
+  // Objects are multi-select: checking a second one widens the match to either.
+  await page.getByRole("checkbox", { name: "Car" }).check();
+  await page.waitForFunction(() => document.querySelectorAll("#incident-results .live-activity-item").length === 60);
+  assert.deepEqual([searches.at(-1).label, searches.at(-1).floor], ["car,person", 0.8]);
+  assert.match(await pane.locator(".incident-filter-confidence-readout").innerText(), /75 results/);
+  await page.getByRole("checkbox", { name: "Person" }).uncheck();
+  await page.waitForFunction(() => document.querySelectorAll("#incident-results .live-activity-item").length === 50);
+  assert.equal(searches.at(-1).label, "car");
   const clear = pane.getByRole("button", { name: "Clear filters (2)" });
   await clear.click();
   await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length === count, INCIDENT_GALLERY_CHUNK);
   assert.equal(await page.getByRole("slider", { name: "Confidence threshold" }).inputValue(), "0");
+  assert.equal(await pane.getByRole("checkbox", { checked: true }).count(), 0);
   // Motion-only incidents carry no detection confidence.
   await pane.getByRole("button", { name: "Motion" }).click();
   await page.waitForFunction(() => document.querySelector(".incident-filter-confidence input").disabled);
