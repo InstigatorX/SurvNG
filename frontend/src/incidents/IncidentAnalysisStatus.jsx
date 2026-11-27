@@ -7,7 +7,7 @@ import "./incident-analysis.css";
 const request = createAnalysisRequester(fetch);
 
 // Only mount in an opened incident, never in feed cards or prefetch paths.
-export function IncidentAnalysisStatus({ incidentId, autoStart = true, onDetail, embedded = false }) {
+export function IncidentAnalysisStatus({ incidentId, autoStart = true, onDetail, embedded = false, hideComplete = false }) {
   const [state, setState] = useState(null);
   const viewer = useRef(null);
   const detailHandler = useRef(onDetail);
@@ -46,6 +46,7 @@ export function IncidentAnalysisStatus({ incidentId, autoStart = true, onDetail,
     };
   }, [incidentId, autoStart]);
   if (!state || (!state.error && state.mode !== "on_demand" && !state.enabled)) return null;
+  if (hideComplete && state.status === "complete" && !state.error) return null;
   const episodes = Array.isArray(state.episodes) ? state.episodes : [];
   const completedEpisodes = episodes.filter((episode) => ["complete", "partial", "unavailable"].includes(episode.status)).length;
   const active = state.status === "queued" || state.status === "running";

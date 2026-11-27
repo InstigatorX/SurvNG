@@ -98,22 +98,6 @@ class MediaExportStore:
                 )
                 """
             )
-            columns = {
-                str(row[1])
-                for row in connection.execute("PRAGMA table_info(media_exports)").fetchall()
-            }
-            if "protected" not in columns:
-                connection.execute(
-                    "ALTER TABLE media_exports ADD COLUMN protected INTEGER NOT NULL DEFAULT 0"
-                )
-            if "label" not in columns:
-                connection.execute(
-                    "ALTER TABLE media_exports ADD COLUMN label TEXT NOT NULL DEFAULT ''"
-                )
-            if "origin" not in columns:
-                connection.execute(
-                    "ALTER TABLE media_exports ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'"
-                )
             connection.execute(
                 "UPDATE media_exports SET status = 'failed', phase = 'Interrupted by restart', "
                 "error = 'export interrupted by server restart', finished_at = ? "

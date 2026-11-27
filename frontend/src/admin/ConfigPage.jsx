@@ -82,6 +82,7 @@ import { cameraStatusSummary, formatStreamInfo } from "../adminOverview.mjs";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
 import { DetectionOccupancyCard } from "./DetectionOccupancyCard.jsx";
 import { SpeechSettings } from "./SpeechSettings.jsx";
+import { FaceCaptureSettings } from "./FaceCaptureSettings.jsx";
 
 export const ADMIN_DESTINATION_ICONS = {
   home: LayoutDashboard,
@@ -800,6 +801,41 @@ export function MaintenanceViewer({ state }) {
 
 export function CalibrationLab(props) {
   return <SystemReviewPanel {...props} />;
+}
+
+// A save the running process could not apply is on disk and applies at the
+// next start. Returns true when it handled such a result.
+async function handleUnappliedSave(payload, saved, setNotice) {
+  if (payload.apply_mode === "restart_pending") {
+    setNotice({ state: "saving", text: `${saved}. SurvNG is restarting to apply it...` });
+    await reloadAfterServerRestart(payload.instance_id, setNotice);
+    return true;
+  }
+  if (payload.apply_mode === "restart_required") {
+    setNotice({ state: "error", text: `${saved}, but SurvNG could not apply it while running. Restart SurvNG to apply it.` });
+    return true;
+  }
+  return false;
+}
+
+// The supervisor is restarting SurvNG: wait for a new process, then reload.
+async function reloadAfterServerRestart(previousInstance, setNotice) {
+  const previous = String(previousInstance || "");
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+    try {
+      const response = await fetch(`/api/system/status?restart_check=${Date.now()}`, { cache: "no-store" });
+      if (!response.ok) continue;
+      const status = await response.json();
+      if (previous && String(status.instance_id || "") === previous) continue;
+      window.location.reload();
+      return;
+    } catch {
+      // Expected while the service restarts.
+    }
+  }
+  setNotice({ state: "error", text: "Saved, but SurvNG is taking longer than expected to restart. Refresh this page shortly." });
 }
 
 export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = "default", setTextSize = null, onAssistantContextChange }) {
@@ -1783,6 +1819,13 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
         throw new Error(detail);
       }
       const payload = await response.json();
+      if (payload.apply_mode === "restart_pending" || payload.apply_mode === "restart_required") {
+        // Saved on disk; the running process still serves the old values.
+        baselineConfigRef.current = structuredClone(configToSave);
+        setBaselineRevision((current) => current + 1);
+        setConfig(structuredClone(configToSave));
+      }
+      if (await handleUnappliedSave(payload, "Saved", setSaveNotice)) return true;
       const reloaded = await load();
       setSaveNotice(reloaded
         ? {
@@ -1878,6 +1921,9 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
         setBaselineRevision((current) => current + 1);
       }
       const saved = cameras.length > 1 ? `${cameras.length} cameras saved` : "Camera settings saved";
+      // Not applied: stop here so zone and order saves do not write the
+      // running (old) configuration over the change saved for the restart.
+      if (await handleUnappliedSave(payload, saved, setSaveNotice)) return null;
       setSaveNotice({
         state: "saved",
         text: payload.apply_mode === "manager_reload"
@@ -1937,11 +1983,13 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
     try {
       const response = await fetch(`/api/config/cameras/${encodeURIComponent(camera.id)}`, { method: "DELETE" });
       if (!response.ok) throw new Error(await response.text());
+      const payload = await response.json().catch(() => ({}));
       removeCamera(camera.id);
       if (baselineConfigRef.current) {
         baselineConfigRef.current.cameras = (baselineConfigRef.current.cameras || []).filter((item) => item.id !== camera.id);
         setBaselineRevision((current) => current + 1);
       }
+      if (await handleUnappliedSave(payload, "Camera removed", setSaveNotice)) return;
       setSaveNotice({ state: "saved", text: "Camera removed. Workers reloaded." });
       const statusResponse = await fetch("/api/cameras");
       if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
@@ -4152,7 +4200,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <label>Hardware Acceleration<select value={config.hardware_acceleration || "auto"} onChange={(event) => updateConfig(["hardware_acceleration"], event.target.value)}><option value="auto">Auto (VAAPI preferred)</option><option value="vaapi">VAAPI</option><option value="qsv">Intel QSV</option><option value="off">Off</option></select></label>
               <label>RTSP Capture Transport<select value={config.capture_rtsp_transport || "tcp"} onChange={(event) => updateConfig(["capture_rtsp_transport"], event.target.value)}><option value="tcp">TCP (recommended)</option><option value="udp">UDP</option></select><small>TCP prevents packet-loss decoder errors on most camera networks. UDP is available for cameras or relays that require it.</small></label>
             </div>
-            <p className="admin-action-note">Changing RTSP transport reloads camera capture workers. Existing custom <code>OPENCV_FFMPEG_CAPTURE_OPTIONS</code> remains an advanced environment override.</p>
+            <p className="admin-action-note">Changing RTSP transport reloads camera capture workers.</p>
           </section>
         )}
         </>
@@ -4382,6 +4430,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <label>API Key<input type="password" value={secretInputValue(config.audit_ai?.api_key)} placeholder={secretInputHint(config.audit_ai?.api_key)} onChange={(event) => updateConfig(["audit_ai", "api_key"], event.target.value)} autoComplete="new-password" /></label>
               <label>Base URL<input value={config.audit_ai?.base_url || ""} onChange={(event) => updateConfig(["audit_ai", "base_url"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "https://generativelanguage.googleapis.com/v1beta" : config.audit_ai?.provider === "openai_compatible" ? "http://localhost:11434/v1" : "https://api.openai.com/v1"} /></label>
               <label>Timeout Seconds<input type="number" min="5" max="120" step="1" value={config.audit_ai?.timeout_seconds ?? 45} onChange={(event) => updateConfig(["audit_ai", "timeout_seconds"], Number(event.target.value))} /></label>
+              <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.incident_titles_enabled ?? false} onChange={(event) => updateConfig(["audit_ai", "incident_titles_enabled"], event.target.checked)} disabled={!config.audit_ai?.enabled} /><span>AI incident titles</span><small>Off by default. Words incident titles with this provider from objects, cameras and zones only; falls back to the built-in title.</small></label>
               <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.allow_apply_recommendations ?? false} onChange={(event) => updateConfig(["audit_ai", "allow_apply_recommendations"], event.target.checked)} /><span>Allow confirmed changes</span></label>
             </div>
           </section>
@@ -4392,7 +4441,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       {section === "detection" ? (
         <div className="detection-settings subsection-workspace">
           <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="Intelligence and detection settings">
-            {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["depth", "Depth Estimation", Layers], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face detection", ScanFace], ["speech", "Speech", Mic]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
+            {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["depth", "Depth Estimation", Layers], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Faces", ScanFace], ["speech", "Speech", Mic]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
           </nav>
           <div className="detection-settings-content">
           {detectionSection === "speech" ? <SpeechSettings config={config} updateConfig={updateConfig} /> : null}
@@ -4701,8 +4750,9 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </div>
           </details> : null}
 
-          {detectionSection === "faces" ? <details className="detection-settings-card detection-feature-card wide-card" open>
-            <summary><span className="detection-settings-card-icon"><ScanFace size={18} /></span><span><strong>Face detection</strong><small>Run the face detector on upper-body person crops.</small></span></summary>
+          {detectionSection === "faces" ? <FaceCaptureSettings config={config} updateConfig={updateConfig} /> : null}
+          {detectionSection === "faces" ? <details className="detection-settings-card detection-feature-card wide-card">
+            <summary><span className="detection-settings-card-icon"><ScanFace size={18} /></span><span><strong>Previous face detection</strong><small>The earlier face pipeline (off). Face capture above replaces it.</small></span></summary>
             <div className="detection-feature-body detection-field-grid">
               <label className="compact-toggle"><input type="checkbox" checked={config.detector?.face_recognition_enabled ?? false} onChange={(event) => updateConfig(["detector", "face_recognition_enabled"], event.target.checked)} /><span>Face detection enabled</span></label>
               <label>Face Detector Model<input value={config.detector?.face_detection_model_path || ""} onChange={(event) => updateConfig(["detector", "face_detection_model_path"], event.target.value)} placeholder="face_detector/model.xml" /><small>OpenVINO XML. Score a candidate on People before replacing a model that is already running.</small></label>

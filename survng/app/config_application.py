@@ -16,17 +16,17 @@ HOT_CONFIG_FIELDS = frozenset({"homekit", "weather", "property", "base_path", "e
 # The configured FFmpeg binary also owns live capture and reloads the manager.
 # Acceleration remains recorder/refinement-only and can be applied in place.
 RECORDER_CONFIG_FIELDS = frozenset({"hardware_acceleration", "recording_segment_seconds"})
-DETECTOR_HOT_POLICY_FIELDS = frozenset({"scene_discovery_enabled", "scene_discovery_interval_seconds", "scene_discovery_heartbeat_seconds", "confidence_threshold", "event_candidate_confidence_threshold", "event_confirmation_frames", "event_class_confirmation_frames", "event_class_confidence_thresholds", "event_refinement_stages", "event_route_refinement_stages", "event_refinement_retry_seconds", "event_refinement_settle_seconds", "event_refinement_retry_interval_seconds", "event_representative_refinement_timeout_seconds", "object_activity_attribution", "stationary_subject_presence", "require_incident_zone", "max_concurrent_refinements", "recorded_adaptive_sampling", "recorded_decode_max_processes", "face_max_observations", "face_detection_threshold", "face_enrich_max_people", "face_match_threshold", "face_unknown_cluster_threshold", "face_auto_identify_enabled", "face_auto_identify_threshold", "face_auto_identify_margin", "face_min_size", "face_max_references", "face_evidence_enabled", "face_evidence_max_extra_frames", "face_evidence_timeout_seconds"})
+DETECTOR_HOT_POLICY_FIELDS = frozenset({"scene_discovery_enabled", "scene_discovery_interval_seconds", "scene_discovery_heartbeat_seconds", "confidence_threshold", "event_candidate_confidence_threshold", "event_confirmation_frames", "event_class_confirmation_frames", "event_class_confidence_thresholds", "event_refinement_stages", "event_route_refinement_stages", "event_refinement_retry_seconds", "event_refinement_settle_seconds", "event_refinement_retry_interval_seconds", "event_representative_refinement_timeout_seconds", "object_activity_attribution", "stationary_subject_presence", "require_incident_zone", "max_concurrent_refinements", "recorded_adaptive_sampling", "recorded_decode_max_processes", "face_max_observations", "face_detection_threshold", "face_enrich_max_people", "face_match_threshold", "face_unknown_cluster_threshold", "face_auto_identify_enabled", "face_auto_identify_threshold", "face_auto_identify_margin", "face_min_size", "face_max_references", "face_evidence_enabled", "face_evidence_max_extra_frames", "face_evidence_timeout_seconds", "face_capture_min_norm", "face_capture_min_size", "face_capture_moments_per_track", "face_capture_faces_per_track", "face_capture_margin_seconds", "face_capture_moment_radius_seconds", "face_capture_backfill_hours", "face_group_threshold"})
 TRACKING_SESSION_FIELDS = frozenset({"enabled", "implementation", "excluded_labels", "sample_fps", "adaptive_sampling_enabled", "stable_sample_fps", "adaptive_stable_frames", "max_catchup_frames_per_tick", "persist_interval_seconds", "max_session_seconds", "recorded_processing_budget_seconds", "lost_timeout_seconds", "min_confirmations", "low_confidence_threshold", "confirmation_confidence_threshold", "match_iou_threshold", "match_center_distance_ratio", "max_active_cameras", "adaptive_burst_enabled", "burst_max_active_cameras", "capacity_wait_seconds", "deferred_reid_enabled", "deferred_reid_delay_seconds", "deferred_reid_min_crop_pixels", "deferred_reid_rate_per_minute", "related_sequence_window_seconds", "camera_transition_routes", "max_tracks_per_session", "reid_max_age_seconds", "reid_max_embeddings_per_frame", "reid_refresh_interval_frames", "reid_match_threshold", "vehicle_reid_match_threshold", "tracking_profile", "reid_spatial_gate_ratio", "reid_top_two_margin", "reid_gallery_size", "reid_provisional_hits", "sparse_buffer_iou_small", "sparse_buffer_iou_large", "entity_relink_enabled", "ambiguity_min_person_tracks"})
 TRACKING_VISIT_POLICY_FIELDS = frozenset({"visit_auto_link_enabled", "visit_match_threshold", "visit_top_two_margin", "visit_min_quality", "visit_max_seconds"})
 TRACKING_SESSION_FIELDS = TRACKING_SESSION_FIELDS | {"analysis_mode"}
 CAPTURE_TRACKING_FIELDS = frozenset({"sample_fps"})
 DETECTOR_OBJECT_ENGINE_FIELDS = frozenset({"enabled", "backend", "object_worker_count", "model_path", "model_xml", "model_output_format", "model_input_layout", "coreml_model_path", "labels_path", "device", "nms_threshold", "warmup_enabled", "labels"})
 DETECTOR_OBJECT_TRACKING_RESET_FIELDS = frozenset({"enabled", "backend", "model_path", "model_xml", "model_output_format", "model_input_layout", "coreml_model_path", "labels_path", "nms_threshold", "labels"})
-DETECTOR_FACE_ENGINE_FIELDS = frozenset({"face_recognition_enabled", "face_embedding_model_path", "face_landmark_model_path", "face_detection_model_path", "face_recognition_device", "face_embedding_profile"})
+DETECTOR_FACE_ENGINE_FIELDS = frozenset({"face_recognition_enabled", "face_embedding_model_path", "face_landmark_model_path", "face_detection_model_path", "face_recognition_device", "face_embedding_profile", "face_capture_enabled", "face_capture_detector_model_path", "face_capture_embedding_model_path", "face_capture_detection_threshold"})
 DETECTOR_SHARED_ENGINE_FIELDS = frozenset({"cache_enabled", "cache_dir"})
 DEPTH_ENGINE_FIELDS = frozenset({"enabled", "model_path", "device", "input_size"})
-DEPTH_HOT_POLICY_FIELDS = frozenset({"min_distance_m", "max_distance_m", "max_incident_distance_m", "store_heatmap", "heatmap_max_width", "motion_evidence_enabled"})
+DEPTH_HOT_POLICY_FIELDS = frozenset({"min_distance_m", "max_distance_m", "max_incident_distance_m", "store_heatmap", "heatmap_max_width"})
 # Vehicle label routing lives in the inference child as well as the tracker.
 # Replace that child when labels change so newly enabled classes reach it.
 TRACKING_REID_ENGINE_FIELDS = frozenset({"reid_enabled", "reid_model_path", "reid_device", "vehicle_reid_enabled", "vehicle_reid_model_path", "vehicle_reid_device", "vehicle_reid_labels"})
@@ -43,6 +43,7 @@ class ConfigurableRuntime(Protocol):
     def reconfigure_inference(self, config: Any, roles: set[str], *, refresh_tracking: bool) -> None: ...
     def reconfigure_object_tracking(self, config: Any) -> None: ...
     def reconfigure_detector_policy(self, config: AppConfig) -> None: ...
+    def reconfigure_speech(self, config: AppConfig) -> None: ...
     def reconfigure_motion(
         self,
         config: AppConfig,
@@ -74,7 +75,10 @@ def manager_owned_config(config: AppConfig) -> dict:
         camera.pop("object_activity_attribution", None)
         camera.pop("stationary_subject_presence", None)
         camera.pop("motion_qualification", None)
+        # Speech listening is replaced on its own (reconfigure_speech).
+        camera.pop("speech", None)
     payload.pop("motion_qualification", None)
+    payload.pop("speech", None)
     payload["detector"] = _without_fields(payload.get("detector", {}), DETECTOR_HOT_POLICY_FIELDS | DETECTOR_OBJECT_ENGINE_FIELDS | DETECTOR_FACE_ENGINE_FIELDS | DETECTOR_SHARED_ENGINE_FIELDS)
     tracking = payload["detector"].get("tracking")
     if isinstance(tracking, dict):
@@ -177,6 +181,12 @@ def motion_config_changes(
     return restart, hot
 
 
+def speech_config_changed(current: AppConfig, incoming: AppConfig) -> bool:
+    return current.speech != incoming.speech or {
+        camera.id: camera.speech for camera in current.cameras
+    } != {camera.id: camera.speech for camera in incoming.cameras}
+
+
 def hot_config_changes(current: AppConfig, incoming: AppConfig) -> list[str]:
     changed = [field for field in sorted(HOT_CONFIG_FIELDS) if getattr(current, field) != getattr(incoming, field)]
     if {c.id: c.retention for c in current.cameras} != {c.id: c.retention for c in incoming.cameras} and "retention" not in changed:
@@ -207,6 +217,7 @@ class TargetedConfigApplication:
             database_retention_changed = "database_retention" in changes
             image_changed = "image_storage" in changes
             semantic_changed = "semantic_search" in changes
+            speech_changed = speech_config_changed(current, incoming)
             policy_changed = any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_HOT_POLICY_FIELDS)
             policy_changed = policy_changed or any(
                 getattr(current.detector.depth, f) != getattr(incoming.detector.depth, f)
@@ -265,6 +276,7 @@ class TargetedConfigApplication:
                     (database_retention_changed, "database_retention", runtime.reconfigure_database_retention, runtime.reconfigure_database_retention),
                     (image_changed, "image_storage", lambda c: runtime.reconfigure_image_storage(c.image_storage), lambda c: runtime.reconfigure_image_storage(c.image_storage)),
                     (semantic_changed, "semantic_search", lambda c: runtime.reconfigure_semantic_search(c.semantic_search), lambda c: runtime.reconfigure_semantic_search(c.semantic_search)),
+                    (speech_changed, "speech", runtime.reconfigure_speech, runtime.reconfigure_speech),
                     (bool(roles), "inference", lambda c: runtime.reconfigure_inference(c.detector, roles, refresh_tracking=refresh), lambda c: runtime.reconfigure_inference(c.detector, roles, refresh_tracking=refresh)),
                     (tracking_changed and not refresh, "tracking", lambda c: runtime.reconfigure_object_tracking(c.detector), lambda c: runtime.reconfigure_object_tracking(c.detector)),
                     (policy_changed, "policy", runtime.reconfigure_detector_policy, runtime.reconfigure_detector_policy),
@@ -299,7 +311,7 @@ class TargetedConfigApplication:
                     try: self._save(current, assign_ids=False)
                     except Exception: LOGGER.exception("failed to restore persisted configuration after targeted apply failure")
                 raise
-            restarted = [name for name, changed in (("recorders", bool(recorder_changes)), ("mqtt", mqtt_changed), ("semantic_search", semantic_changed), ("tracking_sessions", tracking_changed or refresh)) if changed]
+            restarted = [name for name, changed in (("recorders", bool(recorder_changes)), ("mqtt", mqtt_changed), ("semantic_search", semantic_changed), ("speech", speech_changed), ("tracking_sessions", tracking_changed or refresh)) if changed]
             restarted.extend(f"{role}_inference" for role in ("object", "face", "reid", "depth") if role in roles)
             hot = changes + recorder_changes + (["detector_policy"] if policy_changed else [])
             if motion_hot_ids:

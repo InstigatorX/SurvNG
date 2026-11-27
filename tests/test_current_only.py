@@ -1,6 +1,7 @@
 """Current writers round-trip without compatibility rewriting."""
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from datetime import datetime
@@ -193,3 +194,58 @@ def test_initializer_rejects_redacted_template_before_writing(tmp_path):
     assert not destination.exists()
     assert not secrets_path(destination).exists()
     assert not secrets_key_path(secrets_path(destination)).exists()
+
+
+def test_v1_2_0_event_index_leftover_is_dropped(tmp_path):
+    EventStore(tmp_path)
+    with sqlite3.connect(tmp_path / 'survng.sqlite3') as conn:
+        conn.execute('create index idx_event_camera_epoch on events(camera_id, julianday(created_at), id)')
+    reopened = EventStore(tmp_path)
+    with reopened._connect() as conn:
+        names = {row[0] for row in conn.execute("select name from sqlite_master where type='index'")}
+    assert 'idx_event_camera_epoch' not in names
+
+
+def test_startup_reports_a_manager_failure_instead_of_a_telemetry_failure():
+    from types import SimpleNamespace
+    from unittest.mock import Mock, patch
+
+    from survng.app import main
+
+    for failure in (ValueError('invalid configuration'), sqlite3.OperationalError('unreadable')):
+        with patch.object(main, 'get_manager', side_effect=failure):
+            with pytest.raises(type(failure)):
+                main._record_process_lifecycle('startup_started')
+    # A failed telemetry write alone stays non-fatal.
+    telemetry = Mock()
+    telemetry.record_lifecycle_event.side_effect = sqlite3.OperationalError('locked')
+    with patch.object(main, 'get_manager', return_value=SimpleNamespace(telemetry=telemetry)):
+        main._record_process_lifecycle('startup_started')
+
+
+def test_shutdown_lifecycle_events_never_build_a_manager():
+    from unittest.mock import patch
+
+    from survng.app import main
+
+    with (
+        patch.dict(main.__dict__, {'manager': None}),
+        patch.object(main, 'get_manager', side_effect=AssertionError('built at shutdown')),
+    ):
+        main._record_process_lifecycle('shutdown_requested')
+        main._record_process_lifecycle('shutdown_completed')
+
+
+def test_retired_tables_are_dropped_and_scene_changes_is_not_written(tmp_path):
+    EventStore(tmp_path)
+    with sqlite3.connect(tmp_path / 'survng.sqlite3') as conn:
+        conn.execute('create table scene_changes(id integer primary key, incident_id text, revision integer, created_at real)')
+        conn.execute('create table tracking_comparisons(id integer primary key)')
+        conn.execute('create table scene_migrations(name text primary key)')
+        conn.execute('create table scene_acquisition_migrations(name text primary key)')
+    store = EventStore(tmp_path)
+    event = store.add_event(camera_id='gate', kind='motion', topic='motion', message='motion', snapshot_path='', recording_path='')
+    assert store.scene_incident(event_id=event['id'])
+    with sqlite3.connect(tmp_path / 'survng.sqlite3') as conn:
+        tables = {row[0] for row in conn.execute("select name from sqlite_master where type='table'")}
+    assert not tables & {'scene_changes', 'tracking_comparisons', 'scene_migrations', 'scene_acquisition_migrations'}

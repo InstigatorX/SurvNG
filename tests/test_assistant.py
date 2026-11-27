@@ -555,17 +555,17 @@ class AssistantApiTest(unittest.TestCase):
             AppConfig(),
             SimpleNamespace(
                 detector=SimpleNamespace(labels=["person"]),
-                faces=SimpleNamespace(people=lambda: [{
+                identity_people=lambda: [{
                     "id": 7,
-                    "name": "Steve",
+                    "name": "Person A",
                     "notes": "private note",
-                }]),
+                }],
             ),
         )
 
         self.assertEqual(
             catalog["recognized_faces"],
-            [{"id": 7, "name": "Steve"}],
+            [{"id": 7, "name": "Person A"}],
         )
         self.assertNotIn("private note", json.dumps(catalog))
 

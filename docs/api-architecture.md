@@ -20,9 +20,9 @@ the FastAPI application. A handler snapshots that manager once and uses the same
 generation throughout the request so a concurrent reload cannot combine an old
 event store with a new recorder.
 
-Compatibility aliases in `main.py` temporarily preserve direct calls used by
-internal tools and tests. They are not a second route implementation; FastAPI
-registers only the handlers owned by the focused router.
+`main.py` does not re-export route handlers. Tests that call a handler directly
+take it from the router bundle, for example
+`main._recording_route_bundle.handlers["create_media_export"]`.
 
 ## Adding an API area
 

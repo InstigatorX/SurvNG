@@ -28,6 +28,7 @@ class Scenes:
                         for item in snapshots]
         self.current = deepcopy(snapshots[-1]) if snapshots else scene()
         self.acknowledged = []
+        self.acknowledged_alerts = []
 
     def scene_pending_notifications(self):
         return deepcopy(self.pending)
@@ -35,8 +36,9 @@ class Scenes:
     def settle_scene_incidents(self):
         pass
 
-    def acknowledge_scene_notification(self, incident_id, revision):
+    def acknowledge_scene_notification(self, incident_id, revision, *, zone_alert_ids=()):
         self.acknowledged.append((incident_id, revision))
+        self.acknowledged_alerts.extend(zone_alert_ids)
         self.pending = [item for item in self.pending if (item["incident_id"], item["revision"]) != (incident_id, revision)]
 
     def list_scene_incident_notifications(self):
@@ -89,7 +91,7 @@ def test_publication_failure_stops_ordered_replay_and_retries_after_restart():
 
 
 def test_acknowledgement_failure_permits_at_least_once_delivery():
-    store = Scenes(scene())
+    store = Scenes({**scene(), "zone_alerts": [{"alert_id": "gate-drive-car"}]})
     acknowledge = store.acknowledge_scene_notification
     store.acknowledge_scene_notification = Mock(side_effect=RuntimeError("db unavailable"))
     published = []
@@ -99,6 +101,8 @@ def test_acknowledgement_failure_permits_at_least_once_delivery():
     store.acknowledge_scene_notification = acknowledge
     assert lifecycle.run_once() == 1
     assert [(item["incident_id"], item["revision"]) for item in published] == [("scene-1", 1)] * 2
+    assert [item["zone_alerts"][0]["alert_id"] for item in published] == ["gate-drive-car"] * 2
+    assert store.acknowledged_alerts == ["gate-drive-car"]
 
 
 def test_invalid_snapshot_revision_is_not_published_or_acknowledged():

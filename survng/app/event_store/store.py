@@ -10,7 +10,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..incident_utils import event_snapshot_path, portable_media_path, snapshot_deletion_claimed
 from ..main_database import (
@@ -34,6 +34,7 @@ from .scene_admission import EventStoreSceneAdmissionMixin
 from .scene_review import EventStoreSceneReviewMixin
 from .scene_tracking import EventStoreSceneTrackingMixin
 from .scene_context import EventStoreSceneContextMixin
+from .incident_reviews import EventStoreIncidentReviewMixin
 
 LOGGER = logging.getLogger(__name__)
 
@@ -69,12 +70,10 @@ class EventStore(
     EventStoreCalibrationMixin,
     EventStoreMotionIntelligenceMixin,
     EventStoreSceneContextMixin,
+    EventStoreIncidentReviewMixin,
 ):
     SNAPSHOT_SIZE_WRITE_BATCH = 50
     SNAPSHOT_REFERENCE_WRITE_BATCH = 50
-    # Match storage repair: low-space, full, and read-only locations can still
-    # prove a file is gone. Offline, unmounted, or unavailable locations cannot.
-    _HEALTHY_SNAPSHOT_LOCATION_STATES = frozenset({"online", "low_space", "full", "read_only"})
     SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY = "snapshot_size_backfill_cursor"
     SNAPSHOT_SIZE_BACKFILL_WORK_KEY = "snapshot_size_backfill_sweep_work"
     SNAPSHOT_SIZE_IDLE_SCAN_SECONDS = 3600.0
@@ -91,9 +90,11 @@ class EventStore(
         database_dir: Path | None = None,
         media_storage: MediaStorageRegistry | None = None,
         database_write_lock: threading.RLock | None = None,
+        zone_alert_rules: Callable[[str], dict[str, bool]] | None = None,
     ) -> None:
         self.storage_dir = storage_dir
         self.media_storage = media_storage
+        self._zone_alert_rules = zone_alert_rules
         self.db_path = (database_dir or storage_dir) / "survng.sqlite3"
         self.jobs_db_path = self.db_path.parent / "detection-jobs.sqlite3"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,6 +124,7 @@ class EventStore(
         self._init_scene_acquisition_db()
         self._init_gallery_db()
         self._init_scene_db()
+        self._init_incident_review_db()
         with self._connect() as conn:
             self._init_scene_tracking_schema(conn)
         self._recover_snapshot_deletion_claims()
@@ -610,7 +612,13 @@ class EventStore(
         bounded_hours = max(1, min(int(hours), 24 * 31))
         bucket_seconds = max(60, min(int(bucket_minutes), 60) * 60)
         start = current - timedelta(hours=bounded_hours)
-        query = "select camera_id, created_at, objects_json from events where created_at >= ?"
+        # Few events carry tracking; matching the key's text in SQLite skips
+        # building and parsing a week of other events' JSON (about 30 KB each).
+        # Every row the loop below keeps contains it.
+        query = (
+            "select camera_id, created_at, objects_json from events where created_at >= ? "
+            "and instr(objects_json, '\"object_tracking\"') > 0"
+        )
         parameters: list[Any] = [start.isoformat()]
         if camera_id:
             query += " and camera_id = ?"
@@ -1069,7 +1077,10 @@ class EventStore(
                     event_id,
                 ),
             )
-            updated = self._finish_evidence_commit(conn, event_id, row, reason="evidence_refined", cover_satisfied=bool(portable_snapshot and any(item.get("label") and item.get("frame_source") == "recorded_main" and item.get("snapshot_visible") is not False and item.get("incident_eligible") is not False for item in replacement)))
+            updated = self._finish_evidence_commit(
+                conn, event_id, row, reason="evidence_refined", zone_alert_objects=replacement,
+                cover_satisfied=bool(portable_snapshot and any(item.get("label") and item.get("frame_source") == "recorded_main" and item.get("snapshot_visible") is not False and item.get("incident_eligible") is not False for item in replacement)),
+            )
         if replaced_snapshot and replaced_snapshot != portable_snapshot:
             self._delete_snapshot_if_unreferenced(replaced_snapshot)
         return dict(updated) if updated is not None else None
@@ -1751,24 +1762,6 @@ class EventStore(
 
     def _snapshot_verdict(self, path: Path) -> str:
         return self._snapshot_gate().verdict(path, presence=path_presence)
-
-    def _snapshot_location_unreliable(self, path: Path) -> bool:
-        """Return whether this snapshot location can prove a file is gone.
-
-        A missing path on an unmounted or unreachable disk is not evidence the
-        image was deleted. Clearing the incident link in that state orphans a
-        file that reappears when the location returns.
-        """
-        if self.media_storage is None:
-            return False
-        location_id = self.media_storage.location_id_for(path, role="snapshots")
-        if location_id is None:
-            return True
-        try:
-            status = self.media_storage.status(location_id)
-        except (KeyError, OSError):
-            return True
-        return status.state not in self._HEALTHY_SNAPSHOT_LOCATION_STATES
 
     def _recover_snapshot_deletion_claims(self) -> None:
         """Finish or release snapshot deletion claims left by a process crash.

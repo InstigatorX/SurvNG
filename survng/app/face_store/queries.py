@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -127,101 +126,6 @@ class FaceStoreQueryMixin:
                 candidate_total / len(track_rows), 2
             ) if track_rows else 0.0,
         }
-
-    def camera_suitability(self) -> list[dict[str, Any]]:
-        """Score how useful each camera is for face recognition."""
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                select camera_id, recognition_outcome, person_id,
-                    quality_score, quality_json
-                from face_observations
-                where canonical = 1
-                order by camera_id, observed_at desc
-                """
-            ).fetchall()
-
-        grouped: dict[str, list[sqlite3.Row]] = {}
-        for row in rows:
-            grouped.setdefault(str(row["camera_id"] or ""), []).append(row)
-
-        result: list[dict[str, Any]] = []
-        for camera_id, items in grouped.items():
-            total = len(items)
-            embedded = sum(
-                1 for row in items
-                if row["recognition_outcome"] == FACE_OUTCOME_EMBEDDED
-            )
-            too_small = sum(
-                1 for row in items
-                if row["recognition_outcome"] == FACE_OUTCOME_TOO_SMALL
-            )
-            failed = sum(
-                1 for row in items
-                if row["recognition_outcome"] == FACE_OUTCOME_FAILED
-            )
-            known = sum(1 for row in items if row["person_id"] is not None)
-            qualities = [
-                float(row["quality_score"])
-                for row in items
-                if row["quality_score"] is not None
-            ]
-            sizes: list[float] = []
-            for row in items:
-                try:
-                    quality = json.loads(row["quality_json"] or "{}")
-                    value = float(quality.get("size"))
-                    if math.isfinite(value):
-                        sizes.append(max(0.0, min(1.0, value)))
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    pass
-
-            usable_rate = embedded / total if total else 0.0
-            avg_quality = sum(qualities) / len(qualities) if qualities else 0.0
-            avg_size = sum(sizes) / len(sizes) if sizes else 0.0
-            known_rate = known / embedded if embedded else 0.0
-            score = max(
-                0.0,
-                min(
-                    1.0,
-                    0.50 * usable_rate
-                    + 0.25 * avg_quality
-                    + 0.15 * avg_size
-                    + 0.10 * known_rate,
-                ),
-            )
-            if total < 5:
-                grade = "insufficient_data"
-            elif score >= 0.78:
-                grade = "excellent"
-            elif score >= 0.62:
-                grade = "good"
-            elif score >= 0.45:
-                grade = "marginal"
-            else:
-                grade = "poor"
-
-            result.append({
-                "camera_id": camera_id,
-                "score": round(score, 4),
-                "grade": grade,
-                "observations": total,
-                "embedded": embedded,
-                "known": known,
-                "too_small": too_small,
-                "processing_failed": failed,
-                "usable_rate": round(usable_rate, 4),
-                "too_small_rate": round(too_small / total, 4) if total else 0.0,
-                "failure_rate": round(failed / total, 4) if total else 0.0,
-                "average_quality": round(avg_quality, 4),
-                "average_face_size": round(avg_size, 4),
-                "identified_rate": round(known_rate, 4),
-            })
-
-        return sorted(
-            result,
-            key=lambda item: (-item["score"], item["camera_id"]),
-        )
 
     def observations(
         self,
@@ -367,43 +271,6 @@ class FaceStoreQueryMixin:
                         item["consensus"] = {}
                     observations.append(item)
         return observations
-
-    def confirmed_quality_issues(
-        self,
-        *,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                select o.*, p.name as person_name,
-                    candidate.name as candidate_person_name
-                from face_observations o
-                join face_people p on p.id = o.person_id
-                left join face_people candidate on candidate.id = o.candidate_person_id
-                where o.canonical = 1
-                    and o.person_id is not null
-                    and o.review_status = 'confirmed'
-                order by coalesce(o.quality_score, 0) asc,
-                    coalesce(o.match_confidence, 0) asc,
-                    o.observed_at desc
-                limit ?
-                """,
-                (max(1, min(int(limit), 500)),),
-            ).fetchall()
-        result = []
-        for row in rows:
-            item = self._observation_row(row)
-            flags = []
-            if float(item.get("quality_score") or 0.0) < 0.45:
-                flags.append("low_quality")
-            if float(item.get("match_confidence") or 0.0) < 0.30:
-                flags.append("weak_match")
-            if item.get("reference_pinned"):
-                flags.append("reference")
-            item["diagnostic_flags"] = flags
-            result.append(item)
-        return result
 
     def snapshot_path(self, observation_id: int) -> tuple[Path, dict[str, float]] | None:
         observation = self.observation(observation_id)

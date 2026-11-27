@@ -87,7 +87,10 @@ class CanonicalIncidentLifecycle:
                     if payload["incident_id"] != incident_id or int(payload["revision"]) != revision:
                         raise ValueError("incident outbox snapshot does not match its revision")
                     self._publish(payload)
-                    self._events.acknowledge_scene_notification(incident_id, revision)
+                    self._events.acknowledge_scene_notification(
+                        incident_id, revision,
+                        zone_alert_ids=tuple(alert["alert_id"] for alert in payload.get("zone_alerts", [])),
+                    )
                     delivered += 1
                 except Exception:
                     # Preserve publication order when one revision cannot be

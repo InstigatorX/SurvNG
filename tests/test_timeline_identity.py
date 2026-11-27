@@ -60,6 +60,9 @@ class _Manager:
     def camera(self, camera_id):
         return object() if camera_id == "gate" else None
 
+    def face_identity_observations(self, event_ids):
+        return self.faces.for_event_ids(event_ids)
+
 
 def _dependencies(manager):
     return RecordingRouteDependencies(

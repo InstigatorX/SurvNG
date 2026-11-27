@@ -1,6 +1,7 @@
 """Recording media runtime ownership: caching, remux, previews, clips, exports, and hardware probes."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -14,9 +15,12 @@ import tempfile
 import threading
 import time
 import weakref
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+import cv2
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
@@ -33,12 +37,45 @@ from .media_sessions import (
     MediaSessionLease,
     MediaSessionRequest,
 )
-from .recording_media import RECORDING_FMP4_VERSION, concatenated_clip_timing, event_clip_window, playback_segment_duration
+from .recording_media import RECORDING_FMP4_VERSION, concatenated_clip_timing, event_clip_window, mp4_video_dimensions, playback_segment_duration
 from .recording_mp4 import offset_fmp4_timestamps
+from .recorded_decoder import (
+    FAILURE_TIMEOUT,
+    DecodePlan,
+)
+from .recording_frame_runs import FrameRunError, decode_frame_run
+from .recording_frame_steps import (
+    FRAME_TIME_TOLERANCE_SECONDS,
+    SegmentFrames,
+    frame_index_at,
+    frame_run,
+    parse_packet_listing,
+    scaled_size,
+)
 from .recording_routes import recording_source
 from .security import redact_secret_text
 
 LOGGER = logging.getLogger(__name__)
+
+# Scrub-preview strips: tiles per row, the most tiles one segment gets, and
+# the frame size (about 1280x800) up to which every frame is decoded.
+RECORDING_STRIP_COLUMNS = 6
+RECORDING_STRIP_MAX_TILES = 60
+RECORDING_STRIP_FULL_DECODE_PIXELS = 1_024_000
+# After a failed GPU strip, how long strips are made on the CPU.
+RECORDING_STRIP_HARDWARE_RETRY_SECONDS = 300.0
+# A GPU strip takes a fraction of a second; one that takes this long is hung.
+RECORDING_STRIP_HARDWARE_TIMEOUT_SECONDS = 5.0
+# Frame stepping: segments whose frame lists are remembered, the budget for
+# decoding one run, and the JPEG quality of a stepped frame (it is looked at
+# for detail).
+RECORDING_FRAME_LIST_CACHE_ENTRIES = 64
+RECORDING_FRAME_RUN_TIMEOUT_SECONDS = 10.0
+RECORDING_FRAME_JPEG_QUALITY = 88
+# New frame-run bytes that bring the preview cache's maintenance forward.
+RECORDING_FRAME_MAINTENANCE_BYTES = 32 * 1024 * 1024
+# Frame lists probed at once (a demux each, on request threads).
+RECORDING_FRAME_LIST_PROBES = 2
 
 
 class RecordingPrewarmCancelled(RuntimeError):
@@ -80,6 +117,20 @@ class RecordingMediaRuntime:
         self.recording_preview_max_age_seconds = 7 * 24 * 60 * 60
         self.recording_preview_max_bytes = 256 * 1024 * 1024
         self.recording_preview_build_limiter = threading.BoundedSemaphore(1)
+        # Strips are asked for in pairs (where the playhead is, and the
+        # segment it is heading into). Each build also holds a transcode
+        # media session, of which there are two.
+        self.recording_strip_build_limiter = threading.BoundedSemaphore(2)
+        self.recording_strip_hardware_retry_at = 0.0
+        # Frame-step runs: one decode at a time, apart from the single
+        # preview build that incident and training stills wait on.
+        self.recording_frame_run_build_limiter = threading.BoundedSemaphore(1)
+        self.recording_frame_lists: OrderedDict[tuple[str, int, int], SegmentFrames] = OrderedDict()
+        self.recording_frame_list_lock = threading.Lock()
+        self.recording_frame_list_limiter = threading.BoundedSemaphore(RECORDING_FRAME_LIST_PROBES)
+        self.recording_frame_bytes_since_maintenance = 0
+        self.recording_frame_short_warned_at = float('-inf')
+        self.recording_frame_short_suppressed = 0
         self.recording_preview_locks: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
         self.recording_preview_locks_guard = threading.Lock()
         self.recording_preview_maintenance_lock = threading.Lock()
@@ -142,10 +193,24 @@ class RecordingMediaRuntime:
                     active_manager=selected_manager,
                 )
             ),
+            tolerant_row_loader=lambda camera_id, start_epoch, end_epoch, source: (
+                self._recording_day_rows(
+                    camera_id,
+                    start_epoch,
+                    end_epoch,
+                    source,
+                    fresh=True,
+                    active_manager=selected_manager,
+                    keep_unknown=True,
+                )
+            ),
             path_resolver=lambda value: self._recording_storage_path(
                 value,
                 active_manager=selected_manager,
             ),
+            # The resolver reports a missing or out-of-storage file as an
+            # HTTP error; a tolerant listing treats it as unavailable.
+            unavailable_errors=(HTTPException,),
             remuxer=lambda path, duration, media_offset: (
                 self._recording_fmp4_files(
                     path,
@@ -460,7 +525,7 @@ class RecordingMediaRuntime:
         device_args = ['-qsv_device', render_devices[0]] if render_devices else []
         return [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', *device_args, '-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv', '-c:v', decoder, '-f', 'concat', '-safe', '0', '-i', str(concat_path), '-ss', f'{local_start:.3f}', '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '23', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', str(tmp_path)]
 
-    def _recording_day_rows(self, camera_id: str, start_epoch: float, end_epoch: float, source: str, *, fresh: bool=False, active_manager: AppManager | None=None) -> list[dict]:
+    def _recording_day_rows(self, camera_id: str, start_epoch: float, end_epoch: float, source: str, *, fresh: bool=False, active_manager: AppManager | None=None, keep_unknown: bool=False) -> list[dict]:
         selected_manager = active_manager or self.manager
         selected_source = recording_source(source)
         cache_key = (camera_id, selected_source, int(start_epoch), int(end_epoch))
@@ -476,13 +541,20 @@ class RecordingMediaRuntime:
                 selected_manager.recorder.resolve_recording_playback_metadata(rows)
                 return rows
         rows = [row for row in selected_manager.recorder.recording_rows_between(camera_id, start_epoch, end_epoch, selected_source, discover_missing=False) if int(row.get('size_bytes') or 0) > 1024]
-        if fresh:
+        if keep_unknown:
+            # A growing playlist must see rows whose file cannot be checked
+            # right now (they are marked), not lose them for one re-read.
+            rows = selected_manager.recorder.discard_missing_recording_rows(rows, keep_unknown=True)
+        elif fresh:
             rows = selected_manager.recorder.discard_missing_recording_rows(rows)
         selected_manager.recorder.lease_recordings_for_playback(rows)
         # The index retains exact video sample durations separately from its
         # availability estimates. Unknown legacy files are resolved once here.
         selected_manager.recorder.resolve_recording_playback_metadata(rows)
         selected_manager.recorder.queue_stream_fingerprints(rows)
+        if keep_unknown:
+            # Marked rows must never reach the shared row cache.
+            return rows
         with self.recording_day_cache_lock:
             self.recording_day_cache[cache_key] = (now, rows)
             expired = [
@@ -852,6 +924,505 @@ class RecordingMediaRuntime:
                 self.recording_preview_build_limiter.release()
             self._maintain_recording_preview_cache(preview_path)
             return preview_path
+
+    def _recording_preview_strip(
+        self,
+        row: dict,
+        *,
+        width: int = 320,
+        active_manager: AppManager | None = None,
+    ) -> tuple[Path, dict]:
+        """A cached JPEG grid of one segment's frames at a fixed step, and its layout.
+
+        The timeline shows these while the playhead is dragged: one request
+        covers a whole segment, so moving within it needs no further decode.
+        Tile ``i`` is the frame ``i * step_seconds`` into the segment.
+        """
+        selected_manager = active_manager or self.manager
+        selected_config = getattr(selected_manager, 'config', self.config)
+        source_path = self._recording_storage_path(row.get('path'), active_manager=selected_manager)
+        start_epoch = float(row.get('start_epoch') or 0)
+        end_epoch = float(row.get('end_epoch') or start_epoch)
+        duration = max(0.05, end_epoch - start_epoch)
+        tile_width = max(160, min(640, int(width)))
+        # One frame a second; a long segment is thinned to at most 60 tiles.
+        step = max(1, math.ceil(duration / RECORDING_STRIP_MAX_TILES))
+        expected = math.ceil(duration / step) + 2
+        columns = min(RECORDING_STRIP_COLUMNS, expected)
+        rows = math.ceil(expected / columns)
+        try:
+            stat = source_path.stat()
+        except OSError as exc:
+            raise HTTPException(status_code=404, detail='recording file not found') from exc
+        fingerprint = (
+            f'strip-v1:{source_path}:{stat.st_mtime_ns}:{stat.st_size}:'
+            f'{duration:.3f}:{tile_width}:{step}:{columns}x{rows}'
+        )
+        cache_key = hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:32]
+        cache_dir = selected_manager.database_dir / 'recording-preview-cache'
+        strip_path = cache_dir / f'{cache_key}.jpg'
+        metadata_path = strip_path.with_suffix('.json')
+
+        def cached() -> dict | None:
+            if not self._recording_preview_ready(strip_path, touch=True):
+                return None
+            try:
+                layout = json.loads(metadata_path.read_text(encoding='utf-8'))
+                return layout if int(layout['count']) > 0 else None
+            except (json.JSONDecodeError, KeyError, OSError, TypeError, ValueError):
+                return None
+
+        layout = cached()
+        if layout is not None:
+            return strip_path, layout
+        with self.recording_preview_locks_guard:
+            lock = self.recording_preview_locks.setdefault(cache_key, threading.Lock())
+        with lock:
+            layout = cached()
+            if layout is not None:
+                return strip_path, layout
+            # A large frame costs most of its time in the decoder, so only
+            # its keyframes are decoded: the frame for a second with no
+            # keyframe is then the keyframe before it. Small streams (a
+            # camera's sub stream) are cheap enough to decode in full.
+            dimensions = mp4_video_dimensions(source_path)
+            keyframes_only = (
+                dimensions is None
+                or dimensions[0] * dimensions[1] > RECORDING_STRIP_FULL_DECODE_PIXELS
+            )
+            # A large frame decodes and scales about twice as fast on the
+            # GPU. It is tried where hardware is allowed and VAAPI works;
+            # after a failure the CPU does the work for a while. Decided
+            # before a build slot is taken: the first VAAPI probe is slow.
+            hardware = (
+                dimensions is not None
+                and keyframes_only
+                and self._hardware_acceleration_mode() != 'off'
+                and time.monotonic() >= self.recording_strip_hardware_retry_at
+                and bool(self._ffmpeg_vaapi_info().get('available'))
+            )
+
+            def command(on_gpu: bool) -> list[str]:
+                # round=up: tile i is the last frame at or before i * step,
+                # not one from the second that follows it. start_time=0: a
+                # video track that begins a little into the file (audio came
+                # first) would otherwise shift every tile by a step.
+                select = f'fps=1/{step}:start_time=0:round=up'
+                grid = f'showinfo@strip,tile={columns}x{rows}'
+                if on_gpu:
+                    device = str(self._ffmpeg_vaapi_info().get('device') or '/dev/dri/renderD128')
+                    decode = [
+                        '-vaapi_device', device,
+                        '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi',
+                    ]
+                    filters = (
+                        f'{select},scale_vaapi=w={tile_width}:h=-2:format=nv12,'
+                        f'hwdownload,format=nv12,{grid}'
+                    )
+                else:
+                    decode = [*RECORDED_FRAME_INPUT_THREAD_ARGS]
+                    filters = f"{select},scale='min({tile_width},iw)':-2,{grid}"
+                return [
+                    selected_config.ffmpeg_path, '-hide_banner', '-loglevel', 'info', '-nostdin',
+                    *decode,
+                    *(['-skip_frame', 'nokey'] if keyframes_only else []),
+                    '-i', str(source_path),
+                    '-map', '0:v:0', '-an', '-frames:v', '1',
+                    *RECORDED_FRAME_OUTPUT_THREAD_ARGS,
+                    '-vf', filters,
+                    '-q:v', '6', '-y', str(temporary),
+                ]
+
+            def build(on_gpu: bool, timeout: float) -> tuple[int, str]:
+                """(tiles that hold a frame, or 0 on failure; why it failed)."""
+                temporary.unlink(missing_ok=True)
+                built = subprocess.run(
+                    command(on_gpu), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout,
+                )
+                # The grid is padded with blank tiles; only these hold a frame.
+                frames = min(
+                    columns * rows,
+                    len(re.findall(rb'showinfo@strip[^\r\n]*\bpts_time:', built.stderr or b'')),
+                )
+                if (
+                    built.returncode == 0 and frames > 0
+                    and temporary.is_file() and temporary.stat().st_size > 0
+                ):
+                    return frames, ''
+                return 0, (built.stderr or b'').decode('utf-8', errors='replace').strip()[-300:]
+
+            temporary = cache_dir / f'.{cache_key}.{os.getpid()}.{threading.get_ident()}.tmp.jpg'
+            if not self.recording_strip_build_limiter.acquire(timeout=3.0):
+                raise HTTPException(status_code=429, detail='recording preview generator is busy', headers={'Retry-After': '1'})
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                session = None
+                media_sessions = getattr(selected_manager, 'media_sessions', None)
+                if media_sessions is not None:
+                    try:
+                        # A strip is a short decode that ends in one small
+                        # JPEG. It has a resource of its own: two strips at
+                        # once would take both transcode slots that event
+                        # clips, exports and HomeKit share, and the JPEG
+                        # encoders can all be held by live MJPEG streams.
+                        session = media_sessions.acquire(
+                            MediaSessionRequest(
+                                MediaSessionKind.RECORDING_PREVIEW,
+                                resources={MediaResourceClass.PREVIEW_PROCESS: 1},
+                                owner_generation=getattr(
+                                    selected_manager,
+                                    'media_session_generation',
+                                    None,
+                                ),
+                            ),
+                            timeout=3.0,
+                        )
+                    except MediaSessionAdmissionError as exc:
+                        raise HTTPException(
+                            status_code=429,
+                            detail=str(exc),
+                            headers={'Retry-After': '1'},
+                        ) from exc
+                # Nothing between taking the session and entering it: a lease
+                # that is never entered is never released.
+                with session if session is not None else contextlib.nullcontext():
+                    count, error = 0, ''
+                    if hardware:
+                        try:
+                            count, error = build(True, RECORDING_STRIP_HARDWARE_TIMEOUT_SECONDS)
+                        except subprocess.TimeoutExpired:
+                            error = 'timed out'
+                        except OSError as exc:
+                            error = str(exc)
+                        if count <= 0:
+                            # A hung or broken GPU must not cost every strip
+                            # its timeout: the CPU takes over for a while.
+                            self.recording_strip_hardware_retry_at = (
+                                time.monotonic() + RECORDING_STRIP_HARDWARE_RETRY_SECONDS
+                            )
+                            LOGGER.warning(
+                                'recording preview strip: hardware decode failed for %s, using the CPU: %s',
+                                source_path.name, redact_secret_text(error),
+                            )
+                            hardware = False
+                    if count <= 0:
+                        try:
+                            count, error = build(False, 15)
+                        except subprocess.TimeoutExpired as exc:
+                            raise HTTPException(status_code=504, detail='recording preview timed out') from exc
+                        except OSError as exc:
+                            raise HTTPException(status_code=500, detail='recording preview failed') from exc
+                if count <= 0:
+                    LOGGER.warning('recording preview strip failed for %s: %s', source_path.name, redact_secret_text(error))
+                    raise HTTPException(status_code=500, detail='recording preview failed')
+                layout = {
+                    'count': count,
+                    'columns': columns,
+                    'rows': rows,
+                    'step_seconds': step,
+                    'keyframes_only': keyframes_only,
+                    'hardware': hardware,
+                }
+                # The layout first: an image without one is never served.
+                metadata_path.write_text(json.dumps(layout, separators=(',', ':')), encoding='utf-8')
+                os.replace(temporary, strip_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+                self.recording_strip_build_limiter.release()
+            self._maintain_recording_preview_cache(strip_path)
+            return strip_path, layout
+
+    def _recording_segment_frames(
+        self,
+        row: dict,
+        *,
+        active_manager: AppManager | None = None,
+    ) -> SegmentFrames:
+        """The frames one recording file presents, from its packet index.
+
+        A demux, not a decode (tens of milliseconds for a ten-second
+        segment); remembered per file version, for a bounded number of files.
+        """
+        selected_manager = active_manager or self.manager
+        source_path = self._recording_storage_path(row.get('path'), active_manager=selected_manager)
+        try:
+            stat = source_path.stat()
+        except OSError as exc:
+            raise HTTPException(status_code=404, detail='recording file not found') from exc
+        key = (str(source_path), stat.st_mtime_ns, stat.st_size)
+        with self.recording_frame_list_lock:
+            cached = self.recording_frame_lists.get(key)
+            if cached is not None:
+                self.recording_frame_lists.move_to_end(key)
+                return cached
+        command = [
+            self.deps.ffprobe_path(), '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'packet=pts_time,flags:format=start_time',
+            '-of', 'json', str(source_path),
+        ]
+        if not self.recording_frame_list_limiter.acquire(timeout=3.0):
+            raise HTTPException(status_code=429, detail='recording frame list is busy', headers={'Retry-After': '1'})
+        try:
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(status_code=504, detail='recording frame list timed out') from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail='recording frame list failed') from exc
+        finally:
+            self.recording_frame_list_limiter.release()
+        frames = parse_packet_listing((result.stdout or b'').decode('utf-8', errors='replace'))
+        if result.returncode != 0 or not frames.times:
+            error = (result.stderr or b'').decode('utf-8', errors='replace').strip()
+            LOGGER.warning(
+                'recording frame list failed for %s: %s',
+                source_path.name, redact_secret_text(error[-300:]) or 'no video frames',
+            )
+            raise HTTPException(status_code=500, detail='recording frame list failed')
+        with self.recording_frame_list_lock:
+            self.recording_frame_lists[key] = frames
+            self.recording_frame_lists.move_to_end(key)
+            while len(self.recording_frame_lists) > RECORDING_FRAME_LIST_CACHE_ENTRIES:
+                self.recording_frame_lists.popitem(last=False)
+        return frames
+
+    def _recording_step_frame(
+        self,
+        row: dict,
+        epoch: float,
+        *,
+        width: int = 1280,
+        active_manager: AppManager | None = None,
+    ) -> tuple[Path, float]:
+        """The exact frame on screen at ``epoch``, as a cached JPEG, and its time.
+
+        The frame is decoded with the rest of its run (``frame_run``) in one
+        decoder process; the whole run is cached, so stepping on through it
+        reads files. Returns the JPEG and the epoch of the frame it shows,
+        from the decoded frame's own timestamp.
+        """
+        selected_manager = active_manager or self.manager
+        selected_config = getattr(selected_manager, 'config', self.config)
+        source_path = self._recording_storage_path(row.get('path'), active_manager=selected_manager)
+        start_epoch = float(row.get('start_epoch') or 0)
+        frames = self._recording_segment_frames(row, active_manager=selected_manager)
+        index = frame_index_at(frames.times, epoch - start_epoch)
+        run_start, run_stop = frame_run(frames, index)
+        target = frames.times[index]
+        output_width = max(320, min(1920, int(width)))
+        try:
+            stat = source_path.stat()
+        except OSError as exc:
+            raise HTTPException(status_code=404, detail='recording file not found') from exc
+        fingerprint = (
+            f'frame-run-v3:{source_path}:{stat.st_mtime_ns}:{stat.st_size}:'
+            f'{frames.times[run_start]:.6f}:{run_stop - run_start}:{output_width}'
+        )
+        cache_key = hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:32]
+        cache_dir = selected_manager.database_dir / 'recording-preview-cache'
+        # Every file is a JPEG with an optional sibling .json, so the preview
+        # cache's size and age bounds cover runs too. The run's frame times
+        # sit beside its first frame: losing that frame loses the run.
+        metadata_path = cache_dir / f'{cache_key}-00.json'
+
+        def frame_path(number: int) -> Path:
+            return cache_dir / f'{cache_key}-{number:02d}.jpg'
+
+        def cached() -> tuple[Path, float] | None:
+            try:
+                times = [float(value) for value in json.loads(metadata_path.read_text(encoding='utf-8'))['times']]
+            except (json.JSONDecodeError, KeyError, OSError, TypeError, ValueError):
+                return None
+            if not times:
+                return None
+            number = frame_index_at(times, target)
+            path = frame_path(number)
+            if not self._recording_preview_ready(path, touch=True):
+                return None
+            # A run in use stays fresh as a whole, so the cache's oldest-first
+            # eviction takes runs together rather than a run's unused frames
+            # (which would cost the next step a decode).
+            for other in range(len(times)):
+                if other != number:
+                    self._recording_preview_ready(frame_path(other), touch=True)
+            if abs(times[number] - target) > FRAME_TIME_TOLERANCE_SECONDS:
+                # The decoder did not produce this frame (a damaged or
+                # truncated stream): never stand another frame in for it.
+                raise HTTPException(status_code=500, detail='recording frame could not be decoded')
+            return path, start_epoch + times[number]
+
+        found = cached()
+        if found is not None:
+            return found
+        with self.recording_preview_locks_guard:
+            lock = self.recording_preview_locks.setdefault(cache_key, threading.Lock())
+        with lock:
+            found = cached()
+            if found is not None:
+                return found
+            # Decided before a build slot is taken: the first VAAPI probe is slow.
+            size, plans = self._frame_run_plans(source_path, output_width)
+            if not self.recording_frame_run_build_limiter.acquire(timeout=3.0):
+                raise HTTPException(status_code=429, detail='recording frame generator is busy', headers={'Retry-After': '1'})
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                session = None
+                media_sessions = getattr(selected_manager, 'media_sessions', None)
+                if media_sessions is not None:
+                    try:
+                        # Like a strip: a short decode ending in a few
+                        # JPEGs, never one of the two transcode slots event
+                        # clips, exports and HomeKit share.
+                        session = media_sessions.acquire(
+                            MediaSessionRequest(
+                                MediaSessionKind.RECORDING_PREVIEW,
+                                resources={MediaResourceClass.PREVIEW_PROCESS: 1},
+                                owner_generation=getattr(
+                                    selected_manager,
+                                    'media_session_generation',
+                                    None,
+                                ),
+                            ),
+                            timeout=3.0,
+                        )
+                    except MediaSessionAdmissionError as exc:
+                        raise HTTPException(
+                            status_code=429,
+                            detail=str(exc),
+                            headers={'Retry-After': '1'},
+                        ) from exc
+                # Nothing between taking the session and entering it.
+                with session if session is not None else contextlib.nullcontext():
+                    decoded = self._decode_frame_run(
+                        selected_config.ffmpeg_path, source_path, frames, run_start, run_stop, output_width,
+                        size=size, plans=plans,
+                    )
+                times = []
+                written = 0
+                for number, (pts, image) in enumerate(decoded):
+                    temporary = cache_dir / f'.{cache_key}-{number:02d}.{os.getpid()}.{threading.get_ident()}.tmp.jpg'
+                    try:
+                        temporary.write_bytes(image)
+                        os.replace(temporary, frame_path(number))
+                    finally:
+                        temporary.unlink(missing_ok=True)
+                    # FFmpeg prints a frame's time rounded; the frame list
+                    # has it exactly. The decoded time names the frame.
+                    nearest = frames.times[frame_index_at(frames.times, pts)]
+                    times.append(nearest if abs(nearest - pts) <= FRAME_TIME_TOLERANCE_SECONDS else round(pts, 6))
+                    written += len(image)
+                # The times last: a run without them is never served.
+                metadata_path.write_text(json.dumps({'times': times}, separators=(',', ':')), encoding='utf-8')
+                if len(times) != run_stop - run_start:
+                    self._warn_short_frame_run(source_path, len(times), run_stop - run_start)
+            finally:
+                self.recording_frame_run_build_limiter.release()
+            # Runs are large (up to 30 frames): held-down stepping can write
+            # tens of megabytes a minute, more than the ten-minute
+            # maintenance pace allows for. Enough new bytes force a pass.
+            with self.recording_frame_list_lock:
+                self.recording_frame_bytes_since_maintenance += written
+                force = self.recording_frame_bytes_since_maintenance >= RECORDING_FRAME_MAINTENANCE_BYTES
+                if force:
+                    self.recording_frame_bytes_since_maintenance = 0
+            if force:
+                self.recording_preview_last_maintenance = float('-inf')
+            self._maintain_recording_preview_cache(frame_path(0))
+            found = cached()
+            if found is None:
+                raise HTTPException(status_code=500, detail='recording frame failed')
+            return found
+
+    def _frame_run_plans(self, source_path: Path, width: int) -> tuple[tuple[int, int] | None, tuple[DecodePlan, ...]]:
+        """The output size of a run's frames, and the decoder attempts for it.
+
+        As for preview strips: the GPU decodes and scales where hardware
+        acceleration is not ``off`` and VAAPI works, with the CPU after it;
+        after a GPU failure (for a strip or a run) the CPU does the work for
+        a while. A frame of unknown size stays on the CPU: the GPU scaler
+        would be told a size with nothing to check it against.
+        """
+        size = scaled_size(mp4_video_dimensions(source_path), width)
+        cpu = DecodePlan('cpu')
+        if (
+            size is None
+            or self._hardware_acceleration_mode() == 'off'
+            or time.monotonic() < self.recording_strip_hardware_retry_at
+        ):
+            return size, (cpu,)
+        vaapi = self._ffmpeg_vaapi_info()
+        if not vaapi.get('available'):
+            return size, (cpu,)
+        device = str(vaapi.get('device') or '/dev/dri/renderD128')
+        return size, (
+            DecodePlan(
+                'vaapi',
+                ('-vaapi_device', device, '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi'),
+                f'scale_vaapi=w={size[0]}:h={size[1]}:format=nv12,hwdownload,format=nv12',
+            ),
+            cpu,
+        )
+
+    def _decode_frame_run(
+        self,
+        ffmpeg_path: str,
+        source_path: Path,
+        frames: SegmentFrames,
+        run_start: int,
+        run_stop: int,
+        width: int,
+        *,
+        size: tuple[int, int] | None,
+        plans: tuple[DecodePlan, ...],
+    ) -> list[tuple[float, bytes]]:
+        """Decode frames ``[run_start, run_stop)`` once: (source pts, JPEG) each.
+
+        The shared run decoder does the work, with the attempts from
+        ``_frame_run_plans``; a GPU that fails for other than the file is
+        left alone for a while, as for strips.
+        """
+        try:
+            run = decode_frame_run(
+                ffmpeg_path, source_path, frames, run_start, run_stop, width,
+                size=size, plans=plans, consumer='frame_step',
+                hardware_timeout=RECORDING_STRIP_HARDWARE_TIMEOUT_SECONDS,
+                cpu_timeout=RECORDING_FRAME_RUN_TIMEOUT_SECONDS,
+            )
+        except FrameRunError as exc:
+            if exc.hardware_failed:
+                self.recording_strip_hardware_retry_at = time.monotonic() + RECORDING_STRIP_HARDWARE_RETRY_SECONDS
+            if exc.failure == FAILURE_TIMEOUT:
+                raise HTTPException(status_code=504, detail='recording frame timed out') from exc
+            raise HTTPException(status_code=500, detail='recording frame failed') from exc
+        if run.hardware_failed:
+            # A broken or hung GPU must not cost every run its timeout.
+            self.recording_strip_hardware_retry_at = time.monotonic() + RECORDING_STRIP_HARDWARE_RETRY_SECONDS
+        decoded: list[tuple[float, bytes]] = []
+        for pts, image in run.frames:
+            ok, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, RECORDING_FRAME_JPEG_QUALITY])
+            if not ok:
+                raise HTTPException(status_code=500, detail='recording frame failed')
+            decoded.append((pts, encoded.tobytes()))
+        if not decoded:
+            # Frames without their times cannot be placed; nothing is cached.
+            LOGGER.warning('recording frame run for %s reported no frame times', source_path.name)
+            raise HTTPException(status_code=500, detail='recording frame failed')
+        return decoded
+
+    def _warn_short_frame_run(self, source_path: Path, decoded: int, expected: int) -> None:
+        """A run with frames missing, at most once a minute (stepping repeats)."""
+        now = time.monotonic()
+        with self.recording_frame_list_lock:
+            if now - self.recording_frame_short_warned_at < 60.0:
+                self.recording_frame_short_suppressed += 1
+                return
+            suppressed = self.recording_frame_short_suppressed
+            self.recording_frame_short_warned_at = now
+            self.recording_frame_short_suppressed = 0
+        LOGGER.warning(
+            'recording frame run for %s decoded %d of %d frames%s',
+            source_path.name, decoded, expected,
+            f' (suppressed={suppressed})' if suppressed else '',
+        )
 
     @staticmethod
     def _recording_preview_timestamp(path: Path) -> tuple[float | None, str]:

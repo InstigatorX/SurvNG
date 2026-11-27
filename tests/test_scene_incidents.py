@@ -182,29 +182,6 @@ class SceneIncidentTest(unittest.TestCase):
         self.assertEqual(card["camera_id"], detail["camera_id"])
         self.assertEqual(card["camera_id"], "gate")
 
-    def test_existing_scene_object_schema_adds_facet_index_after_column(self):
-        with self.store._connect() as connection:
-            connection.execute("drop index if exists scene_object_facet_label")
-            connection.execute("pragma foreign_keys=off")
-            connection.execute(
-                "create table scene_objects_legacy("
-                "id text primary key,episode_id text not null references scene_episodes(id),"
-                "label_override text,association_locked integer not null default 0)"
-            )
-            connection.execute(
-                "insert into scene_objects_legacy select id,episode_id,label_override,association_locked "
-                "from scene_objects"
-            )
-            connection.execute("drop table scene_objects")
-            connection.execute("alter table scene_objects_legacy rename to scene_objects")
-
-        restored = EventStore(self.root)
-        with restored._connect() as connection:
-            columns = {row[1] for row in connection.execute("pragma table_info(scene_objects)")}
-            indexes = {row[1] for row in connection.execute("pragma index_list(scene_objects)")}
-        self.assertIn("facet_label", columns)
-        self.assertIn("scene_object_facet_label", indexes)
-
     def test_bounded_facets_include_whole_overlapping_incident(self):
         first = self.add(objects=[person(zones=["front"])])
         self.add(20, objects=[person(70, label="dog", zones=["side"])])

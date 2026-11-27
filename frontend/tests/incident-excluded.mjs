@@ -47,7 +47,7 @@ try {
     return route.fulfill({ json: {} });
   });
   await page.goto(`http://127.0.0.1:${server.address().port}/survng/incidents`);
-  const detections = page.locator(".incident-summary-objects .inspector-detection");
+  const detections = page.locator(".incident-inspector .incident-observed-objects li");
   const excludedBox = page.locator(".object-box").filter({ hasText: "car" }).first();
   await detections.filter({ hasText: "car" }).waitFor();
   assert.equal(await page.getByText("outside incident zone", { exact: true }).count(), 0);

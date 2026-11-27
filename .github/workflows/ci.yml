@@ -57,6 +57,7 @@ jobs:
             tests/test_app_lifespan.py \
             tests/test_frontend_routes.py \
             tests/test_recorder.py \
+            tests/test_growing_playlist.py \
             tests/test_calibration.py \
             tests/test_live_delivery.py \
             tests/test_stream_info.py \
@@ -114,6 +115,9 @@ jobs:
         run: |
           scripts/run-tests.sh \
             tests/test_scene_incidents.py \
+            tests/test_scene_visible_intervals.py \
+            tests/test_incident_reviews.py \
+            tests/test_incident_titles.py \
             tests/test_scene_history_extent.py \
             tests/test_evidence_gallery.py \
             tests/test_face_reference_retention.py \
@@ -125,6 +129,7 @@ jobs:
             tests/test_ema*.py \
             tests/test_adaptive_motion.py \
             tests/test_capture_protocols.py \
+            tests/test_onvif_stop_bounds.py \
             tests/test_onvif_inspector.py \
             tests/test_onvif_addressing.py \
             tests/test_recorded_object_detection.py \
@@ -140,11 +145,12 @@ jobs:
       - name: Run tracking evaluation regression tests
         run: |
           scripts/run-tests.sh \
-            tests/test_tracking_evaluation.py \
             tests/test_tracking_candidate.py \
             tests/test_recorded_video_frames.py \
             tests/test_recorded_decoder.py \
             tests/test_recording_fragmented.py \
+            tests/test_recording_frame_steps.py \
+            tests/test_recording_frame_runs.py \
             tests/test_open_segment_refinement.py \
             tests/test_object_tracking_lifecycle.py \
             tests/test_tracking_frames.py \
@@ -154,3 +160,44 @@ jobs:
       - name: Post-job cleanup
         if: always()
         run: scripts/github-runner-cleanup.sh --publish
+
+  frontend-browser:
+    # Browser tests of the frontend against mocked APIs, generated media and
+    # the synthetic preview server. Tests that need a running SurvNG
+    # (`// browser-test: live-survng`) are skipped by --offline.
+    runs-on: ubuntu-24.04
+    # The Ubuntu mirror can serve these runners at under 100 kB/s, which made
+    # an uncached FFmpeg install take 12 minutes.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # FFmpeg's packages are kept between runs, so only packages that changed
+      # since the last run are downloaded.
+      - name: Restore FFmpeg package cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-ffmpeg-ubuntu-24.04-${{ github.run_id }}
+          restore-keys: apt-ffmpeg-ubuntu-24.04-
+      - name: Install FFmpeg
+        run: |
+          mkdir -p ~/apt-archives/partial
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-archives" ffmpeg
+          sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
+      - name: Install frontend dependencies
+        run: npm --prefix frontend ci
+      # The runner image already has Chromium's system libraries; --with-deps
+      # only added fonts and Mesa updates, over the same slow mirror.
+      - name: Install Playwright Chromium
+        working-directory: frontend
+        run: npx playwright install chromium
+      - name: Build frontend static assets
+        run: npm --prefix frontend run build
+      - name: Run frontend browser tests
+        run: node frontend/tests/run-tests.mjs browser --offline

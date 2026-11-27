@@ -10,7 +10,6 @@ import numpy as np
 
 from survng.app.config import ObjectTrackingConfig
 from survng.app.object_track.assignment import maximum_weight_assignment
-from survng.app.object_track.candidate import HybridCandidateObjectTracker
 from survng.app.object_track.hybrid import HybridObjectTracker
 from survng.app.object_track.registry import build_builtin_object_tracker_registry
 from tests import test_object_tracking as existing_contract
@@ -78,9 +77,6 @@ class HybridProductionRegressionTest(unittest.TestCase):
             0.7,
         )
         self.assertIsInstance(tracker, HybridObjectTracker)
-
-    def test_candidate_name_remains_compatible(self) -> None:
-        self.assertTrue(issubclass(HybridCandidateObjectTracker, HybridObjectTracker))
 
     def test_box_shrink_does_not_collapse_prediction_or_fragment_identity(self) -> None:
         for gap in (1 / 0.75, 2.0):

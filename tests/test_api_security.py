@@ -28,7 +28,6 @@ from survng.app.config_routes import (
     _restore_camera_secrets as restore_camera_secrets,
     restore_config_secrets,
 )
-from survng.app.face_routes import _public_face_observation
 from survng.app.incident_presenter import _event_row
 from survng.app.recording_routes import _public_recording_row
 from survng.app.security import (
@@ -59,7 +58,7 @@ def camera(camera_id: str = "gate", name: str = "Gate") -> CameraConfig:
 
 class ApiSecretBoundaryTest(unittest.TestCase):
     def test_health_response_is_minimal_and_does_not_probe_runtime(self) -> None:
-        self.assertEqual(main.health(), {"status": "ok"})
+        self.assertEqual(main._frontend_route_bundle.handlers["health"](), {"status": "ok"})
 
     def test_config_payload_masks_and_round_trips_every_secret(self) -> None:
         current = AppConfig(
@@ -174,12 +173,10 @@ class ApiSecretBoundaryTest(unittest.TestCase):
             }
         )
         recording = _public_recording_row({"path": "/srv/private/clip.mp4", "name": "clip.mp4"})
-        face = _public_face_observation({"snapshot_path": "/srv/private/face.jpg", "id": 3})
 
         self.assertEqual(event["snapshot_path"], "available")
         self.assertEqual(event["recording_path"], "available")
         self.assertNotIn("path", recording)
-        self.assertNotIn("snapshot_path", face)
 
     def test_recording_paths_must_resolve_inside_recording_storage(self) -> None:
         with tempfile.TemporaryDirectory() as storage, tempfile.TemporaryDirectory() as outside:

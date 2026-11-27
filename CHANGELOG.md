@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased
+
+- New incident page: a plain-language title, a storyline with one lane per
+  camera episode and a bar per object's visible interval, object cards that
+  focus the player and follow an object across cameras, per-object
+  corrections, and a review mode with Reviewed / Keep for later / Nothing here
+  verdicts (keys E, F, X; J and K move without deciding). Scene objects now
+  carry `visible_intervals`; verdicts are stored per incident and served by
+  `GET /api/incidents/review-queue` and `GET`/`PUT /api/incidents/{id}/review`.
+  A verdict is feedback only and never changes evidence. See
+  `docs/guide/incidents.md`.
+- Optional AI incident titles (Admin → AI Provider, off by default) word the
+  incident page title with the configured provider from scene facts only, and
+  fall back to the built-in title when off or on failure. See
+  `docs/guide/assistant.md`.
+- Database cleanup runs daily at `database_retention.run_at` (host local time,
+  default `03:00`) instead of 10 minutes after every restart. A restart only
+  starts a catch-up run when the last completed run began more than
+  `interval_hours` ago. See `docs/guide/admin.md`.
+- Only data written by `v1.2.0` or later is supported. Startup no longer
+  upgrades older databases, `secrets.json` must be the encrypted format, and
+  completed exports are always served as MP4. Startup drops retired tables that
+  no current build reads (`scene_changes`, `tracking_comparisons`, `scene_migrations`,
+  `scene_acquisition_migrations`, `scene_discovery_baselines`) and unused
+  indexes. See `docs/current-only.md`.
+- Removed endpoints with no caller and no documentation: the
+  `/api/faces/` diagnostics, benchmark (`/production`, `/camera-pairs`,
+  `/by-identity`), `gallery-optimization`, `camera-suitability`,
+  `unknown-cluster-health`, `representation-health`, `gallery-candidates` and
+  `maintenance/dedupe` routes, and
+  `/api/cameras/{id}/recordings/mobile-window.mp4`.
+- Removed config fields `detector.depth.motion_evidence_enabled` and
+  `cameras[].video_backend`; files that still contain them load unchanged.
+  See `docs/dead-code-cleanup-2026-11.md`.
+- Timeline: step the paused player one frame back or forward (buttons beside
+  the ±10 s skips, or `,` and `.`), with exact server-decoded frames and their
+  time to the millisecond. New endpoints `recordings/frames.json` and
+  `recordings/frame.jpg`; see `docs/recording-frame-api.md`.
+
 ## SurvNG v1.2
 
 Released as `v1.2.0`.

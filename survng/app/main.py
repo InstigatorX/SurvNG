@@ -48,14 +48,6 @@ from .detection_routes import (
     DetectionRouteDependencies,
     create_detection_router,
 )
-from .face_detection_routes import (
-    FaceDetectionRouteDependencies,
-    create_face_detection_router,
-)
-from .face_routes import (
-    FaceRouteDependencies,
-    create_face_router,
-)
 from .frontend_routes import FrontendRouteDependencies, create_frontend_router
 from .help_docs import HelpRouteDependencies, create_help_router
 from .onvif_inspector_routes import create_onvif_inspector_router
@@ -64,7 +56,11 @@ from .media_sessions import MediaSessionManager
 from .homekit_routes import HomeKitRouteDependencies, create_homekit_router
 from .manager_access import ManagerAccessCoordinator
 from .config_changes import ConfigChangeActorMiddleware, ConfigChangeLog
-from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
+from .manager_reload import (
+    ManagerGenerationLifecycle,
+    ManagerReloadHooks,
+    ManagerReloadRestartPending,
+)
 from . import process_exit
 from .local_observability import LocalObservabilityServer, build_runtime_status
 from .perf_samples import SlowSiteTable, TimedLock
@@ -106,6 +102,7 @@ from .motion_pipeline import build_builtin_motion_registry
 from .system_routes import SystemRouteDependencies, create_system_router
 from .tls_routes import TlsRouteDependencies, create_tls_router
 from .speech_routes import SpeechRouteDependencies, create_speech_router
+from .face_capture.routes import FaceCaptureRouteDependencies, create_face_capture_router
 from .training_routes import TrainingRouteDependencies, create_training_router
 from .proxy import apply_trusted_proxy_headers, request_is_secure, scope_header
 from .security import (
@@ -428,9 +425,19 @@ class SecurityBoundaryMiddleware:
             and APPLICATION_STOPPING.is_set()
             and str(scope.get("method") or "GET").upper() not in {"GET", "HEAD", "OPTIONS"}
             and api_path.startswith("/api/")
+            # Stopping without restarting (no supervisor): the restart is
+            # how the operator gets out of it.
+            and not (
+                RESTART_REQUIRED.is_set()
+                and api_path in {"/api/system/restart", "/api/auth/login", "/api/auth/logout"}
+            )
         ):
             response = JSONResponse(
-                {"detail": "SurvNG is shutting down; configuration changes are temporarily unavailable"},
+                {
+                    "detail": _settings_frozen_detail()
+                    if RESTART_REQUIRED.is_set()
+                    else "SurvNG is shutting down; configuration changes are temporarily unavailable"
+                },
                 status_code=503,
                 headers={"Cache-Control": "no-store", "Retry-After": "10"},
             )
@@ -734,14 +741,21 @@ def _request_server_restart() -> dict[str, object]:
     """Queue a supervisor-owned restart after the HTTP response can be sent."""
     global SERVER_RESTART_SCHEDULED
     with SERVER_RESTART_LOCK:
-        if SERVER_RESTART_SCHEDULED or APPLICATION_STOPPING.is_set():
+        # A saved change waiting for a manual restart leaves the process
+        # stopping without restarting; that restart is exactly what is asked.
+        if SERVER_RESTART_SCHEDULED or (
+            APPLICATION_STOPPING.is_set() and not RESTART_REQUIRED.is_set()
+        ):
             raise RuntimeError("SurvNG is already restarting or shutting down")
-        active_tasks = _active_storage_tasks(get_manager())
+        # A required restart cannot wait for storage work: the operator could
+        # not cancel it while settings are frozen.
+        active_tasks = [] if RESTART_REQUIRED.is_set() else _active_storage_tasks(get_manager())
         if active_tasks:
             raise RuntimeError(
                 "SurvNG cannot restart while storage work is active: "
                 f"{', '.join(active_tasks)}. Wait for it to finish or cancel it from Maintenance."
             )
+        already_stopping = APPLICATION_STOPPING.is_set()
         SERVER_RESTART_SCHEDULED = True
         APPLICATION_STOPPING.set()
 
@@ -765,7 +779,10 @@ def _request_server_restart() -> dict[str, object]:
             )
             with SERVER_RESTART_LOCK:
                 SERVER_RESTART_SCHEDULED = False
-                APPLICATION_STOPPING.clear()
+                # A process that was already stopping (a change waiting for
+                # this restart) must stay frozen; only undo our own stop.
+                if not already_stopping:
+                    APPLICATION_STOPPING.clear()
 
     threading.Thread(
         target=restart_from_supervisor,
@@ -784,6 +801,7 @@ def reload_manager(
     *,
     assign_ids: bool = False,
     persist: bool = True,
+    keep_unapplied: bool = False,
 ) -> AppConfig:
     """Replace the active manager through the generation lifecycle owner."""
     effective = normalize_config(
@@ -841,11 +859,37 @@ def reload_manager(
             previous_manager,
             effective,
             persist=persist,
+            keep_unapplied=keep_unapplied,
         )
     return effective
 
 
 CONFIG_CHANGE_LOG = ConfigChangeLog()
+
+
+# Set when a saved change needs a manual restart (no supervisor restarted us).
+RESTART_REQUIRED = threading.Event()
+
+
+def _settings_frozen_detail() -> str:
+    if RESTART_REQUIRED.is_set():
+        return "SurvNG needs a restart before settings can change again"
+    return "SurvNG is restarting or shutting down; configuration changes are temporarily unavailable"
+
+
+def save_settings_change(
+    next_config: AppConfig,
+    path: str | Path | None = None,
+    assign_ids: bool = True,
+) -> None:
+    """Save from a settings route; refused while a restart is pending.
+
+    The running configuration is stale then: saving it with one more change
+    would overwrite the change saved for the restart.
+    """
+    if APPLICATION_STOPPING.is_set():
+        raise HTTPException(status_code=503, detail=_settings_frozen_detail())
+    save_config_with_history(next_config, path, assign_ids)
 
 
 def save_config_with_history(
@@ -867,8 +911,15 @@ def apply_config_update(
     *,
     assign_ids: bool = False,
     persist: bool = True,
+    allow_restart_pending: bool = False,
 ) -> tuple[AppConfig, dict[str, object]]:
-    """Apply configuration through the dedicated transaction owner."""
+    """Apply configuration through the dedicated transaction owner.
+
+    ``allow_restart_pending``: the caller can report a change that is saved
+    but applies only when SurvNG restarts (the old manager generation would
+    not stop). Other callers keep the all-or-nothing contract: the change is
+    not saved and the failure is raised.
+    """
     global config
     application = TargetedConfigApplication(
         lock=MANAGER_RELOAD_LOCK,
@@ -882,12 +933,43 @@ def apply_config_update(
     # lock allowed a concurrent update to leave global and manager config on
     # different commits.
     with MANAGER_RELOAD_LOCK:
+        if APPLICATION_STOPPING.is_set():
+            # Shutting down, or restarting to apply a saved change. Applying
+            # another change to the old in-memory configuration now would
+            # overwrite that saved change on disk.
+            raise HTTPException(status_code=503, detail=_settings_frozen_detail())
         current = config
         previous_ffmpeg_path = current.ffmpeg_path
         if manager_owned_config(current) != manager_owned_config(effective):
             if effective.ffmpeg_path != previous_ffmpeg_path:
                 _recording_media_runtime.clear_hardware_probe_caches()
-            applied = reload_manager(effective, assign_ids=False, persist=persist)
+            try:
+                applied = reload_manager(
+                    effective,
+                    assign_ids=False,
+                    persist=persist,
+                    keep_unapplied=allow_restart_pending,
+                )
+            except ManagerReloadRestartPending as pending:
+                if not pending.restarting:
+                    # The process stays stopping until someone restarts it.
+                    RESTART_REQUIRED.set()
+                if not pending.persisted:
+                    raise
+                # Saved, but this process cannot finish the cutover. With a
+                # supervisor it restarts with the saved configuration; without
+                # one, someone has to restart SurvNG.
+                return effective, {
+                    "apply_mode": (
+                        "restart_pending" if pending.restarting else "restart_required"
+                    ),
+                    "persisted": True,
+                    "applied": False,
+                    "camera_workers_restarted": pending.restarting,
+                    "subsystems_restarted": ["process"] if pending.restarting else [],
+                    "instance_id": PROCESS_INSTANCE_ID,
+                    "message": str(pending),
+                }
             prepare_bootstrap_token(applied)
             return applied, {
                 "apply_mode": "manager_reload",
@@ -908,9 +990,20 @@ def apply_config_update(
 
 
 def _record_process_lifecycle(kind: str) -> None:
-    """Record restart evidence without making telemetry a lifecycle dependency."""
+    """Record restart evidence without making telemetry a lifecycle dependency.
+
+    Building the manager is not telemetry: a startup that cannot build it
+    (invalid configuration, an unreadable database) reports that error itself. Later
+    events only use a manager that exists, so shutdown never stops here.
+    """
+    if kind == "startup_started":
+        active = get_manager()
+    else:
+        active = globals().get("manager")
+        if active is None:
+            return
     try:
-        get_manager().telemetry.record_lifecycle_event(PROCESS_INSTANCE_ID, kind)
+        active.telemetry.record_lifecycle_event(PROCESS_INSTANCE_ID, kind)
     except Exception:
         logging.getLogger(__name__).exception(
             "could not persist process lifecycle event %s",
@@ -921,6 +1014,7 @@ def _record_process_lifecycle(kind: str) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     APPLICATION_STOPPING.clear()
+    RESTART_REQUIRED.clear()
     loop = asyncio.get_running_loop()
     early_onvif_thread: threading.Thread | None = None
     early_onvif_lock = threading.Lock()
@@ -1096,7 +1190,7 @@ app.include_router(
             publish_config=_publish_config_runtime,
             apply_config=apply_config_update,
             reload_manager=reload_manager,
-            save_config=save_config_with_history,
+            save_config=save_settings_change,
             validate_config=validate_manager_configuration,
             lock=MANAGER_RELOAD_LOCK,
             probe_limiter=CONFIG_PROBE_LIMITER,
@@ -1268,27 +1362,7 @@ app.include_router(
 )
 app.include_router(create_onvif_inspector_router())
 app.include_router(create_speech_router(SpeechRouteDependencies(get_manager=get_manager)))
-health = _frontend_route_bundle.handlers["health"]
-favicon = _frontend_route_bundle.handlers["favicon"]
-apple_touch_icon = _frontend_route_bundle.handlers["apple_touch_icon"]
-progressive_web_manifest = _frontend_route_bundle.handlers["progressive_web_manifest"]
-progressive_web_service_worker = _frontend_route_bundle.handlers["progressive_web_service_worker"]
-index = _frontend_route_bundle.handlers["index"]
-recordings_page = _frontend_route_bundle.handlers["recordings_page"]
-recording_search_page = _frontend_route_bundle.handlers["recording_search_page"]
-recording_exports_page = _frontend_route_bundle.handlers["recording_exports_page"]
-timeline_page = _frontend_route_bundle.handlers["timeline_page"]
-timeline_exports_page = _frontend_route_bundle.handlers["timeline_exports_page"]
-exports_page = _frontend_route_bundle.handlers["exports_page"]
-search_page = _frontend_route_bundle.handlers["search_page"]
-config_page = _frontend_route_bundle.handlers["config_page"]
-admin_page = _frontend_route_bundle.handlers["admin_page"]
-incidents_page = _frontend_route_bundle.handlers["incidents_page"]
-faces_page = _frontend_route_bundle.handlers["faces_page"]
-people_page = _frontend_route_bundle.handlers["people_page"]
-property_page = _frontend_route_bundle.handlers["property_page"]
-live_page = _frontend_route_bundle.handlers["live_page"]
-onvif_page = _frontend_route_bundle.handlers["onvif_page"]
+app.include_router(create_face_capture_router(FaceCaptureRouteDependencies(get_manager=get_manager)))
 
 _semantic_route_bundle = create_semantic_router(
     SemanticRouteDependencies(
@@ -1305,12 +1379,6 @@ _semantic_route_bundle = create_semantic_router(
     )
 )
 app.include_router(_semantic_route_bundle.router)
-semantic_search_status = _semantic_route_bundle.handlers["semantic_search_status"]
-semantic_search = _semantic_route_bundle.handlers["semantic_search"]
-semantic_visual_search = _semantic_route_bundle.handlers["semantic_visual_search"]
-semantic_visual_frame_search = _semantic_route_bundle.handlers[
-    "semantic_visual_frame_search"
-]
 
 _system_route_bundle = create_system_router(
     SystemRouteDependencies(
@@ -1333,17 +1401,6 @@ _system_route_bundle = create_system_router(
     )
 )
 app.include_router(_system_route_bundle.router)
-cameras = _system_route_bundle.handlers["cameras"]
-application_event_stream = _system_route_bundle.handlers["application_event_stream"]
-get_motion_pipeline_catalog = _system_route_bundle.handlers[
-    "get_motion_pipeline_catalog"
-]
-accelerator = _system_route_bundle.handlers["accelerator"]
-detector_status = _system_route_bundle.handlers["detector_status"]
-object_tracking_catalog = _system_route_bundle.handlers["object_tracking_catalog"]
-detector_models = _system_route_bundle.handlers["detector_models"]
-event_clip_settings = _system_route_bundle.handlers["event_clip_settings"]
-recording_cache_status = _system_route_bundle.handlers["recording_cache_status"]
 
 
 # Assemble incident/event queries after all assistant consumers are defined.
@@ -1356,13 +1413,6 @@ _incident_query_bundle = create_incident_query_router(
     INCIDENT_QUERIES,
 )
 app.include_router(_incident_query_bundle.router)
-
-events = _incident_query_bundle.handlers["events"]
-incidents = _incident_query_bundle.handlers["incidents"]
-incident_feed = _incident_query_bundle.handlers["incident_feed"]
-incident_detail = _incident_query_bundle.handlers["incident_detail"]
-incident_search = _incident_query_bundle.handlers["incident_search"]
-incident_for_event = _incident_query_bundle.handlers["incident_for_event"]
 
 
 _intelligence_route_bundle = create_intelligence_router(
@@ -1406,27 +1456,6 @@ _camera_api_route_bundle = create_camera_api_router(
 )
 app.include_router(_camera_api_route_bundle.router)
 
-snapshot = _camera_api_route_bundle.handlers["snapshot"]
-zone_snapshot = _camera_api_route_bundle.handlers["zone_snapshot"]
-live_info = _camera_api_route_bundle.handlers["live_info"]
-stream_source = _camera_api_route_bundle.handlers["stream_source"]
-stream = _camera_api_route_bundle.handlers["stream"]
-relay_go2rtc_websocket = _camera_api_route_bundle.handlers[
-    "relay_go2rtc_websocket"
-]
-webrtc_signaling = _camera_api_route_bundle.handlers["webrtc_signaling"]
-mse_stream = _camera_api_route_bundle.handlers["mse_stream"]
-start_camera = _camera_api_route_bundle.handlers["start_camera"]
-stop_camera = _camera_api_route_bundle.handlers["stop_camera"]
-motion_test = _camera_api_route_bundle.handlers["motion_test"]
-motion_debug_status = _camera_api_route_bundle.handlers["motion_debug_status"]
-set_motion_debug = _camera_api_route_bundle.handlers["set_motion_debug"]
-motion_debug_image = _camera_api_route_bundle.handlers["motion_debug_image"]
-start_recording = _camera_api_route_bundle.handlers["start_recording"]
-stop_recording = _camera_api_route_bundle.handlers["stop_recording"]
-set_camera_recording = _camera_api_route_bundle.handlers["set_camera_recording"]
-set_camera_detection = _camera_api_route_bundle.handlers["set_camera_detection"]
-
 
 _detection_route_bundle = create_detection_router(
     DetectionRouteDependencies(
@@ -1437,9 +1466,6 @@ _detection_route_bundle = create_detection_router(
     )
 )
 app.include_router(_detection_route_bundle.router)
-
-detect_event_snapshot = _detection_route_bundle.handlers["detect_event_snapshot"]
-detect_debug_frame = _detection_route_bundle.handlers["detect_debug_frame"]
 
 
 _appearance_route_bundle = create_appearance_router(
@@ -1453,13 +1479,6 @@ _appearance_route_bundle = create_appearance_router(
     )
 )
 app.include_router(_appearance_route_bundle.router)
-
-event_snapshot = _appearance_route_bundle.handlers["event_snapshot"]
-event_thumbnail = _appearance_route_bundle.handlers["event_thumbnail"]
-event_appearance_matches = _appearance_route_bundle.handlers["event_appearance_matches"]
-event_related_incidents = _appearance_route_bundle.handlers["event_related_incidents"]
-appearance_index_status = _appearance_route_bundle.handlers["appearance_index_status"]
-queue_appearance_backfill = _appearance_route_bundle.handlers["queue_appearance_backfill"]
 
 
 app.include_router(
@@ -1480,38 +1499,9 @@ app.include_router(
 )
 
 
-_face_route_bundle = create_face_router(
-    FaceRouteDependencies(
-        get_manager=get_manager,
-        manager_lock=MANAGER_RELOAD_LOCK,
-        start_observation_sync=_start_face_observation_sync,
-        manager_access=MANAGER_ACCESS,
-    )
-)
-app.include_router(_face_route_bundle.router)
-app.include_router(
-    create_face_detection_router(
-        FaceDetectionRouteDependencies(
-            get_manager=get_manager,
-            get_config=lambda: config,
-        )
-    )
-)
-
-face_status = _face_route_bundle.handlers["face_status"]
-face_people = _face_route_bundle.handlers["face_people"]
-create_face_person = _face_route_bundle.handlers["create_face_person"]
-delete_face_person = _face_route_bundle.handlers["delete_face_person"]
-face_observations = _face_route_bundle.handlers["face_observations"]
-face_observation_count = _face_route_bundle.handlers["face_observation_count"]
-face_observation = _face_route_bundle.handlers["face_observation"]
-assign_face_observation = _face_route_bundle.handlers["assign_face_observation"]
-face_crop = _face_route_bundle.handlers["face_crop"]
-
-
 # Assemble the recording HTTP boundary after its legacy media helpers exist.
-# The explicit aliases preserve the direct-call surface used by internal tools
-# and tests while route ownership lives in recording_routes.
+# Route ownership lives in recording_routes; tests call its handlers through
+# _recording_route_bundle.handlers.
 _recording_route_bundle = create_recording_router(
     RecordingRouteDependencies(
         get_manager=get_manager,
@@ -1537,6 +1527,27 @@ _recording_route_bundle = create_recording_router(
         ),
         recording_preview_timestamp=(
             _recording_media_runtime._recording_preview_timestamp
+        ),
+        recording_preview_strip=lambda active_manager, *args, **kwargs: (
+            _recording_media_runtime._recording_preview_strip(
+                *args,
+                active_manager=active_manager,
+                **kwargs,
+            )
+        ),
+        recording_segment_frames=lambda active_manager, *args, **kwargs: (
+            _recording_media_runtime._recording_segment_frames(
+                *args,
+                active_manager=active_manager,
+                **kwargs,
+            )
+        ),
+        recording_step_frame=lambda active_manager, *args, **kwargs: (
+            _recording_media_runtime._recording_step_frame(
+                *args,
+                active_manager=active_manager,
+                **kwargs,
+            )
         ),
         recording_segment_path=lambda active_manager, *args, **kwargs: (
             _recording_media_runtime._recording_segment_path(
@@ -1574,38 +1585,3 @@ _recording_route_bundle = create_recording_router(
     )
 )
 app.include_router(_recording_route_bundle.router)
-
-recordings = _recording_route_bundle.handlers["recordings"]
-recording_events = _recording_route_bundle.handlers["recording_events"]
-recording_day = _recording_route_bundle.handlers["recording_day"]
-recording_grid_day = _recording_route_bundle.handlers["recording_grid_day"]
-recording_grid_updates = _recording_route_bundle.handlers["recording_grid_updates"]
-_public_media_export = _recording_route_bundle.handlers["_public_media_export"]
-create_media_export = _recording_route_bundle.handlers["create_media_export"]
-list_media_exports = _recording_route_bundle.handlers["list_media_exports"]
-media_export_summary = _recording_route_bundle.handlers["media_export_summary"]
-batch_media_exports = _recording_route_bundle.handlers["batch_media_exports"]
-_public_media_export_batch = _recording_route_bundle.handlers[
-    "_public_media_export_batch"
-]
-get_media_export = _recording_route_bundle.handlers["get_media_export"]
-download_media_export = _recording_route_bundle.handlers["download_media_export"]
-play_media_export = _recording_route_bundle.handlers["play_media_export"]
-protect_media_export = _recording_route_bundle.handlers["protect_media_export"]
-update_media_export_metadata = _recording_route_bundle.handlers[
-    "update_media_export_metadata"
-]
-delete_media_export = _recording_route_bundle.handlers["delete_media_export"]
-recording_segment = _recording_route_bundle.handlers["recording_segment"]
-recording_window = _recording_route_bundle.handlers["recording_window"]
-recording_preview = _recording_route_bundle.handlers["recording_preview"]
-recording_updates = _recording_route_bundle.handlers["recording_updates"]
-recording_day_hls_playlist = _recording_route_bundle.handlers[
-    "recording_day_hls_playlist"
-]
-recording_day_hls_init = _recording_route_bundle.handlers["recording_day_hls_init"]
-recording_day_hls_segment = _recording_route_bundle.handlers[
-    "recording_day_hls_segment"
-]
-event_clip = _recording_route_bundle.handlers["event_clip"]
-event_stream = _recording_route_bundle.handlers["event_stream"]

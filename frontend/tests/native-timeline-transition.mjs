@@ -14,6 +14,7 @@ for (const autoplay of [true, false]) {
   const calls = [];
   const warmWindow = { start: 110, end: 1010, rows: [{ start_epoch: 110, end_epoch: 120 }] };
   const context = vm.createContext({
+    frameStepSeekRef: { current: false }, frameStep: { leave() {} },
     Number, performance, recordingSegmentAt, snapToRecording: (value) => value,
     activeCameraId: "gate", isAllCameras: false, useSegmentPlayback: true,
     timelineView: { startEpoch: 0, endEpoch: 1010 },
@@ -29,7 +30,7 @@ for (const autoplay of [true, false]) {
     setNativeSegment: (value) => calls.push(["segment", value]),
     requestPlaybackWindow: () => { throw new Error("Warm window must not be fetched again"); },
   });
-  vm.runInContext(functionSource("playAt", "panTimelineViewport"), context);
+  vm.runInContext(functionSource("playAt", "selectPlaybackCamera"), context);
   context.playAt(110.01, autoplay);
   assert.equal(calls.find(([name]) => name === "detail")[1].rows, warmWindow.rows);
   assert.equal(calls.find(([name]) => name === "segment")[1].start_epoch, 110);
@@ -42,6 +43,7 @@ for (const autoplay of [true, false]) {
 // The Pause button must cancel that intent rather than issue another play().
 const paused = [];
 const toggle = vm.createContext({
+  frameStep: { resume: () => null },
   videoRef: { current: { paused: true, pause: () => paused.push("pause") } },
   useSegmentPlayback: true, heroSeeking: true, autoplayRef: { current: true },
   setHeroPlaying: (value) => paused.push(value), requestRecordingPlay: () => paused.push("play"),

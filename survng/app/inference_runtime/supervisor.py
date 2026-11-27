@@ -21,6 +21,7 @@ from .types import (
     MAX_INFERENCE_FRAME_BYTES,
     PERSON_REID_REQUEST_TIMEOUT_SECONDS,
     InferenceRollbackIncomplete,
+    InferenceShed,
     InferenceUnavailable,
     InferenceWorkload,
 )
@@ -80,7 +81,7 @@ class InferenceSupervisor:
             config,
             "face",
             self._base_face_status(),
-            start_enabled=bool(config.face_recognition_enabled),
+            start_enabled=config.face_worker_enabled(),
         )
         self._reid = _InferenceWorker(
             config,
@@ -478,7 +479,7 @@ class InferenceSupervisor:
                     return (
                         self._face,
                         self._base_face_status(),
-                        bool(self.config.face_recognition_enabled),
+                        self.config.face_worker_enabled(),
                     )
                 if role == "depth":
                     return (
@@ -722,7 +723,6 @@ class InferenceSupervisor:
             "max_distance_m": depth.max_distance_m,
             "max_incident_distance_m": depth.max_incident_distance_m,
             "store_heatmap": depth.store_heatmap,
-            "motion_evidence_enabled": depth.motion_evidence_enabled,
         }
 
     def start(self) -> bool:
@@ -824,17 +824,6 @@ class InferenceSupervisor:
         confidence_threshold: float | None = None,
     ) -> list[dict[str, Any]]:
         return self.detect(frame, confidence_threshold)
-
-    def detect_offline(
-        self,
-        frame: np.ndarray,
-        confidence_threshold: float | None = None,
-    ) -> list[dict[str, Any]]:
-        return self._detect_for_workload(
-            frame,
-            confidence_threshold,
-            InferenceWorkload.OFFLINE,
-        )
 
     def detect_tracking(
         self,
@@ -968,6 +957,36 @@ class InferenceSupervisor:
         try:
             result = self._face.request("embed", frame=face, workload=workload)
             return np.asarray(result, dtype=np.float32)
+        finally:
+            self._leave_device_workload(workload)
+
+    def face_capture_unavailable(self) -> str:
+        """Why face capture cannot run, from the face worker's last status; "" when it may.
+
+        Reads cached status only (no IPC). A worker that has not reported a
+        capture engine yet is given the request, which starts it.
+        """
+        if not self.config.face_capture_enabled:
+            return "Face capture is disabled."
+        capture = self._face.cached_status().get("capture")
+        if isinstance(capture, dict) and capture.get("ready") is False:
+            return f"Face capture models are unavailable: {capture.get('error') or 'not loaded'}"
+        return ""
+
+    def capture_faces(self, crop: np.ndarray, *, embed: bool = True) -> list[dict[str, Any]]:
+        """Faces in an upper-body crop with landmarks, AdaFace norm and embedding.
+
+        ``embed=False`` only detects. Optional enrichment: shed for incident
+        inference (``InferenceUnavailable``).
+        """
+        reason = self.face_capture_unavailable()
+        if reason:
+            raise InferenceUnavailable(reason)
+        workload = InferenceWorkload.ENRICHMENT
+        if not self._enter_device_workload(workload, source="face_capture"):
+            raise InferenceShed("face capture shed for incident inference")
+        try:
+            return list(self._face.request("capture_faces", frame=crop, embed=embed, workload=workload) or [])
         finally:
             self._leave_device_workload(workload)
 

@@ -27,19 +27,16 @@ const video = () => document.querySelector(".recording-hero-media video");
 function snapshot() {
   const element = video();
   if (element && !ids.has(element)) ids.set(element, nextId++);
-  const track = document.querySelector(".recordings-v2-track");
-  const slider = track?.querySelector('input[type="range"]');
+  const scroller = document.querySelector(".event-rail-scroller");
+  const span = document.querySelector('.event-rail [aria-label="Rail zoom"] button[aria-pressed="true"]');
   return {
     url: location.href, videoId: element ? ids.get(element) : null,
     src: element?.currentSrc || element?.src || "", currentTime: element?.currentTime,
     duration: element?.duration, paused: element?.paused, seeking: element?.seeking,
     readyState: element?.readyState, error: element?.error?.code || null,
     context, playhead: context?.recording_epoch,
-    rangeOffset: Number(slider?.value), rangeSeconds: Number(slider?.max),
-    // A half-hour pan can retain the same hourly label at a new position.
-    ticks: [...document.querySelectorAll(".recordings-v2-ticks > span")].map(node => ({
-      label: node.textContent, left: node.style.left,
-    })),
+    // The Event Rail: its zoom, and the scroller that scrubs time under the playhead line.
+    railSpan: span?.textContent || "", railHeight: scroller?.clientHeight || 0, railScrollTop: scroller?.scrollTop ?? null,
     notices: [...document.querySelectorAll(".recordings-v2-notice,.recordings-v2-message")].map(node => node.textContent),
     events: events.slice(-15),
   };

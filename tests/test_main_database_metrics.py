@@ -9,7 +9,6 @@ import pytest
 
 from survng.app import main_database
 from survng.app.event_store import EventStore
-from survng.app.face_detection_dataset import FaceDetectionDataset
 from survng.app.main_database import (
     ClosingDatabaseConnection,
     closing_connection_factory,
@@ -149,15 +148,12 @@ def test_domain_factories_are_labelled_and_bounded(tmp_path: Path) -> None:
             self.index_path = path
 
     events = EventStore(tmp_path)
-    dataset = FaceDetectionDataset.__new__(FaceDetectionDataset)
-    dataset.database_path = tmp_path / "face-dataset.sqlite3"
     expected = {
         "main": events._connect,
         "jobs": events._connect_jobs,
         "telemetry": TelemetryStore(tmp_path)._connect,
         "recording_index": _Index(tmp_path / "recording-index.sqlite3")._index_connection,
         "exports": MediaExportStore(tmp_path)._connect,
-        "face_dataset": dataset._connect,
     }
     for domain, factory in expected.items():
         connection = factory()

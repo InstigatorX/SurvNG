@@ -80,6 +80,7 @@ export function useIncidentDetails() {
   const [incidentDetails, setIncidentDetails] = useState({});
   const incidentSelectionRequestRef = useRef(0);
   const [selectedEvent, setSelectedEvent] = useState(null);
+  const [incidentPreviewLoading, setIncidentPreviewLoading] = useState(false);
 
   async function loadIncidentDetail(incident) {
     const query = incidentDetailQuery(incident);
@@ -97,13 +98,22 @@ export function useIncidentDetails() {
 
   async function openIncidentOverlay(incident) {
     const request = ++incidentSelectionRequestRef.current;
+    setIncidentPreviewLoading(Boolean(incidentDetailQuery(incident)));
     setSelectedEvent(incident);
     const detail = await loadIncidentDetail(incident);
-    if (request === incidentSelectionRequestRef.current) setSelectedEvent(detail);
+    if (request === incidentSelectionRequestRef.current) {
+      setSelectedEvent(detail);
+      setIncidentPreviewLoading(false);
+    }
+  }
+
+  function invalidateIncidentSelection() {
+    incidentSelectionRequestRef.current += 1;
+    setIncidentPreviewLoading(false);
   }
 
   function closeIncidentOverlay() {
-    incidentSelectionRequestRef.current += 1;
+    invalidateIncidentSelection();
     setSelectedEvent(null);
   }
 
@@ -114,6 +124,8 @@ export function useIncidentDetails() {
     incidentSelectionRequestRef,
     selectedEvent,
     setSelectedEvent,
+    incidentPreviewLoading,
+    invalidateIncidentSelection,
     openIncidentOverlay,
     closeIncidentOverlay,
   };

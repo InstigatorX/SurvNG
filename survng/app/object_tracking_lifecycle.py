@@ -76,15 +76,6 @@ class ObjectTrackingLifecycle:
     def current(self) -> ObjectTrackingSession:
         return self._session
 
-    def bind_for_compatibility(self, session: ObjectTrackingSession) -> None:
-        """Support legacy integrations that replace an inactive session directly."""
-        with self.lifecycle_lock:
-            if self._session is not session and self._session.running():
-                raise RuntimeError(
-                    f"cannot replace active object tracking session for {self.camera.id}"
-                )
-            self._session = session
-
     def create(
         self,
         factory: ObjectTrackingSessionFactory,

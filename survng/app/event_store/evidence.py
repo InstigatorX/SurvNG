@@ -65,9 +65,6 @@ class EventStoreEvidenceMixin:
                 );
                 create index if not exists idx_event_evidence_attempts on event_evidence_attempts(event_id,id);
             """)
-            outbox_columns = {row["name"] for row in conn.execute("pragma table_info(event_evidence_outbox)")}
-            if "publication_done" not in outbox_columns:
-                conn.execute("alter table event_evidence_outbox add column publication_done integer not null default 0")
 
     @staticmethod
     def _check_evidence_revision(row: sqlite3.Row, expected_revision: int | None) -> None:
@@ -105,7 +102,7 @@ class EventStoreEvidenceMixin:
         conn.execute("update events set evidence_revision=1 where id=?", (event_id,))
         row = conn.execute("select * from events where id=?", (event_id,)).fetchone()
         objects = _objects(row["objects_json"])
-        self._scene_ingest(conn, row)
+        self._scene_ingest(conn, row, objects=objects, zone_alert_objects=objects)
         # Initial callbacks are best effort too. The projection obligation is
         # durable even if the process stops immediately after event admission.
         self._evidence_outbox(conn, row, "evidence_updated", reason="incident_admitted")
@@ -137,7 +134,7 @@ class EventStoreEvidenceMixin:
         self._evidence_outbox(conn, row, "cover_required", policy_version=1, deadline_epoch=now + 300)
 
     def _finish_evidence_commit(self, conn, event_id, before, *, reason, cover_satisfied=False,
-                                notify=True, activity=True):
+                                notify=True, activity=True, zone_alert_objects=None):
         """Finish a writer's transaction; bytes/annotations/revision advance together."""
         row = conn.execute("select * from events where id=?", (event_id,)).fetchone()
         if row is None:
@@ -162,7 +159,7 @@ class EventStoreEvidenceMixin:
                                    notify=notify, activity=activity)
         else:
             self._scene_ingest(conn, row, force_revision=changed, objects=after_objects,
-                               notify=notify, activity=activity)
+                               notify=notify, activity=activity, zone_alert_objects=zone_alert_objects)
         if changed:
             conn.execute("update events set evidence_revision=evidence_revision+1 where id=?", (event_id,))
             row = conn.execute("select * from events where id=?", (event_id,)).fetchone()

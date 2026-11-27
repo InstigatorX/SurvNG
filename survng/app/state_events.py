@@ -43,13 +43,17 @@ class StateEventBroker:
         return sequence if sequence >= 0 else None
 
     def subscribe(self) -> queue.Queue[StateEvent | None]:
+        return self.subscribe_with_cursor()[0]
+
+    def subscribe_with_cursor(self) -> tuple[queue.Queue[StateEvent | None], str]:
+        """Subscribe and capture the cursor before any events can enter the queue."""
         subscriber: queue.Queue[StateEvent | None] = queue.Queue(maxsize=self._subscriber_queue_size)
         with self._lock:
             if self._closed:
                 subscriber.put_nowait(None)
             else:
                 self._subscribers.add(subscriber)
-        return subscriber
+            return subscriber, f"{self.instance_id}:{self._next_id - 1}"
 
     def unsubscribe(self, subscriber: queue.Queue[StateEvent | None]) -> None:
         with self._lock:

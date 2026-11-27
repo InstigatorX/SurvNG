@@ -126,30 +126,6 @@ class RecordingIndexMixin:
                 )
                 """
             )
-            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(recordings)")}
-            if "playable" not in columns:
-                connection.execute("ALTER TABLE recordings ADD COLUMN playable INTEGER NOT NULL DEFAULT 1")
-            if "health_error" not in columns:
-                connection.execute("ALTER TABLE recordings ADD COLUMN health_error TEXT NOT NULL DEFAULT ''")
-            if "validated" not in columns:
-                connection.execute("ALTER TABLE recordings ADD COLUMN validated INTEGER NOT NULL DEFAULT 0")
-            if "stream_fingerprint" not in columns:
-                connection.execute("ALTER TABLE recordings ADD COLUMN stream_fingerprint TEXT NOT NULL DEFAULT ''")
-            if "fingerprint_checked" not in columns:
-                connection.execute("ALTER TABLE recordings ADD COLUMN fingerprint_checked INTEGER NOT NULL DEFAULT 0")
-                connection.execute(
-                    """
-                    UPDATE recordings
-                    SET fingerprint_checked = 1
-                    WHERE stream_fingerprint != ''
-                    """
-                )
-            if "playback_duration_seconds" not in columns:
-                connection.execute("ALTER TABLE recordings ADD COLUMN playback_duration_seconds REAL")
-            if "location_id" not in columns:
-                connection.execute(
-                    "ALTER TABLE recordings ADD COLUMN location_id TEXT NOT NULL DEFAULT 'default'"
-                )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS recordings_fingerprint_pending
@@ -486,13 +462,20 @@ class RecordingIndexMixin:
         with self._playback_lease_lock:
             self._playback_active_leases.pop(str(token), None)
 
-    def discard_missing_recording_rows(self, rows: list[dict]) -> list[dict]:
+    def discard_missing_recording_rows(
+        self,
+        rows: list[dict],
+        *,
+        keep_unknown: bool = False,
+    ) -> list[dict]:
         """Filter playback manifests without dropping index rows on flaky storage.
 
         Confirmed-missing files on a healthy root are removed from the index.
         Unknown stats and missing paths under an unavailable recording root are
         withheld from the manifest but left indexed so historical segments
-        reappear when the volume returns.
+        reappear when the volume returns. With ``keep_unknown`` they are
+        returned instead, marked ``_storage_unavailable``, for a caller that
+        must tell an unreadable row from one that has left the index.
         """
         existing: list[dict] = []
         stale_paths: list[str] = []
@@ -503,6 +486,8 @@ class RecordingIndexMixin:
                 existing.append(row)
             elif verdict == "confirmed_absent":
                 stale_paths.append(path)
+            elif keep_unknown:
+                existing.append({**row, "_storage_unavailable": "storage verdict unknown"})
         self._delete_index_paths(stale_paths)
         return existing
 
@@ -633,7 +618,7 @@ class RecordingIndexMixin:
 
     def _log_index_exception(self, key: str, message: str, *args: object) -> None:
         now = time.monotonic()
-        last = getattr(self, "_index_error_log_at", {}).get(key, 0.0)
+        last = getattr(self, "_index_error_log_at", {}).get(key, -math.inf)
         if now - last < 60.0:
             LOGGER.debug(message, *args, exc_info=True)
             return

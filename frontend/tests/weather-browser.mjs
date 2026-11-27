@@ -1,4 +1,5 @@
 // Uses the isolated synthetic server: node tools/camera-workspace-preview.mjs.
+// browser-test: preview-server
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
 

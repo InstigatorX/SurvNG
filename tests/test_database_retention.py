@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -238,22 +238,110 @@ def test_motion_effectiveness_range_follows_audit_retention(dry_run: bool, expec
 def test_reschedule_wakes_the_loop_to_run_after_the_startup_delay(store: EventStore) -> None:
     import threading
 
-    config = DatabaseRetentionConfig(dry_run=True, interval_hours=24.0)
+    holder = {"config": DatabaseRetentionConfig(dry_run=True, interval_hours=24.0)}
     retention = DatabaseRetention(
-        store, lambda: config, pause_seconds=0, startup_delay_seconds=0.2,
+        store, lambda: holder["config"], pause_seconds=0, startup_delay_seconds=0.2,
     )
     ran = threading.Event()
     retention.run_once = lambda **_: ran.set()  # type: ignore[method-assign]
     retention.start()
     try:
-        assert ran.wait(5.0)  # startup run
+        assert ran.wait(5.0)  # no completed run on record: catch up
         ran.clear()
-        assert not ran.wait(0.5)  # next run is a day away
+        assert not ran.wait(0.5)  # next run is the daily run_at
+        later = (datetime.now() + timedelta(hours=12)).strftime("%H:%M")
+        holder["config"] = holder["config"].model_copy(update={"run_at": later})
+        retention.reschedule()
+        assert not ran.wait(0.5)  # only run_at changed: no run at a busy time
+        holder["config"] = holder["config"].model_copy(update={"dry_run": False})
         retention.reschedule()
         assert ran.wait(5.0)  # policy change: runs after the short delay
     finally:
         retention.stop()
     assert retention._thread is None
+
+
+def _run_at(store: EventStore, epoch: float) -> dict:
+    """A completed dry run that started at ``epoch``."""
+    return DatabaseRetention(
+        store, lambda: DatabaseRetentionConfig(dry_run=True), clock=lambda: epoch, pause_seconds=0,
+    ).run_once()
+
+
+def _first_due(store: EventStore, now: float, **config) -> float:
+    retention = DatabaseRetention(
+        store, lambda: DatabaseRetentionConfig(**config), clock=lambda: now,
+        startup_delay_seconds=600.0, tz=timezone.utc,
+    )
+    return retention._first_due()
+
+
+def test_restart_after_a_recent_run_waits_for_run_at(store: EventStore) -> None:
+    now = datetime(2026, 11, 24, 14, 32, tzinfo=timezone.utc).timestamp()
+    _run_at(store, now - 11 * HOUR)  # 03:32 today
+
+    due = _first_due(store, now, run_at="03:00")
+
+    assert due == datetime(2026, 11, 25, 3, 0, tzinfo=timezone.utc).timestamp()
+
+
+def test_restart_after_a_missed_run_catches_up_after_the_startup_delay(store: EventStore) -> None:
+    now = datetime(2026, 11, 24, 14, 32, tzinfo=timezone.utc).timestamp()
+    _run_at(store, now - 30 * HOUR)
+
+    assert _first_due(store, now, run_at="03:00") == now + 600.0
+    # No record at all (first start with this build) also catches up.
+    fresh = EventStore(store.storage_dir / "fresh")
+    assert _first_due(fresh, now, run_at="03:00") == now + 600.0
+
+
+def test_catch_up_never_delays_an_earlier_run_at(store: EventStore) -> None:
+    now = datetime(2026, 11, 24, 2, 55, tzinfo=timezone.utc).timestamp()
+
+    due = _first_due(store, now, run_at="03:00")
+
+    assert due == datetime(2026, 11, 24, 3, 0, tzinfo=timezone.utc).timestamp()
+
+
+def test_only_completed_runs_are_recorded(store: EventStore) -> None:
+    retention = _retention(store, dry_run=True)
+    retention._stop.set()  # every step raises _Stopped
+    assert retention.run_once().get("interrupted") is True
+    assert retention._last_completed_run() is None
+
+    _run_at(store, NOW)
+    assert retention._last_completed_run() == NOW
+
+
+def test_daily_run_time_follows_local_clock_changes() -> None:
+    from zoneinfo import ZoneInfo
+
+    from survng.app.database_retention import next_daily_run
+
+    zone = ZoneInfo("America/New_York")
+
+    def local(*parts: int) -> float:
+        return datetime(*parts, tzinfo=zone).timestamp()
+
+    # 03:00 exists on both change days, so it is exactly 03:00 local.
+    assert next_daily_run(local(2026, 3, 7, 12, 0), "03:00", zone) == local(2026, 3, 8, 3, 0)
+    assert next_daily_run(local(2026, 11, 1, 0, 0), "03:00", zone) == local(2026, 11, 1, 3, 0)
+    # 02:30 is skipped in spring and runs at 03:30 EDT instead.
+    spring = next_daily_run(local(2026, 3, 8, 0, 0), "02:30", zone)
+    assert datetime.fromtimestamp(spring, zone).strftime("%H:%M %Z") == "03:30 EDT"
+    # 01:30 repeats in autumn; after the first one the next run is the next day.
+    autumn = next_daily_run(local(2026, 11, 1, 0, 0), "01:30", zone)
+    assert datetime.fromtimestamp(autumn, zone).strftime("%H:%M %Z") == "01:30 EDT"
+    assert next_daily_run(autumn + 600, "01:30", zone) == local(2026, 11, 2, 1, 30)
+
+
+@pytest.mark.parametrize("value", ("3:00", "24:00", "03:60", "03:00:00", ""))
+def test_run_at_must_be_a_24_hour_time(value: str) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        DatabaseRetentionConfig(run_at=value)
+    assert DatabaseRetentionConfig().run_at == "03:00"
 
 
 @pytest.mark.parametrize("parent", (

@@ -346,6 +346,8 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
         "detection_enabled": bool(raw.get("detection_enabled")),
         "detection_cleanup_required": bool(lifecycle.get("detection_cleanup_required")),
         "onvif_connected": bool(raw.get("onvif_connected")),
+        "onvif_unreachable": bool(raw.get("onvif_unreachable")),
+        "onvif_abandoned_workers": int(_number(raw.get("onvif_abandoned_workers"))),
         "lifecycle_generation": _optional_number(lifecycle.get("generation")),
         "motion": _motion_snapshot(raw.get("motion_qualification"), tracking),
         "spatial_alignment": {
@@ -866,6 +868,12 @@ _RETENTION_FILE_FAILURE_REASONS = (
 )
 
 
+def _retention_run_at(value: object) -> str | None:
+    """The configured ``HH:MM`` run time, or None for anything else."""
+    text = str(value or "")
+    return text if re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", text) else None
+
+
 def _database_retention_snapshot(service: Any) -> dict[str, Any]:
     """Report pruning policy and the last run's per-table counts."""
     status_source = getattr(service, "status", None)
@@ -886,9 +894,12 @@ def _database_retention_snapshot(service: Any) -> dict[str, Any]:
         "running": bool(raw.get("running")),
         "runs": int(_number(raw.get("runs"))),
         "next_run_at": str(raw.get("next_run_at") or "")[:40],
-        "policy": _numeric_fields(policy, (
-            "empty_discovery_hours", "activity_days", "motion_audit_days", "interval_hours",
-        )),
+        "policy": {
+            **_numeric_fields(policy, (
+                "empty_discovery_hours", "activity_days", "motion_audit_days", "interval_hours",
+            )),
+            "run_at": _retention_run_at(policy.get("run_at")),
+        },
         "last_run": None,
     }
     if raw.get("last_error"):

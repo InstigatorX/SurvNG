@@ -314,10 +314,8 @@ class MotionRecordingProvider(Protocol):
 
 
 LiveFrameProvider = Callable[[], Frame | None]
-TimestampedLiveFrameProvider = Callable[[], TimestampedLiveFrame | tuple[Frame, float] | None]
-TimestampedEvidenceFrameProvider = Callable[
-    [dict[str, Any]], TimestampedLiveFrame | tuple[Frame, float] | None
-]
+TimestampedLiveFrameProvider = Callable[[], TimestampedLiveFrame | None]
+TimestampedEvidenceFrameProvider = Callable[[dict[str, Any]], TimestampedLiveFrame | None]
 StopRequested = Callable[[], bool]
 
 
@@ -581,6 +579,8 @@ class RecordedMotionObjectDetector:
         self.decode_budget = decode_budget
         self._scene_frames: deque[TimestampedLiveFrame] = deque(maxlen=4)
         self._scene_frames_lock = threading.Lock()
+        self._unexpected_frame_types: set[str] = set()
+        self._unexpected_frame_types_lock = threading.Lock()
         # Bytes of the last frame decoded for this camera (width x height x 3).
         self._last_frame_bytes = 0
 
@@ -764,7 +764,8 @@ class RecordedMotionObjectDetector:
         retained = sample is not None
         if sample is None:
             sample = self.timestamped_live_frame_provider() if self.timestamped_live_frame_provider else None
-        if not isinstance(sample, TimestampedLiveFrame):
+        sample = self._timestamped_sample(sample)
+        if sample is None:
             return None
         captured = float(sample.captured_at_epoch)
         age = time.time() - captured
@@ -856,6 +857,7 @@ class RecordedMotionObjectDetector:
             sample = None
         else:
             sample = provider() if provider is not None else None
+        sample = self._timestamped_sample(sample)
         if sample is None:
             return self._result(
                 None,
@@ -865,31 +867,20 @@ class RecordedMotionObjectDetector:
                 workflow_started,
                 refinement_pending=True,
             )
-        if isinstance(sample, TimestampedLiveFrame):
-            frame = sample.frame
-            captured_at = float(sample.captured_at_epoch)
-            sequence = int(sample.sequence)
-            generation = int(sample.camera_generation)
-            capture_generation = int(sample.capture_generation)
-            source = str(sample.source or "live")
-            geometry_trusted = bool(sample.geometry_trusted)
-            provenance_valid = bool(
-                source == "live"
-                and sequence > 0
-                and generation > 0
-                and capture_generation > 0
-                and math.isfinite(float(sample.captured_at_monotonic))
-            )
-        else:
-            # Compatibility for external factories/tests. It remains fresh but
-            # cannot claim capture-generation provenance.
-            frame, captured_at = sample
-            sequence = 0
-            generation = 0
-            capture_generation = 0
-            source = "live"
-            geometry_trusted = True
-            provenance_valid = True
+        frame = sample.frame
+        captured_at = float(sample.captured_at_epoch)
+        sequence = int(sample.sequence)
+        generation = int(sample.camera_generation)
+        capture_generation = int(sample.capture_generation)
+        source = str(sample.source or "live")
+        geometry_trusted = bool(sample.geometry_trusted)
+        provenance_valid = bool(
+            source == "live"
+            and sequence > 0
+            and generation > 0
+            and capture_generation > 0
+            and math.isfinite(float(sample.captured_at_monotonic))
+        )
         if not math.isfinite(float(captured_at)) or not provenance_valid:
             return self._result(
                 None,
@@ -1047,7 +1038,8 @@ class RecordedMotionObjectDetector:
         if budget is not None:
             maximum_frames = refinement_frame_count(stages)
             if (self.detector.config.face_recognition_enabled
-                    and self.detector.config.face_evidence_enabled):
+                    and self.detector.config.face_evidence_enabled
+                    and not getattr(self.detector.config, "face_capture_enabled", False)):
                 maximum_frames += self.detector.config.face_evidence_max_extra_frames
             # A job reading a segment that is not indexed yet has no rows; without
             # the camera's last decoded size it would reserve the 36 MiB
@@ -1688,11 +1680,28 @@ class RecordedMotionObjectDetector:
                                     [], [], event_epoch, self.camera.id, planned_offsets))
         return self._live_fallback_result(event_epoch, timing, workflow_started, refinement_pending)
 
+    def _timestamped_sample(self, sample: object) -> TimestampedLiveFrame | None:
+        """Accept only provenance-carrying frames; say once per type when not."""
+        if sample is None or isinstance(sample, TimestampedLiveFrame):
+            return sample
+        kind = type(sample).__name__
+        with self._unexpected_frame_types_lock:
+            first = kind not in self._unexpected_frame_types
+            self._unexpected_frame_types.add(kind)
+        if first:
+            LOGGER.warning(
+                "Frame provider for %s returned %s instead of TimestampedLiveFrame; "
+                "treating it as no frame",
+                self.camera.id,
+                kind,
+            )
+        return None
+
     def _live_fallback_result(
         self, event_epoch: float, timing: dict[str, float],
         workflow_started: float, refinement_pending: bool,
     ) -> RecordedDetectionResult:
-        fallback_sample = (
+        fallback_sample = self._timestamped_sample(
             self.timestamped_live_frame_provider()
             if self.timestamped_live_frame_provider is not None
             else None
@@ -1912,6 +1921,9 @@ class RecordedMotionObjectDetector:
         config = self.detector.config
         if not config.face_recognition_enabled or not config.face_evidence_enabled:
             return
+        # The deferred face capture job searches the whole person track instead.
+        if getattr(config, "face_capture_enabled", False):
+            return
         started = time.monotonic()
         deadline = min(
             deadline if deadline is not None else started,
@@ -2111,6 +2123,7 @@ class RecordedMotionObjectDetector:
                 objects,
                 detect_faces,
                 max_people=8,
+                timing=timing,
             )
             objects = self._merge_dedicated_faces(objects, dedicated_faces)
         for detected in objects:
@@ -2191,6 +2204,7 @@ class RecordedMotionObjectDetector:
                 1,
                 self.detector.config.face_enrich_max_people,
             ),
+            timing=timing,
         )
         merged = self._merge_dedicated_faces(objects, dedicated_faces)
         frame_height, frame_width = frame.shape[:2]
@@ -2291,8 +2305,17 @@ class RecordedMotionObjectDetector:
         detect_faces: Callable[[Frame], list[dict[str, Any]]],
         *,
         max_people: int,
+        timing: dict[str, float] | None = None,
     ) -> list[dict[str, Any]]:
         """Run the 300px face model where CCTV faces retain useful resolution."""
+
+        def count(stage: str, amount: int = 1) -> None:
+            # Funnel counters, stored with the event's detection phases and
+            # read by survng.app.face_funnel.
+            if timing is not None and amount:
+                key = f"face_search_{stage}"
+                timing[key] = timing.get(key, 0.0) + amount
+
         frame_height, frame_width = frame.shape[:2]
         detected_faces: list[dict[str, Any]] = []
         people = [
@@ -2302,21 +2325,27 @@ class RecordedMotionObjectDetector:
             and str(item.get("label") or "").strip().lower() == "person"
             and _box(item) is not None
         ]
+        count("people_over_cap", max(0, len(people) - max_people))
         for person in sorted(people, key=_confidence, reverse=True)[:max_people]:
             check_evidence_cancellation()
             box = _box(person)
             if box is None:
                 continue
+            count("people")
             window = upper_body_window(box, frame_width, frame_height)
             if window is None:
+                count("windows_too_small")
                 continue
             left, top, right, bottom = window
+            count("crops")
+            found = 0
             for detected in detect_faces(frame[top:bottom, left:right]):
                 if not isinstance(detected, dict):
                     continue
                 face_box = _box(detected)
                 if face_box is None:
                     continue
+                found += 1
                 fx1, fy1, fx2, fy2 = face_box
                 detected_faces.append(
                     {
@@ -2330,6 +2359,9 @@ class RecordedMotionObjectDetector:
                         "parent_person_box": person.get("box"),
                     }
                 )
+            count("faces", found)
+            if not found:
+                count("crops_empty")
         return detected_faces
 
     @staticmethod

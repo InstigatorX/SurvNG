@@ -341,7 +341,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
             })
 
 
-    def test_application_preflight_rejects_retired_camera_mog2_source(self) -> None:
+    def test_application_preflight_rejects_unsupported_fusion_source(self) -> None:
         config = AppConfig.model_validate({
             "cameras": [{
                 "id": "gate",
@@ -359,10 +359,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
             }],
         })
 
-        with self.assertRaisesRegex(
-            ValueError,
-            "camera 'gate'.*MOG2 stage/source.*EMA",
-        ):
+        with self.assertRaisesRegex(ValueError, r"camera .gate.*fusion sources \[.mog2.\] are unsupported"):
             validate_motion_pipeline_configuration(config)
 
     def test_application_preflight_closes_temporary_pipelines(self) -> None:

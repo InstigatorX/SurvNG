@@ -355,7 +355,7 @@ class ConfigReloadTest(unittest.TestCase):
             effective, result = main.apply_config_update(incoming)
 
         clear.assert_called_once_with()
-        reload.assert_called_once_with(incoming, assign_ids=False, persist=True)
+        reload.assert_called_once_with(incoming, assign_ids=False, persist=True, keep_unapplied=False)
         active.reconfigure_recorders.assert_not_called()
         self.assertTrue(result["camera_workers_restarted"])
 
@@ -572,6 +572,102 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertFalse(result["camera_workers_restarted"])
         self.assertIs(main.config, effective)
         self.assertIs(active.config, effective)
+
+    def test_speech_changes_replace_speech_alone_without_a_manager_reload(self) -> None:
+        active = Mock()
+        current = AppConfig.model_validate({
+            "speech": {"enabled": True},
+            "cameras": [{"id": "foyer", "name": "Foyer", "stream_url": "rtsp://example.invalid/foyer",
+                         "speech": {"enabled": True}}],
+        })
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.cameras[0].speech.enabled = False
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_speech.assert_called_once_with(effective)
+        active.reconfigure_motion.assert_not_called()
+        self.assertFalse(result["camera_workers_restarted"])
+        self.assertIn("speech", result["subsystems_restarted"])
+
+    def test_a_reload_this_process_cannot_finish_reports_the_change_saved(self) -> None:
+        from survng.app.manager_reload import ManagerReloadRestartPending
+
+        active = Mock()
+        current = AppConfig(base_path="/old")
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(update={"capture_rtsp_transport": "udp"})
+        pending = ManagerReloadRestartPending("stuck; restarting", persisted=True)
+
+        with patch("survng.app.main.reload_manager", side_effect=pending) as reload:
+            _effective, result = main.apply_config_update(incoming, allow_restart_pending=True)
+
+        self.assertTrue(reload.call_args.kwargs["keep_unapplied"])
+        self.assertEqual(result["apply_mode"], "restart_pending")
+        self.assertTrue(result["persisted"])
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["instance_id"], main.PROCESS_INSTANCE_ID)
+
+        # Without a supervisor the saved change waits for a manual restart.
+        manual = ManagerReloadRestartPending("stuck", persisted=True, restarting=False)
+        with patch("survng.app.main.reload_manager", side_effect=manual):
+            _effective, result = main.apply_config_update(incoming, allow_restart_pending=True)
+        self.assertEqual(result["apply_mode"], "restart_required")
+
+        self.assertTrue(main.RESTART_REQUIRED.is_set())
+        main.RESTART_REQUIRED.clear()
+
+        # Callers that cannot report it never ask for the change to be kept.
+        unsaved = ManagerReloadRestartPending("stuck; restarting", persisted=False)
+        with (
+            patch("survng.app.main.reload_manager", side_effect=unsaved) as reload,
+            self.assertRaises(ManagerReloadRestartPending),
+        ):
+            main.apply_config_update(incoming)
+        self.assertFalse(reload.call_args.kwargs["keep_unapplied"])
+        self.assertFalse(main.RESTART_REQUIRED.is_set())
+
+        # Unsaved and no supervisor: still frozen until a manual restart.
+        stranded = ManagerReloadRestartPending("stuck", persisted=False, restarting=False)
+        try:
+            with (
+                patch("survng.app.main.reload_manager", side_effect=stranded),
+                self.assertRaises(ManagerReloadRestartPending),
+            ):
+                main.apply_config_update(incoming)
+            self.assertTrue(main.RESTART_REQUIRED.is_set())
+        finally:
+            main.RESTART_REQUIRED.clear()
+
+    def test_no_change_is_applied_while_surviving_a_restart_to_apply_a_saved_one(self) -> None:
+        from fastapi import HTTPException
+
+        active = Mock()
+        current = AppConfig(base_path="/old")
+        active.config = current
+        main.config = current
+        main.manager = active
+        main.APPLICATION_STOPPING.set()
+        try:
+            with (
+                patch("survng.app.main.save_config") as save,
+                self.assertRaises(HTTPException) as raised,
+            ):
+                main.apply_config_update(current.model_copy(update={"base_path": "/new"}))
+        finally:
+            main.APPLICATION_STOPPING.clear()
+        self.assertEqual(raised.exception.status_code, 503)
+        save.assert_not_called()
 
     def test_image_storage_change_hot_applies_without_restarting_cameras(self) -> None:
         active = Mock()
@@ -847,7 +943,7 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             effective, result = main.apply_config_update(incoming)
 
-        reload.assert_called_once_with(incoming, assign_ids=False, persist=True)
+        reload.assert_called_once_with(incoming, assign_ids=False, persist=True, keep_unapplied=False)
         active.reconfigure_object_tracking.assert_not_called()
         self.assertIs(effective, incoming)
         self.assertEqual(result["apply_mode"], "manager_reload")
@@ -1181,7 +1277,7 @@ class ConfigReloadTest(unittest.TestCase):
         with patch("survng.app.main.reload_manager", return_value=effective) as reload:
             result_config, result = main.apply_config_update(replacement)
 
-        reload.assert_called_once_with(effective, assign_ids=False, persist=True)
+        reload.assert_called_once_with(effective, assign_ids=False, persist=True, keep_unapplied=False)
         self.assertIs(result_config, effective)
         self.assertEqual(result["apply_mode"], "manager_reload")
         self.assertTrue(result["camera_workers_restarted"])

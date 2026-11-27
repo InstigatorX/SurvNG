@@ -78,6 +78,7 @@ from .motion_pipeline import (
 )
 from .motion_pipeline.recorded_decode_budget import RecordedDecodeBudget
 from .database_retention import DatabaseRetention
+from .face_capture.service import FaceCaptureService
 from .evidence_projection import EvidenceProjection
 from .motion_analysis import FairMotionAnalysisLimiter
 from .recording_lifecycle import RecordingLifecycle
@@ -90,6 +91,13 @@ from .speech.attach import ATTACH_PAD_SECONDS
 
 
 LOGGER = logging.getLogger("uvicorn.error")
+# An event face capture finishes within this long of its time is live: its
+# names refresh the incident and its notification. Older ones (a backfill, a
+# seed of past incidents) only record scene identities.
+FACE_IDENTITY_LIVE_SECONDS = 30 * 60.0
+FACE_CAPTURE_IDENTITY_OFFSET = 1_000_000_000
+# A name sync that could not record anything waits this long to try again.
+IDENTITY_SYNC_RETRY_SECONDS = 60.0
 
 
 def _route_provenance_from_event(
@@ -188,37 +196,6 @@ def validate_media_storage_configuration(config: AppConfig) -> None:
 
 
 def validate_motion_pipeline_configuration(config: AppConfig) -> None:
-    def selected_sources(value: object) -> set[str]:
-        if isinstance(value, str):
-            values = (value,)
-        elif isinstance(value, (list, tuple)):
-            values = value
-        else:
-            return set()
-        return {
-            str(source).strip().lower()
-            for source in values
-            if str(source).strip()
-        }
-
-    def reject_retired_mog2(scope: str, motion_config: object) -> None:
-        pipeline = getattr(motion_config, "pipeline", None)
-        for graph_name in ("qualification", "observation", "fusion"):
-            stages = getattr(pipeline, graph_name, None) if pipeline is not None else None
-            for stage in stages or ():
-                implementation = str(stage.implementation).strip().lower()
-                sources = selected_sources(stage.options.get("sources"))
-                if implementation in {"opencv_mog2", "opencv_mog2_evidence"} or "mog2" in sources:
-                    raise ValueError(
-                        f"invalid motion pipeline for {scope}: MOG2 stage/source "
-                        f"in {graph_name} has been retired; use Enhanced Motion "
-                        "Analysis (EMA) validation"
-                    )
-
-    reject_retired_mog2("global configuration", config.motion_qualification)
-    for camera in config.cameras:
-        reject_retired_mog2(f"camera {camera.id!r}", camera.motion_qualification)
-
     registry = build_builtin_motion_registry()
     targets = [("global", CameraMotionQualificationConfig())] + [
         (camera.id, camera.motion_qualification)
@@ -308,6 +285,7 @@ class AppManager:
             database_dir=self.database_dir,
             media_storage=self.media_storage,
             database_write_lock=self.database_write_lock,
+            zone_alert_rules=self._zone_alert_rules,
         )
         self.ema_route_candidates = EmaRouteCandidateCache(
             self.database_dir / "ema-route-cache.sqlite3",
@@ -421,6 +399,15 @@ class AppManager:
             self.events, lambda: self.semantic_search, self.state_events,
             self._refresh_incident_notification,
         )
+        # Idle unless detector.face_capture_enabled; reads the config each pass.
+        self.face_capture = FaceCaptureService(
+            config=lambda: self.config,
+            events_db_path=self.events.db_path,
+            inference=lambda: self.detector,
+            recording_rows=lambda *args, **kwargs: self.recorder.recording_rows_between(*args, **kwargs),
+            on_identities=self._face_capture_identities,
+            on_sync_queued=self._start_identity_sync,
+        )
         self.database_retention = DatabaseRetention(
             self.events, lambda: self.config.database_retention,
         )
@@ -445,17 +432,15 @@ class AppManager:
         self.faces.set_identity_event_publisher(
             self._publish_identity_update
         )
+        # One worker records names changed on the People page (queued in the
+        # face capture store).
+        self._identity_sync_lock = threading.Lock()
+        self._identity_sync_running = False
+        # Serializes replacing speech against final shutdown stopping it.
+        self._speech_swap_lock = threading.Lock()
+        self._speech_closed = False
         # Construction is inert (no database, model, or process) until start.
-        self.speech = SpeechLifecycle(
-            config,
-            database_dir=self.database_dir,
-            camera_enabled=self._speech_camera_active,
-            audio_available=self._speech_audio_available,
-            publish=self.mqtt.publish,
-            episode_windows=lambda camera_id, start, end: self.events.scene_episode_windows_overlapping(camera_id, start, end),
-            recording_ranges=self._speech_recording_ranges,
-            request_incident_check=self._speech_incident_check,
-        )
+        self.speech = self._build_speech(config)
         self._process_started_monotonic = time.monotonic()
         self._process_started_at = datetime.now(timezone.utc).isoformat()
         self._lifecycle_lock = threading.RLock()
@@ -554,6 +539,10 @@ class AppManager:
         event.setdefault(
             "published_at", datetime.now(timezone.utc).isoformat()
         )
+        if self.names_from_face_capture():
+            # The previous recognizer's names are not what incidents show
+            # now; refreshing would overwrite face capture's names with its.
+            return
         self.state_events.publish("identity_update", event)
         self.mqtt.publish("events/identity", event)
         self._refresh_incident_notification(str(event.get("camera_id") or ""), int(event.get("event_id") or 0))
@@ -904,6 +893,9 @@ class AppManager:
                 self.evidence_projection.start()
                 if getattr(self, "database_retention", None) is not None:
                     self.database_retention.start()
+                if getattr(self, "face_capture", None) is not None:
+                    self.face_capture.start()
+                    self._resume_identity_sync()
                 self.camera_fleet.start_admission(
                     startup_tasks,
                     on_complete=self._camera_startup_completed,
@@ -939,6 +931,40 @@ class AppManager:
                     self._closed = True
                 self._started = False
                 raise
+
+    def _build_speech(self, config: AppConfig) -> SpeechLifecycle:
+        return SpeechLifecycle(
+            config,
+            database_dir=self.database_dir,
+            camera_enabled=self._speech_camera_active,
+            audio_available=self._speech_audio_available,
+            publish=self.mqtt.publish,
+            episode_windows=lambda camera_id, start, end: self.events.scene_episode_windows_overlapping(camera_id, start, end),
+            recording_ranges=self._speech_recording_ranges,
+            request_incident_check=self._speech_incident_check,
+        )
+
+    def reconfigure_speech(self, config: AppConfig) -> None:
+        """Replace speech listening alone; cameras and recorders keep running."""
+        with self._lifecycle_lock:
+            if self._stopping or self._closed:
+                raise RuntimeError("application manager is stopping")
+            running = self._started
+        with self._speech_swap_lock:
+            if self._speech_closed:
+                raise RuntimeError("application manager is stopping")
+            previous = getattr(self, "speech", None)
+            replacement = self._build_speech(config)
+            if previous is not None:
+                previous.stop()
+            self.speech = replacement
+            if running:
+                self._start_speech()
+        try:
+            # Home Assistant shows speech entities only for listening cameras.
+            self._mqtt_connected()
+        except Exception:
+            LOGGER.exception("MQTT discovery refresh failed after speech reconfiguration")
 
     def _start_speech(self) -> None:
         speech = getattr(self, "speech", None)
@@ -1136,7 +1162,16 @@ class AppManager:
         attempt("runtime monitor", self.runtime_monitor.stop)
         if getattr(self, "database_retention", None) is not None:
             attempt("database retention", self.database_retention.stop)
-        speech = getattr(self, "speech", None)
+        if getattr(self, "face_capture", None) is not None:
+            attempt("face capture", self.face_capture.stop)
+        speech_swap_lock = getattr(self, "_speech_swap_lock", None)
+        if speech_swap_lock is not None:
+            # Waits for a replacement in progress, then stops whichever runs.
+            with speech_swap_lock:
+                self._speech_closed = True
+                speech = getattr(self, "speech", None)
+        else:
+            speech = getattr(self, "speech", None)
         if speech is not None:
             LOGGER.info("SurvNG shutdown: stopping speech listeners")
             attempt("speech listeners", speech.stop)
@@ -1754,9 +1789,29 @@ class AppManager:
             return False
         return any(self._scene_alert_enabled(decision, payload) for decision in payload.get("alert_decisions", []))
 
+    def _zone_alert_rules(self, camera_id: str) -> dict[str, bool]:
+        config = self.config
+        camera = next((item for item in config.cameras if item.id == camera_id), None)
+        if camera is None:
+            return {}
+        enabled = config.integration_notifications.enabled and camera.incident_notifications_enabled
+        return {zone.name: enabled and zone.notifications_enabled for zone in camera.zones
+                if zone.enabled and zone.behavior == "incident"}
+
     def incident_notification_payload(self, payload: dict) -> dict:
         camera = next((camera for camera in self.config.cameras if camera.id == payload.get("camera_id")), None)
         result = {**payload, "notifications_enabled": self.incident_notification_allowed(payload)}
+        if payload.get("zone_alerts"):
+            zone_alerts = payload["zone_alerts"]
+            rules = {camera_id: self._zone_alert_rules(camera_id)
+                     for camera_id in {alert["camera_id"] for alert in zone_alerts}}
+            result["zone_alerts"] = [{
+                **alert,
+                "notifications_enabled": (
+                    payload.get("schema_version") == 3 and not payload.get("historical")
+                    and alert["notifications_enabled"] and rules[alert["camera_id"]].get(alert["zone"], False)
+                ),
+            } for alert in zone_alerts]
         if camera is not None or payload.get("camera_id"):
             result["camera_name"] = camera.name if camera else payload["camera_id"]
         base_url = self.config.integration_notifications.base_url
@@ -1806,48 +1861,240 @@ class AppManager:
             return camera.speech.notify == "always"
         return not self.config.integration_notifications.exclude_motion
 
+    def names_from_face_capture(self) -> bool:
+        """Names come from face capture unless only the previous recognizer is
+        on (capture off, recognition on). Its People page and the incident
+        person filter use the same people. The two number people separately,
+        so never both."""
+        face_capture = getattr(self, "face_capture", None)
+        if face_capture is None:
+            return False
+        detector = self.config.detector
+        return bool(detector.face_capture_enabled or not detector.face_recognition_enabled)
+
+    def identity_people(self) -> list[dict]:
+        """Named people (id, name) from the source that names incidents: the
+        incident person filter and the Assistant's catalog use these."""
+        if self.names_from_face_capture():
+            if not self.face_capture.has_store():
+                return []
+            people = self.face_capture.groups.people()
+        else:
+            people = self.faces.people()
+        return [{"id": int(person["id"]), "name": str(person.get("name") or "")}
+                for person in people if person.get("id") is not None]
+
+    def face_identity_observations(self, event_ids: list[int]) -> list[dict]:
+        """Named faces of these events, from the source names_from_face_capture picks."""
+        if self.names_from_face_capture():
+            if not self.face_capture.has_store():
+                return []  # never captured here: leave nothing on disk
+            return self.face_capture.groups.identity_observations(list(event_ids))
+        return list(self.faces.for_event_ids(list(event_ids)))
+
+    def _face_capture_identities(self, event_id: int, camera_id: str, epoch: float) -> None:
+        """Names face capture found in an event reach its incident.
+
+        A recent event refreshes its incident and notification as recognition
+        did, and announces on MQTT events/identity each name it gained
+        ('assigned') or lost ('cleared') since its last recording; an older
+        one (a backfill or a seed of past incidents) only records its scene
+        identities. A failure queues the event for the name sync to retry.
+        """
+        try:
+            faces = self._event_identity_faces(event_id)
+            live = time.time() - float(epoch) <= FACE_IDENTITY_LIVE_SECONDS
+            before = {int(item.get("person_id") or 0): item for item in self.events.scene_identities_of(event_id)}
+            self._record_scene_identities(event_id, faces)
+        except Exception:
+            LOGGER.exception("could not record the names of event %s; queued to retry", event_id)
+            self.face_capture.store.queue_identity_sync([event_id])
+            self._start_identity_sync()
+            return
+        if not live:
+            return
+        now = {int(face["person_id"]): face for face in faces}
+        published_at = datetime.now(timezone.utc).isoformat()
+        changes = [("assigned", face) for person_id, face in now.items() if person_id not in before]
+        changes += [("cleared", item) for person_id, item in before.items() if person_id and person_id not in now]
+        for action, face in changes:
+            payload = {
+                "type": "identity_update",
+                "action": action,
+                "active": action == "assigned",
+                "source": "face_capture",
+                "observation_id": int(face.get("observation_id") or 0),
+                "event_id": int(event_id),
+                "camera_id": camera_id,
+                "person_id": int(face.get("person_id") or 0),
+                "name": str(face.get("name") or ""),
+                "confidence": round(float(face.get("confidence") or 0.0), 4) if action == "assigned" else None,
+                "identity_status": str(face.get("status") or ""),
+                "review_status": str(face.get("review_status") or ""),
+                "published_at": published_at,
+            }
+            self.state_events.publish("identity_update", payload)
+            self.mqtt.publish("events/identity", payload)
+        if changes:
+            self._refresh_incident_notification(camera_id, int(event_id))
+
+    def sync_face_identities(self, event_ids: list[int]) -> None:
+        """Record changed names (a group named, merged, a face removed) as
+        these events' scene identities, in the background: a person's events
+        can be many. No notifications are sent again.
+
+        The events wait in the face capture store, so a reload or restart
+        finishes the work; one worker reads each event's names when it gets
+        to it, so quick successive edits end with the last one's names.
+        """
+        ids = {int(event_id) for event_id in event_ids}
+        if not ids:
+            return
+        self.face_capture.store.queue_identity_sync(ids)
+        self._start_identity_sync()
+
+    def _start_identity_sync(self) -> None:
+        if self._stopping or self._closed:
+            return
+        with self._identity_sync_lock:
+            if self._identity_sync_running:
+                return
+            self._identity_sync_running = True
+        threading.Thread(target=self._drain_identity_sync, name="face-identity-sync", daemon=True).start()
+
+    def _resume_identity_sync(self) -> None:
+        """Finish name syncs a previous generation or process left queued."""
+        face_capture = getattr(self, "face_capture", None)
+        if face_capture is None or not face_capture.has_store():
+            return
+        try:
+            pending = face_capture.store.identity_sync_pending()
+        except Exception:
+            LOGGER.exception("could not read queued face name syncs")
+            return
+        if pending:
+            self._start_identity_sync()
+
+    def _drain_identity_sync(self) -> None:
+        store = self.face_capture.store
+        stalled = False
+        try:
+            while not (self._stopping or self._closed):
+                batch = store.identity_sync_batch(50)
+                if not batch:
+                    return
+                synced: list[int] = []
+                failure: Exception | None = None
+                for event_id, version in batch:
+                    if self._stopping or self._closed:
+                        return  # the rows stay queued for the next start
+                    try:
+                        self._record_scene_identities(event_id, self._event_identity_faces(event_id))
+                    except Exception as error:
+                        failure = failure or error
+                        continue
+                    store.identity_sync_done(event_id, version)
+                    synced.append(event_id)
+                if synced:
+                    # Open views (Timeline) refresh their names: one notice per
+                    # batch, no MQTT, no notification.
+                    self.state_events.publish("identity_update", {
+                        "type": "identity_update", "action": "synced", "source": "face_capture",
+                        "event_ids": synced, "event_id": synced[0],
+                        "published_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                if failure is not None:
+                    # One line per batch. Nothing went through: the event store
+                    # is unavailable; stop until the next start or edit.
+                    LOGGER.error(
+                        "could not record the names of %d of %d events: %s",
+                        len(batch) - len(synced), len(batch), redact_secret_text(failure),
+                    )
+                    if not synced:
+                        stalled = True
+                        # Try again later by itself, not only at the next
+                        # start or People page edit.
+                        retry = threading.Timer(IDENTITY_SYNC_RETRY_SECONDS, self._start_identity_sync)
+                        retry.daemon = True
+                        retry.start()
+                        return
+        except Exception:
+            LOGGER.exception("face name sync stopped; it tries again in a minute")
+            stalled = True
+            retry = threading.Timer(IDENTITY_SYNC_RETRY_SECONDS, self._start_identity_sync)
+            retry.daemon = True
+            retry.start()
+        finally:
+            with self._identity_sync_lock:
+                self._identity_sync_running = False
+            # An edit that queued events after the last batch was read and
+            # before the flag cleared would otherwise wait for the next start.
+            try:
+                if not stalled and not (self._stopping or self._closed) and store.identity_sync_pending():
+                    self._start_identity_sync()
+            except Exception:
+                LOGGER.exception("could not check queued face name syncs; they resume at the next start")
+
+    def _record_scene_identities(self, event_id: int, faces: list[dict]) -> None:
+        """Scene identities join episodes by identity id: face capture's people
+        get ids of their own there, so they never equal ones the previous
+        recognizer recorded. Everywhere else they keep their person id."""
+        recorded = [
+            {**face, "identity_id": FACE_CAPTURE_IDENTITY_OFFSET + int(face["person_id"])}
+            if face.get("origin") == "face_capture" else face
+            for face in faces
+        ]
+        self.events.update_scene_identities(
+            event_id, recorded, routes=self.config.detector.tracking.camera_transition_routes,
+        )
+
+    def _event_identity_faces(self, event_id: int) -> list[dict]:
+        faces: list[dict] = []
+        for observation in self.face_identity_observations([event_id]):
+            person_id = observation.get("person_id")
+            if person_id is None:
+                continue
+            faces.append({
+                "origin": str(observation.get("source") or "recognition"),
+                "observation_id": int(observation.get("observation_id") or 0),
+                "identity_id": int(person_id),
+                "person_id": int(person_id),
+                "name": str(
+                    observation.get("person_name")
+                    or f"Person {int(person_id)}"
+                ),
+                "status": (
+                    "automatic"
+                    if bool(observation.get("auto_identified"))
+                    or str(observation.get("review_status") or "")
+                    == "auto_identified"
+                    else "confirmed"
+                ),
+                "review_status": str(
+                    observation.get("review_status") or "confirmed"
+                ),
+                "source": (
+                    "automatic"
+                    if bool(observation.get("auto_identified"))
+                    or str(observation.get("review_status") or "")
+                    == "auto_identified"
+                    else "operator"
+                ),
+                "confidence": float(
+                    observation.get("match_confidence") or 0.0
+                ),
+            })
+        return faces
+
     def _refresh_incident_notification(self, camera_id: str, event_id: int, *, allow_new: bool = False) -> None:
         event = self.events.get(event_id) if event_id else None
         camera = self.camera(camera_id)
         if event is not None:
             event = dict(event)
-            faces: list[dict] = []
-            for observation in self.faces.for_event_ids([event_id]):
-                person_id = observation.get("person_id")
-                if person_id is None:
-                    continue
-                faces.append({
-                    "observation_id": int(observation.get("observation_id") or 0),
-                    "identity_id": int(person_id),
-                    "person_id": int(person_id),
-                    "name": str(
-                        observation.get("person_name")
-                        or f"Person {int(person_id)}"
-                    ),
-                    "status": (
-                        "automatic"
-                        if bool(observation.get("auto_identified"))
-                        or str(observation.get("review_status") or "")
-                        == "auto_identified"
-                        else "confirmed"
-                    ),
-                    "review_status": str(
-                        observation.get("review_status") or "confirmed"
-                    ),
-                    "source": (
-                        "automatic"
-                        if bool(observation.get("auto_identified"))
-                        or str(observation.get("review_status") or "")
-                        == "auto_identified"
-                        else "operator"
-                    ),
-                    "confidence": float(
-                        observation.get("match_confidence") or 0.0
-                    ),
-                })
+            faces = self._event_identity_faces(event_id)
             event["faces"] = faces
             event = apply_event_identity(event)
-            self.events.update_scene_identities(event_id, faces, routes=self.config.detector.tracking.camera_transition_routes)
+            self._record_scene_identities(event_id, faces)
             self.incidents.track_incident(
                 event,
                 camera.name if camera is not None else camera_id,

@@ -4,6 +4,7 @@ import { IncidentScenePanel } from "../incidents/IncidentScenePanel.jsx";
 import { IncidentAnalysisStatus } from "../incidents/IncidentAnalysisStatus.jsx";
 import { useIncidentPlayback } from "../incidents/useIncidentPlayback.js";
 import { incidentEpisodeMediaUrl } from "../incidentScene.mjs";
+import { epochOf, formatSpan, isUncertainObject } from "../incidentStory.mjs";
 import { IncidentRecordingPlayer, incidentRecordingBounds } from "../incidents/IncidentRecordingPlayer.jsx";
 import { createPortal } from "react-dom";
 import {
@@ -33,7 +34,7 @@ import { recordedIncidentWindow, trackingCoverageAt, containedFrameTransform, in
 import { liveActivityEventId, liveActivityIncidentHref } from "../liveWorkspace.mjs";
 import { adjacentIncident, eventCoverEpoch, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentImageRenderRect, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "./api.js";
-import { formatDateTime } from "./format.js";
+import { formatDateTime, formatTimeOnly } from "./format.js";
 import { useStoredState, useModalFocus } from "./hooks.js";
 import { eventSnapshotUrl, eventThumbnailUrl, eventClipUrl } from "./mediaUrls.js";
 import { RetryingImage } from "./RetryingImage.jsx";
@@ -621,24 +622,39 @@ export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, wind
 }
 
 
-export function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, onSelect, onOpenOverlay }) {
+function liveActivityLabel(incident) {
+  const labels = incidentLabels(incident).filter((label) => label !== "face");
+  if (!labels.length) return incident.speech ? "Speech" : incident.has_objects ? "Activity" : "Motion only";
+  const names = labels.slice(0, 2).map((label) => {
+    const sightings = incident.scene_objects?.filter((object) => object.label === label);
+    const possible = sightings?.length && sightings.every(isUncertainObject);
+    return `${possible ? "possible " : ""}${label.replaceAll("_", " ")}`;
+  });
+  const text = names.join(" and ");
+  return text.charAt(0).toUpperCase() + text.slice(1) + (labels.length > names.length ? ` +${labels.length - names.length}` : "");
+}
+
+export function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, onSelect, onOpenOverlay, livePreview = false }) {
   const labels = incidentLabels(incident);
   const trigger = incidentTriggerLabel(incident);
   const eventId = liveActivityEventId(incident);
   const time = incident.start_at || incident.created_at;
+  const fullTime = formatDateTime(time, timeZone);
   const activityLabel = labels.length ? labels.join(", ") : "Motion only";
   return (
-    <article className={`live-activity-item${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
-      <button type="button" className="live-activity-select" onClick={() => onSelect(incident)} aria-label={`Open ${cameraName} activity at ${formatDateTime(time, timeZone)}`}>
+    <article className={`live-activity-item${livePreview ? " live-preview-row" : ""}${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
+      <button type="button" className="live-activity-select" onClick={() => onSelect(incident)} aria-label={livePreview
+        ? `Preview ${liveActivityLabel(incident)} in ${cameraName} at ${fullTime}` : `Open ${cameraName} activity at ${fullTime}`}>
         <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusControls={false} showAnnotations={thumbnailAnnotations} showTracking={false} /></span>
         <span className="live-activity-copy">
-          <span className="live-activity-kind"><IncidentObjectBadges labels={labels} /><IncidentSpeechBadge speech={incident.speech} /><span className="sr-only">{activityLabel}</span></span>
+          {livePreview ? <strong className="live-preview-row-label">{liveActivityLabel(incident)}</strong>
+            : <span className="live-activity-kind"><IncidentObjectBadges labels={labels} /><IncidentSpeechBadge speech={incident.speech} /><span className="sr-only">{activityLabel}</span></span>}
           <b>{cameraName}</b>
-          <time>{formatDateTime(time, timeZone)}</time>
+          <time dateTime={time} title={livePreview ? fullTime : undefined}>{livePreview ? formatTimeOnly(time, timeZone) : fullTime}</time>
         </span>
       </button>
-      <IncidentSourceDot trigger={trigger} className="live-activity-trigger" onClick={() => onOpenOverlay(incident)} ariaLabel={`Preview exact ${trigger} event`} title={`${trigger} trigger`} />
-      {!eventId ? <span className="sr-only">No exact event link is available.</span> : null}
+      {!livePreview ? <IncidentSourceDot trigger={trigger} className="live-activity-trigger" onClick={() => onOpenOverlay(incident)} ariaLabel={`Preview exact ${trigger} event`} title={`${trigger} trigger`} /> : null}
+      {!livePreview && !eventId ? <span className="sr-only">No exact event link is available.</span> : null}
     </article>
   );
 }
@@ -904,7 +920,7 @@ export function DebugDetectionOverlay({
   return <canvas ref={canvasRef} className="event-detection-canvas" aria-hidden="true" />;
 }
 
-export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectIncident = false, onClose, onSelect, onRefresh }) {
+export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectIncident = false, livePreview = false, loading = false, cameraNameById, onClose, onSelect, onRefresh }) {
   const [correctedScene, setCorrectedScene] = useState(null);
   const event = correctedScene?.id === sourceEvent.id && Number(correctedScene.revision) >= Number(sourceEvent.revision || 0) ? correctedScene : sourceEvent;
   const scenePlayback = useIncidentPlayback(event);
@@ -917,6 +933,11 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
   const [detectionDebugStats, setDetectionDebugStats] = useState(null);
   const [trackingVisible, setTrackingVisible] = useState(false);
   const [analysisToolsOpen, setAnalysisToolsOpen] = useState(false);
+  const [previewToolsOpen, setPreviewToolsOpen] = useState(false);
+  const [previewAnnotations, setPreviewAnnotations] = useState(false);
+  const [previewAvailability, setPreviewAvailability] = useState(null);
+  const previewFootage = useRef({ played: false, missed: false });
+  const previewPlayRef = useRef(null);
   const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0 });
   const [mediaSize, setMediaSize] = useState(() => incidentTrackingFrameSize(event));
   const [fullSnapshotRequested, setFullSnapshotRequested] = useState(false);
@@ -928,7 +949,7 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
   useEffect(() => {
     if (scenePlayback.selection) {
       setManualDetection(null);
-      setTrackingVisible(false);
+      if (!livePreview) setTrackingVisible(false);
       setPlaybackBounds(null);
       setVideoActive(true);
     }
@@ -966,22 +987,64 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
   }, [event.id]);
 
   const sceneBounds = incidentRecordingBounds(scenePlayback.clip || viewerEvent);
-  const activeBounds = playbackBounds
+  const activeBounds = livePreview && loading ? null : playbackBounds
     || (scenePlayback.clip ? sceneBounds : null)
     || (videoActive && !event.episodes?.length ? sceneBounds : null);
   const recordingActive = Boolean(activeBounds);
+  const previewCanPlay = !loading && previewAvailability !== "unavailable" && (
+    event.episodes?.length ? scenePlayback.episodes.some((episode) => episode.clip) : Boolean(sceneBounds)
+  );
+  const previewHasNext = livePreview && scenePlayback.episodes.slice(scenePlayback.index + 1).some((episode) => episode.clip);
+  const poster = livePreview && !manualDetection && !trackingVisible ? event : trackingEvent;
+  const previewCameraId = recordingActive ? viewerEvent.camera_id : poster.camera_id;
+  const previewCamera = cameraNameById?.get(previewCameraId) || previewCameraId;
+  const previewTime = event.start_at || event.created_at;
+  const duration = event.duration_seconds ?? (epochOf(event.end_at) - epochOf(previewTime));
   const downloadWindow = incidentClipWindow(viewerEvent, 5, 5);
   const downloadUrl = Number.isFinite(manualEventId)
     ? incidentEpisodeMediaUrl(eventClipUrl(manualEventId, downloadWindow.before, downloadWindow.after), viewerEvent)
     : "";
 
   function playEventClip() {
+    if (livePreview && !previewCanPlay) return;
+    if (livePreview && !recordingActive) {
+      previewFootage.current = { played: false, missed: false };
+      setPreviewAvailability(null);
+    }
     if (event.episodes?.length && !scenePlayback.selection) { scenePlayback.playAll(); return; }
     if (!sceneBounds) return;
     setPlaybackBounds(null);
     setVideoActive(true);
   }
 
+  function stopEventPlayback() {
+    scenePlayback.stop();
+    setVideoActive(false);
+    setPlaybackBounds(null);
+  }
+
+  function previewRecordingUnavailable() {
+    previewFootage.current.missed = true;
+    if (scenePlayback.clip && previewHasNext) {
+      scenePlayback.ended();
+      return;
+    }
+    stopEventPlayback();
+    const { played } = previewFootage.current;
+    setPreviewAvailability(played ? "partial" : "unavailable");
+    if (!played && document.activeElement === previewPlayRef.current) {
+      modalRef.current?.querySelector("[data-modal-initial]")?.focus();
+    }
+  }
+
+  function finishEventPlayback() {
+    if (livePreview) previewFootage.current.played = true;
+    if (scenePlayback.clip && (!livePreview || previewHasNext)) scenePlayback.ended();
+    else {
+      stopEventPlayback();
+      if (livePreview && previewFootage.current.missed) setPreviewAvailability("partial");
+    }
+  }
 
   function clampZoom(nextZoom) {
     const scale = Math.max(1, Math.min(6, nextZoom.scale));
@@ -1133,7 +1196,7 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
       return;
     }
     if (zoom.scale > 1 || recordingActive) return;
-    if (sceneBounds) playEventClip();
+    if (sceneBounds || livePreview) playEventClip();
   }
 
   function resetZoom() {
@@ -1150,6 +1213,14 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
     setDetectionDebugStats(null);
     setTrackingVisible(false);
     setAnalysisToolsOpen(false);
+    setPreviewToolsOpen(false);
+    setPreviewAnnotations(false);
+    setPreviewAvailability(null);
+    previewFootage.current = { played: false, missed: false };
+    if (livePreview) {
+      setVideoActive(false);
+      setPlaybackBounds(null);
+    }
     setManualDetection(null);
     setManualError("");
     setManualLoading(false);
@@ -1202,61 +1273,156 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
     return () => window.removeEventListener("keydown", onKey);
   }, [event.id, events, onClose, onSelect]);
 
+  const diagnostics = (
+    <details
+      className="event-analysis-details"
+      open={analysisToolsOpen}
+      onToggle={(toggleEvent) => setAnalysisToolsOpen(toggleEvent.currentTarget.open)}
+    >
+      <summary>{livePreview ? "Diagnostics" : "Analysis tools & diagnostics"}</summary>
+      <div className="event-analysis-details-body">
+        {storedTracks.length ? (
+          <div className="event-track-summary">
+            <span className="muted">Stored tracking</span>
+            <strong>{storedTracks.length} track{storedTracks.length === 1 ? "" : "s"} · {String(trackingEvent.object_tracking?.implementation || "tracker").replaceAll("_", " ")} · {Number(trackingEvent.object_tracking?.sample_fps || 0) || "?"} FPS</strong>
+            <small>{replayTrackCount ? `${replayTrackCount} track${replayTrackCount === 1 ? "" : "s"} can replay over video. Dashed, faded boxes are estimated positions during the configured lost-object grace period. Snapshot boxes mark each track's last stored position.` : "Paths show sampled object centers over time. The box marks each track's last stored position."}</small>
+            {Number(reidDiagnostics.inference_attempts || 0) || Number(reidDiagnostics.reid_avoided_geometry_matches || 0) ? (
+              <div className="tracking-diagnostics">
+                <span>Appearance checks <strong>{Number(reidDiagnostics.inference_attempts || 0)}</strong></span>
+                <span>Checks avoided <strong>{Number(reidDiagnostics.reid_avoided_geometry_matches || 0)}</strong></span>
+                {Object.entries(reidAttemptReasons).map(([reason, count]) => <span key={reason}>{String(reason).replaceAll("_", " ")} <strong>{count}</strong></span>)}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="manual-detect-panel" onClick={(event) => event.stopPropagation()}>
+          <div className="manual-detect-head">
+            <div>
+              <span className="muted">Manual OpenVINO</span>
+              <strong>{Math.round(safeManualConfidence * 100)}% confidence</strong>
+            </div>
+            <button type="button" className="tile-control-button" onClick={runManualDetection} disabled={manualLoading || (livePreview && loading) || !Number.isFinite(manualEventId)}>
+              <Search size={15} /> {manualLoading ? "Running" : "Run"}
+            </button>
+          </div>
+          <input
+            type="range"
+            min="0.05"
+            max="0.95"
+            step="0.01"
+            value={safeManualConfidence}
+            onChange={(event) => setManualConfidence(event.target.value)}
+            aria-label="Manual detection confidence"
+          />
+          {manualError ? <span className="manual-debug error">{manualError}</span> : null}
+          {manualDetection ? (
+            <div className="manual-debug">
+              <span>{manualDetection.object_count} objects</span>
+              <span>{manualDetection.elapsed_ms} ms</span>
+              <span>{manualDetection.detector?.loaded_backend || "detector"}</span>
+              <span>{manualDetection.detector?.loaded_device || manualDetection.detector?.configured_device || "device"}</span>
+              <span>{manualDetection.snapshot_width}x{manualDetection.snapshot_height}</span>
+              {manualDetection.labels?.length ? <code>{manualDetection.labels.join(", ")}</code> : <code>no labels</code>}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </details>
+  );
+  const mediaTools = <>
+    {(!livePreview || storedTracks.length > 0) ? <button
+      type="button"
+      className={`tile-control-button tracking-trail-toggle ${trackingVisible ? "active" : ""}`}
+      onClick={() => {
+        if (livePreview && !trackingVisible) setDetectionDebug(false);
+        setTrackingVisible((visible) => !visible);
+      }}
+      disabled={!storedTracks.length}
+      title={storedTracks.length ? `${trackingVisible ? "Hide" : "Show"} stored object tracking${replayTrackCount ? " on the snapshot and video" : " on the event snapshot"}` : "No stored tracks for this event; run Compare to generate an offline replay"}
+      aria-label={storedTracks.length ? `${trackingVisible ? "Hide" : "Show"} stored object tracks` : "Stored object tracks unavailable"}
+      aria-pressed={trackingVisible}
+    >
+      <ListTree size={16} /> Tracks
+    </button> : null}
+    {(!livePreview || previewCanPlay) ? <button
+      type="button"
+      className={`tile-control-button debug-detection-toggle ${detectionDebug ? "active" : ""}`}
+      onClick={() => {
+        if (!(livePreview ? recordingActive : videoActive)) playEventClip();
+        setDetectionDebug((enabled) => {
+          if (!enabled) setTrackingVisible(false);
+          return !enabled;
+        });
+      }}
+      disabled={!sceneBounds}
+      title="Toggle real-time OpenVINO detection and tracking"
+      aria-label={livePreview ? "AI overlay" : undefined}
+      aria-pressed={detectionDebug}
+    >
+      <Activity size={16} /> {livePreview ? "AI overlay" : "AI"}
+    </button> : null}
+    {downloadUrl ? (
+      <a className={`tile-control-button${livePreview ? "" : " icon-only"}`} href={downloadUrl} download={downloadName} title="Download event video" aria-label={livePreview ? "Download video" : "Download event video"}>
+        <Download size={18} />{livePreview ? "Download video" : null}
+      </a>
+    ) : !livePreview ? (
+      <span className="tile-control-button icon-only disabled" title="Event video not ready" aria-label="Event video not ready">
+        <Download size={18} />
+      </span>
+    ) : null}
+  </>;
+
   return createPortal((
-    <div ref={modalRef} className="event-overlay" role="dialog" aria-modal="true" aria-label="Event image">
-      <button className="live-overlay-backdrop" type="button" onClick={onClose} aria-label="Close event image" />
+    <div ref={modalRef} className={`event-overlay${livePreview ? " live-incident-preview" : ""}`} role="dialog" aria-modal="true" aria-label={livePreview ? "Incident preview" : "Event image"}>
+      {livePreview ? <div className="live-overlay-backdrop" onClick={onClose} aria-hidden="true" />
+        : <button className="live-overlay-backdrop" type="button" onClick={onClose} aria-label="Close event image" />}
       <section className="event-overlay-panel" style={mediaStyle}>
         <div className="event-detail-head">
           <div>
-            <h2>{viewerEvent.camera_id}</h2>
-            <time>{formatDateTime(viewerEvent.created_at, timeZone)}</time>
+            <h2>{livePreview ? `${liveActivityLabel(event)} · ${previewCamera}` : viewerEvent.camera_id}</h2>
+            {livePreview ? <p className="live-incident-time">
+              <time dateTime={previewTime} title={formatDateTime(previewTime, timeZone)}>{formatTimeOnly(previewTime, timeZone)}</time>
+              {duration > 0 ? ` · ${formatSpan(duration)}` : null}
+            </p> : <time>{formatDateTime(viewerEvent.created_at, timeZone)}</time>}
           </div>
           <div className="overlay-actions">
-            <a
-              className="nav-button tile-control-button"
-              href={appUrl(liveActivityIncidentHref(viewerEvent))}
-              aria-label="Open this event in Incidents"
-              title="Open this event in Incidents"
-            >
-              <Siren size={16} /> Incident
-            </a>
-            <button
-              type="button"
-              className={`tile-control-button tracking-trail-toggle ${trackingVisible ? "active" : ""}`}
-              onClick={() => setTrackingVisible((visible) => !visible)}
-              disabled={!storedTracks.length}
-              title={storedTracks.length ? `${trackingVisible ? "Hide" : "Show"} stored object tracking${replayTrackCount ? " on the snapshot and video" : " on the event snapshot"}` : "No stored tracks for this event; run Compare to generate an offline replay"}
-              aria-label={storedTracks.length ? `${trackingVisible ? "Hide" : "Show"} stored object tracks` : "Stored object tracks unavailable"}
-              aria-pressed={trackingVisible}
-            >
-              <ListTree size={16} /> Tracks
-            </button>
-            <button
-              type="button"
-              className={`tile-control-button debug-detection-toggle ${detectionDebug ? "active" : ""}`}
-              onClick={() => {
-                if (!videoActive) playEventClip();
-                setDetectionDebug((enabled) => {
-                  if (!enabled) setTrackingVisible(false);
-                  return !enabled;
-                });
-              }}
-              disabled={!sceneBounds}
-              title="Toggle real-time OpenVINO detection and tracking"
-              aria-pressed={detectionDebug}
-            >
-              <Activity size={16} /> AI
-            </button>
-            {downloadUrl ? (
-              <a className="tile-control-button icon-only" href={downloadUrl} download={downloadName} title="Download event video" aria-label="Download event video">
-                <Download size={18} />
+            {livePreview ? <>
+              {previewAvailability === "partial" ? <span className="live-incident-status" role="status">Some footage unavailable</span> : null}
+              {recordingActive || previewCanPlay
+                ? <button type="button" ref={previewPlayRef} className="tile-control-button live-incident-play" onClick={recordingActive ? stopEventPlayback : playEventClip}>
+                  {recordingActive ? "Back to image" : <><Play size={16} /> Play</>}
+                </button>
+                : <span className="live-incident-status" role="status">{loading ? "Loading incident…" : "Recording unavailable"}</span>}
+              <a className="tile-control-button" href={appUrl(liveActivityIncidentHref(event, { preferPage: true }))}>Open incident</a>
+              <details className="live-incident-tools" open={previewToolsOpen}
+                onToggle={(event) => setPreviewToolsOpen(event.currentTarget.open)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Escape" || !previewToolsOpen) return;
+                  event.stopPropagation();
+                  setPreviewToolsOpen(false);
+                  event.currentTarget.querySelector("summary")?.focus();
+                }}>
+                <summary className="tile-control-button">Tools</summary>
+                {previewToolsOpen ? <div className="live-incident-tool-panel">
+                  <div className="live-incident-tool-buttons">
+                    <button type="button" className="tile-control-button" aria-pressed={previewAnnotations} onClick={() => setPreviewAnnotations((value) => !value)}>Detection boxes</button>
+                    {mediaTools}
+                  </div>
+                  {diagnostics}
+                </div> : null}
+              </details>
+            </> : <>
+              <a
+                className="nav-button tile-control-button"
+                href={appUrl(liveActivityIncidentHref(viewerEvent))}
+                aria-label="Open this event in Incidents"
+                title="Open this event in Incidents"
+              >
+                <Siren size={16} /> Incident
               </a>
-            ) : (
-              <span className="tile-control-button icon-only disabled" title="Event video not ready" aria-label="Event video not ready">
-                <Download size={18} />
-              </span>
-            )}
-            <button type="button" className="tile-control-button icon-only" data-modal-initial onClick={onClose} aria-label="Close event image">
+              {mediaTools}
+            </>}
+            <button type="button" className="tile-control-button icon-only" data-modal-initial onClick={onClose} aria-label={livePreview ? "Close incident preview" : "Close event image"}>
               <X size={18} />
             </button>
           </div>
@@ -1264,8 +1430,8 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
         <div
           ref={mediaRef}
           className={`event-detail-media event-detail-play-target ${zoom.scale > 1 ? "zoomed" : ""}`}
-          role="button"
-          tabIndex={0}
+          role={livePreview ? undefined : "button"}
+          tabIndex={livePreview ? undefined : 0}
           onClick={onMediaClick}
           onDoubleClick={resetZoom}
           onWheel={onMediaWheel}
@@ -1278,26 +1444,27 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
           onPointerUp={onMediaPointerUp}
           onPointerCancel={onMediaPointerUp}
           onKeyDown={(keyEvent) => {
+            if (keyEvent.target !== keyEvent.currentTarget) return;
             if (keyEvent.key === "0") resetZoom();
             if ((keyEvent.key === "Enter" || keyEvent.key === " ") && sceneBounds && zoom.scale === 1) {
               keyEvent.preventDefault();
               playEventClip();
             }
           }}
-          title={zoom.scale > 1 ? "Drag to pan. Double-click to reset zoom." : "Scroll or pinch to zoom. Click to play the recording."}
+          title={zoom.scale > 1 ? "Drag to pan. Double-click to reset zoom." : livePreview && !previewCanPlay ? "Scroll or pinch to zoom." : "Scroll or pinch to zoom. Click to play the recording."}
         >
           <SnapshotImage
-            event={trackingEvent}
+            event={poster}
             alt="selected event snapshot"
             iconSize={42}
             className="event-snapshot-frame"
             zoom={zoom}
-            allowObjectFocus={zoom.scale === 1 && !recordingActive}
+            allowObjectFocus={zoom.scale === 1 && !recordingActive && (!livePreview || previewAnnotations)}
             progressive
             fullResolution={fullSnapshotRequested}
             highQualityZoom={zoom.scale > 1}
             onRequestFullResolution={() => setFullSnapshotRequested(true)}
-            showAnnotations
+            showAnnotations={!livePreview || previewAnnotations || Boolean(manualDetection)}
             showTracking={trackingVisible && !manualDetection}
             onImageSize={setMediaSize}
           />
@@ -1320,8 +1487,9 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
               }}
               confidence={safeManualConfidence}
               onAnalysisStats={setDetectionDebugStats}
-              onEnded={() => { if (scenePlayback.clip) scenePlayback.ended(); else { setVideoActive(false); setPlaybackBounds(null); } }}
-              onClose={() => { scenePlayback.stop(); setVideoActive(false); setPlaybackBounds(null); }}
+              onUnavailable={livePreview ? previewRecordingUnavailable : undefined}
+              onEnded={finishEventPlayback}
+              onClose={stopEventPlayback}
             />
           ) : null}
           {recordingActive && detectionDebug && detectionDebugStats ? (
@@ -1332,65 +1500,12 @@ export function EventOverlay({ event: sourceEvent, events, timeZone, canCorrectI
             </div>
           ) : null}
         </div>
-        <div className="event-detail-body">
+        {!livePreview ? <div className="event-detail-body">
           <IncidentAnalysisStatus key={event.incident_id || event.id} incidentId={event.incident_id} onDetail={(detail) => setCorrectedScene((current) => current?.id === detail.id && Number(current.revision) > Number(detail.revision) ? current : detail)} />
           <IncidentScenePanel key={event.incident_id || event.id} incident={event} timeZone={timeZone} canCorrectIncident={canCorrectIncident} onChanged={(detail) => { setCorrectedScene(detail); onRefresh?.(); }} onSelectEpisode={scenePlayback.select} onPlayScene={scenePlayback.playAll} activeEpisodeId={scenePlayback.episode?.episode_id} onNextEpisode={scenePlayback.hasNext ? scenePlayback.nextEpisode : null} onStopPlayback={scenePlayback.stop} />
           <IncidentSpeechPanel incident={event} timeZone={timeZone} />
-          <details
-            className="event-analysis-details"
-            open={analysisToolsOpen}
-            onToggle={(toggleEvent) => setAnalysisToolsOpen(toggleEvent.currentTarget.open)}
-          >
-            <summary>Analysis tools &amp; diagnostics</summary>
-            <div className="event-analysis-details-body">
-              {storedTracks.length ? (
-                <div className="event-track-summary">
-                  <span className="muted">Stored tracking</span>
-                  <strong>{storedTracks.length} track{storedTracks.length === 1 ? "" : "s"} · {String(trackingEvent.object_tracking?.implementation || "tracker").replaceAll("_", " ")} · {Number(trackingEvent.object_tracking?.sample_fps || 0) || "?"} FPS</strong>
-                  <small>{replayTrackCount ? `${replayTrackCount} track${replayTrackCount === 1 ? "" : "s"} can replay over video. Dashed, faded boxes are estimated positions during the configured lost-object grace period. Snapshot boxes mark each track's last stored position.` : "Paths show sampled object centers over time. The box marks each track's last stored position."}</small>
-                  {Number(reidDiagnostics.inference_attempts || 0) || Number(reidDiagnostics.reid_avoided_geometry_matches || 0) ? (
-                    <div className="tracking-diagnostics">
-                      <span>Appearance checks <strong>{Number(reidDiagnostics.inference_attempts || 0)}</strong></span>
-                      <span>Checks avoided <strong>{Number(reidDiagnostics.reid_avoided_geometry_matches || 0)}</strong></span>
-                      {Object.entries(reidAttemptReasons).map(([reason, count]) => <span key={reason}>{String(reason).replaceAll("_", " ")} <strong>{count}</strong></span>)}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-              <div className="manual-detect-panel" onClick={(event) => event.stopPropagation()}>
-                <div className="manual-detect-head">
-                  <div>
-                    <span className="muted">Manual OpenVINO</span>
-                    <strong>{Math.round(safeManualConfidence * 100)}% confidence</strong>
-                  </div>
-                  <button type="button" className="tile-control-button" onClick={runManualDetection} disabled={manualLoading || !Number.isFinite(manualEventId)}>
-                    <Search size={15} /> {manualLoading ? "Running" : "Run"}
-                  </button>
-                </div>
-                <input
-                  type="range"
-                  min="0.05"
-                  max="0.95"
-                  step="0.01"
-                  value={safeManualConfidence}
-                  onChange={(event) => setManualConfidence(event.target.value)}
-                  aria-label="Manual detection confidence"
-                />
-                {manualError ? <span className="manual-debug error">{manualError}</span> : null}
-                {manualDetection ? (
-                  <div className="manual-debug">
-                    <span>{manualDetection.object_count} objects</span>
-                    <span>{manualDetection.elapsed_ms} ms</span>
-                    <span>{manualDetection.detector?.loaded_backend || "detector"}</span>
-                    <span>{manualDetection.detector?.loaded_device || manualDetection.detector?.configured_device || "device"}</span>
-                    <span>{manualDetection.snapshot_width}x{manualDetection.snapshot_height}</span>
-                    {manualDetection.labels?.length ? <code>{manualDetection.labels.join(", ")}</code> : <code>no labels</code>}
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          </details>
-        </div>
+          {diagnostics}
+        </div> : null}
       </section>
     </div>
   ), document.body);
