@@ -115,7 +115,8 @@ def test_camera_zone_and_person_filters_take_several_values(tmp_path):
     def seen(camera, at, zone):
         return store.add_event(camera, 'motion', created_at=datetime.fromtimestamp(at, timezone.utc).isoformat(),
                                objects_json=json.dumps([observation(at, zones=[zone], temporal_observations=2)]))
-    gate, door, yard = seen('gate', 1000, 'Road'), seen('door', 2000, 'Porch'), seen('yard', 3000, 'Lawn')
+    gate, door = seen('gate', 1000, 'Road'), seen('door', 2000, 'Porch')
+    seen('yard', 3000, 'Lawn')
     assert store.count_scene_incidents() == 3
     # Any chosen value matches within one filter; blanks and repeats are ignored.
     assert store.count_scene_incidents(camera_id='gate') == 1
