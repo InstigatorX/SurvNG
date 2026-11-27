@@ -56,6 +56,7 @@ jobs:
             tests/test_camera_semantics*.py \
             tests/test_app_lifespan.py \
             tests/test_frontend_routes.py \
+            tests/test_static_assets.py \
             tests/test_recorder.py \
             tests/test_growing_playlist.py \
             tests/test_calibration.py \
