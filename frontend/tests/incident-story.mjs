@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {
   cardIdentities, cardOrder, cropBackgroundStyle, establishmentReasonText, followSegments, formatSpan, frameBoxes, incidentStoryTitle,
-  nearestObservation, objectKind, objectPath, objectSummary, reviewKeyAction, reviewPosition, storyObjects, storyline,
+  layoutStoryLane, nearestObservation, objectKind, objectPath, objectSummary, reviewKeyAction, reviewPosition, storyObjects, storyline,
 } from "../src/incidentStory.mjs";
 import { BASE, CAMERAS, queueFor, storyIncident } from "./fixtures/incident-story.mjs";
 
@@ -41,10 +41,15 @@ const line = storyline(incident, objects);
 assert.equal(line.start, BASE);
 assert.equal(line.end, BASE + 102);
 assert.deepEqual(line.lanes.map((lane) => lane.cameraId), ["front-driveway", "front-door", "side-yard"]);
-const driveway = line.lanes[0];
+const driveway = layoutStoryLane(line.lanes[0].bars, line.start, line.end, 500);
 assert.equal(driveway.rows, 2);
-assert.deepEqual(driveway.bars.filter((bar) => bar.objectId === "object-car").map((bar) => [bar.state, bar.row]), [["moving", 0], ["stationary", 0]]);
-assert.equal(driveway.bars.find((bar) => bar.objectId === "object-person").row, 1);
+assert.deepEqual(driveway.bars.filter(({ bar }) => bar.objectId === "object-car").map(({ bar, row }) => [bar.state, row]), [["moving", 0], ["stationary", 0]]);
+assert.equal(driveway.bars.find(({ bar }) => bar.objectId === "object-person").row, 1);
+const shortSightings = layoutStoryLane([
+  { start: 10, end: 10 }, { start: 11, end: 11.2 }, { start: 98, end: 100 }, { start: 100, end: 100 },
+], 0, 100, 220);
+assert.ok(shortSightings.bars.every(({ width, left }) => width >= 24 && left + width <= 220));
+assert.deepEqual(shortSightings.bars.map(({ row }) => row), [0, 1, 0, 1]);
 assert.equal(line.lanes[2].bars[0].uncertain, true);
 // Fallback without server intervals: one observed span per camera, never "stationary".
 const legacy = storyObjects({ scene_objects: [{ ...incident.scene_objects[0], visible_intervals: undefined }] })[0];
@@ -66,6 +71,13 @@ assert.deepEqual(followSegments(byLabel.person, { start: BASE, end: BASE + 102 }
 assert.equal(nearestObservation(byLabel.person, BASE + 60, "front-door").id, "obs-person-door-62");
 const cover = byLabel.car.observations.find((item) => item.id === "obs-cover-car");
 assert.deepEqual(frameBoxes(objects, cover).map((item) => item.object.label).sort(), ["car", "person"]);
+const otherFrames = [{
+  observations: [
+    { ...cover, captured_at: new Date((BASE + 30.533) * 1000).toISOString() },
+    { ...cover, image: { source: "live" } },
+  ],
+}];
+assert.equal(frameBoxes(otherFrames, cover).length, 0);
 const crop = cropBackgroundStyle({ detection_frame_width: 1000, detection_frame_height: 500, box: { x1: 450, y1: 200, x2: 550, y2: 300 } }, 1, 0);
 assert.deepEqual(crop, { backgroundSize: "1000% 500%", backgroundPosition: "50% 50%" });
 assert.equal(cropBackgroundStyle({ box: { x1: 0, y1: 0, x2: 1, y2: 1 } }), null);

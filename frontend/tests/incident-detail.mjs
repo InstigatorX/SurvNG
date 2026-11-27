@@ -191,6 +191,7 @@ async function storyChecks(width) {
   assert.equal(await page.locator(".story-path li.active").innerText().then((text) => text.includes("Front Driveway")), true);
   // 3 · Follow: a bar on another camera moves the frame there and says so.
   const doorBar = page.locator(".story-lane").nth(1).locator(".story-bar").first();
+  await doorBar.scrollIntoViewIfNeeded();
   const bar = await doorBar.boundingBox();
   await page.mouse.click(bar.x + bar.width * 0.25, bar.y + bar.height / 2);
   await page.getByRole("status").filter({ hasText: "Switched from Front Driveway" }).waitFor();
@@ -202,7 +203,9 @@ async function storyChecks(width) {
   await page.waitForFunction(() => document.querySelector(".story-frame .incident-recording-player")?.dataset.cameraId === "front-door");
   assert.ok(requests.some((item) => item.includes("/cameras/front-door/recordings/window")));
   // A bar click during playback re-targets the player to that camera.
-  const drivewayBar = await page.locator(".story-lane").nth(0).locator(".story-bar.person").boundingBox();
+  const driveway = page.locator(".story-lane").nth(0).locator(".story-bar.person");
+  await driveway.scrollIntoViewIfNeeded();
+  const drivewayBar = await driveway.boundingBox();
   await page.mouse.click(drivewayBar.x + drivewayBar.width * 0.5, drivewayBar.y + drivewayBar.height / 2);
   await page.waitForFunction(() => document.querySelector(".story-frame .incident-recording-player")?.dataset.cameraId === "front-driveway");
   assert.equal(await page.locator(".story-frame-chip.strong").innerText(), "Front Driveway");
@@ -423,7 +426,9 @@ async function followThemeChecks() {
   drivewayMode = "boundary";
   await page.reload();
   await page.locator(".story-card", { hasText: "Person" }).click();
-  const doorBar = await page.locator(".story-lane").nth(1).locator(".story-bar").first().boundingBox();
+  const boundaryBar = page.locator(".story-lane").nth(1).locator(".story-bar").first();
+  await boundaryBar.scrollIntoViewIfNeeded();
+  const doorBar = await boundaryBar.boundingBox();
   await page.mouse.click(doorBar.x + 2, doorBar.y + doorBar.height / 2);
   await page.getByRole("button", { name: "Follow Person" }).click();
   await page.waitForFunction(() => document.querySelector(".story-frame .incident-recording-player")?.dataset.cameraId === "front-door");
@@ -437,7 +442,51 @@ async function followThemeChecks() {
   await page.close();
 }
 
+async function stillEvidenceChecks() {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, timezoneId: "America/New_York", hasTouch: true });
+  page.setDefaultTimeout(5000);
+  const incident = storyIncident();
+  const person = incident.scene_objects.find((object) => object.id === "object-person");
+  const sighting = person.observations.find((observation) => observation.id === "obs-person-door-47");
+  sighting.snapshot_available = false;
+  delete incident.snapshot_observation_id;
+  delete incident.snapshot_url;
+  incident.snapshot_captured_at = new Date((BASE + 30.5) * 1000).toISOString();
+  const requests = [];
+  await page.route("**/api/**", (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
+    if (path.endsWith("/cameras")) return route.fulfill({ json: CAMERAS });
+    if (path.includes("/incidents/notification/")) return route.fulfill({ json: { incident, notification: { state: "complete" } } });
+    if (path.endsWith("/preview.jpg")) {
+      requests.push([path, Number(url.searchParams.get("epoch")), url.searchParams.get("source")]);
+      if (url.searchParams.get("source") === "main") return route.fulfill({ status: 500 });
+      return route.fulfill({
+        contentType: "image/svg+xml", body: svg,
+        headers: { "X-SurvNG-Actual-Timestamp": String(BASE + 48) },
+      });
+    }
+    if (path.endsWith("/thumbnail.jpg") || path.endsWith("/snapshot")) return route.fulfill({ contentType: "image/svg+xml", body: svg });
+    return route.fulfill({ json: {} });
+  });
+  await page.goto(`${origin}/survng/incidents/${incident.incident_id}`);
+  const frame = page.locator(".story-frame");
+  await frame.getByText("Best frame", { exact: false }).waitFor();
+  assert.match(await frame.locator(".story-frame-chips time").getAttribute("datetime", { timeout: 1000 }), /15:24:50\.500Z/);
+  const doorBar = page.locator(".story-lane").nth(1).locator(".story-bar").first();
+  await doorBar.press("Enter");
+  await frame.getByText("Nearby recording frame", { exact: false }).waitFor();
+  assert.deepEqual(requests.map(([, epoch, source]) => [epoch, source]), [[BASE + 47, "main"], [BASE + 47, "live"]]);
+  assert.match(requests[0][0], /\/front-door\//);
+  assert.equal(await frame.locator(".story-box").count(), 0);
+  assert.match(await frame.locator(".story-frame-chips time").getAttribute("datetime"), /15:25:08\.000Z/);
+  assert.match(await page.getByRole("link", { name: "View in Timeline" }).getAttribute("href"), /source=live/);
+  await page.close();
+}
+
 try {
+  await stillEvidenceChecks();
   await followThemeChecks();
   await viewerChecks();
   await titleChecks();

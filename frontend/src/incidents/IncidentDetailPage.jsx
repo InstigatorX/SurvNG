@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Camera, ImageOff, Play, RefreshCw, X } from "lucide-react";
-import { incidentGalleryFrames, incidentEvidenceFrames } from "../incidentNavigation.mjs";
+import { eventCoverEpoch, incidentGalleryFrames, incidentEvidenceFrames } from "../incidentNavigation.mjs";
 import { appUrl, fetch, recordingsHref } from "../shared/api.js";
 import { formatDateTime, formatTimeOnly } from "../shared/format.js";
+import { recordingPreviewUrl } from "../shared/mediaUrls.js";
 import { observationBoxStyle, canonicalIncidentHref, incidentEpisodeClips } from "../incidentScene.mjs";
 import {
   cardIdentities, epochOf, findObservation, followSegments, formatSpan, frameBoxes, incidentStoryTitle, nearestObservation,
-  objectBestObservation, objectName, observationSnapshotUrl, reviewKeyAction, reviewPosition, storyObjects, storyline,
+  objectBestObservation, objectName, observationSnapshotUrl, reviewKeyAction, reviewPosition, sameObservationFrame, storyObjects, storyline,
 } from "../incidentStory.mjs";
 import { IncidentRecordingPlayer } from "./IncidentRecordingPlayer.jsx";
 import { IncidentScenePanel } from "./IncidentScenePanel.jsx";
@@ -14,6 +15,7 @@ import { IncidentSpeechPanel } from "./IncidentSpeech.jsx";
 import { IncidentStoryline } from "./IncidentStoryline.jsx";
 import { CorrectPanel, ObjectCards, PathPanel, WhyPanel } from "./IncidentStoryObjects.jsx";
 import { IncidentPeople } from "../people/IncidentPeople.jsx";
+import { useIncidentStill } from "./useIncidentStill.js";
 import "./incident-detail.css";
 import "./incident-story.css";
 
@@ -23,15 +25,48 @@ const VERDICTS = [
   { verdict: "nothing_here", label: "Nothing here", key: "X" },
 ];
 
-function EvidenceImage({ label, onClick, src }) {
-  const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [src]);
-  const content = !src || failed
+const NEARBY_SECONDS = 2;
+const SAME_MOMENT_SECONDS = 0.1;
+
+function eventThumbnail(eventId, revision) {
+  return eventId ? `/api/events/${eventId}/thumbnail.jpg?width=1280&quality=85&revision=${encodeURIComponent(revision)}` : "";
+}
+
+function recordingCandidate(cameraId, epoch, source) {
+  return { src: recordingPreviewUrl(encodeURIComponent(cameraId), epoch, source, { width: 1280, exact: true }), epoch, source };
+}
+
+function nearbyStill(observations, cameraId, epoch) {
+  const candidates = observations.filter((observation) => observationSnapshotUrl(observation)
+    && Math.abs(epochOf(observation.captured_at) - epoch) <= NEARBY_SECONDS);
+  return nearestObservation({ observations: candidates }, epoch, cameraId);
+}
+
+function savedCandidate(observation) {
+  return { src: observationSnapshotUrl(observation), epoch: epochOf(observation?.captured_at), observation };
+}
+
+function stillCandidates({ cameraId, epoch, saved, nearby }) {
+  const frames = [];
+  if (saved.src) frames.push(saved);
+  if (cameraId && Number.isFinite(epoch)) {
+    frames.push(recordingCandidate(cameraId, epoch, "main"), recordingCandidate(cameraId, epoch, "live"));
+  }
+  if (nearby.src && nearby.src !== saved.src) frames.push(nearby);
+  return frames;
+}
+
+function EvidenceImage({ frame, onClick }) {
+  const [failed, setFailed] = useState(null);
+  const candidate = failed === frame.src ? frame.fallback : frame;
+  const label = candidate?.label || frame.label;
+  const src = candidate?.src;
+  const content = !src || failed === frame.fallback?.src
     ? <span className="incident-detail-image-empty"><ImageOff size={28} />Image unavailable</span>
-    : <img loading={onClick ? "lazy" : "eager"} src={appUrl(src)} alt={label} onError={() => setFailed(true)} />;
+    : <img key={src} loading={onClick ? "lazy" : "eager"} src={appUrl(src)} alt={label} onError={() => setFailed(src)} />;
   return onClick
     ? <button className="incident-detail-frame" onClick={onClick} aria-label={label}>{content}<span>{label}</span></button>
-    : <div className="incident-detail-hero">{content}</div>;
+    : <><div className="incident-detail-hero">{content}</div><p className="incident-detail-hint">{label}</p></>;
 }
 
 function EvidenceViewer({ frames, selected, onClose }) {
@@ -40,21 +75,21 @@ function EvidenceViewer({ frames, selected, onClose }) {
   useEffect(() => { dialog.current.showModal(); }, []);
   const frame = frames[index];
   return <dialog ref={dialog} className="incident-evidence-viewer" aria-label="Evidence image viewer" onCancel={onClose} onClose={onClose}>
-    <header><span>{frame.label} · {index + 1} / {frames.length}</span><button autoFocus onClick={onClose} aria-label="Close evidence"><X size={22} /></button></header>
-    <EvidenceImage src={frame.src} label={frame.label} />
+    <header><span>{index + 1} / {frames.length}</span><button autoFocus onClick={onClose} aria-label="Close evidence"><X size={22} /></button></header>
+    <EvidenceImage key={frame.src} frame={frame} />
     <nav aria-label="Evidence navigation"><button disabled={index === 0} onClick={() => setIndex(index - 1)}>Previous</button><button disabled={index === frames.length - 1} onClick={() => setIndex(index + 1)}>Next</button></nav>
   </dialog>;
 }
 
 // A still frame with every object's box from the same capture, colored by object.
-function StillFrame({ src, anchor, boxes, selectedId, legacyBoxes, label }) {
-  const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [src]);
-  const width = Number(anchor?.detection_frame_width || legacyBoxes?.[0]?.detection_frame_width) || 16;
-  const height = Number(anchor?.detection_frame_height || legacyBoxes?.[0]?.detection_frame_height) || 9;
-  if (!src || failed) return <span className="incident-detail-image-empty story-frame-empty"><ImageOff size={28} />Image unavailable</span>;
+function StillFrame({ still, anchor, boxes, selectedId, legacyBoxes, label, onCover }) {
+  const width = Number(still.width || anchor?.detection_frame_width || legacyBoxes?.[0]?.detection_frame_width) || 16;
+  const height = Number(still.height || anchor?.detection_frame_height || legacyBoxes?.[0]?.detection_frame_height) || 9;
+  if (still.status === "loading") return <span role="status" className="incident-detail-image-empty story-frame-empty">Loading recording frame…</span>;
+  if (still.status === "unavailable") return <div className="incident-detail-image-empty story-frame-empty"><ImageOff size={28} />Image unavailable
+    {onCover ? <button type="button" onClick={onCover}>Back to best frame</button> : null}</div>;
   return <div className="story-frame-image" style={{ aspectRatio: `${width} / ${height}`, "--frame-w": width, "--frame-h": height }}>
-    <img src={appUrl(src)} alt={label} onError={() => setFailed(true)} />
+    <img key={still.src} src={appUrl(still.src)} alt={label} onError={still.onError} />
     {boxes.map(({ object, observation }) => {
       const style = observationBoxStyle(observation);
       if (!style) return null;
@@ -114,7 +149,7 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
   const [cameraNames, setCameraNames] = useState(() => new Map());
   const [selectedId, setSelectedId] = useState(null);
   const [correcting, setCorrecting] = useState(false);
-  const [frameRef, setFrameRef] = useState(null); // { observationId } pinned by a bar click
+  const [frameRef, setFrameRef] = useState(null); // camera and moment pinned by a bar click
   const [cursor, setCursor] = useState(null);
   const [playback, setPlayback] = useState(null);
   const [notice, setNotice] = useState(null);
@@ -194,6 +229,7 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
   const cameraName = useCallback((id) => cameraNames.get(id) || (id === incident?.camera_id ? data?.camera_name : null) || id || "Camera",
     [cameraNames, data?.camera_name, incident?.camera_id]);
   const objects = useMemo(() => storyObjects(incident), [incident]);
+  const observations = useMemo(() => objects.flatMap((object) => object.observations || []), [objects]);
   const line = useMemo(() => storyline(incident, objects), [incident, objects]);
   const selected = objects.find((object) => String(object.id) === String(selectedId)) || null;
   // A correction or a refresh can remove the selected object; then nothing is selected.
@@ -308,24 +344,43 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  // The still frame: a pinned observation, else the selected object's frame,
-  // else the incident's best (cover) frame.
-  const cover = incident?.snapshot_observation_id ? findObservation(objects, incident.snapshot_observation_id) : null;
-  const pinned = frameRef ? findObservation(objects, frameRef.observationId) : null;
-  let anchor = pinned?.observation || cover?.observation || null;
-  let mode = "Best frame";
-  if (!pinned && selected) {
-    const inCover = cover && frameBoxes([selected], cover.observation).length;
-    anchor = inCover ? cover.observation : objectBestObservation(selected);
-  }
-  if (selected) mode = (selected.observation_count || selected.observations?.length) === 1 ? "Only supporting image" : `Following ${objectName(selected)}`;
-  const anchorEpoch = epochOf(anchor?.captured_at);
+  const cover = incident?.snapshot_observation_id ? findObservation(objects, incident.snapshot_observation_id)?.observation : null;
+  const coverEvent = incident?.events?.find((event) => String(event.id) === String(incident.representative_event_id));
+  const coverEpoch = epochOf(cover?.captured_at || incident?.snapshot_captured_at) || eventCoverEpoch(coverEvent || incident) || startEpoch;
+  const revision = notification?.revision || incident?.end_at || 0;
+  const pin = selected ? frameRef : null;
+  const pinned = pin ? nearestObservation(selected, pin.epoch, pin.cameraId) : null;
+  const selectedAnchor = selected && (cover && frameBoxes([selected], cover).length ? cover : objectBestObservation(selected));
+  const targetCamera = pin?.cameraId || selectedAnchor?.camera_id || selected?.intervals[0]?.camera_id || cover?.camera_id || coverEvent?.camera_id || incident?.camera_id;
+  const targetEpoch = pin?.epoch ?? (epochOf(selectedAnchor?.captured_at) || selected?.intervals[0]?.start || coverEpoch);
+  const coverStill = cover ? savedCandidate(cover) : {
+    src: incident?.snapshot_url || eventThumbnail(incident?.representative_event_id, revision),
+    epoch: coverEpoch,
+    legacy: true,
+  };
+  const isCover = !selected;
+  const targetObservation = pin
+    ? (Math.abs(epochOf(pinned?.captured_at) - targetEpoch) < SAME_MOMENT_SECONDS ? pinned : null)
+    : selectedAnchor;
+  const sharedStill = targetObservation && !observationSnapshotUrl(targetObservation)
+    ? observations.find((item) => observationSnapshotUrl(item) && sameObservationFrame(item, targetObservation)) : null;
+  const saved = isCover ? coverStill : savedCandidate(sharedStill || targetObservation);
+  const nearby = savedCandidate(nearbyStill(selected?.observations || [], targetCamera, targetEpoch));
+  const still = useIncidentStill(playback ? [] : stillCandidates({ cameraId: targetCamera, epoch: targetEpoch, saved, nearby }));
+  const anchor = still.observation;
   const boxes = frameBoxes(objects, anchor);
-  const stillSrc = anchor ? observationSnapshotUrl(anchor)
-    : incident?.representative_event_id ? `/api/events/${incident.representative_event_id}/thumbnail.jpg?width=1280&quality=85&revision=${encodeURIComponent(notification?.revision || incident?.end_at || 0)}` : "";
-  const legacyBoxes = anchor ? null : (incident?.objects || []).filter((item) => item.box);
-  const frameCamera = playback ? playback.segments[playback.index]?.cameraId : anchor?.camera_id || incident?.camera_id;
-  const shownEpoch = Number.isFinite(cursor) ? cursor : Number.isFinite(anchorEpoch) ? anchorEpoch : startEpoch;
+  const legacyBoxes = still.legacy ? (incident?.objects || []).filter((item) => item.box) : null;
+  const frameCamera = playback ? playback.segments[playback.index]?.cameraId : targetCamera;
+  const shownEpoch = playback && Number.isFinite(cursor) ? cursor : (still.epoch ?? targetEpoch);
+  let mode = selected ? `Following ${objectName(selected)}` : "Best frame";
+  if (still.status === "ready" && still.source) {
+    mode = still.actual == null ? "Recording frame · approximate time"
+      : Math.abs(still.actual - targetEpoch) >= SAME_MOMENT_SECONDS ? "Nearby recording frame" : "Recording frame";
+  } else if (still.status === "ready" && Math.abs(still.epoch - targetEpoch) >= SAME_MOMENT_SECONDS) {
+    mode = "Nearby saved frame";
+  } else if (still.status === "ready" && selected && selected.observations?.length === 1) {
+    mode = "Only supporting image";
+  }
 
   function segmentsFor(object) {
     if (object) return followSegments(object, { start: startEpoch, end: endEpoch });
@@ -337,15 +392,16 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
   // Play from the moment pinned on the storyline when there is one.
   function startFollowing() {
     const segments = segmentsFor(selected);
-    const pinnedAt = pinned ? epochOf(pinned.observation.captured_at) : NaN;
+    const pinnedAt = pin?.epoch ?? NaN;
     const index = Number.isFinite(pinnedAt)
-      ? segments.findIndex((item) => item.cameraId === pinned.observation.camera_id && pinnedAt >= item.start && pinnedAt <= item.end) : -1;
+      ? segments.findIndex((item) => item.cameraId === pin.cameraId && pinnedAt >= item.start && pinnedAt <= item.end) : -1;
     startPlayback(segments, Math.max(0, index), index >= 0 ? pinnedAt : null, null);
   }
 
   function startPlayback(segments, index = 0, initialEpoch = null, from = null) {
     if (!segments.length) return;
     setFrameRef(null);
+    setCursor(initialEpoch ?? segments[index].start);
     setPlayback({ segments, index, initialEpoch, key: Date.now() });
     if (from && from !== segments[index].cameraId) setNotice({ text: `Switched from ${cameraName(from)}`, key: Date.now() });
   }
@@ -389,14 +445,13 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
         const distance = (segment) => Math.min(Math.abs(segment.start - epoch), Math.abs(segment.end - epoch));
         index = segments.reduce((best, segment, candidate) => (segment.cameraId === bar.camera_id && (best < 0 || distance(segment) < distance(segments[best])) ? candidate : best), -1);
       }
-      if (index < 0) return;
-      startPlayback(segments, index, epoch, from);
-      setCursor(epoch);
-      return;
+      if (index >= 0) {
+        startPlayback(segments, index, epoch, from);
+        return;
+      }
+      stopPlayback();
     }
-    const observation = nearestObservation(object, epoch, bar.camera_id);
-    setFrameRef(observation ? { observationId: observation.id } : null);
-    setCursor(observation ? epochOf(observation.captured_at) : epoch);
+    setFrameRef({ cameraId: bar.camera_id, epoch });
     if (from && from !== bar.camera_id) setNotice({ text: `Switched from ${cameraName(from)}`, key: Date.now() });
   }
 
@@ -405,14 +460,25 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
     const seen = new Set();
     const events = [...(incident.events || [])].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     const existing = events.flatMap((event) => incidentEvidenceFrames(event).map((frame) => {
+      const cameraId = event.camera_id || incident.camera_id;
+      const retained = frame.kind !== "snapshot" && nearbyStill(observations, cameraId, frame.epoch);
+      const eventEpoch = eventCoverEpoch(event);
+      const thumbnail = eventThumbnail(event.id, revision);
+      const timeLabel = (epoch) => formatDateTime(new Date(epoch * 1000).toISOString(), zone);
       const src = frame.kind === "snapshot"
-        ? `/api/events/${event.id}/thumbnail.jpg?width=1280&quality=85&revision=${encodeURIComponent(notification?.revision || incident?.end_at || 0)}`
-        : `/api/cameras/${encodeURIComponent(event.camera_id || incident.camera_id)}/recordings/preview.jpg?epoch=${encodeURIComponent(frame.epoch)}&source=main&width=1280&exact=true`;
-      return { ...frame, src, label: `${frame.label} · ${formatDateTime(new Date(frame.epoch * 1000).toISOString(), zone)}` };
+        ? thumbnail : recordingCandidate(cameraId, frame.epoch, "main").src;
+      const fallback = retained
+        ? { src: observationSnapshotUrl(retained), label: `Saved frame · ${timeLabel(epochOf(retained.captured_at))}` }
+        : frame.kind === "snapshot" ? null
+          : Math.abs(eventEpoch - frame.epoch) <= NEARBY_SECONDS
+            ? { src: thumbnail, label: `Saved frame · ${timeLabel(eventEpoch)}` }
+            : { src: recordingCandidate(cameraId, frame.epoch, "live").src, label: `Sub-stream frame · ${timeLabel(frame.epoch)}` };
+      const approximate = frame.kind === "recording" ? "around " : "";
+      return { ...frame, src, fallback, label: `${frame.label} · ${approximate}${timeLabel(frame.epoch)}` };
     }));
     const gallery = incidentGalleryFrames(incident).map((frame) => ({ ...frame, src: `${frame.event.snapshot_url}?width=1280&quality=85`, label: `${frame.label} · ${formatDateTime(frame.event.created_at, zone)}` }));
     return [...existing, ...gallery].filter((frame) => (seen.has(frame.src) ? false : (seen.add(frame.src), true)));
-  }, [incident, notification?.revision, zone]);
+  }, [incident, observations, revision, zone]);
 
   const ongoing = ["active", "new", "updated"].includes(notification?.state || incident?.state);
   const identityNames = notification?.people || (incident?.identities || []).map((item) => item?.name).filter(Boolean);
@@ -434,7 +500,7 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
       : `Showing ${objectName(selected)} only. Click the card again to bring everything back.`)
     : objects.length ? "Click a bar or an object card to focus." : "No objects were observed. The storyline shows each camera episode.";
   const crumbDay = Number.isFinite(startEpoch) ? dayLabel(startEpoch, zone) : "";
-  const timelineHref = recordingsHref({ cameraId: frameCamera, epoch: Number.isFinite(shownEpoch) ? shownEpoch : startEpoch, source: "main" });
+  const timelineHref = recordingsHref({ cameraId: frameCamera, epoch: Number.isFinite(shownEpoch) ? shownEpoch : startEpoch, source: still.source || "main" });
   const segment = playback?.segments[playback.index];
 
   useEffect(() => {
@@ -494,11 +560,12 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
                 {playback && segment ? <IncidentRecordingPlayer key={playback.key} cameraId={segment.cameraId} startEpoch={segment.start} endEpoch={segment.end}
                   initialEpoch={playback.initialEpoch} timeZone={zone} autoPlay onPlayhead={setCursor} onEnded={playbackEnded} onClose={stopPlayback}
                   onUnavailable={() => { if (playback.index + 1 < playback.segments.length) playbackEnded(true); }} />
-                  : <StillFrame src={stillSrc} anchor={anchor} boxes={boxes} selectedId={focusId} legacyBoxes={legacyBoxes} label={`Incident at ${cameraName(frameCamera)}`} />}
+                  : <StillFrame still={still} anchor={anchor} boxes={boxes} selectedId={focusId} legacyBoxes={legacyBoxes}
+                    label={`Incident at ${cameraName(frameCamera)}`} onCover={!isCover ? () => selectObject(null) : null} />}
                 </div>
                 <div className="story-frame-chips">
                   <span className="story-frame-chip strong">{cameraName(frameCamera)}</span>
-                  <span className="story-frame-chip">{formatTimeOnly(shownEpoch, zone)} · {playback ? (selected ? `Following ${objectName(selected)}` : "Playing incident") : mode}</span>
+                  <span className="story-frame-chip"><time dateTime={Number.isFinite(shownEpoch) ? new Date(shownEpoch * 1000).toISOString() : undefined}>{formatTimeOnly(shownEpoch, zone)}</time> · {playback ? (selected ? `Following ${objectName(selected)}` : "Playing incident") : mode}</span>
                 </div>
                 <span className="sr-only" role="status" aria-live="polite">{notice?.text || ""}</span>
                 {notice ? <div key={notice.key} className="story-switched" aria-hidden="true">{notice.text}</div> : null}
@@ -539,7 +606,7 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
             <details>
               <summary>Evidence images ({evidenceFrames.length})</summary>
               <div className="incident-detail-frames">
-                {evidenceFrames.map((frame, index) => <EvidenceImage key={frame.src} src={frame.src} label={frame.label} onClick={() => setSelectedFrame({ frames: evidenceFrames, index })} />)}
+                {evidenceFrames.map((frame, index) => <EvidenceImage key={frame.src} frame={frame} onClick={() => setSelectedFrame({ frames: evidenceFrames, index })} />)}
               </div>
               {!evidenceFrames.length ? <p>No evidence images are available.</p> : <p className="incident-detail-hint">Frames from expired recordings may be unavailable.</p>}
             </details>

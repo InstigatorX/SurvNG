@@ -113,18 +113,26 @@ export function storyline(incident, objects = storyObjects(incident)) {
   for (const lane of lanes) {
     lane.repeated = sameCamera.get(lane.cameraId) > 1;
     lane.bars.sort((left, right) => left.start - right.start);
-    // Stack bars of different objects that overlap in time into rows.
-    const rows = [];
-    for (const bar of lane.bars) {
-      let row = rows.findIndex((items) => items.every((item) => item.objectId === bar.objectId || item.end + 0.5 < bar.start || bar.end + 0.5 < item.start));
-      if (row < 0) { rows.push([]); row = rows.length - 1; }
-      rows[row].push(bar);
-      bar.row = row;
-    }
-    lane.rows = Math.max(1, rows.length);
   }
   lanes.sort((left, right) => left.start - right.start);
   return { start, end, lanes };
+}
+
+export function layoutStoryLane(bars, start, end, trackWidth) {
+  const rightEdges = [];
+  const positioned = bars.map((bar) => {
+    const startX = fraction(bar.start, start, end) * trackWidth;
+    const endX = fraction(bar.end, start, end) * trackWidth;
+    const minimum = Math.min(24, trackWidth);
+    const left = Math.min(startX, trackWidth - minimum);
+    const right = Math.max(endX, left + minimum);
+    const width = right - left;
+    const availableRow = rightEdges.findIndex((right) => right <= left);
+    const row = availableRow < 0 ? rightEdges.length : availableRow;
+    rightEdges[row] = right;
+    return { bar, row, left, width, startX, endX };
+  });
+  return { bars: positioned, rows: Math.max(1, rightEdges.length) };
 }
 
 export function timelineTicks(start, end, count = 5) {
@@ -267,12 +275,18 @@ export function objectBestObservation(object) {
     || (Number(right.confidence || 0) - Number(left.confidence || 0)))[0] || null;
 }
 
+export function sameObservationFrame(observation, anchor) {
+  const source = anchor.image?.source || anchor.frame_source;
+  const observedSource = observation.image?.source || observation.frame_source;
+  return observation.camera_id === anchor.camera_id && epochOf(observation.captured_at) === epochOf(anchor.captured_at)
+    && (!source || !observedSource || source === observedSource);
+}
+
 // Every object's box in the same captured frame as ``anchor``.
 export function frameBoxes(objects, anchor) {
   if (!anchor) return [];
-  const epoch = epochOf(anchor.captured_at);
   return objects.flatMap((object) => (object.observations || [])
-    .filter((observation) => observation.camera_id === anchor.camera_id && Math.abs(epochOf(observation.captured_at) - epoch) < 0.05 && observation.box)
+    .filter((observation) => observation.box && sameObservationFrame(observation, anchor))
     .map((observation) => ({ object, observation })));
 }
 

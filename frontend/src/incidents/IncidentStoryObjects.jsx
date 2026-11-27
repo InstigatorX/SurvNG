@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { appUrl, fetch } from "../shared/api.js";
 import { formatTimeOnly } from "../shared/format.js";
+import { recordingPreviewUrl } from "../shared/mediaUrls.js";
 import { sceneEstablishmentText } from "../incidentScene.mjs";
 import {
-  cardOrder, cropBackgroundStyle, establishmentReasonText, fraction, objectBestObservation, objectName, objectPath,
+  cardOrder, cropBackgroundStyle, epochOf, establishmentReasonText, fraction, objectBestObservation, objectName, objectPath,
   objectSummary, observationSnapshotUrl,
 } from "../incidentStory.mjs";
 import { VisualSimilarIncidents } from "./IncidentCard.jsx";
@@ -11,12 +12,27 @@ import { IncidentAnalysisStatus } from "./IncidentAnalysisStatus.jsx";
 
 function ObjectThumb({ object }) {
   const observation = objectBestObservation(object);
-  const url = observationSnapshotUrl(observation);
+  const still = appUrl(observationSnapshotUrl(observation));
+  const epoch = epochOf(observation?.captured_at);
+  const previews = observation?.camera_id && Number.isFinite(epoch)
+    ? ["main", "live"].map((source) => recordingPreviewUrl(encodeURIComponent(observation.camera_id), epoch, source, { width: 320, exact: true }))
+    : [];
+  const urls = [still, ...previews].filter(Boolean);
+  const key = urls.join("\n");
+  const [error, setError] = useState(null);
+  const index = error?.key === key ? error.index : 0;
+  const src = urls[index];
   const tall = object.kind === "person";
-  const aspect = tall ? 52 / 68 : 52 / 40;
-  const crop = url ? cropBackgroundStyle(observation, aspect) : null;
-  const style = url ? { backgroundImage: `url("${appUrl(url)}")`, ...(crop || { backgroundSize: "cover", backgroundPosition: "center" }) } : undefined;
-  return <span className={`story-thumb${tall ? " tall" : ""}`} style={style} aria-hidden="true" />;
+  const crop = src && src === still ? cropBackgroundStyle(observation, tall ? 52 / 68 : 52 / 40) : null;
+  let style;
+  if (crop) {
+    const [width, height] = crop.backgroundSize.split(" ").map(parseFloat);
+    const [x, y] = crop.backgroundPosition.split(" ").map(parseFloat);
+    style = { width: `${width}%`, height: `${height}%`, left: `${(100 - width) * x / 100}%`, top: `${(100 - height) * y / 100}%` };
+  }
+  return <span className={`story-thumb${tall ? " tall" : ""}`} aria-hidden="true">
+    {src ? <img key={src} src={src} alt="" loading="lazy" style={style} onError={() => setError({ key, index: index + 1 })} /> : null}
+  </span>;
 }
 
 function MiniBar({ object, line }) {
