@@ -77,6 +77,29 @@ def test_duplicate_raw_batches_still_attach_the_cover(tmp_path):
     assert scene['scene_objects'][0]['observations'][0]['snapshot_available']
 
 
+def test_confidence_floor_filters_incident_search(tmp_path):
+    store = EventStore(tmp_path)
+    add(store, 1000, [observation(1000, confidence=.9, temporal_observations=2),
+                      observation(1000, 'car', confidence=.55, temporal_observations=2)])
+    add(store, 2000, [observation(2000, 'car', confidence=.6, temporal_observations=2)])
+    add(store, 3000, [])
+    assert store.count_scene_incidents(event_type='object') == 2
+    assert store.count_scene_incidents(event_type='object', min_confidence=.8) == 1
+    assert store.count_scene_incidents(event_type='object', min_confidence=.95) == 0
+    # A label and a floor must hold for the same observation.
+    assert store.count_scene_incidents(object_label='car', min_confidence=.58) == 1
+    assert store.count_scene_incidents(object_label='car', min_confidence=.8) == 0
+    assert len(store.list_scene_incident_cards(min_confidence=.8)) == 1
+    assert len(store.list_scene_incidents(min_confidence=.8, summary_only=True)) == 1
+    # Motion-only incidents have no detection to compare.
+    assert store.count_scene_incidents(event_type='motion', min_confidence=.8) == store.count_scene_incidents(event_type='motion')
+    manager = SimpleNamespace(events=store)
+    day = datetime.fromtimestamp(1000, timezone.utc).strftime('%Y-%m-%d')
+    found = IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='object', min_confidence=.8, limit=10)
+    assert found['total'] == 1 and len(found['items']) == 1
+    assert IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='object', limit=10)['total'] == 2
+
+
 def test_rare_filter_does_not_hydrate_unmatched_history(tmp_path):
     store=EventStore(tmp_path)
     for i in range(4):add(store,1000+i*100,[observation(1000+i*100)])

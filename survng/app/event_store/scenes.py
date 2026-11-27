@@ -1297,7 +1297,7 @@ class EventStoreSceneMixin:
         return result
 
     @staticmethod
-    def _scene_query_where(*, start_epoch=None, end_epoch=None, camera_id="", event_type="all", object_label="", zone=""):
+    def _scene_query_where(*, start_epoch=None, end_epoch=None, camera_id="", event_type="all", object_label="", zone="", min_confidence=0.0):
         clauses=["i.state != 'unconfirmed'", "exists(select 1 from scene_episodes p join scene_event_membership m on m.episode_id=p.id where p.incident_id=i.id)"]
         args=[]
         if start_epoch is not None:
@@ -1309,10 +1309,19 @@ class EventStoreSceneMixin:
         observed="select 1 from scene_observations o join scene_episodes p on p.id=o.episode_id where p.incident_id=i.id and " + _DISPLAY_CONFIDENCE_SQL
         if event_type in {"object","motion"}:
             clauses.append(("not " if event_type=="motion" else "")+"exists("+observed+")")
+        # A confidence floor asks for one displayable observation at or above it.
+        # With a label selected, the same observation must satisfy both.
+        floor=max(0.0,min(float(min_confidence or 0.0),1.0)) if event_type!="motion" else 0.0
+        confident=" and cast(json_extract(o.payload_json,'$.confidence') as real)>=?" if floor>0 else ""
         if object_label:
             clauses.append("exists(select 1 from scene_observations o join scene_objects s on s.id=o.object_id "
-                           "join scene_episodes p on p.id=o.episode_id where p.incident_id=i.id and "+_DISPLAY_CONFIDENCE_SQL+" and "+EventStoreSceneMixin._scene_label_sql()+"=?)")
+                           "join scene_episodes p on p.id=o.episode_id where p.incident_id=i.id and "+_DISPLAY_CONFIDENCE_SQL+" and "+EventStoreSceneMixin._scene_label_sql()+"=?"+confident+")")
             args.append(object_label)
+            if floor>0:
+                args.append(floor)
+        elif floor>0:
+            clauses.append("exists("+observed+confident+")")
+            args.append(floor)
         if zone:
             clauses.append("exists(select 1 from scene_observation_zones z "
                            "join scene_episodes p on p.id=z.episode_id "
@@ -1375,13 +1384,13 @@ class EventStoreSceneMixin:
             return conn.execute("select count(*) from scene_incidents i where "+where,args).fetchone()[0]
 
     def list_scene_incidents(self,*,start_epoch=None,end_epoch=None,start_at=None,end_at=None,camera_id="",limit=200,offset=0,
-                             event_type="all",object_label="",zone="",summary_only=False):
+                             event_type="all",object_label="",zone="",summary_only=False,min_confidence=0.0):
         if start_at is not None:
             start_epoch=_epoch(start_at)
         if end_at is not None:
             end_epoch=_epoch(end_at)
         where,args=self._scene_query_where(start_epoch=start_epoch,end_epoch=end_epoch,camera_id=camera_id,
-                                          event_type=event_type,object_label=object_label,zone=zone)
+                                          event_type=event_type,object_label=object_label,zone=zone,min_confidence=min_confidence)
         with self._connect() as conn:
             ids=conn.execute("select i.id from scene_incidents i where "+where+" order by i.start_epoch desc,i.id limit ? offset ?",
                              (*args,max(1,min(int(limit),1000)),max(0,int(offset)))).fetchall()
@@ -1401,7 +1410,7 @@ class EventStoreSceneMixin:
             return [payload for payload in payloads if payload is not None]
 
     def list_scene_incident_cards(self,*,start_epoch=None,end_epoch=None,start_at=None,end_at=None,camera_id="",limit=200,offset=0,
-                                  event_type="all",object_label="",zone=""):
+                                  event_type="all",object_label="",zone="",min_confidence=0.0):
         """Page rows for the incident rail: cover, labels, and time, without observation history."""
         from ..incident_presenter import _best_incident_event, _event_row
         if start_at is not None:
@@ -1409,7 +1418,7 @@ class EventStoreSceneMixin:
         if end_at is not None:
             end_epoch=_epoch(end_at)
         where,args=self._scene_query_where(start_epoch=start_epoch,end_epoch=end_epoch,camera_id=camera_id,
-                                          event_type=event_type,object_label=object_label,zone=zone)
+                                          event_type=event_type,object_label=object_label,zone=zone,min_confidence=min_confidence)
         with self._connect() as conn:
             ids=[row[0] for row in conn.execute(
                 "select i.id from scene_incidents i where "+where+" order by i.start_epoch desc,i.id limit ? offset ?",

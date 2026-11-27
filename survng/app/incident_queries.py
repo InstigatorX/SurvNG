@@ -407,12 +407,15 @@ class IncidentQueryService:
         limit: int = 18,
         offset: int = 0,
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
+        min_confidence: float = 0.0,
     ) -> dict[str, Any]:
         day_start, day = _local_day_start(day, time_zone)
         day_end = day_start + timedelta(days=1)
         bounds = {"start_epoch":day_start.timestamp(), "end_epoch":day_end.timestamp()}
         facets = manager.events.scene_incident_facets(**bounds)
         filters = {**bounds, "event_type":event_type, "camera_id":camera_id, "object_label":object_label, "zone":zone}
+        if math.isfinite(min_confidence) and min_confidence > 0:
+            filters["min_confidence"] = min(float(min_confidence), 1.0)
         selected_person_id = max(0, int(person_id))
         bounded_limit = max(1, min(limit, 100))
         bounded_offset = max(0, offset)
@@ -680,6 +683,7 @@ def create_incident_query_router(
         limit: int = 18,
         offset: int = 0,
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
+        min_confidence: float = 0.0,
     ) -> dict[str, Any]:
         return with_manager(
             lambda active: service.search(
@@ -694,6 +698,7 @@ def create_incident_query_router(
                 limit=limit,
                 offset=offset,
                 gap_seconds=gap_seconds,
+                min_confidence=min_confidence,
             )
         )
 
