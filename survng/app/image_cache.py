@@ -13,6 +13,9 @@ from typing import Any
 from fastapi.responses import FileResponse, Response
 
 
+IMMUTABLE_IMAGE = "private, max-age=31536000, immutable"
+
+
 class LocalImageCache:
     """Thread-safe, bounded cache for derived JPEG interface images."""
 
@@ -89,18 +92,39 @@ class LocalImageCache:
                 continue
 
 
+def image_version(path: Path) -> str:
+    """A short token naming one version of an image file.
+
+    It changes whenever the file is replaced or rewritten, so a URL that
+    carries it can be kept by the browser without asking again.
+    """
+    stat = path.stat()
+    return hashlib.sha1(f"{path}:{stat.st_mtime_ns}:{stat.st_size}".encode()).hexdigest()[:16]
+
+
 def revalidated_image_response(
     path: Path, media_type: str, request: Any = None, filename: str | None = None,
+    *, version: str = "", source: Path | None = None,
 ) -> Response:
     """Serve an interface image that the browser must revalidate on every use.
 
-    Evidence can change behind a URL, so the response stays ``no-cache``. The
-    validator lets an unchanged image answer with 304 and no body instead of
-    being sent again each time a page shows it.
+    Evidence can change behind a URL, so the response stays ``no-cache`` unless
+    the request pins a file version (see below). The validator lets an
+    unchanged image answer with 304 and no body instead of being sent again
+    each time a page shows it.
     """
     stat = path.stat()
     etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
     headers = {"Cache-Control": "private, no-cache", "ETag": etag}
+    # A request that names the exact version of the source file it wants may
+    # keep the answer for good. Any other request, or one whose version is no
+    # longer current, is revalidated as before.
+    if version and filename is None:
+        try:
+            if version == image_version(source if source is not None else path):
+                headers["Cache-Control"] = IMMUTABLE_IMAGE
+        except OSError:
+            pass
     presented = request.headers.get("if-none-match", "") if request is not None else ""
     if filename is None and presented:
         candidates = {item.strip().removeprefix("W/") for item in presented.split(",")}

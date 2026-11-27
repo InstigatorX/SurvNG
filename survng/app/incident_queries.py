@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, Body, Request
 from .event_store.scenes import SceneConflict
-from .image_cache import revalidated_image_response
+from .image_cache import image_version, revalidated_image_response
 from .incident_utils import snapshot_media_type
 
 from .audit_ai import motion_audit_interpretation
@@ -64,6 +64,22 @@ def _with_speech(manager: Any, incidents: list[dict[str, Any]]) -> list[dict[str
     """Add speech counts when this manager supports speech (optional enrichment)."""
     attach = getattr(manager, "attach_incident_speech", None)
     return attach(incidents) if callable(attach) else incidents
+
+
+def _with_image_versions(manager: Any, incidents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Name the version of each card's picture so the browser can keep it."""
+    storage_dir = getattr(manager, "storage_dir", None)
+    if storage_dir is None:
+        return incidents
+    media_storage = getattr(manager, "media_storage", None)
+    for incident in incidents:
+        if not incident.get("snapshot_path"):
+            continue
+        try:
+            incident["image_version"] = image_version(event_snapshot_path(storage_dir, incident, media_storage))
+        except (OSError, ValueError):
+            continue
+    return incidents
 
 
 def _filter_incidents_by_event_type(
@@ -121,6 +137,9 @@ def _filter_incidents_by_person(
             for event in incident.get("events", [])
         )
     ]
+
+
+MAX_SEARCH_DAYS_BACK = 31
 
 
 def _person_ids(value: int | str) -> set[int]:
@@ -421,10 +440,15 @@ class IncidentQueryService:
         offset: int = 0,
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
         min_confidence: float = 0.0,
+        days_back: int = 0,
     ) -> dict[str, Any]:
         day_start, day = _local_day_start(day, time_zone)
         day_end = day_start + timedelta(days=1)
-        bounds = {"start_epoch":day_start.timestamp(), "end_epoch":day_end.timestamp()}
+        # The list can run on from the chosen day into the days before it.
+        # Whole local days are subtracted, so a clock change does not shift the bound.
+        earlier = max(0, min(int(days_back), MAX_SEARCH_DAYS_BACK))
+        range_start = datetime.combine(day_start.date() - timedelta(days=earlier), datetime.min.time(), day_start.tzinfo)
+        bounds = {"start_epoch":range_start.timestamp(), "end_epoch":day_end.timestamp()}
         facets = manager.events.scene_incident_facets(**bounds)
         filters = {**bounds, "event_type":event_type, "camera_id":camera_id, "object_label":object_label, "zone":zone}
         if math.isfinite(min_confidence) and min_confidence > 0:
@@ -453,13 +477,14 @@ class IncidentQueryService:
             total = manager.events.count_scene_incidents(**filters)
             page_summaries = manager.events.list_scene_incident_cards(**filters,limit=bounded_limit,offset=bounded_offset)
         return {
-            "items": _with_speech(manager, [_incident_list_payload(item) for item in page_summaries]),
+            "items": _with_image_versions(manager, _with_speech(manager, [_incident_list_payload(item) for item in page_summaries])),
             "total": total,
             "limit": bounded_limit,
             "offset": bounded_offset,
             "day": day,
+            "days_back": earlier,
             "time_zone": time_zone,
-            "start_at": day_start.astimezone(timezone.utc).isoformat(),
+            "start_at": range_start.astimezone(timezone.utc).isoformat(),
             "end_at": day_end.astimezone(timezone.utc).isoformat(),
             "facets": facets,
         }
@@ -698,6 +723,7 @@ def create_incident_query_router(
         offset: int = 0,
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
         min_confidence: float = 0.0,
+        days_back: int = 0,
     ) -> dict[str, Any]:
         return with_manager(
             lambda active: service.search(
@@ -713,6 +739,7 @@ def create_incident_query_router(
                 offset=offset,
                 gap_seconds=gap_seconds,
                 min_confidence=min_confidence,
+                days_back=days_back,
             )
         )
 
@@ -808,6 +835,7 @@ def create_incident_query_router(
         aspect_w: float = 16.0,
         aspect_h: float = 9.0,
         focus_bbox: str = "",
+        s: str = "",
         request: Request = None,
     ):
         def resolve(active):
@@ -863,8 +891,8 @@ def create_incident_query_router(
                         )
                     return _jpeg_thumbnail(frame, safe_width, safe_quality)
                 cached = active.image_cache.get_or_create("observations", identity, build)
-                return revalidated_image_response(cached, "image/jpeg", request)
-            return revalidated_image_response(path, snapshot_media_type(path), request)
+                return revalidated_image_response(cached, "image/jpeg", request, version=s, source=path)
+            return revalidated_image_response(path, snapshot_media_type(path), request, version=s)
         return with_manager(resolve)
 
     @router.get("/api/incidents/{incident_id}")

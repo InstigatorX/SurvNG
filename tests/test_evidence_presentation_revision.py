@@ -105,6 +105,30 @@ def test_a_different_thumbnail_size_is_a_different_image(tmp_path):
     assert routes["event_thumbnail"](7, v="1", width=240, request=asked).status_code == 200
 
 
+def test_a_request_that_pins_the_file_version_may_be_kept_for_good(tmp_path):
+    from survng.app.image_cache import image_version
+    routes, event = _routes(tmp_path)
+    source = tmp_path / "snapshots" / "frame.png"
+    pinned = image_version(source)
+    keep = "private, max-age=31536000, immutable"
+    assert routes["event_thumbnail"](7, v="1", s=pinned, width=160).headers["cache-control"] == keep
+    # Without the version, or with one that is no longer current, it is revalidated as before.
+    assert routes["event_thumbnail"](7, v="1", width=160).headers["cache-control"] == "private, no-cache"
+    assert routes["event_thumbnail"](7, v="1", s="0123456789abcdef", width=160).headers["cache-control"] == "private, no-cache"
+    frame = np.full((120, 240, 3), 90, dtype=np.uint8)
+    assert cv2.imwrite(str(source), frame)
+    import os
+    os.utime(source, ns=(source.stat().st_atime_ns, source.stat().st_mtime_ns + 5_000_000_000))
+    assert image_version(source) != pinned
+    stale = routes["event_thumbnail"](7, v="1", s=pinned, width=160)
+    assert stale.headers["cache-control"] == "private, no-cache"
+    # A pinned version does not get past a changed evidence revision.
+    event["evidence_revision"] = 2
+    with pytest.raises(HTTPException) as refused:
+        routes["event_thumbnail"](7, v="1", s=image_version(source), width=160)
+    assert refused.value.status_code == 409
+
+
 def test_a_download_is_always_sent(tmp_path):
     routes, _event = _routes(tmp_path)
     etag = routes["event_snapshot"](7, v="1").headers["etag"]

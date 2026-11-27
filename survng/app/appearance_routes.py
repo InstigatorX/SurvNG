@@ -424,6 +424,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
         aspect_h: float = 0.0,
         focus_bbox: str = "",
         v: str = "",
+        s: str = "",
         request: Request = None,
     ) -> Response:
         safe_width = max(160, min(int(width), 2560))
@@ -501,7 +502,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
             cached = active_manager.image_cache.get_or_create(
                 "events", identity, build
             )
-            return revalidated_image_response(cached, "image/jpeg", request)
+            return revalidated_image_response(cached, "image/jpeg", request, version=s, source=snapshot_path)
 
         return with_manager(response)
 

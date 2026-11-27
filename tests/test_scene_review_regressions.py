@@ -144,6 +144,73 @@ def test_camera_zone_and_person_filters_take_several_values(tmp_path):
     assert people('') == 3 and people(0) == 3
 
 
+def test_search_runs_on_into_earlier_days_when_asked(tmp_path):
+    store = EventStore(tmp_path)
+    day = 86400
+    base = 1780000000 - (1780000000 % day)                  # midnight UTC
+    for offset in (3600, -day + 3600, -2 * day + 3600, -40 * day + 3600):
+        add(store, base + offset, [observation(base + offset, temporal_observations=2)])
+    manager = SimpleNamespace(events=store)
+    today = datetime.fromtimestamp(base, timezone.utc).strftime('%Y-%m-%d')
+    def found(**extra):
+        return IncidentQueryService.search(manager, day=today, time_zone='UTC', event_type='all', limit=10, **extra)
+    assert found()['total'] == 1 and found()['days_back'] == 0
+    assert found(days_back=1)['total'] == 2
+    back = found(days_back=2)
+    assert back['total'] == 3
+    # Newest first across the day boundary, with one offset running through all of it.
+    starts = [item['start_at'] for item in back['items']]
+    assert starts == sorted(starts, reverse=True)
+    assert found(days_back=2, offset=2)['items'][0]['id'] == back['items'][2]['id']
+    # The reach is bounded, and nonsense is treated as no reach.
+    assert found(days_back=400)['total'] == 3 and found(days_back=400)['days_back'] == 31
+    assert found(days_back=-5)['total'] == 1
+    assert back['start_at'] == datetime.fromtimestamp(base - 2 * day, timezone.utc).isoformat()
+
+
+def test_search_runs_back_whole_local_days_across_a_clock_change(tmp_path):
+    store = EventStore(tmp_path)
+    # 2026-11-01 is the day US clocks go back: that local day is 25 hours long.
+    result = IncidentQueryService.search(SimpleNamespace(events=store), day='2026-11-02', time_zone='America/New_York',
+                                         event_type='all', days_back=2)
+    assert result['start_at'] == '2026-10-31T04:00:00+00:00'
+    assert result['end_at'] == '2026-11-03T05:00:00+00:00'
+
+
+def test_cards_carry_the_review_verdict(tmp_path):
+    store = EventStore(tmp_path)
+    first = add(store, 1000, [observation(1000, temporal_observations=2)])
+    add(store, 2000, [observation(2000, temporal_observations=2)])
+    reviewed = store.scene_incident(event_id=first['id'])['id']
+    assert [card['review_verdict'] for card in store.list_scene_incident_cards()] == [None, None]
+    store.set_incident_review(reviewed, 'reviewed')
+    by_id = {card['id']: card['review_verdict'] for card in store.list_scene_incident_cards()}
+    assert by_id[reviewed] == 'reviewed' and list(by_id.values()).count(None) == 1
+    day = datetime.fromtimestamp(1000, timezone.utc).strftime('%Y-%m-%d')
+    items = IncidentQueryService.search(SimpleNamespace(events=store), day=day, time_zone='UTC', event_type='all', limit=10)['items']
+    assert {item['id']: item['review_verdict'] for item in items} == by_id
+    store.set_incident_review(reviewed, None)
+    assert [card['review_verdict'] for card in store.list_scene_incident_cards()] == [None, None]
+
+
+def test_cards_name_the_version_of_their_picture(tmp_path):
+    from survng.app.image_cache import image_version
+    from survng.app.incident_queries import _with_image_versions
+    picture = tmp_path / 'snapshots' / 'cover.jpg'
+    picture.parent.mkdir()
+    picture.write_bytes(b'first')
+    manager = SimpleNamespace(storage_dir=tmp_path, media_storage=None)
+    cards = _with_image_versions(manager, [{'id': 'a', 'snapshot_path': 'snapshots/cover.jpg'}, {'id': 'b', 'snapshot_path': ''},
+                                           {'id': 'c', 'snapshot_path': 'snapshots/missing.jpg'}])
+    assert cards[0]['image_version'] == image_version(picture)
+    assert 'image_version' not in cards[1] and 'image_version' not in cards[2]
+    before = cards[0]['image_version']
+    picture.write_bytes(b'second, longer')
+    assert _with_image_versions(manager, [{'snapshot_path': 'snapshots/cover.jpg'}])[0]['image_version'] != before
+    # A manager without storage (as in unit tests) simply adds nothing.
+    assert _with_image_versions(SimpleNamespace(), [{'snapshot_path': 'x.jpg'}]) == [{'snapshot_path': 'x.jpg'}]
+
+
 def test_rare_filter_does_not_hydrate_unmatched_history(tmp_path):
     store=EventStore(tmp_path)
     for i in range(4):add(store,1000+i*100,[observation(1000+i*100)])

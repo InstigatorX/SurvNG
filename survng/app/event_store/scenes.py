@@ -1453,6 +1453,9 @@ class EventStoreSceneMixin:
                 f"where p.incident_id in ({placeholders})",
                 ids,
             ).fetchall()
+            # Whether a person has looked at each incident; shown on its card.
+            verdict_by={row["incident_id"]:row["verdict"] for row in conn.execute(
+                f"select incident_id,verdict from scene_incident_reviews where incident_id in ({placeholders})", ids)}
             event_rows=conn.execute(
                 "select p.incident_id,e.id,e.camera_id,e.kind,e.topic,e.created_at,e.snapshot_path,e.evidence_revision,e.objects_json "
                 "from events e join scene_event_membership m on m.event_id=e.id "
@@ -1573,6 +1576,7 @@ class EventStoreSceneMixin:
                 "has_objects":bool(labels),
                 "kind":"object" if labels else "motion",
                 "trigger_source":trigger,
+                "review_verdict":verdict_by.get(incident_id),
                 "event_count":len(members),
                 "event_ids":[event["id"] for event in members],
                 "objects":cover_objects,
