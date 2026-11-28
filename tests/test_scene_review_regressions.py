@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+from fastapi import HTTPException
+
 from survng.app.events import EventStore
 from survng.app.incident_queries import IncidentQueryService, _filter_incident_summaries
 
@@ -142,6 +145,143 @@ def test_camera_zone_and_person_filters_take_several_values(tmp_path):
     assert people('7,9') == 2
     assert people('9, ,bad,404') == 1
     assert people('') == 3 and people(0) == 3
+
+
+def test_zone_filter_starts_from_each_incidents_own_episodes(tmp_path):
+    store = EventStore(tmp_path)
+    add(store, 1000, [observation(1000, zones=['Road'], temporal_observations=2)])
+    where, args = store._scene_query_where(zone='Road,Porch')
+    with store._connect() as conn:
+        plan = [row[3] for row in conn.execute('explain query plan select count(*) from scene_incidents i where ' + where, args)]
+    # The zone rows are looked up by episode. Looked up by zone name alone, every
+    # row of that zone is visited once per incident.
+    zone_step = next(step for step in plan if step.startswith('SEARCH z '))
+    assert 'episode_id=?' in zone_step, plan
+    assert store.count_scene_incidents(zone='Road') == 1 and store.count_scene_incidents(zone='Porch') == 0
+
+
+def test_card_cover_choice_is_reused_until_an_event_changes(tmp_path):
+    from survng.app import incident_presenter
+    store = EventStore(tmp_path)
+    events = [add(store, 1000 + step * 8, [observation(1000 + step * 8, confidence=.6 + step / 20, temporal_observations=2)]) for step in range(5)]
+    with patch.object(incident_presenter, '_event_row', wraps=incident_presenter._event_row) as present:
+        first = store.list_scene_incident_cards()
+        presented_once = present.call_count
+        assert presented_once == 5
+        again = store.list_scene_incident_cards()
+        assert present.call_count == presented_once, 'listing the same incident again reads no event'
+        assert again == first
+        # The kept choice is a copy: a caller changing its card cannot change the next one.
+        first[0]['events'][0]['snapshot_captured_at'] = 'changed'
+        assert store.list_scene_incident_cards() == again
+        # A changed event is a different key, so the choice is made afresh.
+        with store._lock, store._connect() as conn:
+            conn.execute('update events set objects_json=? where id=?',
+                         (json.dumps([observation(1000, confidence=.99, temporal_observations=2)]), events[0]['id']))
+        store.list_scene_incident_cards()
+        assert present.call_count == 2 * presented_once
+
+
+def test_compact_search_leaves_out_the_per_event_list(tmp_path):
+    store = EventStore(tmp_path)
+    for step in range(6):                                   # one incident, six events
+        add(store, 1000 + step * 8, [observation(1000 + step * 8, temporal_observations=2)])
+    manager = SimpleNamespace(events=store)
+    day = datetime.fromtimestamp(1000, timezone.utc).strftime('%Y-%m-%d')
+    full = IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='all', limit=10)['items'][0]
+    compact = IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='all', limit=10, compact=True)['items'][0]
+    assert len(full['events']) == 6 and 'events' not in compact
+    # Everything a gallery tile draws, and the event membership, is still there.
+    assert compact['event_ids'] == full['event_ids'] and len(compact['event_ids']) == 6
+    for key in ('id', 'incident_id', 'revision', 'camera_id', 'start_at', 'labels', 'objects', 'representative_event_id', 'review_verdict'):
+        assert compact[key] == full[key], key
+    assert len(json.dumps(compact)) < len(json.dumps(full)) / 2
+
+
+def test_cards_carry_the_review_verdict(tmp_path):
+    store = EventStore(tmp_path)
+    first = add(store, 1000, [observation(1000, temporal_observations=2)])
+    add(store, 2000, [observation(2000, temporal_observations=2)])
+    reviewed = store.scene_incident(event_id=first['id'])['id']
+    assert [card['review_verdict'] for card in store.list_scene_incident_cards()] == [None, None]
+    store.set_incident_review(reviewed, 'reviewed')
+    by_id = {card['id']: card['review_verdict'] for card in store.list_scene_incident_cards()}
+    assert by_id[reviewed] == 'reviewed' and list(by_id.values()).count(None) == 1
+    day = datetime.fromtimestamp(1000, timezone.utc).strftime('%Y-%m-%d')
+    items = IncidentQueryService.search(SimpleNamespace(events=store), day=day, time_zone='UTC', event_type='all', limit=10)['items']
+    assert {item['id']: item['review_verdict'] for item in items} == by_id
+    store.set_incident_review(reviewed, None)
+    assert [card['review_verdict'] for card in store.list_scene_incident_cards()] == [None, None]
+
+
+def test_search_filters_by_review_state_and_marks_many_at_once(tmp_path):
+    store = EventStore(tmp_path)
+    ids = [store.scene_incident(event_id=add(store, 1000 * step, [observation(1000 * step, temporal_observations=2)])['id'])['id']
+           for step in range(1, 6)]
+    store.set_incident_review(ids[0], 'reviewed')
+    store.set_incident_review(ids[1], 'nothing_here')
+    store.set_incident_review(ids[2], 'keep')              # kept for later: still to look at
+    assert store.count_scene_incidents(review='reviewed') == 2
+    assert store.count_scene_incidents(review='unreviewed') == 3
+    assert store.count_scene_incidents(review='') == 5
+    assert {card['id'] for card in store.list_scene_incident_cards(review='unreviewed')} == set(ids[2:])
+    manager = SimpleNamespace(events=store)
+    day = datetime.fromtimestamp(1000, timezone.utc).strftime('%Y-%m-%d')
+    def total(**extra):
+        return IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='all', limit=10, **extra)['total']
+    assert (total(review='unreviewed'), total(review='reviewed'), total(review='all'), total()) == (3, 2, 5, 5)
+    with pytest.raises(HTTPException):
+        total(review='maybe')
+
+    marked = store.set_incident_reviews(ids[2:], 'reviewed')
+    assert marked == {'verdict': 'reviewed', 'incident_ids': ids[2:]}
+    assert store.count_scene_incidents(review='unreviewed') == 0
+    assert store.incident_review(ids[2])['verdict'] == 'reviewed'
+    store.set_incident_reviews([ids[0], ids[0], ids[4]], None)   # repeats are one request
+    assert store.count_scene_incidents(review='unreviewed') == 2
+    # All or nothing: one unknown incident leaves every mark as it was.
+    with pytest.raises(LookupError):
+        store.set_incident_reviews([ids[0], 'incident-missing'], 'reviewed')
+    assert store.incident_review(ids[0])['verdict'] is None
+    for bad in ([], [''], [f'incident-{n}' for n in range(501)]):
+        with pytest.raises(ValueError):
+            store.set_incident_reviews(bad, 'reviewed')
+    with pytest.raises(ValueError):
+        store.set_incident_reviews(ids[:1], 'maybe')
+
+
+def test_search_names_the_version_of_each_cover_file(tmp_path):
+    from survng.app.image_cache import image_version
+    picture = tmp_path / 'snapshots' / 'cover.jpg'
+    picture.parent.mkdir()
+    picture.write_bytes(b'first')
+    store = EventStore(tmp_path)
+    def add_pictured(at, path):
+        return store.add_event('gate', 'motion', created_at=datetime.fromtimestamp(at, timezone.utc).isoformat(),
+                               objects_json=json.dumps([observation(at, temporal_observations=2)]), snapshot_path=path)
+    seen = add_pictured(1000, 'snapshots/cover.jpg')
+    add_pictured(2000, 'snapshots/missing.jpg')
+    add(store, 3000, [observation(3000, temporal_observations=2)])
+    reviewed = store.scene_incident(event_id=seen['id'])['id']
+    store.set_incident_review(reviewed, 'reviewed')
+    faces = [{'event_id': seen['id'], 'person_id': 7}]
+    manager = SimpleNamespace(events=store, storage_dir=tmp_path, media_storage=None,
+                              face_identity_observations=lambda ids: [face for face in faces if face['event_id'] in ids])
+    day = datetime.fromtimestamp(1000, timezone.utc).strftime('%Y-%m-%d')
+    def search(**extra):
+        return IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='all', limit=10, **extra)['items']
+    # The stored cards say only that a picture exists; the version is of the file itself.
+    items = search()
+    assert [item['snapshot_path'] for item in items] == ['', 'available', 'available']
+    assert [item.get('image_version') for item in items] == [None, None, image_version(picture)]
+    assert all('_cover_file' not in item for item in items)
+    # A People filter reads full incidents; they carry the same version and review mark.
+    (person,) = search(person_id=7)
+    assert person['id'] == reviewed and person['image_version'] == image_version(picture)
+    assert person['review_verdict'] == 'reviewed' and '_cover_file' not in person
+    before = items[2]['image_version']
+    picture.write_bytes(b'second, longer')
+    assert search()[2]['image_version'] != before
 
 
 def test_rare_filter_does_not_hydrate_unmatched_history(tmp_path):

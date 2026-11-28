@@ -1,5 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useIncidentFaceNames } from "../people/IncidentPeople.jsx";
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -16,9 +15,10 @@ import {
 import { loadRelatedIncident } from "../relatedIncidents.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { incidentReplayTracking, incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
-import { incidentDetailQuery, incidentFocusStep, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryColumns, incidentGalleryWanted, INCIDENT_GALLERY_CHUNK, incidentFilterValues, encodeIncidentFilterValue, toggleIncidentFilterValue, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
-import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
+import { incidentDetailQuery, incidentFocusStep, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryColumns, incidentGalleryWanted, INCIDENT_GALLERY_CHUNK, incidentFilterValues, keepIncidentIdentity, mergeIncidentHead, toggleIncidentFilterValue, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
+import { keepListedIncidents, mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
 import { APP_BASE_PATH, appUrl, incidentRecordingContext, fetch } from "../shared/api.js";
+import { eventThumbnailUrl, thumbnailWidthFor } from "../shared/mediaUrls.js";
 import { INCIDENT_REFRESH_FALLBACK_MS } from "../shared/constants.js";
 import { dateKeyForTimeZone, addDaysToDateKey, zonedDateSecondToEpoch } from "../shared/datetime.js";
 import { useStoredState, isMobileViewport } from "../shared/hooks.js";
@@ -31,14 +31,21 @@ import { IncidentAnalysisStatus } from "./IncidentAnalysisStatus.jsx";
 import { useIncidentPlayback } from "./useIncidentPlayback.js";
 import "./mobile-incidents.css";
 
+const REVIEWED_VERDICTS = new Set(["reviewed", "nothing_here"]);
+// A long gallery re-renders often, and most tiles have not changed.
+const IncidentTile = memo(IncidentListItem);
+const FILTER_PANE_WIDTH = 264;
+
 // One multi-select filter: any checked value matches, and nothing checked means all.
-function IncidentFilterChecks({ title, options, filter, onChange, columns = false, empty }) {
+function IncidentFilterChecks({ title, options, filter, onChange, columns = false, collapsed = false, empty }) {
   const chosen = incidentFilterValues(filter);
+  // A list that starts collapsed still opens when it already narrows the results.
+  const [open, setOpen] = useState(() => !collapsed || chosen.length > 0);
   // A choice made on another day stays listed so it can be cleared.
   const known = new Set(options.map((option) => String(option.value)));
   const listed = [...options, ...chosen.filter((value) => !known.has(value)).map((value) => ({ value, label: value }))];
   return (
-    <details className="incident-filter-section incident-filter-group" open>
+    <details className="incident-filter-section incident-filter-group" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary><h3>{title}</h3><span className="incident-filter-count">{chosen.length ? `${chosen.length} selected` : "All"}</span></summary>
       {listed.length ? (
         <div className={`incident-filter-checks${columns ? " columns" : ""}`} role="group" aria-label={title}>
@@ -69,6 +76,11 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   // Percent. The slider moves the draft; the search follows once it settles.
   const [incidentMinConfidence, setIncidentMinConfidence] = useState(0);
   const [confidenceDraft, setConfidenceDraft] = useState(0);
+  // Which incidents to list by review mark. The page opens on what is still to look at.
+  const [reviewFilter, setReviewFilter] = useState("unreviewed");
+  // "reviewed" or "unreviewed" while a mark-all is waiting to be confirmed.
+  const [bulkReview, setBulkReview] = useState(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
   const [incidentPeople, setIncidentPeople] = useState([]);
   const [incidentDensity, setIncidentDensity] = useStoredState("survng.incidentDensity.v1", "compact");
   const today = dateKeyForTimeZone(Date.now(), timeZone);
@@ -118,7 +130,23 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const [storedGalleryColumns, setStoredGalleryColumns] = useStoredState("survng.incidentGalleryColumns.v1", 4);
   const galleryColumns = incidentGalleryColumns(storedGalleryColumns);
   // How many incidents the gallery has asked for. Scrolling near the end asks for more.
-  const [galleryWanted, setGalleryWanted] = useState(INCIDENT_GALLERY_CHUNK);
+  // The count belongs to one set of filters. Under any other it starts over, in
+  // the same render as the filter change, so a change costs one search and not
+  // a first one for the old count followed by a second for the reset.
+  const galleryScope = [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter,
+    incidentMinConfidence, reviewFilter, incidentDay, semanticIncidentActiveQuery].join("\u0001");
+  const [galleryWantedState, setGalleryWantedState] = useState({ scope: galleryScope, count: INCIDENT_GALLERY_CHUNK });
+  const galleryWanted = galleryWantedState.scope === galleryScope ? galleryWantedState.count : INCIDENT_GALLERY_CHUNK;
+  // Listeners made in an earlier render call this too, so it reads the scope
+  // of the latest render rather than the one it was created in.
+  const galleryScopeRef = useRef(galleryScope);
+  galleryScopeRef.current = galleryScope;
+  const setGalleryWanted = (next) => setGalleryWantedState((current) => {
+    const scope = galleryScopeRef.current;
+    const base = current.scope === scope ? current.count : INCIDENT_GALLERY_CHUNK;
+    const count = typeof next === "function" ? next(base) : next;
+    return count === base && current.scope === scope ? current : { scope, count };
+  });
   const [galleryMoreError, setGalleryMoreError] = useState("");
   const [filtersPinned, setFiltersPinned] = useState(false);
   const galleryLoadedRef = useRef({ key: "", token: -1, items: [] });
@@ -126,6 +154,13 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   // 0: nothing to reveal. Infinity: waiting for the gallery to hold the open
   // incident. Otherwise the time until which a layout change repeats the scroll.
   const galleryRevealRef = useRef(0);
+  // The next chunk, fetched before it is needed: { key, token, offset, limit, promise }.
+  const galleryAheadRef = useRef(null);
+  const warmedImagesRef = useRef([]);
+  // Whether the next refresh must re-read everything shown, or only the newest incidents.
+  const galleryFullRefreshRef = useRef(true);
+  const refreshPollCountRef = useRef(0);
+  const [viewportWidth, setViewportWidth] = useState(() => (typeof window !== "undefined" ? window.innerWidth : 1440));
   const [incidentPageSize, setIncidentPageSize] = useState(12);
   const retainedGallerySelectionRef = useRef(null);
   const galleryPageAnchorRef = useRef(null);
@@ -149,10 +184,11 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const tabletInspectorToggleRef = useRef(null);
   const relatedPreviewRequestRef = useRef(0);
   const mobileView = isMobileViewport();
-  const galleryMode = !mobileView && galleryExpanded;
+  // The phone layout is always the gallery; a tile there opens the incident's page.
+  const galleryMode = mobileView || galleryExpanded;
   const galleryModeRef = useRef(galleryMode);
   galleryModeRef.current = galleryMode;
-  const incidentsPerPage = mobileView ? 12 : galleryMode ? galleryWanted : incidentPageSize;
+  const incidentsPerPage = galleryMode ? galleryWanted : incidentPageSize;
   const cameraNameById = useMemo(() => new Map(cameras.map((camera) => [camera.id, camera.name || camera.id])), [cameras]);
   const incidentCameraOptions = incidentFacets.camera_ids || [];
   const incidentObjectOptions = incidentFacets.labels || [];
@@ -231,14 +267,131 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const incidentPageCount = Math.max(1, Math.ceil(displayedIncidentTotal / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
   const pagedIncidents = galleryIncidents;
-  const incidentFaceNames = useIncidentFaceNames(pagedIncidents);
   incidentPagingRef.current = {
     // The old page stays visible while the next request is in flight. Anchor
     // its actual offset if the user toggles the gallery before that load ends.
     offset: semanticIncidentActive ? incidentPage * incidentsPerPage : Number(new URLSearchParams(incidentLoadedQueryRef.current).get("offset")) || 0,
     pageSize: incidentsPerPage, items: visibleIncidents, selectedId: focusedIncident?.id,
   };
+  // Tiles are memoized, so they get handlers that never change identity.
+  const tileHandlersRef = useRef({});
+  const selectTile = useCallback((incident) => tileHandlersRef.current.select(incident), []);
+  const previewTile = useCallback((incident) => tileHandlersRef.current.preview(incident), []);
   galleryGrowthRef.current = { count: visibleIncidents.length, total: displayedIncidentTotal, wanted: galleryWanted };
+  // Ask for pictures near the size they are shown at, not one large size for every layout.
+  const pixelRatio = typeof window !== "undefined" ? window.devicePixelRatio : 1;
+  const tileCssWidth = mobileView ? viewportWidth - 40
+    : galleryMode ? (viewportWidth - FILTER_PANE_WIDTH - 16 - 8 * (galleryColumns - 1)) / galleryColumns
+    : 160;
+  // A phone shows one picture per row; past 1.5x the extra detail is not worth the bytes on a mobile link.
+  const tileThumbnailWidth = thumbnailWidthFor(tileCssWidth, mobileView ? Math.min(1.5, pixelRatio) : pixelRatio);
+  const tileImageRef = useRef({});
+  tileImageRef.current = { width: tileThumbnailWidth, columns: mobileView ? 2 : galleryColumns, plain: thumbnailObjectFocus === "off" };
+
+  // Review marks: the checkbox answers at once, then the server confirms.
+  const [reviewOverrides, setReviewOverrides] = useState({});
+  const reviewOverridesRef = useRef(reviewOverrides);
+  reviewOverridesRef.current = reviewOverrides;
+  const [reviewError, setReviewError] = useState("");
+  const isReviewed = (incident) => reviewOverrides[String(incident.id)] ?? REVIEWED_VERDICTS.has(incident.review_verdict);
+  // The verdict as far as this page knows: a mark made here, or the listed one.
+  const knownVerdict = (incident) => {
+    const override = reviewOverrides[String(incident.id)];
+    return override === undefined ? incident.review_verdict || null : override ? "reviewed" : null;
+  };
+  const reviewSavesRef = useRef(new Map());
+  const reviewConfirmedRef = useRef(new Map());
+  async function changeReview(incident, checked) {
+    const key = String(incident.id);
+    setReviewError("");
+    setReviewOverrides((current) => ({ ...current, [key]: checked }));
+    // Saves for one incident go in the order they were asked for.
+    const save = (reviewSavesRef.current.get(key) || Promise.resolve()).then(async () => {
+      const response = await fetch(`/api/incidents/${encodeURIComponent(incident.incident_id || incident.id)}/review`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ verdict: checked ? "reviewed" : null }),
+      });
+      if (!response.ok) throw new Error(response.status === 403 ? "Only an administrator can mark incidents as reviewed." : "Could not save the review mark. Try again.");
+      reviewConfirmedRef.current.set(key, checked);
+    });
+    const settled = save.catch(() => {});
+    reviewSavesRef.current.set(key, settled);
+    try {
+      await save;
+    } catch (failure) {
+      // Back to the last mark the server accepted here, or else the listed one,
+      // unless a later change has replaced this one.
+      const confirmed = reviewConfirmedRef.current.get(key);
+      setReviewOverrides((current) => {
+        if (current[key] !== checked) return current;
+        const next = { ...current };
+        if (confirmed === undefined) delete next[key]; else next[key] = confirmed;
+        return next;
+      });
+      setReviewError(failure.message || "Could not save the review mark. Try again.");
+    } finally {
+      if (reviewSavesRef.current.get(key) === settled) reviewSavesRef.current.delete(key);
+    }
+  }
+  const reviewTile = useCallback((incident, checked) => tileHandlersRef.current.review(incident, checked), []);
+  // Marking everything shown changes only what needs changing. "Reviewed" leaves
+  // alone what is already decided or kept for later; "Unreviewed" clears only a
+  // Reviewed mark, never Keep for later or Nothing here.
+  const bulkTargets = (target) => visibleIncidents.filter((incident) => {
+    if (!(incident.incident_id || incident.id)) return false;
+    const verdict = knownVerdict(incident);
+    return target === "reviewed" ? verdict === null : verdict === "reviewed";
+  });
+  async function markAllShown(target) {
+    const shown = bulkTargets(target);
+    if (!shown.length || bulkBusy) return;
+    const checked = target === "reviewed";
+    setBulkBusy(true);
+    setReviewError("");
+    let saved = 0;
+    try {
+      // The server takes up to 500 at a time; each batch is saved together or not at all.
+      for (; saved < shown.length; saved += 500) {
+        const batch = shown.slice(saved, saved + 500);
+        const response = await fetch("/api/incidents/reviews", {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ incident_ids: batch.map((incident) => incident.incident_id || incident.id), verdict: checked ? "reviewed" : null }),
+        });
+        if (!response.ok) throw Object.assign(new Error("refused"), { forbidden: response.status === 403 });
+        for (const incident of batch) reviewConfirmedRef.current.set(String(incident.id), checked);
+        setReviewOverrides((current) => ({ ...current, ...Object.fromEntries(batch.map((incident) => [String(incident.id), checked])) }));
+      }
+    } catch (failure) {
+      setReviewError(failure?.forbidden ? "Only an administrator can mark incidents as reviewed."
+        : saved ? `Could not save all the review marks. ${saved} of ${shown.length} were saved.` : "Could not save the review marks. Nothing was changed.");
+    } finally {
+      if (saved) refreshIncidentEvidence(true);
+      setBulkBusy(false);
+      setBulkReview(null);
+    }
+  }
+  // A mark the list now agrees with no longer needs remembering here.
+  useEffect(() => {
+    setReviewOverrides((current) => {
+      const settled = incidents.filter((incident) => !reviewSavesRef.current.has(String(incident.id))
+        && current[String(incident.id)] === REVIEWED_VERDICTS.has(incident.review_verdict)
+        && (current[String(incident.id)] || !incident.review_verdict));
+      if (!settled.length) return current;
+      const next = { ...current };
+      for (const incident of settled) {
+        delete next[String(incident.id)];
+        // The list is the reference again; a later failed save falls back to it.
+        reviewConfirmedRef.current.delete(String(incident.id));
+      }
+      return next;
+    });
+  }, [incidents]);
+  // A message about a failed save does not outstay the moment.
+  useEffect(() => {
+    if (!reviewError) return undefined;
+    const timer = window.setTimeout(() => setReviewError(""), 8000);
+    return () => window.clearTimeout(timer);
+  }, [reviewError]);
+
   useEffect(() => {
     if (!displayedIncident && tabletInspectorOpen) setTabletInspectorOpen(false);
   }, [displayedIncident, tabletInspectorOpen]);
@@ -332,6 +485,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       if (rect.width <= 0 || rect.height <= 0) return;
       const width = rect.width;
       const height = rect.height;
+      setViewportWidth(window.innerWidth);
       if (galleryExpanded) {
         // The gallery has no pages; a taller or wider list may need more rows.
         galleryPageAnchorRef.current = null;
@@ -375,13 +529,33 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     chosen.scrollIntoView({ block: "center" });
   }
 
+  // Arrow keys move between pictures in the gallery; Enter or Space opens one as usual.
+  function onGalleryKeyDown(event) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    const current = event.target instanceof HTMLElement ? event.target.closest(".live-activity-select") : null;
+    if (!current || !galleryModeRef.current) return;
+    const columns = mobileView ? 1 : galleryColumns;
+    const tiles = [...event.currentTarget.querySelectorAll(".live-activity-select")];
+    const index = tiles.indexOf(current);
+    const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -columns, ArrowDown: columns }[event.key];
+    const target = event.key === "Home" ? 0 : event.key === "End" ? tiles.length - 1 : step == null ? null : index + step;
+    if (target == null || index < 0) return;
+    event.preventDefault();
+    tiles[Math.max(0, Math.min(tiles.length - 1, target))]?.focus();
+  }
+
   function loadMoreGalleryIfNearEnd() {
-    const rail = incidentRailListRef.current;
+    // The desktop gallery scrolls inside its own list. On a phone the list
+    // scrolls too when the layout bounds it, and otherwise the page does.
+    const list = incidentRailListRef.current || document.getElementById("incident-results");
+    const scroller = list && list.scrollHeight > list.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(list).overflowY)
+      ? list : document.scrollingElement;
     const growth = galleryGrowthRef.current;
-    if (!rail || !galleryModeRef.current) return;
+    if (!scroller || !galleryModeRef.current) return;
     // Fewer shown than asked for means a load is in flight or has failed.
     if (growth.count >= growth.total || growth.count < growth.wanted) return;
-    if (rail.scrollHeight - rail.scrollTop - rail.clientHeight > 600) return;
+    // Start early: the next incidents are already fetched, so appending them is immediate.
+    if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > Math.max(600, scroller.clientHeight * 1.5)) return;
     setGalleryWanted((wanted) => (wanted === growth.wanted ? wanted + INCIDENT_GALLERY_CHUNK : wanted));
   }
 
@@ -395,6 +569,16 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   }, [galleryMode, incidentResultSource, displayedIncidentTotal, galleryColumns, galleryWanted, semanticIncidentActive]);
 
   useEffect(() => {
+    if (!mobileView) return undefined;
+    const onScroll = () => loadMoreGalleryIfNearEnd();
+    const onResize = () => setViewportWidth(window.innerWidth);
+    // Capture, so a scroll inside the list is heard as well as a page scroll.
+    window.addEventListener("scroll", onScroll, { passive: true, capture: true });
+    window.addEventListener("resize", onResize);
+    return () => { window.removeEventListener("scroll", onScroll, { capture: true }); window.removeEventListener("resize", onResize); };
+  }, [mobileView]);
+
+  useEffect(() => {
     if (confidenceDraft === incidentMinConfidence) return undefined;
     const timer = window.setTimeout(() => setIncidentMinConfidence(confidenceDraft), 300);
     return () => window.clearTimeout(timer);
@@ -405,7 +589,8 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     refreshIncidentEvidence();
   }
 
-  function refreshIncidentEvidence() {
+  function refreshIncidentEvidence(full = true) {
+    if (full !== false) galleryFullRefreshRef.current = true;
     const sequence = ++incidentEvidenceRefreshSequence.current;
     incidentDetailCacheRef.current.clear();
     setIncidentRefreshToken((value) => value + 1);
@@ -449,7 +634,6 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     setSemanticIncidentLoading(true);
     setSemanticIncidentError("");
     setIncidentPage(0);
-    setGalleryWanted(INCIDENT_GALLERY_CHUNK);
     setEventFilter("object");
     try {
       const nextDay = addDaysToDateKey(incidentDay || today, 1);
@@ -490,7 +674,26 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
         };
       });
       if (semanticIncidentRequestRef.current !== controller) return;
-      setSemanticIncidentResults(rankSemanticIncidentDetails(hydrated, incidentZoneFilter));
+      // The review and people filters are decided by the list itself, so ask it
+      // which of the day's incidents pass them, and for their review marks.
+      const listed = new Map();
+      const listFilters = new URLSearchParams({ day: incidentDay || today, time_zone: timeZone, event_type: "object", gap_seconds: "45", compact: "true", limit: "100" });
+      if (reviewFilter !== "all") listFilters.set("review", reviewFilter);
+      if (incidentPersonFilter !== "all") listFilters.set("person_id", incidentPersonFilter);
+      for (let offset = 0; hydrated.some(Boolean) && offset < 1000; offset += 100) {
+        listFilters.set("offset", String(offset));
+        const listResponse = await fetch(`/api/incidents/search?${listFilters}`, { signal: controller.signal });
+        if (!listResponse.ok) throw new Error("Could not apply the review and people filters to the matches.");
+        const page = (await listResponse.json()).items || [];
+        for (const item of page) listed.set(String(item.incident_id || item.id), item.review_verdict ?? null);
+        if (page.length < 100) break;
+      }
+      if (semanticIncidentRequestRef.current !== controller) return;
+      // With no review or people filter the list only supplies marks, so a match it did not reach is kept.
+      const unfiltered = reviewFilter === "all" && incidentPersonFilter === "all";
+      setSemanticIncidentResults(rankSemanticIncidentDetails(keepListedIncidents(hydrated, listed, { keepUnlisted: unfiltered }), incidentZoneFilter, {
+        minConfidence: incidentMinConfidence / 100, labels: incidentFilterValues(incidentObjectFilter),
+      }));
     } catch (error) {
       if (error?.name !== "AbortError") setSemanticIncidentError(error.message || "Semantic incident search failed");
     } finally {
@@ -528,7 +731,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   useEffect(() => {
     if (!semanticIncidentActiveQuery) return;
     runSemanticIncidentSearch(null, semanticIncidentActiveQuery);
-  }, [incidentCameraFilter, incidentDay, incidentObjectFilter, incidentZoneFilter]);
+  }, [incidentCameraFilter, incidentDay, incidentObjectFilter, incidentZoneFilter, incidentMinConfidence, incidentPersonFilter, reviewFilter]);
 
   useAppEvents(({ type, data }) => {
     if (document.hidden || (type !== "incident" && type !== "resync")) return;
@@ -541,13 +744,15 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       || Number(incident?.representative_event_id) === affectedId
       || Number(incident?.id) === affectedId
       || incident?.events?.some((event) => Number(event.id) === affectedId)
+      || incident?.event_ids?.some((eventId) => Number(eventId) === affectedId)
     ));
     if (type !== "resync" && !forceReconcile && !affectsVisibleEvidence && (incidentDay !== today || incidentPage !== 0)) return;
     if (incidentEventRefreshTimer.current) return;
     incidentEventRefreshTimer.current = window.setTimeout(
       () => {
         incidentEventRefreshTimer.current = null;
-        refreshIncidentEvidence();
+        // A new incident elsewhere only changes the top of the list.
+        refreshIncidentEvidence(type === "resync" || forceReconcile || affectsVisibleEvidence);
       },
       1000,
     );
@@ -559,7 +764,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   }, []);
 
   useVisiblePolling(
-    refreshIncidentEvidence,
+    // The fallback poll re-reads the newest incidents; every fourth one re-reads
+    // everything shown, in case an event about an older incident was missed.
+    () => refreshIncidentEvidence((refreshPollCountRef.current += 1) % 4 === 0),
     INCIDENT_REFRESH_FALLBACK_MS,
     true,
     { immediate: false },
@@ -585,11 +792,48 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
 
   useEffect(() => {
     let cancelled = false;
+    // A search that has been superseded is dropped, so it neither holds the
+    // server nor arrives after its replacement.
+    const superseded = new AbortController();
+    async function searchPage(filters, limit, offset, signal = superseded.signal) {
+      const query = new URLSearchParams(filters);
+      query.set("limit", String(limit));
+      query.set("offset", String(offset));
+      const response = await fetch(`/api/incidents/search?${query}`, signal ? { signal } : undefined);
+      if (!response.ok) throw new Error("Unable to load incidents");
+      return response.json();
+    }
+    // Keep one chunk in hand so reaching the end shows more at once, and start
+    // the pictures of its first rows. A failure here is silent: the same
+    // request is made again, and reported, when the incidents are needed.
+    function fetchAhead(filters, baseKey, offset) {
+      const current = galleryAheadRef.current;
+      if (current && current.key === baseKey && current.token === incidentRefreshToken && current.offset === offset) return;
+      // Fetched for later use, so it outlives the load that asked for it.
+      const promise = searchPage(filters, INCIDENT_GALLERY_CHUNK, offset, null).then((payload) => {
+        const tile = tileImageRef.current;
+        if (tile.plain && galleryAheadRef.current?.promise === promise) {
+          warmedImagesRef.current = (payload.items || []).slice(0, tile.columns * 2).map((incident) => {
+            const image = new Image();
+            image.decoding = "async";
+            image.src = eventThumbnailUrl(incident, tile.width);
+            return image;
+          });
+        }
+        return payload;
+      }).catch(() => null);
+      galleryAheadRef.current = { key: baseKey, token: incidentRefreshToken, offset, limit: INCIDENT_GALLERY_CHUNK, promise };
+    }
     async function loadGallery(filters) {
       const baseKey = `gallery:${filters}`;
       const loaded = galleryLoadedRef.current;
       const sameList = loaded.key === baseKey && loaded.token === incidentRefreshToken;
-      if (sameList && loaded.items.length >= galleryWanted) return;
+      if (sameList && loaded.items.length >= galleryWanted) {
+        // Back to a list already held: an interrupted load for other filters left this set.
+        setIncidentLoading(false);
+        return;
+      }
+      const previous = loaded.key === baseKey ? loaded.items : [];
       const foregroundLoad = loaded.key !== baseKey;
       if (foregroundLoad) {
         setIncidentLoading(true);
@@ -597,18 +841,45 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       }
       setGalleryMoreError("");
       try {
-        // Scrolling adds to the end. A refresh or a filter change reads again from the top.
+        // Scrolling adds to the end. A filter change reads again from the top. A
+        // routine refresh re-reads the newest incidents and keeps the rest.
+        // An incident marked here stays in view until the next refresh but has
+        // already left the server's filtered list, so it does not count towards
+        // the position to read from.
+        const departed = (list) => reviewFilter === "all" ? 0 : list.filter((item) => {
+          const marked = reviewOverridesRef.current[String(item.id)];
+          return marked !== undefined && marked !== (reviewFilter === "reviewed");
+        }).length;
         let items = sameList ? loaded.items : [];
-        let offset = items.length;
+        let offset = items.length - departed(items);
         let payload = null;
+        if (!sameList && previous.length && !galleryFullRefreshRef.current) {
+          const head = await searchPage(filters, INCIDENT_GALLERY_CHUNK, 0);
+          if (cancelled) return;
+          const merged = mergeIncidentHead(previous, head.items || [], Number(head.total));
+          if (merged) {
+            payload = head;
+            items = merged;
+            offset = items.length - departed(items);
+          }
+        }
         while (items.length < galleryWanted) {
+          // A mark still being saved has not left the server's list yet. Wait
+          // for it, and any started meanwhile, so the position counts the list
+          // as it will be read.
+          let waited = false;
+          while (reviewFilter !== "all" && reviewSavesRef.current.size) {
+            waited = true;
+            await Promise.all([...reviewSavesRef.current.values()]);
+            if (cancelled) return;
+          }
+          if (waited) offset = Math.min(offset, items.length - departed(items));
+          if (payload && offset >= Number(payload.total || 0)) break;
           const limit = Math.min(100, galleryWanted - items.length);
-          const query = new URLSearchParams(filters);
-          query.set("limit", String(limit));
-          query.set("offset", String(offset));
-          const response = await fetch(`/api/incidents/search?${query}`);
-          if (!response.ok) throw new Error("Unable to load incidents");
-          payload = await response.json();
+          const ahead = galleryAheadRef.current;
+          const prepared = ahead && ahead.key === baseKey && ahead.token === incidentRefreshToken && ahead.offset === offset && ahead.limit === limit
+            ? await ahead.promise : null;
+          payload = prepared || await searchPage(filters, limit, offset);
           if (cancelled) return;
           const page = payload.items || [];
           const seen = new Set(items.map((item) => String(item.id)));
@@ -617,12 +888,17 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
           if (page.length < limit || offset >= Number(payload.total || 0)) break;
         }
         if (!payload) return;
+        if (!sameList) {
+          items = keepIncidentIdentity(previous, items);
+          galleryFullRefreshRef.current = false;
+        }
         galleryLoadedRef.current = { key: baseKey, token: incidentRefreshToken, items };
         incidentLoadedQueryRef.current = `${baseKey}&offset=0`;
         setIncidents(items);
         setIncidentTotal(Math.max(Number(payload.total || 0), items.length));
         setIncidentFacets(payload.facets || { camera_ids: [], labels: [], zones: [] });
         setIncidentLoadError("");
+        if (offset < Number(payload.total || 0)) fetchAhead(filters, baseKey, offset);
       } catch (error) {
         if (cancelled) return;
         if (foregroundLoad) {
@@ -635,7 +911,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
           setGalleryMoreError("Could not load more incidents.");
         }
       } finally {
-        if (!cancelled && foregroundLoad) setIncidentLoading(false);
+        // Any run that finishes leaves the list current, including one that
+        // returned to filters whose interrupted predecessor set this.
+        if (!cancelled) setIncidentLoading(false);
       }
     }
     async function loadIncidentPage() {
@@ -650,7 +928,12 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       if (incidentZoneFilter !== "all") filters.set("zone", incidentZoneFilter);
       if (incidentPersonFilter !== "all") filters.set("person_id", incidentPersonFilter);
       if (confidenceApplies && incidentMinConfidence > 0) filters.set("min_confidence", String(incidentMinConfidence / 100));
-      if (galleryMode) return loadGallery(filters);
+      if (reviewFilter !== "all") filters.set("review", reviewFilter);
+      if (galleryMode) {
+        // Gallery tiles do not draw the per-event list, which is most of a busy incident's card.
+        filters.set("compact", "true");
+        return loadGallery(filters);
+      }
       galleryLoadedRef.current = { key: "", token: -1, items: [] };
       const query = new URLSearchParams(filters);
       query.set("limit", String(incidentsPerPage));
@@ -662,7 +945,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
         setIncidentLoadError("");
       }
       try {
-        const response = await fetch(`/api/incidents/search?${query}`);
+        const response = await fetch(`/api/incidents/search?${query}`, { signal: superseded.signal });
         if (!response.ok) throw new Error("Unable to load incidents");
         const payload = await response.json();
         if (cancelled) return;
@@ -691,16 +974,17 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     loadIncidentPage();
     return () => {
       cancelled = true;
+      superseded.abort();
     };
-  }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentMinConfidence, confidenceApplies, incidentPage, incidentsPerPage, incidentRefreshToken, galleryMode]);
+  }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentMinConfidence, confidenceApplies, reviewFilter, incidentPage, incidentsPerPage, incidentRefreshToken, galleryMode]);
 
   useEffect(() => {
     retainedGallerySelectionRef.current = null;
     galleryPageAnchorRef.current = null;
     setIncidentPage(0);
-    setGalleryWanted(INCIDENT_GALLERY_CHUNK);
-    if (galleryModeRef.current && incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
-  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentMinConfidence, incidentDay, incidentDensity]);
+    const list = incidentRailListRef.current || document.getElementById("incident-results");
+    if (galleryModeRef.current && list) list.scrollTop = 0;
+  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentMinConfidence, reviewFilter, incidentDay, incidentDensity]);
 
   useEffect(() => {
     if (incidentPage >= incidentPageCount) setIncidentPage(Math.max(0, incidentPageCount - 1));
@@ -818,6 +1102,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   function selectGalleryIncident(incident) {
     toggleIncident(incident.id);
   }
+  tileHandlersRef.current = { select: !mobileView && galleryExpanded ? openIncidentOverlay : selectGalleryIncident, preview: openIncidentOverlay, review: changeReview };
 
   function changeIncidentPage(page, { scroll = true } = {}) {
     retainedGallerySelectionRef.current = null;
@@ -965,12 +1250,109 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     <div className={`incident-semantic-search ${semanticIncidentActive ? "active" : ""} ${semanticIncidentError ? "error" : ""}`}>
       <form onSubmit={runSemanticIncidentSearch} role="search" aria-label="Semantic incident search">
         <Search size={15} aria-hidden="true" />
-        <input value={semanticIncidentQuery} onChange={(event) => setSemanticIncidentQuery(event.target.value)} placeholder="Search incidents…" aria-label="Describe incidents to find" disabled={semanticIncidentLoading} />
+        <input value={semanticIncidentQuery} onChange={(event) => setSemanticIncidentQuery(event.target.value)} aria-label="Describe incidents to find" disabled={semanticIncidentLoading} />
         {semanticIncidentActive ? <button type="button" className="secondary" onClick={resetSemanticIncidentSearch} aria-label="Reset semantic incident search">Reset</button> : null}
         <button type="submit" disabled={semanticIncidentLoading || !semanticIncidentQuery.trim()}>{semanticIncidentLoading ? "Searching…" : "Search"}</button>
       </form>
       {semanticIncidentError ? <small>{semanticIncidentError}</small> : semanticIncidentActive ? <small>Showing visual matches for “{semanticIncidentActiveQuery}” using the selected day and filters.</small> : null}
     </div>
+  );
+
+  const tileHud = galleryMode || incidentDensity === "comfortable";
+  function renderTile(incident) {
+    return <IncidentTile key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone}
+      selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus}
+      thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} thumbnailWidth={tileThumbnailWidth} hud={tileHud}
+      reviewed={tileHud ? isReviewed(incident) : null} reviewDisabled={!canCorrectIncident} onReviewChange={reviewTile}
+      onSelect={selectTile} onOpenOverlay={previewTile} />;
+  }
+  // The list covers one day. Its end offers the day before, one step away.
+  const earlierDay = addDaysToDateKey(incidentDay || today, -1);
+  const earlierDayLabel = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "long", month: "short", day: "numeric" }).format(new Date(`${earlierDay}T12:00:00Z`));
+  const dayComplete = !semanticIncidentActive && !displayedIncidentLoading && !displayedIncidentError && visibleIncidents.length >= displayedIncidentTotal;
+  function openEarlierDay() {
+    setIncidentDay(earlierDay);
+    const list = incidentRailListRef.current || document.getElementById("incident-results");
+    if (list) list.scrollTop = 0;
+    window.scrollTo(0, 0);
+  }
+  // A list still on screen while its replacement loads: say so at once.
+  const listUpdating = Boolean(displayedIncidentLoading && visibleIncidents.length);
+  const galleryStatus = (
+    <div className="incident-gallery-status" role="status">
+      {reviewError ? <span className="incident-gallery-error">{reviewError}</span> : null}
+      {listUpdating ? <span>Updating…</span> : null}
+      {galleryMoreError ? <><span>{galleryMoreError}</span><button type="button" onClick={() => setIncidentRefreshToken((value) => value + 1)}>Retry</button></>
+        : listUpdating ? null
+        : visibleIncidents.length && visibleIncidents.length < displayedIncidentTotal ? <span>Showing {visibleIncidents.length} of {displayedIncidentTotal}. Scroll for more.</span>
+        : visibleIncidents.length && semanticIncidentActive ? <span>All {displayedIncidentTotal} {displayedIncidentTotal === 1 ? "match" : "matches"}.</span>
+        : visibleIncidents.length ? <span>All {displayedIncidentTotal} {displayedIncidentTotal === 1 ? "incident" : "incidents"} for this day.</span> : null}
+      {dayComplete ? <button type="button" className="incident-earlier-day" onClick={openEarlierDay}>Earlier: {earlierDayLabel}</button> : null}
+    </div>
+  );
+  // Two toggles; both pressed shows everything. One always stays pressed:
+  // turning off the only pressed one switches to the other.
+  const toggleReviewFilter = (value) => setReviewFilter((current) => {
+    const other = value === "reviewed" ? "unreviewed" : "reviewed";
+    if (current === "all") return other;
+    return current === value ? other : "all";
+  });
+  const reviewFilterControl = (
+    <div className="incident-filter-toggle compact incident-filter-segments" role="group" aria-label="Review filter">
+      {[["unreviewed", "Unreviewed"], ["reviewed", "Reviewed"]].map(([value, label]) => {
+        const pressed = reviewFilter === value || reviewFilter === "all";
+        return <button key={value} type="button" className={pressed ? "active" : ""} aria-pressed={pressed} onClick={() => toggleReviewFilter(value)}>{label}</button>;
+      })}
+    </div>
+  );
+  // Marking everything shown changes shared state for many incidents, so it asks first.
+  const shownCount = visibleIncidents.length;
+  // Closing the prompt puts keyboard focus back on the group's first usable button.
+  const bulkGroupRef = useRef(null);
+  const bulkWasOpenRef = useRef(false);
+  useEffect(() => {
+    // Only when focus was left nowhere, or in the group: not taken from where the person went meanwhile.
+    const adrift = document.activeElement === document.body || bulkGroupRef.current?.contains(document.activeElement);
+    if (bulkWasOpenRef.current && !bulkReview && adrift) (bulkGroupRef.current?.querySelector("button:not(:disabled)") || bulkGroupRef.current)?.focus();
+    bulkWasOpenRef.current = Boolean(bulkReview);
+  }, [bulkReview]);
+  const bulkCount = { reviewed: bulkTargets("reviewed").length, unreviewed: bulkTargets("unreviewed").length };
+  const bulkReviewControl = semanticIncidentActive ? null : (
+    <div className="incident-bulk-review" role="group" aria-label="Mark all shown" ref={bulkGroupRef} tabIndex={-1}>
+      {bulkReview ? <>
+        <span>Mark {bulkCount[bulkReview]} shown as {bulkReview}?</span>
+        <button key="confirm" type="button" className="primary" disabled={bulkBusy || !bulkCount[bulkReview]} onClick={() => void markAllShown(bulkReview)}>{bulkBusy ? "Saving…" : "Confirm"}</button>
+        <button key="cancel" type="button" autoFocus disabled={bulkBusy} onClick={() => setBulkReview(null)}>Cancel</button>
+      </> : <>
+        <span>Mark all shown</span>
+        <button key="reviewed" type="button" disabled={!canCorrectIncident || !bulkCount.reviewed} title="Incidents kept for later are left as they are" onClick={() => setBulkReview("reviewed")}>Reviewed</button>
+        <button key="unreviewed" type="button" disabled={!canCorrectIncident || !bulkCount.unreviewed} title="Clears Reviewed marks only" onClick={() => setBulkReview("unreviewed")}>Unreviewed</button>
+      </>}
+    </div>
+  );
+  const confidenceControl = (
+    <section className="incident-filter-section incident-filter-confidence">
+      <h3 id="incident-confidence-heading">Confidence threshold</h3>
+      <input type="range" min={0} max={95} step={5} value={confidenceApplies ? confidenceDraft : 0} disabled={!confidenceApplies} onChange={(event) => setConfidenceDraft(Number(event.target.value))} onPointerUp={(event) => setIncidentMinConfidence(Number(event.currentTarget.value))} onKeyUp={(event) => setIncidentMinConfidence(Number(event.currentTarget.value))} aria-labelledby="incident-confidence-heading" aria-valuetext={confidenceApplies && confidenceDraft > 0 ? `${confidenceDraft}% or higher` : "Any confidence"} style={{ "--fill": `${(confidenceApplies ? confidenceDraft : 0) / 95 * 100}%` }} />
+      <div className="incident-filter-confidence-readout">
+        <span>{displayedIncidentTotal} {displayedIncidentTotal === 1 ? "result" : "results"}</span>
+        <output>{confidenceApplies && confidenceDraft > 0 ? `${confidenceDraft}%` : "Any"}</output>
+      </div>
+      {!confidenceApplies ? <small>Motion-only incidents have no detection confidence.</small> : null}
+    </section>
+  );
+  const filterLists = (
+    <>
+      <IncidentFilterChecks title="Cameras" filter={incidentCameraFilter} onChange={setIncidentCameraFilter}
+        options={incidentCameraOptions.map((id) => ({ value: id, label: cameraNameById.get(id) || id }))} empty="No cameras on this day." />
+      <IncidentFilterChecks title="Objects" filter={incidentObjectFilter} onChange={setIncidentObjectFilter} columns
+        options={incidentObjectOptions.map((label) => ({ value: label, label: label.replaceAll("_", " "), icon: <IncidentObjectIcon label={label} size={19} /> }))} empty="No objects on this day." />
+      {confidenceControl}
+      <IncidentFilterChecks title="Zones" collapsed filter={incidentZoneFilter} onChange={setIncidentZoneFilter}
+        options={incidentZoneOptions.map((zone) => ({ value: zone, label: zone }))} empty="No zones on this day." />
+      <IncidentFilterChecks title="People" collapsed filter={incidentPersonFilter} onChange={setIncidentPersonFilter}
+        options={incidentPeople.map((person) => ({ value: String(person.id), label: person.name }))} empty="No named people yet." />
+    </>
   );
 
   if (!mobileView) {
@@ -984,28 +1366,12 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                   <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}><ScanSearch size={15} aria-hidden="true" />Objects</button>
                   <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}><Radar size={15} aria-hidden="true" />Motion</button>
                 </div>
+                {reviewFilterControl}
                 {semanticIncidentControl}
                 {incidentDayControl()}
               </div>
               <div className="incident-filter-pane-scroll">
-                <IncidentFilterChecks title="Cameras" filter={incidentCameraFilter} onChange={setIncidentCameraFilter}
-                  options={incidentCameraOptions.map((id) => ({ value: id, label: cameraNameById.get(id) || id }))} empty="No cameras on this day." />
-                <IncidentFilterChecks title="Objects" filter={incidentObjectFilter} onChange={setIncidentObjectFilter} columns
-                  options={incidentObjectOptions.map((label) => ({ value: label, label: label.replaceAll("_", " "), icon: <IncidentObjectIcon label={label} size={15} /> }))} empty="No objects on this day." />
-                <section className="incident-filter-section incident-filter-confidence">
-                  <h3 id="incident-confidence-heading">Confidence threshold</h3>
-                  <input type="range" min={0} max={95} step={5} value={confidenceApplies ? confidenceDraft : 0} disabled={!confidenceApplies} onChange={(event) => setConfidenceDraft(Number(event.target.value))} aria-labelledby="incident-confidence-heading" aria-valuetext={confidenceApplies && confidenceDraft > 0 ? `${confidenceDraft}% or higher` : "Any confidence"} style={{ "--fill": `${(confidenceApplies ? confidenceDraft : 0) / 95 * 100}%` }} />
-                  <div className="incident-filter-confidence-readout">
-                    <span>{displayedIncidentTotal} {displayedIncidentTotal === 1 ? "result" : "results"}</span>
-                    <output>{confidenceApplies && confidenceDraft > 0 ? `${confidenceDraft}%` : "Any"}</output>
-                  </div>
-                  {!confidenceApplies ? <small>Motion-only incidents have no detection confidence.</small>
-                    : semanticIncidentActive ? <small>Search matches are not filtered by confidence.</small> : null}
-                </section>
-                <IncidentFilterChecks title="Zones" filter={incidentZoneFilter} onChange={setIncidentZoneFilter}
-                  options={incidentZoneOptions.map((zone) => ({ value: zone, label: zone }))} empty="No zones on this day." />
-                <IncidentFilterChecks title="People" filter={incidentPersonFilter} onChange={(next) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(next); }}
-                  options={incidentPeople.map((person) => ({ value: String(person.id), label: person.name }))} empty="No named people yet." />
+                {filterLists}
               </div>
               <div className="incident-filter-pane-foot incident-toolbar-summary" aria-label={`${activeIncidentFilterCount} active filters`}>
                 <button type="button" onClick={clearIncidentFilters} disabled={!activeIncidentFilterCount}>Clear filters{activeIncidentFilterCount ? ` (${activeIncidentFilterCount})` : ""}</button>
@@ -1023,6 +1389,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                 {galleryExpanded ? (
                   <>
                     <span className="shown-bubble">{displayedIncidentTotal} {semanticIncidentActive ? "matches" : "shown"}</span>
+                    {bulkReviewControl}
                     <label className="incident-gallery-columns">
                       <span>Per row</span>
                       <input type="range" min={2} max={8} step={1} value={galleryColumns} onChange={(event) => setStoredGalleryColumns(incidentGalleryColumns(event.target.value))} aria-label="Incidents per row" style={{ "--fill": `${(galleryColumns - 2) / 6 * 100}%` }} />
@@ -1039,12 +1406,10 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                   <button type="button" className={incidentDensity === "comfortable" ? "active" : ""} aria-pressed={incidentDensity === "comfortable"} onClick={() => setIncidentDensity("comfortable")} title="Grid view" aria-label="Grid view"><Grid2X2 size={15} /></button>
                 </div>
               </div>
-              <div id="incident-results" className="incident-rail-list" ref={incidentRailListRef} aria-label="Incidents" onScroll={galleryExpanded ? loadMoreGalleryIfNearEnd : undefined} onWheel={() => { galleryRevealRef.current = 0; }} onPointerDown={() => { galleryRevealRef.current = 0; }} style={galleryExpanded ? { "--incident-gallery-columns": galleryColumns } : undefined}>
+              <div id="incident-results" className={`incident-rail-list${listUpdating ? " updating" : ""}`} aria-busy={listUpdating} ref={incidentRailListRef} aria-label="Incidents" onKeyDown={galleryExpanded ? onGalleryKeyDown : undefined} onScroll={galleryExpanded ? loadMoreGalleryIfNearEnd : undefined} onWheel={() => { galleryRevealRef.current = 0; }} onPointerDown={() => { galleryRevealRef.current = 0; }} style={galleryExpanded ? { "--incident-gallery-columns": galleryColumns } : undefined}>
                 {displayedIncidentLoading && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
                 {!galleryIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
-                {galleryIncidents.length ? pagedIncidents.map((incident) => (
-                  <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} hud={galleryExpanded || incidentDensity === "comfortable"} onSelect={galleryExpanded ? openIncidentOverlay : selectGalleryIncident} onOpenOverlay={openIncidentOverlay} />
-                )) : null}
+                {galleryIncidents.length ? pagedIncidents.map(renderTile) : null}
                 {!displayedIncidentLoading && !displayedIncidentError && !galleryIncidents.length ? (
                   <div className="empty-state">
                     {linkedIncidentLoading
@@ -1056,12 +1421,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                 ) : null}
               </div>
               {galleryExpanded ? (
-                <div className="incident-gallery-status" role="status">
-                  {galleryMoreError ? <><span>{galleryMoreError}</span><button type="button" onClick={() => setIncidentRefreshToken((value) => value + 1)}>Retry</button></>
-                    : !galleryIncidents.length ? null
-                    : galleryIncidents.length < displayedIncidentTotal ? <span>Showing {galleryIncidents.length} of {displayedIncidentTotal}. Scroll for more.</span>
-                    : <span>All {displayedIncidentTotal} {displayedIncidentTotal === 1 ? "incident" : "incidents"} for this day.</span>}
-                </div>
+                galleryStatus
               ) : (
                 <div className={`incident-pager ${displayedIncidentTotal > incidentsPerPage ? "" : "placeholder"}`} aria-label="Incident pages" aria-hidden={displayedIncidentTotal <= incidentsPerPage}>
                   <button type="button" onClick={() => changeIncidentPage(Math.max(0, incidentPage - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
@@ -1201,69 +1561,23 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
           <div className="incident-filter-selects">
             <label><span>Activity</span><select value={eventFilter} aria-label="Incident type" onChange={(event) => { resetSemanticIncidentSearch(); setEventFilter(event.target.value); }}><option value="object">Objects</option><option value="motion">Motion</option></select></label>
             {incidentDayControl({ caption: true })}
-            <label>
-              <span>Camera</span>
-              <select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)} aria-label="Incident camera">
-                <option value="all">All cameras</option>
-                {incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}
-              </select>
-            </label>
-            <label>
-              <span>Object type</span>
-              <select value={incidentObjectFilter} onChange={(event) => setIncidentObjectFilter(event.target.value)} aria-label="Incident object">
-                <option value="all">All objects</option>
-                {incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}
-              </select>
-            </label>
-            <label>
-              <span>Zone</span>
-              <select value={incidentFilterValues(incidentZoneFilter).length === 1 ? incidentFilterValues(incidentZoneFilter)[0] : "all"} onChange={(event) => setIncidentZoneFilter(event.target.value === "all" ? "all" : encodeIncidentFilterValue(event.target.value))} aria-label="Incident zone">
-                <option value="all">All zones</option>
-                {incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}
-              </select>
-            </label>
-            <label>
-              <span>Person</span>
-              <select value={incidentPersonFilter} onChange={(event) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(event.target.value); }} aria-label="Known person">
-                <option value="all">All people</option>
-                {incidentPeople.map((person) => <option value={person.id} key={person.id}>{person.name}</option>)}
-              </select>
-            </label>
           </div>
+          {reviewFilterControl}
           {semanticIncidentControl}
           <div className="mobile-filter-actions">
             <button type="button" onClick={() => { clearIncidentFilters(); setIncidentDay(today); setEventFilter("object"); resetSemanticIncidentSearch(); }}>Reset filters</button>
             <button type="button" onClick={() => setMobileFiltersOpen(false)}>Done</button>
           </div>
+          <div className="mobile-filter-lists">{filterLists}</div>
         </div> : null}
-        <div className="incident-gallery">
-          {displayedIncidentLoading ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
-          {!displayedIncidentLoading && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
-          {!displayedIncidentLoading && !displayedIncidentError && visibleIncidents.length
-            ? pagedIncidents.map((incident) => (
-              <IncidentCard
-                key={incident.id}
-                incident={incident}
-                faceNames={incidentFaceNames[String(incident.id)]}
-                timeZone={timeZone}
-                expanded={false}
-                thumbnailAnnotations={thumbnailAnnotations}
-                thumbnailObjectFocus={thumbnailObjectFocus}
-                thumbnailObjectFocusZoom={thumbnailObjectFocusZoom}
-                onToggle={toggleIncident}
-                onSelect={() => toggleIncident(incident.id)}
-              />
-            ))
-            : null}
+        {bulkReviewControl}
+        <div id="incident-results" className={`incident-gallery incident-phone-gallery${listUpdating ? " updating" : ""}`} aria-busy={listUpdating} aria-label="Incidents" onKeyDown={onGalleryKeyDown}>
+          {displayedIncidentLoading && !visibleIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
+          {!visibleIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
+          {visibleIncidents.length ? pagedIncidents.map(renderTile) : null}
           {!displayedIncidentLoading && !displayedIncidentError && !visibleIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "No semantic matches for the selected filters." : "No incidents match the current filters."}</div> : null}
         </div>
-        {displayedIncidentTotal > incidentsPerPage ? (
-          <div className="incident-pager" aria-label="Incident pages">
-            <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
-            <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
-            <button type="button" onClick={() => setIncidentPage((page) => Math.min(incidentPageCount - 1, page + 1))} disabled={clampedIncidentPage >= incidentPageCount - 1}>Next</button>
-          </div>
-        ) : null}
+        {galleryStatus}
       </section>
       {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} canCorrectIncident={canCorrectIncident} onClose={closeOpenedIncident} onSelect={openIncidentOverlay} onRefresh={refresh} /> : null}
     </main>

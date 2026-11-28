@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { CircleAlert } from "lucide-react";
 
 import "./typeScale.css";
+import "./fonts.css";
 import "./styles.css";
 import "./shell/shell.css";
 import "./timeline/timeline.css";
@@ -37,16 +38,40 @@ function lazyExport(importer, exportName) {
   return lazy(() => importer().then((module) => ({ default: module[exportName] })));
 }
 
-const LivePage = lazyExport(() => import("./live/LivePage.jsx"), "LivePage");
-const IncidentDetailPage = lazyExport(() => import("./incidents/IncidentDetailPage.jsx"), "IncidentDetailPage");
-const ObservationsPage = lazyExport(() => import("./incidents/ObservationsPage.jsx"), "ObservationsPage");
-const IncidentsPage = lazyExport(() => import("./incidents/IncidentsPage.jsx"), "IncidentsPage");
-const ExportCenterPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "ExportCenterPage");
-const RecordingsPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "RecordingsPage");
-const SemanticSearchPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "SemanticSearchPage");
-const ConfigPage = lazyExport(() => import("./admin/ConfigPage.jsx"), "ConfigPage");
-const PeoplePage = lazyExport(() => import("./people/PeoplePage.jsx"), "PeoplePage");
-const PropertyPage = lazyExport(() => import("./property/PropertyPage.jsx"), "PropertyPage");
+// One importer per page, so the page for the current address can start
+// loading before the app has rendered anything.
+const pageImporters = {
+  live: () => import("./live/LivePage.jsx"),
+  incident: () => import("./incidents/IncidentDetailPage.jsx"),
+  observations: () => import("./incidents/ObservationsPage.jsx"),
+  incidents: () => import("./incidents/IncidentsPage.jsx"),
+  timelinePages: () => import("./timeline/TimelinePages.jsx"),
+  admin: () => import("./admin/ConfigPage.jsx"),
+  people: () => import("./people/PeoplePage.jsx"),
+  property: () => import("./property/PropertyPage.jsx"),
+};
+const LivePage = lazyExport(pageImporters.live, "LivePage");
+const IncidentDetailPage = lazyExport(pageImporters.incident, "IncidentDetailPage");
+const ObservationsPage = lazyExport(pageImporters.observations, "ObservationsPage");
+const IncidentsPage = lazyExport(pageImporters.incidents, "IncidentsPage");
+const ExportCenterPage = lazyExport(pageImporters.timelinePages, "ExportCenterPage");
+const RecordingsPage = lazyExport(pageImporters.timelinePages, "RecordingsPage");
+const SemanticSearchPage = lazyExport(pageImporters.timelinePages, "SemanticSearchPage");
+const ConfigPage = lazyExport(pageImporters.admin, "ConfigPage");
+const PeoplePage = lazyExport(pageImporters.people, "PeoplePage");
+const PropertyPage = lazyExport(pageImporters.property, "PropertyPage");
+
+// The page's code used to be requested only after the session check came
+// back. Ask for it at once; the import is shared with the lazy component, and
+// a failure here is reported when that component loads.
+function preloadCurrentPage() {
+  try {
+    const pathname = appPathname();
+    const page = /^\/incidents\/incident-[^/]+\/?$/.test(pathname) ? "incident" : resolveWorkspace(pathname)?.id;
+    const importer = pageImporters[{ exports: "timelinePages", timeline: "timelinePages", search: "timelinePages" }[page] || page];
+    importer?.().catch(() => {});
+  } catch { /* the app renders its own error for an unusable address */ }
+}
 
 function WorkspaceFallback() {
   return <main className="workspace-not-found" aria-busy="true"><p>Loading workspace…</p></main>;
@@ -161,5 +186,6 @@ function App() {
   );
 }
 
+preloadCurrentPage();
 createRoot(document.getElementById("root")).render(<App />);
 registerSurvngServiceWorker();

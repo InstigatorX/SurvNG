@@ -17,6 +17,17 @@ export function eventSnapshotDownloadUrl(event) {
   return `${path}${path.includes("?") ? "&" : "?"}download=true${hash == null ? "" : `#${hash}`}`;
 }
 
+// Thumbnail widths come from a short list so that nearby tile sizes share one
+// stored image. The pixel density is capped at 2: beyond that the extra detail
+// is not visible at tile size and the image is several times heavier.
+export const THUMBNAIL_WIDTHS = Object.freeze([240, 320, 480, 640, 960]);
+
+export function thumbnailWidthFor(cssWidth, devicePixelRatio = 1) {
+  const density = Math.max(1, Math.min(2, Number(devicePixelRatio) || 1));
+  const needed = Math.max(1, Number(cssWidth) || 0) * density;
+  return THUMBNAIL_WIDTHS.find((width) => width >= needed) || THUMBNAIL_WIDTHS[THUMBNAIL_WIDTHS.length - 1];
+}
+
 export function eventThumbnailUrl(event, width = 720, quality = 82, options = {}) {
   if (event?.snapshot_url) {
     if (!event.snapshot_observation_id && !event.snapshot_evidence_id) return appUrl(event.snapshot_url);
@@ -24,6 +35,8 @@ export function eventThumbnailUrl(event, width = 720, quality = 82, options = {}
       width: String(Math.max(160, Math.min(2560, Math.round(Number(width) || 720)))),
       quality: String(Math.max(50, Math.min(95, Math.round(Number(quality) || 82)))),
     });
+    // Naming the file version lets the browser keep the picture without asking again.
+    if (event.image_version) params.set("s", String(event.image_version));
     return appUrl(`${event.snapshot_url}${event.snapshot_url.includes("?") ? "&" : "?"}${params}`);
   }
   const eventId = Number(event?.representative_event_id || event?.id);
@@ -33,6 +46,7 @@ export function eventThumbnailUrl(event, width = 720, quality = 82, options = {}
     quality: String(Math.max(50, Math.min(95, Math.round(Number(quality) || 82)))),
   });
   if (event?.evidence_revision != null) params.set("v", String(event.evidence_revision));
+  if (event?.image_version) params.set("s", String(event.image_version));
   if (options?.objectFocus) {
     params.set("object_focus", "true");
     if (options.incidentEligibleOnly) params.set("incident_eligible_only", "true");

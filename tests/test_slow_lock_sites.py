@@ -164,14 +164,16 @@ def test_slow_transaction_is_attributed_with_its_write_lock_time(
         connection.execute("create table t (value integer not null)")
     _slow_write(connect, 0.05)
 
-    sites = table.snapshot()["sites"]
+    # On a slow machine the setup above can itself exceed the 20 ms threshold and
+    # be recorded too (it took 26 ms on a CI runner). Only the deliberately slow
+    # write is this test's subject.
+    sites = [site for site in table.snapshot()["sites"] if site["site"].endswith(" _slow_write")]
     assert len(sites) == 1
     assert sites[0]["site"].startswith("main ")
-    assert sites[0]["site"].endswith(" _slow_write")
     assert sites[0]["max_write_lock_ms"] >= 40.0
     held = write_lock.histograms()["slow_holds"]["sites"]
     # The write lock is attributed to the statement that first wrote.
-    assert held and held[0]["site"].endswith(" _slow_write")
+    assert any(site["site"].endswith(" _slow_write") for site in held)
     assert "slow_transactions" in main_database.database_metrics_snapshot()
 
 

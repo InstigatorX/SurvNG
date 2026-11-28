@@ -624,3 +624,29 @@ export function toggleIncidentFilterValue(filter, value) {
   const next = chosen.includes(key) ? chosen.filter((item) => item !== key) : [...chosen, key];
   return next.length ? next.sort().map(encodeIncidentFilterValue).join(",") : "all";
 }
+
+// Keep the object already shown when a re-read returns the same incident
+// unchanged, so the list can tell which tiles need to be drawn again.
+export function keepIncidentIdentity(previous, items) {
+  const known = new Map((previous || []).map((item) => [String(item.id), item]));
+  return (items || []).map((item) => {
+    const shown = known.get(String(item.id));
+    return shown && JSON.stringify(shown) === JSON.stringify(item) ? shown : item;
+  });
+}
+
+// Fold a fresh read of the newest incidents into a longer list already shown.
+// Returns null when the two do not overlap: too much changed to merge, and the
+// whole list should be read again.
+export function mergeIncidentHead(previous, head, total = Infinity) {
+  const fresh = keepIncidentIdentity(previous, head);
+  if (!previous?.length) return fresh;
+  // The fresh read is the whole list: nothing older exists to keep.
+  if (fresh.length >= total) return fresh;
+  const ids = new Set(fresh.map((item) => String(item.id)));
+  if (!previous.some((item) => ids.has(String(item.id)))) return null;
+  // Everything newer than the oldest incident in the fresh read comes from it;
+  // older incidents were not re-read and stay as they are.
+  const oldest = previous.findLastIndex((item) => ids.has(String(item.id)));
+  return [...fresh, ...previous.slice(oldest + 1).filter((item) => !ids.has(String(item.id)))];
+}

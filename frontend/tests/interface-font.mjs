@@ -29,9 +29,14 @@ for (const page of ["index.html", "config.html", "recordings.html"]) {
 }
 
 // The stylesheet gives every optional font a stack, and every bundled face a file that exists.
-const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+const css = readFileSync(new URL("../src/fonts.css", import.meta.url), "utf8");
+const appCss = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 for (const font of optional) assert.match(css, new RegExp(`:root\\[data-font="${font}"\\] \\{\\s+--font-ui:`), `${font} has a font stack`);
-assert.match(css, /font-family: var\(--font-ui\);/);
+assert.match(appCss, /font-family: var\(--font-ui\);/);
+// The standalone ONVIF inspector loads the same faces and follows the same choice.
+assert.match(readFileSync(new URL("../src/onvif/onvif.css", import.meta.url), "utf8"), /font-family: var\(--font-ui,/);
+const inspector = readFileSync(new URL("../src/onvif/main.jsx", import.meta.url), "utf8");
+assert.ok(inspector.includes('import "../fonts.css";') && inspector.includes("applyInterfaceFont("));
 const faces = [...css.matchAll(/url\("(@fontsource-variable\/[^"]+)"\)/g)].map((match) => match[1]);
 assert.equal(faces.length, 5, "Inter and four optional faces are bundled; the system font needs none");
 for (const face of faces) assert.ok(existsSync(new URL(`../node_modules/${face}`, import.meta.url)), `${face} is installed`);

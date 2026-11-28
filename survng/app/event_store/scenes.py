@@ -39,6 +39,9 @@ def _display_confidence(item):
 
 
 # Equivalent predicate for bounded card/label queries, before loading payloads.
+# Card cover choices kept in memory, one per incident listed recently.
+_CARD_COVER_CACHE_ENTRIES = 4000
+
 _DISPLAY_CONFIDENCE_SQL = (
     "coalesce(json_extract(o.payload_json,'$.confidence_eligible'),1)!=0 and "
     "(json_extract(o.payload_json,'$.confidence_threshold') is null or "
@@ -1319,7 +1322,7 @@ class EventStoreSceneMixin:
         return result
 
     @staticmethod
-    def _scene_query_where(*, start_epoch=None, end_epoch=None, camera_id="", event_type="all", object_label="", zone="", min_confidence=0.0):
+    def _scene_query_where(*, start_epoch=None, end_epoch=None, camera_id="", event_type="all", object_label="", zone="", min_confidence=0.0, review=""):
         clauses=["i.state != 'unconfirmed'", "exists(select 1 from scene_episodes p join scene_event_membership m on m.episode_id=p.id where p.incident_id=i.id)"]
         args=[]
         if start_epoch is not None:
@@ -1352,10 +1355,19 @@ class EventStoreSceneMixin:
             args.append(floor)
         zones=chosen(zone)
         if zones:
-            clauses.append("exists(select 1 from scene_observation_zones z "
-                           "join scene_episodes p on p.id=z.episode_id "
+            # Start from this incident's episodes (CROSS JOIN fixes the order).
+            # Left to choose, the planner walks every row of the zone for each
+            # incident, which took over a second per day of incidents.
+            clauses.append("exists(select 1 from scene_episodes p "
+                           "cross join scene_observation_zones z on z.episode_id=p.id "
                            "where p.incident_id=i.id and z.zone in ("+",".join("?"*len(zones))+"))")
             args.extend(zones)
+        # "reviewed" means a person recorded Reviewed or Nothing here; an incident
+        # kept for later still needs looking at.
+        if review in {"reviewed","unreviewed"}:
+            clauses.append(("" if review=="reviewed" else "not ")+
+                           "exists(select 1 from scene_incident_reviews r where r.incident_id=i.id "
+                           "and r.verdict in ('reviewed','nothing_here'))")
         return " and ".join(clauses),args
 
     @staticmethod
@@ -1413,13 +1425,13 @@ class EventStoreSceneMixin:
             return conn.execute("select count(*) from scene_incidents i where "+where,args).fetchone()[0]
 
     def list_scene_incidents(self,*,start_epoch=None,end_epoch=None,start_at=None,end_at=None,camera_id="",limit=200,offset=0,
-                             event_type="all",object_label="",zone="",summary_only=False,min_confidence=0.0):
+                             event_type="all",object_label="",zone="",summary_only=False,min_confidence=0.0,review=""):
         if start_at is not None:
             start_epoch=_epoch(start_at)
         if end_at is not None:
             end_epoch=_epoch(end_at)
         where,args=self._scene_query_where(start_epoch=start_epoch,end_epoch=end_epoch,camera_id=camera_id,
-                                          event_type=event_type,object_label=object_label,zone=zone,min_confidence=min_confidence)
+                                          event_type=event_type,object_label=object_label,zone=zone,min_confidence=min_confidence,review=review)
         with self._connect() as conn:
             ids=conn.execute("select i.id from scene_incidents i where "+where+" order by i.start_epoch desc,i.id limit ? offset ?",
                              (*args,max(1,min(int(limit),1000)),max(0,int(offset)))).fetchall()
@@ -1438,8 +1450,38 @@ class EventStoreSceneMixin:
             payloads=(self._scene_notification_payload(conn,row[0]) for row in ids)
             return [payload for payload in payloads if payload is not None]
 
+    def _card_cover_choice(self, members, present, choose):
+        """Which event represents an incident on its card, and each event's capture time.
+
+        Deciding it reads and scores every event of the incident, which is most
+        of the work of listing busy incidents, and the gallery lists the same
+        incidents again on every refresh, filter change and scroll. The answer
+        depends only on the stored event rows, so it is kept under a digest of
+        those rows: any change to an event is a different key.
+        """
+        if not members:
+            return None, {}
+        # A digest, not the rows: objects_json can run to kilobytes per event.
+        digest = hashlib.blake2b(digest_size=16)
+        for event in members:
+            digest.update(repr(tuple(event)).encode("utf-8", "surrogatepass"))
+            digest.update(b"\x00")
+        key = digest.digest()
+        cache = getattr(self, "_card_cover_cache", None)
+        if cache is None:
+            cache = self._card_cover_cache = {}
+        found = cache.get(key)
+        if found is None:
+            presented = [present(dict(event)) for event in members]
+            found = (choose(presented)["id"],
+                     {event["id"]: event["snapshot_captured_at"] for event in presented if event.get("snapshot_captured_at")})
+            if len(cache) >= _CARD_COVER_CACHE_ENTRIES:
+                cache.clear()
+            cache[key] = found
+        return found[0], dict(found[1])
+
     def list_scene_incident_cards(self,*,start_epoch=None,end_epoch=None,start_at=None,end_at=None,camera_id="",limit=200,offset=0,
-                                  event_type="all",object_label="",zone="",min_confidence=0.0):
+                                  event_type="all",object_label="",zone="",min_confidence=0.0,review=""):
         """Page rows for the incident rail: cover, labels, and time, without observation history."""
         from ..incident_presenter import _best_incident_event, _event_row
         if start_at is not None:
@@ -1447,7 +1489,7 @@ class EventStoreSceneMixin:
         if end_at is not None:
             end_epoch=_epoch(end_at)
         where,args=self._scene_query_where(start_epoch=start_epoch,end_epoch=end_epoch,camera_id=camera_id,
-                                          event_type=event_type,object_label=object_label,zone=zone,min_confidence=min_confidence)
+                                          event_type=event_type,object_label=object_label,zone=zone,min_confidence=min_confidence,review=review)
         with self._connect() as conn:
             ids=[row[0] for row in conn.execute(
                 "select i.id from scene_incidents i where "+where+" order by i.start_epoch desc,i.id limit ? offset ?",
@@ -1474,6 +1516,9 @@ class EventStoreSceneMixin:
                 f"where p.incident_id in ({placeholders})",
                 ids,
             ).fetchall()
+            # Whether a person has looked at each incident; shown on its card.
+            verdict_by={row["incident_id"]:row["verdict"] for row in conn.execute(
+                f"select incident_id,verdict from scene_incident_reviews where incident_id in ({placeholders})", ids)}
             event_rows=conn.execute(
                 "select p.incident_id,e.id,e.camera_id,e.kind,e.topic,e.created_at,e.snapshot_path,e.evidence_revision,e.objects_json "
                 "from events e join scene_event_membership m on m.event_id=e.id "
@@ -1528,13 +1573,9 @@ class EventStoreSceneMixin:
                 continue
             members=events_by.get(incident_id, [])
             labels=sorted(labels_by.get(incident_id, ()))
-            presented_members=[_event_row(dict(event)) for event in members]
-            best=(
-                _best_incident_event(presented_members)
-                if presented_members else None
-            )
+            best_id,captured_by=self._card_cover_choice(members,_event_row,_best_incident_event)
             representative=next(
-                (event for event in members if event["id"] == best["id"]),
+                (event for event in members if event["id"] == best_id),
                 members[-1] if members else None,
             )
             opener=members[0] if members else None
@@ -1542,8 +1583,6 @@ class EventStoreSceneMixin:
             trigger="ema" if raw_trigger in {"ema","adaptive","visual_backup","adaptive/visual_backup"} else "speech" if raw_trigger==SPEECH_TOPIC else "doorbell" if raw_trigger==DOORBELL_TOPIC else "camera"
             snapshot_observation_id=None
             snapshot_url=None
-            captured_by={event["id"]:event["snapshot_captured_at"] for event in presented_members
-                         if event.get("snapshot_captured_at")}
             selected = _scene_observation_cover(
                 representative, observations_by.get(incident_id, []),
                 recorded_pixels=recorded_pixels_by.get(incident_id, 0),
@@ -1557,14 +1596,17 @@ class EventStoreSceneMixin:
                 snapshot_observation_id=cover["id"]
                 snapshot_url=f"/api/incidents/observations/{snapshot_observation_id}/snapshot"
                 snapshot_path="available"
+                cover_file=str(cover["snapshot_path"] or "")
                 snapshot_captured_at=_iso(cover["captured_epoch"])
                 cover_objects=_card_cover_objects(_json(selected["objects"]))
             elif representative is not None and representative["snapshot_path"]:
                 snapshot_path="available"
+                cover_file=str(representative["snapshot_path"])
                 snapshot_captured_at=captured_by.get(representative["id"])
                 cover_objects=_card_cover_objects(representative["objects_json"])
             else:
                 snapshot_path=""
+                cover_file=""
                 snapshot_captured_at=None
                 cover_objects=[]
             cover_event_id=int(representative["id"]) if representative is not None and snapshot_path else None
@@ -1588,12 +1630,16 @@ class EventStoreSceneMixin:
                 "snapshot_path":snapshot_path,
                 "snapshot_url":snapshot_url,
                 "snapshot_observation_id":snapshot_observation_id,
+                # Where the cover is stored. Private: the caller names the file's
+                # version from it and removes it before the card is sent.
+                "_cover_file":cover_file,
                 **({"snapshot_captured_at":snapshot_captured_at} if snapshot_captured_at else {}),
                 "labels":labels,
                 "zones":sorted(zones_by.get(incident_id, ())),
                 "has_objects":bool(labels),
                 "kind":"object" if labels else "motion",
                 "trigger_source":trigger,
+                "review_verdict":verdict_by.get(incident_id),
                 "event_count":len(members),
                 "event_ids":[event["id"] for event in members],
                 "objects":cover_objects,

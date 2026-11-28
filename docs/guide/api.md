@@ -154,6 +154,7 @@ curl -s http://127.0.0.1:8088/api/config | python -m json.tool
 | GET | `/api/incidents/feed` | Compact live feed |
 | GET | `/api/incidents/detail` | Detailed incident payload |
 | GET | `/api/incidents/search` | Filtered incident search |
+| PUT | `/api/incidents/reviews` | Set or clear one verdict on several incidents (`{"incident_ids": [...], "verdict": "reviewed" \| null}`, at most 500, all or nothing) |
 | GET | `/api/incidents/by-event/{event_id}` | Incident containing an event |
 | GET | `/api/events/{event_id}/snapshot.jpg` | Full evidence image |
 | GET | `/api/events/{event_id}/thumbnail.jpg` | Resized thumbnail (`object_focus=true` crops to detected objects from the full snapshot before resize; optional `zoom`, `aspect_w`, `aspect_h`) |
@@ -175,7 +176,9 @@ curl -s -G 'http://127.0.0.1:8088/api/incidents/search' \
   --data-urlencode 'limit=20' | python -m json.tool
 ```
 
-`min_confidence` (0 to 1) keeps incidents with a detection at or above that confidence; with `object_label` set, that object must reach it. An incident with no detections (motion only) has none to compare, so a threshold above 0 leaves it out. `camera_id`, `object_label`, `zone` and `person_id` each accept several values separated by commas and match any of them; different filters narrow each other. Inside a value, write a comma as `%2C` and a percent sign as `%25` (before URL encoding). `limit` is capped at 100; page with `offset`.
+`min_confidence` (0 to 1) keeps incidents with a detection at or above that confidence; with `object_label` set, that object must reach it. An incident with no detections (motion only) has none to compare, so a threshold above 0 leaves it out. `camera_id`, `object_label`, `zone` and `person_id` each accept several values separated by commas and match any of them; different filters narrow each other. Inside a value, write a comma as `%2C` and a percent sign as `%25` (before URL encoding). `review=unreviewed` or `review=reviewed` keeps incidents without or with a Reviewed or Nothing here verdict. `compact=true` leaves out each item's per-event list (`event_ids` remains), which is most of a busy incident's card.
+
+Each item carries `review_verdict` (`reviewed`, `keep`, `nothing_here` or null) and, when its picture is on disk, `image_version`. Passing that value as `s=` to the item's thumbnail or snapshot URL lets the response be cached for good; without it the image is revalidated on every use. `limit` is capped at 100; page with `offset`.
 
 Exact query parameter names follow the live OpenAPI schema at `/docs` if your build adds filters.
 

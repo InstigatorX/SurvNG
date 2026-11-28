@@ -13,9 +13,9 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, HTTPException, Body
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Body, Request
 from .event_store.scenes import SceneConflict, filter_values
+from .image_cache import image_version, revalidated_image_response
 from .incident_utils import snapshot_media_type
 
 from .audit_ai import motion_audit_interpretation
@@ -64,6 +64,36 @@ def _with_speech(manager: Any, incidents: list[dict[str, Any]]) -> list[dict[str
     """Add speech counts when this manager supports speech (optional enrichment)."""
     attach = getattr(manager, "attach_incident_speech", None)
     return attach(incidents) if callable(attach) else incidents
+
+
+def _with_image_versions(manager: Any, incidents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Name the version of each card's picture so the browser can keep it.
+
+    The public snapshot_path is only a marker, so the file comes from the
+    private _cover_file a card carries, or from the stored observation or event
+    behind the cover. The version must be of the file the cover's URL serves.
+    """
+    storage_dir = getattr(manager, "storage_dir", None)
+    media_storage = getattr(manager, "media_storage", None)
+    for incident in incidents:
+        known = "_cover_file" in incident
+        raw_path = str(incident.pop("_cover_file", "") or "")
+        if storage_dir is None or not incident.get("snapshot_path"):
+            continue
+        if not known:
+            observation_id = incident.get("snapshot_observation_id")
+            source = (manager.events.scene_observation(str(observation_id)) if observation_id
+                      else manager.events.get(int(incident.get("representative_event_id") or 0)))
+            raw_path = str((source or {}).get("snapshot_path") or "")
+        if not raw_path:
+            continue
+        try:
+            incident["image_version"] = image_version(
+                event_snapshot_path(storage_dir, {"snapshot_path": raw_path}, media_storage))
+        except (OSError, ValueError):
+            # No readable file: the card goes without a version and its picture is revalidated.
+            continue
+    return incidents
 
 
 def _filter_incidents_by_event_type(
@@ -363,7 +393,7 @@ class IncidentQueryService:
             ),
         }
         return {
-            "items": _with_speech(manager, [_incident_list_payload(item) for item in page]),
+            "items": _with_image_versions(manager, _with_speech(manager, [_incident_list_payload(item) for item in page])),
             "limit": bounded_limit,
             "offset": bounded_offset,
             "has_more": has_more,
@@ -421,7 +451,11 @@ class IncidentQueryService:
         offset: int = 0,
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
         min_confidence: float = 0.0,
+        compact: bool = False,
+        review: str = "",
     ) -> dict[str, Any]:
+        if review not in {"", "all", "reviewed", "unreviewed"}:
+            raise HTTPException(status_code=422, detail="review must be reviewed, unreviewed or all")
         day_start, day = _local_day_start(day, time_zone)
         day_end = day_start + timedelta(days=1)
         bounds = {"start_epoch":day_start.timestamp(), "end_epoch":day_end.timestamp()}
@@ -429,6 +463,8 @@ class IncidentQueryService:
         filters = {**bounds, "event_type":event_type, "camera_id":camera_id, "object_label":object_label, "zone":zone}
         if math.isfinite(min_confidence) and min_confidence > 0:
             filters["min_confidence"] = min(float(min_confidence), 1.0)
+        if review in {"reviewed", "unreviewed"}:
+            filters["review"] = review
         # One id, or several separated by commas; an incident with any of them matches.
         selected_person_id = _person_ids(person_id)
         bounded_limit = max(1, min(limit, 100))
@@ -448,12 +484,23 @@ class IncidentQueryService:
                 if len(batch)<100:
                     break
                 cursor += len(batch)
-            page_summaries = [manager.events.scene_incident(incident_id) for incident_id in selected]
+            # Full incidents do not carry the review mark that cards do.
+            page_summaries = [
+                {**incident, "review_verdict": manager.events.incident_review(incident["id"])["verdict"]}
+                for incident in (manager.events.scene_incident(incident_id) for incident_id in selected)
+            ]
         else:
             total = manager.events.count_scene_incidents(**filters)
             page_summaries = manager.events.list_scene_incident_cards(**filters,limit=bounded_limit,offset=bounded_offset)
+        items = _with_image_versions(manager, _with_speech(manager, [_incident_list_payload(item) for item in page_summaries]))
+        if compact:
+            # A picture gallery shows the cover, labels and time. The per-event
+            # list is most of a busy incident's card and none of it is drawn;
+            # event_ids still says which events belong.
+            for item in items:
+                item.pop("events", None)
         return {
-            "items": _with_speech(manager, [_incident_list_payload(item) for item in page_summaries]),
+            "items": items,
             "total": total,
             "limit": bounded_limit,
             "offset": bounded_offset,
@@ -698,6 +745,8 @@ def create_incident_query_router(
         offset: int = 0,
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
         min_confidence: float = 0.0,
+        compact: bool = False,
+        review: str = "",
     ) -> dict[str, Any]:
         return with_manager(
             lambda active: service.search(
@@ -713,6 +762,8 @@ def create_incident_query_router(
                 offset=offset,
                 gap_seconds=gap_seconds,
                 min_confidence=min_confidence,
+                compact=compact,
+                review=review,
             )
         )
 
@@ -779,7 +830,7 @@ def create_incident_query_router(
             status=status, limit=limit, offset=offset))
 
     @router.get("/api/observations/{sample_id}/snapshot")
-    def observation_sample_snapshot(sample_id: str):
+    def observation_sample_snapshot(sample_id: str, request: Request = None):
         def resolve(active):
             sample = active.events.scene_sample(sample_id)
             if sample is None or not sample.get("snapshot_path"):
@@ -788,7 +839,7 @@ def create_incident_query_router(
                 path = event_snapshot_path(active.storage_dir, sample, active.media_storage)
             except (FileNotFoundError, PermissionError):
                 raise HTTPException(status_code=404, detail="supporting image expired")
-            return FileResponse(path, media_type=snapshot_media_type(path), headers={"Cache-Control":"private, no-cache"})
+            return revalidated_image_response(path, snapshot_media_type(path), request)
         return with_manager(resolve)
 
     @router.get("/api/observations/{record_id}")
@@ -808,6 +859,8 @@ def create_incident_query_router(
         aspect_w: float = 16.0,
         aspect_h: float = 9.0,
         focus_bbox: str = "",
+        s: str = "",
+        request: Request = None,
     ):
         def resolve(active):
             observation = (active.events.scene_evidence_image(observation_id)
@@ -829,6 +882,7 @@ def create_incident_query_router(
                     _bbox_focus_thumbnail_frame,
                     _clamp_object_focus_zoom,
                     _jpeg_thumbnail,
+                    _read_frame_for_width,
                 )
                 safe_width, safe_quality = max(160, min(2560, width or 960)), max(50, min(95, quality))
                 focus_zoom = _clamp_object_focus_zoom(zoom)
@@ -848,7 +902,7 @@ def create_incident_query_router(
                     f"{focus_bbox}:{focus_zoom:.3f}:{focus_aspect_w:.3f}:{focus_aspect_h:.3f}"
                 )
                 def build():
-                    frame = cv2.imread(str(path))
+                    frame = _read_frame_for_width(path, safe_width) if parsed_focus_bbox is None else cv2.imread(str(path))
                     if frame is None:
                         raise HTTPException(status_code=404, detail="supporting image unavailable")
                     if parsed_focus_bbox is not None:
@@ -861,8 +915,8 @@ def create_incident_query_router(
                         )
                     return _jpeg_thumbnail(frame, safe_width, safe_quality)
                 cached = active.image_cache.get_or_create("observations", identity, build)
-                return FileResponse(cached, media_type="image/jpeg", headers={"Cache-Control":"private, no-cache"})
-            return FileResponse(path, media_type=snapshot_media_type(path), headers={"Cache-Control": "private, no-cache"})
+                return revalidated_image_response(cached, "image/jpeg", request, version=s, source=path)
+            return revalidated_image_response(path, snapshot_media_type(path), request, version=s)
         return with_manager(resolve)
 
     @router.get("/api/incidents/{incident_id}")
@@ -918,6 +972,20 @@ def create_incident_query_router(
             return {"incident_id": incident_id, "status": "disabled", "title": None}
         # The provider call runs outside the manager lease.
         return titles.title(incident, ai_config, names)
+
+    @router.put("/api/incidents/reviews")
+    def review_incidents(review: dict[str, Any] = Body(...)):
+        # One verdict for several incidents, saved together or not at all.
+        if "verdict" not in review or not isinstance(review.get("incident_ids"), list):
+            raise HTTPException(status_code=422, detail="verdict and incident_ids are required")
+        def record(active):
+            try:
+                return active.events.set_incident_reviews(review["incident_ids"], review["verdict"])
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return with_manager(record)
 
     @router.get("/api/incidents/{incident_id}/review")
     def incident_review(incident_id: str):

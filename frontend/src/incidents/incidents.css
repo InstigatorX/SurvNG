@@ -886,11 +886,12 @@
   gap: 1px;
   padding: 3px 7px 4px;
   border-radius: 7px;
-  background: rgba(3, 4, 5, .34);
+  /* No blur behind the label: it was repainted for every picture on every
+   * scrolled frame and made scrolling stutter. The shadow keeps the text readable. */
+  background: rgba(3, 4, 5, .42);
   color: #fff;
   line-height: 1.25;
   text-shadow: 0 1px 2px rgba(0, 0, 0, .85);
-  backdrop-filter: blur(3px);
 }
 
 .incident-hud-where b,
@@ -919,20 +920,79 @@
 
 .incident-hud-objects .pill {
   border-color: transparent;
-  background: rgba(3, 4, 5, .34);
+  background: rgba(3, 4, 5, .42);
   color: #fff;
-  backdrop-filter: blur(3px);
 }
 
 .incident-hud-objects .pill svg {
   filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .8));
 }
 
+/* The review mark takes the upper right; the source dot moves to the lower right. */
+.live-activity-item.with-hud .live-activity-trigger,
 .incident-rail.comfortable .live-activity-item.with-hud .live-activity-trigger,
 .gallery-expanded .incident-rail .live-activity-item.with-hud .live-activity-trigger {
-  top: 6px;
-  right: 6px;
-  bottom: auto;
+  top: auto;
+  right: 8px;
+  bottom: 8px;
+}
+
+/* Over a picture the dot's hover state is a tint like the rest of the HUD, not a solid block. */
+.live-activity-item.with-hud .live-activity-trigger:hover,
+.live-activity-item.with-hud .live-activity-trigger:focus-visible {
+  border-radius: 8px;
+  background: rgba(3, 4, 5, .42);
+}
+
+.incident-hud-review {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(3, 4, 5, .42);
+  cursor: pointer;
+}
+
+.incident-hud-review input {
+  /* The app's inputs have a minimum height; without clearing it the box is
+   * taller than it looks and the mark sits low in its outline. */
+  display: block;
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--good);
+  cursor: inherit;
+}
+
+.incident-hud-review:has(input:disabled) {
+  cursor: default;
+}
+
+.incident-hud-review:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Leave room for the review mark beside the camera name. */
+.live-activity-item.with-hud .incident-hud-where {
+  max-width: calc(100% - 52px);
+}
+
+.incident-earlier-day {
+  min-height: 28px;
+  padding: 2px 10px;
+  font-size: var(--text-xs);
+}
+
+.incident-gallery-error {
+  color: var(--bad-ink);
 }
 
 @media (max-width: 1180px) {
@@ -1001,4 +1061,179 @@
   .gallery-expanded .incident-rail .live-activity-item:focus-within {
     transform: none;
   }
+}
+
+/* A long day can hold hundreds of tiles. Each tile's height follows from its
+ * width alone, so the browser can skip laying out and painting the ones that
+ * are off screen without the scroll length changing. */
+.gallery-expanded .incident-rail .live-activity-item.with-hud {
+  aspect-ratio: 16 / 9;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px auto 180px;
+}
+
+.gallery-expanded .incident-rail .live-activity-item.with-hud .live-activity-select,
+.gallery-expanded .incident-rail .live-activity-item.with-hud .live-activity-thumb {
+  height: 100%;
+}
+
+.gallery-expanded .incident-rail .live-activity-item.with-hud .live-activity-thumb {
+  aspect-ratio: auto;
+}
+
+/* Phone gallery: the same tiles as the desktop gallery. */
+.incident-phone-gallery .live-activity-item.with-hud {
+  min-width: 0;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 350px auto 197px;
+}
+
+.incident-phone-gallery .live-activity-item.with-hud .live-activity-select,
+.incident-phone-gallery .live-activity-item.with-hud .live-activity-thumb {
+  height: 100%;
+}
+
+.incident-phone-gallery .live-activity-item.with-hud .live-activity-thumb {
+  aspect-ratio: auto;
+}
+
+.incident-phone-gallery .incident-hud-review {
+  width: 40px;
+  height: 40px;
+  top: 2px;
+  right: 2px;
+}
+
+.incident-phone-gallery .incident-hud-review input {
+  width: 20px;
+  height: 20px;
+}
+
+.mobile-incidents .mobile-filter-lists {
+  display: grid;
+  border-top: 1px solid var(--line);
+}
+
+.mobile-incidents .mobile-filter-lists .incident-filter-check {
+  min-height: 44px;
+}
+
+.mobile-incidents .incident-gallery-status {
+  flex-wrap: wrap;
+  /* Never squeezed by the list above it: its button would be cut off at the bottom. */
+  flex: 0 0 auto;
+  padding: 6px 10px;
+}
+
+.mobile-incidents .incident-earlier-day {
+  min-height: 44px;
+}
+
+/* Review filter: Unreviewed and Reviewed are separate toggles; both on shows everything. */
+.incident-filter-pane .incident-filter-toggle.incident-filter-segments[aria-label="Review filter"] button {
+  padding-inline: 6px;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.mobile-incidents .incident-filter-toggle.incident-filter-segments {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.mobile-incidents .incident-filter-toggle.incident-filter-segments button {
+  min-height: 44px;
+}
+
+/* Mark every incident shown; a second step confirms. */
+.incident-bulk-review {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.incident-bulk-review button {
+  min-height: 28px;
+  padding: 2px 9px;
+  font-size: var(--text-xs);
+}
+
+.incident-bulk-review button.primary {
+  border-color: var(--good);
+  color: var(--ok-ink);
+}
+
+.mobile-incidents .incident-bulk-review {
+  display: flex;
+  padding: 6px 10px;
+}
+
+.mobile-incidents .incident-bulk-review button {
+  min-height: 44px;
+  padding-inline: 14px;
+}
+
+/* A reviewed incident's picture steps back, so what is left stands out. */
+.live-activity-item.with-hud.is-reviewed .live-activity-thumb .snapshot-frame {
+  opacity: .5;
+}
+
+/* Filter pane type a step larger, the day centred, and larger object icons. */
+.incident-filter-pane .incident-filter-section h3,
+.incident-filter-pane .incident-filter-check,
+.incident-filter-pane .incident-filter-section select,
+.incident-filter-pane .incident-filter-segments button,
+.incident-filter-pane .incident-semantic-search input,
+.incident-filter-pane .incident-day-stepper input[type="date"] {
+  font-size: var(--text-md);
+}
+
+.incident-filter-pane .incident-filter-count,
+.incident-filter-pane .incident-filter-confidence-readout,
+.incident-filter-pane .incident-filter-section small {
+  font-size: var(--text-sm);
+}
+
+.incident-filter-pane .incident-day-stepper input[type="date"],
+.mobile-incidents .incident-day-stepper input[type="date"] {
+  text-align: center;
+}
+
+.incident-filter-pane .incident-day-stepper input[type="date"]::-webkit-datetime-edit,
+.mobile-incidents .incident-day-stepper input[type="date"]::-webkit-datetime-edit {
+  flex: 1 1 auto;
+  text-align: center;
+}
+
+.incident-filter-check svg {
+  flex: 0 0 auto;
+}
+
+.incident-hud-objects .pill.object-icon-pill {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 4px;
+}
+
+.incident-hud-objects .pill.object-icon-pill svg {
+  width: 20px;
+  height: 20px;
+}
+
+.incident-bulk-review button.primary {
+  background: var(--ok-bg);
+}
+
+/* The old list steps back the moment a filter changes, until the new one arrives. */
+#incident-results.updating {
+  opacity: .55;
+  transition: opacity 120ms ease;
 }

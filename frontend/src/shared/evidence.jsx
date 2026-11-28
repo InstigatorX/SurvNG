@@ -162,7 +162,7 @@ export function objectBoxes(event) {
     .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
 }
 
-export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, objectFocusMode = null, objectFocusZoom = 1, objectFocusAspect = { width: 16, height: 9 }, objectFocusControls = true, showAnnotations = true, showTracking = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, zones = null, zonesVisible = false, selectedObjectIndex = null, onSelectObject = null, onRequestFullResolution, onImageSize, children }) {
+export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, objectFocusMode = null, objectFocusZoom = 1, objectFocusAspect = { width: 16, height: 9 }, objectFocusControls = true, showAnnotations = true, showTracking = false, thumbnail = false, thumbnailWidth = null, progressive = false, fullResolution = false, highQualityZoom = false, zones = null, zonesVisible = false, selectedObjectIndex = null, onSelectObject = null, onRequestFullResolution, onImageSize, children }) {
   const boxes = objectBoxes(event);
   const tracks = showTracking ? snapshotTrackOverview(event, eventCoverEpoch(event)) : [];
   const boxCoordinateSize = incidentDetectionFrameSize(event);
@@ -208,7 +208,10 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
   // Phones cap density at 2x and use the card thumbnail quality: a 3x, q90
   // crop is several times larger than the plain card image for little gain.
   const phoneThumbnail = typeof window !== "undefined" && window.matchMedia?.("(max-width: 760px)").matches;
-  const focusThumbnailWidth = Math.max(320, Math.min(1280, Math.ceil((frameSize?.width || 160) * (phoneThumbnail ? Math.min(2, devicePixelRatio) : devicePixelRatio))));
+  // A caller that knows the tile's size names a listed width: it is known before
+  // the tile is measured, so the crop is requested once, and nearby sizes share it.
+  const focusThumbnailWidth = thumbnailWidth
+    || Math.max(320, Math.min(1280, Math.ceil((frameSize?.width || 160) * (phoneThumbnail ? Math.min(2, devicePixelRatio) : devicePixelRatio))));
   const focusThumbnailQuality = phoneThumbnail ? 82 : 90;
   const focusAspect = incidentObjectFocusAspect(objectFocusAspect, useServerObjectCrop);
   const thumbnailSrc = useServerObjectCrop
@@ -218,7 +221,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
       aspectWidth: focusAspect?.width,
       aspectHeight: focusAspect?.height,
     })
-    : eventThumbnailUrl(event);
+    : eventThumbnailUrl(event, thumbnailWidth || undefined);
   const focusImageKey = `${progressiveImageKey}:object-focus:${focusThumbnailWidth}:${focusZoom}:${focusAspect?.width || 0}x${focusAspect?.height || 0}`;
   const imageReady = loadedImageKey === progressiveImageKey
     || (useServerObjectCrop && loadedImageKey === focusImageKey);
@@ -634,7 +637,7 @@ function liveActivityLabel(incident) {
   return text.charAt(0).toUpperCase() + text.slice(1) + (labels.length > names.length ? ` +${labels.length - names.length}` : "");
 }
 
-export function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, onSelect, onOpenOverlay, livePreview = false, hud = false }) {
+export function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, onSelect, onOpenOverlay, livePreview = false, hud = false, thumbnailWidth = null, reviewed = null, reviewDisabled = false, onReviewChange = null }) {
   const labels = incidentLabels(incident);
   const trigger = incidentTriggerLabel(incident);
   const eventId = liveActivityEventId(incident);
@@ -642,10 +645,10 @@ export function IncidentListItem({ incident, cameraName, timeZone, selected, thu
   const fullTime = formatDateTime(time, timeZone);
   const activityLabel = labels.length ? labels.join(", ") : "Motion only";
   return (
-    <article className={`live-activity-item${livePreview ? " live-preview-row" : ""}${hud ? " with-hud" : ""}${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
+    <article className={`live-activity-item${livePreview ? " live-preview-row" : ""}${hud ? " with-hud" : ""}${hud && reviewed ? " is-reviewed" : ""}${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
       <button type="button" className="live-activity-select" onClick={() => onSelect(incident)} aria-label={livePreview
         ? `Preview ${liveActivityLabel(incident)} in ${cameraName} at ${fullTime}` : `Open ${cameraName} activity at ${fullTime}`}>
-        <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusControls={false} showAnnotations={thumbnailAnnotations} showTracking={false} />
+        <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail thumbnailWidth={thumbnailWidth} objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusControls={false} showAnnotations={thumbnailAnnotations} showTracking={false} />
           {hud ? <>
             <span className="incident-hud incident-hud-where"><b>{cameraName}</b><time dateTime={time} title={fullTime}>{formatHudDateTime(time, timeZone)}</time></span>
             <span className="incident-hud incident-hud-objects"><IncidentObjectBadges labels={labels} /><IncidentSpeechBadge speech={incident.speech} /></span>
@@ -658,6 +661,9 @@ export function IncidentListItem({ incident, cameraName, timeZone, selected, thu
           <time dateTime={time} title={livePreview ? fullTime : undefined}>{livePreview ? formatTimeOnly(time, timeZone) : fullTime}</time>
         </span>}
       </button>
+      {hud && reviewed != null ? <label className="incident-hud-review" title={reviewed ? "Reviewed" : "Mark as reviewed"}>
+        <input type="checkbox" checked={reviewed} disabled={reviewDisabled} onChange={(changeEvent) => onReviewChange?.(incident, changeEvent.target.checked)} aria-label={`Reviewed: ${cameraName} at ${fullTime}`} />
+      </label> : null}
       {!livePreview ? <IncidentSourceDot trigger={trigger} className="live-activity-trigger" onClick={() => onOpenOverlay(incident)} ariaLabel={`Preview exact ${trigger} event`} title={`${trigger} trigger`} /> : null}
       {!livePreview && !eventId ? <span className="sr-only">No exact event link is available.</span> : null}
     </article>

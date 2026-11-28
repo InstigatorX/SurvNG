@@ -29,9 +29,10 @@ const START = Date.parse("2026-03-08T23:31:00Z");
 const incidents = Array.from({ length: TOTAL }, (_, index) => {
   const labels = LABELS[index % LABELS.length];
   const camera = CAMERAS[index % CAMERAS.length].id;
-  const at = new Date(START - index * 240000).toISOString();
+  // 25 minutes apart: 150 incidents reach back about two and a half days.
+  const at = new Date(START - index * 1500000).toISOString();
   return { id: `incident-${index}`, incident_id: `incident-${index}`, revision: 1, camera_id: camera, camera_ids: [camera], created_at: at, start_at: at, end_at: at,
-    duration_seconds: 20, representative_event_id: 1000 + index, event_ids: [1000 + index], labels, has_objects: true, zones: ["Entry"], snapshot_path: "cover.webp",
+    duration_seconds: 20, representative_event_id: 1000 + index, event_ids: [1000 + index], review_verdict: index === 1 ? "reviewed" : index === 2 ? "keep" : null, image_version: `v${index}`, labels, has_objects: true, zones: ["Entry"], snapshot_path: "cover.webp",
     objects: labels.map((label) => ({ label, confidence: index % 2 ? .9 : .6, box: { x1: 300, y1: 200, x2: 600, y2: 600 }, detection_frame_width: 1280, detection_frame_height: 720 })) };
 });
 
@@ -40,23 +41,42 @@ try {
   page.setDefaultTimeout(10000);
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  const searches = [];
+  const searches = [], requests = [], images = [], reviews = [];
+  let failReview = false, honorReview = false;
   let failMore = false;
+  const days = [], reviewParams = [], bulkReviews = [];
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
+    requests.push(path);
+    if (path.includes("thumbnail.jpg")) images.push(path + url.search);
     if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
     if (path.endsWith("/api/cameras")) return route.fulfill({ json: CAMERAS });
+    if (path.endsWith("/semantic-search")) return route.fulfill({ json: { results: [1000, 1001, 1003].map((id, rank) => ({ event: { id }, score: .9 - rank / 10 })) } });
+    if (path.includes("/incidents/by-event/")) return route.fulfill({ json: incidents[Number(path.split("/").pop()) - 1000] });
+    if (path.endsWith("/incidents/reviews")) {
+      bulkReviews.push(route.request().postDataJSON());
+      return route.fulfill({ json: {} });
+    }
+    if (path.endsWith("/review")) {
+      reviews.push([decodeURIComponent(path.split("/").at(-2)), route.request().postDataJSON().verdict]);
+      return failReview ? route.fulfill({ status: 500, json: {} }) : route.fulfill({ json: {} });
+    }
     if (path.endsWith("/face-names")) return route.fulfill({ json: { people: [{ id: 7, name: "Alex" }, { id: 9, name: "Sam" }] } });
     if (path.endsWith("/incidents/search")) {
       const limit = Number(url.searchParams.get("limit")), offset = Number(url.searchParams.get("offset"));
       const floor = Number(url.searchParams.get("min_confidence") || 0), label = url.searchParams.get("object_label");
       const camera = url.searchParams.get("camera_id");
+      days.push(url.searchParams.get("day"));
+      reviewParams.push(url.searchParams.get("review"));
       searches.push({ limit, offset, floor, label, type: url.searchParams.get("event_type"), camera, zone: url.searchParams.get("zone"), person: url.searchParams.get("person_id") });
       if (failMore && offset > 0) return route.fulfill({ status: 500, json: {} });
       const wanted = label ? label.split(",") : [];
       const cameras = camera ? camera.split(",") : [];
-      const matched = incidents.filter((item) => (!wanted.length || item.labels.some((name) => wanted.includes(name))) && (!cameras.length || cameras.includes(item.camera_id)) && item.objects.some((object) => object.confidence >= floor));
+      const reviewed = (item) => item.review_verdict === "reviewed" || item.review_verdict === "nothing_here";
+      const review = honorReview ? url.searchParams.get("review") : null;
+      const matched = incidents.filter((item) => (!wanted.length || item.labels.some((name) => wanted.includes(name))) && (!cameras.length || cameras.includes(item.camera_id)) && item.objects.some((object) => object.confidence >= floor)
+        && (!review || reviewed(item) === (review === "reviewed")));
       return route.fulfill({ json: { items: matched.slice(offset, offset + limit), total: matched.length, facets: { camera_ids: CAMERAS.map((camera) => camera.id), labels: ["car", "person"], zones: ["Entry"] } } });
     }
     if (path.endsWith("/incidents/detail")) return route.fulfill({ json: incidents.find((item) => item.id === url.searchParams.get("incident_id")) || incidents[0] });
@@ -73,7 +93,21 @@ try {
   await tiles.first().waitFor();
   assert.equal(await page.locator(".gallery-expanded").count(), 1);
   assert.equal(await tiles.count(), INCIDENT_GALLERY_CHUNK);
-  assert.deepEqual(searches.map(({ limit, offset }) => [limit, offset]), [[INCIDENT_GALLERY_CHUNK, 0]]);
+  // The next incidents are fetched ahead of need, but not shown yet.
+  await page.waitForFunction(() => true);
+  await page.waitForTimeout(300);
+  assert.deepEqual(searches.map(({ limit, offset }) => [limit, offset]), [[INCIDENT_GALLERY_CHUNK, 0], [INCIDENT_GALLERY_CHUNK, INCIDENT_GALLERY_CHUNK]]);
+  assert.equal(await tiles.count(), INCIDENT_GALLERY_CHUNK);
+  assert.ok(!requests.some((path) => path.includes("face-captures")), "the desktop gallery does not look up names it never shows");
+  // Pictures are requested near the size they are shown at: four per row at 1440 wide is about 280 px.
+  assert.match(await tiles.first().locator("img").getAttribute("src"), /thumbnail\.jpg\?width=320&/);
+  // The picture's version is named, so the browser may keep it without asking again.
+  assert.match(await tiles.first().locator("img").getAttribute("src"), /[?&]s=v0(&|$)/);
+  // One day per request: counting and listing a month at once made the first load slow.
+  assert.equal(new Set(days).size, 1);
+  assert.match(days[0], /^\d{4}-\d{2}-\d{2}$/);
+  const warmed = images.filter((url) => /events\/10[6-9]\d\/thumbnail\.jpg\?width=320&/.test(url));
+  assert.equal(warmed.length, 8, "the first two rows of the next chunk start loading before they are shown");
   assert.equal(new URL(page.url()).search, "");
   assert.equal(await page.locator(".incident-pager").count(), 0, "the gallery has no pages");
   assert.match(await status.innerText(), new RegExp(`Showing ${INCIDENT_GALLERY_CHUNK} of ${TOTAL}`));
@@ -89,6 +123,80 @@ try {
   const thumb = await first.locator(".live-activity-thumb").boundingBox();
   assert.ok(hud.x - thumb.x < 12 && hud.y - thumb.y < 12, "where and when at the upper left");
   assert.ok(icons.x - thumb.x < 12 && thumb.y + thumb.height - (icons.y + icons.height) < 12, "objects at the lower left");
+
+  // Review marks sit at the upper right; the source dot moves to the lower right.
+  const mark = (index) => tiles.nth(index).getByRole("checkbox");
+  assert.deepEqual([await mark(0).isChecked(), await mark(1).isChecked(), await mark(2).isChecked()], [false, true, false], "kept-for-later is not reviewed");
+  const markBox = await tiles.first().locator(".incident-hud-review").boundingBox();
+  const dotBox = await tiles.first().locator(".live-activity-trigger").boundingBox();
+  assert.ok(thumb.x + thumb.width - (markBox.x + markBox.width) < 12 && markBox.y - thumb.y < 12, "review mark at the upper right");
+  assert.ok(dotBox.y > thumb.y + thumb.height / 2 && dotBox.x > thumb.x + thumb.width / 2, "source dot at the lower right");
+  const checkBox = await mark(0).boundingBox();
+  assert.ok(Math.abs((checkBox.x + checkBox.width / 2) - (markBox.x + markBox.width / 2)) < 1
+    && Math.abs((checkBox.y + checkBox.height / 2) - (markBox.y + markBox.height / 2)) < 1, "the checkbox sits in the middle of its outline");
+  // Blur behind the labels made scrolling stutter: every picture's was repainted on every frame.
+  assert.deepEqual(await tiles.first().evaluate((tile) => [...tile.querySelectorAll(".incident-hud, .incident-hud .pill, .incident-hud-review")]
+    .map((element) => getComputedStyle(element).backdropFilter).filter((value) => value !== "none")), []);
+  await mark(0).check();
+  assert.deepEqual(reviews.at(-1), ["incident-0", "reviewed"]);
+  assert.equal(await page.getByRole("dialog").count(), 0, "marking does not open the incident");
+  await mark(1).uncheck();
+  assert.deepEqual(reviews.at(-1), ["incident-1", null]);
+  // A mark that could not be saved goes back, and says so.
+  failReview = true;
+  await mark(3).click();
+  await page.locator(".incident-gallery-error").waitFor();
+  assert.equal(await mark(3).isChecked(), false);
+  failReview = false;
+  // Leave the tile, which lifts slightly under the pointer.
+  await page.mouse.move(5, 5);
+
+  // The page opens on what is still to look at; the filter can show the rest.
+  assert.deepEqual([...new Set(reviewParams)], ["unreviewed"]);
+  const reviewFilter = page.getByRole("group", { name: "Review filter" });
+  assert.equal(await reviewFilter.getByRole("button", { name: "Unreviewed", exact: true }).getAttribute("aria-pressed"), "true");
+  // Every label of the review filter is shown whole, inside the control.
+  assert.deepEqual(await reviewFilter.evaluate((group) => { const box = group.getBoundingClientRect();
+    return [...group.querySelectorAll("button")].filter((button) => button.scrollWidth > button.clientWidth + 1 || button.getBoundingClientRect().right > box.right + 1).map((button) => button.textContent); }), []);
+  assert.ok(await tiles.nth(0).evaluate((element) => element.classList.contains("is-reviewed")), "a marked picture steps back");
+  // Mark everything shown, after a confirmation, in one request.
+  const bulk = page.getByRole("group", { name: "Mark all shown" });
+  await bulk.getByRole("button", { name: "Reviewed", exact: true }).click();
+  assert.match(await bulk.innerText(), new RegExp(`Mark ${INCIDENT_GALLERY_CHUNK - 2} shown as reviewed\\?`));
+  assert.equal(bulkReviews.length, 0, "nothing is saved before confirming");
+  await bulk.getByRole("button", { name: "Cancel" }).click();
+  await bulk.getByRole("button", { name: "Reviewed", exact: true }).click();
+  await bulk.getByRole("button", { name: "Confirm" }).click();
+  await bulk.getByRole("button", { name: "Reviewed", exact: true }).waitFor();
+  assert.equal(bulkReviews.length, 1);
+  assert.equal(bulkReviews[0].verdict, "reviewed");
+  // Only what needs changing is sent: not the one already marked, nor the one kept for later.
+  assert.equal(bulkReviews[0].incident_ids.length, INCIDENT_GALLERY_CHUNK - 2);
+  assert.ok(!bulkReviews[0].incident_ids.includes("incident-0") && !bulkReviews[0].incident_ids.includes("incident-2"));
+  // Two toggles: pressing the second as well shows everything, with no review filter sent.
+  const pressed = () => reviewFilter.getByRole("button").evaluateAll((buttons) => buttons.map((button) => `${button.textContent}:${button.getAttribute("aria-pressed")}`));
+  assert.deepEqual(await pressed(), ["Unreviewed:true", "Reviewed:false"]);
+  await reviewFilter.getByRole("button", { name: "Reviewed", exact: true }).click();
+  for (let waited = 0; reviewParams.at(-1) !== null && waited < 5000; waited += 100) await page.waitForTimeout(100);
+  assert.equal(reviewParams.at(-1), null, "both pressed sends no review filter");
+  assert.deepEqual(await pressed(), ["Unreviewed:true", "Reviewed:true"]);
+  await reviewFilter.getByRole("button", { name: "Unreviewed", exact: true }).click();
+  for (let waited = 0; reviewParams.at(-1) !== "reviewed" && waited < 5000; waited += 100) await page.waitForTimeout(100);
+  assert.equal(reviewParams.at(-1), "reviewed");
+  assert.deepEqual(await pressed(), ["Unreviewed:false", "Reviewed:true"]);
+  await bulk.getByRole("button", { name: "Unreviewed", exact: true }).click();
+  await bulk.getByRole("button", { name: "Confirm" }).click();
+  await bulk.getByRole("button", { name: "Unreviewed", exact: true }).waitFor();
+  assert.equal(bulkReviews.at(-1).verdict, null);
+  assert.ok(!bulkReviews.at(-1).incident_ids.includes("incident-2"), "clearing marks leaves Keep for later alone");
+  // One toggle always stays pressed: turning off the only one switches to the other.
+  await reviewFilter.getByRole("button", { name: "Reviewed", exact: true }).click();
+  for (let waited = 0; reviewParams.at(-1) !== "unreviewed" && waited < 5000; waited += 100) await page.waitForTimeout(100);
+  assert.equal(reviewParams.at(-1), "unreviewed");
+  assert.deepEqual(await pressed(), ["Unreviewed:true", "Reviewed:false"]);
+  await page.waitForTimeout(600);
+  assert.equal(await page.getByLabel("Describe incidents to find").getAttribute("placeholder"), null);
+  await page.mouse.move(5, 5);
 
   // Filters sit in a pane left of the gallery.
   const pane = page.getByRole("complementary", { name: "Incident filters" });
@@ -109,32 +217,85 @@ try {
     assert.ok(listBox.width - (boxes[columns - 1].x + boxes[columns - 1].width - listBox.x) < 28, "the row fills the width");
     const picture = await tiles.first().locator(".live-activity-thumb").boundingBox();
     assert.ok(Math.abs(picture.width - boxes[0].width) < 4, "the picture fills its tile");
+    const asked = Number(new URL(await tiles.first().locator("img").getAttribute("src"), origin).searchParams.get("width"));
+    assert.ok(asked >= picture.width && asked <= picture.width * 2, `a ${Math.round(picture.width)} px picture asks for a near size, not ${asked}`);
   }
   assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("survng.incidentGalleryColumns.v1"))), 4);
 
-  // A failed load keeps what is shown and offers a retry.
+  // Arrow keys move between pictures: sideways by one, up and down by a row.
+  const focused = () => page.evaluate(() => [...document.querySelectorAll("#incident-results .live-activity-select")].indexOf(document.activeElement));
+  await tiles.first().locator(".live-activity-select").focus();
+  await page.keyboard.press("ArrowRight");
+  assert.equal(await focused(), 1);
+  await page.keyboard.press("ArrowDown");
+  assert.equal(await focused(), 5, "four per row");
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowUp");
+  assert.equal(await focused(), 0);
+  await page.keyboard.press("ArrowUp");
+  assert.equal(await focused(), 0, "stays on the first picture");
+  await page.keyboard.press("End");
+  assert.equal(await focused(), await tiles.count() - 1);
+  await page.keyboard.press("Home");
+  assert.equal(await focused(), 0);
+  assert.equal(await page.getByRole("dialog").count(), 0, "moving does not open anything");
+  // Arrow keys on a review mark are left to the checkbox.
+  await tiles.first().getByRole("checkbox").focus();
+  await page.keyboard.press("ArrowRight");
+  assert.equal(await focused(), -1);
+
+  // A failed load keeps what is shown and offers a retry. The chunk fetched
+  // ahead was appended without a request; the one after it fails.
   await toEnd();
   await status.getByText("Could not load more incidents.").waitFor();
-  assert.equal(await tiles.count(), INCIDENT_GALLERY_CHUNK);
-  assert.deepEqual(searches.at(-1), { limit: INCIDENT_GALLERY_CHUNK, offset: INCIDENT_GALLERY_CHUNK, floor: 0, label: null, type: "object", camera: null, zone: null, person: null },
-    "scrolling near the end asks for the incidents after the ones shown");
+  assert.equal(await tiles.count(), 2 * INCIDENT_GALLERY_CHUNK);
+  // (A background refresh re-reads from offset 0 and may land at any moment.)
+  const deeper = () => searches.filter((search) => search.offset > 0);
+  assert.deepEqual([deeper().at(-1).limit, deeper().at(-1).offset], [INCIDENT_GALLERY_CHUNK, 2 * INCIDENT_GALLERY_CHUNK],
+    "reaching the end asks for the incidents after the ones shown");
   failMore = false;
   await status.getByRole("button", { name: "Retry" }).click();
-  await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length === count, 2 * INCIDENT_GALLERY_CHUNK);
-  await toEnd();
   await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length === count, TOTAL);
-  assert.equal(await tiles.first().locator(".incident-hud-where b").innerText(), "Front Door", "earlier tiles stay");
-  assert.match(await status.innerText(), new RegExp(`All ${TOTAL} incidents`));
-  const settled = searches.length;
+  // Off-screen tiles are not rendered, so read their text from the document.
+  assert.equal(await tiles.first().locator(".incident-hud-where b").textContent(), "Front Door", "earlier tiles stay");
+  assert.equal(await tiles.first().evaluate((element) => getComputedStyle(element).contentVisibility), "auto");
+  assert.match(await status.innerText(), new RegExp(`All ${TOTAL} incidents for this day`));
+  const settled = deeper().length;
   await toEnd();
   await page.waitForTimeout(400);
-  assert.equal(searches.length, settled, "nothing more to ask for at the end");
+  assert.equal(deeper().length, settled, "nothing more to ask for at the end");
+
+  // The background refresh re-reads only the newest incidents, however many are
+  // shown, and leaves the pictures already loaded alone.
+  await tiles.nth(100).evaluate((element) => { element.dataset.kept = "yes"; });
+  const before = { searches: searches.length, images: images.length };
+  for (let waited = 0; searches.length === before.searches && waited < 20000; waited += 250) await page.waitForTimeout(250);
+  await page.waitForTimeout(500);
+  const refreshes = searches.slice(before.searches);
+  assert.ok(refreshes.length >= 1, "the gallery refreshes in the background");
+  assert.ok(refreshes.every((search) => search.offset === 0 && search.limit === INCIDENT_GALLERY_CHUNK), `one small read per refresh, got ${JSON.stringify(refreshes)}`);
+  assert.equal(await tiles.count(), TOTAL);
+  assert.equal(await tiles.nth(100).getAttribute("data-kept"), "yes");
+  assert.equal(images.length, before.images, "no picture is requested again");
+
+  // The end of the day offers the day before, one step away.
+  const dayInput = page.getByLabel("Incident day");
+  const shownDay = await dayInput.inputValue();
+  const earlier = status.getByRole("button", { name: /^Earlier: [A-Z][a-z]+day, [A-Z][a-z]{2} \d{1,2}$/ });
+  await earlier.click();
+  const dayBefore = new Date(Date.parse(`${shownDay}T12:00:00Z`) - 86400000).toISOString().slice(0, 10);
+  await page.waitForFunction((value) => document.querySelector('input[aria-label="Incident day"]').value === value, dayBefore);
+  await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length === count, INCIDENT_GALLERY_CHUNK);
+  assert.equal(days.at(-1), dayBefore);
+  assert.equal(await list.evaluate((element) => element.scrollTop), 0, "the earlier day starts at its top");
+  assert.equal(await earlier.count(), 0, "offered again only at the end of that day");
 
   // Confidence threshold and object choice go to the search and reset the list.
   await page.getByRole("slider", { name: "Confidence threshold" }).fill("80");
-  await page.waitForFunction(() => document.querySelectorAll("#incident-results .live-activity-item").length === 60);
+  for (let waited = 0; searches.at(-1).floor !== 0.8 && waited < 5000; waited += 100) await page.waitForTimeout(100);
+  await page.waitForFunction(() => document.querySelector(".incident-gallery-status").innerText.includes("of 75"));
   assert.equal(searches.at(-1).floor, 0.8);
-  assert.equal(searches.at(-1).offset, 0);
+  assert.equal(searches.findLast((search) => search.offset === 0).floor, 0.8, "a filter change reads again from the top");
   assert.match(await pane.locator(".incident-filter-confidence-readout").innerText(), /75 results\s+80%/);
   await page.getByRole("checkbox", { name: "Person" }).check();
   await page.waitForFunction(() => document.querySelectorAll("#incident-results .live-activity-item").length === 50);
@@ -160,6 +321,10 @@ try {
   await pane.getByRole("checkbox", { name: "Front Driveway" }).check();
   await page.waitForFunction(() => document.querySelector(".incident-gallery-status").innerText.includes("of 150"));
   assert.equal(searches.at(-1).camera, "driveway,front-door");
+  // Zones and People start collapsed; opening one shows its list.
+  assert.equal(await pane.getByRole("checkbox", { name: "Entry" }).isVisible(), false);
+  await pane.locator("summary", { hasText: "Zones" }).click();
+  await pane.locator("summary", { hasText: "People" }).click();
   await pane.getByRole("checkbox", { name: "Entry" }).check();
   await pane.getByRole("checkbox", { name: "Alex" }).check();
   await pane.getByRole("checkbox", { name: "Sam" }).check();
@@ -231,11 +396,85 @@ try {
     return Boolean(box) && box.top >= frame.top && box.bottom <= frame.bottom;
   }), "the open incident is in view after the gallery settles");
 
+  // Visual search matches follow the review filter and carry the review marks.
+  honorReview = true;
+  await page.getByLabel("Describe incidents to find").fill("someone at the door");
+  await page.getByRole("search", { name: "Semantic incident search" }).getByRole("button", { name: "Search", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector(".incident-gallery-status").innerText.includes("All 2 matches"));
+  assert.deepEqual(await tiles.evaluateAll((items) => items.map((item) => item.querySelector("time").textContent.length > 0)), [true, true]);
+  assert.ok(searches.some((search) => search.limit === 100), "the list is asked which incidents pass the filters");
+  await reviewFilter.getByRole("button", { name: "Reviewed", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector(".incident-gallery-status").innerText.includes("All 3 matches"));
+  assert.equal(await tiles.count(), 3);
+  await page.getByRole("button", { name: "Reset semantic incident search" }).click();
+  honorReview = false;
+  await reviewFilter.getByRole("button", { name: "Unreviewed", exact: true }).click();
+  await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length >= count, INCIDENT_GALLERY_CHUNK);
+
   // A link to one incident still opens its viewer.
   await page.goto(`${origin}/survng/incidents?incident_id=incident-3`);
   await page.locator(".incident-pager").waitFor();
   assert.equal(await page.locator(".gallery-expanded").count(), 0);
   assert.deepEqual(errors, []);
   await page.close();
-  console.log("Incident gallery: default view, scroll loading, per-row sizing, picture overlay, multi-select filters, confidence, incident preview and viewer round trip passed");
+
+  // Phone: the same gallery, scroll loading, multi-select filters and review marks.
+  const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  phone.setDefaultTimeout(10000);
+  const phoneErrors = [], phoneSearches = [], phoneReviews = [];
+  phone.on("pageerror", (error) => phoneErrors.push(error.message));
+  await phone.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
+    if (path.endsWith("/api/cameras")) return route.fulfill({ json: CAMERAS });
+    if (path.endsWith("/face-names")) return route.fulfill({ json: { people: [{ id: 7, name: "Alex" }] } });
+    if (path.endsWith("/review")) { phoneReviews.push([decodeURIComponent(path.split("/").at(-2)), route.request().postDataJSON().verdict]); return route.fulfill({ json: {} }); }
+    if (path.endsWith("/incidents/search")) {
+      const limit = Number(url.searchParams.get("limit")), offset = Number(url.searchParams.get("offset")), camera = url.searchParams.get("camera_id");
+      phoneSearches.push({ limit, offset, camera, floor: Number(url.searchParams.get("min_confidence") || 0) });
+      const matched = incidents.filter((item) => !camera || camera.split(",").includes(item.camera_id));
+      return route.fulfill({ json: { items: matched.slice(offset, offset + limit), total: matched.length, facets: { camera_ids: CAMERAS.map((item) => item.id), labels: ["car", "person"], zones: ["Entry"] } } });
+    }
+    if (path.endsWith(".jpg") || path.endsWith(".webp") || path.endsWith("/snapshot")) return route.fulfill({ contentType: "image/svg+xml", body: svg });
+    return route.fulfill({ json: {} });
+  });
+  await phone.goto(`${origin}/survng/incidents`);
+  const phoneTiles = phone.locator("#incident-results .live-activity-item");
+  await phoneTiles.first().waitFor();
+  assert.equal(await phoneTiles.count(), INCIDENT_GALLERY_CHUNK);
+  assert.equal(await phone.locator(".incident-pager").count(), 0, "no pages on the phone either");
+  assert.equal(await phoneTiles.first().locator(".incident-hud-where b").innerText(), "Front Door");
+  assert.equal(await phoneTiles.first().locator(".live-activity-copy").count(), 0);
+  assert.ok(await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "nothing overflows sideways");
+  const phoneTile = await phoneTiles.first().boundingBox();
+  const phoneMark = await phoneTiles.first().locator(".incident-hud-review").boundingBox();
+  assert.ok(phoneTile.width > 300, "one picture per row");
+  assert.ok(phoneMark.width >= 40 && phoneMark.height >= 40, "the review mark is large enough to tap");
+  await phoneTiles.first().getByRole("checkbox").check();
+  assert.deepEqual(phoneReviews, [["incident-0", "reviewed"]]);
+  assert.equal(new URL(phone.url()).pathname, "/survng/incidents", "marking does not open the incident");
+  // Scrolling to the end adds more, whichever element the layout scrolls.
+  await phone.evaluate(() => { const list = document.querySelector("#incident-results"); list.scrollTop = list.scrollHeight; window.scrollTo(0, document.documentElement.scrollHeight); });
+  await phone.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length >= count, 2 * INCIDENT_GALLERY_CHUNK);
+  await phone.evaluate(() => { document.querySelector("#incident-results").scrollTop = 0; window.scrollTo(0, 0); });
+  // The filter sheet has the same lists and the confidence threshold.
+  await phone.getByRole("button", { name: "Filters", exact: true }).click();
+  await phone.getByRole("checkbox", { name: "Front Driveway", exact: true }).check();
+  await phone.getByRole("checkbox", { name: "Front Door", exact: true }).check();
+  await phone.waitForFunction(() => document.querySelector(".incident-gallery-status")?.innerText.includes("of 150"));
+  assert.equal(phoneSearches.at(-1).camera, "driveway,front-door");
+  await phone.getByRole("checkbox", { name: "Front Door", exact: true }).uncheck();
+  await phone.waitForFunction(() => document.querySelector(".incident-gallery-status")?.innerText.includes("of 75"));
+  assert.equal(phoneSearches.at(-1).camera, "driveway");
+  await phone.getByRole("slider", { name: "Confidence threshold" }).fill("80");
+  await phone.waitForTimeout(700);
+  assert.equal(phoneSearches.at(-1).floor, 0.8);
+  await phone.getByRole("button", { name: "Done", exact: true }).click();
+  // A picture opens the incident's own page.
+  await phoneTiles.first().locator(".live-activity-select").click();
+  await phone.waitForURL("**/survng/incidents/incident-1");
+  assert.deepEqual(phoneErrors, []);
+  await phone.close();
+  console.log("Incident gallery: default view, scroll loading, per-row sizing, picture overlay, multi-select filters, confidence, review marks, earlier days, incident preview, viewer round trip and phone layout passed");
 } finally { await browser.close(); await new Promise((resolve) => server.close(resolve)); }

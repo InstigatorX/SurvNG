@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- Incidents opens on a gallery in place of the viewer. It loads as it is
+  scrolled, a day at a time with a step to the day before at its end, with a
+  slider for incidents per row. Each picture shows its camera and time, object icons and a
+  review mark, and opens the incident overlay used by Live. Filters move to a
+  left pane: cameras, object types, zones and known people are multi-select, and
+  a confidence threshold is new. The phone layout uses the same gallery and
+  filters. The gallery opens on unreviewed incidents, with a review filter and a
+  confirmed **Mark all shown**. `/api/incidents/search` gains `min_confidence`, `review` and `compact`, takes
+  comma-separated `camera_id`, `object_label`, `zone` and `person_id`, and
+  returns `review_verdict` and `image_version` per item;
+  `PUT /api/incidents/reviews` marks several incidents at once. See
+  `docs/guide/incidents.md`.
+- Incident detail: unfinished camera views are named again in "Why this is an
+  incident", and a followed object keeps a box, drawn as an estimate, on
+  recording frames between analysed frames.
+- Faster incident gallery: pictures are requested near their shown size and
+  kept by the browser when their URL names the file version (`s=`); other image
+  requests answer 304 when unchanged. Large snapshots are decoded at reduced
+  size for thumbnails, the interface's scripts and styles are served compressed
+  with long-lived caching, and the periodic refresh re-reads only the newest
+  incidents. The zone filter no longer walks every row of a zone for each
+  incident, which took over a second per day of incidents. Listing an incident
+  again reuses its cover choice while its events are unchanged.
+- Admin → General has a per-browser **Font** setting beside Text size: Inter
+  (default), Figtree, Manrope, DM Sans, Source Sans or the system font. All are
+  bundled; none is fetched from another site.
 - New incident page: a plain-language title, a storyline with one lane per
   camera episode and a bar per object's visible interval, object cards that
   focus the player and follow an object across cameras, per-object

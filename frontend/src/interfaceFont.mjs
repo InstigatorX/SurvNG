@@ -4,7 +4,7 @@
 // and the browser downloads only the one in use. The boot scripts in
 // index.html, config.html and recordings.html apply the same ids before React
 // loads; keep them in sync with INTERFACE_FONTS. The standalone ONVIF inspector
-// has its own stylesheet and keeps its own font.
+// applies the choice as it starts.
 
 export const INTERFACE_FONTS = Object.freeze(["inter", "figtree", "manrope", "dm-sans", "source-sans", "system"]);
 

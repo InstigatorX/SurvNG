@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.gzip import GZipMiddleware, GZipResponder, IdentityResponder
-from fastapi.staticfiles import StaticFiles
+from .static_assets import InterfaceStaticFiles
 
 from .weather import create_weather_router
 from .config import (
@@ -1287,7 +1287,7 @@ app.add_middleware(ConfigChangeActorMiddleware)
 app.add_middleware(ConfiguredBasePathMiddleware)
 app.add_middleware(SecurityBoundaryMiddleware)
 app.add_middleware(JsonGZipMiddleware, minimum_size=1024, compresslevel=5)
-app.mount("/static", StaticFiles(directory="survng/static"), name="static")
+app.mount("/static", InterfaceStaticFiles(directory="survng/static"), name="static")
 
 
 

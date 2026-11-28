@@ -11,10 +11,11 @@ from typing import Any
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import Response
 
 from .camera_routes import match_camera_route
+from .image_cache import revalidated_image_response
 from .incident_utils import event_snapshot_path, snapshot_media_type
 from .manager import AppManager
 from .manager_access import ManagerAccessCoordinator
@@ -43,6 +44,65 @@ def _validate_evidence_revision(event: dict[str, Any], requested: str) -> None:
             detail="event evidence changed; refresh the incident",
             headers={"Cache-Control": "private, no-store"},
         )
+
+
+_JPEG_FRAME_MARKERS = frozenset({0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF})
+
+
+def _jpeg_dimensions(path: Any) -> tuple[int, int] | None:
+    """Width and height from a JPEG's header, without decoding the picture."""
+    try:
+        with open(path, "rb") as stream:
+            if stream.read(2) != b"\xff\xd8":
+                return None
+            while True:
+                byte = stream.read(1)
+                if not byte:
+                    return None
+                if byte != b"\xff":
+                    continue
+                marker = stream.read(1)
+                while marker == b"\xff":
+                    marker = stream.read(1)
+                if not marker:
+                    return None
+                code = marker[0]
+                if code in (0x00, 0x01, 0xD8) or 0xD0 <= code <= 0xD7:
+                    continue
+                if code in (0xD9, 0xDA):
+                    return None
+                size = stream.read(2)
+                if len(size) < 2:
+                    return None
+                length = int.from_bytes(size, "big")
+                if code in _JPEG_FRAME_MARKERS:
+                    frame = stream.read(5)
+                    if len(frame) < 5:
+                        return None
+                    return int.from_bytes(frame[3:5], "big"), int.from_bytes(frame[1:3], "big")
+                stream.seek(max(0, length - 2), 1)
+    except OSError:
+        return None
+
+
+def _read_frame_for_width(path: Any, width: int) -> np.ndarray | None:
+    """Read a snapshot that will only be shown ``width`` pixels wide.
+
+    A JPEG can be decoded at a half, quarter or eighth of its size for a
+    fraction of the work. Use the smallest of those that is still at least as
+    wide as the thumbnail, so the final resize only ever scales down.
+    """
+    dimensions = _jpeg_dimensions(path)
+    if dimensions is not None:
+        # A rotated picture swaps its sides when decoded; the shorter side is the safe bound.
+        shortest = min(dimensions)
+        for factor, flag in ((8, cv2.IMREAD_REDUCED_COLOR_8), (4, cv2.IMREAD_REDUCED_COLOR_4), (2, cv2.IMREAD_REDUCED_COLOR_2)):
+            if shortest // factor >= width:
+                frame = cv2.imread(str(path), flag)
+                if frame is not None and frame.shape[1] >= width:
+                    return frame
+                break
+    return cv2.imread(str(path))
 
 
 def _jpeg_thumbnail(frame: np.ndarray, width: int, quality: int) -> bytes:
@@ -327,8 +387,8 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
             return operation(active)
 
     @router.get("/api/events/{event_id}/snapshot.jpg")
-    def event_snapshot(event_id: int, download: bool = False, v: str = "") -> FileResponse:
-        def response(active_manager: AppManager) -> FileResponse:
+    def event_snapshot(event_id: int, download: bool = False, v: str = "", request: Request = None) -> Response:
+        def response(active_manager: AppManager) -> Response:
             event = active_manager.events.get(event_id)
             if event is None:
                 raise HTTPException(status_code=404, detail="event not found")
@@ -343,11 +403,11 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             except PermissionError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
-            return FileResponse(
+            return revalidated_image_response(
                 snapshot_path,
-                media_type=snapshot_media_type(snapshot_path),
+                snapshot_media_type(snapshot_path),
+                request,
                 filename=snapshot_path.name if download else None,
-                headers={"Cache-Control": "private, no-cache"},
             )
 
         return with_manager(response)
@@ -364,7 +424,9 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
         aspect_h: float = 0.0,
         focus_bbox: str = "",
         v: str = "",
-    ) -> FileResponse:
+        s: str = "",
+        request: Request = None,
+    ) -> Response:
         safe_width = max(160, min(int(width), 2560))
         safe_quality = max(50, min(int(quality), 95))
         focus_enabled = bool(object_focus)
@@ -390,7 +452,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
         if parsed_focus_bbox is not None and (focus_aspect_w <= 0 or focus_aspect_h <= 0):
             focus_aspect_w, focus_aspect_h = 16.0, 11.0
 
-        def response(active_manager: AppManager) -> FileResponse:
+        def response(active_manager: AppManager) -> Response:
             event = active_manager.events.get(event_id)
             if event is None:
                 raise HTTPException(status_code=404, detail="event not found")
@@ -415,7 +477,9 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
             )
 
             def build() -> bytes:
-                frame = cv2.imread(str(snapshot_path))
+                # A crop needs the full picture; a plain thumbnail does not.
+                plain = parsed_focus_bbox is None and not focus_enabled
+                frame = _read_frame_for_width(snapshot_path, safe_width) if plain else cv2.imread(str(snapshot_path))
                 if frame is None:
                     raise HTTPException(
                         status_code=404, detail="snapshot is unavailable"
@@ -438,11 +502,10 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
             cached = active_manager.image_cache.get_or_create(
                 "events", identity, build
             )
-            return FileResponse(
-                cached,
-                media_type="image/jpeg",
-                headers={"Cache-Control": "private, no-cache"},
-            )
+            # An object crop is drawn from the event's annotations, which can change
+            # while the file does not; only a checked revision may pin one.
+            pinned = s if (not focus_enabled or v.isdecimal()) else ""
+            return revalidated_image_response(cached, "image/jpeg", request, version=pinned, source=snapshot_path)
 
         return with_manager(response)
 
