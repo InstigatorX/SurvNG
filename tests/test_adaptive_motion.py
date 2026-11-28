@@ -13,6 +13,10 @@ from survng.app.motion_pipeline import (
     adaptive_motion_stage_configs,
     build_builtin_motion_registry,
 )
+from survng.app.motion_pipeline.adaptive_stages import (
+    AdaptiveMotionScoringStage,
+    _StationaryRegion,
+)
 from survng.app.motion_types import MotionBlob, MotionFrameBlobs, MotionTrack
 
 
@@ -901,6 +905,74 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
             [result.scoring.reason for result in results[1:]],
             ["qualified", "qualified"],
         )
+
+    def test_stationary_region_requires_real_overlap_to_match(self) -> None:
+        region = _StationaryRegion(
+            box=(0.48, 0.48, 0.52, 0.52), first_seen=100.0, last_seen=120.0, hits=3,
+        )
+
+        # Nearby but disjoint, and a much larger box that merely contains it.
+        self.assertFalse(AdaptiveMotionScoringStage._matches_stationary_region(
+            (0.55, 0.1, 0.95, 0.9), [region],
+        ))
+        self.assertFalse(AdaptiveMotionScoringStage._matches_stationary_region(
+            (0.3, 0.3, 0.7, 0.7), [region],
+        ))
+        # The same blob re-detected with modest jitter in position and size.
+        self.assertTrue(AdaptiveMotionScoringStage._matches_stationary_region(
+            (0.485, 0.475, 0.528, 0.522), [region],
+        ))
+
+    def test_larger_overlapping_box_does_not_inflate_stationary_region(self) -> None:
+        regions = [_StationaryRegion(
+            box=(0.4, 0.4, 0.5, 0.5), first_seen=100.0, last_seen=100.0,
+        )]
+
+        # Overlaps the region well enough to count as evidence, but covers
+        # about 2.6 times its area.
+        for index in range(5):
+            AdaptiveMotionScoringStage._remember_stationary_region(
+                regions, (0.4, 0.4, 0.56, 0.56), 104.0 + index * 4.0,
+            )
+
+        self.assertEqual(len(regions), 1)
+        self.assertEqual(regions[0].hits, 6)
+        for actual, expected in zip(regions[0].box, (0.4, 0.4, 0.5, 0.5)):
+            self.assertAlmostEqual(actual, expected)
+        self.assertFalse(AdaptiveMotionScoringStage._matches_stationary_region(
+            (0.5, 0.5, 0.56, 0.56), regions,
+        ))
+
+    def test_jittered_stationary_blob_still_matches_after_track_id_reset(self) -> None:
+        scorer = stationary_memory_scorer()
+        try:
+            for track_id, (x, y), captured_at in (
+                (1, (0.44, 0.4), 100.8),
+                (2, (0.452, 0.41), 108.8),
+                (3, (0.432, 0.392), 116.8),
+            ):
+                score_stationary_memory_track(
+                    scorer,
+                    stationary_memory_track(
+                        track_id, ((x, y),) * 5, captured_at - 0.8,
+                        half_size=(0.06 + (track_id - 2) * 0.004, 0.08),
+                    ),
+                    captured_at,
+                )
+            later = score_stationary_memory_track(
+                scorer,
+                stationary_memory_track(
+                    9,
+                    tuple((x + 0.008, y + 0.005) for x, y in QUALIFIED_SHORT_TRAVEL_PATH),
+                    117.4,
+                ),
+                118.4,
+            )
+        finally:
+            scorer.close()
+
+        self.assertFalse(later.scoring.accepted)
+        self.assertEqual(later.scoring.reason, "stationary_region")
 
     def test_long_running_directional_motion_remains_credible(self) -> None:
         scorer = MotionPipelineFactory(build_builtin_motion_registry()).create(

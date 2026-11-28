@@ -212,6 +212,16 @@ _STATIONARY_REGION_EVIDENCE_REASONS = frozenset({
     "stationary_foreground",
     "persistent_scene_motion",
 })
+# A box matches a region only by real overlap. IoU >= 0.3 still admits the
+# same blob re-detected with its box shifted by about a third of its size on
+# both axes, but never a box that merely lies nearby, and never one more than
+# about 3.3 times larger or smaller than the region.
+_STATIONARY_REGION_MIN_IOU = 0.3
+# Only a comparably sized box moves the remembered geometry. A matching box
+# much larger or smaller still counts as evidence but cannot inflate or
+# shrink the region, so repeated large matches cannot make it catch unrelated
+# motion nearby.
+_STATIONARY_REGION_BLEND_MIN_AREA_RATIO = 0.67
 
 
 @dataclass(slots=True)
@@ -1396,33 +1406,34 @@ class AdaptiveMotionScoringStage:
         }
 
     @staticmethod
+    def _stationary_region_overlap(
+        box: tuple[float, float, float, float],
+        region_box: tuple[float, float, float, float],
+    ) -> tuple[float, float]:
+        """Return the IoU and the smaller-to-larger area ratio of two boxes."""
+        x1, y1, x2, y2 = box
+        rx1, ry1, rx2, ry2 = region_box
+        intersection = max(0.0, min(x2, rx2) - max(x1, rx1)) * max(
+            0.0,
+            min(y2, ry2) - max(y1, ry1),
+        )
+        area = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+        region_area = max(0.0, rx2 - rx1) * max(0.0, ry2 - ry1)
+        union = max(1e-9, area + region_area - intersection)
+        area_ratio = min(area, region_area) / max(1e-9, area, region_area)
+        return intersection / union, area_ratio
+
+    @classmethod
     def _matches_stationary_region(
+        cls,
         box: tuple[float, float, float, float],
         regions: list[_StationaryRegion],
     ) -> bool:
-        x1, y1, x2, y2 = box
-        center = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
-        diagonal = max(0.02, math.hypot(x2 - x1, y2 - y1))
-        for region in regions:
-            rx1, ry1, rx2, ry2 = region.box
-            intersection = max(0.0, min(x2, rx2) - max(x1, rx1)) * max(
-                0.0,
-                min(y2, ry2) - max(y1, ry1),
-            )
-            union = max(
-                1e-9,
-                (x2 - x1) * (y2 - y1)
-                + (rx2 - rx1) * (ry2 - ry1)
-                - intersection,
-            )
-            region_center = ((rx1 + rx2) / 2.0, (ry1 + ry2) / 2.0)
-            region_diagonal = max(0.02, math.hypot(rx2 - rx1, ry2 - ry1))
-            if intersection / union >= 0.2 or math.dist(center, region_center) <= max(
-                diagonal,
-                region_diagonal,
-            ) * 0.5:
-                return True
-        return False
+        return any(
+            cls._stationary_region_overlap(box, region.box)[0]
+            >= _STATIONARY_REGION_MIN_IOU
+            for region in regions
+        )
 
     @classmethod
     def _remember_stationary_region(
@@ -1432,11 +1443,13 @@ class AdaptiveMotionScoringStage:
         observed_at: float,
     ) -> None:
         for region in regions:
-            if cls._matches_stationary_region(box, [region]):
-                region.box = tuple(
-                    old * 0.75 + new * 0.25
-                    for old, new in zip(region.box, box)
-                )
+            iou, area_ratio = cls._stationary_region_overlap(box, region.box)
+            if iou >= _STATIONARY_REGION_MIN_IOU:
+                if area_ratio >= _STATIONARY_REGION_BLEND_MIN_AREA_RATIO:
+                    region.box = tuple(
+                        old * 0.75 + new * 0.25
+                        for old, new in zip(region.box, box)
+                    )
                 # Count each evaluation once, so several tracks or a replayed
                 # window cannot confirm a region within a single cycle.
                 if observed_at > region.last_seen:
