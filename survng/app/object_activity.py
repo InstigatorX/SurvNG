@@ -520,9 +520,17 @@ class ObjectActivityAttributor:
         stable_displacement, stable_extent = self.stationary_policy.scene_stable_limits(motion)
         # Without a box the limits would fall back to the largest movement
         # threshold; such a sighting cannot be placed, so it is never still.
-        placed = motion.normalized_box is not None
+        # Nor is one whose raw displacement is credible movement: the motion
+        # estimate drops a lone endpoint that its neighbours disagree with,
+        # and a track that is still until its last sample shows a departure.
+        can_be_still = bool(
+            motion.normalized_box is not None
+            and not self._raw_movement(
+                observation, motion, self._estimate_support(observation)[0]
+            )
+        )
         stable = bool(
-            placed
+            can_be_still
             and observation.get("temporal_consensus") is True
             and motion.stable(
                 maximum_displacement_ratio=stable_displacement,
@@ -531,7 +539,7 @@ class ObjectActivityAttributor:
             )
         )
         stable_observation = bool(
-            placed
+            can_be_still
             and observation.get("temporal_consensus") is True
             and motion.temporal_evidence_available
             and motion.displacement_ratio <= stable_displacement

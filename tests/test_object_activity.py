@@ -831,3 +831,63 @@ def test_a_car_creeping_off_its_spot_is_admitted_once_it_leaves_the_match() -> N
         assert admitted is not matched
     first_admitted = next(index for index, (_, _, admitted) in enumerate(roles) if admitted)
     assert all(admitted for _, _, admitted in roles[first_admitted:])
+
+
+@pytest.mark.parametrize("tolerance", ["low", "balanced", "high"])
+def test_a_still_looking_track_whose_dropped_endpoint_departs_is_not_learned(tolerance) -> None:
+    from survng.app.object_motion import estimate_object_motion
+
+    def sighting(motion):
+        return observation(
+            box={"x1": 400, "y1": 600, "x2": 579, "y2": 651},
+            temporal_track_observations=motion.samples,
+            temporal_center_displacement_ratio=motion.raw_displacement_ratio,
+            temporal_center_path_ratio=motion.raw_path_ratio,
+            temporal_motion=motion.as_dict(),
+        )
+
+    attributor = ObjectActivityAttributor("enforce", tolerance)
+    still = estimate_object_motion([(-1.0, 0.5, 0.5), (0.0, 0.5005, 0.5), (1.0, 0.5, 0.5003)])
+    for index in range(3):
+        attributor.admit([sighting(still)], {}, event_key=f"parked-{index}",
+                         observed_at_epoch=1000.0 + index * 60.0)
+    before = (remembered(attributor), remembered_boxes(attributor))
+    # Five parked samples, then 0.06 away. The estimate drops the last one,
+    # and what remains is still.
+    departure = estimate_object_motion([
+        (-1.0, 0.5, 0.5), (0.0, 0.503, 0.5), (0.5, 0.5, 0.502),
+        (1.0, 0.503, 0.502), (1.5, 0.5, 0.5), (2.5, 0.5, 0.56),
+    ])
+    assert departure.isolated_points_rejected == 1
+    assert departure.displacement_ratio == 0.0
+
+    admission = attributor.admit([sighting(departure)], {}, event_key="departure",
+                                 observed_at_epoch=2000.0)[0]
+
+    assert admission.attribution.role is not ObjectActivityRole.SCENE_CONTEXT
+    assert admission.admitted is True
+    assert (remembered(attributor), remembered_boxes(attributor)) == before
+
+
+def test_a_rejected_glitch_below_the_movement_threshold_is_still_still() -> None:
+    from survng.app.object_motion import estimate_object_motion
+
+    attributor = ObjectActivityAttributor("enforce", "high")
+    glitch = estimate_object_motion([
+        (-1.0, 0.5, 0.5), (0.0, 0.5005, 0.5), (0.5, 0.5, 0.5003),
+        (1.0, 0.5004, 0.5), (1.5, 0.5, 0.5), (2.5, 0.5, 0.5055),
+    ])
+    assert glitch.isolated_points_rejected == 1
+    sighting = observation(
+        box={"x1": 400, "y1": 600, "x2": 579, "y2": 651},
+        temporal_track_observations=glitch.samples,
+        temporal_center_displacement_ratio=glitch.raw_displacement_ratio,
+        temporal_center_path_ratio=glitch.raw_path_ratio,
+        temporal_motion=glitch.as_dict(),
+    )
+    roles = [
+        attributor.admit([dict(sighting)], {}, event_key=f"event-{index}",
+                         observed_at_epoch=1000.0 + index * 60.0)[0].attribution.role
+        for index in range(3)
+    ]
+    assert roles[-1] is ObjectActivityRole.SCENE_CONTEXT
