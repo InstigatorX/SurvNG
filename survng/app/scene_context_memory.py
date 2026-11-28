@@ -15,6 +15,38 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator, Mapping, Protocol
 
 
+# Detectors routinely flip one vehicle between these classes from one incident
+# to the next. They match one another so that a parked vehicle is learned once;
+# every other label must match exactly. The stored label keeps the first class
+# seen.
+INTERCHANGEABLE_SUBJECT_LABELS = frozenset({"car", "truck", "bus"})
+# Each new sighting moves a subject's reference box a fifth of the way toward
+# its own box. A single detection's box error of 10-15% then shifts the
+# reference by only 2-3%, so sightings that err in opposite directions still
+# match it, while a subject that has genuinely settled into a slightly
+# different box is followed within a handful of sightings.
+REFERENCE_BOX_WEIGHT = 0.2
+
+
+def same_subject_label(stored: str, observed: str) -> bool:
+    """Whether two detector labels may describe one remembered subject."""
+    return stored == observed or (
+        stored in INTERCHANGEABLE_SUBJECT_LABELS
+        and observed in INTERCHANGEABLE_SUBJECT_LABELS
+    )
+
+
+def blend_reference_box(
+    reference: tuple[float, float, float, float],
+    box: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    x1, y1, x2, y2 = (
+        old * (1.0 - REFERENCE_BOX_WEIGHT) + new * REFERENCE_BOX_WEIGHT
+        for old, new in zip(reference, box)
+    )
+    return x1, y1, x2, y2
+
+
 def normalized_box(
     observation: Mapping[str, Any],
 ) -> tuple[float, float, float, float] | None:
@@ -66,7 +98,12 @@ def merge_subjects(
     observed_at_epoch: float,
     max_sightings: int,
 ) -> tuple[SceneContextSubject, list[SceneContextSubject]]:
-    """Collapse overlapping rows for one car into the earliest subject."""
+    """Collapse overlapping rows for one car into the earliest subject.
+
+    The survivor keeps a stable reference box. Only a new sighting, an event
+    not already recorded, blends its box in; later frames of a recorded event
+    leave it unchanged, so the reference changes only with the sighting set.
+    """
     survivor = min(subjects, key=lambda subject: (subject.first_seen_epoch, subject.row_id or 0))
     keys: list[str] = []
     for subject in sorted(subjects, key=lambda subject: subject.first_seen_epoch):
@@ -75,8 +112,8 @@ def merge_subjects(
                 keys.append(key)
     if event_key and event_key not in keys:
         keys.append(event_key)
+        survivor.box = blend_reference_box(survivor.box, box)
     survivor.stable_event_keys = keys[-max_sightings:]
-    survivor.box = box
     survivor.first_seen_epoch = min(subject.first_seen_epoch for subject in subjects)
     survivor.last_seen_epoch = observed_at_epoch
     moved = [subject.last_moved_epoch for subject in subjects if subject.last_moved_epoch is not None]
@@ -111,7 +148,7 @@ class SceneContextSnapshot:
         matches = [
             subject
             for subject in self._subjects
-            if subject.label == label
+            if same_subject_label(subject.label, label)
             and subject.last_seen_epoch >= cutoff
             and subject_visible(subject, event_key, observed_at_epoch)
             and box_iou(subject.box, box) >= min_iou
@@ -232,7 +269,7 @@ class InMemorySceneContextMemory:
                 subject
                 for stored_camera, subject in self._subjects
                 if stored_camera == camera_id
-                and subject.label == label
+                and same_subject_label(subject.label, label)
                 and subject_visible(subject, event_key, observed_at_epoch)
                 and box_iou(subject.box, box) >= min_iou
             ]
@@ -270,7 +307,7 @@ class InMemorySceneContextMemory:
                 subject
                 for stored_camera, subject in self._subjects
                 if stored_camera == camera_id
-                and subject.label == label
+                and same_subject_label(subject.label, label)
                 and subject_visible(subject, event_key, observed_at_epoch)
                 and box_iou(subject.box, box) >= min_iou
             ]
@@ -320,7 +357,7 @@ class InMemorySceneContextMemory:
             for stored_camera, subject in self._subjects:
                 matches = bool(
                     stored_camera == camera_id
-                    and subject.label == label
+                    and same_subject_label(subject.label, label)
                     and box_iou(subject.box, box) >= min_iou
                 )
                 if matches and invalidate_location:
@@ -397,7 +434,7 @@ class DurableSceneContextMemory:
             matches = [
                 subject
                 for subject in self._subjects
-                if subject.label == label
+                if same_subject_label(subject.label, label)
                 and subject_visible(subject, event_key, observed_at_epoch)
                 and box_iou(subject.box, box) >= min_iou
             ]
@@ -436,7 +473,7 @@ class DurableSceneContextMemory:
             overlapping = [
                 subject
                 for subject in self._subjects
-                if subject.label == label
+                if same_subject_label(subject.label, label)
                 and subject_visible(subject, event_key, observed_at_epoch)
                 and box_iou(subject.box, box) >= min_iou
             ]
@@ -484,7 +521,8 @@ class DurableSceneContextMemory:
             retained: list[SceneContextSubject] = []
             for subject in self._subjects:
                 matches = bool(
-                    subject.label == label and box_iou(subject.box, box) >= min_iou
+                    same_subject_label(subject.label, label)
+                    and box_iou(subject.box, box) >= min_iou
                 )
                 if matches and invalidate_location:
                     subject.last_moved_epoch = subject.last_seen_epoch

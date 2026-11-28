@@ -1,4 +1,6 @@
 """Stationary subjects are one durable fact shared by admission, establishment, and alerts."""
+import pytest
+
 from survng.app.config import CameraConfig, DetectorConfig
 from survng.app.events import EventStore
 from survng.app.object_activity import (
@@ -321,3 +323,132 @@ def test_establishment_snapshot_carries_the_effective_presence_policy():
     assert policy["object_activity_attribution"] == "shadow"
     camera.stationary_subject_presence = "ignore"
     assert establishment_zone_policy(camera, detector_config=detector)["stationary_subject_presence"] == "ignore"
+
+
+def _memory(kind, tmp_path):
+    if kind == "durable":
+        return EventStore(tmp_path).scene_context_memory("gate")
+    from survng.app.scene_context_memory import InMemorySceneContextMemory
+
+    return InMemorySceneContextMemory()
+
+
+def _sighting(attributor, event_key, epoch, **values):
+    return attributor.admit(
+        [observation(**values)], {}, event_key=event_key, observed_at_epoch=epoch,
+    )[0]
+
+
+def _scaled(scale):
+    """The default 200 px box at (100, 100)-(300, 300), scaled about its centre."""
+    half = 100.0 * scale
+    return {"x1": 200.0 - half, "y1": 200.0 - half, "x2": 200.0 + half, "y2": 200.0 + half}
+
+
+@pytest.mark.parametrize("kind", ["memory", "durable"])
+def test_opposite_box_errors_still_match_one_subject(kind, tmp_path):
+    memory = _memory(kind, tmp_path)
+    attributor = ObjectActivityAttributor("enforce", memory=memory, camera_id="gate")
+    _sighting(attributor, "one", 1000.0)
+    # Each later box is within the match IoU of the true box, but the two
+    # disagree with each other: one detection is 15% large, the next 12.5%
+    # small.
+    _sighting(attributor, "two", 1060.0, box=_scaled(1.15))
+    third = _sighting(attributor, "three", 1120.0, box=_scaled(0.875))
+    fourth = _sighting(attributor, "four", 1180.0)
+
+    assert third.attribution.role.value == "scene_context"
+    assert fourth.attribution.role.value == "scene_context"
+    assert memory.count("gate") == 1
+
+
+@pytest.mark.parametrize("kind", ["memory", "durable"])
+def test_a_vehicle_flipping_between_car_and_truck_is_one_subject(kind, tmp_path):
+    memory = _memory(kind, tmp_path)
+    attributor = ObjectActivityAttributor("enforce", memory=memory, camera_id="gate")
+    labels = ["car", "truck", "car", "bus"]
+    admissions = [
+        _sighting(attributor, f"event-{index}", 1000.0 + index * 60.0, label=label)
+        for index, label in enumerate(labels)
+    ]
+
+    assert [admission.admitted for admission in admissions] == [True, True, False, False]
+    assert memory.count("gate") == 1
+    if kind == "durable":
+        assert memory._store.load_scene_context("gate")[0]["label"] == "car"
+
+
+@pytest.mark.parametrize("kind", ["memory", "durable"])
+def test_non_vehicle_labels_still_match_exactly(kind, tmp_path):
+    memory = _memory(kind, tmp_path)
+    attributor = ObjectActivityAttributor("enforce", memory=memory, camera_id="gate")
+    _sighting(attributor, "one", 1000.0, label="car")
+    _sighting(attributor, "two", 1060.0, label="car")
+    person = _sighting(attributor, "three", 1120.0, label="person")
+    motorcycle = _sighting(attributor, "four", 1180.0, label="motorcycle")
+
+    assert person.attribution.role.value == "indeterminate"
+    assert motorcycle.attribution.role.value == "indeterminate"
+    assert memory.count("gate") == 3
+
+
+def test_movement_of_a_relabelled_vehicle_invalidates_its_location(tmp_path):
+    store = EventStore(tmp_path)
+    attributor = ObjectActivityAttributor(
+        "enforce", memory=store.scene_context_memory("gate"), camera_id="gate",
+    )
+    _sighting(attributor, "one", 1000.0, label="car")
+    _sighting(attributor, "two", 1060.0, label="car")
+
+    moved = _sighting(
+        attributor,
+        "moved",
+        1120.0,
+        label="truck",
+        temporal_center_displacement_ratio=0.05,
+        temporal_center_path_ratio=0.08,
+    )
+
+    assert moved.attribution.role.value == "active"
+    assert store.load_scene_context("gate") == []
+
+
+def test_reference_box_moves_only_with_a_new_sighting(tmp_path):
+    store = EventStore(tmp_path)
+    memory = store.scene_context_memory("gate")
+    attributor = ObjectActivityAttributor("enforce", memory=memory, camera_id="gate")
+    _sighting(attributor, "one", 1000.0)
+    _sighting(attributor, "two", 1060.0, box=_scaled(1.1))
+    written = memory.writes
+    persisted = store.load_scene_context("gate")[0]
+
+    # Later frames of the same event, with jittered boxes, change nothing.
+    _sighting(attributor, "two", 1061.0, box=_scaled(0.9))
+    _sighting(attributor, "two", 1062.0, box=_scaled(1.12))
+
+    assert memory.writes == written
+    assert store.load_scene_context("gate") == [persisted]
+    # The reference is a damped blend, not the newest box.
+    assert 0.09 < persisted["box_x1"] < 0.1
+
+
+def test_establishment_snapshot_matches_a_relabelled_vehicle(tmp_path):
+    from survng.app.scene_context_memory import SceneContextSnapshot, SceneContextSubject
+
+    snapshot = SceneContextSnapshot([SceneContextSubject(
+        label="car",
+        box=(0.1, 0.1, 0.3, 0.3),
+        last_seen_epoch=1000.0,
+        first_seen_epoch=900.0,
+        stable_event_keys=["one", "two"],
+    )])
+
+    def match(label):
+        return snapshot.match(
+            camera_id="gate", label=label, box=(0.1, 0.1, 0.3, 0.3), event_key="three",
+            observed_at_epoch=1060.0, min_iou=0.72, ttl_seconds=7200.0,
+        )[0]
+
+    assert match("truck") is True
+    assert match("bus") is True
+    assert match("person") is False
