@@ -118,5 +118,11 @@ assert.equal(estimatedBox(byLabel.person, "front-door", Number.NaN), null);
 assert.deepEqual(coverageChips(incident, cameraName), [{ tone: "warn", text: "Side Yard analysis pending" }]);
 assert.deepEqual(coverageChips({ episodes: [{ camera_id: "side-yard", coverage: { state: "incomplete", gaps: [{}] } }] }, cameraName), [{ tone: "warn", text: "Side Yard analysis incomplete" }]);
 assert.deepEqual(coverageChips({ episodes: [{ camera_id: "front-door", coverage: { state: "sampled" } }] }, cameraName), []);
+// Nothing is pending where recorded analysis is not coming: motion alone, or a view that was only sampled.
+const waiting = { camera_id: "side-yard", coverage: { state: "incomplete", reason: "analysis pending", gaps: [] } };
+assert.deepEqual(coverageChips({ episodes: [waiting] }, cameraName), []);
+assert.deepEqual(coverageChips({ labels: ["person"], episodes: [waiting] }, cameraName), [{ tone: "warn", text: "Side Yard analysis pending" }]);
+assert.deepEqual(coverageChips({ labels: ["person"], episodes: [{ camera_id: "side-yard", coverage: { state: "incomplete", gaps: [],
+  reason: "sampled detector frames; continuous coverage not established" } }] }, cameraName), []);
 
 console.log("incident story helpers passed");

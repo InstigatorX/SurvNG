@@ -11,6 +11,9 @@ This experiment brings four concepts from the Velador camera workspace demo into
 
 ## Incident gallery prototype
 
+> Superseded: this section records the first prototype. The gallery is now the
+> Incidents page's default view; see `docs/guide/incidents.md` for how it works today.
+
 On desktop and tablet, **Expand gallery** in the Incidents rail expands the
 existing thumbnail list across the workspace with a 320ms opening/closing
 transition. **Collapse gallery** or Escape returns to the standard investigation

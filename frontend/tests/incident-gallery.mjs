@@ -27,6 +27,10 @@ assert.deepEqual(incidentFilterValues("car, person,,car"), ["car", "person"]);
 assert.equal(toggleIncidentFilterValue("all", "person"), "person");
 assert.equal(toggleIncidentFilterValue("person", "car"), "car,person");
 assert.equal(toggleIncidentFilterValue("car,person", "car"), "person");
+// A value with a comma in it stays one value.
+assert.equal(toggleIncidentFilterValue("Porch", "Driveway, left"), "Driveway%2C left,Porch");
+assert.deepEqual(incidentFilterValues("Driveway%2C left,Porch"), ["Driveway, left", "Porch"]);
+assert.equal(toggleIncidentFilterValue("Driveway%2C left,Porch", "Driveway, left"), "Porch");
 assert.equal(toggleIncidentFilterValue("person", "person"), "all", "nothing checked means every object");
 
 assert.equal(toggleIncidentFilterValue("all", 7), "7", "person ids arrive as numbers");

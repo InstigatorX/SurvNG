@@ -69,6 +69,20 @@ def _incident_display_summary(objects):
 JOIN_SUBJECT_ALIASES_SQL = "update scene_track_aliases set object_id=? where object_id=?"
 JOIN_SUBJECT_EMBEDDINGS_SQL = "update appearance_embeddings set scene_object_id=? where scene_object_id=?"
 
+def filter_values(value):
+    """The values of a multi-value filter: comma separated, any of them matches.
+
+    A comma inside a value is written %2C. A value sent whole with a plain
+    comma in it (a zone named "Driveway, left" from an older caller) is kept
+    as a candidate too, so it still matches exactly.
+    """
+    raw=str(value or "").strip()
+    parts=[part.strip().replace("%2C",",") for part in raw.split(",") if part.strip()]
+    if len(parts)>1:
+        parts.append(raw)
+    return list(dict.fromkeys(parts))
+
+
 class SceneConflict(ValueError):
     """A correction was based on an obsolete incident revision."""
 
@@ -1309,8 +1323,7 @@ class EventStoreSceneMixin:
             clauses.append("i.start_epoch<?"); args.append(end_epoch)
         # Cameras, labels and zones each take several values separated by commas;
         # within one filter any value matches, and the filters combine with "and".
-        def chosen(value):
-            return list(dict.fromkeys(part.strip() for part in str(value or "").split(",") if part.strip()))
+        chosen=filter_values
         cameras=chosen(camera_id)
         if cameras:
             clauses.append("exists(select 1 from scene_episodes p where p.incident_id=i.id and p.camera_id in ("+",".join("?"*len(cameras))+"))")

@@ -1,8 +1,10 @@
+import { incidentFilterValues } from "./incidentNavigation.mjs";
+
 export function semanticIncidentRequest({ query, cameraFilter, objectFilter, startAt, endAt, limit = 60 }) {
   return {
     query: String(query || "").trim(),
-    camera_ids: cameraFilter && cameraFilter !== "all" ? String(cameraFilter).split(",").map((id) => id.trim()).filter(Boolean) : [],
-    object_labels: objectFilter && objectFilter !== "all" ? String(objectFilter).split(",").map((label) => label.trim()).filter(Boolean) : [],
+    camera_ids: incidentFilterValues(cameraFilter),
+    object_labels: incidentFilterValues(objectFilter),
     start_at: String(startAt || ""),
     end_at: String(endAt || ""),
     limit: Math.max(1, Math.min(100, Number(limit) || 60)),
@@ -35,7 +37,7 @@ export function rankSemanticIncidentDetails(details, zoneFilter = "all", { minCo
   for (const detail of Array.isArray(details) ? details : []) {
     if (!detail?.id) continue;
     const zones = Array.isArray(detail.zones) ? detail.zones : [];
-    const wantedZones = zoneFilter && zoneFilter !== "all" ? String(zoneFilter).split(",").map((zone) => zone.trim()).filter(Boolean) : [];
+    const wantedZones = incidentFilterValues(zoneFilter);
     if (wantedZones.length && !wantedZones.some((zone) => zones.includes(zone))) continue;
     // The same rule as the list: one detection of a chosen type must reach the floor.
     if (minConfidence > 0 && !((incidentPeakConfidence(detail, labels) ?? -1) >= minConfidence)) continue;

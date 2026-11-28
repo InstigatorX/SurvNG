@@ -176,7 +176,7 @@ curl -s -G 'http://127.0.0.1:8088/api/incidents/search' \
   --data-urlencode 'limit=20' | python -m json.tool
 ```
 
-`min_confidence` (0 to 1) keeps incidents with a detection at or above that confidence; with `object_label` set, that object must reach it. `camera_id`, `object_label`, `zone` and `person_id` each accept several values separated by commas and match any of them; different filters narrow each other. `review=unreviewed` or `review=reviewed` keeps incidents without or with a Reviewed or Nothing here verdict. `compact=true` leaves out each item's per-event list (`event_ids` remains), which is most of a busy incident's card.
+`min_confidence` (0 to 1) keeps incidents with a detection at or above that confidence; with `object_label` set, that object must reach it. An incident with no detections (motion only) has none to compare, so a threshold above 0 leaves it out. `camera_id`, `object_label`, `zone` and `person_id` each accept several values separated by commas and match any of them; different filters narrow each other. Write a comma inside a value as `%2C` (before URL encoding). `review=unreviewed` or `review=reviewed` keeps incidents without or with a Reviewed or Nothing here verdict. `compact=true` leaves out each item's per-event list (`event_ids` remains), which is most of a busy incident's card.
 
 Each item carries `review_verdict` (`reviewed`, `keep`, `nothing_here` or null) and, when its picture is on disk, `image_version`. Passing that value as `s=` to the item's thumbnail or snapshot URL lets the response be cached for good; without it the image is revalidated on every use. `limit` is capped at 100; page with `offset`.
 
