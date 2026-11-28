@@ -789,3 +789,90 @@ def test_a_corrupt_sightings_column_loads_as_no_sightings(tmp_path):
             camera_id="gate", label="car", box=(0.1, 0.1, 0.3, 0.3), event_key="two",
             observed_at_epoch=1120.0, min_iou=0.72, ttl_seconds=7200.0,
         )[:2] == (True, 0)
+
+
+def _parked_then_banded(memory, *, tolerance="high"):
+    from tests.test_object_activity import night_car
+
+    attributor = ObjectActivityAttributor("enforce", tolerance, memory=memory, camera_id="gate")
+    for index in range(8):
+        attributor.admit([night_car(0.001)], {}, event_key=f"parked-{index}",
+                         observed_at_epoch=1000.0 + index * 60.0)
+    return attributor
+
+
+def _banded(attributor, event_key, epoch):
+    from tests.test_object_activity import banded_car
+
+    return attributor.admit([banded_car()], {}, event_key=event_key, observed_at_epoch=epoch)[0]
+
+
+def _subject(memory):
+    subjects = memory._subjects
+    return subjects[0][1] if isinstance(subjects[0], tuple) else subjects[0]
+
+
+@pytest.mark.parametrize("kind", ["memory", "durable"])
+def test_a_car_seen_only_in_the_band_stays_known_and_then_expires(kind, tmp_path):
+    memory = _memory(kind, tmp_path)
+    attributor = _parked_then_banded(memory)
+    subject = _subject(memory)
+    box, keys = subject.box, list(subject.stable_event_keys)
+    ttl = attributor.stationary_policy.scene_memory_ttl_seconds
+
+    # Three hours of night events, every one in the band, none still.
+    start = 1420.0 + 600.0
+    nights = [start + index * 600.0 for index in range(19)]
+    assert nights[-1] - 1420.0 > ttl
+    for index, epoch in enumerate(nights):
+        admission = _banded(attributor, f"night-{index}", epoch)
+        assert admission.attribution.role.value == "scene_context", index
+        assert admission.admitted is False
+
+    # Kept alive by its last sighting, never moved or extended.
+    assert (subject.box, subject.stable_event_keys, subject.last_seen_epoch) == (box, keys, nights[-1])
+    if kind == "durable":
+        assert memory._store.load_scene_context("gate")[0]["last_seen_epoch"] == nights[-1]
+
+    # Once nothing is seen there for the TTL, the subject expires.
+    gone = _banded(attributor, "after", nights[-1] + ttl + 1.0)
+    assert gone.attribution.role.value == "indeterminate"
+    assert gone.admitted is True
+    assert memory.count("gate") == 0
+
+
+@pytest.mark.parametrize("kind", ["memory", "durable"])
+def test_a_jitter_absorbed_sighting_also_keeps_the_subject_known(kind, tmp_path):
+    from tests.test_object_activity import night_car
+
+    memory = _memory(kind, tmp_path)
+    attributor = _parked_then_banded(memory)
+    ttl = attributor.stationary_policy.scene_memory_ttl_seconds
+    epochs = [1420.0 + index * 1800.0 for index in range(1, 7)]
+    for index, epoch in enumerate(epochs):
+        admission = attributor.admit([night_car(0.00994)], {}, event_key=f"night-{index}",
+                                     observed_at_epoch=epoch)[0]
+        assert admission.attribution.evidence.scene_context_jitter_absorbed is True, index
+    assert epochs[-1] - 1420.0 > ttl
+    assert _subject(memory).last_seen_epoch == epochs[-1]
+
+
+def test_a_refresh_writes_once_per_event_and_reloads_as_it_is_held(tmp_path):
+    store = EventStore(tmp_path)
+    memory = store.scene_context_memory("gate")
+    attributor = _parked_then_banded(memory)
+    written = memory.writes
+
+    # Every frame of one event, then a late event older than the newest sighting.
+    for offset in range(5):
+        _banded(attributor, "night", 2000.0 + offset)
+    assert memory.writes == written + 1
+    _banded(attributor, "late", 1500.0)
+    assert memory.writes == written + 1
+    assert _subject(memory).last_seen_epoch == 2000.0
+
+    store._scene_context_memories.clear()
+    reloaded = store.scene_context_memory("gate")
+    fields = lambda s: (s.label, s.box, s.first_seen_epoch, s.last_seen_epoch,  # noqa: E731
+                        s.stable_event_keys, s.sighting_epochs)
+    assert [fields(s) for s in reloaded._subjects] == [fields(s) for s in memory._subjects]

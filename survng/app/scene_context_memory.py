@@ -3,7 +3,8 @@
 Live admission and recorded analysis share one memory. An in-memory memory
 keeps today's process-local behavior. A durable memory hydrates that working
 set from the event store and writes through only when the set of sightings
-changes, a subject is forgotten, or an expired row is pruned.
+changes, a subject is forgotten, an expired row is pruned, or a known subject
+is refreshed (at most once per event).
 """
 
 from __future__ import annotations
@@ -345,6 +346,39 @@ class SceneContextSubject:
     # sighting cap. Held in the working set only: after a restart an evicted
     # event can be taken back once, then it is recorded again.
     evicted_event_keys: list[str] = field(default_factory=list)
+    # Events that have already refreshed this subject, newest last. Held in
+    # the working set only, so a refresh is written at most once per event
+    # (once more after a restart).
+    refreshed_event_keys: list[str] = field(default_factory=list)
+
+
+# Bounds the events remembered as having refreshed a subject. Recorded
+# analysis can interleave a few events; sixteen, the sighting cap, is ample.
+REFRESHED_EVENT_KEYS_MAX = 16
+
+
+def refresh_subject(subject: SceneContextSubject, event_key: str, observed_at_epoch: float) -> bool:
+    """Keep a known subject alive from a sighting that is not a still one.
+
+    Only the last sighting time moves, never backwards, and only on the first
+    frame of an event that is not already one of the subject's sightings. The
+    reference box, the sightings and their times are unchanged, so such a
+    sighting can keep a subject from expiring but never moves or extends it.
+    True when the subject changed.
+    """
+    if (
+        not event_key
+        or event_key in subject.refreshed_event_keys
+        or event_key in subject.stable_event_keys
+    ):
+        return False
+    subject.refreshed_event_keys = [
+        *subject.refreshed_event_keys, event_key,
+    ][-REFRESHED_EVENT_KEYS_MAX:]
+    if observed_at_epoch <= subject.last_seen_epoch:
+        return False
+    subject.last_seen_epoch = observed_at_epoch
+    return True
 
 
 class SceneContextMemory(Protocol):
@@ -388,6 +422,17 @@ class SceneContextMemory(Protocol):
         ttl_seconds: float,
         max_entries: int,
         max_sightings: int,
+    ) -> None: ...
+
+    def refresh(
+        self,
+        *,
+        camera_id: str,
+        label: str,
+        reference_box: tuple[float, float, float, float],
+        event_key: str,
+        observed_at_epoch: float,
+        ttl_seconds: float,
     ) -> None: ...
 
     def forget(
@@ -528,6 +573,27 @@ class InMemorySceneContextMemory:
                 self._subjects = [
                     item for index, item in enumerate(self._subjects) if index not in drop
                 ]
+
+    def refresh(
+        self,
+        *,
+        camera_id: str,
+        label: str,
+        reference_box: tuple[float, float, float, float],
+        event_key: str,
+        observed_at_epoch: float,
+        ttl_seconds: float,
+    ) -> None:
+        with self._lock:
+            self._prune(camera_id, observed_at_epoch, ttl_seconds)
+            for stored_camera, subject in self._subjects:
+                if (
+                    stored_camera == camera_id
+                    and subject.box == reference_box
+                    and same_subject_label(subject.label, label)
+                    and subject_visible(subject, event_key, observed_at_epoch)
+                ):
+                    refresh_subject(subject, event_key, observed_at_epoch)
 
     def forget(
         self,
@@ -712,6 +778,29 @@ class DurableSceneContextMemory:
                 self._subjects = self._subjects[-max_entries:]
                 for subject in dropped:
                     self._delete(subject)
+
+    def refresh(
+        self,
+        *,
+        camera_id: str,
+        label: str,
+        reference_box: tuple[float, float, float, float],
+        event_key: str,
+        observed_at_epoch: float,
+        ttl_seconds: float,
+    ) -> None:
+        if camera_id != self.camera_id:
+            return
+        with self._lock:
+            self._prune(observed_at_epoch, ttl_seconds)
+            for subject in self._subjects:
+                if (
+                    subject.box == reference_box
+                    and same_subject_label(subject.label, label)
+                    and subject_visible(subject, event_key, observed_at_epoch)
+                    and refresh_subject(subject, event_key, observed_at_epoch)
+                ):
+                    self._persist(subject)
 
     def forget(
         self,

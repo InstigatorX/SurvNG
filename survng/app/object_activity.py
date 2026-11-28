@@ -80,6 +80,17 @@ KNOWN_SUBJECT_JITTER_INVALIDATION_FRACTION = 0.6
 # endpoint is how a subject that starts to leave shows up. A track with a
 # rejected sample, or without a versioned estimate saying none was rejected,
 # keeps the plain thresholds.
+# A sighting that matches a remembered subject seen still at this place in at
+# least KNOWN_SUBJECT_JITTER_MIN_PRIOR_SIGHTINGS earlier events, and shows no
+# credible movement, no zone entry and no robust new appearance, is scene
+# context whatever its sample count. It closes the band between "still" and
+# "credibly moving", which otherwise stays indeterminate and admitted, for
+# well-established subjects only: the bar is the same strong evidence the
+# jitter rule asks for, three times the plain two prior sightings. Neither
+# rule's sightings are still ones, so they do not blend the reference box or
+# add a sighting; they only keep the subject from expiring (see
+# refresh_subject).
+ESTABLISHED_SCENE_CONTEXT_REASON = "established_scene_context_without_credible_movement"
 # Movement at or beyond these bounds leaves the remembered location: the
 # memory is forgotten there, not only this event's sighting.
 LOCATION_INVALIDATION_DISPLACEMENT_RATIO = 0.02
@@ -557,7 +568,7 @@ class ObjectActivityAttributor:
         ema_overlap = self._ema_overlap(observation, qualification)
         jitter_allowance = known_subject_jitter_allowance(motion.movement_threshold)
         raw_displacement, rejected_points = self._estimate_support(observation)
-        footprint_match, footprint_sightings, footprint_offset = self._known_footprint_evidence(
+        footprint_match, footprint_sightings, footprint_offset, footprint_box = self._known_footprint_evidence(
             observation,
             motion,
             jitter_allowance=jitter_allowance,
@@ -571,12 +582,15 @@ class ObjectActivityAttributor:
             footprint_match
             and footprint_sightings >= KNOWN_SUBJECT_JITTER_MIN_PRIOR_SIGHTINGS
         )
+        # The subject a sighting that is not still keeps alive, if any.
+        refresh_box: tuple[float, float, float, float] | None = None
         if jitter_absorbed:
             # Not a still sighting, so it neither builds the memory nor,
             # since it is not movement, erases it.
             role = ObjectActivityRole.SCENE_CONTEXT
             confidence = 0.8
             reasons = ("sparse_jitter_on_known_scene_context",)
+            refresh_box = footprint_box
         elif motion.credible_movement:
             role = ObjectActivityRole.ACTIVE
             confidence = self._bounded(
@@ -599,6 +613,18 @@ class ObjectActivityAttributor:
             role = ObjectActivityRole.SCENE_CONTEXT
             confidence = self._bounded(0.86 + min(0.1, memory_sightings * 0.02))
             reasons = ("repeated_stable_scene_context",)
+        elif (
+            memory_match
+            and memory_sightings >= KNOWN_SUBJECT_JITTER_MIN_PRIOR_SIGHTINGS
+            and not motion.robust_new_appearance
+            and not self._raw_movement(observation, motion, raw_displacement)
+        ):
+            role = ObjectActivityRole.SCENE_CONTEXT
+            confidence = 0.8
+            reasons = (ESTABLISHED_SCENE_CONTEXT_REASON,)
+            refresh_box = self._matched_reference(
+                observation, event_key=event_key, observed_at_epoch=observed_at_epoch,
+            )
         else:
             role = ObjectActivityRole.INDETERMINATE
             confidence = 0.35 if motion.track_observations >= 2 else 0.15
@@ -646,7 +672,65 @@ class ObjectActivityAttributor:
                     or motion.movement_extent_ratio >= extent_bound
                 ),
             )
+        elif refresh_box is not None:
+            self.memory.refresh(
+                camera_id=self.camera_id,
+                label=str(observation.get("label") or "").strip().lower(),
+                reference_box=refresh_box,
+                event_key=event_key,
+                observed_at_epoch=observed_at_epoch,
+                ttl_seconds=self.stationary_policy.scene_memory_ttl_seconds,
+            )
         return result
+
+    @staticmethod
+    def _raw_movement(
+        observation: Mapping[str, Any],
+        motion: TemporalObjectMotionEvidence,
+        raw_displacement: float | None,
+    ) -> bool:
+        """Credible displacement on every sample, before any is rejected.
+
+        The motion estimate drops a lone endpoint that its neighbours disagree
+        with, and that endpoint is how a subject that starts to leave shows
+        up. The established rule therefore also checks the raw displacement,
+        and the legacy centre displacement, against the movement threshold.
+        """
+        try:
+            legacy = float(observation.get("temporal_center_displacement_ratio") or 0.0)
+        except (TypeError, ValueError):
+            legacy = 0.0
+        if not math.isfinite(legacy):
+            legacy = 0.0
+        return max(raw_displacement or 0.0, legacy) >= motion.movement_threshold
+
+    def _matched_reference(
+        self,
+        observation: Mapping[str, Any],
+        *,
+        event_key: str,
+        observed_at_epoch: float,
+    ) -> tuple[float, float, float, float] | None:
+        """Reference box of the subject the plain memory match chose."""
+        label = str(observation.get("label") or "").strip().lower()
+        box = self._normalized_box(observation)
+        if not label or box is None:
+            return None
+        candidates = self.memory.known_subjects(
+            camera_id=self.camera_id,
+            label=label,
+            box=box,
+            event_key=event_key,
+            observed_at_epoch=observed_at_epoch,
+            min_iou=self.stationary_policy.scene_memory_min_iou,
+            ttl_seconds=self.stationary_policy.scene_memory_ttl_seconds,
+        )
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda subject: (subject.prior_sightings, self._box_iou(subject.box, box)),
+        ).box
 
     def _known_footprint_evidence(
         self,
@@ -659,7 +743,7 @@ class ObjectActivityAttributor:
         stable_observation: bool,
         event_key: str,
         observed_at_epoch: float,
-    ) -> tuple[bool, int, float | None]:
+    ) -> tuple[bool, int, float | None, tuple[float, float, float, float] | None]:
         """Whether a jittering sighting sits on a well-established footprint.
 
         Only a sighting that fails stillness by its displacement or excursion
@@ -667,9 +751,10 @@ class ObjectActivityAttributor:
         A still sighting keeps the plain rule, and zone entry, a robust new
         appearance, a rejected sample, or incomplete evidence is never jitter.
 
-        Returns the match, the matched subject's prior sightings, and the
-        distance of the box centre from the nearest well-established
-        reference centre, whether or not it matched.
+        Returns the match, the matched subject's prior sightings, the
+        distance of the box centre from the matched reference centre (or the
+        nearest well-established one when none matched), and the matched
+        reference box.
         """
         if not (
             not stable_observation
@@ -685,11 +770,11 @@ class ObjectActivityAttributor:
             and raw_displacement is not None
             and raw_displacement <= jitter_allowance
         ):
-            return False, 0, None
+            return False, 0, None, None
         label = str(observation.get("label") or "").strip().lower()
         box = self._normalized_box(observation)
         if not label or box is None:
-            return False, 0, None
+            return False, 0, None, None
         candidates = [
             subject
             for subject in self.memory.known_subjects(
@@ -704,7 +789,7 @@ class ObjectActivityAttributor:
             if subject.prior_sightings >= KNOWN_SUBJECT_JITTER_MIN_PRIOR_SIGHTINGS
         ]
         if not candidates:
-            return False, 0, None
+            return False, 0, None, None
         matched = [
             subject
             for subject in candidates
@@ -712,12 +797,12 @@ class ObjectActivityAttributor:
             and _sides_within(subject.box, box, KNOWN_SUBJECT_FOOTPRINT_MAX_SIDE_RATIO)
         ]
         if not matched:
-            return False, 0, min(_center_offset(subject.box, box) for subject in candidates)
+            return False, 0, min(_center_offset(subject.box, box) for subject in candidates), None
         best = max(
             matched,
             key=lambda subject: (subject.prior_sightings, -_center_offset(subject.box, box)),
         )
-        return True, best.prior_sightings, _center_offset(best.box, box)
+        return True, best.prior_sightings, _center_offset(best.box, box), best.box
 
     @staticmethod
     def _estimate_support(observation: Mapping[str, Any]) -> tuple[float | None, int | None]:

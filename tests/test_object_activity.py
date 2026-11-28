@@ -523,8 +523,13 @@ def test_jitter_without_a_remembered_subject_fails_open() -> None:
         ("car", (179, 51), [(-1.0, 0.5, 0.5), (0.0, 0.509, 0.5), (0.5, 0.506, 0.5), (1.5, 0.5, 0.58)]),
         # Standing, then walking 0.05 sideways.
         ("person", (50, 200), [(-1.0, 0.5, 0.5), (0.0, 0.5, 0.506), (1.0, 0.55, 0.5)]),
+        # Beyond the jitter rule's four samples: five samples in the band
+        # between still and moving, then 0.06 away. The established-subject
+        # rule must not absorb it either.
+        ("car", (179, 51), [(-1.0, 0.5, 0.5), (0.0, 0.509, 0.5), (0.5, 0.5, 0.508),
+                            (1.0, 0.5085, 0.506), (1.5, 0.501, 0.5), (2.5, 0.5, 0.56)]),
     ],
-    ids=["car_three_samples", "car_four_samples", "person_walks_off"],
+    ids=["car_three_samples", "car_four_samples", "person_walks_off", "car_six_samples"],
 )
 def test_a_departure_hidden_by_a_rejected_endpoint_is_not_jitter(label, size, trajectory) -> None:
     from survng.app.object_motion import (
@@ -694,3 +699,135 @@ def test_the_footprint_does_not_depend_on_which_way_the_box_errs() -> None:
             event_key="night", observed_at_epoch=2000.0,
         )[0]
         assert admission.attribution.role is ObjectActivityRole.SCENE_CONTEXT, (dx, dy)
+
+
+ESTABLISHED_REASON = "established_scene_context_without_credible_movement"
+
+
+def banded_car(samples: int = 6, *, shift: float = 0.0, **values: object) -> dict[str, object]:
+    """Production evidence (B): neither still nor credibly moving.
+
+    Excursion 0.0142 is above the stillness limit of about 0.0112 for this
+    box at "high" and below its credible path threshold of about 0.0186.
+    """
+    return night_car(0.004, samples=samples, excursion=0.0142, shift=shift, **values)
+
+
+def remembered_boxes(attributor: ObjectActivityAttributor) -> list[tuple[float, ...]]:
+    return [subject.box for _, subject in attributor.memory._subjects]
+
+
+@pytest.mark.parametrize("samples", [6, 7])
+def test_a_known_subject_in_the_indeterminate_band_is_scene_context(samples) -> None:
+    attributor = parked_overnight(sightings=16)
+    before = (remembered(attributor), remembered_boxes(attributor))
+
+    admission = attributor.admit(
+        [banded_car(samples)], {}, event_key="night", observed_at_epoch=2000.0
+    )[0]
+
+    evidence = admission.attribution.evidence
+    assert evidence.credible_movement is False
+    assert admission.attribution.role is ObjectActivityRole.SCENE_CONTEXT
+    assert evidence.reasons == (ESTABLISHED_REASON,)
+    assert admission.admitted is False
+    assert admission.reason == "stationary_scene_context"
+    # Neither blended into the reference nor added as a sighting.
+    assert (remembered(attributor), remembered_boxes(attributor)) == before
+
+
+@pytest.mark.parametrize("samples", [0, 1, 2, 3])
+def test_the_rule_holds_whatever_the_sample_count(samples) -> None:
+    attributor = parked_overnight(sightings=8)
+    sighting = banded_car(samples)
+    if samples < 2:
+        sighting["temporal_consensus"] = False
+    admission = attributor.admit([sighting], {}, event_key="night", observed_at_epoch=2000.0)[0]
+    assert admission.attribution.role is ObjectActivityRole.SCENE_CONTEXT
+
+
+@pytest.mark.parametrize(
+    ("sightings", "expected"),
+    [(0, ObjectActivityRole.INDETERMINATE), (5, ObjectActivityRole.INDETERMINATE),
+     (6, ObjectActivityRole.SCENE_CONTEXT)],
+)
+def test_the_band_stays_indeterminate_without_a_well_established_subject(sightings, expected) -> None:
+    attributor = (
+        parked_overnight(sightings=sightings) if sightings
+        else ObjectActivityAttributor("enforce", "high")
+    )
+    admission = attributor.admit([banded_car()], {}, event_key="night", observed_at_epoch=2000.0)[0]
+    assert admission.attribution.role is expected
+    assert admission.admitted is (expected is not ObjectActivityRole.SCENE_CONTEXT)
+
+
+def test_a_robust_new_appearance_on_a_known_spot_is_never_scene_context() -> None:
+    attributor = parked_overnight(sightings=16)
+    admission = attributor.admit(
+        [banded_car(temporal_robust_new_appearance=True)], {}, event_key="arrival",
+        observed_at_epoch=2000.0,
+    )[0]
+    assert admission.attribution.role is ObjectActivityRole.INDETERMINATE
+    assert admission.attribution.evidence.reasons == ("robust_new_appearance_without_causal_motion",)
+    assert admission.admitted is True
+
+
+@pytest.mark.parametrize(
+    ("sighting", "forgotten"),
+    [
+        (night_car(0.004, samples=6, excursion=0.0142, temporal_zone_entry=True), True),
+        (night_car(0.009, samples=6, excursion=0.0142), False),
+        (night_car(0.004, samples=6, excursion=0.02), False),
+        (night_car(0.03, samples=6, excursion=0.05), True),
+    ],
+    ids=["zone_entry", "credible_displacement", "credible_path", "leaving"],
+)
+def test_movement_on_a_known_spot_is_active_and_revokes_as_before(sighting, forgotten) -> None:
+    attributor = parked_overnight(sightings=16)
+    admission = attributor.admit([sighting], {}, event_key="moving", observed_at_epoch=2000.0)[0]
+    assert admission.attribution.role is ObjectActivityRole.ACTIVE
+    assert admission.admitted is True
+    assert (attributor.memory.count() == 0) is forgotten
+
+
+def test_a_late_event_counts_only_sightings_from_before_it() -> None:
+    attributor = ObjectActivityAttributor("enforce", "high")
+    for index in range(2):
+        attributor.admit([night_car(0.001)], {}, event_key=f"early-{index}",
+                         observed_at_epoch=1000.0 + index * 60.0)
+    for index in range(6):
+        attributor.admit([night_car(0.001)], {}, event_key=f"later-{index}",
+                         observed_at_epoch=3000.0 + index * 60.0)
+
+    # Analysed last, the event at 2000 s had two sightings before it.
+    late = attributor.admit([banded_car()], {}, event_key="late", observed_at_epoch=2000.0)[0]
+
+    assert late.attribution.evidence.scene_context_memory_sightings == 2
+    assert late.attribution.role is ObjectActivityRole.INDETERMINATE
+    assert late.admitted is True
+
+
+def test_a_car_creeping_off_its_spot_is_admitted_once_it_leaves_the_match() -> None:
+    attributor = parked_overnight(sightings=16)
+    reference = remembered_boxes(attributor)
+    keys = remembered(attributor)
+    roles = []
+    # Each event, the car is 6 px further along, never credibly moving
+    # within the event.
+    for step in range(1, 12):
+        admission = attributor.admit(
+            [banded_car(shift=6.0 * step)], {}, event_key=f"creep-{step}",
+            observed_at_epoch=2000.0 + step * 600.0,
+        )[0]
+        roles.append((admission.attribution.evidence.scene_context_memory_match,
+                      admission.attribution.role, admission.admitted))
+        # The reference never follows it, and nothing is added.
+        assert remembered_boxes(attributor) == reference
+        assert remembered(attributor) == keys
+
+    assert any(role is ObjectActivityRole.SCENE_CONTEXT for _, role, _ in roles)
+    for matched, role, admitted in roles:
+        assert (role is ObjectActivityRole.SCENE_CONTEXT) is matched
+        assert admitted is not matched
+    first_admitted = next(index for index, (_, _, admitted) in enumerate(roles) if admitted)
+    assert all(admitted for _, _, admitted in roles[first_admitted:])
