@@ -3,8 +3,28 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 from typing import Any
+
+
+def _sighting_epochs(raw: object, sightings: list[str]) -> dict[str, float]:
+    """Recorded sighting times; a row from before they were kept has none."""
+    try:
+        value = json.loads(raw) if isinstance(raw, str) and raw else {}
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    epochs: dict[str, float] = {}
+    for key in sightings:
+        try:
+            when = float(value[key])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(when):
+            epochs[key] = when
+    return epochs
 
 
 class EventStoreSceneContextMixin:
@@ -24,9 +44,17 @@ class EventStoreSceneContextMixin:
                     first_seen_epoch real not null,
                     last_seen_epoch real not null,
                     sightings_json text not null,
-                    last_moved_epoch real
+                    last_moved_epoch real,
+                    sighting_epochs_json text
                 )"""
             )
+            columns = {
+                row[1] for row in conn.execute("pragma table_info(scene_context_subjects)")
+            }
+            if "sighting_epochs_json" not in columns:
+                conn.execute(
+                    "alter table scene_context_subjects add column sighting_epochs_json text"
+                )
             conn.execute(
                 "create index if not exists scene_context_subjects_camera_label "
                 "on scene_context_subjects(camera_id, label)"
@@ -49,7 +77,7 @@ class EventStoreSceneContextMixin:
 
         rows = conn.execute(
             "select id, label, box_x1, box_y1, box_x2, box_y2, first_seen_epoch, "
-            "last_seen_epoch, sightings_json, last_moved_epoch "
+            "last_seen_epoch, sightings_json, last_moved_epoch, sighting_epochs_json "
             "from scene_context_subjects where camera_id=? order by id",
             (camera_id,),
         ).fetchall()
@@ -61,14 +89,16 @@ class EventStoreSceneContextMixin:
                 sightings = []
             if not isinstance(sightings, list):
                 sightings = []
+            keys = [str(item) for item in sightings]
             subjects.append(SceneContextSubject(
                 label=str(row["label"]),
                 box=(float(row["box_x1"]), float(row["box_y1"]), float(row["box_x2"]), float(row["box_y2"])),
                 last_seen_epoch=float(row["last_seen_epoch"]),
                 first_seen_epoch=float(row["first_seen_epoch"]),
-                stable_event_keys=[str(item) for item in sightings],
+                stable_event_keys=keys,
                 row_id=int(row["id"]) if row["id"] is not None else None,
                 last_moved_epoch=row["last_moved_epoch"],
+                sighting_epochs=_sighting_epochs(row["sighting_epochs_json"], keys),
             ))
         return SceneContextSnapshot(subjects)
 
@@ -76,7 +106,7 @@ class EventStoreSceneContextMixin:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 "select id, label, box_x1, box_y1, box_x2, box_y2, first_seen_epoch, "
-                "last_seen_epoch, sightings_json, last_moved_epoch "
+                "last_seen_epoch, sightings_json, last_moved_epoch, sighting_epochs_json "
                 "from scene_context_subjects where camera_id=? order by id",
                 (camera_id,),
             ).fetchall()
@@ -88,6 +118,7 @@ class EventStoreSceneContextMixin:
                 sightings = []
             if not isinstance(sightings, list):
                 sightings = []
+            keys = [str(item) for item in sightings]
             loaded.append({
                 "id": int(row["id"]),
                 "label": row["label"],
@@ -97,7 +128,8 @@ class EventStoreSceneContextMixin:
                 "box_y2": row["box_y2"],
                 "first_seen_epoch": row["first_seen_epoch"],
                 "last_seen_epoch": row["last_seen_epoch"],
-                "sightings": [str(item) for item in sightings],
+                "sightings": keys,
+                "sighting_epochs": _sighting_epochs(row["sighting_epochs_json"], keys),
                 "last_moved_epoch": row["last_moved_epoch"],
             })
         return loaded
@@ -114,6 +146,7 @@ class EventStoreSceneContextMixin:
             float(subject["last_seen_epoch"]),
             json.dumps(list(subject.get("sightings") or []), separators=(",", ":")),
             subject.get("last_moved_epoch"),
+            json.dumps(dict(subject.get("sighting_epochs") or {}), separators=(",", ":")),
         )
         with self._lock, self._connect() as conn:
             row_id = subject.get("id")
@@ -121,14 +154,14 @@ class EventStoreSceneContextMixin:
                 conn.execute(
                     "update scene_context_subjects set label=?, box_x1=?, box_y1=?, box_x2=?, "
                     "box_y2=?, first_seen_epoch=?, last_seen_epoch=?, sightings_json=?, "
-                    "last_moved_epoch=? where id=? and camera_id=?",
+                    "last_moved_epoch=?, sighting_epochs_json=? where id=? and camera_id=?",
                     (*payload, int(row_id), camera_id),
                 )
                 return int(row_id)
             cursor = conn.execute(
                 "insert into scene_context_subjects(camera_id, label, box_x1, box_y1, box_x2, "
-                "box_y2, first_seen_epoch, last_seen_epoch, sightings_json, last_moved_epoch) "
-                "values(?,?,?,?,?,?,?,?,?,?)",
+                "box_y2, first_seen_epoch, last_seen_epoch, sightings_json, last_moved_epoch, "
+                "sighting_epochs_json) values(?,?,?,?,?,?,?,?,?,?,?)",
                 (camera_id, *payload),
             )
             return int(cursor.lastrowid)

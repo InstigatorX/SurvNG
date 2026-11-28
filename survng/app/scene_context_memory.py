@@ -72,11 +72,26 @@ def normalized_box(
     return normalized
 
 
-def prior_sightings(event_keys: list[str], event_key: str) -> int:
-    """Sightings from other events. The current event is not a prior."""
-    if not event_key:
-        return len(event_keys)
-    return sum(1 for key in event_keys if key != event_key)
+def sighting_epoch(subject: SceneContextSubject, event_key: str) -> float:
+    """When a sighting was recorded.
+
+    A ledger written before sightings carried times has none; such a sighting
+    dates from the subject's last sighting, which every in-order event follows.
+    """
+    return subject.sighting_epochs.get(event_key, subject.last_seen_epoch)
+
+
+def prior_sightings(
+    subject: SceneContextSubject,
+    event_key: str,
+    observed_at_epoch: float,
+) -> int:
+    """Sightings from other events at or before this one. The current event is not a prior."""
+    return sum(
+        1
+        for key in subject.stable_event_keys
+        if key != event_key and sighting_epoch(subject, key) <= observed_at_epoch
+    )
 
 
 def subject_visible(
@@ -92,14 +107,13 @@ def subject_visible(
     such as a car that arrived in it and then parked, does not apply to it.
     Later frames of an event the subject already records still apply.
 
-    An out-of-order event counts every other sighting of the subject,
-    including those after it. Sightings carry no times of their own, and
-    they do not need them: the subject was at this place before the event,
-    and the later sightings show it was still there after it. Movement that
-    leaves the place forgets the location, so a subject seen there again
-    afterwards starts over with a later first sighting. The event's own TTL
-    cutoff is older than the newest event's, so it never prunes a subject
-    that the newest sighting keeps alive.
+    An out-of-order event counts only the subject's sightings at or before
+    it (see prior_sightings), exactly what it would have counted had it been
+    analysed in order. A later sighting is not evidence that the subject was
+    already there: a car that left unseen and another that parked in the same
+    bay are one subject to the memory. The event's own TTL cutoff is older
+    than the newest event's, so it never prunes a subject that the newest
+    sighting keeps alive.
     """
     if subject.first_seen_epoch <= observed_at_epoch:
         return True
@@ -109,15 +123,18 @@ def subject_visible(
 def revoke_sighting(subject: SceneContextSubject, event_key: str) -> bool:
     """Remove one event's sighting; True when the subject recorded it.
 
-    Sightings carry no times, so the first remaining one is unknown. The
-    subject is dated from its last sighting instead: an event before that is
-    no longer judged against it, which fails open, while events after it
-    match as before.
+    The subject is then dated from its first remaining sighting, so an event
+    between the revoked sighting and that one is no longer judged against it.
     """
     if event_key not in subject.stable_event_keys:
         return False
     subject.stable_event_keys.remove(event_key)
-    subject.first_seen_epoch = max(subject.first_seen_epoch, subject.last_seen_epoch)
+    subject.sighting_epochs.pop(event_key, None)
+    if subject.stable_event_keys:
+        subject.first_seen_epoch = max(
+            subject.first_seen_epoch,
+            min(sighting_epoch(subject, key) for key in subject.stable_event_keys),
+        )
     return True
 
 
@@ -140,16 +157,28 @@ def merge_subjects(
     """
     survivor = min(subjects, key=lambda subject: (subject.first_seen_epoch, subject.row_id or 0))
     keys: list[str] = []
+    epochs: dict[str, float] = {}
+    dated: dict[str, float] = {}
     for subject in sorted(subjects, key=lambda subject: subject.first_seen_epoch):
         for key in subject.stable_event_keys:
             if key not in keys:
                 keys.append(key)
+            when = sighting_epoch(subject, key)
+            dated[key] = min(dated.get(key, when), when)
+            if key in subject.sighting_epochs:
+                epochs[key] = min(epochs.get(key, when), when)
     last_seen = max(subject.last_seen_epoch for subject in subjects)
     if event_key and event_key not in keys:
         keys.append(event_key)
+        epochs[event_key] = dated[event_key] = observed_at_epoch
         survivor.box = blend_reference_box(survivor.box, box)
         last_seen = max(last_seen, observed_at_epoch)
-    survivor.stable_event_keys = keys[-max_sightings:]
+    if len(keys) > max_sightings:
+        # Keep the latest sightings by time; a late, older event goes first.
+        kept = set(sorted(keys, key=lambda key: dated[key])[-max_sightings:])
+        keys = [key for key in keys if key in kept]
+    survivor.stable_event_keys = keys
+    survivor.sighting_epochs = {key: epochs[key] for key in keys if key in epochs}
     survivor.first_seen_epoch = min(subject.first_seen_epoch for subject in subjects)
     survivor.last_seen_epoch = last_seen
     moved = [subject.last_moved_epoch for subject in subjects if subject.last_moved_epoch is not None]
@@ -194,13 +223,13 @@ class SceneContextSnapshot:
         found = max(
             matches,
             key=lambda subject: (
-                prior_sightings(subject.stable_event_keys, event_key),
+                prior_sightings(subject, event_key, observed_at_epoch),
                 box_iou(subject.box, box),
             ),
         )
         return (
             True,
-            prior_sightings(found.stable_event_keys, event_key),
+            prior_sightings(found, event_key, observed_at_epoch),
             max(0.0, observed_at_epoch - found.last_seen_epoch),
         )
 
@@ -227,6 +256,7 @@ class SceneContextSubject:
     stable_event_keys: list[str] = field(default_factory=list)
     row_id: int | None = None
     last_moved_epoch: float | None = None
+    sighting_epochs: dict[str, float] = field(default_factory=dict)
 
 class SceneContextMemory(Protocol):
     writes: int
@@ -314,13 +344,13 @@ class InMemorySceneContextMemory:
             match = max(
                 matches,
                 key=lambda subject: (
-                    prior_sightings(subject.stable_event_keys, event_key),
+                    prior_sightings(subject, event_key, observed_at_epoch),
                     box_iou(subject.box, box),
                 ),
             )
             return (
                 True,
-                prior_sightings(match.stable_event_keys, event_key),
+                prior_sightings(match, event_key, observed_at_epoch),
                 max(0.0, observed_at_epoch - match.last_seen_epoch),
             )
 
@@ -364,6 +394,7 @@ class InMemorySceneContextMemory:
                     camera_id,
                     SceneContextSubject(
                         label, box, observed_at_epoch, observed_at_epoch, [event_key],
+                        sighting_epochs={event_key: observed_at_epoch},
                     ),
                 ))
             camera_subjects = [
@@ -445,6 +476,7 @@ class DurableSceneContextMemory:
                 stable_event_keys=list(row["sightings"]),
                 row_id=int(row["id"]) if row.get("id") is not None else None,
                 last_moved_epoch=row.get("last_moved_epoch"),
+                sighting_epochs=dict(row.get("sighting_epochs") or {}),
             ))
 
     @contextmanager
@@ -479,13 +511,13 @@ class DurableSceneContextMemory:
             match = max(
                 matches,
                 key=lambda subject: (
-                    prior_sightings(subject.stable_event_keys, event_key),
+                    prior_sightings(subject, event_key, observed_at_epoch),
                     box_iou(subject.box, box),
                 ),
             )
             return (
                 True,
-                prior_sightings(match.stable_event_keys, event_key),
+                prior_sightings(match, event_key, observed_at_epoch),
                 max(0.0, observed_at_epoch - match.last_seen_epoch),
             )
 
@@ -531,6 +563,7 @@ class DurableSceneContextMemory:
             else:
                 subject = SceneContextSubject(
                     label, box, observed_at_epoch, observed_at_epoch, [event_key],
+                    sighting_epochs={event_key: observed_at_epoch},
                 )
                 self._subjects.append(subject)
                 self._persist(subject)
@@ -608,6 +641,7 @@ class DurableSceneContextMemory:
                 "first_seen_epoch": subject.first_seen_epoch,
                 "last_seen_epoch": subject.last_seen_epoch,
                 "sightings": list(subject.stable_event_keys),
+                "sighting_epochs": dict(subject.sighting_epochs),
                 "last_moved_epoch": subject.last_moved_epoch,
             },
         )

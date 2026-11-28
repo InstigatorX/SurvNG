@@ -474,7 +474,8 @@ def test_recorded_analysis_that_finishes_after_a_later_event_still_knows_the_sub
 
     assert late.attribution.role.value == "scene_context"
     assert late.admitted is False
-    assert late.attribution.evidence.scene_context_memory_sightings == 5
+    # The four sightings before it; the live one at 2005 s came after.
+    assert late.attribution.evidence.scene_context_memory_sightings == 4
     assert memory.count("gate") == 1
 
 
@@ -511,14 +512,15 @@ def test_a_late_sighting_is_written_once_and_reloads_as_it_is_held(tmp_path):
     store._scene_context_memories.clear()
     reloaded = store.scene_context_memory("gate")
     assert [
-        (s.label, s.box, s.first_seen_epoch, s.last_seen_epoch, s.stable_event_keys)
+        (s.label, s.box, s.first_seen_epoch, s.last_seen_epoch, s.stable_event_keys, s.sighting_epochs)
         for s in reloaded._subjects
     ] == [
-        (s.label, s.box, s.first_seen_epoch, s.last_seen_epoch, s.stable_event_keys)
+        (s.label, s.box, s.first_seen_epoch, s.last_seen_epoch, s.stable_event_keys, s.sighting_epochs)
         for s in memory._subjects
     ]
     row = store.load_scene_context("gate")[0]
     assert (row["first_seen_epoch"], row["last_seen_epoch"]) == (1000.0, 2005.0)
+    assert row["sighting_epochs"]["recorded"] == 2000.0
 
 
 def test_the_establishment_snapshot_also_knows_the_subject_for_a_late_event(tmp_path):
@@ -534,7 +536,7 @@ def test_the_establishment_snapshot_also_knows_the_subject_for_a_late_event(tmp_
     )
 
     assert snapshot.match(**query) == memory.match(**query)
-    assert snapshot.match(**query)[:2] == (True, 5)
+    assert snapshot.match(**query)[:2] == (True, 4)
 
 
 @pytest.mark.parametrize("kind", ["memory", "durable", "snapshot"])
@@ -583,3 +585,64 @@ def test_a_revoked_first_sighting_no_longer_dates_the_subject(kind, tmp_path):
 
     assert late.attribution.role.value == "indeterminate"
     assert late.admitted is True
+
+
+@pytest.mark.parametrize("kind", ["memory", "durable", "snapshot"])
+def test_a_late_event_counts_only_sightings_from_before_it(kind, tmp_path):
+    memory = _memory("durable" if kind == "snapshot" else kind, tmp_path)
+    attributor = ObjectActivityAttributor("enforce", memory=memory, camera_id="gate")
+    # One car was seen once at 1000 s and left unseen. Another parks in the
+    # same bay at 2000 s, and a live event sees it at 2005 s.
+    _sighting(attributor, "first-car", 1000.0)
+    _sighting(attributor, "live", 2005.0)
+    query = dict(
+        camera_id="gate", label="car", box=(0.1, 0.1, 0.3, 0.3), event_key="arrival",
+        observed_at_epoch=2000.0, min_iou=0.72, ttl_seconds=7200.0,
+    )
+    if kind == "snapshot":
+        store = memory._store
+        with store._connect() as conn:
+            snapshot = store.scene_context_snapshot(conn, "gate")
+        assert snapshot.match(**query)[:2] == (True, 1)
+        return
+
+    # The recording of 2000 s is analysed last. In order, it would have had
+    # one prior sighting; the sighting at 2005 s is not evidence before it.
+    arrival = _sighting(attributor, "arrival", 2000.0)
+
+    assert arrival.attribution.evidence.scene_context_memory_sightings == 1
+    assert arrival.attribution.role.value == "indeterminate"
+    assert arrival.admitted is True
+    assert memory.count("gate") == 1
+
+
+def test_a_ledger_from_before_sighting_times_still_loads_and_matches(tmp_path):
+    store = EventStore(tmp_path)
+    with store._connect() as conn:
+        conn.execute("drop table scene_context_subjects")
+        conn.execute(
+            """create table scene_context_subjects (
+                id integer primary key, camera_id text not null, label text not null,
+                box_x1 real not null, box_y1 real not null, box_x2 real not null,
+                box_y2 real not null, first_seen_epoch real not null,
+                last_seen_epoch real not null, sightings_json text not null,
+                last_moved_epoch real)"""
+        )
+        conn.execute(
+            "insert into scene_context_subjects(camera_id, label, box_x1, box_y1, box_x2, "
+            "box_y2, first_seen_epoch, last_seen_epoch, sightings_json) "
+            "values('gate','car',0.1,0.1,0.3,0.3,1000.0,1060.0,'[\"one\",\"two\"]')"
+        )
+    upgraded = EventStore(tmp_path)
+    attributor = ObjectActivityAttributor(
+        "enforce", memory=upgraded.scene_context_memory("gate"), camera_id="gate",
+    )
+
+    # Sightings without times date from the last one, so in-order events
+    # count them as before, and a late event before it does not.
+    assert _sighting(attributor, "three", 1120.0).attribution.role.value == "scene_context"
+    late = _sighting(attributor, "late", 1030.0)
+    assert late.attribution.role.value == "indeterminate"
+    assert upgraded.load_scene_context("gate")[0]["sighting_epochs"] == {
+        "three": 1120.0, "late": 1030.0,
+    }
