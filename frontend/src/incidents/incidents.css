@@ -1125,8 +1125,21 @@
 }
 
 /* Review filter: three choices in the same segmented control as Objects / Motion. */
-.incident-filter-toggle.incident-filter-segments.three {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+/* Its labels differ a lot in length, so each segment is as wide as its own
+ * label needs and they share what is left. Three equal thirds cut "Unreviewed"
+ * short. If a large text size or a wide font still does not fit, the last
+ * segment moves to a second row; no label is ever clipped. */
+.incident-filter-pane .incident-filter-toggle.incident-filter-segments.three {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.incident-filter-pane .incident-filter-toggle.incident-filter-segments.three button {
+  flex: 1 1 auto;
+  min-width: max-content;
+  padding-inline: 6px;
+  font-size: var(--text-sm);
+  white-space: nowrap;
 }
 
 .mobile-incidents .incident-filter-toggle.incident-filter-segments {
@@ -1215,11 +1228,6 @@
 .incident-hud-objects .pill.object-icon-pill svg {
   width: 20px;
   height: 20px;
-}
-
-.incident-filter-pane .incident-filter-toggle.incident-filter-segments.three button {
-  padding-inline: 2px;
-  font-size: var(--text-sm);
 }
 
 .incident-bulk-review button.primary {

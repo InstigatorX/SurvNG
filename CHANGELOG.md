@@ -23,7 +23,8 @@
   size for thumbnails, the interface's scripts and styles are served compressed
   with long-lived caching, and the periodic refresh re-reads only the newest
   incidents. The zone filter no longer walks every row of a zone for each
-  incident, which took over a second per day of incidents.
+  incident, which took over a second per day of incidents. Listing an incident
+  again reuses its cover choice while its events are unchanged.
 - Admin → General has a per-browser **Font** setting beside Text size: Inter
   (default), Figtree, Manrope, DM Sans, Source Sans or the system font. All are
   bundled; none is fetched from another site.

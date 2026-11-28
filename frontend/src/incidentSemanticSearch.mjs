@@ -65,3 +65,13 @@ export async function mapWithConcurrency(items, concurrency, mapper) {
   await Promise.all(Array.from({ length: workerCount }, worker));
   return results;
 }
+
+// Keep the matches the incident list would also show under the same review and
+// people filters, and give each its review mark. ``listed`` maps the id of
+// every incident the list returns to its verdict.
+export function keepListedIncidents(details, listed) {
+  return (Array.isArray(details) ? details : []).flatMap((detail) => {
+    const id = String(detail?.incident_id || detail?.id || "");
+    return id && listed.has(id) ? [{ ...detail, review_verdict: listed.get(id) }] : [];
+  });
+}

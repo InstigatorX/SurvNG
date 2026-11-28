@@ -21,6 +21,10 @@ was sent.
 and time at its upper left, icons for the observed objects at its lower left,
 and a review mark at its upper right.
 
+![The incident gallery with its filter pane](images/incidents-gallery.png)
+
+*The pictures in this illustration are drawn stand-ins for camera snapshots.*
+
 - **Per row** sets how many incidents share a row, from 2 to 8. Pictures grow or
   shrink to fill the row, and SurvNG remembers the setting in this browser.
 - There are no pages. Scroll down and the next incidents of the day load as you
@@ -52,7 +56,8 @@ Filters sit in a pane left of the gallery:
 
 - **Objects** or **Motion**
 - **Unreviewed**, **Reviewed** or **All**
-- Search (describe what you are looking for)
+- Search (describe what you are looking for). Matches follow the camera,
+  object, zone, people, review and confidence filters.
 - Day
 - Cameras, object types, zones and known people. Each is a list of checkboxes:
   check any number, and an incident matches when it has any checked value.

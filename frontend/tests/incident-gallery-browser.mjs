@@ -42,7 +42,7 @@ try {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   const searches = [], requests = [], images = [], reviews = [];
-  let failReview = false;
+  let failReview = false, honorReview = false;
   let failMore = false;
   const days = [], reviewParams = [], bulkReviews = [];
   await page.route("**/api/**", async (route) => {
@@ -52,6 +52,8 @@ try {
     if (path.includes("thumbnail.jpg")) images.push(path + url.search);
     if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
     if (path.endsWith("/api/cameras")) return route.fulfill({ json: CAMERAS });
+    if (path.endsWith("/semantic-search")) return route.fulfill({ json: { results: [1000, 1001, 1003].map((id, rank) => ({ event: { id }, score: .9 - rank / 10 })) } });
+    if (path.includes("/incidents/by-event/")) return route.fulfill({ json: incidents[Number(path.split("/").pop()) - 1000] });
     if (path.endsWith("/incidents/reviews")) {
       bulkReviews.push(route.request().postDataJSON());
       return route.fulfill({ json: {} });
@@ -71,7 +73,10 @@ try {
       if (failMore && offset > 0) return route.fulfill({ status: 500, json: {} });
       const wanted = label ? label.split(",") : [];
       const cameras = camera ? camera.split(",") : [];
-      const matched = incidents.filter((item) => (!wanted.length || item.labels.some((name) => wanted.includes(name))) && (!cameras.length || cameras.includes(item.camera_id)) && item.objects.some((object) => object.confidence >= floor));
+      const reviewed = (item) => item.review_verdict === "reviewed" || item.review_verdict === "nothing_here";
+      const review = honorReview ? url.searchParams.get("review") : null;
+      const matched = incidents.filter((item) => (!wanted.length || item.labels.some((name) => wanted.includes(name))) && (!cameras.length || cameras.includes(item.camera_id)) && item.objects.some((object) => object.confidence >= floor)
+        && (!review || reviewed(item) === (review === "reviewed")));
       return route.fulfill({ json: { items: matched.slice(offset, offset + limit), total: matched.length, facets: { camera_ids: CAMERAS.map((camera) => camera.id), labels: ["car", "person"], zones: ["Entry"] } } });
     }
     if (path.endsWith("/incidents/detail")) return route.fulfill({ json: incidents.find((item) => item.id === url.searchParams.get("incident_id")) || incidents[0] });
@@ -150,6 +155,9 @@ try {
   assert.deepEqual([...new Set(reviewParams)], ["unreviewed"]);
   const reviewFilter = page.getByRole("group", { name: "Review filter" });
   assert.equal(await reviewFilter.getByRole("button", { name: "Unreviewed", exact: true }).getAttribute("aria-pressed"), "true");
+  // Every label of the review filter is shown whole, inside the control.
+  assert.deepEqual(await reviewFilter.evaluate((group) => { const box = group.getBoundingClientRect();
+    return [...group.querySelectorAll("button")].filter((button) => button.scrollWidth > button.clientWidth + 1 || button.getBoundingClientRect().right > box.right + 1).map((button) => button.textContent); }), []);
   assert.ok(await tiles.nth(0).evaluate((element) => element.classList.contains("is-reviewed")), "a marked picture steps back");
   // Mark everything shown, after a confirmation, in one request.
   const bulk = page.getByRole("group", { name: "Mark all shown" });
@@ -372,6 +380,21 @@ try {
     const frame = document.querySelector("#incident-results").getBoundingClientRect();
     return Boolean(box) && box.top >= frame.top && box.bottom <= frame.bottom;
   }), "the open incident is in view after the gallery settles");
+
+  // Visual search matches follow the review filter and carry the review marks.
+  honorReview = true;
+  await page.getByLabel("Describe incidents to find").fill("someone at the door");
+  await page.getByRole("search", { name: "Semantic incident search" }).getByRole("button", { name: "Search", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector(".incident-gallery-status").innerText.includes("All 2 matches"));
+  assert.deepEqual(await tiles.evaluateAll((items) => items.map((item) => item.querySelector("time").textContent.length > 0)), [true, true]);
+  assert.ok(searches.some((search) => search.limit === 100), "the list is asked which incidents pass the filters");
+  await reviewFilter.getByRole("button", { name: "All", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector(".incident-gallery-status").innerText.includes("All 3 matches"));
+  assert.equal(await tiles.count(), 3);
+  await page.getByRole("button", { name: "Reset semantic incident search" }).click();
+  honorReview = false;
+  await reviewFilter.getByRole("button", { name: "Unreviewed", exact: true }).click();
+  await page.waitForFunction((count) => document.querySelectorAll("#incident-results .live-activity-item").length >= count, INCIDENT_GALLERY_CHUNK);
 
   // A link to one incident still opens its viewer.
   await page.goto(`${origin}/survng/incidents?incident_id=incident-3`);

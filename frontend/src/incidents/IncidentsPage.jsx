@@ -16,7 +16,7 @@ import { loadRelatedIncident } from "../relatedIncidents.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { incidentReplayTracking, incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
 import { incidentDetailQuery, incidentFocusStep, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryColumns, incidentGalleryWanted, INCIDENT_GALLERY_CHUNK, incidentFilterValues, keepIncidentIdentity, mergeIncidentHead, toggleIncidentFilterValue, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
-import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
+import { keepListedIncidents, mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
 import { APP_BASE_PATH, appUrl, incidentRecordingContext, fetch } from "../shared/api.js";
 import { eventThumbnailUrl, thumbnailWidthFor } from "../shared/mediaUrls.js";
 import { INCIDENT_REFRESH_FALLBACK_MS } from "../shared/constants.js";
@@ -607,7 +607,22 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
         };
       });
       if (semanticIncidentRequestRef.current !== controller) return;
-      setSemanticIncidentResults(rankSemanticIncidentDetails(hydrated, incidentZoneFilter, {
+      // The review and people filters are decided by the list itself, so ask it
+      // which of the day's incidents pass them, and for their review marks.
+      const listed = new Map();
+      const listFilters = new URLSearchParams({ day: incidentDay || today, time_zone: timeZone, event_type: "object", gap_seconds: "45", compact: "true", limit: "100" });
+      if (reviewFilter !== "all") listFilters.set("review", reviewFilter);
+      if (incidentPersonFilter !== "all") listFilters.set("person_id", incidentPersonFilter);
+      for (let offset = 0; hydrated.some(Boolean) && offset < 1000; offset += 100) {
+        listFilters.set("offset", String(offset));
+        const listResponse = await fetch(`/api/incidents/search?${listFilters}`, { signal: controller.signal });
+        if (!listResponse.ok) throw new Error("Could not apply the review and people filters to the matches.");
+        const page = (await listResponse.json()).items || [];
+        for (const item of page) listed.set(String(item.incident_id || item.id), item.review_verdict ?? null);
+        if (page.length < 100) break;
+      }
+      if (semanticIncidentRequestRef.current !== controller) return;
+      setSemanticIncidentResults(rankSemanticIncidentDetails(keepListedIncidents(hydrated, listed), incidentZoneFilter, {
         minConfidence: incidentMinConfidence / 100, labels: incidentFilterValues(incidentObjectFilter),
       }));
     } catch (error) {
@@ -647,7 +662,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   useEffect(() => {
     if (!semanticIncidentActiveQuery) return;
     runSemanticIncidentSearch(null, semanticIncidentActiveQuery);
-  }, [incidentCameraFilter, incidentDay, incidentObjectFilter, incidentZoneFilter, incidentMinConfidence]);
+  }, [incidentCameraFilter, incidentDay, incidentObjectFilter, incidentZoneFilter, incidentMinConfidence, incidentPersonFilter, reviewFilter]);
 
   useAppEvents(({ type, data }) => {
     if (document.hidden || (type !== "incident" && type !== "resync")) return;
@@ -1221,7 +1236,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       {confidenceControl}
       <IncidentFilterChecks title="Zones" collapsed filter={incidentZoneFilter} onChange={setIncidentZoneFilter}
         options={incidentZoneOptions.map((zone) => ({ value: zone, label: zone }))} empty="No zones on this day." />
-      <IncidentFilterChecks title="People" collapsed filter={incidentPersonFilter} onChange={(next) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(next); }}
+      <IncidentFilterChecks title="People" collapsed filter={incidentPersonFilter} onChange={setIncidentPersonFilter}
         options={incidentPeople.map((person) => ({ value: String(person.id), label: person.name }))} empty="No named people yet." />
     </>
   );

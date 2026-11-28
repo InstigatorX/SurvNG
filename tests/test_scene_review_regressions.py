@@ -160,6 +160,28 @@ def test_zone_filter_starts_from_each_incidents_own_episodes(tmp_path):
     assert store.count_scene_incidents(zone='Road') == 1 and store.count_scene_incidents(zone='Porch') == 0
 
 
+def test_card_cover_choice_is_reused_until_an_event_changes(tmp_path):
+    from survng.app import incident_presenter
+    store = EventStore(tmp_path)
+    events = [add(store, 1000 + step * 8, [observation(1000 + step * 8, confidence=.6 + step / 20, temporal_observations=2)]) for step in range(5)]
+    with patch.object(incident_presenter, '_event_row', wraps=incident_presenter._event_row) as present:
+        first = store.list_scene_incident_cards()
+        presented_once = present.call_count
+        assert presented_once == 5
+        again = store.list_scene_incident_cards()
+        assert present.call_count == presented_once, 'listing the same incident again reads no event'
+        assert again == first
+        # The kept choice is a copy: a caller changing its card cannot change the next one.
+        first[0]['events'][0]['snapshot_captured_at'] = 'changed'
+        assert store.list_scene_incident_cards() == again
+        # A changed event is a different key, so the choice is made afresh.
+        with store._lock, store._connect() as conn:
+            conn.execute('update events set objects_json=? where id=?',
+                         (json.dumps([observation(1000, confidence=.99, temporal_observations=2)]), events[0]['id']))
+        store.list_scene_incident_cards()
+        assert present.call_count == 2 * presented_once
+
+
 def test_compact_search_leaves_out_the_per_event_list(tmp_path):
     store = EventStore(tmp_path)
     for step in range(6):                                   # one incident, six events

@@ -39,6 +39,9 @@ def _display_confidence(item):
 
 
 # Equivalent predicate for bounded card/label queries, before loading payloads.
+# Card cover choices kept in memory, one per incident listed recently.
+_CARD_COVER_CACHE_ENTRIES = 4000
+
 _DISPLAY_CONFIDENCE_SQL = (
     "coalesce(json_extract(o.payload_json,'$.confidence_eligible'),1)!=0 and "
     "(json_extract(o.payload_json,'$.confidence_threshold') is null or "
@@ -1426,6 +1429,31 @@ class EventStoreSceneMixin:
             payloads=(self._scene_notification_payload(conn,row[0]) for row in ids)
             return [payload for payload in payloads if payload is not None]
 
+    def _card_cover_choice(self, members, present, choose):
+        """Which event represents an incident on its card, and each event's capture time.
+
+        Deciding it reads and scores every event of the incident, which is most
+        of the work of listing busy incidents, and the gallery lists the same
+        incidents again on every refresh, filter change and scroll. The answer
+        depends only on the stored event rows, so it is kept under those rows
+        themselves: any change to an event is a different key.
+        """
+        if not members:
+            return None, {}
+        key = tuple(tuple(event) for event in members)
+        cache = getattr(self, "_card_cover_cache", None)
+        if cache is None:
+            cache = self._card_cover_cache = {}
+        found = cache.get(key)
+        if found is None:
+            presented = [present(dict(event)) for event in members]
+            found = (choose(presented)["id"],
+                     {event["id"]: event["snapshot_captured_at"] for event in presented if event.get("snapshot_captured_at")})
+            if len(cache) >= _CARD_COVER_CACHE_ENTRIES:
+                cache.clear()
+            cache[key] = found
+        return found[0], dict(found[1])
+
     def list_scene_incident_cards(self,*,start_epoch=None,end_epoch=None,start_at=None,end_at=None,camera_id="",limit=200,offset=0,
                                   event_type="all",object_label="",zone="",min_confidence=0.0,review=""):
         """Page rows for the incident rail: cover, labels, and time, without observation history."""
@@ -1519,13 +1547,9 @@ class EventStoreSceneMixin:
                 continue
             members=events_by.get(incident_id, [])
             labels=sorted(labels_by.get(incident_id, ()))
-            presented_members=[_event_row(dict(event)) for event in members]
-            best=(
-                _best_incident_event(presented_members)
-                if presented_members else None
-            )
+            best_id,captured_by=self._card_cover_choice(members,_event_row,_best_incident_event)
             representative=next(
-                (event for event in members if event["id"] == best["id"]),
+                (event for event in members if event["id"] == best_id),
                 members[-1] if members else None,
             )
             opener=members[0] if members else None
@@ -1533,8 +1557,6 @@ class EventStoreSceneMixin:
             trigger="ema" if raw_trigger in {"ema","adaptive","visual_backup","adaptive/visual_backup"} else "speech" if raw_trigger==SPEECH_TOPIC else "doorbell" if raw_trigger==DOORBELL_TOPIC else "camera"
             snapshot_observation_id=None
             snapshot_url=None
-            captured_by={event["id"]:event["snapshot_captured_at"] for event in presented_members
-                         if event.get("snapshot_captured_at")}
             selected = _scene_observation_cover(
                 representative, observations_by.get(incident_id, []),
                 recorded_pixels=recorded_pixels_by.get(incident_id, 0),

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { incidentPeakConfidence, mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../src/incidentSemanticSearch.mjs";
+import { incidentPeakConfidence, keepListedIncidents, mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../src/incidentSemanticSearch.mjs";
 
 assert.deepEqual(semanticIncidentRequest({
   query: " white delivery truck ",
@@ -50,5 +50,12 @@ assert.deepEqual(rankSemanticIncidentDetails([sure, unsure, unknown]).map((item)
 assert.deepEqual(rankSemanticIncidentDetails([sure, unsure, unknown], "all", { minConfidence: .6 }).map((item) => item.id), ["b", "a"]);
 assert.deepEqual(rankSemanticIncidentDetails([sure, unsure, unknown], "all", { minConfidence: .8 }).map((item) => item.id), ["a"]);
 assert.deepEqual(rankSemanticIncidentDetails([sure, unsure], "all", { minConfidence: .8, labels: ["car"] }).map((item) => item.id), []);
+
+
+// Matches follow the list's review and people filters and carry its review marks.
+const listed = new Map([["incident-a", "reviewed"], ["incident-b", null]]);
+const kept = keepListedIncidents([{ id: "x", incident_id: "incident-a" }, { id: "incident-b" }, { id: "incident-c" }, null, {}], listed);
+assert.deepEqual(kept.map((item) => [item.incident_id || item.id, item.review_verdict]), [["incident-a", "reviewed"], ["incident-b", null]]);
+assert.deepEqual(keepListedIncidents(undefined, listed), []);
 
 console.log("incident semantic search tests passed");
