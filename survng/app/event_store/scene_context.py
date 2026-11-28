@@ -18,6 +18,8 @@ def _sighting_epochs(raw: object, sightings: list[str]) -> dict[str, float]:
         return {}
     epochs: dict[str, float] = {}
     for key in sightings:
+        if isinstance(value.get(key), bool):
+            continue
         try:
             when = float(value[key])
         except (KeyError, TypeError, ValueError):

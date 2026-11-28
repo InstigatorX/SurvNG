@@ -108,10 +108,12 @@ def subject_visible(
     Later frames of an event the subject already records still apply.
 
     An out-of-order event counts only the subject's sightings at or before
-    it (see prior_sightings), exactly what it would have counted had it been
-    analysed in order. A later sighting is not evidence that the subject was
-    already there: a car that left unseen and another that parked in the same
-    bay are one subject to the memory. The event's own TTL cutoff is older
+    it (see prior_sightings). A later sighting is not evidence that the
+    subject was already there: a car that left unseen and another that parked in the same
+    bay are one subject to the memory. The count can still exceed what
+    in-order analysis would have given when a later event merged two
+    overlapping subjects, but every sighting it counts came before the event.
+    The event's own TTL cutoff is older
     than the newest event's, so it never prunes a subject that the newest
     sighting keeps alive.
     """
@@ -145,8 +147,11 @@ def merge_subjects(
     box: tuple[float, float, float, float],
     observed_at_epoch: float,
     max_sightings: int,
-) -> tuple[SceneContextSubject, list[SceneContextSubject]]:
+) -> tuple[SceneContextSubject, list[SceneContextSubject], bool]:
     """Collapse overlapping rows for one car into the earliest subject.
+
+    Returns the survivor, the merged-away subjects, and whether this event
+    was added as a new sighting.
 
     The survivor keeps a stable reference box. Only a new sighting, an event
     not already recorded, blends its box in; later frames of a recorded event
@@ -154,6 +159,8 @@ def merge_subjects(
     The last sighting time follows the same rule and never moves backwards:
     an older event remembered late keeps the newest time, which drives the
     TTL and eviction, and a durable subject reloads exactly as it is held.
+    A late event older than every one of a full set of kept sightings would
+    be trimmed at once, so it is not a new sighting and changes nothing.
     """
     survivor = min(subjects, key=lambda subject: (subject.first_seen_epoch, subject.row_id or 0))
     keys: list[str] = []
@@ -168,15 +175,24 @@ def merge_subjects(
             if key in subject.sighting_epochs:
                 epochs[key] = min(epochs.get(key, when), when)
     last_seen = max(subject.last_seen_epoch for subject in subjects)
-    if event_key and event_key not in keys:
-        keys.append(event_key)
-        epochs[event_key] = dated[event_key] = observed_at_epoch
-        survivor.box = blend_reference_box(survivor.box, box)
-        last_seen = max(last_seen, observed_at_epoch)
-    if len(keys) > max_sightings:
+
+    def latest(candidates: list[str]) -> list[str]:
         # Keep the latest sightings by time; a late, older event goes first.
-        kept = set(sorted(keys, key=lambda key: dated[key])[-max_sightings:])
-        keys = [key for key in keys if key in kept]
+        if len(candidates) <= max_sightings:
+            return candidates
+        kept = set(sorted(candidates, key=lambda key: dated[key])[-max_sightings:])
+        return [key for key in candidates if key in kept]
+
+    added = False
+    if event_key and event_key not in keys:
+        dated[event_key] = observed_at_epoch
+        if event_key in latest([*keys, event_key]):
+            added = True
+            keys.append(event_key)
+            epochs[event_key] = observed_at_epoch
+            survivor.box = blend_reference_box(survivor.box, box)
+            last_seen = max(last_seen, observed_at_epoch)
+    keys = latest(keys)
     survivor.stable_event_keys = keys
     survivor.sighting_epochs = {key: epochs[key] for key in keys if key in epochs}
     survivor.first_seen_epoch = min(subject.first_seen_epoch for subject in subjects)
@@ -184,7 +200,7 @@ def merge_subjects(
     moved = [subject.last_moved_epoch for subject in subjects if subject.last_moved_epoch is not None]
     if moved:
         survivor.last_moved_epoch = max(moved)
-    return survivor, [subject for subject in subjects if subject is not survivor]
+    return survivor, [subject for subject in subjects if subject is not survivor], added
 
 
 class SceneContextSnapshot:
@@ -378,7 +394,7 @@ class InMemorySceneContextMemory:
                 and box_iou(subject.box, box) >= min_iou
             ]
             if overlapping:
-                _survivor, extras = merge_subjects(
+                _survivor, extras, _added = merge_subjects(
                     overlapping,
                     event_key=event_key,
                     box=box,
@@ -546,8 +562,7 @@ class DurableSceneContextMemory:
                 and box_iou(subject.box, box) >= min_iou
             ]
             if overlapping:
-                had_key = any(event_key in subject.stable_event_keys for subject in overlapping)
-                survivor, extras = merge_subjects(
+                survivor, extras, added = merge_subjects(
                     overlapping,
                     event_key=event_key,
                     box=box,
@@ -558,7 +573,7 @@ class DurableSceneContextMemory:
                     self._delete(extra)
                 drop = {id(subject) for subject in extras}
                 self._subjects = [subject for subject in self._subjects if id(subject) not in drop]
-                if not had_key or extras:
+                if added or extras:
                     self._persist(survivor)
             else:
                 subject = SceneContextSubject(

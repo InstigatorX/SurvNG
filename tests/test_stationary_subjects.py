@@ -646,3 +646,37 @@ def test_a_ledger_from_before_sighting_times_still_loads_and_matches(tmp_path):
     assert upgraded.load_scene_context("gate")[0]["sighting_epochs"] == {
         "three": 1120.0, "late": 1030.0,
     }
+
+
+@pytest.mark.parametrize("kind", ["memory", "durable"])
+def test_a_late_sighting_older_than_every_kept_one_changes_nothing(kind, tmp_path):
+    memory = _memory(kind, tmp_path)
+    common = dict(camera_id="gate", label="car", min_iou=0.72, ttl_seconds=7200.0,
+                  max_entries=64, max_sightings=16)
+    memory.remember(box=(0.1, 0.1, 0.3, 0.3), event_key="first", observed_at_epoch=1000.0, **common)
+    for index in range(16):
+        memory.remember(box=(0.1, 0.1, 0.3, 0.3), event_key=f"later-{index}",
+                        observed_at_epoch=2000.0 + index, **common)
+    subjects = memory._subjects
+    subject = subjects[0][1] if kind == "memory" else subjects[0]
+    held = (list(subject.stable_event_keys), subject.box, dict(subject.sighting_epochs))
+    written = memory.writes
+
+    # Every frame of a late event at 1500 s: it is older than all sixteen
+    # kept sightings, so it would be trimmed at once.
+    for _frame in range(4):
+        memory.remember(box=(0.115, 0.1, 0.315, 0.3), event_key="late",
+                        observed_at_epoch=1500.0, **common)
+
+    assert (list(subject.stable_event_keys), subject.box, dict(subject.sighting_epochs)) == held
+    assert memory.writes == written
+
+
+def test_a_corrupt_sighting_time_is_ignored(tmp_path):
+    store = EventStore(tmp_path)
+    store.save_scene_context("gate", {
+        "label": "car", "box": (0.1, 0.1, 0.3, 0.3), "first_seen_epoch": 1000.0,
+        "last_seen_epoch": 1060.0, "sightings": ["one", "two"],
+        "sighting_epochs": {"one": True, "two": 1060.0},
+    })
+    assert store.load_scene_context("gate")[0]["sighting_epochs"] == {"two": 1060.0}
