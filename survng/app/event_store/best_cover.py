@@ -111,6 +111,13 @@ def best_cover_baseline(target: dict[str, Any]) -> dict[str, float | bool]:
     }
 
 
+_FRAME_SPECIFIC_COVER_FIELDS = (
+    "snapshot_frame_reference", "snapshot_timestamp_exact", "snapshot_timestamp_uncertainty_seconds",
+    "snapshot_sharpness_score", "snapshot_exposure_score", "snapshot_edge_detail_score",
+    "snapshot_contrast_score",
+)
+
+
 class EventStoreBestCoverMixin:
     def _init_best_cover_db(self) -> None:
         with self._lock, self._connect() as conn:
@@ -130,21 +137,22 @@ class EventStoreBestCoverMixin:
                     on event_best_cover_jobs(camera_id, state, available_at_epoch);
             """)
 
-    # A pending cover requirement or queued/running tracking owns the cover
-    # first; the pass waits rather than racing either writer.
+    # Tracking that can still run, or a pending cover requirement, owns the
+    # cover first; the pass waits rather than racing either writer. Demand
+    # work whose viewer left is not waiting to run and does not block.
     _BEST_COVER_BLOCKED_SQL = (
         "exists(select 1 from scene_analysis_jobs j where j.episode_id=b.episode_id "
-        "and j.state in ('queued','running')) "
+        "and (j.state='running' or (j.state='queued' and (j.admission='automatic' or j.requested_until>:now)))) "
         "or exists(select 1 from event_cover_requirements r where r.event_id=b.event_id and r.state='pending')"
     )
     _BEST_COVER_DISCOVERY_SQL = (
         "select p.id as episode_id, min(m.event_id) as event_id from scene_episodes p "
         "join scene_incidents i on i.id=p.incident_id "
         "join scene_event_membership m on m.episode_id=p.id "
-        "where p.camera_id=? and p.last_activity_epoch<=? and p.last_activity_epoch>=? "
+        "where p.camera_id=:camera and p.last_activity_epoch<=:closed_before and p.last_activity_epoch>=:oldest "
         "and i.state not in ('unconfirmed','merged') "
         "and not exists(select 1 from event_best_cover_jobs b where b.episode_id=p.id) "
-        "group by p.id order by p.last_activity_epoch limit ?"
+        "group by p.id order by p.last_activity_epoch limit :limit"
     )
 
     def claim_best_cover(
@@ -157,39 +165,43 @@ class EventStoreBestCoverMixin:
         if not lease_owner:
             raise ValueError("best cover lease owner is required")
         now = time.time() if now is None else float(now)
-        closed_before, oldest = now - settle_seconds, now - max_age_seconds
+        params = {"camera": camera_id, "now": now, "closed_before": now - settle_seconds,
+                  "oldest": now - max_age_seconds, "attempts": int(maximum_attempts)}
+        # Expired budgets are settled even while blocked, so a job waiting on
+        # tracking cannot stay pending past its deadline.
         due_sql = (
-            "select 1 from event_best_cover_jobs b where b.camera_id=? and b.state='pending' "
-            "and (b.lease_expires_at_epoch is null or b.lease_expires_at_epoch<=?) "
-            f"and (b.available_at_epoch<=? or b.deadline_epoch<=?) and not ({self._BEST_COVER_BLOCKED_SQL}) limit 1"
+            "select 1 from event_best_cover_jobs b where b.camera_id=:camera and b.state='pending' "
+            "and (b.lease_expires_at_epoch is null or b.lease_expires_at_epoch<=:now) "
+            "and (b.deadline_epoch<=:now or b.attempts>=:attempts "
+            f"or (b.available_at_epoch<=:now and not ({self._BEST_COVER_BLOCKED_SQL}))) limit 1"
         )
         # Idle per-camera workers must not reserve the shared main-DB writer.
         with polling_connection(self.db_path) as conn:
-            discover = conn.execute(self._BEST_COVER_DISCOVERY_SQL,
-                                    (camera_id, closed_before, oldest, 1)).fetchone() is not None
-            due = discover or conn.execute(due_sql, (camera_id, now, now, now)).fetchone() is not None
+            discover = conn.execute(self._BEST_COVER_DISCOVERY_SQL, {**params, "limit": 1}).fetchone() is not None
+            due = discover or conn.execute(due_sql, params).fetchone() is not None
         if not due:
             return None
         with self._lock, self._connect() as conn:
             conn.execute("begin immediate")
-            for row in conn.execute(self._BEST_COVER_DISCOVERY_SQL, (camera_id, closed_before, oldest, 8)).fetchall():
+            for row in conn.execute(self._BEST_COVER_DISCOVERY_SQL, {**params, "limit": 8}).fetchall():
                 conn.execute(
                     "insert or ignore into event_best_cover_jobs (event_id,episode_id,camera_id,state,"
                     "available_at_epoch,deadline_epoch,created_at,updated_at) values(?,?,?,'pending',?,?,?,?)",
                     (row["event_id"], row["episode_id"], camera_id, now, now + BEST_COVER_JOB_DEADLINE_SECONDS, now, now),
                 )
             conn.execute(
-                "update event_best_cover_jobs set state='exhausted',reason=case when deadline_epoch<=? "
+                "update event_best_cover_jobs set state='exhausted',reason=case when deadline_epoch<=:now "
                 "then 'deadline_expired' else 'attempts_exhausted' end,lease_owner='',lease_expires_at_epoch=null,"
-                "updated_at=? where camera_id=? and state='pending' and (deadline_epoch<=? or attempts>=?) "
-                "and (lease_expires_at_epoch is null or lease_expires_at_epoch<=?)",
-                (now, now, camera_id, now, maximum_attempts, now),
+                "updated_at=:now where camera_id=:camera and state='pending' "
+                "and (deadline_epoch<=:now or attempts>=:attempts) "
+                "and (lease_expires_at_epoch is null or lease_expires_at_epoch<=:now)",
+                params,
             )
             row = conn.execute(
-                "select b.* from event_best_cover_jobs b where b.camera_id=? and b.state='pending' "
-                "and b.available_at_epoch<=? and (b.lease_expires_at_epoch is null or b.lease_expires_at_epoch<=?) "
+                "select b.* from event_best_cover_jobs b where b.camera_id=:camera and b.state='pending' "
+                "and b.available_at_epoch<=:now and (b.lease_expires_at_epoch is null or b.lease_expires_at_epoch<=:now) "
                 f"and not ({self._BEST_COVER_BLOCKED_SQL}) order by b.available_at_epoch,b.event_id limit 1",
-                (camera_id, now, now),
+                params,
             ).fetchone()
             if row is None:
                 return None
@@ -206,6 +218,19 @@ class EventStoreBestCoverMixin:
                 "select * from event_best_cover_jobs where event_id=?", (row["event_id"],)).fetchone())
             job["event"] = dict(event)
             job["episode"] = dict(episode)
+            # Subjects of the episode's other events share its window; the
+            # pass must not present one of theirs as this event's subject.
+            labels: set[str] = set()
+            for other in conn.execute("select e.objects_json from scene_event_membership m join events e "
+                                      "on e.id=m.event_id where m.episode_id=? and m.event_id!=?",
+                                      (row["episode_id"], row["event_id"])):
+                try:
+                    items = json.loads(other["objects_json"] or "[]")
+                except (TypeError, ValueError):
+                    items = []
+                labels.update(str(item["label"]) for item in items if isinstance(item, dict) and item.get("label")
+                              and not item.get("status") and item.get("incident_eligible") is not False)
+            job["episode_member_labels"] = sorted(labels)
             return job
 
     @staticmethod
@@ -230,7 +255,10 @@ class EventStoreBestCoverMixin:
         if state not in {"done", "skipped", "retry"}:
             raise ValueError("best cover result must be done, skipped or retry")
         now = time.time()
-        raw = json.dumps(result or {}, sort_keys=True, separators=(",", ":"), allow_nan=False)[:16384]
+        raw = json.dumps(result or {}, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        if len(raw) > 16384:
+            # Keep the stored summary valid JSON rather than cutting it.
+            raw = json.dumps({"truncated": True, "bytes": len(raw)})
         with self._lock, self._connect() as conn:
             if state == "retry":
                 sql = ("update event_best_cover_jobs set state=case when attempts>=? or deadline_epoch<=? "
@@ -244,7 +272,8 @@ class EventStoreBestCoverMixin:
                 (*params, reason[:200], raw, now, int(event_id), lease_owner),
             ).rowcount == 1
 
-    def defer_best_cover(self, event_id: int, *, lease_owner: str, reason: str) -> bool:
+    def defer_best_cover(self, event_id: int, *, lease_owner: str, reason: str,
+                         delay_seconds: float = 5.0) -> bool:
         """Yield a live lease to security work without charging an attempt."""
         now = time.time()
         with self._lock, self._connect() as conn:
@@ -252,7 +281,7 @@ class EventStoreBestCoverMixin:
                 "update event_best_cover_jobs set attempts=max(0,attempts-1),available_at_epoch=?,reason=?,"
                 "lease_owner='',lease_expires_at_epoch=null,updated_at=? "
                 "where event_id=? and state='pending' and lease_owner=? and lease_expires_at_epoch>?",
-                (now + 5.0, reason[:200], now, int(event_id), lease_owner, now),
+                (now + max(0.0, delay_seconds), reason[:200], now, int(event_id), lease_owner, now),
             ).rowcount == 1
 
     def promote_best_cover(
@@ -267,7 +296,6 @@ class EventStoreBestCoverMixin:
         that the same single subject is still the target, and that the new
         view is still materially better than what is stored now.
         """
-        from .evidence import EventSnapshotChangedError
 
         portable_snapshot = portable_media_path(self.storage_dir, snapshot_path)
         reason = ""
@@ -289,7 +317,9 @@ class EventStoreBestCoverMixin:
                         cover_metrics=cover_metrics, expected_revision=expected_revision,
                         lease_owner=lease_owner,
                     )
-            except EventSnapshotChangedError:
+            except Exception:
+                # Revision races and database errors alike: nothing references
+                # the new file, and the retry writes its own.
                 self._delete_snapshot_if_unreferenced(portable_snapshot)
                 raise
         if updated is None:
@@ -351,6 +381,9 @@ class EventStoreBestCoverMixin:
                 # No identity is claimed for other subjects in this frame.
                 item["snapshot_visible"] = False
                 continue
+            for stale in _FRAME_SPECIFIC_COVER_FIELDS:
+                # These describe the previous cover frame, not this one.
+                item.pop(stale, None)
             item["box"] = {key: float(subject["box"][key]) for key in ("x1", "y1", "x2", "y2")}
             item["detection_frame_width"] = int(frame_width)
             item["detection_frame_height"] = int(frame_height)

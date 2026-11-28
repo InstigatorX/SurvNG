@@ -620,30 +620,40 @@ establishment, activity clocks or alert decisions.
 1. **Sample uniformly.** It samples the episode window from start to last
    activity at roughly one frame every `detector.best_cover_sample_interval_seconds`
    (default 1.5 s), spread evenly and capped at `detector.best_cover_max_frames`
-   (default 12). Frames come from the substream recording when it covers the
-   window at least as well as main; otherwise from main, decoded no wider
-   than 640 px. Motion-guided selection was considered and not used: no
+   (default 12). Each instant is decoded on its own, so a small cap still
+   reaches the end of a long episode. Frames come from the substream
+   recording when it covers the window at least as well as main; otherwise
+   from main, decoded no wider than 640 px. Motion-guided selection was considered and not used: no
    per-sample foreground size or position is kept for a closed episode (see
    `docs/incident-evidence-data-path.md`).
 2. **Detect and rank.** The object detector runs once per sampled frame. Only
    the event's single cover subject (same label) counts, and only where the
-   event's recorded establishment-zone snapshot admits it. Views rank by full
+   event's recorded establishment-zone snapshot admits it. Label
+   compatibility is not identity proof, so two cases are left alone. A
+   frame with two such subjects is not a candidate. An episode whose other
+   events also have a subject with that label is skipped
+   (`ambiguous_episode_subjects`). Views rank by full
    framing, then the same subject-view score as recorded refinement
    (√area × crop sharpness).
 3. **Verify on main.** At most two leading candidates are re-read from the
    main recording at full detail, and the detector confirms the subject at
-   the same place. The cover is replaced only when the verified view is
+   the same place. When the main framing differs from the substream's (a
+   different aspect ratio), positions do not map, so only a single subject is
+   accepted there. The cover is replaced only when the verified view is
    materially better. That uses tracking's rule: a fully framed cover needs a
    subject at least 1.5× larger, edge clearance of at least 1%, and crop
    quality of at least `max(0.12, 0.55 × current)`.
 
 The pass runs per camera on the refinement worker, after detection,
 verification, cover requirements and discovery, and it yields to security
-work without charging an attempt. Each attempt has a 20-second budget. A job
+work without charging an attempt. When the detector declines optional
+inference under load, the job waits a minute, also without charging an
+attempt. Each attempt has a 20-second budget. A job
 gets three attempts and a 30-minute deadline; episodes that closed more than
 an hour earlier are never queued. Missing or unreadable footage, a missed
-budget, or an incomplete search with no better view all leave the job
-retrying until it is exhausted. None of them picks a frame.
+budget, an incomplete search with no better view, or a leading candidate
+whose main frame could not be read all leave the job retrying until it is
+exhausted. None of them picks a frame.
 
 A camera that records only its substream has no main recording to save from.
 Its job is settled as `skipped` (`main_recording_disabled`).

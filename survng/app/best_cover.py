@@ -50,6 +50,13 @@ BEST_COVER_SEARCH_WIDTH = 640
 # Ranked candidates verified on the main recording per attempt.
 BEST_COVER_MAIN_READS = 2
 BEST_COVER_LOG_INTERVAL_SECONDS = 60.0
+# Yield for longer when the detector itself declines optional work, so a
+# loaded detector is not offered the same decode-and-detect every few seconds.
+BEST_COVER_LOAD_DEFER_SECONDS = 60.0
+
+
+class _InferenceDeferred(EvidenceWorkPreempted):
+    """The detector declined optional inference under load."""
 
 
 class BestCoverDetector(Protocol):
@@ -69,17 +76,31 @@ class SearchCoverage:
     window_seconds: float = 0.0
     recorded_seconds: float = 0.0
     decode_failures: int = 0
+    targets: int = 0
+    unrecorded_targets: int = 0
     frames: int = 0
 
     @property
     def complete(self) -> bool:
-        return (self.decode_failures == 0 and self.window_seconds > 0
-                and self.recorded_seconds >= self.window_seconds - 0.5)
+        """Every uniformly spread target instant was recorded and decoded."""
+        return (self.targets > 0 and self.decode_failures == 0 and self.unrecorded_targets == 0
+                and self.frames == self.targets)
 
     def summary(self) -> dict[str, Any]:
         return {"source": self.source, "window_seconds": round(self.window_seconds, 3),
-                "recorded_seconds": round(self.recorded_seconds, 3),
-                "decode_failures": self.decode_failures, "frames": self.frames, "complete": self.complete}
+                "recorded_seconds": round(self.recorded_seconds, 3), "targets": self.targets,
+                "unrecorded_targets": self.unrecorded_targets, "decode_failures": self.decode_failures,
+                "frames": self.frames, "complete": self.complete}
+
+
+def best_cover_targets(start: float, end: float, *, interval: float, cap: int) -> list[float]:
+    """Instants spread evenly over the whole window, at most ``cap`` of them."""
+    duration = max(0.0, end - start)
+    if duration <= 0 or cap <= 0:
+        return []
+    count = max(1, min(int(cap), int(duration // max(0.1, interval)) + 1))
+    step = duration / count
+    return [start + step * (index + 0.5) for index in range(count)]
 
 
 def _row_span(row: dict[str, Any]) -> tuple[float, float]:
@@ -107,9 +128,15 @@ class RecordedBestCoverFrames:
 
     def search(self, start: float, end: float, *, interval: float, cap: int,
                coverage: SearchCoverage) -> Iterator[DecodedVideoFrame]:
-        """Yield at most ``cap`` frames spread uniformly over the recorded window."""
-        duration = max(0.0, end - start)
-        coverage.window_seconds = duration
+        """Yield at most ``cap`` frames at instants spread over the whole window.
+
+        Each instant is decoded on its own (a short trimmed read after an input
+        seek). A low-rate filter over a long window would not do: the decoder
+        enforces a minimum sampling rate, so a small cap would be spent early.
+        The short read samples densely because the rate filter emits on a fixed
+        time grid; only its first frame is used.
+        """
+        coverage.window_seconds = max(0.0, end - start)
         live_rows, main_rows = self.rows("live", start, end), self.rows("main", start, end)
 
         def covered(rows: list[dict[str, Any]]) -> float:
@@ -120,39 +147,38 @@ class RecordedBestCoverFrames:
         rows, source = (live_rows, "live") if live_rows and covered(live_rows) >= covered(main_rows) else (main_rows, "main")
         coverage.source = source
         coverage.recorded_seconds = covered(rows)
-        if not rows or duration <= 0:
-            return
-        count = max(1, min(int(cap), int(duration // max(0.1, interval)) + 1))
-        fps = max(0.05, count / max(duration, 1e-3))
+        targets = best_cover_targets(start, end, interval=interval, cap=cap)
+        coverage.targets = len(targets)
         recorder = self._recorder()
-        for row in rows:
-            if coverage.frames >= cap:
-                return
-            row_start, row_end = _row_span(row)
-            segment_start, segment_end = max(start, row_start), min(end, row_end)
-            if segment_end <= segment_start:
+        for target in targets:
+            row = next((row for row in rows if _row_span(row)[0] <= target < _row_span(row)[1]), None)
+            if row is None:
+                coverage.unrecorded_targets += 1
                 continue
             path = Path(str(row["path"]))
+            row_start, row_end = _row_span(row)
             samples = None
+            sample = None
             try:
                 samples = iter(sampled_video_frames(
-                    path, start_epoch=segment_start, sample_fps=fps,
-                    duration_seconds=segment_end - segment_start, ffmpeg_path=recorder.ffmpeg_path,
+                    path, start_epoch=target, sample_fps=10.0,
+                    duration_seconds=max(0.05, min(0.5, row_end - target)), ffmpeg_path=recorder.ffmpeg_path,
                     maximum_width=BEST_COVER_SEARCH_WIDTH,
-                    start_offset_seconds=max(0.0, segment_start - row_start), probe_path=path,
+                    start_offset_seconds=max(0.0, target - row_start), probe_path=path,
                 ))
-                for sample in samples:
-                    if coverage.frames >= cap:
-                        return
-                    coverage.frames += 1
-                    yield sample
+                sample = next(samples, None)
             except (OSError, RuntimeError, ValueError) as error:
-                coverage.decode_failures += 1
                 self._log("best cover search decode failed for %s/%s: %s", path.name, error)
             finally:
                 close = getattr(samples, "close", None)
                 if callable(close):
                     close()
+            if sample is None:
+                # An unreadable instant (decoder error or no frame) is a gap.
+                coverage.decode_failures += 1
+                continue
+            coverage.frames += 1
+            yield sample
 
     def main_frame(self, captured_at: float, width_hint: int,
                    reference: VideoFrameReference | None) -> np.ndarray | None:
@@ -173,6 +199,7 @@ class _Candidate:
     normalized_box: tuple[float, float, float, float] = field(compare=False)
     area: float = field(compare=False)
     clearance: float = field(compare=False)
+    aspect: float = field(compare=False, default=0.0)
     reference: VideoFrameReference | None = field(compare=False, default=None)
 
 
@@ -237,6 +264,10 @@ class BestCoverPass:
         event_id = int(job["event_id"])
         try:
             state, reason, result = self._evaluate(job, preempted)
+        except _InferenceDeferred:
+            self.store.defer_best_cover(event_id, lease_owner=self.lease_owner, reason="inference_deferred",
+                                        delay_seconds=BEST_COVER_LOAD_DEFER_SECONDS)
+            return True
         except EvidenceWorkPreempted:
             self.store.defer_best_cover(event_id, lease_owner=self.lease_owner, reason="security_work_preempted")
             return True
@@ -266,6 +297,10 @@ class BestCoverPass:
         target = best_cover_target(objects)
         if target is None:
             return "skipped", "ambiguous_cover_subject", {}
+        if str(target["label"]) in set(job.get("episode_member_labels") or ()):
+            # Other events in this episode have a same-label subject; a view
+            # of theirs would be presented as this event's subject.
+            return "skipped", "ambiguous_episode_subjects", {}
         episode = job["episode"]
         start = float(episode["start_epoch"])
         end = max(float(episode["end_epoch"]), float(episode["last_activity_epoch"]), start + 1.0)
@@ -292,12 +327,15 @@ class BestCoverPass:
             detections = self._detect(frame, threshold)
             detector_calls += 1
             height, width = frame.shape[:2]
-            for item in detections:
+            subjects = [item for item in detections if _box(item) is not None
+                        and str(item.get("label")) == label and _admitted(item, policy, width, height)]
+            if len(subjects) != 1:
+                # None, or more than one same-label subject: no view in this
+                # frame can be attributed to the event's subject.
+                continue
+            for item in subjects:
                 box = _box(item)
-                if box is None or str(item.get("label")) != label:
-                    continue
-                if not _admitted(item, policy, width, height):
-                    continue
+                assert box is not None
                 clearance, area = _normalized_box_metrics(item, frame)
                 quality = _crop_quality(frame, box)
                 fully_framed = clearance >= 0.01
@@ -306,7 +344,7 @@ class BestCoverPass:
                           float(item.get("confidence") or 0.0)),
                     captured_at=float(sample.captured_at), label=label,
                     normalized_box=(box[0] / width, box[1] / height, box[2] / width, box[3] / height),
-                    area=area, clearance=clearance,
+                    area=area, clearance=clearance, aspect=width / float(height),
                     reference=sample.reference if coverage.source == "main" else None,
                 ))
         result.update(search=coverage.summary(), detector_calls=detector_calls,
@@ -375,9 +413,10 @@ class BestCoverPass:
                 return "done", str(diagnostics.get("reason") or "promotion_declined"), result
             return "done", "promoted", result
         result.update(detector_calls=detector_calls)
-        if main_failures and main_failures == min(len(plausible), BEST_COVER_MAIN_READS):
-            # Missing full-detail footage is incomplete, never a reason to keep
-            # a cheap frame or to fall back to an arbitrary one.
+        if main_failures:
+            # A leading candidate was never checked at full detail. Missing
+            # footage is incomplete: neither a final verdict nor a reason to
+            # fall back to a cheaper or arbitrary frame.
             return "retry", "main_frame_unavailable", result
         return ("done" if coverage.complete else "retry"), last_reason, result
 
@@ -385,7 +424,7 @@ class BestCoverPass:
         detections = list(self.detector().detect(frame, confidence_threshold=threshold))
         if any(isinstance(item, dict) and item.get("status") == "inference_deferred" for item in detections):
             # Optional inference was declined under load: yield, do not fail.
-            raise EvidenceWorkPreempted()
+            raise _InferenceDeferred()
         failure = detection_failure(detections)
         if failure:
             raise RuntimeError(f"object detector unavailable: {failure[:160]}")
@@ -398,11 +437,18 @@ class BestCoverPass:
         nx1, ny1, nx2, ny2 = candidate.normalized_box
         expected = (nx1 * width, ny1 * height, nx2 * width, ny2 * height)
         diagonal = math.hypot(width, height)
+        subjects = [item for item in self._detect(frame, threshold) if _box(item) is not None
+                    and str(item.get("label")) == candidate.label and _admitted(item, policy, width, height)]
+        aspect = width / float(height)
+        if candidate.aspect > 0 and abs(aspect - candidate.aspect) / aspect > 0.02:
+            # Substream and main framing differ, so a normalized position is
+            # not trustworthy; accept only an unambiguous single subject.
+            subjects = subjects if len(subjects) == 1 else []
+            expected = _box(subjects[0]) if subjects else expected
         best: tuple[float, dict[str, Any], tuple[float, float, float, float]] | None = None
-        for item in self._detect(frame, threshold):
+        for item in subjects:
             box = _box(item)
-            if box is None or str(item.get("label")) != candidate.label or not _admitted(item, policy, width, height):
-                continue
+            assert box is not None
             overlap = _iou(expected, box)
             distance = math.hypot((box[0] + box[2] - expected[0] - expected[2]) / 2,
                                   (box[1] + box[3] - expected[1] - expected[3]) / 2) / diagonal
