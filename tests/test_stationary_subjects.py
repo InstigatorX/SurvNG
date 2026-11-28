@@ -452,3 +452,134 @@ def test_establishment_snapshot_matches_a_relabelled_vehicle(tmp_path):
     assert match("truck") is True
     assert match("bus") is True
     assert match("person") is False
+
+
+def _parked_for_an_hour(attributor):
+    """Four still sightings at 1000-1180 s, then a live one at 2005 s."""
+    for index in range(4):
+        _sighting(attributor, f"parked-{index}", 1000.0 + index * 60.0)
+    return _sighting(attributor, "live", 2005.0)
+
+
+@pytest.mark.parametrize("kind", ["memory", "durable"])
+def test_recorded_analysis_that_finishes_after_a_later_event_still_knows_the_subject(kind, tmp_path):
+    memory = _memory(kind, tmp_path)
+    attributor = ObjectActivityAttributor("enforce", memory=memory, camera_id="gate")
+    live = _parked_for_an_hour(attributor)
+    assert live.attribution.role.value == "scene_context"
+
+    # The recording of an event at 2000 s is analysed after the live event at
+    # 2005 s has refreshed the subject. The car was already parked at 2000 s.
+    late = _sighting(attributor, "recorded", 2000.0)
+
+    assert late.attribution.role.value == "scene_context"
+    assert late.admitted is False
+    assert late.attribution.evidence.scene_context_memory_sightings == 5
+    assert memory.count("gate") == 1
+
+
+@pytest.mark.parametrize("kind", ["memory", "durable"])
+def test_a_late_sighting_never_moves_the_subject_back_in_time(kind, tmp_path):
+    memory = _memory(kind, tmp_path)
+    attributor = ObjectActivityAttributor("enforce", memory=memory, camera_id="gate")
+    _parked_for_an_hour(attributor)
+    _sighting(attributor, "recorded", 2000.0)
+
+    ttl = attributor.stationary_policy.scene_memory_ttl_seconds
+    # Still inside the TTL of the 2005 s sighting, past that of 2000 s.
+    after = _sighting(attributor, "after", 2005.0 + ttl - 1.0)
+
+    assert after.attribution.role.value == "scene_context"
+    assert after.attribution.evidence.scene_context_memory_sightings == 6
+    assert memory.count("gate") == 1
+
+
+def test_a_late_sighting_is_written_once_and_reloads_as_it_is_held(tmp_path):
+    store = EventStore(tmp_path)
+    memory = store.scene_context_memory("gate")
+    attributor = ObjectActivityAttributor("enforce", memory=memory, camera_id="gate")
+    _parked_for_an_hour(attributor)
+    written = memory.writes
+
+    _sighting(attributor, "recorded", 2000.0)
+    assert memory.writes == written + 1
+    # Later frames of the late event change nothing.
+    _sighting(attributor, "recorded", 2001.0)
+    _sighting(attributor, "live", 2007.0)
+    assert memory.writes == written + 1
+
+    store._scene_context_memories.clear()
+    reloaded = store.scene_context_memory("gate")
+    assert [
+        (s.label, s.box, s.first_seen_epoch, s.last_seen_epoch, s.stable_event_keys)
+        for s in reloaded._subjects
+    ] == [
+        (s.label, s.box, s.first_seen_epoch, s.last_seen_epoch, s.stable_event_keys)
+        for s in memory._subjects
+    ]
+    row = store.load_scene_context("gate")[0]
+    assert (row["first_seen_epoch"], row["last_seen_epoch"]) == (1000.0, 2005.0)
+
+
+def test_the_establishment_snapshot_also_knows_the_subject_for_a_late_event(tmp_path):
+    store = EventStore(tmp_path)
+    memory = store.scene_context_memory("gate")
+    attributor = ObjectActivityAttributor("enforce", memory=memory, camera_id="gate")
+    _parked_for_an_hour(attributor)
+    with store._connect() as conn:
+        snapshot = store.scene_context_snapshot(conn, "gate")
+    query = dict(
+        camera_id="gate", label="car", box=(0.1, 0.1, 0.3, 0.3), event_key="recorded",
+        observed_at_epoch=2000.0, min_iou=0.72, ttl_seconds=7200.0,
+    )
+
+    assert snapshot.match(**query) == memory.match(**query)
+    assert snapshot.match(**query)[:2] == (True, 5)
+
+
+@pytest.mark.parametrize("kind", ["memory", "durable", "snapshot"])
+def test_a_car_that_parked_after_an_event_cannot_suppress_its_arrival(kind, tmp_path):
+    memory = _memory("durable" if kind == "snapshot" else kind, tmp_path)
+    attributor = ObjectActivityAttributor("enforce", memory=memory, camera_id="gate")
+    for index in range(4):
+        _sighting(attributor, f"parked-{index}", 1060.0 + index * 60.0)
+
+    if kind == "snapshot":
+        store = memory._store
+        with store._connect() as conn:
+            snapshot = store.scene_context_snapshot(conn, "gate")
+        matched = snapshot.match(
+            camera_id="gate", label="car", box=(0.1, 0.1, 0.3, 0.3), event_key="arrival",
+            observed_at_epoch=1000.0, min_iou=0.72, ttl_seconds=7200.0,
+        )
+        assert matched == (False, 0, None)
+        return
+    # The arrival at 1000 s is analysed last. Sightings that began after it
+    # are not evidence that the car was already there.
+    arrival = _sighting(attributor, "arrival", 1000.0)
+
+    assert arrival.attribution.role.value == "indeterminate"
+    assert arrival.admitted is True
+    assert arrival.attribution.evidence.scene_context_memory_match is False
+
+
+@pytest.mark.parametrize("kind", ["memory", "durable"])
+def test_a_revoked_first_sighting_no_longer_dates_the_subject(kind, tmp_path):
+    memory = _memory(kind, tmp_path)
+    attributor = ObjectActivityAttributor("enforce", memory=memory, camera_id="gate")
+    for key, epoch in (("one", 1000.0), ("two", 1060.0), ("three", 1120.0)):
+        _sighting(attributor, key, epoch)
+    # Refinement shows the first event moved, below the bound that forgets
+    # the location. Its sighting is revoked; the later two remain.
+    refined = _sighting(
+        attributor, "one", 1000.0,
+        temporal_center_displacement_ratio=0.015, temporal_center_path_ratio=0.02,
+    )
+    assert refined.attribution.role.value == "active"
+    assert memory.count("gate") == 1
+
+    # Nothing that remains was seen before 1030 s, so the late event is new.
+    late = _sighting(attributor, "late", 1030.0)
+
+    assert late.attribution.role.value == "indeterminate"
+    assert late.admitted is True

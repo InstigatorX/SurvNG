@@ -84,10 +84,41 @@ def subject_visible(
     event_key: str,
     observed_at_epoch: float,
 ) -> bool:
-    """A subject still applies at this instant, including later frames of its event."""
-    if subject.last_seen_epoch <= observed_at_epoch:
+    """A subject applies to an event it was already known before.
+
+    Recorded analysis of an event often finishes after a later live event
+    has refreshed the subject, so what counts is when the subject was first
+    seen, not when it was last seen. A subject first seen after the event,
+    such as a car that arrived in it and then parked, does not apply to it.
+    Later frames of an event the subject already records still apply.
+
+    An out-of-order event counts every other sighting of the subject,
+    including those after it. Sightings carry no times of their own, and
+    they do not need them: the subject was at this place before the event,
+    and the later sightings show it was still there after it. Movement that
+    leaves the place forgets the location, so a subject seen there again
+    afterwards starts over with a later first sighting. The event's own TTL
+    cutoff is older than the newest event's, so it never prunes a subject
+    that the newest sighting keeps alive.
+    """
+    if subject.first_seen_epoch <= observed_at_epoch:
         return True
     return bool(event_key) and event_key in subject.stable_event_keys
+
+
+def revoke_sighting(subject: SceneContextSubject, event_key: str) -> bool:
+    """Remove one event's sighting; True when the subject recorded it.
+
+    Sightings carry no times, so the first remaining one is unknown. The
+    subject is dated from its last sighting instead: an event before that is
+    no longer judged against it, which fails open, while events after it
+    match as before.
+    """
+    if event_key not in subject.stable_event_keys:
+        return False
+    subject.stable_event_keys.remove(event_key)
+    subject.first_seen_epoch = max(subject.first_seen_epoch, subject.last_seen_epoch)
+    return True
 
 
 def merge_subjects(
@@ -103,6 +134,9 @@ def merge_subjects(
     The survivor keeps a stable reference box. Only a new sighting, an event
     not already recorded, blends its box in; later frames of a recorded event
     leave it unchanged, so the reference changes only with the sighting set.
+    The last sighting time follows the same rule and never moves backwards:
+    an older event remembered late keeps the newest time, which drives the
+    TTL and eviction, and a durable subject reloads exactly as it is held.
     """
     survivor = min(subjects, key=lambda subject: (subject.first_seen_epoch, subject.row_id or 0))
     keys: list[str] = []
@@ -110,12 +144,14 @@ def merge_subjects(
         for key in subject.stable_event_keys:
             if key not in keys:
                 keys.append(key)
+    last_seen = max(subject.last_seen_epoch for subject in subjects)
     if event_key and event_key not in keys:
         keys.append(event_key)
         survivor.box = blend_reference_box(survivor.box, box)
+        last_seen = max(last_seen, observed_at_epoch)
     survivor.stable_event_keys = keys[-max_sightings:]
     survivor.first_seen_epoch = min(subject.first_seen_epoch for subject in subjects)
-    survivor.last_seen_epoch = observed_at_epoch
+    survivor.last_seen_epoch = last_seen
     moved = [subject.last_moved_epoch for subject in subjects if subject.last_moved_epoch is not None]
     if moved:
         survivor.last_moved_epoch = max(moved)
@@ -362,8 +398,8 @@ class InMemorySceneContextMemory:
                 )
                 if matches and invalidate_location:
                     continue
-                if matches and event_key in subject.stable_event_keys:
-                    subject.stable_event_keys.remove(event_key)
+                if matches:
+                    revoke_sighting(subject, event_key)
                 if subject.stable_event_keys:
                     retained.append((stored_camera, subject))
             self._subjects[:] = retained
@@ -528,8 +564,7 @@ class DurableSceneContextMemory:
                     subject.last_moved_epoch = subject.last_seen_epoch
                     self._delete(subject)
                     continue
-                if matches and event_key in subject.stable_event_keys:
-                    subject.stable_event_keys.remove(event_key)
+                if matches and revoke_sighting(subject, event_key):
                     if subject.stable_event_keys:
                         self._persist(subject)
                 if subject.stable_event_keys:
