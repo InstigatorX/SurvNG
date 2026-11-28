@@ -367,20 +367,25 @@ class ObjectActivityAttributor:
                 reasons=("not_object_detection",),
             )
         motion = temporal_object_motion_evidence(observation)
+        stable_displacement, stable_extent = self.stationary_policy.scene_stable_limits(motion)
+        # Without a box the limits would fall back to the largest movement
+        # threshold; such a sighting cannot be placed, so it is never still.
+        placed = motion.normalized_box is not None
         stable = bool(
-            observation.get("temporal_consensus") is True
+            placed
+            and observation.get("temporal_consensus") is True
             and motion.stable(
-                maximum_displacement_ratio=self.stationary_policy.scene_stable_displacement_ratio,
-                maximum_path_ratio=self.stationary_policy.scene_stable_path_ratio,
+                maximum_displacement_ratio=stable_displacement,
+                maximum_path_ratio=stable_extent,
                 require_trigger_span=True,
             )
         )
         stable_observation = bool(
-            observation.get("temporal_consensus") is True
+            placed
+            and observation.get("temporal_consensus") is True
             and motion.temporal_evidence_available
-            and motion.displacement_ratio
-            <= self.stationary_policy.scene_stable_displacement_ratio
-            and motion.movement_extent_ratio <= self.stationary_policy.scene_stable_path_ratio
+            and motion.displacement_ratio <= stable_displacement
+            and motion.movement_extent_ratio <= stable_extent
             and not motion.zone_entry
         )
         with self.memory.hold():
@@ -454,7 +459,7 @@ class ObjectActivityAttributor:
             memory_age=memory_age,
             reasons=reasons,
         )
-        if stable_observation:
+        if stable_observation and role is not ObjectActivityRole.ACTIVE:
             self._remember_scene_context(
                 observation,
                 event_key=event_key,
