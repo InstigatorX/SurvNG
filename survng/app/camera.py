@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,7 @@ from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .object_tracking_lifecycle import ObjectTrackingLifecycle
 from .object_activity import AttributionMode, ObjectActivityAttributor
 from .tracking_frames import CameraFrameTimeline, TrackingFrameBatch
+from .best_cover import BestCoverPass, RecordedBestCoverFrames
 from .motion_pipeline import (
     MotionDecisionHandlerFactory,
     MotionDebugSnapshotStore,
@@ -456,6 +458,9 @@ class CameraWorker:
             prewarm_tracking=self.tracking_lifecycle.prewarm,
             image_reader=self.media.read_image,
             refinement_store=motion_decision_handler_factory.events,
+            best_cover_pass=self._build_best_cover_pass(
+                motion_decision_handler_factory.events, detector_factory, establishment_zones,
+            ),
         )
         ring_size = self.motion_config.motion_ring_size()
         self.motion_events = MotionEventCoordinator(
@@ -1303,6 +1308,32 @@ class CameraWorker:
             frame_width,
             after_epoch=after_epoch,
         )
+
+    def _build_best_cover_pass(
+        self, store: Any, detector_factory: RecordedMotionObjectDetectorFactory,
+        zone_policy: Callable[[], dict[str, Any]],
+    ) -> Callable[[Callable[[], bool]], bool] | None:
+        """Whole-episode cover search on this camera's refinement worker."""
+        if not callable(getattr(type(store), "claim_best_cover", None)):
+            return None
+        cover_pass = BestCoverPass(
+            camera_id=self.camera.id, store=store,
+            # Resolved per call: the detector and its configuration reload.
+            detector=lambda: detector_factory.detector,
+            frames=RecordedBestCoverFrames(
+                camera_id=self.camera.id,
+                recorder=lambda: self.tracking_frames.recorder,
+                main_frame_at=lambda captured_at, width, reference: (
+                    self.tracking_frames.recorded_frame_at(captured_at, width, reference)
+                ),
+            ),
+            snapshot_writer=lambda frame, event_at: self.media.write_snapshot(frame, event_at),
+            config=lambda: detector_factory.detector.config,
+            camera=lambda: self.camera,
+            zone_policy=zone_policy,
+            lease_owner=uuid.uuid4().hex,
+        )
+        return cover_pass.run
 
     def _write_snapshot(self, frame: Any, event_at: datetime | None = None) -> str:
         return self.media.write_snapshot(frame, event_at)

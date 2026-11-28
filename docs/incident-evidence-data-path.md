@@ -136,6 +136,12 @@ The event database owns:
   saying why.
 - `scene_notification_outbox`: one pending marker per incident with an
   unpublished change.
+- `event_best_cover_jobs`: optional whole-episode cover search
+  (`detector.best_cover_pass_enabled`), one row per closed episode, owned by
+  the episode's first event. Its state is `pending`, `done`, `skipped` or
+  `exhausted`. Each row holds a lease, attempts, a deadline, a reason, and a
+  bounded result summary (search source, coverage, detector calls). It is
+  presentation only and never schedules security work.
 
 Object association uses supported track continuity or unambiguous nearby geometry.
 Ambiguous associations remain separate possible objects. Operator corrections
@@ -249,6 +255,34 @@ Search, assistant investigation, recording views and notifications resolve the
 same canonical scene. Semantic and appearance indexes can reference retained
 observations independently of current covers. Image/model unavailability remains
 explicit; metadata membership does not claim a vector exists for every object.
+
+### Whole-episode cover
+
+With `detector.best_cover_pass_enabled`, a closed episode's cover can be
+improved without tracking. The pass samples the window uniformly at a low rate
+on cheap frames, then runs the detector on at most
+`detector.best_cover_max_frames` of them. It saves only the verified winner,
+read from the main recording at full detail.
+
+It is a uniform sampler, not a motion-guided one. Per-sample foreground
+size and position are not retained after the fact:
+
+- The continuous-analysis ring holds seconds.
+- The accepted-sample history is in memory only.
+- The durable EMA route cache keeps only boxes, without area. It expires
+  after ten minutes and records only in the `camera_rescue` and `adaptive`
+  trigger modes.
+
+Retaining that data would mean a new motion-history writer, which was out of
+scope.
+
+Tracking owns the cover first. The pass waits while recorded tracking is
+queued or running, and skips an episode whose cover tracking promoted.
+Tracking replaces a cover the pass promoted only with a materially better
+view. Promotions are revision- and lease-checked and commit with `notify`
+off: the browser and indexes update, MQTT does not. Missing main footage is
+reported as incomplete; a substream-only camera is reported as `skipped`. See
+VIDEO_PIPELINE.md, "Whole-episode best cover".
 
 Notification schema 3 carries the complete object roster and separate alert
 decisions. It contains representative evidence per object; full frame history is

@@ -121,6 +121,7 @@ jobs:
             tests/test_incident_titles.py \
             tests/test_scene_history_extent.py \
             tests/test_evidence_gallery.py \
+            tests/test_best_cover_pass.py \
             tests/test_face_reference_retention.py \
             tests/test_face_review_decisions.py
       - name: Run motion subsystem regression tests
