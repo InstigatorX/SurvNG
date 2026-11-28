@@ -9,10 +9,15 @@ from typing import Any
 
 
 def _sighting_epochs(raw: object, sightings: list[str]) -> dict[str, float]:
-    """Recorded sighting times; a row from before they were kept has none."""
+    """Recorded sighting times; a row from before they were kept has none.
+
+    A corrupt column loads as no times rather than failing the camera's
+    memory: malformed JSON, an integer past the parser's digit limit
+    (ValueError), or nesting past the recursion limit.
+    """
     try:
         value = json.loads(raw) if isinstance(raw, str) and raw else {}
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         return {}
     if not isinstance(value, dict):
         return {}
@@ -22,7 +27,7 @@ def _sighting_epochs(raw: object, sightings: list[str]) -> dict[str, float]:
             continue
         try:
             when = float(value[key])
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             continue
         if math.isfinite(when):
             epochs[key] = when
@@ -87,7 +92,7 @@ class EventStoreSceneContextMixin:
         for row in rows:
             try:
                 sightings = json.loads(row["sightings_json"] or "[]")
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
                 sightings = []
             if not isinstance(sightings, list):
                 sightings = []
@@ -116,7 +121,7 @@ class EventStoreSceneContextMixin:
         for row in rows:
             try:
                 sightings = json.loads(row["sightings_json"] or "[]")
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
                 sightings = []
             if not isinstance(sightings, list):
                 sightings = []

@@ -159,8 +159,11 @@ def merge_subjects(
     The last sighting time follows the same rule and never moves backwards:
     an older event remembered late keeps the newest time, which drives the
     TTL and eviction, and a durable subject reloads exactly as it is held.
-    A late event older than every one of a full set of kept sightings would
-    be trimmed at once, so it is not a new sighting and changes nothing.
+    A full set takes a new sighting only from an event strictly newer than
+    its oldest kept sighting, so an event of the same time cannot swap with
+    it on every frame. An event whose sighting was trimmed is not taken
+    back: a later frame of it would otherwise be dated as the newest sighting
+    and trim another in turn.
     """
     survivor = min(subjects, key=lambda subject: (subject.first_seen_epoch, subject.row_id or 0))
     keys: list[str] = []
@@ -175,24 +178,38 @@ def merge_subjects(
             if key in subject.sighting_epochs:
                 epochs[key] = min(epochs.get(key, when), when)
     last_seen = max(subject.last_seen_epoch for subject in subjects)
+    evicted = list(dict.fromkeys(
+        key for subject in subjects for key in subject.evicted_event_keys
+        if key not in keys
+    ))
 
     def latest(candidates: list[str]) -> list[str]:
         # Keep the latest sightings by time; a late, older event goes first.
         if len(candidates) <= max_sightings:
             return candidates
         kept = set(sorted(candidates, key=lambda key: dated[key])[-max_sightings:])
+        evicted.extend(key for key in candidates if key not in kept)
         return [key for key in candidates if key in kept]
 
-    added = False
-    if event_key and event_key not in keys:
-        dated[event_key] = observed_at_epoch
-        if event_key in latest([*keys, event_key]):
-            added = True
-            keys.append(event_key)
-            epochs[event_key] = observed_at_epoch
-            survivor.box = blend_reference_box(survivor.box, box)
-            last_seen = max(last_seen, observed_at_epoch)
     keys = latest(keys)
+    added = False
+    if (
+        event_key
+        and event_key not in keys
+        and event_key not in evicted
+        and (
+            len(keys) < max_sightings
+            or observed_at_epoch > min(dated[key] for key in keys)
+        )
+    ):
+        added = True
+        keys.append(event_key)
+        dated[event_key] = observed_at_epoch
+        epochs[event_key] = observed_at_epoch
+        survivor.box = blend_reference_box(survivor.box, box)
+        last_seen = max(last_seen, observed_at_epoch)
+        keys = latest(keys)
+    survivor.evicted_event_keys = evicted[-max_sightings:]
     survivor.stable_event_keys = keys
     survivor.sighting_epochs = {key: epochs[key] for key in keys if key in epochs}
     survivor.first_seen_epoch = min(subject.first_seen_epoch for subject in subjects)
@@ -273,6 +290,11 @@ class SceneContextSubject:
     row_id: int | None = None
     last_moved_epoch: float | None = None
     sighting_epochs: dict[str, float] = field(default_factory=dict)
+    # Events whose sighting a full set trimmed, newest last and bounded by the
+    # sighting cap. Held in the working set only: after a restart an evicted
+    # event can be taken back once, then it is recorded again.
+    evicted_event_keys: list[str] = field(default_factory=list)
+
 
 class SceneContextMemory(Protocol):
     writes: int

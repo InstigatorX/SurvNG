@@ -680,3 +680,112 @@ def test_a_corrupt_sighting_time_is_ignored(tmp_path):
         "sighting_epochs": {"one": True, "two": 1060.0},
     })
     assert store.load_scene_context("gate")[0]["sighting_epochs"] == {"two": 1060.0}
+
+
+def _full_set(memory):
+    """Sixteen sightings at 2000-2015 s, the cap."""
+    common = dict(camera_id="gate", label="car", min_iou=0.72, ttl_seconds=7200.0,
+                  max_entries=64, max_sightings=16)
+    for index in range(16):
+        memory.remember(box=(0.1, 0.1, 0.3, 0.3), event_key=f"kept-{index}",
+                        observed_at_epoch=2000.0 + index, **common)
+    subjects = memory._subjects
+    subject = subjects[0][1] if isinstance(subjects[0], tuple) else subjects[0]
+    return subject, common
+
+
+def _held(subject):
+    return (list(subject.stable_event_keys), subject.box, dict(subject.sighting_epochs))
+
+
+@pytest.mark.parametrize("kind", ["memory", "durable"])
+def test_an_event_as_old_as_the_oldest_kept_sighting_does_not_evict_it(kind, tmp_path):
+    memory = _memory(kind, tmp_path)
+    subject, common = _full_set(memory)
+    held = _held(subject)
+    written = memory.writes
+
+    # Frames of two events at the same time as the oldest kept sighting,
+    # alternating. Neither may displace the other.
+    for _frame in range(3):
+        memory.remember(box=(0.112, 0.1, 0.312, 0.3), event_key="tie",
+                        observed_at_epoch=2000.0, **common)
+        memory.remember(box=(0.1, 0.1, 0.3, 0.3), event_key="kept-0",
+                        observed_at_epoch=2000.0, **common)
+
+    assert _held(subject) == held
+    assert memory.writes == written
+
+
+@pytest.mark.parametrize("kind", ["memory", "durable"])
+def test_an_evicted_sighting_that_returns_is_not_re_dated(kind, tmp_path):
+    memory = _memory(kind, tmp_path)
+    subject, common = _full_set(memory)
+
+    # A newer event evicts the oldest sighting, once.
+    memory.remember(box=(0.1, 0.1, 0.3, 0.3), event_key="newer",
+                    observed_at_epoch=3000.0, **common)
+    assert "kept-0" not in subject.stable_event_keys
+    held = _held(subject)
+    written = memory.writes
+
+    # Later frames of the evicted event, and then of the next one it would
+    # evict, would otherwise date them as the newest and swap on each frame.
+    for offset in range(3):
+        memory.remember(box=(0.112, 0.1, 0.312, 0.3), event_key="kept-0",
+                        observed_at_epoch=3001.0 + offset, **common)
+
+    assert _held(subject) == held
+    assert subject.sighting_epochs["kept-1"] == 2001.0
+    assert memory.writes == written
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"one": 1' + "0" * 400 + ', "two": 1060.0}',  # float() overflows
+        '{"one": 1' + "0" * 5000 + "}",  # beyond the integer digit limit
+        '{"one":' * 100000 + "1" + "}" * 100000,  # nesting beyond the recursion limit
+    ],
+    ids=["huge_integer", "huge_integer_digits", "deep_nesting"],
+)
+def test_a_corrupt_sighting_time_column_loads_without_times(tmp_path, raw):
+    store = EventStore(tmp_path)
+    store.save_scene_context("gate", {
+        "label": "car", "box": (0.1, 0.1, 0.3, 0.3), "first_seen_epoch": 1000.0,
+        "last_seen_epoch": 1060.0, "sightings": ["one", "two"],
+        "sighting_epochs": {"one": 1000.0, "two": 1060.0},
+    })
+    with store._connect() as conn:
+        conn.execute("update scene_context_subjects set sighting_epochs_json=?", (raw,))
+
+    rows = store.load_scene_context("gate")
+    memory = store.scene_context_memory("gate")
+    with store._connect() as conn:
+        snapshot = store.scene_context_snapshot(conn, "gate")
+
+    assert rows[0]["sightings"] == ["one", "two"]
+    assert rows[0]["sighting_epochs"] in ({}, {"two": 1060.0})
+    assert memory.count("gate") == 1
+    assert snapshot.match(
+        camera_id="gate", label="car", box=(0.1, 0.1, 0.3, 0.3), event_key="three",
+        observed_at_epoch=1120.0, min_iou=0.72, ttl_seconds=7200.0,
+    )[:2] == (True, 2)
+
+
+def test_a_corrupt_sightings_column_loads_as_no_sightings(tmp_path):
+    store = EventStore(tmp_path)
+    store.save_scene_context("gate", {
+        "label": "car", "box": (0.1, 0.1, 0.3, 0.3), "first_seen_epoch": 1000.0,
+        "last_seen_epoch": 1060.0, "sightings": ["one"], "sighting_epochs": {"one": 1000.0},
+    })
+    with store._connect() as conn:
+        conn.execute("update scene_context_subjects set sightings_json=?",
+                     ("[" * 100000 + "]" * 100000,))
+
+    assert store.load_scene_context("gate")[0]["sightings"] == []
+    with store._connect() as conn:
+        assert store.scene_context_snapshot(conn, "gate").match(
+            camera_id="gate", label="car", box=(0.1, 0.1, 0.3, 0.3), event_key="two",
+            observed_at_epoch=1120.0, min_iou=0.72, ttl_seconds=7200.0,
+        )[:2] == (True, 0)
