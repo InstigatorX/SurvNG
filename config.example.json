@@ -128,6 +128,7 @@
     "event_class_confidence_thresholds": {
       "robot_lawnmower": 0.75
     },
+    "stationary_person_suppression": "exempt",
     "labels": [],
     "depth": {
       "enabled": false,

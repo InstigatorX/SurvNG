@@ -876,3 +876,223 @@ def test_a_refresh_writes_once_per_event_and_reloads_as_it_is_held(tmp_path):
     fields = lambda s: (s.label, s.box, s.first_seen_epoch, s.last_seen_epoch,  # noqa: E731
                         s.stable_event_keys, s.sighting_epochs)
     assert [fields(s) for s in reloaded._subjects] == [fields(s) for s in memory._subjects]
+
+
+# Item: a still person is exempt from stationary suppression by default.
+
+def _still_person(role="scene_context", label="person"):
+    samples = physical([label], [box(20, 80)])
+    samples[0]["observations"][0]["activity_role"] = role
+    return samples
+
+
+def _known(attributor, label, count=2):
+    for index in range(count):
+        attributor.admit([observation(label=label)], {}, event_key=f"seen-{label}-{index}",
+                         observed_at_epoch=1000.0 + index * 60.0)
+
+
+def test_person_suppression_defaults_to_exempt_and_cameras_inherit_it():
+    from survng.app.scene_zone_admission import effective_stationary_person_suppression
+
+    detector = DetectorConfig()
+    camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
+    assert detector.stationary_person_suppression == "exempt"
+    assert camera.stationary_person_suppression == "inherit"
+    assert effective_stationary_person_suppression(camera, detector) == "exempt"
+    assert establishment_zone_policy(camera, detector_config=detector)["stationary_person_suppression"] == "exempt"
+    camera.stationary_person_suppression = "suppress"
+    assert effective_stationary_person_suppression(camera, detector) == "suppress"
+    assert establishment_zone_policy(camera, detector_config=detector)["stationary_person_suppression"] == "suppress"
+    camera.stationary_person_suppression = "inherit"
+    detector.stationary_person_suppression = "suppress"
+    assert effective_stationary_person_suppression(camera, detector) == "suppress"
+
+
+@pytest.mark.parametrize(
+    ("label", "setting", "admitted"),
+    [("person", "exempt", True), ("person", "suppress", False),
+     ("car", "exempt", False), ("dog", "exempt", False), ("face", "exempt", False)],
+)
+def test_live_admission_exempts_only_a_person(label, setting, admitted):
+    attributor = ObjectActivityAttributor("enforce", person_suppression=setting)
+    _known(attributor, label)
+
+    admission = attributor.admit([observation(label=label)], {}, event_key="now",
+                                 observed_at_epoch=1200.0)[0]
+
+    assert admission.attribution.role.value == "scene_context"
+    assert admission.admitted is admitted
+    assert admission.counterfactual_suppressed is not admitted
+    stored = admission.stored_observation()
+    assert stored["activity_role"] == "scene_context"
+    assert stored["activity_admission_reason"] == (
+        "stationary_person_exempt" if admitted else "stationary_scene_context"
+    )
+    assert attributor.status()["enforced_suppressions"] == (0 if admitted else 1)
+
+
+@pytest.mark.parametrize(("setting", "counterfactual"), [("exempt", False), ("suppress", True)])
+def test_shadow_mode_records_the_counterfactual_only_where_enforcement_would_suppress(setting, counterfactual):
+    attributor = ObjectActivityAttributor("shadow", person_suppression=setting)
+    _known(attributor, "person")
+    admission = attributor.admit([observation(label="person")], {}, event_key="now",
+                                 observed_at_epoch=1200.0)[0]
+    assert admission.admitted is True
+    assert admission.counterfactual_suppressed is counterfactual
+
+
+def test_the_exemption_hot_applies_to_a_running_attributor():
+    attributor = ObjectActivityAttributor("enforce", person_suppression="suppress")
+    _known(attributor, "person")
+    assert attributor.admit([observation(label="person")], {}, event_key="a",
+                            observed_at_epoch=1200.0)[0].admitted is False
+    attributor.reconfigure_stationary_person_suppression("exempt")
+    assert attributor.admit([observation(label="person")], {}, event_key="b",
+                            observed_at_epoch=1260.0)[0].admitted is True
+    assert attributor.status()["stationary_person_suppression"] == "exempt"
+
+
+@pytest.mark.parametrize(
+    ("label", "setting", "suppressed"),
+    [("person", "exempt", False), ("person", "suppress", True), ("Person", "exempt", False),
+     ("car", "exempt", True), ("dog", "exempt", True)],
+)
+def test_alerts_exempt_only_a_person(label, setting, suppressed):
+    item = {"label": label, "activity_role": "scene_context", "alert_eligible": True, "alert_reasons": []}
+    apply_stationary_alert(item, presence="ignore", mode="enforce", person_suppression=setting)
+    assert item["alert_eligible"] is (not suppressed)
+    shadow = {"label": label, "activity_role": "scene_context", "alert_eligible": True, "alert_reasons": []}
+    apply_stationary_alert(shadow, presence="ignore", mode="shadow", person_suppression=setting)
+    assert ("alert_shadow_reasons" in shadow) is suppressed
+    assert stationary_subject_effect(
+        "scene_context", "ignore", "enforce", label=label, person_suppression=setting,
+    ) == ("enforce" if suppressed else "")
+
+
+def test_an_alert_without_a_person_setting_keeps_suppressing():
+    item = {"label": "person", "activity_role": "scene_context", "alert_eligible": True, "alert_reasons": []}
+    apply_stationary_alert(item, presence="ignore", mode="enforce")
+    assert item["alert_eligible"] is False
+
+
+def _enforcing(**values):
+    return _policy(stationary_subject_presence="ignore", object_activity_attribution="enforce", **values)
+
+
+@pytest.mark.parametrize(
+    ("label", "setting", "supported"),
+    [("person", "exempt", True), ("person", "suppress", False), ("car", "exempt", False),
+     ("dog", "exempt", False)],
+)
+def test_a_notice_is_verified_by_a_still_person_only_when_exempt(label, setting, supported):
+    decision = evaluate_scene_establishment(
+        _still_person(label=label),
+        policy=_enforcing(stationary_person_suppression=setting),
+        notice={"source": "motion", "epoch": 1000},
+    )
+    assert (decision["status"] == "supported") is supported
+    interpreted = decision["zone_interpretation"]["observations"][0]
+    assert interpreted["activity_role"] == "scene_context"
+    assert (interpreted["admission_reason"] == "stationary_scene_context") is (not supported)
+
+
+def test_a_snapshot_from_before_the_setting_keeps_suppressing_a_person():
+    decision = evaluate_scene_establishment(
+        _still_person(), policy=_enforcing(), notice={"source": "motion", "epoch": 1000},
+    )
+    assert decision["status"] == "unsupported"
+    assert decision["reason"] == "stationary_scene_context"
+
+
+@pytest.mark.parametrize(("setting", "counterfactual"), [("exempt", False), ("suppress", True)])
+def test_establishment_shadow_counterfactual_follows_the_exemption(setting, counterfactual):
+    decision = evaluate_scene_establishment(
+        _still_person(),
+        policy=_policy(stationary_subject_presence="ignore", object_activity_attribution="shadow",
+                       stationary_person_suppression=setting),
+        notice={"source": "motion", "epoch": 1000},
+    )
+    assert decision["status"] == "supported"
+    assert bool(decision["diagnostics"].get("stationary_scene_context_counterfactual")) is counterfactual
+
+
+@pytest.mark.parametrize(("label", "setting", "counted"),
+                         [("person", "exempt", True), ("person", "suppress", False),
+                          ("car", "exempt", False)])
+def test_in_place_motion_of_a_still_person_is_activity_when_exempt(label, setting, counted):
+    samples = physical([label, label], [box(20, 80), box(20, 80)])
+    witness = samples[-1]["metadata"]["activity_witnesses"][0]
+    witness["kind"] = "localized_motion"
+    witness["normalized_displacement"] = 0.0004
+    for sample in samples:
+        sample["observations"][0]["activity_role"] = "scene_context"
+        sample["metadata"]["confirmation_complete"] = True
+    established = evaluate_scene_establishment(
+        samples, policy=_enforcing(stationary_person_suppression=setting),
+    )
+    assert (established["status"] == "supported") is counted
+
+
+@pytest.mark.parametrize(("label", "setting", "supported"),
+                         [("person", "exempt", True), ("person", "suppress", False),
+                          ("car", "exempt", False)])
+def test_a_full_frame_camera_notice_follows_the_exemption(label, setting, supported):
+    samples = _still_person(label=label)
+    payload = samples[0]["observations"][0]
+    payload.update(temporal_consensus=True, incident_eligible=True)
+    policy = {"version": 1, "require_incident_zone": False, "zones": [],
+              "stationary_subject_presence": "ignore", "object_activity_attribution": "enforce",
+              "stationary_person_suppression": setting}
+    decision = evaluate_scene_establishment(
+        samples, policy=policy,
+        notice={"source": "camera", "epoch": 1000,
+                "camera_admission": {"version": 1, "trigger_class": "generic_camera"}},
+    )
+    assert (decision["status"] == "supported") is supported
+
+
+@pytest.mark.parametrize(("label", "supported"), [("person", True), ("car", False)])
+def test_a_role_assigned_from_memory_does_not_suppress_an_exempt_person(tmp_path, label, supported):
+    store = EventStore(tmp_path)
+    attributor = ObjectActivityAttributor("enforce", memory=store.scene_context_memory("gate"),
+                                          camera_id="gate")
+    for key, epoch in (("one", 1000.0), ("two", 1060.0)):
+        parked = _parked_box()
+        parked["label"] = label
+        attributor.admit([parked], {}, event_key=key, observed_at_epoch=epoch)
+    samples = physical([label], [box(20, 80)])
+
+    decision = evaluate_scene_establishment(
+        samples, policy=_enforcing(stationary_person_suppression="exempt"),
+        notice={"source": "motion", "epoch": 1120},
+        scene_context_memory=store.scene_context_memory("gate"),
+        event_key="three", observed_at_epoch=1120.0,
+    )
+
+    # The role is still recorded for audit.
+    assert samples[0]["observations"][0]["activity_role"] == "scene_context"
+    assert (decision["status"] == "supported") is supported
+
+
+@pytest.mark.parametrize(("label", "exempt", "rescued"),
+                         [("person", True, True), ("person", False, False), ("car", True, False)])
+def test_semantic_rescue_follows_the_exemption(label, exempt, rescued):
+    from unittest.mock import patch
+
+    from survng.app.motion_pipeline import decision_handler
+
+    candidate = {"label": label, "activity_role": "scene_context", "spatial_zone_eligible": True,
+                 "confidence_eligible": True, "temporal_incident_observations": 2,
+                 "temporal_required_observations": 2, "incident_eligible": False,
+                 "temporal_eligible": False, "semantic_tier": "rescue_candidate",
+                 "incident_ineligible_reasons": ["pending_causal_confirmation"]}
+    attributor = ObjectActivityAttributor(
+        "enforce", person_suppression="exempt" if exempt else "suppress",
+    )
+    with patch.object(decision_handler, "motion_correlated_objects",
+                      side_effect=lambda frame, items, *args, **kwargs: (list(items), {})):
+        decision_handler._admit_semantic_rescues(
+            object(), [candidate], {}, {}, stationary_suppressed=attributor.suppresses_stationary,
+        )
+    assert candidate["semantic_rescue_admitted"] is rescued

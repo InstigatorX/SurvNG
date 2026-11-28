@@ -16,7 +16,13 @@ from .object_motion import (
     temporal_object_motion_evidence,
 )
 from .scene_context_memory import InMemorySceneContextMemory, SceneContextMemory, normalized_box
-from .stationary_policy import StationaryObjectPolicy, stationary_object_policy
+from .stationary_policy import (
+    PERSON_SUPPRESSION_VALUES,
+    RECORDED_PERSON_SUPPRESSION,
+    StationaryObjectPolicy,
+    stationary_object_policy,
+    stationary_suppression_exempt,
+)
 
 
 AttributionMode = Literal["off", "shadow", "enforce"]
@@ -279,13 +285,26 @@ class ObjectIncidentAdmission:
         return self.attribution.observation
 
 
-def apply_stationary_alert(observation: dict[str, Any], *, presence: str, mode: str) -> None:
+def apply_stationary_alert(
+    observation: dict[str, Any],
+    *,
+    presence: str,
+    mode: str,
+    person_suppression: str = RECORDED_PERSON_SUPPRESSION,
+) -> None:
     """Clear alert eligibility for an enforced stationary subject.
 
     An unconfirmed track keeps its temporal reason. Shadow mode records the
-    counterfactual and leaves eligibility unchanged.
+    counterfactual and leaves eligibility unchanged. An exempt person is
+    neither suppressed nor a counterfactual.
     """
-    effect = stationary_subject_effect(str(observation.get("activity_role") or ""), presence, mode)
+    effect = stationary_subject_effect(
+        str(observation.get("activity_role") or ""),
+        presence,
+        mode,
+        label=observation.get("label"),
+        person_suppression=person_suppression,
+    )
     if effect == "shadow":
         observation["alert_shadow_reasons"] = ["stationary_scene_context"]
     if effect != "enforce":
@@ -298,13 +317,22 @@ def apply_stationary_alert(observation: dict[str, Any], *, presence: str, mode: 
     observation["alert_reasons"] = ["stationary_scene_context"]
 
 
-def stationary_subject_effect(role: str, presence: str, mode: str) -> str:
+def stationary_subject_effect(
+    role: str,
+    presence: str,
+    mode: str,
+    *,
+    label: object = "",
+    person_suppression: str = RECORDED_PERSON_SUPPRESSION,
+) -> str:
     """How a proven stationary subject affects establishment and alerts.
 
     ``enforce`` suppresses presence. ``shadow`` records the counterfactual.
-    Anything else, including a missing role, fails open.
+    Anything else, including a missing role or an exempt person, fails open.
     """
     if str(role or "") != "scene_context" or presence != "ignore":
+        return ""
+    if stationary_suppression_exempt(label, person_suppression):
         return ""
     if mode == "enforce":
         return "enforce"
@@ -365,9 +393,17 @@ class ObjectActivityAttributor:
         *,
         memory: SceneContextMemory | None = None,
         camera_id: str = "",
+        person_suppression: str = RECORDED_PERSON_SUPPRESSION,
     ) -> None:
         self.mode: AttributionMode = mode
         self.camera_id = camera_id
+        # The camera passes its effective setting; standalone use keeps the
+        # behaviour from before the setting, which suppressed a still person.
+        self.person_suppression = (
+            person_suppression
+            if person_suppression in PERSON_SUPPRESSION_VALUES
+            else RECORDED_PERSON_SUPPRESSION
+        )
         self.memory: SceneContextMemory = memory or InMemorySceneContextMemory()
         self.stationary_policy: StationaryObjectPolicy = stationary_object_policy(
             stationary_tolerance
@@ -434,6 +470,7 @@ class ObjectActivityAttributor:
                     source: dict(counts)
                     for source, counts in self._semantic_rescue_by_source.items()
                 },
+                "stationary_person_suppression": self.person_suppression,
                 "scene_context_memory_entries": self.memory.count(self.camera_id),
                 "scene_context_memory_ttl_seconds": self.stationary_policy.scene_memory_ttl_seconds,
                 "stationary_policy": self.stationary_policy.as_dict(),
@@ -472,6 +509,15 @@ class ObjectActivityAttributor:
     def reconfigure_stationary_tolerance(self, tolerance: str) -> None:
         with self._lock:
             self.stationary_policy = stationary_object_policy(tolerance)
+
+    def reconfigure_stationary_person_suppression(self, value: str) -> None:
+        with self._lock:
+            if value in PERSON_SUPPRESSION_VALUES:
+                self.person_suppression = value
+
+    def suppresses_stationary(self, observation: Mapping[str, Any]) -> bool:
+        """Whether this observation's label is suppressed when it is scene context."""
+        return not stationary_suppression_exempt(observation.get("label"), self.person_suppression)
 
     def stamp_recorded(
         self,
@@ -959,10 +1005,11 @@ class ObjectActivityAttributor:
     ) -> ObjectIncidentAdmission:
         observation = attribution.observation
         detector_eligible = observation.get("incident_eligible") is not False
-        counterfactual = bool(
-            detector_eligible
-            and attribution.role is ObjectActivityRole.SCENE_CONTEXT
-        )
+        scene_context = attribution.role is ObjectActivityRole.SCENE_CONTEXT
+        exempt = scene_context and not self.suppresses_stationary(observation)
+        # The role stays scene context for audit; an exempt person is neither
+        # suppressed nor a counterfactual suppression.
+        counterfactual = bool(detector_eligible and scene_context and not exempt)
         enforced = self.mode == "enforce" and counterfactual
         return ObjectIncidentAdmission(
             attribution=attribution,
@@ -976,6 +1023,8 @@ class ObjectActivityAttributor:
                 if counterfactual
                 else "detector_ineligible"
                 if not detector_eligible
+                else "stationary_person_exempt"
+                if exempt
                 else "activity_eligible"
             ),
         )
@@ -998,6 +1047,7 @@ class ObjectActivityAttributor:
                 counterfactual = bool(
                     result.observation.get("incident_eligible") is not False
                     and result.role is ObjectActivityRole.SCENE_CONTEXT
+                    and self.suppresses_stationary(result.observation)
                 )
                 if counterfactual:
                     self._counts["counterfactual_suppressions"] += 1

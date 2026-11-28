@@ -12,7 +12,7 @@ import numpy as np
 import cv2
 
 from .activity_events import ActivityEventBus
-from .scene_zone_admission import establishment_zone_policy
+from .scene_zone_admission import effective_stationary_person_suppression, establishment_zone_policy
 from .camera_capture import (
     CaptureBackend,
     CameraCaptureService,
@@ -969,6 +969,7 @@ class CameraWorker:
             stationary_tolerance=tolerance,
             memory=memory,
             camera_id=self.camera.id,
+            person_suppression=effective_stationary_person_suppression(self.camera, detector_config),
         )
         return attributor
 
@@ -979,12 +980,16 @@ class CameraWorker:
         """Apply scene-context enforcement and presence without rebuilding the camera."""
         self.camera.object_activity_attribution = camera.object_activity_attribution
         self.camera.stationary_subject_presence = camera.stationary_subject_presence
+        self.camera.stationary_person_suppression = camera.stationary_person_suppression
         mode = (
             detector.object_activity_attribution
             if camera.object_activity_attribution == "inherit"
             else camera.object_activity_attribution
         )
         self.reconfigure_object_activity_attribution(mode)
+        self.motion_decision_handler.reconfigure_stationary_person_suppression(
+            effective_stationary_person_suppression(camera, detector)
+        )
 
     def reconfigure_motion_policy(
         self,

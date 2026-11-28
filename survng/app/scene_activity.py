@@ -40,7 +40,8 @@ def localized_change_supported(local, background) -> bool:
     )
 
 
-def evaluate_scene_activity(samples, *, policy_version=1, ignore_stationary_scene_context=False) -> dict[str, Any]:
+def evaluate_scene_activity(samples, *, policy_version=1, ignore_stationary_scene_context=False,
+                            stationary_exempt_labels=frozenset()) -> dict[str, Any]:
     if policy_version != 1:
         raise ValueError("unsupported scene activity policy version")
     # A retry, a second model, or a second resolution of one capture does not
@@ -119,10 +120,16 @@ def evaluate_scene_activity(samples, *, policy_version=1, ignore_stationary_scen
                 if (
                     ignore_stationary_scene_context
                     and witness["kind"] == "localized_motion"
-                    and all(str(observations[key].get("activity_role") or "") == "scene_context" for key in ids)
+                    and all(
+                        str(observations[key].get("activity_role") or "") == "scene_context"
+                        and str(observations[key].get("label") or "").strip().lower()
+                        not in stationary_exempt_labels
+                        for key in ids
+                    )
                 ):
                     # In-place pixel change on a known stationary subject is
-                    # retained on the sample, but it is not activity.
+                    # retained on the sample, but it is not activity. An
+                    # exempt label (a still person, when so configured) is.
                     continue
                 supported.append((after, ids, "video_verified_activity"))
                 witnesses.append({"epoch": after, "observation_ids": ids, "kind": "video_verified_activity"})

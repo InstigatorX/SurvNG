@@ -85,3 +85,33 @@ _POLICIES = {
 
 def stationary_object_policy(value: str | None) -> StationaryObjectPolicy:
     return _POLICIES.get(str(value or "balanced").strip().lower(), _POLICIES["balanced"])
+
+
+# A still person is often the point of a camera: someone waiting at a door,
+# or sitting in a room. ``stationary_person_suppression`` decides whether a
+# person proven to be stationary scene context is still suppressed. The role
+# is recorded either way; only its effect changes, and only for this label.
+STATIONARY_EXEMPTABLE_LABELS = frozenset({"person"})
+PERSON_SUPPRESSION_VALUES = frozenset({"suppress", "exempt"})
+# Configuration default: a still person counts.
+DEFAULT_PERSON_SUPPRESSION = "exempt"
+# What a decision recorded before the setting existed did: it suppressed.
+RECORDED_PERSON_SUPPRESSION = "suppress"
+
+
+def stationary_suppression_exempt(label: object, person_suppression: object) -> bool:
+    """Whether a stationary subject with this label is exempt from suppression."""
+    return bool(
+        person_suppression == "exempt"
+        and str(label or "").strip().lower() in STATIONARY_EXEMPTABLE_LABELS
+    )
+
+
+def policy_person_suppression(policy: object) -> str:
+    """The person setting a policy snapshot recorded.
+
+    A snapshot taken before the setting existed keeps its recorded behaviour,
+    which suppressed a still person like any other stationary subject.
+    """
+    value = policy.get("stationary_person_suppression") if isinstance(policy, dict) else None
+    return value if value in PERSON_SUPPRESSION_VALUES else RECORDED_PERSON_SUPPRESSION

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Upgrade note: still people count again by default.** A person proven to be
+  stationary scene context (someone standing on a porch, people sitting
+  indoors) was suppressed like a parked car when stationary subject presence
+  was "only when it moves" and scene context was enforced. The new
+  **Still people** setting (`detector.stationary_person_suppression`, default
+  `exempt`; per camera `inherit`, `exempt` or `suppress`) now lets such a
+  person establish incidents and alert. Set a camera, or the global setting, to
+  **Suppress like other stationary subjects** to keep the earlier behaviour.
+  Only the `person` label is affected; the role is still recorded as scene
+  context, shadow mode reports no counterfactual for an exempt person, and
+  incidents recorded before the setting keep their recorded decision.
 - Incidents opens on a gallery in place of the viewer. It loads as it is
   scrolled, a day at a time with a step to the day before at its end, with a
   slider for incidents per row. Each picture shows its camera and time, object icons and a

@@ -770,6 +770,67 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(result["apply_mode"], "hot")
         self.assertFalse(result["camera_workers_restarted"])
 
+    def test_stationary_person_suppression_hot_applies_globally_and_per_camera(self) -> None:
+        for change in ("detector", "camera"):
+            with self.subTest(change=change):
+                active = Mock()
+                current = AppConfig(cameras=[
+                    CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main"),
+                ])
+                active.config = current
+                main.config = current
+                main.manager = active
+                incoming = current.model_copy(deep=True)
+                if change == "detector":
+                    incoming.detector.stationary_person_suppression = "suppress"
+                else:
+                    incoming.cameras[0].stationary_person_suppression = "suppress"
+
+                with (
+                    patch("survng.app.main.reload_manager") as reload,
+                    patch("survng.app.main.save_config"),
+                ):
+                    effective, result = main.apply_config_update(incoming)
+
+                reload.assert_not_called()
+                active.reconfigure_detector_policy.assert_called_once_with(effective)
+                self.assertEqual(result["apply_mode"], "hot")
+                self.assertFalse(result["camera_workers_restarted"])
+
+    def test_a_camera_worker_hot_applies_person_suppression_to_its_attributor(self) -> None:
+        from types import SimpleNamespace
+
+        from survng.app.camera import CameraWorker
+        from survng.app.config import DetectorConfig
+        from survng.app.object_activity import ObjectActivityAttributor
+        from survng.app.motion_pipeline.decision_handler import MotionDecisionHandler
+
+        attributor = ObjectActivityAttributor("enforce", person_suppression="exempt")
+        handler = SimpleNamespace(activity_attributor=attributor)
+        handler.reconfigure_activity_attribution = (
+            lambda mode: MotionDecisionHandler.reconfigure_activity_attribution(handler, mode)
+        )
+        handler.reconfigure_stationary_person_suppression = (
+            lambda value: MotionDecisionHandler.reconfigure_stationary_person_suppression(handler, value)
+        )
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
+        worker = SimpleNamespace(camera=camera.model_copy(deep=True), motion_decision_handler=handler)
+        worker.reconfigure_object_activity_attribution = (
+            lambda mode: CameraWorker.reconfigure_object_activity_attribution(worker, mode)
+        )
+        updated = camera.model_copy(deep=True)
+        updated.stationary_person_suppression = "suppress"
+
+        CameraWorker.reconfigure_stationary_subject_policy(worker, updated, DetectorConfig())
+
+        self.assertEqual(worker.camera.stationary_person_suppression, "suppress")
+        self.assertEqual(attributor.person_suppression, "suppress")
+        updated.stationary_person_suppression = "inherit"
+        CameraWorker.reconfigure_stationary_subject_policy(
+            worker, updated, DetectorConfig(stationary_person_suppression="exempt"),
+        )
+        self.assertEqual(attributor.person_suppression, "exempt")
+
     def test_camera_motion_scalar_tuning_hot_applies_without_worker_restart(self) -> None:
         active = Mock()
         current = AppConfig(cameras=[

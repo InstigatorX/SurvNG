@@ -26,6 +26,7 @@ from ..object_activity import (
 from ..scene_zone_admission import (
     effective_activity_attribution,
     effective_stationary_presence,
+    effective_stationary_person_suppression,
     establishment_zone_policy,
 )
 from ..security import redact_secret_text
@@ -1356,8 +1357,14 @@ class ObjectTrackingSession:
                     )
                     presence = effective_stationary_presence(self.camera, self.detector.config)
                     attribution = effective_activity_attribution(self.camera, self.detector.config)
+                    person_suppression = effective_stationary_person_suppression(
+                        self.camera, self.detector.config,
+                    )
                     for observation in stamped_observations:
-                        apply_stationary_alert(observation, presence=presence, mode=attribution)
+                        apply_stationary_alert(
+                            observation, presence=presence, mode=attribution,
+                            person_suppression=person_suppression,
+                        )
                 # Physical evidence and object/alert associations have separate
                 # ownership. Keep only one prior image; persist the measurements
                 # and both frame references, never infer activity from a new ID.

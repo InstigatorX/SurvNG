@@ -16,7 +16,14 @@ from .config import CameraConfig, DetectionZone
 from .motion_correlation import _aligned_motion_regions, assess_motion_objects
 from .scene_activity import _number, evaluate_scene_activity
 from .scene_context_memory import normalized_box
-from .stationary_policy import stationary_object_policy
+from .stationary_policy import (
+    DEFAULT_PERSON_SUPPRESSION,
+    PERSON_SUPPRESSION_VALUES,
+    STATIONARY_EXEMPTABLE_LABELS,
+    policy_person_suppression,
+    stationary_object_policy,
+    stationary_suppression_exempt,
+)
 from .zones import _point_in_polygon, apply_depth_zone_filters, apply_detection_zones, class_confidence_threshold
 
 ESTABLISHMENT_ZONE_POLICY_VERSION = "establishment_zones_v1"
@@ -34,6 +41,19 @@ def effective_stationary_presence(camera: CameraConfig, detector_config: Any | N
     if value == "inherit":
         value = getattr(detector_config, "stationary_subject_presence", "ignore")
     return value if value in {"ignore", "activity"} else "ignore"
+
+
+def effective_stationary_person_suppression(camera: CameraConfig, detector_config: Any | None = None) -> str:
+    """Resolve a camera inherit to the detector's person setting."""
+    value = getattr(camera, "stationary_person_suppression", "inherit")
+    if value == "inherit":
+        value = getattr(detector_config, "stationary_person_suppression", DEFAULT_PERSON_SUPPRESSION)
+    return value if value in PERSON_SUPPRESSION_VALUES else DEFAULT_PERSON_SUPPRESSION
+
+
+def _stationary_suppressible(payload: dict[str, Any], policy: dict[str, Any] | None) -> bool:
+    """A scene-context box this snapshot may suppress; an exempt person is not."""
+    return not stationary_suppression_exempt(payload.get("label"), policy_person_suppression(policy))
 
 
 def effective_activity_attribution(camera: CameraConfig, detector_config: Any | None = None) -> str:
@@ -99,6 +119,7 @@ def establishment_zone_policy(
         policy["class_confidence_thresholds"] = normalized
     policy["stationary_subject_presence"] = effective_stationary_presence(camera, detector_config)
     policy["object_activity_attribution"] = effective_activity_attribution(camera, detector_config)
+    policy["stationary_person_suppression"] = effective_stationary_person_suppression(camera, detector_config)
     return policy
 
 
@@ -272,7 +293,8 @@ def interpret_establishment_observation(observation: dict[str, Any], policy: dic
     admission_reason = "below_confidence" if eligible and not admitted else reason
     role = str(payload.get("activity_role") or "")
     effect = ""
-    if eligible and role == "scene_context":
+    exempt = role == "scene_context" and not _stationary_suppressible(payload, policy)
+    if eligible and role == "scene_context" and not exempt:
         if stationary_presence_enforced(policy):
             effect = "enforce"
             admission_reason = "stationary_scene_context"
@@ -289,6 +311,7 @@ def interpret_establishment_observation(observation: dict[str, Any], policy: dic
         "activity_role": role or "indeterminate",
         "stationary_presence": policy.get("stationary_subject_presence") if isinstance(policy, dict) else None,
         "stationary_counterfactual": effect == "shadow",
+        "stationary_person_exempt": exempt,
     }
 
 
@@ -424,7 +447,11 @@ def _unrestricted_admits(payload: dict[str, Any], policy: dict[str, Any] | None)
     """Confidence and stationary policy for a full frame, where zones do not apply."""
     if not _confidence_admitted(payload, policy):
         return False
-    return not (stationary_presence_enforced(policy) and str(payload.get("activity_role") or "") == "scene_context")
+    return not (
+        stationary_presence_enforced(policy)
+        and str(payload.get("activity_role") or "") == "scene_context"
+        and _stationary_suppressible(payload, policy)
+    )
 
 
 def _motion_region_rejection(located: dict[str, Any] | None) -> str | None:
@@ -771,6 +798,11 @@ def evaluate_scene_establishment(
     activity = evaluate_scene_activity(
         samples,
         ignore_stationary_scene_context=stationary_presence_enforced(policy),
+        stationary_exempt_labels=(
+            STATIONARY_EXEMPTABLE_LABELS
+            if policy_person_suppression(policy) == "exempt"
+            else frozenset()
+        ),
     )
     if not isinstance(policy, dict):
         policy = None

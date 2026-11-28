@@ -2505,6 +2505,24 @@ class TrackingMotionPromotionTest(unittest.TestCase):
         )
         self.assertGreaterEqual(evidence["match_iou"], 0.5)
 
+    def test_a_still_person_is_promotable_only_when_exempt_from_stationary_suppression(self) -> None:
+        for label, setting, promoted in (
+            ("person", "exempt", True),
+            ("person", "suppress", False),
+            ("car", "exempt", False),
+        ):
+            with self.subTest(label=label, setting=setting):
+                promotions = tracking_motion_promotions(
+                    [self.demoted(label=label, activity_role="scene_context")],
+                    self.tracking(self.drifting(), label=label),
+                    person_suppression=setting,
+                )
+                self.assertEqual(bool(promotions), promoted)
+        # A caller without the setting keeps the recorded behaviour.
+        self.assertEqual(tracking_motion_promotions(
+            [self.demoted(activity_role="scene_context")], self.tracking(self.drifting()),
+        ), {})
+
     def test_repeated_fast_transit_qualifies_on_supported_excursion(self) -> None:
         """Repeated crossings retain meaningful extent after temporal filtering."""
         centers = [

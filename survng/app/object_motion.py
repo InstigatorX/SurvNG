@@ -8,6 +8,8 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
+from .stationary_policy import RECORDED_PERSON_SUPPRESSION, stationary_suppression_exempt
+
 
 MINIMUM_MOVEMENT_RATIO = 0.003
 MAXIMUM_MOVEMENT_RATIO = 0.02
@@ -245,20 +247,24 @@ def temporal_object_motion_evidence(
 def tracking_motion_promotions(
     objects: Sequence[Any],
     tracking: Mapping[str, Any],
+    *,
+    person_suppression: str = RECORDED_PERSON_SUPPRESSION,
 ) -> dict[int, dict[str, Any]]:
     """Re-check motion-demoted objects against whole-session tracking evidence.
 
     Use the same bounded excursion estimator as initial admission. A longer
     observation window can establish travel that sparse refinement missed, but
     accumulating stationary box noise cannot. All other eligibility gates and
-    track identity matching remain authoritative.
+    track identity matching remain authoritative. A stationary subject is not
+    promoted unless it is a person exempt from stationary suppression.
     """
     width = _positive_float(tracking.get("frame_width"))
     height = _positive_float(tracking.get("frame_height"))
     if width is None or height is None:
         return {}
     candidates = [
-        (index, item) for index, item in enumerate(objects) if _promotable(item)
+        (index, item) for index, item in enumerate(objects)
+        if _promotable(item, person_suppression)
     ]
     if not candidates:
         return {}
@@ -329,7 +335,7 @@ def tracking_motion_promotions(
     return promotions
 
 
-def _promotable(item: Any) -> bool:
+def _promotable(item: Any, person_suppression: str = RECORDED_PERSON_SUPPRESSION) -> bool:
     if not isinstance(item, Mapping) or not item.get("label"):
         return False
     if item.get("incident_eligible") is not False:
@@ -346,7 +352,10 @@ def _promotable(item: Any) -> bool:
         and item.get("spatial_zone_eligible") is True
         and item.get("temporal_eligible") is True
         and item.get("temporal_consensus") is True
-        and str(item.get("activity_role") or "") != "scene_context"
+        and (
+            str(item.get("activity_role") or "") != "scene_context"
+            or stationary_suppression_exempt(item.get("label"), person_suppression)
+        )
     )
 
 

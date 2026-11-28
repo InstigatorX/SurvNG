@@ -74,7 +74,7 @@ motion that names no observation, cannot satisfy the restriction
 witness that was measured and found ineligible. A box already known as stationary
 scene context does not verify a notice or count as in-place `localized_motion`
 when the snapshotted policy ignores stationary presence and enforcement is on
-(`stationary_scene_context`). Movement and arrival still count. A snapshot
+(`stationary_scene_context`), unless it is a person and the snapshot exempts still people (`stationary_person_suppression: exempt`, the default). Movement and arrival still count. A snapshot
 without that policy, or with presence set to activity, shadow, or off, keeps
 its recorded meaning. Cross-camera association uses the
 same rule: the camera being admitted needs its own zone-eligible activity.

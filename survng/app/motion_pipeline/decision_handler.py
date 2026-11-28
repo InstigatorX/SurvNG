@@ -74,8 +74,13 @@ def _admit_semantic_rescues(
     objects: list[dict[str, Any]],
     qualification: dict[str, Any],
     alignment: dict[str, Any],
+    *,
+    stationary_suppressed: Callable[[dict[str, Any]], bool] | None = None,
 ) -> dict[str, Any]:
     """Reject below-threshold candidates after recording causal context.
+
+    A stationary subject is not rescued unless ``stationary_suppressed`` says
+    its label is exempt (a still person, when so configured).
 
     The configured object confidence is the incident admission floor. Causal
     motion may explain a candidate, but must not override that operator policy.
@@ -102,6 +107,9 @@ def _admit_semantic_rescues(
     admitted = 0
     for detected in candidates:
         activity_role = str(detected.get("activity_role") or "indeterminate")
+        stationary = activity_role == "scene_context" and (
+            stationary_suppressed is None or stationary_suppressed(detected)
+        )
         zone_allowed = detected.get("spatial_zone_eligible") is True
         confidence_allowed = bool(detected.get("confidence_eligible") is True)
         qualifying_observations = max(
@@ -118,7 +126,7 @@ def _admit_semantic_rescues(
             and confirmations_allowed
             and id(detected) in admitted_ids
             and zone_allowed
-            and activity_role != "scene_context"
+            and not stationary
         )
         detected["semantic_rescue_admitted"] = eligible
         detected["semantic_rescue_policy"] = "causal_v1"
@@ -146,7 +154,7 @@ def _admit_semantic_rescues(
                 else "insufficient_qualifying_confirmations"
                 if not confirmations_allowed
                 else "stationary_scene_context"
-                if activity_role == "scene_context"
+                if stationary
                 else "outside_incident_zone"
                 if not zone_allowed
                 else "low_confidence_without_causal_motion"
@@ -337,6 +345,10 @@ class MotionDecisionHandler:
     def reconfigure_stationary_tolerance(self, tolerance: str) -> None:
         if self.activity_attributor is not None:
             self.activity_attributor.reconfigure_stationary_tolerance(tolerance)
+
+    def reconfigure_stationary_person_suppression(self, value: str) -> None:
+        if self.activity_attributor is not None:
+            self.activity_attributor.reconfigure_stationary_person_suppression(value)
 
     def handle(
         self,
@@ -657,6 +669,11 @@ class MotionDecisionHandler:
                 objects,
                 qualification,
                 self.spatial_alignment,
+                stationary_suppressed=(
+                    self.activity_attributor.suppresses_stationary
+                    if self.activity_attributor is not None
+                    else None
+                ),
             )
             rescue_summary["trigger_source"] = str(
                 qualification.get("trigger_source") or "unknown"

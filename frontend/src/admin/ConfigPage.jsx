@@ -2481,6 +2481,11 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, textSize = 
                         <option value="ignore">Only when it moves, arrives, or departs</option>
                         <option value="activity">Presence can establish and alert</option>
                       </select><small>Applies to incident establishment and alerts on this camera, not only live labels.</small></label>
+                      <label>Still people<select value={selectedCamera.stationary_person_suppression || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["stationary_person_suppression"], event.target.value)}>
+                        <option value="inherit">Use global ({config.detector?.stationary_person_suppression === "suppress" ? "Suppress" : "Always count"})</option>
+                        <option value="exempt">Always count a person</option>
+                        <option value="suppress">Suppress like other stationary subjects</option>
+                      </select><small>Whether a person known to be standing or sitting still can establish an incident and alert on this camera.</small></label>
                     </div> : null}
 
                     {cameraSection === "info" ? <div className="field-row camera-info-fields">
@@ -4546,6 +4551,10 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                 <option value="ignore">Only when it moves, arrives, or departs</option>
                 <option value="activity">Presence can establish and alert</option>
               </select><small>Applies to incident establishment and alerts, not only live labels. Choose presence when a camera should treat a known stationary subject as activity.</small></label>
+              <label>Still people<select value={config.detector?.stationary_person_suppression || "exempt"} onChange={(event) => updateConfig(["detector", "stationary_person_suppression"], event.target.value)}>
+                <option value="exempt">Always count a person</option>
+                <option value="suppress">Suppress like other stationary subjects</option>
+              </select><small>A person known to be standing or sitting still still establishes incidents and alerts unless a camera is set to suppress. Other stationary subjects follow the presence policy above.</small></label>
               <div className="detection-settings-subhead"><strong>Fixed areas remain explicit</strong><small>Object Ignore zones suppress only their matching classes. “Exclude from EMA” independently removes all visual motion in that polygon.</small></div>
             </div>
           </section> : null}

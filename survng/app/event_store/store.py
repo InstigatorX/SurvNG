@@ -22,6 +22,7 @@ from ..main_database import (
 from ..media_storage import MediaStorageRegistry, path_presence
 from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 from ..object_motion import tracking_motion_promotions
+from ..stationary_policy import policy_person_suppression
 from ..perf_samples import SlowSiteTable, TimedLock
 from .calibration import EventStoreCalibrationMixin
 from .jobs import EventStoreJobsMixin
@@ -2027,9 +2028,24 @@ class EventStore(
             # Whole-session movement can restore a subject that refinement
             # demoted on about a second of samples. Commit that with the
             # tracking metadata so eligibility and evidence stay consistent.
-            for index, fields in tracking_motion_promotions(objects, tracking).items():
-                objects[index].update(fields)
             zone_policy = tracking.get("establishment_zone_policy") if isinstance(tracking, dict) else None
+            # The event's own snapshot decides whether a still person may be
+            # promoted; one recorded before the setting keeps suppressing.
+            recorded_policy = next(
+                (
+                    item["motion_qualification"]["establishment_zone_policy"]
+                    for item in objects
+                    if isinstance(item, dict)
+                    and item.get("status") == "motion_qualification"
+                    and isinstance(item.get("motion_qualification"), dict)
+                    and isinstance(item["motion_qualification"].get("establishment_zone_policy"), dict)
+                ),
+                zone_policy,
+            )
+            for index, fields in tracking_motion_promotions(
+                objects, tracking, person_suppression=policy_person_suppression(recorded_policy),
+            ).items():
+                objects[index].update(fields)
             if isinstance(zone_policy, dict):
                 tracking = {key: value for key, value in tracking.items() if key != "establishment_zone_policy"}
                 stamped = False
