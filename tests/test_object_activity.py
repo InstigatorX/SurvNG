@@ -565,3 +565,132 @@ def test_a_departure_hidden_by_a_rejected_endpoint_is_not_jitter(label, size, tr
     audit = admission.attribution.evidence.as_dict()
     assert audit["scene_context_jitter_absorbed"] is False
     assert audit["scene_context_jitter_isolated_points_rejected"] == 1
+
+
+# The remembered production reference box, and the IoU of each per-sample
+# observation that established one of the six night incidents.
+PRODUCTION_REFERENCE_BOX = (0.4754, 0.5098, 0.6623, 0.5635)
+PRODUCTION_SAMPLE_FOOTPRINT_IOU = (0.718, 0.772, 0.807, 0.810, 0.822, 0.834)
+
+
+def night_car_at(box: dict[str, float], displacement: float, **values: object) -> dict[str, object]:
+    sighting = night_car(displacement, **values)
+    sighting["box"] = box
+    return sighting
+
+
+def parked_at_production_reference(sightings: int = 8) -> ObjectActivityAttributor:
+    x1, y1, x2, y2 = (value * 1000 for value in PRODUCTION_REFERENCE_BOX)
+    attributor = ObjectActivityAttributor("enforce", "high")
+    for index in range(sightings):
+        attributor.admit(
+            [night_car_at({"x1": x1, "y1": y1, "x2": x2, "y2": y2}, 0.001)], {},
+            event_key=f"parked-{index}", observed_at_epoch=1000.0 + index * 60.0,
+        )
+    return attributor
+
+
+def sample_box(*, dx: float = 0.0, dy: float = 0.0, width: float = 0.179, height: float = 0.051):
+    x1, y1, x2, y2 = PRODUCTION_REFERENCE_BOX
+    cx, cy = (x1 + x2) / 2 + dx, (y1 + y2) / 2 + dy
+    return {
+        "x1": (cx - width / 2) * 1000, "y1": (cy - height / 2) * 1000,
+        "x2": (cx + width / 2) * 1000, "y2": (cy + height / 2) * 1000,
+    }
+
+
+def vertical_offset_for(iou: float) -> float:
+    """The vertical shift of a 17.9% x 5.1% box that overlaps the reference at ``iou``."""
+    from survng.app.scene_context_memory import box_iou, normalized_box
+
+    def overlap(dy: float) -> float:
+        box = normalized_box({"box": sample_box(dy=dy), "detection_frame_width": 1000,
+                              "detection_frame_height": 1000})
+        return box_iou(PRODUCTION_REFERENCE_BOX, box)
+
+    low, high = 0.0, 0.05
+    for _ in range(60):
+        middle = (low + high) / 2
+        low, high = (middle, high) if overlap(middle) > iou else (low, middle)
+    return low
+
+
+@pytest.mark.parametrize("measured", PRODUCTION_NIGHT_JITTER)
+@pytest.mark.parametrize("iou", PRODUCTION_SAMPLE_FOOTPRINT_IOU)
+def test_every_production_sample_on_the_remembered_spot_is_absorbed(iou, measured) -> None:
+    attributor = parked_at_production_reference()
+    before = remembered(attributor)
+    box = sample_box(dy=vertical_offset_for(iou))
+
+    admission = attributor.admit(
+        [night_car_at(box, measured)], {}, event_key="night", observed_at_epoch=2000.0
+    )[0]
+
+    evidence = admission.attribution.evidence
+    assert admission.attribution.role is ObjectActivityRole.SCENE_CONTEXT
+    assert admission.admitted is False
+    assert evidence.reasons == ("sparse_jitter_on_known_scene_context",)
+    audit = evidence.as_dict()
+    assert audit["scene_context_footprint_match"] is True
+    assert audit["scene_context_footprint_sightings"] == 8
+    assert audit["scene_context_footprint_center_offset_ratio"] <= (
+        audit["scene_context_jitter_allowance_ratio"]
+    )
+    assert remembered(attributor) == before
+
+
+def test_the_lowest_production_sample_is_below_the_plain_memory_match() -> None:
+    attributor = parked_at_production_reference()
+    admission = attributor.admit(
+        [night_car_at(sample_box(dy=vertical_offset_for(0.718)), 0.00994)], {},
+        event_key="night", observed_at_epoch=2000.0,
+    )[0]
+
+    evidence = admission.attribution.evidence
+    assert evidence.scene_context_memory_match is False
+    assert evidence.scene_context_footprint_match is True
+    assert admission.attribution.role is ObjectActivityRole.SCENE_CONTEXT
+
+
+@pytest.mark.parametrize(
+    "box",
+    [
+        # Rolled forward or back a little more than the allowance.
+        sample_box(dy=0.0125),
+        sample_box(dy=-0.0125),
+        # Moved sideways into the next bay, or a third of the way there.
+        sample_box(dx=0.19),
+        sample_box(dx=0.06),
+        # On the same centre, but a box of another shape: turning out, or a
+        # larger vehicle in front.
+        sample_box(width=0.13),
+        sample_box(height=0.066),
+    ],
+    ids=["forward", "back", "next_bay", "part_way", "turning", "taller"],
+)
+def test_a_car_that_has_moved_off_its_footprint_stays_active(box) -> None:
+    attributor = parked_at_production_reference()
+    before = remembered(attributor)
+
+    admission = attributor.admit(
+        [night_car_at(box, 0.009)], {}, event_key="moved", observed_at_epoch=2000.0
+    )[0]
+
+    assert admission.attribution.role is ObjectActivityRole.ACTIVE
+    assert admission.admitted is True
+    audit = admission.attribution.evidence.as_dict()
+    assert audit["scene_context_footprint_match"] is False
+    assert audit["scene_context_jitter_absorbed"] is False
+    assert remembered(attributor) == before
+
+
+def test_the_footprint_does_not_depend_on_which_way_the_box_errs() -> None:
+    allowance = known_subject_jitter_allowance(0.00744)
+    for dx, dy in ((allowance * 0.9, 0.0), (0.0, allowance * 0.9),
+                   (allowance * 0.63, allowance * 0.63)):
+        attributor = parked_at_production_reference()
+        admission = attributor.admit(
+            [night_car_at(sample_box(dx=dx, dy=dy), 0.009)], {},
+            event_key="night", observed_at_epoch=2000.0,
+        )[0]
+        assert admission.attribution.role is ObjectActivityRole.SCENE_CONTEXT, (dx, dy)

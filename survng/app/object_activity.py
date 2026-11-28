@@ -10,6 +10,7 @@ from enum import StrEnum
 from typing import Any, Iterable, Literal, Mapping
 
 from .object_motion import (
+    MINIMUM_TRACKING_MATCH_IOU,
     TemporalObjectMotionEvidence,
     estimate_object_motion,
     temporal_object_motion_evidence,
@@ -37,11 +38,33 @@ KNOWN_SUBJECT_JITTER_MAX_TRACK_OBSERVATIONS = 4
 # seen still at this place in six earlier events, none of which moved it away.
 # The production car carried 8 to 16.
 KNOWN_SUBJECT_JITTER_MIN_PRIOR_SIGHTINGS = 6
-# The memory itself matches from IoU 0.72, which tolerates a 15% box scale
-# error. Jitter is absorbed only on the remembered footprint: at 0.85 a box of
-# the same size has slid at most about 8% of its width. The production car
-# overlapped its previous sighting at 0.91 to 0.99.
-KNOWN_SUBJECT_FOOTPRINT_MIN_IOU = 0.85
+# Jitter is absorbed only on the remembered footprint. The footprint is
+# judged by where the box sits and how large it is, not by IoU, because IoU
+# depends on the box's shape: for a wide, flat parked car (17.9% x 5.1% of
+# the frame) a vertical error of 0.0083 already gives IoU 0.72, the same
+# error sideways gives 0.95, and the jitter allowance itself permits 0.011.
+#
+# The box centre must lie within the jitter allowance of the remembered
+# reference centre, the same bound the sighting's own movement must meet,
+# so the footprint can never be wider than the jitter it absorbs. The
+# reference box moves only with still sightings, so a car that creeps
+# across events cannot drag its footprint along.
+#
+# Each side must be within a factor of 1.2 of the reference side. The memory
+# match tolerates about a 15% scale error (IoU 0.72 on a shared centre is a
+# factor of 1.18); a car turning out of its bay, or another vehicle in front
+# of it, changes its box by more than that before its centre has moved the
+# allowance. The production car's boxes were within 5% of the reference.
+KNOWN_SUBJECT_FOOTPRINT_MAX_SIDE_RATIO = 1.2
+# IoU only confirms that the box is the remembered subject, with the
+# tracker's own same-object test. It is below the plain memory match of 0.72
+# on purpose: within the two bounds above, a flat box reaches IoU 0.63 at the
+# allowance and 0.54 with a 20% size error, and the production car's
+# per-sample boxes overlapped the reference at 0.718 to 0.834. The risk is a
+# car that has rolled up to the allowance (about a fifth of a flat box's
+# height) toward or away from the camera, with sparse jitter, being absorbed
+# once; it is never followed, so a further step leaves the footprint.
+KNOWN_SUBJECT_FOOTPRINT_MIN_IOU = MINIMUM_TRACKING_MATCH_IOU
 # Up to 1.5 movement thresholds, 6% of the box diagonal, for both displacement
 # and excursion. This covers the production car's largest jitter, 1.33
 # thresholds. The excursion allowance stays below the credible path threshold
@@ -84,6 +107,33 @@ def known_subject_jitter_allowance(movement_threshold: float) -> float:
     )
 
 
+def _center_offset(
+    reference: tuple[float, float, float, float],
+    box: tuple[float, float, float, float],
+) -> float:
+    """Distance between two box centres, in the frame units of displacement."""
+    return math.dist(
+        ((reference[0] + reference[2]) / 2.0, (reference[1] + reference[3]) / 2.0),
+        ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0),
+    )
+
+
+def _sides_within(
+    reference: tuple[float, float, float, float],
+    box: tuple[float, float, float, float],
+    ratio: float,
+) -> bool:
+    """Whether each side of ``box`` is within ``ratio`` of the reference side."""
+    for low, high in ((0, 2), (1, 3)):
+        expected = reference[high] - reference[low]
+        observed = box[high] - box[low]
+        if expected <= 0.0 or observed <= 0.0:
+            return False
+        if max(expected, observed) > ratio * min(expected, observed):
+            return False
+    return True
+
+
 class ObjectActivityRole(StrEnum):
     ACTIVE = "active"
     SCENE_CONTEXT = "scene_context"
@@ -115,6 +165,7 @@ class ObjectActivityEvidence:
     scene_context_jitter_absorbed: bool = False
     scene_context_jitter_raw_displacement_ratio: float | None = None
     scene_context_jitter_isolated_points_rejected: int | None = None
+    scene_context_footprint_center_offset_ratio: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -153,6 +204,11 @@ class ObjectActivityEvidence:
             ),
             "scene_context_jitter_isolated_points_rejected": (
                 self.scene_context_jitter_isolated_points_rejected
+            ),
+            "scene_context_footprint_center_offset_ratio": (
+                round(self.scene_context_footprint_center_offset_ratio, 5)
+                if self.scene_context_footprint_center_offset_ratio is not None
+                else None
             ),
         }
 
@@ -501,15 +557,13 @@ class ObjectActivityAttributor:
         ema_overlap = self._ema_overlap(observation, qualification)
         jitter_allowance = known_subject_jitter_allowance(motion.movement_threshold)
         raw_displacement, rejected_points = self._estimate_support(observation)
-        footprint_match, footprint_sightings = self._known_footprint_evidence(
+        footprint_match, footprint_sightings, footprint_offset = self._known_footprint_evidence(
             observation,
             motion,
             jitter_allowance=jitter_allowance,
             raw_displacement=raw_displacement,
             rejected_points=rejected_points,
             stable_observation=stable_observation,
-            memory_match=memory_match,
-            memory_sightings=memory_sightings,
             event_key=event_key,
             observed_at_epoch=observed_at_epoch,
         )
@@ -571,6 +625,7 @@ class ObjectActivityAttributor:
             jitter_absorbed=jitter_absorbed,
             jitter_raw_displacement=raw_displacement,
             jitter_rejected_points=rejected_points,
+            footprint_offset=footprint_offset,
         )
         if stable_observation and role is not ObjectActivityRole.ACTIVE:
             self._remember_scene_context(
@@ -602,22 +657,22 @@ class ObjectActivityAttributor:
         raw_displacement: float | None,
         rejected_points: int | None,
         stable_observation: bool,
-        memory_match: bool,
-        memory_sightings: int,
         event_key: str,
         observed_at_epoch: float,
-    ) -> tuple[bool, int]:
+    ) -> tuple[bool, int, float | None]:
         """Whether a jittering sighting sits on a well-established footprint.
 
         Only a sighting that fails stillness by its displacement or excursion
         alone, from a sparse track, within the jitter allowance, is checked.
         A still sighting keeps the plain rule, and zone entry, a robust new
         appearance, a rejected sample, or incomplete evidence is never jitter.
+
+        Returns the match, the matched subject's prior sightings, and the
+        distance of the box centre from the nearest well-established
+        reference centre, whether or not it matched.
         """
         if not (
             not stable_observation
-            and memory_match
-            and memory_sightings >= KNOWN_SUBJECT_JITTER_MIN_PRIOR_SIGHTINGS
             and motion.normalized_box is not None
             and observation.get("temporal_consensus") is True
             and motion.temporal_evidence_available
@@ -630,21 +685,39 @@ class ObjectActivityAttributor:
             and raw_displacement is not None
             and raw_displacement <= jitter_allowance
         ):
-            return False, 0
+            return False, 0, None
         label = str(observation.get("label") or "").strip().lower()
         box = self._normalized_box(observation)
         if not label or box is None:
-            return False, 0
-        matched, sightings, _age = self.memory.match(
-            camera_id=self.camera_id,
-            label=label,
-            box=box,
-            event_key=event_key,
-            observed_at_epoch=observed_at_epoch,
-            min_iou=KNOWN_SUBJECT_FOOTPRINT_MIN_IOU,
-            ttl_seconds=self.stationary_policy.scene_memory_ttl_seconds,
+            return False, 0, None
+        candidates = [
+            subject
+            for subject in self.memory.known_subjects(
+                camera_id=self.camera_id,
+                label=label,
+                box=box,
+                event_key=event_key,
+                observed_at_epoch=observed_at_epoch,
+                min_iou=KNOWN_SUBJECT_FOOTPRINT_MIN_IOU,
+                ttl_seconds=self.stationary_policy.scene_memory_ttl_seconds,
+            )
+            if subject.prior_sightings >= KNOWN_SUBJECT_JITTER_MIN_PRIOR_SIGHTINGS
+        ]
+        if not candidates:
+            return False, 0, None
+        matched = [
+            subject
+            for subject in candidates
+            if _center_offset(subject.box, box) <= jitter_allowance
+            and _sides_within(subject.box, box, KNOWN_SUBJECT_FOOTPRINT_MAX_SIDE_RATIO)
+        ]
+        if not matched:
+            return False, 0, min(_center_offset(subject.box, box) for subject in candidates)
+        best = max(
+            matched,
+            key=lambda subject: (subject.prior_sightings, -_center_offset(subject.box, box)),
         )
-        return matched, sightings if matched else 0
+        return True, best.prior_sightings, _center_offset(best.box, box)
 
     @staticmethod
     def _estimate_support(observation: Mapping[str, Any]) -> tuple[float | None, int | None]:
@@ -681,6 +754,7 @@ class ObjectActivityAttributor:
         jitter_absorbed: bool = False,
         jitter_raw_displacement: float | None = None,
         jitter_rejected_points: int | None = None,
+        footprint_offset: float | None = None,
     ) -> ObjectActivityAttribution:
         motion = motion or temporal_object_motion_evidence(observation)
         overlap = self._ema_overlap(observation, qualification) if ema_overlap is None else ema_overlap
@@ -718,6 +792,7 @@ class ObjectActivityAttributor:
                 scene_context_jitter_absorbed=jitter_absorbed,
                 scene_context_jitter_raw_displacement_ratio=jitter_raw_displacement,
                 scene_context_jitter_isolated_points_rejected=jitter_rejected_points,
+                scene_context_footprint_center_offset_ratio=footprint_offset,
             ),
         )
 

@@ -12,7 +12,7 @@ import math
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Mapping, Protocol
+from typing import Any, Iterable, Iterator, Mapping, Protocol
 
 
 # Detectors routinely flip one vehicle between these classes from one incident
@@ -266,6 +266,25 @@ class SceneContextSnapshot:
             max(0.0, observed_at_epoch - found.last_seen_epoch),
         )
 
+    def known_subjects(
+        self,
+        *,
+        camera_id: str,
+        label: str,
+        box: tuple[float, float, float, float],
+        event_key: str,
+        observed_at_epoch: float,
+        min_iou: float,
+        ttl_seconds: float,
+    ) -> list[KnownSubject]:
+        del camera_id
+        cutoff = observed_at_epoch - ttl_seconds
+        return known_subjects(
+            (subject for subject in self._subjects if subject.last_seen_epoch >= cutoff),
+            label=label, box=box, event_key=event_key,
+            observed_at_epoch=observed_at_epoch, min_iou=min_iou,
+        )
+
 
 def box_iou(
     left: tuple[float, float, float, float],
@@ -278,6 +297,38 @@ def box_iou(
     right_area = max(0.0, right[2] - right[0]) * max(0.0, right[3] - right[1])
     union = left_area + right_area - intersection
     return intersection / union if union > 0.0 else 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class KnownSubject:
+    """A remembered subject as one event sees it: its reference box and priors."""
+
+    box: tuple[float, float, float, float]
+    prior_sightings: int
+    age_seconds: float
+
+
+def known_subjects(
+    subjects: Iterable[SceneContextSubject],
+    *,
+    label: str,
+    box: tuple[float, float, float, float],
+    event_key: str,
+    observed_at_epoch: float,
+    min_iou: float,
+) -> list[KnownSubject]:
+    """Every visible subject overlapping ``box`` at ``min_iou``, with its priors."""
+    return [
+        KnownSubject(
+            box=subject.box,
+            prior_sightings=prior_sightings(subject, event_key, observed_at_epoch),
+            age_seconds=max(0.0, observed_at_epoch - subject.last_seen_epoch),
+        )
+        for subject in subjects
+        if same_subject_label(subject.label, label)
+        and subject_visible(subject, event_key, observed_at_epoch)
+        and box_iou(subject.box, box) >= min_iou
+    ]
 
 
 @dataclass(slots=True)
@@ -312,6 +363,18 @@ class SceneContextMemory(Protocol):
         min_iou: float,
         ttl_seconds: float,
     ) -> tuple[bool, int, float | None]: ...
+
+    def known_subjects(
+        self,
+        *,
+        camera_id: str,
+        label: str,
+        box: tuple[float, float, float, float],
+        event_key: str,
+        observed_at_epoch: float,
+        min_iou: float,
+        ttl_seconds: float,
+    ) -> list[KnownSubject]: ...
 
     def remember(
         self,
@@ -390,6 +453,25 @@ class InMemorySceneContextMemory:
                 True,
                 prior_sightings(match, event_key, observed_at_epoch),
                 max(0.0, observed_at_epoch - match.last_seen_epoch),
+            )
+
+    def known_subjects(
+        self,
+        *,
+        camera_id: str,
+        label: str,
+        box: tuple[float, float, float, float],
+        event_key: str,
+        observed_at_epoch: float,
+        min_iou: float,
+        ttl_seconds: float,
+    ) -> list[KnownSubject]:
+        with self._lock:
+            self._prune(camera_id, observed_at_epoch, ttl_seconds)
+            return known_subjects(
+                (subject for stored, subject in self._subjects if stored == camera_id),
+                label=label, box=box, event_key=event_key,
+                observed_at_epoch=observed_at_epoch, min_iou=min_iou,
             )
 
     def remember(
@@ -557,6 +639,26 @@ class DurableSceneContextMemory:
                 True,
                 prior_sightings(match, event_key, observed_at_epoch),
                 max(0.0, observed_at_epoch - match.last_seen_epoch),
+            )
+
+    def known_subjects(
+        self,
+        *,
+        camera_id: str,
+        label: str,
+        box: tuple[float, float, float, float],
+        event_key: str,
+        observed_at_epoch: float,
+        min_iou: float,
+        ttl_seconds: float,
+    ) -> list[KnownSubject]:
+        if camera_id != self.camera_id:
+            return []
+        with self._lock:
+            self._prune(observed_at_epoch, ttl_seconds)
+            return known_subjects(
+                self._subjects, label=label, box=box, event_key=event_key,
+                observed_at_epoch=observed_at_epoch, min_iou=min_iou,
             )
 
     def remember(
