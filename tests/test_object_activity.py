@@ -4,7 +4,11 @@ from copy import deepcopy
 
 import pytest
 
-from survng.app.object_activity import ObjectActivityAttributor, ObjectActivityRole
+from survng.app.object_activity import (
+    ObjectActivityAttributor,
+    ObjectActivityRole,
+    known_subject_jitter_allowance,
+)
 
 
 def observation(**values: object) -> dict[str, object]:
@@ -367,6 +371,9 @@ def night_car(
             "version": 2,
             "displacement_ratio": displacement,
             "excursion_ratio": excursion,
+            "raw_displacement_ratio": displacement,
+            "samples": samples,
+            "isolated_points_rejected": 0,
         },
         **values,
     )
@@ -505,3 +512,56 @@ def test_jitter_without_a_remembered_subject_fails_open() -> None:
     assert unclear.attribution.role is ObjectActivityRole.INDETERMINATE
     assert unclear.admitted is True
     assert moving.attribution.evidence.as_dict()["scene_context_footprint_match"] is False
+
+
+@pytest.mark.parametrize(
+    ("label", "size", "trajectory"),
+    [
+        # Parked, then 0.06 down the frame by the third sample.
+        ("car", (179, 51), [(-1.0, 0.5, 0.5), (0.0, 0.506, 0.5), (1.5, 0.5, 0.56)]),
+        # Three samples parked, then 0.08 away by the fourth.
+        ("car", (179, 51), [(-1.0, 0.5, 0.5), (0.0, 0.509, 0.5), (0.5, 0.506, 0.5), (1.5, 0.5, 0.58)]),
+        # Standing, then walking 0.05 sideways.
+        ("person", (50, 200), [(-1.0, 0.5, 0.5), (0.0, 0.5, 0.506), (1.0, 0.55, 0.5)]),
+    ],
+    ids=["car_three_samples", "car_four_samples", "person_walks_off"],
+)
+def test_a_departure_hidden_by_a_rejected_endpoint_is_not_jitter(label, size, trajectory) -> None:
+    from survng.app.object_motion import (
+        estimate_object_motion,
+        temporal_object_motion_evidence,
+    )
+
+    def sighting(motion):
+        width, height = size
+        return observation(
+            label=label,
+            box={"x1": 400, "y1": 600, "x2": 400 + width, "y2": 600 + height},
+            temporal_track_observations=motion.samples,
+            temporal_center_displacement_ratio=motion.raw_displacement_ratio,
+            temporal_center_path_ratio=motion.raw_path_ratio,
+            temporal_motion=motion.as_dict(),
+        )
+
+    attributor = ObjectActivityAttributor("enforce", "high")
+    still = estimate_object_motion([(-1.0, 0.5, 0.5), (0.0, 0.5005, 0.5), (1.0, 0.5, 0.5003)])
+    for index in range(8):
+        attributor.admit(
+            [sighting(still)], {}, event_key=f"parked-{index}",
+            observed_at_epoch=1000.0 + index * 60.0,
+        )
+    departure = estimate_object_motion(trajectory)
+    # The filter drops the one sample that shows the departure.
+    assert departure.isolated_points_rejected == 1
+    threshold = temporal_object_motion_evidence(sighting(departure)).movement_threshold
+    assert departure.displacement_ratio <= known_subject_jitter_allowance(threshold)
+
+    admission = attributor.admit(
+        [sighting(departure)], {}, event_key="departure", observed_at_epoch=2000.0
+    )[0]
+
+    assert admission.attribution.role is not ObjectActivityRole.SCENE_CONTEXT
+    assert admission.admitted is True
+    audit = admission.attribution.evidence.as_dict()
+    assert audit["scene_context_jitter_absorbed"] is False
+    assert audit["scene_context_jitter_isolated_points_rejected"] == 1

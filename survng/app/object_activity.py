@@ -52,6 +52,11 @@ KNOWN_SUBJECT_JITTER_MOVEMENT_FACTOR = 1.5
 # It never exceeds 60% of the displacement that forgets the location, so
 # movement that leaves the place is always well clear of it.
 KNOWN_SUBJECT_JITTER_INVALIDATION_FRACTION = 0.6
+# Jitter is judged on every sample. With three or four samples, the motion
+# estimate drops a lone endpoint that its neighbours disagree with, and that
+# endpoint is how a subject that starts to leave shows up. A track with a
+# rejected sample, or without a versioned estimate saying none was rejected,
+# keeps the plain thresholds.
 # Movement at or beyond these bounds leaves the remembered location: the
 # memory is forgotten there, not only this event's sighting.
 LOCATION_INVALIDATION_DISPLACEMENT_RATIO = 0.02
@@ -108,6 +113,8 @@ class ObjectActivityEvidence:
     scene_context_footprint_match: bool = False
     scene_context_footprint_sightings: int = 0
     scene_context_jitter_absorbed: bool = False
+    scene_context_jitter_raw_displacement_ratio: float | None = None
+    scene_context_jitter_isolated_points_rejected: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -139,6 +146,14 @@ class ObjectActivityEvidence:
             "scene_context_footprint_match": self.scene_context_footprint_match,
             "scene_context_footprint_sightings": self.scene_context_footprint_sightings,
             "scene_context_jitter_absorbed": self.scene_context_jitter_absorbed,
+            "scene_context_jitter_raw_displacement_ratio": (
+                round(self.scene_context_jitter_raw_displacement_ratio, 5)
+                if self.scene_context_jitter_raw_displacement_ratio is not None
+                else None
+            ),
+            "scene_context_jitter_isolated_points_rejected": (
+                self.scene_context_jitter_isolated_points_rejected
+            ),
         }
 
 
@@ -485,10 +500,13 @@ class ObjectActivityAttributor:
         )
         ema_overlap = self._ema_overlap(observation, qualification)
         jitter_allowance = known_subject_jitter_allowance(motion.movement_threshold)
+        raw_displacement, rejected_points = self._estimate_support(observation)
         footprint_match, footprint_sightings = self._known_footprint_evidence(
             observation,
             motion,
             jitter_allowance=jitter_allowance,
+            raw_displacement=raw_displacement,
+            rejected_points=rejected_points,
             stable_observation=stable_observation,
             memory_match=memory_match,
             memory_sightings=memory_sightings,
@@ -551,6 +569,8 @@ class ObjectActivityAttributor:
             footprint_match=footprint_match,
             footprint_sightings=footprint_sightings,
             jitter_absorbed=jitter_absorbed,
+            jitter_raw_displacement=raw_displacement,
+            jitter_rejected_points=rejected_points,
         )
         if stable_observation and role is not ObjectActivityRole.ACTIVE:
             self._remember_scene_context(
@@ -579,6 +599,8 @@ class ObjectActivityAttributor:
         motion: TemporalObjectMotionEvidence,
         *,
         jitter_allowance: float,
+        raw_displacement: float | None,
+        rejected_points: int | None,
         stable_observation: bool,
         memory_match: bool,
         memory_sightings: int,
@@ -590,7 +612,7 @@ class ObjectActivityAttributor:
         Only a sighting that fails stillness by its displacement or excursion
         alone, from a sparse track, within the jitter allowance, is checked.
         A still sighting keeps the plain rule, and zone entry, a robust new
-        appearance, or incomplete evidence is never jitter.
+        appearance, a rejected sample, or incomplete evidence is never jitter.
         """
         if not (
             not stable_observation
@@ -604,6 +626,9 @@ class ObjectActivityAttributor:
             and not motion.robust_new_appearance
             and motion.displacement_ratio <= jitter_allowance
             and motion.movement_extent_ratio <= jitter_allowance
+            and rejected_points == 0
+            and raw_displacement is not None
+            and raw_displacement <= jitter_allowance
         ):
             return False, 0
         label = str(observation.get("label") or "").strip().lower()
@@ -620,6 +645,21 @@ class ObjectActivityAttributor:
             ttl_seconds=self.stationary_policy.scene_memory_ttl_seconds,
         )
         return matched, sightings if matched else 0
+
+    @staticmethod
+    def _estimate_support(observation: Mapping[str, Any]) -> tuple[float | None, int | None]:
+        """Raw displacement and rejected samples from a versioned motion estimate."""
+        estimate = observation.get("temporal_motion")
+        if not isinstance(estimate, Mapping) or estimate.get("version") != 2:
+            return None, None
+        try:
+            raw = float(estimate["raw_displacement_ratio"])
+            rejected = int(estimate["isolated_points_rejected"])
+        except (KeyError, TypeError, ValueError):
+            return None, None
+        if not math.isfinite(raw) or raw < 0.0 or rejected < 0:
+            return None, None
+        return raw, rejected
 
     def _result(
         self,
@@ -639,6 +679,8 @@ class ObjectActivityAttributor:
         footprint_match: bool = False,
         footprint_sightings: int = 0,
         jitter_absorbed: bool = False,
+        jitter_raw_displacement: float | None = None,
+        jitter_rejected_points: int | None = None,
     ) -> ObjectActivityAttribution:
         motion = motion or temporal_object_motion_evidence(observation)
         overlap = self._ema_overlap(observation, qualification) if ema_overlap is None else ema_overlap
@@ -674,6 +716,8 @@ class ObjectActivityAttributor:
                 scene_context_footprint_match=footprint_match,
                 scene_context_footprint_sightings=footprint_sightings,
                 scene_context_jitter_absorbed=jitter_absorbed,
+                scene_context_jitter_raw_displacement_ratio=jitter_raw_displacement,
+                scene_context_jitter_isolated_points_rejected=jitter_rejected_points,
             ),
         )
 
