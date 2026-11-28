@@ -916,14 +916,15 @@ def test_a_small_car_off_its_footprint_by_a_seventh_of_its_width_stays_active(to
     assert admission.attribution.evidence.scene_context_footprint_match is False
 
 
-@pytest.mark.parametrize("samples", [0, 1, 3, 6])
-def test_a_vehicle_that_appeared_during_the_event_is_not_the_remembered_one(samples) -> None:
+@pytest.mark.parametrize("samples", [0, 1])
+def test_a_vehicle_that_appeared_without_motion_evidence_is_not_the_remembered_one(samples) -> None:
+    # A truck passing in front of a parked car, seen once: nothing but its
+    # appearance says whether it is the parked car.
     attributor = parked_overnight(sightings=8)
     subject = attributor.memory._subjects[0][1]
     last_seen = subject.last_seen_epoch
-    sighting = banded_car(samples, label="truck", temporal_newly_appeared=True)
-    if samples < 2:
-        sighting["temporal_consensus"] = False
+    sighting = banded_car(samples, label="truck", temporal_newly_appeared=True,
+                          temporal_consensus=False)
 
     admission = attributor.admit([sighting], {}, event_key="passing", observed_at_epoch=2000.0)[0]
 
@@ -933,15 +934,25 @@ def test_a_vehicle_that_appeared_during_the_event_is_not_the_remembered_one(samp
     assert subject.last_seen_epoch == last_seen
 
 
+@pytest.mark.parametrize("samples", [3, 4, 6])
+def test_a_parked_car_missed_in_its_first_sample_is_still_the_remembered_one(samples) -> None:
+    # Recorded refinement marks a track missing from its first sample as
+    # newly appeared; a sparse night track often is. With motion evidence,
+    # passing traffic shows credible movement instead.
+    attributor = parked_overnight(sightings=8)
+    sighting = banded_car(samples, temporal_newly_appeared=True)
+
+    admission = attributor.admit([sighting], {}, event_key="night", observed_at_epoch=2000.0)[0]
+
+    assert admission.attribution.role is ObjectActivityRole.SCENE_CONTEXT
+
+
 @pytest.mark.parametrize("measured", [min(PRODUCTION_NIGHT_JITTER), max(PRODUCTION_NIGHT_JITTER)])
-def test_jitter_from_a_vehicle_that_appeared_during_the_event_is_not_absorbed(measured) -> None:
+def test_jitter_on_a_refinement_track_missed_in_its_first_sample_is_absorbed(measured) -> None:
     attributor = parked_overnight()
-    subject = attributor.memory._subjects[0][1]
-    last_seen = subject.last_seen_epoch
 
     admission = attributor.admit([night_car(measured, temporal_newly_appeared=True)], {},
-                                 event_key="arrival", observed_at_epoch=2000.0)[0]
+                                 event_key="night", observed_at_epoch=2000.0)[0]
 
-    assert admission.attribution.evidence.scene_context_jitter_absorbed is False
-    assert admission.admitted is True
-    assert subject.last_seen_epoch == last_seen
+    assert admission.attribution.evidence.scene_context_jitter_absorbed is True
+    assert admission.admitted is False

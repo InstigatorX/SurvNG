@@ -100,8 +100,13 @@ KNOWN_SUBJECT_JITTER_INVALIDATION_FRACTION = 0.6
 # jitter rule asks for, three times the plain two prior sightings. Neither
 # rule's sightings are still ones, so they do not blend the reference box or
 # add a sighting; they only keep the subject from expiring (see
-# refresh_subject). A subject that appeared during the event (absent from its
-# first sample) has not stayed put, so it is never this rule's subject.
+# refresh_subject). A subject seen in fewer than two samples that appeared
+# during the event (absent from its first sample), such as a truck passing in
+# front of a parked car, has nothing but that appearance to place it, so it is
+# never this rule's subject. With two or more samples the appearance alone is
+# not used: recorded refinement marks any track that missed its first sample
+# as newly appeared, as a sparse night track of a parked car often does, and
+# passing traffic shows credible movement instead.
 # Movement at or beyond these bounds leaves the remembered location: the
 # memory is forgotten there, not only this event's sighting.
 LOCATION_INVALIDATION_DISPLACEMENT_RATIO = 0.02
@@ -696,7 +701,7 @@ class ObjectActivityAttributor:
             memory_match
             and memory_sightings >= KNOWN_SUBJECT_JITTER_MIN_PRIOR_SIGHTINGS
             and not motion.robust_new_appearance
-            and not motion.newly_appeared
+            and not (motion.newly_appeared and not motion.temporal_evidence_available)
             and not self._raw_movement(observation, motion, raw_displacement)
         ):
             role = ObjectActivityRole.SCENE_CONTEXT
@@ -828,7 +833,7 @@ class ObjectActivityAttributor:
 
         Only a sighting that fails stillness by its displacement or excursion
         alone, from a sparse track, within the jitter allowance, is checked.
-        A still sighting keeps the plain rule, and zone entry, a new
+        A still sighting keeps the plain rule, and zone entry, a robust new
         appearance, a rejected sample, or incomplete evidence is never jitter.
 
         Returns the match, the matched subject's prior sightings, the
@@ -844,7 +849,6 @@ class ObjectActivityAttributor:
             and motion.track_observations <= KNOWN_SUBJECT_JITTER_MAX_TRACK_OBSERVATIONS
             and not motion.zone_entry
             and not motion.robust_new_appearance
-            and not motion.newly_appeared
             and motion.displacement_ratio <= jitter_allowance
             and motion.movement_extent_ratio <= jitter_allowance
             and rejected_points == 0
