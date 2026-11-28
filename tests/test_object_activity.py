@@ -340,3 +340,168 @@ def test_repeated_scene_context_history_is_bounded() -> None:
     subjects = [subject for _, subject in attributor.memory._subjects]
     assert len(subjects) == 1
     assert len(subjects[0].stable_event_keys) == 16
+
+
+# A parked car at night on a "high" tolerance camera: its box is 17.9% x 5.1%
+# of the frame, so its movement threshold is 0.00745, and each event has only
+# three track samples. These are the displacements and excursions measured
+# for six of its events, all on the remembered spot.
+PRODUCTION_NIGHT_JITTER = (0.00696, 0.00775, 0.00802, 0.00805, 0.00827, 0.00994)
+
+
+def night_car(
+    displacement: float,
+    *,
+    samples: int = 3,
+    excursion: float | None = None,
+    shift: float = 0.0,
+    **values: object,
+) -> dict[str, object]:
+    excursion = displacement if excursion is None else excursion
+    return observation(
+        box={"x1": 400 + shift, "y1": 600, "x2": 579 + shift, "y2": 651},
+        temporal_track_observations=samples,
+        temporal_center_displacement_ratio=displacement,
+        temporal_center_path_ratio=excursion,
+        temporal_motion={
+            "version": 2,
+            "displacement_ratio": displacement,
+            "excursion_ratio": excursion,
+        },
+        **values,
+    )
+
+
+def parked_overnight(tolerance: str = "high", sightings: int = 8) -> ObjectActivityAttributor:
+    attributor = ObjectActivityAttributor("enforce", tolerance)
+    for index in range(sightings):
+        attributor.admit(
+            [night_car(0.001)], {}, event_key=f"parked-{index}",
+            observed_at_epoch=1000.0 + index * 60.0,
+        )
+    return attributor
+
+
+def remembered(attributor: ObjectActivityAttributor) -> list[list[str]]:
+    return [list(subject.stable_event_keys) for _, subject in attributor.memory._subjects]
+
+
+@pytest.mark.parametrize("measured", PRODUCTION_NIGHT_JITTER)
+def test_sparse_jitter_on_an_established_subject_is_scene_context(measured: float) -> None:
+    attributor = parked_overnight()
+    before = remembered(attributor)
+
+    admission = attributor.admit(
+        [night_car(measured)], {}, event_key="night", observed_at_epoch=2000.0
+    )[0]
+
+    evidence = admission.attribution.evidence
+    assert evidence.movement_threshold == pytest.approx(0.00745, abs=1e-5)
+    assert admission.attribution.role is ObjectActivityRole.SCENE_CONTEXT
+    assert admission.admitted is False
+    assert evidence.reasons == ("sparse_jitter_on_known_scene_context",)
+    audit = evidence.as_dict()
+    assert audit["scene_context_jitter_absorbed"] is True
+    assert audit["scene_context_footprint_match"] is True
+    assert audit["scene_context_footprint_sightings"] == 8
+    assert audit["scene_context_jitter_allowance_ratio"] >= max(PRODUCTION_NIGHT_JITTER)
+    # Neither erased nor extended: only still sightings build the memory.
+    assert remembered(attributor) == before
+
+
+@pytest.mark.parametrize("tolerance", ["low", "balanced", "high"])
+def test_the_jitter_allowance_holds_at_every_tolerance(tolerance: str) -> None:
+    attributor = parked_overnight(tolerance)
+    admission = attributor.admit(
+        [night_car(max(PRODUCTION_NIGHT_JITTER))], {}, event_key="night",
+        observed_at_epoch=2000.0,
+    )[0]
+    assert admission.attribution.role is ObjectActivityRole.SCENE_CONTEXT
+
+
+def test_a_car_pulling_away_from_its_remembered_spot_is_active_and_forgets_it() -> None:
+    attributor = parked_overnight()
+
+    admission = attributor.admit(
+        [night_car(0.03, shift=15)], {}, event_key="leaving", observed_at_epoch=2000.0
+    )[0]
+
+    assert admission.attribution.role is ObjectActivityRole.ACTIVE
+    assert admission.admitted is True
+    assert attributor.memory.count() == 0
+
+
+def test_creeping_off_the_remembered_footprint_is_active() -> None:
+    attributor = parked_overnight()
+
+    # Within the jitter allowance, but the box has slid a seventh of its
+    # width: it still matches the memory, not the remembered footprint.
+    admission = attributor.admit(
+        [night_car(0.009, shift=25)], {}, event_key="creeping", observed_at_epoch=2000.0
+    )[0]
+
+    assert admission.attribution.role is ObjectActivityRole.ACTIVE
+    assert admission.attribution.evidence.scene_context_memory_match is True
+    assert admission.admitted is True
+
+
+def test_zone_entry_at_the_remembered_spot_is_active_and_forgets_it() -> None:
+    attributor = parked_overnight()
+
+    admission = attributor.admit(
+        [night_car(0.008, temporal_zone_entry=True)], {}, event_key="entry",
+        observed_at_epoch=2000.0,
+    )[0]
+
+    assert admission.attribution.role is ObjectActivityRole.ACTIVE
+    assert admission.admitted is True
+    assert attributor.memory.count() == 0
+
+
+@pytest.mark.parametrize(
+    "sighting",
+    [
+        night_car(0.009, samples=12),
+        night_car(0.0115),
+        night_car(0.009, excursion=0.015),
+        night_car(0.009, temporal_robust_new_appearance=True),
+    ],
+    ids=["many_samples", "beyond_allowance", "wide_excursion", "robust_appearance"],
+)
+def test_movement_the_jitter_allowance_does_not_cover_stays_active(sighting) -> None:
+    attributor = parked_overnight()
+    before = remembered(attributor)
+
+    admission = attributor.admit([sighting], {}, event_key="moving", observed_at_epoch=2000.0)[0]
+
+    assert admission.attribution.role is ObjectActivityRole.ACTIVE
+    assert admission.admitted is True
+    assert admission.attribution.evidence.as_dict()["scene_context_jitter_absorbed"] is False
+    assert remembered(attributor) == before
+
+
+def test_jitter_needs_more_prior_sightings_than_plain_scene_context() -> None:
+    attributor = parked_overnight(sightings=5)
+
+    jitter = attributor.admit(
+        [night_car(0.008)], {}, event_key="night", observed_at_epoch=2000.0
+    )[0]
+    still = attributor.admit(
+        [night_car(0.00696)], {}, event_key="night-2", observed_at_epoch=2060.0
+    )[0]
+
+    assert jitter.attribution.role is ObjectActivityRole.ACTIVE
+    assert still.attribution.role is ObjectActivityRole.INDETERMINATE
+    assert still.admitted is True
+
+
+def test_jitter_without_a_remembered_subject_fails_open() -> None:
+    attributor = ObjectActivityAttributor("enforce", "high")
+
+    moving = attributor.admit([night_car(0.008)], {}, event_key="one", observed_at_epoch=1000.0)[0]
+    unclear = attributor.admit([night_car(0.00696)], {}, event_key="two", observed_at_epoch=1060.0)[0]
+
+    assert moving.attribution.role is ObjectActivityRole.ACTIVE
+    assert unclear.attribution.role is ObjectActivityRole.INDETERMINATE
+    assert unclear.admitted is True
+    assert moving.attribution.evidence.as_dict()["scene_context_footprint_match"] is False

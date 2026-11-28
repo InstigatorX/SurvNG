@@ -20,6 +20,64 @@ from .stationary_policy import StationaryObjectPolicy, stationary_object_policy
 
 AttributionMode = Literal["off", "shadow", "enforce"]
 
+# Sparse box jitter on a well-established remembered subject.
+#
+# A parked car seen at night may have only a few track samples per event.
+# Its displacement is then the distance between one or two detections at each
+# end of the track, and a box error of a few percent of the box moves it past
+# the credible-movement threshold of 4% of the box diagonal. These constants
+# let such a sighting stay scene context when strong prior evidence says the
+# subject is parked exactly here, and nowhere else.
+#
+# Up to four samples. The production car had three. With five or more, an
+# offset repeated across samples is supported movement, and the plain
+# thresholds apply.
+KNOWN_SUBJECT_JITTER_MAX_TRACK_OBSERVATIONS = 4
+# Three times the plain scene_memory_min_prior_sightings of 2: the subject was
+# seen still at this place in six earlier events, none of which moved it away.
+# The production car carried 8 to 16.
+KNOWN_SUBJECT_JITTER_MIN_PRIOR_SIGHTINGS = 6
+# The memory itself matches from IoU 0.72, which tolerates a 15% box scale
+# error. Jitter is absorbed only on the remembered footprint: at 0.85 a box of
+# the same size has slid at most about 8% of its width. The production car
+# overlapped its previous sighting at 0.91 to 0.99.
+KNOWN_SUBJECT_FOOTPRINT_MIN_IOU = 0.85
+# Up to 1.5 movement thresholds, 6% of the box diagonal, for both displacement
+# and excursion. This covers the production car's largest jitter, 1.33
+# thresholds. The excursion allowance stays below the credible path threshold
+# of 2.5 movement thresholds (or its 0.01 floor), so only displacement-led
+# movement is ever absorbed. The allowance models detector box error, not a
+# stillness preference, so it is the same at every tolerance.
+KNOWN_SUBJECT_JITTER_MOVEMENT_FACTOR = 1.5
+# It never exceeds 60% of the displacement that forgets the location, so
+# movement that leaves the place is always well clear of it.
+KNOWN_SUBJECT_JITTER_INVALIDATION_FRACTION = 0.6
+# Movement at or beyond these bounds leaves the remembered location: the
+# memory is forgotten there, not only this event's sighting.
+LOCATION_INVALIDATION_DISPLACEMENT_RATIO = 0.02
+LOCATION_INVALIDATION_DISPLACEMENT_FACTOR = 2.0
+LOCATION_INVALIDATION_EXTENT_RATIO = 0.04
+LOCATION_INVALIDATION_EXTENT_FACTOR = 4.0
+
+
+def location_invalidation_bounds(movement_threshold: float) -> tuple[float, float]:
+    """Displacement and extent at which a subject has left its remembered place."""
+    return (
+        max(LOCATION_INVALIDATION_DISPLACEMENT_RATIO,
+            movement_threshold * LOCATION_INVALIDATION_DISPLACEMENT_FACTOR),
+        max(LOCATION_INVALIDATION_EXTENT_RATIO,
+            movement_threshold * LOCATION_INVALIDATION_EXTENT_FACTOR),
+    )
+
+
+def known_subject_jitter_allowance(movement_threshold: float) -> float:
+    """Largest displacement and excursion absorbed as jitter for this box."""
+    displacement_bound, _extent_bound = location_invalidation_bounds(movement_threshold)
+    return min(
+        movement_threshold * KNOWN_SUBJECT_JITTER_MOVEMENT_FACTOR,
+        displacement_bound * KNOWN_SUBJECT_JITTER_INVALIDATION_FRACTION,
+    )
+
 
 class ObjectActivityRole(StrEnum):
     ACTIVE = "active"
@@ -46,6 +104,10 @@ class ObjectActivityEvidence:
     scene_context_memory_sightings: int
     scene_context_memory_age_seconds: float | None
     reasons: tuple[str, ...]
+    scene_context_jitter_allowance_ratio: float = 0.0
+    scene_context_footprint_match: bool = False
+    scene_context_footprint_sightings: int = 0
+    scene_context_jitter_absorbed: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +133,12 @@ class ObjectActivityEvidence:
                 else None
             ),
             "reasons": list(self.reasons),
+            "scene_context_jitter_allowance_ratio": round(
+                self.scene_context_jitter_allowance_ratio, 5
+            ),
+            "scene_context_footprint_match": self.scene_context_footprint_match,
+            "scene_context_footprint_sightings": self.scene_context_footprint_sightings,
+            "scene_context_jitter_absorbed": self.scene_context_jitter_absorbed,
         }
 
 
@@ -416,7 +484,28 @@ class ObjectActivityAttributor:
             observed_at_epoch=observed_at_epoch,
         )
         ema_overlap = self._ema_overlap(observation, qualification)
-        if motion.credible_movement:
+        jitter_allowance = known_subject_jitter_allowance(motion.movement_threshold)
+        footprint_match, footprint_sightings = self._known_footprint_evidence(
+            observation,
+            motion,
+            jitter_allowance=jitter_allowance,
+            stable_observation=stable_observation,
+            memory_match=memory_match,
+            memory_sightings=memory_sightings,
+            event_key=event_key,
+            observed_at_epoch=observed_at_epoch,
+        )
+        jitter_absorbed = bool(
+            footprint_match
+            and footprint_sightings >= KNOWN_SUBJECT_JITTER_MIN_PRIOR_SIGHTINGS
+        )
+        if jitter_absorbed:
+            # Not a still sighting, so it neither builds the memory nor,
+            # since it is not movement, erases it.
+            role = ObjectActivityRole.SCENE_CONTEXT
+            confidence = 0.8
+            reasons = ("sparse_jitter_on_known_scene_context",)
+        elif motion.credible_movement:
             role = ObjectActivityRole.ACTIVE
             confidence = self._bounded(
                 0.72
@@ -458,6 +547,10 @@ class ObjectActivityAttributor:
             memory_sightings=memory_sightings,
             memory_age=memory_age,
             reasons=reasons,
+            jitter_allowance=jitter_allowance,
+            footprint_match=footprint_match,
+            footprint_sightings=footprint_sightings,
+            jitter_absorbed=jitter_absorbed,
         )
         if stable_observation and role is not ObjectActivityRole.ACTIVE:
             self._remember_scene_context(
@@ -466,18 +559,67 @@ class ObjectActivityAttributor:
                 observed_at_epoch=observed_at_epoch,
             )
         elif role is ObjectActivityRole.ACTIVE:
+            displacement_bound, extent_bound = location_invalidation_bounds(
+                motion.movement_threshold
+            )
             self._forget_scene_context_observation(
                 observation,
                 event_key=event_key,
                 invalidate_location=bool(
                     motion.zone_entry
-                    or motion.displacement_ratio
-                    >= max(0.02, motion.movement_threshold * 2.0)
-                    or motion.movement_extent_ratio
-                    >= max(0.04, motion.movement_threshold * 4.0)
+                    or motion.displacement_ratio >= displacement_bound
+                    or motion.movement_extent_ratio >= extent_bound
                 ),
             )
         return result
+
+    def _known_footprint_evidence(
+        self,
+        observation: Mapping[str, Any],
+        motion: TemporalObjectMotionEvidence,
+        *,
+        jitter_allowance: float,
+        stable_observation: bool,
+        memory_match: bool,
+        memory_sightings: int,
+        event_key: str,
+        observed_at_epoch: float,
+    ) -> tuple[bool, int]:
+        """Whether a jittering sighting sits on a well-established footprint.
+
+        Only a sighting that fails stillness by its displacement or excursion
+        alone, from a sparse track, within the jitter allowance, is checked.
+        A still sighting keeps the plain rule, and zone entry, a robust new
+        appearance, or incomplete evidence is never jitter.
+        """
+        if not (
+            not stable_observation
+            and memory_match
+            and memory_sightings >= KNOWN_SUBJECT_JITTER_MIN_PRIOR_SIGHTINGS
+            and motion.normalized_box is not None
+            and observation.get("temporal_consensus") is True
+            and motion.temporal_evidence_available
+            and motion.track_observations <= KNOWN_SUBJECT_JITTER_MAX_TRACK_OBSERVATIONS
+            and not motion.zone_entry
+            and not motion.robust_new_appearance
+            and motion.displacement_ratio <= jitter_allowance
+            and motion.movement_extent_ratio <= jitter_allowance
+        ):
+            return False, 0
+        label = str(observation.get("label") or "").strip().lower()
+        box = self._normalized_box(observation)
+        if not label or box is None:
+            return False, 0
+        matched, sightings, _age = self.memory.match(
+            camera_id=self.camera_id,
+            label=label,
+            box=box,
+            event_key=event_key,
+            observed_at_epoch=observed_at_epoch,
+            min_iou=KNOWN_SUBJECT_FOOTPRINT_MIN_IOU,
+            ttl_seconds=self.stationary_policy.scene_memory_ttl_seconds,
+        )
+        return matched, sightings if matched else 0
 
     def _result(
         self,
@@ -493,6 +635,10 @@ class ObjectActivityAttributor:
         memory_sightings: int = 0,
         memory_age: float | None = None,
         reasons: tuple[str, ...] = (),
+        jitter_allowance: float | None = None,
+        footprint_match: bool = False,
+        footprint_sightings: int = 0,
+        jitter_absorbed: bool = False,
     ) -> ObjectActivityAttribution:
         motion = motion or temporal_object_motion_evidence(observation)
         overlap = self._ema_overlap(observation, qualification) if ema_overlap is None else ema_overlap
@@ -520,6 +666,14 @@ class ObjectActivityAttributor:
                 scene_context_memory_sightings=memory_sightings,
                 scene_context_memory_age_seconds=memory_age,
                 reasons=reasons,
+                scene_context_jitter_allowance_ratio=(
+                    known_subject_jitter_allowance(motion.movement_threshold)
+                    if jitter_allowance is None
+                    else jitter_allowance
+                ),
+                scene_context_footprint_match=footprint_match,
+                scene_context_footprint_sightings=footprint_sightings,
+                scene_context_jitter_absorbed=jitter_absorbed,
             ),
         )
 
