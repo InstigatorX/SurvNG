@@ -6,6 +6,65 @@
   src: url("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2") format("woff2-variations");
 }
 
+/* Optional interface fonts (Admin, General, Font). A face is only downloaded
+ * when a rule that names it is in use. */
+@font-face {
+  font-family: "Figtree Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 300 900;
+  src: url("@fontsource-variable/figtree/files/figtree-latin-wght-normal.woff2") format("woff2-variations");
+}
+
+@font-face {
+  font-family: "Manrope Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 200 800;
+  src: url("@fontsource-variable/manrope/files/manrope-latin-wght-normal.woff2") format("woff2-variations");
+}
+
+@font-face {
+  font-family: "DM Sans Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 1000;
+  src: url("@fontsource-variable/dm-sans/files/dm-sans-latin-wght-normal.woff2") format("woff2-variations");
+}
+
+@font-face {
+  font-family: "Source Sans 3 Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 200 900;
+  src: url("@fontsource-variable/source-sans-3/files/source-sans-3-latin-wght-normal.woff2") format("woff2-variations");
+}
+
+:root {
+  --font-ui-fallback: "SF Pro Text", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --font-ui: "Inter Variable", Inter, var(--font-ui-fallback);
+}
+
+:root[data-font="figtree"] {
+  --font-ui: "Figtree Variable", Figtree, var(--font-ui-fallback);
+}
+
+:root[data-font="manrope"] {
+  --font-ui: "Manrope Variable", Manrope, var(--font-ui-fallback);
+}
+
+:root[data-font="dm-sans"] {
+  --font-ui: "DM Sans Variable", "DM Sans", var(--font-ui-fallback);
+}
+
+:root[data-font="source-sans"] {
+  --font-ui: "Source Sans 3 Variable", "Source Sans 3", var(--font-ui-fallback);
+}
+
+:root[data-font="system"] {
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+}
+
 :root {
   color-scheme: light;
   --bg: #edf1f3;
@@ -148,7 +207,7 @@ body {
   min-height: 100vh;
   background: var(--bg);
   color: var(--ink);
-  font-family: "Inter Variable", Inter, "SF Pro Text", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-ui);
   font-size: var(--text-base);
   line-height: 1.35;
   -webkit-text-size-adjust: 100%;
@@ -573,15 +632,6 @@ p {
   padding: 0;
 }
 
-.incidents-desktop-toolbar {
-  display: grid;
-  border-bottom: 1px solid var(--line);
-}
-
-.incidents-command-primary {
-  display: grid;
-}
-
 .incidents-command-filters {
   display: flex;
   align-items: center;
@@ -712,11 +762,6 @@ p {
   }
 }
 
-.incidents-desktop-toolbar .incident-filter-selects.desktop {
-  justify-content: start;
-}
-
-.incidents-desktop-toolbar>button.active,
 .density-control button.active {
   border-color: var(--accent);
   background: var(--active);
@@ -1763,10 +1808,6 @@ p {
 @media (max-width: 1350px) and (min-width: 1051px) {
   .incidents-desktop-page.with-inspector .incidents-desktop-workspace {
     grid-template-columns: minmax(280px, 320px) minmax(0, 1fr) 250px;
-  }
-
-  .incidents-desktop-toolbar {
-    grid-template-columns: auto minmax(0, 1fr) auto;
   }
 }
 

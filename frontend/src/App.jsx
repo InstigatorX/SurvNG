@@ -31,6 +31,7 @@ import { canonicalWorkspaceUrl, resolveWorkspace } from "./workspaceNavigation.m
 import { registerSurvngServiceWorker } from "./registerServiceWorker.mjs";
 import { applyBrowserAppearance } from "./browserAppearance.mjs";
 import { applyTextSize, TEXT_SIZE_STORAGE_KEY } from "./textSize.mjs";
+import { applyInterfaceFont, INTERFACE_FONT_STORAGE_KEY } from "./interfaceFont.mjs";
 
 function lazyExport(importer, exportName) {
   return lazy(() => importer().then((module) => ({ default: module[exportName] })));
@@ -55,6 +56,7 @@ function App() {
   const [timeZone, setTimeZone] = useStoredState("survng.timeZone", DEFAULT_TIME_ZONE);
   const [theme, setTheme] = useStoredState("survng.theme", "dark");
   const [textSize, setTextSize] = useStoredState(TEXT_SIZE_STORAGE_KEY, "default");
+  const [interfaceFont, setInterfaceFont] = useStoredState(INTERFACE_FONT_STORAGE_KEY, "inter");
   const [recordingContext, setRecordingContext] = useState(null);
   const [assistantAsk, setAssistantAsk] = useState(null);
   const [session, setSession] = useState(null);
@@ -112,6 +114,10 @@ function App() {
   useEffect(() => {
     applyTextSize(textSize);
   }, [textSize]);
+
+  useEffect(() => {
+    applyInterfaceFont(interfaceFont);
+  }, [interfaceFont]);
   if (!session) {
     return <main className="workspace-not-found" aria-busy="true"><p>Loading SurvNG…</p></main>;
   }
@@ -122,16 +128,16 @@ function App() {
   if (detailMatch) {
     // The incident detail lives inside the workspace shell (top navigation,
     // Incidents active) but without the assistant panel.
-    return <RuntimeStateProvider><Shell page="incidents" theme={theme} textSize={textSize} recordingContext={recordingContext} session={session} onSignOut={() => void signOut()}>
+    return <RuntimeStateProvider><Shell page="incidents" theme={theme} textSize={textSize} interfaceFont={interfaceFont} recordingContext={recordingContext} session={session} onSignOut={() => void signOut()}>
       <Suspense fallback={<WorkspaceFallback />}><IncidentDetailPage incidentId={(() => { try { return decodeURIComponent(detailMatch[1]); } catch { return detailMatch[1]; } })()} timeZone={timeZone} canCorrectIncident={!viewer} /></Suspense>
     </Shell></RuntimeStateProvider>;
   }
   const workspacePage = viewer && page === "admin" ? "live" : page;
   return (
-    <RuntimeStateProvider><Shell page={workspacePage} theme={theme} textSize={textSize} recordingContext={recordingContext} session={session} onSignOut={() => void signOut()}>
+    <RuntimeStateProvider><Shell page={workspacePage} theme={theme} textSize={textSize} interfaceFont={interfaceFont} recordingContext={recordingContext} session={session} onSignOut={() => void signOut()}>
       <Suspense fallback={<WorkspaceFallback />}>
         {workspacePage === "admin"
-          ? <ConfigPage timeZone={timeZone} setTimeZone={setTimeZone} theme={theme} setTheme={setTheme} textSize={textSize} setTextSize={setTextSize} onAssistantContextChange={setAssistantContext} />
+          ? <ConfigPage timeZone={timeZone} setTimeZone={setTimeZone} theme={theme} setTheme={setTheme} textSize={textSize} setTextSize={setTextSize} interfaceFont={interfaceFont} setInterfaceFont={setInterfaceFont} onAssistantContextChange={setAssistantContext} />
           : workspacePage === "exports"
             ? <ExportCenterPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
             : workspacePage === "timeline"

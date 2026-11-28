@@ -66,6 +66,23 @@ def _incident_display_summary(objects):
 JOIN_SUBJECT_ALIASES_SQL = "update scene_track_aliases set object_id=? where object_id=?"
 JOIN_SUBJECT_EMBEDDINGS_SQL = "update appearance_embeddings set scene_object_id=? where scene_object_id=?"
 
+def filter_values(value):
+    """The values of a multi-value filter: comma separated, any of them matches.
+
+    Inside a value a comma is written %2C and a percent sign %25. A value sent
+    whole and unescaped by an older caller (a zone named "Driveway, left") is
+    kept as a candidate too, so it still matches exactly.
+    """
+    raw=str(value or "").strip()
+    pieces=[part.strip() for part in raw.split(",") if part.strip()]
+    parts=[part.replace("%2C",",").replace("%25","%") for part in pieces]
+    escaped="%2C" in raw or "%25" in raw
+    # Unescaped with a comma, or one value whose text only looks escaped.
+    if (len(parts)>1 and not escaped) or (len(parts)==1 and escaped):
+        parts.append(raw)
+    return list(dict.fromkeys(parts))
+
+
 class SceneConflict(ValueError):
     """A correction was based on an obsolete incident revision."""
 
@@ -924,7 +941,12 @@ class EventStoreSceneMixin:
                     coverage["state"]="incomplete"
                     coverage["reason"]=job["last_error"] or "recorded analysis queued"
         elif candidates and not historical and not context_only:
-            coverage.update(analyzed_through=_iso(latest), reason="sampled detector frames; continuous coverage not established")
+            # Recorded analysis that is queued or running keeps its reason: a
+            # later detection does not mean the episode was only ever sampled.
+            waiting=conn.execute("select 1 from scene_analysis_jobs where episode_id=? and state!='complete'",(episode_id,)).fetchone()
+            coverage.update(analyzed_through=_iso(latest))
+            if not waiting:
+                coverage["reason"]="sampled detector frames; continuous coverage not established"
         coverage_changed = _json(coverage) != episode["coverage_json"]
         conn.execute("update scene_episodes set start_epoch=min(start_epoch,?),end_epoch=max(end_epoch,?), "
                      "last_activity_epoch=max(last_activity_epoch,?),coverage_json=? where id=?",
@@ -1297,27 +1319,43 @@ class EventStoreSceneMixin:
         return result
 
     @staticmethod
-    def _scene_query_where(*, start_epoch=None, end_epoch=None, camera_id="", event_type="all", object_label="", zone=""):
+    def _scene_query_where(*, start_epoch=None, end_epoch=None, camera_id="", event_type="all", object_label="", zone="", min_confidence=0.0):
         clauses=["i.state != 'unconfirmed'", "exists(select 1 from scene_episodes p join scene_event_membership m on m.episode_id=p.id where p.incident_id=i.id)"]
         args=[]
         if start_epoch is not None:
             clauses.append("i.end_epoch>=?"); args.append(start_epoch)
         if end_epoch is not None:
             clauses.append("i.start_epoch<?"); args.append(end_epoch)
-        if camera_id:
-            clauses.append("exists(select 1 from scene_episodes p where p.incident_id=i.id and p.camera_id=?)");args.append(camera_id)
+        # Cameras, labels and zones each take several values separated by commas;
+        # within one filter any value matches, and the filters combine with "and".
+        chosen=filter_values
+        cameras=chosen(camera_id)
+        if cameras:
+            clauses.append("exists(select 1 from scene_episodes p where p.incident_id=i.id and p.camera_id in ("+",".join("?"*len(cameras))+"))")
+            args.extend(cameras)
         observed="select 1 from scene_observations o join scene_episodes p on p.id=o.episode_id where p.incident_id=i.id and " + _DISPLAY_CONFIDENCE_SQL
         if event_type in {"object","motion"}:
             clauses.append(("not " if event_type=="motion" else "")+"exists("+observed+")")
-        if object_label:
+        # A confidence floor asks for one displayable observation at or above it.
+        # With labels selected, the same observation must satisfy both.
+        floor=max(0.0,min(float(min_confidence or 0.0),1.0)) if event_type!="motion" else 0.0
+        confident=" and cast(json_extract(o.payload_json,'$.confidence') as real)>=?" if floor>0 else ""
+        labels=chosen(object_label)
+        if labels:
             clauses.append("exists(select 1 from scene_observations o join scene_objects s on s.id=o.object_id "
-                           "join scene_episodes p on p.id=o.episode_id where p.incident_id=i.id and "+_DISPLAY_CONFIDENCE_SQL+" and "+EventStoreSceneMixin._scene_label_sql()+"=?)")
-            args.append(object_label)
-        if zone:
+                           "join scene_episodes p on p.id=o.episode_id where p.incident_id=i.id and "+_DISPLAY_CONFIDENCE_SQL+" and "+EventStoreSceneMixin._scene_label_sql()+" in ("+",".join("?"*len(labels))+")"+confident+")")
+            args.extend(labels)
+            if floor>0:
+                args.append(floor)
+        elif floor>0:
+            clauses.append("exists("+observed+confident+")")
+            args.append(floor)
+        zones=chosen(zone)
+        if zones:
             clauses.append("exists(select 1 from scene_observation_zones z "
                            "join scene_episodes p on p.id=z.episode_id "
-                           "where p.incident_id=i.id and z.zone=?)")
-            args.append(zone)
+                           "where p.incident_id=i.id and z.zone in ("+",".join("?"*len(zones))+"))")
+            args.extend(zones)
         return " and ".join(clauses),args
 
     @staticmethod
@@ -1375,13 +1413,13 @@ class EventStoreSceneMixin:
             return conn.execute("select count(*) from scene_incidents i where "+where,args).fetchone()[0]
 
     def list_scene_incidents(self,*,start_epoch=None,end_epoch=None,start_at=None,end_at=None,camera_id="",limit=200,offset=0,
-                             event_type="all",object_label="",zone="",summary_only=False):
+                             event_type="all",object_label="",zone="",summary_only=False,min_confidence=0.0):
         if start_at is not None:
             start_epoch=_epoch(start_at)
         if end_at is not None:
             end_epoch=_epoch(end_at)
         where,args=self._scene_query_where(start_epoch=start_epoch,end_epoch=end_epoch,camera_id=camera_id,
-                                          event_type=event_type,object_label=object_label,zone=zone)
+                                          event_type=event_type,object_label=object_label,zone=zone,min_confidence=min_confidence)
         with self._connect() as conn:
             ids=conn.execute("select i.id from scene_incidents i where "+where+" order by i.start_epoch desc,i.id limit ? offset ?",
                              (*args,max(1,min(int(limit),1000)),max(0,int(offset)))).fetchall()
@@ -1401,7 +1439,7 @@ class EventStoreSceneMixin:
             return [payload for payload in payloads if payload is not None]
 
     def list_scene_incident_cards(self,*,start_epoch=None,end_epoch=None,start_at=None,end_at=None,camera_id="",limit=200,offset=0,
-                                  event_type="all",object_label="",zone=""):
+                                  event_type="all",object_label="",zone="",min_confidence=0.0):
         """Page rows for the incident rail: cover, labels, and time, without observation history."""
         from ..incident_presenter import _best_incident_event, _event_row
         if start_at is not None:
@@ -1409,7 +1447,7 @@ class EventStoreSceneMixin:
         if end_at is not None:
             end_epoch=_epoch(end_at)
         where,args=self._scene_query_where(start_epoch=start_epoch,end_epoch=end_epoch,camera_id=camera_id,
-                                          event_type=event_type,object_label=object_label,zone=zone)
+                                          event_type=event_type,object_label=object_label,zone=zone,min_confidence=min_confidence)
         with self._connect() as conn:
             ids=[row[0] for row in conn.execute(
                 "select i.id from scene_incidents i where "+where+" order by i.start_epoch desc,i.id limit ? offset ?",

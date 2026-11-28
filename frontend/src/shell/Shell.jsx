@@ -112,7 +112,7 @@ function TopbarMenu({ className, label, buttonLabel = undefined, menuLabel, chil
   );
 }
 
-export function Shell({ page, theme, textSize = "default", recordingContext, session = null, onSignOut = null, children }) {
+export function Shell({ page, theme, textSize = "default", interfaceFont = "inter", recordingContext, session = null, onSignOut = null, children }) {
   const shellRef = useRef(null);
   const topbarRef = useRef(null);
   const workspaceHeadingRef = useRef(null);
@@ -188,7 +188,7 @@ export function Shell({ page, theme, textSize = "default", recordingContext, ses
       observer?.disconnect();
       window.removeEventListener("resize", fit);
     };
-  }, [textSize, page, session?.user?.role]);
+  }, [textSize, interfaceFont, page, session?.user?.role]);
 
   useLayoutEffect(() => {
     const shell = shellRef.current;

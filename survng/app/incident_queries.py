@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, Body
 from fastapi.responses import FileResponse
-from .event_store.scenes import SceneConflict
+from .event_store.scenes import SceneConflict, filter_values
 from .incident_utils import snapshot_media_type
 
 from .audit_ai import motion_audit_interpretation
@@ -84,20 +84,24 @@ def _filter_incident_summaries(
     zone: str = "",
 ) -> list[dict[str, Any]]:
     filtered = _filter_incidents_by_event_type(summaries, event_type)
-    if camera_id:
-        filtered = [item for item in filtered if camera_id in item.get("camera_ids", [item.get("camera_id")])]
-    if object_label:
-        filtered = [item for item in filtered if object_label in item.get("labels", [])]
-    if zone:
-        filtered = [item for item in filtered if zone in item.get("zones", [])]
+    cameras = set(filter_values(camera_id))
+    if cameras:
+        filtered = [item for item in filtered if cameras.intersection(item.get("camera_ids", [item.get("camera_id")]))]
+    wanted = set(filter_values(object_label))
+    if wanted:
+        filtered = [item for item in filtered if wanted.intersection(item.get("labels", []))]
+    zones = set(filter_values(zone))
+    if zones:
+        filtered = [item for item in filtered if zones.intersection(item.get("zones", []))]
     return filtered
 
 
 def _filter_incidents_by_person(
     manager: AppManager,
     incidents: list[dict[str, Any]],
-    person_id: int,
+    person_id: int | set[int],
 ) -> list[dict[str, Any]]:
+    wanted = {int(person_id)} if isinstance(person_id, int) else set(person_id)
     event_ids = [
         int(event["id"])
         for incident in incidents
@@ -107,7 +111,7 @@ def _filter_incidents_by_person(
     matching_event_ids = {
         int(observation["event_id"])
         for observation in manager.face_identity_observations(event_ids)
-        if int(observation.get("person_id") or 0) == person_id
+        if int(observation.get("person_id") or 0) in wanted
     }
     return [
         incident
@@ -117,6 +121,15 @@ def _filter_incidents_by_person(
             for event in incident.get("events", [])
         )
     ]
+
+
+def _person_ids(value: int | str) -> set[int]:
+    ids: set[int] = set()
+    for part in str(value or "").split(","):
+        part = part.strip()
+        if part.isdigit() and int(part) > 0:
+            ids.add(int(part))
+    return ids
 
 
 def _local_day_start(day: str, time_zone: str) -> tuple[datetime, str]:
@@ -403,17 +416,21 @@ class IncidentQueryService:
         event_type: str = "motion",
         object_label: str = "",
         zone: str = "",
-        person_id: int = 0,
+        person_id: int | str = 0,
         limit: int = 18,
         offset: int = 0,
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
+        min_confidence: float = 0.0,
     ) -> dict[str, Any]:
         day_start, day = _local_day_start(day, time_zone)
         day_end = day_start + timedelta(days=1)
         bounds = {"start_epoch":day_start.timestamp(), "end_epoch":day_end.timestamp()}
         facets = manager.events.scene_incident_facets(**bounds)
         filters = {**bounds, "event_type":event_type, "camera_id":camera_id, "object_label":object_label, "zone":zone}
-        selected_person_id = max(0, int(person_id))
+        if math.isfinite(min_confidence) and min_confidence > 0:
+            filters["min_confidence"] = min(float(min_confidence), 1.0)
+        # One id, or several separated by commas; an incident with any of them matches.
+        selected_person_id = _person_ids(person_id)
         bounded_limit = max(1, min(limit, 100))
         bounded_offset = max(0, offset)
         if selected_person_id:
@@ -676,10 +693,11 @@ def create_incident_query_router(
         event_type: str = "motion",
         object_label: str = "",
         zone: str = "",
-        person_id: int = 0,
+        person_id: str = "",
         limit: int = 18,
         offset: int = 0,
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
+        min_confidence: float = 0.0,
     ) -> dict[str, Any]:
         return with_manager(
             lambda active: service.search(
@@ -694,6 +712,7 @@ def create_incident_query_router(
                 limit=limit,
                 offset=offset,
                 gap_seconds=gap_seconds,
+                min_confidence=min_confidence,
             )
         )
 

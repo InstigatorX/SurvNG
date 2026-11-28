@@ -6,7 +6,7 @@ import { formatDateTime, formatTimeOnly } from "../shared/format.js";
 import { recordingPreviewUrl } from "../shared/mediaUrls.js";
 import { observationBoxStyle, canonicalIncidentHref, incidentEpisodeClips } from "../incidentScene.mjs";
 import {
-  cardIdentities, epochOf, findObservation, followSegments, formatSpan, frameBoxes, incidentStoryTitle, nearestObservation,
+  cardIdentities, epochOf, estimatedBox, findObservation, followSegments, formatSpan, frameBoxes, incidentStoryTitle, nearestObservation,
   objectBestObservation, objectName, observationSnapshotUrl, reviewKeyAction, reviewPosition, sameObservationFrame, storyObjects, storyline,
 } from "../incidentStory.mjs";
 import { IncidentRecordingPlayer } from "./IncidentRecordingPlayer.jsx";
@@ -94,8 +94,8 @@ function StillFrame({ still, anchor, boxes, selectedId, legacyBoxes, label, onCo
       const style = observationBoxStyle(observation);
       if (!style) return null;
       const dimmed = selectedId != null && String(object.id) !== String(selectedId);
-      return <span key={observation.id} className={`story-box ${object.kind}${dimmed ? " dimmed" : ""}`} style={style}>
-        <span>{objectName(object)}{object.kind === "uncertain" ? "? · uncertain" : ""}</span>
+      return <span key={observation.id} className={`story-box ${object.kind}${dimmed ? " dimmed" : ""}${observation.estimated ? " estimated" : ""}`} style={style}>
+        <span>{objectName(object)}{object.kind === "uncertain" ? "? · uncertain" : ""}{observation.estimated ? " · estimated" : ""}</span>
       </span>;
     })}
     {(legacyBoxes || []).map((item, index) => {
@@ -371,7 +371,13 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
   const nearby = savedCandidate(nearbyStill(selected?.observations || [], targetCamera, targetEpoch));
   const still = useIncidentStill(playback ? [] : stillCandidates({ cameraId: targetCamera, epoch: targetEpoch, saved, nearby }));
   const anchor = still.observation;
-  const boxes = frameBoxes(objects, anchor);
+  const shownBoxes = frameBoxes(objects, anchor);
+  // A recording frame between analysed frames has no box of its own. Keep the
+  // followed object marked with an estimate, shown as one.
+  const estimate = selected && still.status === "ready" && !still.legacy
+    && !shownBoxes.some(({ object }) => String(object.id) === String(selected.id))
+    ? estimatedBox(selected, targetCamera, still.epoch ?? targetEpoch) : null;
+  const boxes = estimate ? [...shownBoxes, { object: selected, observation: estimate }] : shownBoxes;
   const legacyBoxes = still.legacy ? (incident?.objects || []).filter((item) => item.box) : null;
   const frameCamera = playback ? playback.segments[playback.index]?.cameraId : targetCamera;
   const shownEpoch = playback && Number.isFinite(cursor) ? cursor : (still.epoch ?? targetEpoch);
@@ -384,6 +390,7 @@ export function IncidentDetailPage({ incidentId, timeZone, canCorrectIncident = 
   } else if (still.status === "ready" && selected && selected.observations?.length === 1) {
     mode = "Only supporting image";
   }
+  if (selected && still.status === "ready" && still.source) mode = `Following ${objectName(selected)} · ${mode.charAt(0).toLowerCase()}${mode.slice(1)}`;
 
   function segmentsFor(object) {
     if (object) return followSegments(object, { start: startEpoch, end: endEpoch });

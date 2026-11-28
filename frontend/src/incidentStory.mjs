@@ -279,6 +279,63 @@ export function frameBoxes(objects, anchor) {
     .map((observation) => ({ object, observation })));
 }
 
+// Where the object's box would be at ``epoch`` on one camera, when no analysed
+// frame matches the shown picture. Bracketing observations are interpolated;
+// a lone neighbour is only trusted when it is very close in time. The result is
+// an estimate and callers must present it as one.
+export const ESTIMATE_BRACKET_SECONDS = 20;
+export const ESTIMATE_SIGHTING_SECONDS = 60;
+export const ESTIMATE_NEAR_SECONDS = 3;
+export function estimatedBox(object, cameraId, epoch) {
+  if (!Number.isFinite(epoch)) return null;
+  const usable = (object?.observations || [])
+    .filter((item) => item.camera_id === cameraId && item.box && Number(item.detection_frame_width) > 0 && Number(item.detection_frame_height) > 0)
+    .map((item) => ({ item, at: epochOf(item.captured_at) }))
+    .filter(({ at }) => Number.isFinite(at))
+    .sort((left, right) => left.at - right.at);
+  let before = null, after = null;
+  for (const entry of usable) {
+    if (entry.at <= epoch) before = entry;
+    else { after = entry; break; }
+  }
+  const frame = (entry) => ({ detection_frame_width: Number(entry.item.detection_frame_width), detection_frame_height: Number(entry.item.detection_frame_height) });
+  const sameFrame = before && after && frame(before).detection_frame_width === frame(after).detection_frame_width
+    && frame(before).detection_frame_height === frame(after).detection_frame_height;
+  // Inside one continuous sighting the object was in view the whole time, so a
+  // wider gap between analysed frames can still be bridged.
+  const continuous = (object?.intervals || []).some((interval) => interval.camera_id === cameraId && interval.start <= epoch && epoch <= interval.end);
+  if (sameFrame && after.at - before.at <= (continuous ? ESTIMATE_SIGHTING_SECONDS : ESTIMATE_BRACKET_SECONDS)) {
+    const t = after.at === before.at ? 0 : (epoch - before.at) / (after.at - before.at);
+    const mix = (key) => Number(before.item.box[key]) + (Number(after.item.box[key]) - Number(before.item.box[key])) * t;
+    const box = { x1: mix("x1"), y1: mix("y1"), x2: mix("x2"), y2: mix("y2") };
+    if (!Object.values(box).every(Number.isFinite)) return null;
+    return { id: `estimate-${object.id}-${cameraId}`, camera_id: cameraId, box, ...frame(before), estimated: true };
+  }
+  const near = [before, after].filter(Boolean).sort((left, right) => Math.abs(left.at - epoch) - Math.abs(right.at - epoch))[0];
+  if (!near || Math.abs(near.at - epoch) > ESTIMATE_NEAR_SECONDS) return null;
+  return { id: `estimate-${object.id}-${cameraId}`, camera_id: cameraId, box: near.item.box, ...frame(near), estimated: true };
+}
+
+// Camera views whose analysis has not finished. A missing object there does
+// not mean it was absent, so the first screen says which views are affected.
+// "Pending" is only said where recorded analysis is expected: not for a view
+// that was only ever sampled, and for motion with no objects only while a
+// recorded analysis job is queued or deferred (not one that ended or failed).
+export function coverageChips(incident, cameraName) {
+  const chips = [];
+  const hasObjects = Boolean(incident?.scene_objects?.length || incident?.labels?.length || incident?.has_objects);
+  for (const episode of incident?.episodes || []) {
+    const state = episode.coverage?.state;
+    if (!state || ["sampled", "historical"].includes(state)) continue;
+    const gaps = episode.coverage?.gaps?.length;
+    const reason = String(episode.coverage?.reason || "");
+    const notComing = reason.startsWith("sampled detector frames") || (!hasObjects && !reason.startsWith("recorded analysis"));
+    if (!gaps && notComing) continue;
+    chips.push({ tone: "warn", text: `${cameraName(episode.camera_id)} analysis ${gaps ? "incomplete" : "pending"}` });
+  }
+  return chips.filter((chip, index) => chips.findIndex((other) => other.text === chip.text) === index);
+}
+
 export function findObservation(objects, observationId) {
   for (const object of objects) {
     const observation = (object.observations || []).find((item) => String(item.id) === String(observationId));

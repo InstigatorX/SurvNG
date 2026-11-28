@@ -34,7 +34,7 @@ import { recordedIncidentWindow, trackingCoverageAt, containedFrameTransform, in
 import { liveActivityEventId, liveActivityIncidentHref } from "../liveWorkspace.mjs";
 import { adjacentIncident, eventCoverEpoch, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentImageRenderRect, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "./api.js";
-import { formatDateTime, formatTimeOnly } from "./format.js";
+import { formatDateTime, formatHudDateTime, formatTimeOnly } from "./format.js";
 import { useStoredState, useModalFocus } from "./hooks.js";
 import { eventSnapshotUrl, eventThumbnailUrl, eventClipUrl } from "./mediaUrls.js";
 import { RetryingImage } from "./RetryingImage.jsx";
@@ -634,7 +634,7 @@ function liveActivityLabel(incident) {
   return text.charAt(0).toUpperCase() + text.slice(1) + (labels.length > names.length ? ` +${labels.length - names.length}` : "");
 }
 
-export function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, onSelect, onOpenOverlay, livePreview = false }) {
+export function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, onSelect, onOpenOverlay, livePreview = false, hud = false }) {
   const labels = incidentLabels(incident);
   const trigger = incidentTriggerLabel(incident);
   const eventId = liveActivityEventId(incident);
@@ -642,16 +642,21 @@ export function IncidentListItem({ incident, cameraName, timeZone, selected, thu
   const fullTime = formatDateTime(time, timeZone);
   const activityLabel = labels.length ? labels.join(", ") : "Motion only";
   return (
-    <article className={`live-activity-item${livePreview ? " live-preview-row" : ""}${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
+    <article className={`live-activity-item${livePreview ? " live-preview-row" : ""}${hud ? " with-hud" : ""}${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
       <button type="button" className="live-activity-select" onClick={() => onSelect(incident)} aria-label={livePreview
         ? `Preview ${liveActivityLabel(incident)} in ${cameraName} at ${fullTime}` : `Open ${cameraName} activity at ${fullTime}`}>
-        <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusControls={false} showAnnotations={thumbnailAnnotations} showTracking={false} /></span>
-        <span className="live-activity-copy">
+        <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusControls={false} showAnnotations={thumbnailAnnotations} showTracking={false} />
+          {hud ? <>
+            <span className="incident-hud incident-hud-where"><b>{cameraName}</b><time dateTime={time} title={fullTime}>{formatHudDateTime(time, timeZone)}</time></span>
+            <span className="incident-hud incident-hud-objects"><IncidentObjectBadges labels={labels} /><IncidentSpeechBadge speech={incident.speech} /></span>
+          </> : null}
+        </span>
+        {hud ? <span className="sr-only">{activityLabel}</span> : <span className="live-activity-copy">
           {livePreview ? <strong className="live-preview-row-label">{liveActivityLabel(incident)}</strong>
             : <span className="live-activity-kind"><IncidentObjectBadges labels={labels} /><IncidentSpeechBadge speech={incident.speech} /><span className="sr-only">{activityLabel}</span></span>}
           <b>{cameraName}</b>
           <time dateTime={time} title={livePreview ? fullTime : undefined}>{livePreview ? formatTimeOnly(time, timeZone) : fullTime}</time>
-        </span>
+        </span>}
       </button>
       {!livePreview ? <IncidentSourceDot trigger={trigger} className="live-activity-trigger" onClick={() => onOpenOverlay(incident)} ariaLabel={`Preview exact ${trigger} event`} title={`${trigger} trigger`} /> : null}
       {!livePreview && !eventId ? <span className="sr-only">No exact event link is available.</span> : null}

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from survng.app.events import EventStore
-from survng.app.incident_queries import IncidentQueryService
+from survng.app.incident_queries import IncidentQueryService, _filter_incident_summaries
 
 
 def observation(at, label='person', **extra):
@@ -75,6 +75,73 @@ def test_duplicate_raw_batches_still_attach_the_cover(tmp_path):
         snapshot_path=str(image),objects_json=json.dumps([raw,{'status':'scene_observations','observations':[raw,raw]}]))
     scene=store.scene_incident(event_id=event['id'])
     assert scene['scene_objects'][0]['observations'][0]['snapshot_available']
+
+
+def test_confidence_floor_filters_incident_search(tmp_path):
+    store = EventStore(tmp_path)
+    add(store, 1000, [observation(1000, confidence=.9, temporal_observations=2),
+                      observation(1000, 'car', confidence=.55, temporal_observations=2)])
+    add(store, 2000, [observation(2000, 'car', confidence=.6, temporal_observations=2)])
+    add(store, 3000, [])
+    assert store.count_scene_incidents(event_type='object') == 2
+    assert store.count_scene_incidents(event_type='object', min_confidence=.8) == 1
+    assert store.count_scene_incidents(event_type='object', min_confidence=.95) == 0
+    # A label and a floor must hold for the same observation.
+    assert store.count_scene_incidents(object_label='car', min_confidence=.58) == 1
+    assert store.count_scene_incidents(object_label='car', min_confidence=.8) == 0
+    assert len(store.list_scene_incident_cards(min_confidence=.8)) == 1
+    assert len(store.list_scene_incidents(min_confidence=.8, summary_only=True)) == 1
+    # Several labels: any one of them matches, and blanks are ignored.
+    add(store, 4000, [observation(4000, 'dog', confidence=.7, temporal_observations=2)])
+    assert store.count_scene_incidents(object_label='car') == 2
+    assert store.count_scene_incidents(object_label='dog') == 1
+    assert store.count_scene_incidents(object_label='car,dog') == 3
+    assert store.count_scene_incidents(object_label=' dog , ,car,dog') == 3
+    assert store.count_scene_incidents(object_label='person,elephant') == 1
+    assert store.count_scene_incidents(object_label='car,dog', min_confidence=.65) == 1
+    assert len(store.list_scene_incident_cards(object_label='car,dog')) == 3
+    assert len(_filter_incident_summaries([{'labels': ['car']}, {'labels': ['dog']}, {'labels': ['person']}], 'all', object_label='car,dog')) == 2
+    # Motion-only incidents have no detection to compare.
+    assert store.count_scene_incidents(event_type='motion', min_confidence=.8) == store.count_scene_incidents(event_type='motion')
+    manager = SimpleNamespace(events=store)
+    day = datetime.fromtimestamp(1000, timezone.utc).strftime('%Y-%m-%d')
+    found = IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='object', min_confidence=.8, limit=10)
+    assert found['total'] == 1 and len(found['items']) == 1
+    assert IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='object', limit=10)['total'] == 3
+
+
+def test_camera_zone_and_person_filters_take_several_values(tmp_path):
+    store = EventStore(tmp_path)
+    def seen(camera, at, zone):
+        return store.add_event(camera, 'motion', created_at=datetime.fromtimestamp(at, timezone.utc).isoformat(),
+                               objects_json=json.dumps([observation(at, zones=[zone], temporal_observations=2)]))
+    gate, door = seen('gate', 1000, 'Road'), seen('door', 2000, 'Porch')
+    seen('yard', 3000, 'Lawn')
+    assert store.count_scene_incidents() == 3
+    # Any chosen value matches within one filter; blanks and repeats are ignored.
+    assert store.count_scene_incidents(camera_id='gate') == 1
+    assert store.count_scene_incidents(camera_id='gate,door') == 2
+    assert store.count_scene_incidents(camera_id=' door , ,gate,door') == 2
+    assert store.count_scene_incidents(camera_id='gate,nowhere') == 1
+    assert store.count_scene_incidents(zone='Road,Lawn') == 2
+    assert store.count_scene_incidents(zone='Porch') == 1
+    # Different filters still narrow each other.
+    assert store.count_scene_incidents(camera_id='gate,door', zone='Porch,Lawn') == 1
+    assert len(store.list_scene_incident_cards(camera_id='gate,yard')) == 2
+    summaries = [{'camera_id': 'gate', 'zones': ['Road']}, {'camera_ids': ['door', 'yard'], 'zones': ['Porch']}, {'camera_id': 'yard', 'zones': []}]
+    assert len(_filter_incident_summaries(summaries, 'all', camera_id='gate,door')) == 2
+    assert len(_filter_incident_summaries(summaries, 'all', zone='Road,Porch')) == 2
+    assert len(_filter_incident_summaries(summaries, 'all', camera_id='yard', zone='Porch')) == 1
+
+    faces = [{'event_id': gate['id'], 'person_id': 7}, {'event_id': door['id'], 'person_id': 9}]
+    manager = SimpleNamespace(events=store, face_identity_observations=lambda ids: [face for face in faces if face['event_id'] in ids])
+    day = datetime.fromtimestamp(1000, timezone.utc).strftime('%Y-%m-%d')
+    def people(value):
+        return IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='all', person_id=value, limit=10)['total']
+    assert people(7) == 1 and people('7') == 1
+    assert people('7,9') == 2
+    assert people('9, ,bad,404') == 1
+    assert people('') == 3 and people(0) == 3
 
 
 def test_rare_filter_does_not_hydrate_unmatched_history(tmp_path):
@@ -189,3 +256,34 @@ def test_complete_incident_reactivates_on_fresh_activity(tmp_path):
         [observation(now + 1, scene_track_key="reopen", temporal_observations=2)],
     )
     assert store.scene_incident(event_id=event["id"])["state"] == "active"
+
+
+def test_a_filter_value_may_contain_a_comma(tmp_path):
+    from survng.app.event_store.scenes import filter_values
+    assert filter_values('gate, door,,gate') == ['gate', 'door', 'gate, door,,gate']
+    assert filter_values('Driveway%2C left,Porch') == ['Driveway, left', 'Porch']
+    assert filter_values('50%252C off') == ['50%2C off', '50%252C off'] and filter_values('50%25 off,Porch') == ['50% off', 'Porch']
+    assert filter_values('gate') == ['gate'] and filter_values('') == [] and filter_values(None) == []
+    store = EventStore(tmp_path)
+    add(store, 1000, [observation(1000, temporal_observations=2, zones=['Driveway, left'])])
+    add(store, 2000, [observation(2000, temporal_observations=2, zones=['Porch'])])
+    assert 'Driveway, left' in store.scene_incident_facets()['zones']
+    # Sent whole, as older callers do, and escaped beside another value, as the gallery does.
+    assert store.count_scene_incidents(zone='Driveway, left') == 1
+    assert store.count_scene_incidents(zone='Driveway%2C left') == 1
+    assert store.count_scene_incidents(zone='Driveway%2C left,Porch') == 2
+    summaries = [{'camera_id': 'gate', 'zones': ['Driveway, left']}, {'camera_id': 'gate', 'zones': ['Porch']}]
+    assert len(_filter_incident_summaries(summaries, 'all', zone='Driveway, left')) == 1
+    assert len(_filter_incident_summaries(summaries, 'all', zone='Driveway%2C left,Porch')) == 2
+
+
+def test_a_later_detection_does_not_hide_queued_recorded_analysis(tmp_path):
+    store = EventStore(tmp_path)
+    event = add(store, 1000, [observation(1000, temporal_observations=2)])
+    def reason():
+        return store.scene_incident(event_id=event['id'])['episodes'][0]['coverage']['reason']
+    assert reason().startswith('sampled detector frames')
+    store.enqueue_scene_tracking(event['id'], 995, 1030)
+    assert reason() == 'recorded analysis queued'
+    add(store, 1005, [observation(1005, temporal_observations=2)])
+    assert reason() == 'recorded analysis queued'

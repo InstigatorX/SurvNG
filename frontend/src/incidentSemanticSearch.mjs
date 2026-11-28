@@ -1,8 +1,10 @@
+import { incidentFilterValues } from "./incidentNavigation.mjs";
+
 export function semanticIncidentRequest({ query, cameraFilter, objectFilter, startAt, endAt, limit = 60 }) {
   return {
     query: String(query || "").trim(),
-    camera_ids: cameraFilter && cameraFilter !== "all" ? [cameraFilter] : [],
-    object_labels: objectFilter && objectFilter !== "all" ? [objectFilter] : [],
+    camera_ids: incidentFilterValues(cameraFilter),
+    object_labels: incidentFilterValues(objectFilter),
     start_at: String(startAt || ""),
     end_at: String(endAt || ""),
     limit: Math.max(1, Math.min(100, Number(limit) || 60)),
@@ -17,7 +19,8 @@ export function rankSemanticIncidentDetails(details, zoneFilter = "all") {
   for (const detail of Array.isArray(details) ? details : []) {
     if (!detail?.id) continue;
     const zones = Array.isArray(detail.zones) ? detail.zones : [];
-    if (zoneFilter && zoneFilter !== "all" && !zones.includes(zoneFilter)) continue;
+    const wantedZones = incidentFilterValues(zoneFilter);
+    if (wantedZones.length && !wantedZones.some((zone) => zones.includes(zone))) continue;
     const current = unique.get(detail.id);
     if (!current || semanticRank(detail) > semanticRank(current)) {
       unique.set(detail.id, detail);

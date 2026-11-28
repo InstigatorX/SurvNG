@@ -172,7 +172,7 @@ async function storyChecks(width) {
   assert.equal(await page.locator(".story-bar.uncertain").count(), 1);
   assert.deepEqual(await page.locator(".story-card-title").allInnerTexts(), ["Person", "Car", "Dog uncertain"]);
   await page.getByRole("heading", { name: "Why this is an incident" }).waitFor();
-  assert.equal(await page.locator(".story-chips").innerText(), "Met alert criteria · Person in Entry");
+  assert.match(await page.locator(".story-chips").innerText(), /^Met alert criteria · Person in Entry\s+Side Yard analysis pending$/);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   // Shortcuts are review-mode only.
   await page.keyboard.press("e");
@@ -198,6 +198,10 @@ async function storyChecks(width) {
   await page.mouse.click(bar.x + bar.width * 0.25, bar.y + bar.height / 2);
   await page.getByRole("status").filter({ hasText: "Switched from Front Driveway" }).waitFor();
   assert.match(await page.locator(".story-frame-chips").innerText(), /Front Door/);
+  // The clicked moment lies between analysed frames: the person stays marked, as an estimate.
+  await page.locator(".story-box.person.estimated").waitFor();
+  assert.match(await page.locator(".story-box.person.estimated").innerText(), /Person · estimated/);
+  assert.match(await page.locator(".story-frame-chips").innerText(), /Following Person/);
   assert.match(await page.locator(".story-path li.active").innerText(), /Front Door/);
   await page.getByRole("button", { name: "Follow Person" }).click();
   await page.locator(".story-frame .incident-recording-player").waitFor();
@@ -482,7 +486,10 @@ async function stillEvidenceChecks() {
   await frame.getByText("Nearby recording frame", { exact: false }).waitFor();
   assert.deepEqual(requests.map(([, epoch, source]) => [epoch, source]), [[BASE + 47, "main"], [BASE + 47, "live"]]);
   assert.match(requests[0][0], /\/front-door\//);
-  assert.equal(await frame.locator(".story-box").count(), 0);
+  // No analysed frame matches this picture, so nothing is drawn as observed;
+  // the followed person is marked with an estimate only.
+  assert.equal(await frame.locator(".story-box:not(.estimated)").count(), 0);
+  assert.equal(await frame.locator(".story-box.person.estimated").count(), 1);
   assert.match(await frame.locator(".story-frame-chips time").getAttribute("datetime"), /15:25:08\.000Z/);
   assert.match(await page.getByRole("link", { name: "View in Timeline" }).getAttribute("href"), /source=live/);
   await page.close();
