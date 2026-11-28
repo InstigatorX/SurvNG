@@ -26,9 +26,10 @@ class StationaryObjectPolicy:
     maximum_displacement_ratio: float
     # Stillness for scene context follows the credible-movement thresholds of
     # the observed box, which grow with its size (see scene_stable_limits).
-    # These two ratios are the fixed limits that applied to every box before;
-    # they remain the floor, so small and mid-sized boxes keep their tested
-    # behaviour.
+    # These two ratios are the fixed limits that applied to every box before.
+    # They remain the floor, so mid-sized boxes keep their behaviour. For the
+    # smallest boxes, near the movement floor, the margin below lowers them
+    # where they used to reach or overlap credible movement.
     scene_stable_displacement_ratio: float
     scene_stable_path_ratio: float
     # A larger box may hold this fraction of its credible-movement thresholds

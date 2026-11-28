@@ -990,6 +990,26 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         self.assertEqual(len(regions), 64)
         self.assertIn(confirmed, regions)
 
+    def test_new_stationary_evidence_is_kept_when_every_region_is_confirmed(self) -> None:
+        regions = [
+            _StationaryRegion(
+                box=(index * 0.015, 0.0, index * 0.015 + 0.01, 0.01),
+                first_seen=80.0,
+                last_seen=100.0 + index * 0.1,
+                hits=3,
+            )
+            for index in range(64)
+        ]
+        oldest = regions[0]
+
+        AdaptiveMotionScoringStage._remember_stationary_region(
+            regions, (0.5, 0.5, 0.6, 0.6), 120.0,
+        )
+
+        self.assertEqual(len(regions), 64)
+        self.assertNotIn(oldest, regions)
+        self.assertEqual(regions[-1].box, (0.5, 0.5, 0.6, 0.6))
+
     def test_jittered_stationary_blob_still_matches_after_track_id_reset(self) -> None:
         scorer = stationary_memory_scorer()
         try:

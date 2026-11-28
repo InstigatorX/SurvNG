@@ -1461,19 +1461,22 @@ class AdaptiveMotionScoringStage:
                 region.last_seen = observed_at
                 region.hits += 1
             return
-        regions.append(_StationaryRegion(
+        added = _StationaryRegion(
             box=box,
             first_seen=observed_at,
             last_seen=observed_at,
-        ))
+        )
+        regions.append(added)
         excess = len(regions) - _STATIONARY_REGION_LIMIT
         if excess > 0:
             # Evict the oldest unconfirmed regions first, so a burst of
-            # one-off rejections cannot push out a confirmed region.
+            # one-off rejections cannot push out a confirmed region. The
+            # region just added is never the one evicted, so new evidence
+            # still enters a scene whose regions are all confirmed.
             evicted = {
                 id(region)
                 for region in sorted(
-                    regions,
+                    (region for region in regions if region is not added),
                     key=lambda region: (region.confirmed, region.last_seen),
                 )[:excess]
             }
