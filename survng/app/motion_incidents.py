@@ -116,7 +116,7 @@ SCENE_DISCOVERY_MAX_AGE_SECONDS = 60.0
 DETECTION_DRAIN_MAX_SECONDS = 600.0
 REFINEMENT_WORKER_STAGES = (
     "claim", "refine", "checkpoint", "handoff", "completion", "complete",
-    "reschedule", "verification", "cover", "discovery",
+    "reschedule", "verification", "cover", "discovery", "best_cover",
 )
 
 
@@ -294,7 +294,9 @@ class MotionIncidentService:
         scene_analysis_pending: Callable[[], bool] | None = None,
         close_out_scene_analysis: Callable[[str], int] | None = None,
         recorded_analysis_available: Callable[[], bool] | None = None,
+        best_cover_pass: Callable[[Callable[[], bool]], bool] | None = None,
     ) -> None:
+        self.best_cover_pass = best_cover_pass
         self.recorded_analysis_available = recorded_analysis_available or (lambda: False)
         self._recorded_review = False
         self.camera_id = camera_id
@@ -1139,6 +1141,33 @@ class MotionIncidentService:
         )
         return True
 
+    def _run_best_cover(self) -> bool:
+        """Lowest-priority presentation work: one whole-episode cover job."""
+        run = self.best_cover_pass
+        if run is None or self._security_work_pending.is_set():
+            return False
+        next_priority_check = 0.0
+
+        def preempted() -> bool:
+            nonlocal next_priority_check
+            if self._security_work_pending.is_set() or bool(self._refinement_stop and self._refinement_stop.is_set()):
+                return True
+            now = time.monotonic()
+            if now >= next_priority_check:
+                next_priority_check = now + 0.25
+                due = getattr(self.refinement_store, "has_due_detection_job", None)
+                if callable(due) and due(self.camera_id):
+                    self._security_work_pending.set()
+                    return True
+            return False
+
+        try:
+            with cancellable_evidence_work(preempted, source="best_cover"):
+                return bool(run(preempted))
+        except EvidenceWorkPreempted:
+            # The pass defers its own lease; a preemption outside it holds none.
+            return True
+
     @database_polling_session()
     def _run_refinements_until_error(self) -> None:
         last_prune = 0.0
@@ -1259,6 +1288,11 @@ class MotionIncidentService:
                 started = time.monotonic()
                 if not draining and self._run_scene_discovery():
                     self._record_worker_stage("discovery", started)
+                    continue
+                # Presentation only, after every security and acquisition stage.
+                started = time.monotonic()
+                if not draining and self._run_best_cover():
+                    self._record_worker_stage("best_cover", started)
                     continue
                 if draining and self._drain_finished():
                     if self._enter_recorded_review():

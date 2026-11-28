@@ -608,6 +608,71 @@ quality, then proximity to the event time, decide. SurvNG retries briefly while 
 being finalized. If no recorded frame becomes readable, it fails over to the
 latest live frame and marks that source in event metadata.
 
+### Whole-episode best cover (optional)
+
+Refinement stops as soon as confirmation is met, so its cover reflects the
+first seconds around the trigger. With `detector.best_cover_pass_enabled`
+(off by default) a light background pass looks across the whole camera episode
+once it has closed (its last activity is older than the 45-second inactivity
+grace). It never runs tracking or ReID and never changes admission,
+establishment, activity clocks or alert decisions.
+
+1. **Sample uniformly.** It samples the episode window from start to last
+   activity at roughly one frame every `detector.best_cover_sample_interval_seconds`
+   (default 1.5 s), spread evenly and capped at `detector.best_cover_max_frames`
+   (default 12). Each instant is decoded on its own, so a small cap still
+   reaches the end of a long episode. Frames come from the substream
+   recording when it covers the window at least as well as main; otherwise
+   from main, decoded no wider than 640 px. Motion-guided selection was considered and not used: no
+   per-sample foreground size or position is kept for a closed episode (see
+   `docs/incident-evidence-data-path.md`).
+2. **Detect and rank.** The object detector runs once per sampled frame. Only
+   the event's single cover subject (same label) counts, and only where the
+   event's recorded establishment-zone snapshot admits it. Label
+   compatibility is not identity proof, so two cases are left alone. A
+   frame with two such subjects is not a candidate. An episode whose other
+   events also have a subject with that label is skipped
+   (`ambiguous_episode_subjects`). Views rank by full
+   framing, then the same subject-view score as recorded refinement
+   (√area × crop sharpness).
+3. **Verify on main.** At most two leading candidates are re-read from the
+   main recording at full detail, and the detector confirms the subject at
+   the same place. When the main framing differs from the substream's (a
+   different aspect ratio), positions do not map, so only a single subject is
+   accepted there. The cover is replaced only when the verified view is
+   materially better. That uses tracking's rule: a fully framed cover needs a
+   subject at least 1.5× larger, edge clearance of at least 1%, and crop
+   quality of at least `max(0.12, 0.55 × current)`.
+
+The pass runs per camera on the refinement worker, after detection,
+verification, cover requirements and discovery, and it yields to security
+work without charging an attempt. When the detector declines optional
+inference under load, the job waits a minute, also without charging an
+attempt. Each attempt has a 20-second budget. A job
+gets three attempts and a 30-minute deadline; episodes that closed more than
+an hour earlier are never queued. Missing or unreadable footage, a missed
+budget, an incomplete search with no better view, or a leading candidate
+whose main frame could not be read all leave the job retrying until it is
+exhausted. None of them picks a frame.
+
+A camera that records only its substream has no main recording to save from.
+Its job is settled as `skipped` (`main_recording_disabled`).
+
+Tracking owns the cover first. While the episode's recorded tracking is
+queued or running, or the event's cover requirement is pending, the pass
+waits. If tracking promoted a cover, the pass skips the episode.
+
+In `on_demand` mode deferred tracking does not block, so the pass runs
+without the incident being opened. If someone later opens the incident and
+tracking proposes a cover, it replaces the pass's cover only under the same
+materially-better rule.
+
+Promotion checks the job lease and the evidence revision it read. A
+concurrent tracking or operator change is never overwritten; the job retries
+against the new cover. A change is published to the browser and search
+indexes, but not to MQTT or Home Assistant. This matches after-the-fact
+on-demand analysis: a better picture is not a new alert.
+
 ### Monocular depth enrichment
 
 When `detector.depth.enabled` and a model path are configured, the object worker

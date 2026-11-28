@@ -1118,6 +1118,12 @@ class DetectorConfig(BaseModel):
         ge=0.0,
         le=60.0,
     )
+    # Background whole-episode cover search once an episode has closed. Off by
+    # default: it adds detector work (at most best_cover_max_frames + a few
+    # verification frames per episode) on the refinement worker.
+    best_cover_pass_enabled: bool = False
+    best_cover_max_frames: int = Field(default=12, ge=1, le=60)
+    best_cover_sample_interval_seconds: float = Field(default=1.5, ge=0.5, le=10.0)
     object_activity_attribution: Literal["off", "shadow", "enforce"] = "enforce"
     stationary_subject_presence: Literal["ignore", "activity"] = "ignore"
     require_incident_zone: bool = True

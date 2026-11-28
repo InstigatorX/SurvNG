@@ -87,6 +87,12 @@ assert.equal(cameraSpeechDirty([{ id: "gate", speech: { enabled: true } }], [{ i
 assert.equal(cameraSpeechDirty([{ id: "gate", speech: { enabled: false }, name: "Renamed" }], [{ id: "gate", speech: { enabled: false }, name: "Gate" }]), false);
 assert.equal(cameraSpeechDirty([], []), false);
 assert.match(configPageSource, /\["speech", "Speech", Mic\]/);
+// The best-cover switch sits with the tracking analysis setting, off by default.
+const trackingBlock = configPageSource.match(/detectionSection === "tracking" \? <section[\s\S]*?<\/section> : null\}/);
+assert.ok(trackingBlock, "tracking settings block exists");
+assert.match(trackingBlock[0], /analysis_mode[\s\S]*best_cover_pass_enabled/);
+assert.match(trackingBlock[0], /checked=\{config\.detector\?\.best_cover_pass_enabled \?\? false\}/);
+assert.match(trackingBlock[0], /updateConfig\(\["detector", "best_cover_max_frames"\], Number\(event\.target\.value\)\)/);
 
 console.log("admin workspace tests passed");
 

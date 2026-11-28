@@ -23,6 +23,7 @@ from ..media_storage import MediaStorageRegistry, path_presence
 from ..volume_identity import VolumeGate, VolumeIdentityStore, identity_db_path
 from ..object_motion import tracking_motion_promotions
 from ..perf_samples import SlowSiteTable, TimedLock
+from .best_cover import EventStoreBestCoverMixin
 from .calibration import EventStoreCalibrationMixin
 from .jobs import EventStoreJobsMixin
 from .evidence import EventStoreEvidenceMixin, EventSnapshotChangedError
@@ -66,6 +67,7 @@ class EventStore(
     EventStoreSceneMixin,
     EventStoreSceneTrackingMixin,
     EventStoreEvidenceMixin,
+    EventStoreBestCoverMixin,
     EventStoreJobsMixin,
     EventStoreCalibrationMixin,
     EventStoreMotionIntelligenceMixin,
@@ -127,6 +129,7 @@ class EventStore(
         self._init_incident_review_db()
         with self._connect() as conn:
             self._init_scene_tracking_schema(conn)
+        self._init_best_cover_db()
         self._recover_snapshot_deletion_claims()
         self._init_jobs_db()
 
@@ -1143,6 +1146,10 @@ class EventStore(
                 if not isinstance(objects, list):
                     objects = []
                 if frame_width * frame_height < self._cover_frame_area(objects):
+                    objects = []
+                elif self._best_cover_blocks_tracking_cover(objects, frame_width, frame_height, cover_metrics):
+                    # The whole-episode pass already chose this cover; tracking
+                    # replaces it only under the same materially-better rule.
                     objects = []
                 for item in objects:
                     if not isinstance(item, dict) or not item.get("label"):
