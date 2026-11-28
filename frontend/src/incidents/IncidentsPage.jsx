@@ -377,7 +377,11 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
         && (current[String(incident.id)] || !incident.review_verdict));
       if (!settled.length) return current;
       const next = { ...current };
-      for (const incident of settled) delete next[String(incident.id)];
+      for (const incident of settled) {
+        delete next[String(incident.id)];
+        // The list is the reference again; a later failed save falls back to it.
+        reviewConfirmedRef.current.delete(String(incident.id));
+      }
       return next;
     });
   }, [incidents]);
@@ -860,13 +864,16 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
           }
         }
         while (items.length < galleryWanted) {
-          if (reviewFilter !== "all" && reviewSavesRef.current.size) {
-            // A mark still being saved has not left the server's list yet. Wait
-            // for it, so the position counts the list as it will be read.
+          // A mark still being saved has not left the server's list yet. Wait
+          // for it, and any started meanwhile, so the position counts the list
+          // as it will be read.
+          let waited = false;
+          while (reviewFilter !== "all" && reviewSavesRef.current.size) {
+            waited = true;
             await Promise.all([...reviewSavesRef.current.values()]);
             if (cancelled) return;
-            offset = Math.min(offset, items.length - departed(items));
           }
+          if (waited) offset = Math.min(offset, items.length - departed(items));
           if (payload && offset >= Number(payload.total || 0)) break;
           const limit = Math.min(100, galleryWanted - items.length);
           const ahead = galleryAheadRef.current;
@@ -1304,7 +1311,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const bulkGroupRef = useRef(null);
   const bulkWasOpenRef = useRef(false);
   useEffect(() => {
-    if (bulkWasOpenRef.current && !bulkReview) (bulkGroupRef.current?.querySelector("button:not(:disabled)") || bulkGroupRef.current)?.focus();
+    // Only when focus was left nowhere, or in the group: not taken from where the person went meanwhile.
+    const adrift = document.activeElement === document.body || bulkGroupRef.current?.contains(document.activeElement);
+    if (bulkWasOpenRef.current && !bulkReview && adrift) (bulkGroupRef.current?.querySelector("button:not(:disabled)") || bulkGroupRef.current)?.focus();
     bulkWasOpenRef.current = Boolean(bulkReview);
   }, [bulkReview]);
   const bulkCount = { reviewed: bulkTargets("reviewed").length, unreviewed: bulkTargets("unreviewed").length };
