@@ -828,7 +828,7 @@ class ObjectActivityAttributor:
 
         Only a sighting that fails stillness by its displacement or excursion
         alone, from a sparse track, within the jitter allowance, is checked.
-        A still sighting keeps the plain rule, and zone entry, a robust new
+        A still sighting keeps the plain rule, and zone entry, a new
         appearance, a rejected sample, or incomplete evidence is never jitter.
 
         Returns the match, the matched subject's prior sightings, the
@@ -844,6 +844,7 @@ class ObjectActivityAttributor:
             and motion.track_observations <= KNOWN_SUBJECT_JITTER_MAX_TRACK_OBSERVATIONS
             and not motion.zone_entry
             and not motion.robust_new_appearance
+            and not motion.newly_appeared
             and motion.displacement_ratio <= jitter_allowance
             and motion.movement_extent_ratio <= jitter_allowance
             and rejected_points == 0

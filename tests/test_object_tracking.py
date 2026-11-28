@@ -2543,6 +2543,61 @@ class TrackingMotionPromotionTest(unittest.TestCase):
                 )
                 self.assertEqual(bool(promotions), promoted)
 
+    def test_an_enforced_departure_inferred_still_is_promoted_by_its_track(self) -> None:
+        from survng.app.object_activity import ObjectActivityAttributor
+
+        def sighting(excursion: float, samples: int) -> dict:
+            item = self.demoted(label="car", incident_eligible=True, incident_ineligible_reasons=[])
+            item.update(
+                temporal_track_observations=samples,
+                temporal_pretrigger_observations=1,
+                temporal_posttrigger_observations=1,
+                temporal_center_displacement_ratio=0.0005,
+                temporal_center_path_ratio=excursion,
+                temporal_robust_new_appearance=False,
+                temporal_zone_entry=False,
+                temporal_motion={
+                    "version": 2, "displacement_ratio": 0.0005, "excursion_ratio": excursion,
+                    "raw_displacement_ratio": 0.0005, "samples": samples,
+                    "isolated_points_rejected": 0,
+                },
+            )
+            return item
+
+        for kind, promoted in (("established", True), ("still", False)):
+            with self.subTest(kind=kind):
+                attributor = ObjectActivityAttributor("enforce", "balanced")
+                for index in range(8):
+                    attributor.admit([sighting(0.0005, 6)], {}, event_key=f"parked-{index}",
+                                     observed_at_epoch=1000.0 + index * 60.0)
+                # Neither still nor credibly moving for this box, or still.
+                excursion = 0.01 if kind == "established" else 0.0005
+                admission = attributor.admit([sighting(excursion, 6)], {}, event_key="leaving",
+                                             observed_at_epoch=2000.0)[0]
+                stored = admission.stored_observation()
+                self.assertEqual(stored["activity_role"], "scene_context")
+                self.assertEqual(stored["incident_ineligible_reasons"], ["stationary_scene_context"])
+
+                promotions = tracking_motion_promotions(
+                    [stored], self.tracking(self.drifting(), label="car"),
+                )
+                self.assertEqual(bool(promotions), promoted)
+                # Jitter alone never promotes it.
+                self.assertEqual(tracking_motion_promotions(
+                    [stored], self.tracking(self.jittering(), label="car"),
+                ), {})
+
+    def test_a_stationary_subject_ineligible_for_another_reason_is_not_promoted(self) -> None:
+        item = self.demoted(
+            label="car", activity_role="scene_context",
+            activity_evidence={"reasons": ["established_scene_context_without_credible_movement"]},
+            detector_incident_eligible=False,
+            incident_ineligible_reasons=["below_confidence_threshold", "stationary_scene_context"],
+        )
+        self.assertEqual(tracking_motion_promotions(
+            [item], self.tracking(self.drifting(), label="car"),
+        ), {})
+
     def test_repeated_fast_transit_qualifies_on_supported_excursion(self) -> None:
         """Repeated crossings retain meaningful extent after temporal filtering."""
         centers = [

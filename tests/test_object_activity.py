@@ -931,3 +931,17 @@ def test_a_vehicle_that_appeared_during_the_event_is_not_the_remembered_one(samp
     assert admission.admitted is True
     # Nor does it keep the parked subject alive.
     assert subject.last_seen_epoch == last_seen
+
+
+@pytest.mark.parametrize("measured", [min(PRODUCTION_NIGHT_JITTER), max(PRODUCTION_NIGHT_JITTER)])
+def test_jitter_from_a_vehicle_that_appeared_during_the_event_is_not_absorbed(measured) -> None:
+    attributor = parked_overnight()
+    subject = attributor.memory._subjects[0][1]
+    last_seen = subject.last_seen_epoch
+
+    admission = attributor.admit([night_car(measured, temporal_newly_appeared=True)], {},
+                                 event_key="arrival", observed_at_epoch=2000.0)[0]
+
+    assert admission.attribution.evidence.scene_context_jitter_absorbed is False
+    assert admission.admitted is True
+    assert subject.last_seen_epoch == last_seen

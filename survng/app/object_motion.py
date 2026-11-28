@@ -21,6 +21,7 @@ MOVEMENT_BOX_SCALE = 0.04
 MINIMUM_PATH_RATIO = 0.01
 PATH_MOVEMENT_SCALE = 2.5
 MOTION_CORRELATION_REASON = "object_not_motion_correlated"
+STATIONARY_SCENE_CONTEXT_REASON = "stationary_scene_context"
 MINIMUM_TRACKING_OBSERVATIONS = 16
 MINIMUM_TRACKING_MATCH_IOU = 0.5
 ISOLATED_POINT_SEPARATION_FACTOR = 3.0
@@ -350,8 +351,22 @@ def _promotable(item: Any, person_suppression: str = RECORDED_PERSON_SUPPRESSION
     reasons = item.get("incident_ineligible_reasons")
     if not isinstance(reasons, list):
         return False
-    if [str(value) for value in reasons] != [MOTION_CORRELATION_REASON]:
-        return False
+    normalized = [str(value) for value in reasons]
+    if normalized != [MOTION_CORRELATION_REASON]:
+        # In enforce mode, live admission suppresses scene context before
+        # motion correlation runs, so it never reaches that demotion. Scene
+        # context inferred without a still sighting is the only stationary
+        # suppression a travelling track may lift, and only for a subject
+        # the detector itself admitted.
+        if not (
+            normalized
+            and set(normalized) <= {MOTION_CORRELATION_REASON, STATIONARY_SCENE_CONTEXT_REASON}
+            and STATIONARY_SCENE_CONTEXT_REASON in normalized
+            and item.get("detector_incident_eligible") is not False
+            and str(item.get("activity_role") or "") == "scene_context"
+            and _stillness_unproven(item)
+        ):
+            return False
     return bool(
         item.get("confidence_eligible") is True
         and item.get("spatial_zone_eligible") is True
