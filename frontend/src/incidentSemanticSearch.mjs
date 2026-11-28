@@ -71,9 +71,10 @@ export async function mapWithConcurrency(items, concurrency, mapper) {
 // Keep the matches the incident list would also show under the same review and
 // people filters, and give each its review mark. ``listed`` maps the id of
 // every incident the list returns to its verdict.
-export function keepListedIncidents(details, listed) {
+export function keepListedIncidents(details, listed, { keepUnlisted = false } = {}) {
   return (Array.isArray(details) ? details : []).flatMap((detail) => {
     const id = String(detail?.incident_id || detail?.id || "");
-    return id && listed.has(id) ? [{ ...detail, review_verdict: listed.get(id) }] : [];
+    if (id && listed.has(id)) return [{ ...detail, review_verdict: listed.get(id) }];
+    return id && keepUnlisted ? [detail] : [];
   });
 }

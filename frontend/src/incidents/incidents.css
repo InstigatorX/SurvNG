@@ -1124,6 +1124,8 @@
 
 .mobile-incidents .incident-gallery-status {
   flex-wrap: wrap;
+  /* Never squeezed by the list above it: its button would be cut off at the bottom. */
+  flex: 0 0 auto;
   padding: 6px 10px;
 }
 

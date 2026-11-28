@@ -52,5 +52,8 @@ assert.deepEqual(mergeIncidentHead(shown, [card(5), card(3)]).map((item) => item
 assert.equal(mergeIncidentHead(shown, [card(9), card(8)]), null, "no overlap: read everything again");
 assert.deepEqual(mergeIncidentHead([], [card(2)]).map((item) => item.id), ["incident-2"]);
 assert.deepEqual(mergeIncidentHead(shown, shown.map((item) => ({ ...item }))), shown);
+// When the fresh read is the whole list, older incidents it no longer has are dropped.
+assert.deepEqual(mergeIncidentHead(shown, [card(5), card(3)], 2).map((item) => item.id), ["incident-5", "incident-3"]);
+assert.deepEqual(mergeIncidentHead(shown, [card(5), card(3)], 9).map((item) => item.id), ["incident-5", "incident-3", "incident-2", "incident-1"]);
 
 console.log("incident gallery tests passed");

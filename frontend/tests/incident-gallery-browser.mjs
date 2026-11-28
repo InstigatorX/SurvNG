@@ -161,9 +161,8 @@ try {
   assert.ok(await tiles.nth(0).evaluate((element) => element.classList.contains("is-reviewed")), "a marked picture steps back");
   // Mark everything shown, after a confirmation, in one request.
   const bulk = page.getByRole("group", { name: "Mark all shown" });
-  assert.ok(await bulk.getByRole("button", { name: "Unreviewed", exact: true }).isDisabled(), "nothing shown is reviewed in this view");
   await bulk.getByRole("button", { name: "Reviewed", exact: true }).click();
-  assert.match(await bulk.innerText(), new RegExp(`Mark ${INCIDENT_GALLERY_CHUNK} shown as reviewed\\?`));
+  assert.match(await bulk.innerText(), new RegExp(`Mark ${INCIDENT_GALLERY_CHUNK - 2} shown as reviewed\\?`));
   assert.equal(bulkReviews.length, 0, "nothing is saved before confirming");
   await bulk.getByRole("button", { name: "Cancel" }).click();
   await bulk.getByRole("button", { name: "Reviewed", exact: true }).click();
@@ -171,8 +170,9 @@ try {
   await bulk.getByRole("button", { name: "Reviewed", exact: true }).waitFor();
   assert.equal(bulkReviews.length, 1);
   assert.equal(bulkReviews[0].verdict, "reviewed");
-  assert.equal(bulkReviews[0].incident_ids.length, INCIDENT_GALLERY_CHUNK);
-  assert.equal(bulkReviews[0].incident_ids[0], "incident-0");
+  // Only what needs changing is sent: not the one already marked, nor the one kept for later.
+  assert.equal(bulkReviews[0].incident_ids.length, INCIDENT_GALLERY_CHUNK - 2);
+  assert.ok(!bulkReviews[0].incident_ids.includes("incident-0") && !bulkReviews[0].incident_ids.includes("incident-2"));
   // Two toggles: pressing the second as well shows everything, with no review filter sent.
   const pressed = () => reviewFilter.getByRole("button").evaluateAll((buttons) => buttons.map((button) => `${button.textContent}:${button.getAttribute("aria-pressed")}`));
   assert.deepEqual(await pressed(), ["Unreviewed:true", "Reviewed:false"]);
@@ -188,6 +188,7 @@ try {
   await bulk.getByRole("button", { name: "Confirm" }).click();
   await bulk.getByRole("button", { name: "Unreviewed", exact: true }).waitFor();
   assert.equal(bulkReviews.at(-1).verdict, null);
+  assert.ok(!bulkReviews.at(-1).incident_ids.includes("incident-2"), "clearing marks leaves Keep for later alone");
   // One toggle always stays pressed: turning off the only one switches to the other.
   await reviewFilter.getByRole("button", { name: "Reviewed", exact: true }).click();
   for (let waited = 0; reviewParams.at(-1) !== "unreviewed" && waited < 5000; waited += 100) await page.waitForTimeout(100);

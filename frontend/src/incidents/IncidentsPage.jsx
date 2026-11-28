@@ -137,10 +137,15 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     incidentMinConfidence, reviewFilter, incidentDay, semanticIncidentActiveQuery].join("\u0001");
   const [galleryWantedState, setGalleryWantedState] = useState({ scope: galleryScope, count: INCIDENT_GALLERY_CHUNK });
   const galleryWanted = galleryWantedState.scope === galleryScope ? galleryWantedState.count : INCIDENT_GALLERY_CHUNK;
+  // Listeners made in an earlier render call this too, so it reads the scope
+  // of the latest render rather than the one it was created in.
+  const galleryScopeRef = useRef(galleryScope);
+  galleryScopeRef.current = galleryScope;
   const setGalleryWanted = (next) => setGalleryWantedState((current) => {
-    const base = current.scope === galleryScope ? current.count : INCIDENT_GALLERY_CHUNK;
+    const scope = galleryScopeRef.current;
+    const base = current.scope === scope ? current.count : INCIDENT_GALLERY_CHUNK;
     const count = typeof next === "function" ? next(base) : next;
-    return count === base && current.scope === galleryScope ? current : { scope: galleryScope, count };
+    return count === base && current.scope === scope ? current : { scope, count };
   });
   const [galleryMoreError, setGalleryMoreError] = useState("");
   const [filtersPinned, setFiltersPinned] = useState(false);
@@ -285,45 +290,98 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
 
   // Review marks: the checkbox answers at once, then the server confirms.
   const [reviewOverrides, setReviewOverrides] = useState({});
+  const reviewOverridesRef = useRef(reviewOverrides);
+  reviewOverridesRef.current = reviewOverrides;
   const [reviewError, setReviewError] = useState("");
   const isReviewed = (incident) => reviewOverrides[String(incident.id)] ?? REVIEWED_VERDICTS.has(incident.review_verdict);
+  // The verdict as far as this page knows: a mark made here, or the listed one.
+  const knownVerdict = (incident) => {
+    const override = reviewOverrides[String(incident.id)];
+    return override === undefined ? incident.review_verdict || null : override ? "reviewed" : null;
+  };
+  const reviewSavesRef = useRef(new Map());
   async function changeReview(incident, checked) {
     const key = String(incident.id);
+    const before = reviewOverridesRef.current[key];
     setReviewError("");
     setReviewOverrides((current) => ({ ...current, [key]: checked }));
-    try {
+    // Saves for one incident go in the order they were asked for.
+    const save = (reviewSavesRef.current.get(key) || Promise.resolve()).then(async () => {
       const response = await fetch(`/api/incidents/${encodeURIComponent(incident.incident_id || incident.id)}/review`, {
         method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ verdict: checked ? "reviewed" : null }),
       });
       if (!response.ok) throw new Error(response.status === 403 ? "Only an administrator can mark incidents as reviewed." : "Could not save the review mark. Try again.");
+    });
+    const settled = save.catch(() => {});
+    reviewSavesRef.current.set(key, settled);
+    try {
+      await save;
     } catch (failure) {
-      setReviewOverrides((current) => { const next = { ...current }; delete next[key]; return next; });
+      // Back to what it showed before this change, unless a later change has replaced it.
+      setReviewOverrides((current) => {
+        if (current[key] !== checked) return current;
+        const next = { ...current };
+        if (before === undefined) delete next[key]; else next[key] = before;
+        return next;
+      });
       setReviewError(failure.message || "Could not save the review mark. Try again.");
+    } finally {
+      if (reviewSavesRef.current.get(key) === settled) reviewSavesRef.current.delete(key);
     }
   }
   const reviewTile = useCallback((incident, checked) => tileHandlersRef.current.review(incident, checked), []);
-  // One verdict for every incident shown, saved together or not at all.
+  // Marking everything shown changes only what needs changing. "Reviewed" leaves
+  // alone what is already decided or kept for later; "Unreviewed" clears only a
+  // Reviewed mark, never Keep for later or Nothing here.
+  const bulkTargets = (target) => visibleIncidents.filter((incident) => {
+    if (!(incident.incident_id || incident.id)) return false;
+    const verdict = knownVerdict(incident);
+    return target === "reviewed" ? verdict === null : verdict === "reviewed";
+  });
   async function markAllShown(target) {
-    const shown = visibleIncidents.filter((incident) => incident.incident_id || incident.id);
+    const shown = bulkTargets(target);
     if (!shown.length || bulkBusy) return;
     const checked = target === "reviewed";
     setBulkBusy(true);
     setReviewError("");
+    let saved = 0;
     try {
-      const response = await fetch("/api/incidents/reviews", {
-        method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ incident_ids: shown.map((incident) => incident.incident_id || incident.id), verdict: checked ? "reviewed" : null }),
-      });
-      if (!response.ok) throw new Error(response.status === 403 ? "Only an administrator can mark incidents as reviewed." : "Could not save the review marks. Nothing was changed.");
-      setReviewOverrides((current) => ({ ...current, ...Object.fromEntries(shown.map((incident) => [String(incident.id), checked])) }));
-      refreshIncidentEvidence(true);
+      // The server takes up to 500 at a time; each batch is saved together or not at all.
+      for (; saved < shown.length; saved += 500) {
+        const batch = shown.slice(saved, saved + 500);
+        const response = await fetch("/api/incidents/reviews", {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ incident_ids: batch.map((incident) => incident.incident_id || incident.id), verdict: checked ? "reviewed" : null }),
+        });
+        if (!response.ok) throw new Error(response.status === 403 ? "Only an administrator can mark incidents as reviewed." : "failed");
+        setReviewOverrides((current) => ({ ...current, ...Object.fromEntries(batch.map((incident) => [String(incident.id), checked])) }));
+      }
     } catch (failure) {
-      setReviewError(failure.message || "Could not save the review marks. Nothing was changed.");
+      setReviewError(failure.message !== "failed" && failure.message ? failure.message
+        : saved ? `Could not save all the review marks. ${saved} of ${shown.length} were saved.` : "Could not save the review marks. Nothing was changed.");
     } finally {
+      if (saved) refreshIncidentEvidence(true);
       setBulkBusy(false);
       setBulkReview(null);
     }
   }
+  // A mark the list now agrees with no longer needs remembering here.
+  useEffect(() => {
+    setReviewOverrides((current) => {
+      const settled = incidents.filter((incident) => current[String(incident.id)] === REVIEWED_VERDICTS.has(incident.review_verdict)
+        && (current[String(incident.id)] || !incident.review_verdict));
+      if (!settled.length) return current;
+      const next = { ...current };
+      for (const incident of settled) delete next[String(incident.id)];
+      return next;
+    });
+  }, [incidents]);
+  // A message about a failed save does not outstay the moment.
+  useEffect(() => {
+    if (!reviewError) return undefined;
+    const timer = window.setTimeout(() => setReviewError(""), 8000);
+    return () => window.clearTimeout(timer);
+  }, [reviewError]);
 
   useEffect(() => {
     if (!displayedIncident && tabletInspectorOpen) setTabletInspectorOpen(false);
@@ -622,7 +680,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
         if (page.length < 100) break;
       }
       if (semanticIncidentRequestRef.current !== controller) return;
-      setSemanticIncidentResults(rankSemanticIncidentDetails(keepListedIncidents(hydrated, listed), incidentZoneFilter, {
+      // With no review or people filter the list only supplies marks, so a match it did not reach is kept.
+      const unfiltered = reviewFilter === "all" && incidentPersonFilter === "all";
+      setSemanticIncidentResults(rankSemanticIncidentDetails(keepListedIncidents(hydrated, listed, { keepUnlisted: unfiltered }), incidentZoneFilter, {
         minConfidence: incidentMinConfidence / 100, labels: incidentFilterValues(incidentObjectFilter),
       }));
     } catch (error) {
@@ -759,7 +819,11 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       const baseKey = `gallery:${filters}`;
       const loaded = galleryLoadedRef.current;
       const sameList = loaded.key === baseKey && loaded.token === incidentRefreshToken;
-      if (sameList && loaded.items.length >= galleryWanted) return;
+      if (sameList && loaded.items.length >= galleryWanted) {
+        // Back to a list already held: an interrupted load for other filters left this set.
+        setIncidentLoading(false);
+        return;
+      }
       const previous = loaded.key === baseKey ? loaded.items : [];
       const foregroundLoad = loaded.key !== baseKey;
       if (foregroundLoad) {
@@ -770,17 +834,24 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       try {
         // Scrolling adds to the end. A filter change reads again from the top. A
         // routine refresh re-reads the newest incidents and keeps the rest.
+        // An incident marked here stays in view until the next refresh but has
+        // already left the server's filtered list, so it does not count towards
+        // the position to read from.
+        const departed = (list) => reviewFilter === "all" ? 0 : list.filter((item) => {
+          const marked = reviewOverridesRef.current[String(item.id)];
+          return marked !== undefined && marked !== (reviewFilter === "reviewed");
+        }).length;
         let items = sameList ? loaded.items : [];
-        let offset = items.length;
+        let offset = items.length - departed(items);
         let payload = null;
         if (!sameList && previous.length && !galleryFullRefreshRef.current) {
           const head = await searchPage(filters, INCIDENT_GALLERY_CHUNK, 0);
           if (cancelled) return;
-          const merged = mergeIncidentHead(previous, head.items || []);
+          const merged = mergeIncidentHead(previous, head.items || [], Number(head.total));
           if (merged) {
             payload = head;
             items = merged;
-            offset = items.length;
+            offset = items.length - departed(items);
           }
         }
         while (items.length < galleryWanted) {
@@ -821,7 +892,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
           setGalleryMoreError("Could not load more incidents.");
         }
       } finally {
-        if (!cancelled && foregroundLoad) setIncidentLoading(false);
+        // Any run that finishes leaves the list current, including one that
+        // returned to filters whose interrupted predecessor set this.
+        if (!cancelled) setIncidentLoading(false);
       }
     }
     async function loadIncidentPage() {
@@ -890,7 +963,8 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     retainedGallerySelectionRef.current = null;
     galleryPageAnchorRef.current = null;
     setIncidentPage(0);
-    if (galleryModeRef.current && incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
+    const list = incidentRailListRef.current || document.getElementById("incident-results");
+    if (galleryModeRef.current && list) list.scrollTop = 0;
   }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentMinConfidence, reviewFilter, incidentDay, incidentDensity]);
 
   useEffect(() => {
@@ -1179,8 +1253,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   const dayComplete = !semanticIncidentActive && !displayedIncidentLoading && !displayedIncidentError && visibleIncidents.length >= displayedIncidentTotal;
   function openEarlierDay() {
     setIncidentDay(earlierDay);
-    if (incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
-    else window.scrollTo(0, 0);
+    const list = incidentRailListRef.current || document.getElementById("incident-results");
+    if (list) list.scrollTop = 0;
+    window.scrollTo(0, 0);
   }
   // A list still on screen while its replacement loads: say so at once.
   const listUpdating = Boolean(displayedIncidentLoading && visibleIncidents.length);
@@ -1213,16 +1288,17 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   );
   // Marking everything shown changes shared state for many incidents, so it asks first.
   const shownCount = visibleIncidents.length;
+  const bulkCount = { reviewed: bulkTargets("reviewed").length, unreviewed: bulkTargets("unreviewed").length };
   const bulkReviewControl = semanticIncidentActive ? null : (
     <div className="incident-bulk-review" role="group" aria-label="Mark all shown">
       {bulkReview ? <>
-        <span>Mark {shownCount} shown as {bulkReview}?</span>
-        <button type="button" className="primary" disabled={bulkBusy} onClick={() => void markAllShown(bulkReview)}>{bulkBusy ? "Saving…" : "Confirm"}</button>
-        <button type="button" disabled={bulkBusy} onClick={() => setBulkReview(null)}>Cancel</button>
+        <span>Mark {bulkCount[bulkReview]} shown as {bulkReview}?</span>
+        <button key="confirm" type="button" className="primary" disabled={bulkBusy || !bulkCount[bulkReview]} onClick={() => void markAllShown(bulkReview)}>{bulkBusy ? "Saving…" : "Confirm"}</button>
+        <button key="cancel" type="button" autoFocus disabled={bulkBusy} onClick={() => setBulkReview(null)}>Cancel</button>
       </> : <>
         <span>Mark all shown</span>
-        <button type="button" disabled={!canCorrectIncident || !shownCount || reviewFilter === "reviewed"} onClick={() => setBulkReview("reviewed")}>Reviewed</button>
-        <button type="button" disabled={!canCorrectIncident || !shownCount || reviewFilter === "unreviewed"} onClick={() => setBulkReview("unreviewed")}>Unreviewed</button>
+        <button key="reviewed" type="button" disabled={!canCorrectIncident || !bulkCount.reviewed} title="Incidents kept for later are left as they are" onClick={() => setBulkReview("reviewed")}>Reviewed</button>
+        <button key="unreviewed" type="button" disabled={!canCorrectIncident || !bulkCount.unreviewed} title="Clears Reviewed marks only" onClick={() => setBulkReview("unreviewed")}>Unreviewed</button>
       </>}
     </div>
   );

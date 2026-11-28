@@ -633,9 +633,11 @@ export function keepIncidentIdentity(previous, items) {
 // Fold a fresh read of the newest incidents into a longer list already shown.
 // Returns null when the two do not overlap: too much changed to merge, and the
 // whole list should be read again.
-export function mergeIncidentHead(previous, head) {
+export function mergeIncidentHead(previous, head, total = Infinity) {
   const fresh = keepIncidentIdentity(previous, head);
   if (!previous?.length) return fresh;
+  // The fresh read is the whole list: nothing older exists to keep.
+  if (fresh.length >= total) return fresh;
   const ids = new Set(fresh.map((item) => String(item.id)));
   if (!previous.some((item) => ids.has(String(item.id)))) return null;
   // Everything newer than the oldest incident in the fresh read comes from it;

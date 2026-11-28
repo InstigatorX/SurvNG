@@ -57,5 +57,7 @@ const listed = new Map([["incident-a", "reviewed"], ["incident-b", null]]);
 const kept = keepListedIncidents([{ id: "x", incident_id: "incident-a" }, { id: "incident-b" }, { id: "incident-c" }, null, {}], listed);
 assert.deepEqual(kept.map((item) => [item.incident_id || item.id, item.review_verdict]), [["incident-a", "reviewed"], ["incident-b", null]]);
 assert.deepEqual(keepListedIncidents(undefined, listed), []);
+// With no filter to apply, a match the list did not reach is kept, without a mark.
+assert.deepEqual(keepListedIncidents([{ id: "incident-a" }, { id: "incident-z" }, {}], listed, { keepUnlisted: true }).map((item) => item.id), ["incident-a", "incident-z"]);
 
 console.log("incident semantic search tests passed");

@@ -38,8 +38,10 @@ and a review mark at its upper right.
 - The gallery opens on **Unreviewed** incidents. A marked picture steps back and
   leaves the list at the next refresh; turn on **Reviewed** in the review filter
   to see it again.
-- **Mark all shown** sets or clears the mark on every incident currently loaded
-  in the gallery, after a confirmation. Scroll first to include more.
+- **Mark all shown** sets or clears the mark on the incidents currently loaded
+  in the gallery, after a confirmation. Scroll first to include more. Marking
+  leaves alone incidents already decided or kept for later; clearing removes
+  only Reviewed marks, never Keep for later or Nothing here.
 - Select a picture to preview that incident in the same overlay the Live page
   uses: play it, open the full incident, or close it to return to the gallery.
 - **Open viewer** switches to the side-by-side viewer; **Gallery**, or `Esc`,
