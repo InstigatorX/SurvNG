@@ -891,3 +891,43 @@ def test_a_rejected_glitch_below_the_movement_threshold_is_still_still() -> None
         for index in range(3)
     ]
     assert roles[-1] is ObjectActivityRole.SCENE_CONTEXT
+
+
+# Review of the round-3 commits.
+
+@pytest.mark.parametrize("tolerance", ["low", "balanced", "high"])
+def test_a_small_car_off_its_footprint_by_a_seventh_of_its_width_stays_active(tolerance) -> None:
+    # A distant car, 3% x 2% of the frame: its movement threshold sits on the
+    # 0.003 floor, so the frame-unit allowance is large for the box.
+    def small(displacement, dx=0.0):
+        sighting = night_car(displacement)
+        sighting["box"] = {"x1": 500 + dx, "y1": 500, "x2": 530 + dx, "y2": 520}
+        return sighting
+
+    attributor = ObjectActivityAttributor("enforce", tolerance)
+    for index in range(8):
+        attributor.admit([small(0.0005)], {}, event_key=f"parked-{index}",
+                         observed_at_epoch=1000.0 + index * 60.0)
+    admission = attributor.admit([small(0.0044, dx=4.4)], {}, event_key="moved",
+                                 observed_at_epoch=2000.0)[0]
+
+    assert admission.attribution.role is ObjectActivityRole.ACTIVE
+    assert admission.admitted is True
+    assert admission.attribution.evidence.scene_context_footprint_match is False
+
+
+@pytest.mark.parametrize("samples", [0, 1, 3, 6])
+def test_a_vehicle_that_appeared_during_the_event_is_not_the_remembered_one(samples) -> None:
+    attributor = parked_overnight(sightings=8)
+    subject = attributor.memory._subjects[0][1]
+    last_seen = subject.last_seen_epoch
+    sighting = banded_car(samples, label="truck", temporal_newly_appeared=True)
+    if samples < 2:
+        sighting["temporal_consensus"] = False
+
+    admission = attributor.admit([sighting], {}, event_key="passing", observed_at_epoch=2000.0)[0]
+
+    assert admission.attribution.role is ObjectActivityRole.INDETERMINATE
+    assert admission.admitted is True
+    # Nor does it keep the parked subject alive.
+    assert subject.last_seen_epoch == last_seen

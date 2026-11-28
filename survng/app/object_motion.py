@@ -8,7 +8,11 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
-from .stationary_policy import RECORDED_PERSON_SUPPRESSION, stationary_suppression_exempt
+from .stationary_policy import (
+    RECORDED_PERSON_SUPPRESSION,
+    UNPROVEN_STILLNESS_REASONS,
+    stationary_suppression_exempt,
+)
 
 
 MINIMUM_MOVEMENT_RATIO = 0.003
@@ -255,8 +259,9 @@ def tracking_motion_promotions(
     Use the same bounded excursion estimator as initial admission. A longer
     observation window can establish travel that sparse refinement missed, but
     accumulating stationary box noise cannot. All other eligibility gates and
-    track identity matching remain authoritative. A stationary subject is not
-    promoted unless it is a person exempt from stationary suppression.
+    track identity matching remain authoritative. A subject proven still in
+    its event is not promoted unless it is a person exempt from stationary
+    suppression; scene context inferred without a still sighting is.
     """
     width = _positive_float(tracking.get("frame_width"))
     height = _positive_float(tracking.get("frame_height"))
@@ -355,8 +360,18 @@ def _promotable(item: Any, person_suppression: str = RECORDED_PERSON_SUPPRESSION
         and (
             str(item.get("activity_role") or "") != "scene_context"
             or stationary_suppression_exempt(item.get("label"), person_suppression)
+            or _stillness_unproven(item)
         )
     )
+
+
+def _stillness_unproven(item: Mapping[str, Any]) -> bool:
+    """Scene context recorded without a still sighting in its event."""
+    evidence = item.get("activity_evidence")
+    reasons = evidence.get("reasons") if isinstance(evidence, Mapping) else None
+    if not isinstance(reasons, list) or not reasons:
+        return False
+    return all(str(reason) in UNPROVEN_STILLNESS_REASONS for reason in reasons)
 
 
 def _track_anchor_box(

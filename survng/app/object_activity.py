@@ -11,12 +11,15 @@ from typing import Any, Iterable, Literal, Mapping
 
 from .object_motion import (
     MINIMUM_TRACKING_MATCH_IOU,
+    MOVEMENT_BOX_SCALE,
     TemporalObjectMotionEvidence,
     estimate_object_motion,
     temporal_object_motion_evidence,
 )
 from .scene_context_memory import InMemorySceneContextMemory, SceneContextMemory, normalized_box
 from .stationary_policy import (
+    ESTABLISHED_SCENE_CONTEXT_REASON,
+    SPARSE_JITTER_SCENE_CONTEXT_REASON,
     PERSON_SUPPRESSION_VALUES,
     RECORDED_PERSON_SUPPRESSION,
     StationaryObjectPolicy,
@@ -52,7 +55,9 @@ KNOWN_SUBJECT_JITTER_MIN_PRIOR_SIGHTINGS = 6
 #
 # The box centre must lie within the jitter allowance of the remembered
 # reference centre, the same bound the sighting's own movement must meet,
-# so the footprint can never be wider than the jitter it absorbs. The
+# so the footprint can never be wider than the jitter it absorbs; and within
+# 6% of the reference diagonal, so it stays in proportion to a small box
+# whose allowance is set by the movement floor (see _footprint_offset_bound). The
 # reference box moves only with still sightings, so a car that creeps
 # across events cannot drag its footprint along.
 #
@@ -95,8 +100,8 @@ KNOWN_SUBJECT_JITTER_INVALIDATION_FRACTION = 0.6
 # jitter rule asks for, three times the plain two prior sightings. Neither
 # rule's sightings are still ones, so they do not blend the reference box or
 # add a sighting; they only keep the subject from expiring (see
-# refresh_subject).
-ESTABLISHED_SCENE_CONTEXT_REASON = "established_scene_context_without_credible_movement"
+# refresh_subject). A subject that appeared during the event (absent from its
+# first sample) has not stayed put, so it is never this rule's subject.
 # Movement at or beyond these bounds leaves the remembered location: the
 # memory is forgotten there, not only this event's sighting.
 LOCATION_INVALIDATION_DISPLACEMENT_RATIO = 0.02
@@ -132,6 +137,26 @@ def _center_offset(
     return math.dist(
         ((reference[0] + reference[2]) / 2.0, (reference[1] + reference[3]) / 2.0),
         ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0),
+    )
+
+
+def _footprint_offset_bound(
+    reference: tuple[float, float, float, float],
+    jitter_allowance: float,
+) -> float:
+    """How far the box centre may sit from the remembered reference centre.
+
+    The jitter allowance, and never more than the same 1.5 movement
+    thresholds measured on the reference box itself without the 0.003 floor:
+    6% of its diagonal. For most boxes the two agree; for a small, distant
+    box the floor makes the allowance a large part of the box, and the
+    diagonal keeps the footprint in proportion. The diagonal does not depend
+    on which way the box errs.
+    """
+    diagonal = math.hypot(reference[2] - reference[0], reference[3] - reference[1])
+    return min(
+        jitter_allowance,
+        diagonal * MOVEMENT_BOX_SCALE * KNOWN_SUBJECT_JITTER_MOVEMENT_FACTOR,
     )
 
 
@@ -643,7 +668,7 @@ class ObjectActivityAttributor:
             # since it is not movement, erases it.
             role = ObjectActivityRole.SCENE_CONTEXT
             confidence = 0.8
-            reasons = ("sparse_jitter_on_known_scene_context",)
+            reasons = (SPARSE_JITTER_SCENE_CONTEXT_REASON,)
             refresh_box = footprint_box
         elif motion.credible_movement:
             role = ObjectActivityRole.ACTIVE
@@ -671,6 +696,7 @@ class ObjectActivityAttributor:
             memory_match
             and memory_sightings >= KNOWN_SUBJECT_JITTER_MIN_PRIOR_SIGHTINGS
             and not motion.robust_new_appearance
+            and not motion.newly_appeared
             and not self._raw_movement(observation, motion, raw_displacement)
         ):
             role = ObjectActivityRole.SCENE_CONTEXT
@@ -847,7 +873,7 @@ class ObjectActivityAttributor:
         matched = [
             subject
             for subject in candidates
-            if _center_offset(subject.box, box) <= jitter_allowance
+            if _center_offset(subject.box, box) <= _footprint_offset_bound(subject.box, jitter_allowance)
             and _sides_within(subject.box, box, KNOWN_SUBJECT_FOOTPRINT_MAX_SIDE_RATIO)
         ]
         if not matched:

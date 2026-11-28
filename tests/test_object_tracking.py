@@ -2523,6 +2523,26 @@ class TrackingMotionPromotionTest(unittest.TestCase):
             [self.demoted(activity_role="scene_context")], self.tracking(self.drifting()),
         ), {})
 
+    def test_whole_session_travel_promotes_a_subject_never_proven_still(self) -> None:
+        # Scene context inferred without a still sighting (an established
+        # subject that was not credibly moving, or absorbed jitter) yields to
+        # a confirmed track that drove away. A sighting proven still, or one
+        # recorded without its reasons, does not.
+        for reasons, promoted in (
+            (["established_scene_context_without_credible_movement"], True),
+            (["sparse_jitter_on_known_scene_context"], True),
+            (["repeated_stable_scene_context"], False),
+            (None, False),
+        ):
+            with self.subTest(reasons=reasons):
+                item = self.demoted(label="car", activity_role="scene_context")
+                if reasons is not None:
+                    item["activity_evidence"] = {"reasons": reasons}
+                promotions = tracking_motion_promotions(
+                    [item], self.tracking(self.drifting(), label="car"),
+                )
+                self.assertEqual(bool(promotions), promoted)
+
     def test_repeated_fast_transit_qualifies_on_supported_excursion(self) -> None:
         """Repeated crossings retain meaningful extent after temporal filtering."""
         centers = [

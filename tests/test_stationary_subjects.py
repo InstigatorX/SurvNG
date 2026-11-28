@@ -1096,3 +1096,18 @@ def test_semantic_rescue_follows_the_exemption(label, exempt, rescued):
             object(), [candidate], {}, {}, stationary_suppressed=attributor.suppresses_stationary,
         )
     assert candidate["semantic_rescue_admitted"] is rescued
+
+
+def test_a_sightings_column_with_repeated_events_counts_each_once(tmp_path):
+    store = EventStore(tmp_path)
+    store.save_scene_context("gate", {
+        "label": "car", "box": (0.1, 0.1, 0.3, 0.3), "first_seen_epoch": 1000.0,
+        "last_seen_epoch": 1060.0, "sightings": ["one"] * 6 + ["two"],
+        "sighting_epochs": {"one": 1000.0, "two": 1060.0},
+    })
+    assert store.load_scene_context("gate")[0]["sightings"] == ["one", "two"]
+    query = dict(camera_id="gate", label="car", box=(0.1, 0.1, 0.3, 0.3), event_key="three",
+                 observed_at_epoch=1120.0, min_iou=0.72, ttl_seconds=7200.0)
+    assert store.scene_context_memory("gate").match(**query)[:2] == (True, 2)
+    with store._connect() as conn:
+        assert store.scene_context_snapshot(conn, "gate").match(**query)[:2] == (True, 2)

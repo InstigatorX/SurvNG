@@ -87,6 +87,19 @@ def stationary_object_policy(value: str | None) -> StationaryObjectPolicy:
     return _POLICIES.get(str(value or "balanced").strip().lower(), _POLICIES["balanced"])
 
 
+# Scene context inferred without a still sighting in the event: a
+# well-established subject that was not credibly moving, or jitter absorbed on
+# its footprint. Stronger movement evidence, such as a confirmed whole-session
+# track that travelled, overrides these; it does not override a sighting
+# proven still.
+ESTABLISHED_SCENE_CONTEXT_REASON = "established_scene_context_without_credible_movement"
+SPARSE_JITTER_SCENE_CONTEXT_REASON = "sparse_jitter_on_known_scene_context"
+UNPROVEN_STILLNESS_REASONS = frozenset({
+    ESTABLISHED_SCENE_CONTEXT_REASON,
+    SPARSE_JITTER_SCENE_CONTEXT_REASON,
+})
+
+
 # A still person is often the point of a camera: someone waiting at a door,
 # or sitting in a room. ``stationary_person_suppression`` decides whether a
 # person proven to be stationary scene context is still suppressed. The role

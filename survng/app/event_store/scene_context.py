@@ -96,7 +96,8 @@ class EventStoreSceneContextMixin:
                 sightings = []
             if not isinstance(sightings, list):
                 sightings = []
-            keys = [str(item) for item in sightings]
+            # A repeated event is one sighting, however the row was written.
+            keys = list(dict.fromkeys(str(item) for item in sightings))
             subjects.append(SceneContextSubject(
                 label=str(row["label"]),
                 box=(float(row["box_x1"]), float(row["box_y1"]), float(row["box_x2"]), float(row["box_y2"])),
@@ -125,7 +126,8 @@ class EventStoreSceneContextMixin:
                 sightings = []
             if not isinstance(sightings, list):
                 sightings = []
-            keys = [str(item) for item in sightings]
+            # A repeated event is one sighting, however the row was written.
+            keys = list(dict.fromkeys(str(item) for item in sightings))
             loaded.append({
                 "id": int(row["id"]),
                 "label": row["label"],
