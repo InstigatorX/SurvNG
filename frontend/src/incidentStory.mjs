@@ -318,8 +318,9 @@ export function estimatedBox(object, cameraId, epoch) {
 
 // Camera views whose analysis has not finished. A missing object there does
 // not mean it was absent, so the first screen says which views are affected.
-// "Pending" is only said where recorded analysis is still expected: not for
-// motion with no objects, and not for a view that was only ever sampled.
+// "Pending" is only said where recorded analysis is expected: not for a view
+// that was only ever sampled, and not for motion that never had a job (its
+// reason is still the one an episode is created with).
 export function coverageChips(incident, cameraName) {
   const chips = [];
   const hasObjects = Boolean(incident?.scene_objects?.length || incident?.labels?.length || incident?.has_objects);
@@ -327,8 +328,9 @@ export function coverageChips(incident, cameraName) {
     const state = episode.coverage?.state;
     if (!state || ["sampled", "historical"].includes(state)) continue;
     const gaps = episode.coverage?.gaps?.length;
-    const sampledOnly = String(episode.coverage?.reason || "").startsWith("sampled detector frames");
-    if (!gaps && (!hasObjects || sampledOnly)) continue;
+    const reason = String(episode.coverage?.reason || "");
+    const notComing = reason.startsWith("sampled detector frames") || (reason === "analysis pending" && !hasObjects);
+    if (!gaps && notComing) continue;
     chips.push({ tone: "warn", text: `${cameraName(episode.camera_id)} analysis ${gaps ? "incomplete" : "pending"}` });
   }
   return chips.filter((chip, index) => chips.findIndex((other) => other.text === chip.text) === index);

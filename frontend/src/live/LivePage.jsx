@@ -31,7 +31,7 @@ import { cameraCaptureConnectivity, cameraTileLiveState } from "../cameraConnect
 import { liveFramingStyle } from "../liveFraming.mjs";
 import { focusLiveMosaicLayout, focusedLiveCameraId as validFocusCameraId } from "../liveFocusLayout.mjs";
 import { detectionStatus, recordingStatus } from "../liveCameraStatus.mjs";
-import { createIncidentPageCache, incidentDetailQuery, incidentThumbnailPageSize, incidentsNewestFirst, retainFocusedIncident } from "../incidentNavigation.mjs";
+import { createIncidentPageCache, encodeIncidentFilterValue, incidentDetailQuery, incidentThumbnailPageSize, incidentsNewestFirst, retainFocusedIncident } from "../incidentNavigation.mjs";
 import { appUrl, incidentRecordingContext, recordingsHref, fetch } from "../shared/api.js";
 import { INCIDENT_REFRESH_FALLBACK_MS, MOTION_WEBRTC_HOLD_MS } from "../shared/constants.js";
 import { formatTimeOnly } from "../shared/format.js";
@@ -1480,7 +1480,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
       });
       if (incidentCameraFilter !== "all") query.set("camera_id", incidentCameraFilter);
       if (incidentObjectFilter !== "all") query.set("object_label", incidentObjectFilter);
-      if (incidentZoneFilter !== "all") query.set("zone", incidentZoneFilter);
+      if (incidentZoneFilter !== "all") query.set("zone", encodeIncidentFilterValue(incidentZoneFilter));
       return query.toString();
     }
     async function loadIncidentFeed() {

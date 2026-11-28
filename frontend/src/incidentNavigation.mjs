@@ -607,17 +607,22 @@ export function incidentGalleryWanted(index, current = INCIDENT_GALLERY_CHUNK) {
 }
 
 // A multi-value filter is "all" or the chosen values joined by commas, the form the search endpoint reads.
-// A comma inside a value (a zone called "Driveway, left") travels as %2C so it is not taken for a separator.
+// A comma inside a value (a zone called "Driveway, left") travels as %2C so it is not taken for a
+// separator, and a percent sign as %25 so that reading it back gives the same value.
+export function encodeIncidentFilterValue(value) {
+  return String(value).replaceAll("%", "%25").replaceAll(",", "%2C");
+}
+
 export function incidentFilterValues(filter) {
   return filter && filter !== "all"
-    ? [...new Set(String(filter).split(",").map((value) => value.trim().replaceAll("%2C", ",")).filter(Boolean))] : [];
+    ? [...new Set(String(filter).split(",").map((value) => value.trim().replaceAll("%2C", ",").replaceAll("%25", "%")).filter(Boolean))] : [];
 }
 
 export function toggleIncidentFilterValue(filter, value) {
   const chosen = incidentFilterValues(filter);
   const key = String(value);
   const next = chosen.includes(key) ? chosen.filter((item) => item !== key) : [...chosen, key];
-  return next.length ? next.sort().map((item) => item.replaceAll(",", "%2C")).join(",") : "all";
+  return next.length ? next.sort().map(encodeIncidentFilterValue).join(",") : "all";
 }
 
 // Keep the object already shown when a re-read returns the same incident

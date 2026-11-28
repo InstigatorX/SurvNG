@@ -300,9 +300,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     return override === undefined ? incident.review_verdict || null : override ? "reviewed" : null;
   };
   const reviewSavesRef = useRef(new Map());
+  const reviewConfirmedRef = useRef(new Map());
   async function changeReview(incident, checked) {
     const key = String(incident.id);
-    const before = reviewOverridesRef.current[key];
     setReviewError("");
     setReviewOverrides((current) => ({ ...current, [key]: checked }));
     // Saves for one incident go in the order they were asked for.
@@ -311,17 +311,20 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
         method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ verdict: checked ? "reviewed" : null }),
       });
       if (!response.ok) throw new Error(response.status === 403 ? "Only an administrator can mark incidents as reviewed." : "Could not save the review mark. Try again.");
+      reviewConfirmedRef.current.set(key, checked);
     });
     const settled = save.catch(() => {});
     reviewSavesRef.current.set(key, settled);
     try {
       await save;
     } catch (failure) {
-      // Back to what it showed before this change, unless a later change has replaced it.
+      // Back to the last mark the server accepted here, or else the listed one,
+      // unless a later change has replaced this one.
+      const confirmed = reviewConfirmedRef.current.get(key);
       setReviewOverrides((current) => {
         if (current[key] !== checked) return current;
         const next = { ...current };
-        if (before === undefined) delete next[key]; else next[key] = before;
+        if (confirmed === undefined) delete next[key]; else next[key] = confirmed;
         return next;
       });
       setReviewError(failure.message || "Could not save the review mark. Try again.");
@@ -353,11 +356,12 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
           method: "PUT", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ incident_ids: batch.map((incident) => incident.incident_id || incident.id), verdict: checked ? "reviewed" : null }),
         });
-        if (!response.ok) throw new Error(response.status === 403 ? "Only an administrator can mark incidents as reviewed." : "failed");
+        if (!response.ok) throw Object.assign(new Error("refused"), { forbidden: response.status === 403 });
+        for (const incident of batch) reviewConfirmedRef.current.set(String(incident.id), checked);
         setReviewOverrides((current) => ({ ...current, ...Object.fromEntries(batch.map((incident) => [String(incident.id), checked])) }));
       }
     } catch (failure) {
-      setReviewError(failure.message !== "failed" && failure.message ? failure.message
+      setReviewError(failure?.forbidden ? "Only an administrator can mark incidents as reviewed."
         : saved ? `Could not save all the review marks. ${saved} of ${shown.length} were saved.` : "Could not save the review marks. Nothing was changed.");
     } finally {
       if (saved) refreshIncidentEvidence(true);
@@ -368,7 +372,8 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   // A mark the list now agrees with no longer needs remembering here.
   useEffect(() => {
     setReviewOverrides((current) => {
-      const settled = incidents.filter((incident) => current[String(incident.id)] === REVIEWED_VERDICTS.has(incident.review_verdict)
+      const settled = incidents.filter((incident) => !reviewSavesRef.current.has(String(incident.id))
+        && current[String(incident.id)] === REVIEWED_VERDICTS.has(incident.review_verdict)
         && (current[String(incident.id)] || !incident.review_verdict));
       if (!settled.length) return current;
       const next = { ...current };
@@ -855,6 +860,13 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
           }
         }
         while (items.length < galleryWanted) {
+          if (reviewFilter !== "all" && reviewSavesRef.current.size) {
+            // A mark still being saved has not left the server's list yet. Wait
+            // for it, so the position counts the list as it will be read.
+            await Promise.all([...reviewSavesRef.current.values()]);
+            if (cancelled) return;
+            offset = Math.min(offset, items.length - departed(items));
+          }
           if (payload && offset >= Number(payload.total || 0)) break;
           const limit = Math.min(100, galleryWanted - items.length);
           const ahead = galleryAheadRef.current;
@@ -1045,7 +1057,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       if (keyEvent.defaultPrevented || tabletInspectorOpen) return;
       // Escape leaves the viewer for the gallery, the page's home.
       // Escape in a field, or one that closes something else, is not a request to leave.
-      const typing = keyEvent.target instanceof Element && keyEvent.target.closest("input, select, textarea, [contenteditable], [role='dialog'], [aria-modal='true']");
+      const typing = keyEvent.target instanceof Element && keyEvent.target.closest("input:not([type='checkbox'], [type='radio'], [type='range'], [type='button']), select, textarea, [contenteditable], [role='dialog'], [aria-modal='true']");
       if (keyEvent.key === "Escape" && !typing && !mobileView && !galleryExpanded && !selectedEvent) {
         keyEvent.preventDefault();
         changeGallery(true);
@@ -1288,9 +1300,16 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
   );
   // Marking everything shown changes shared state for many incidents, so it asks first.
   const shownCount = visibleIncidents.length;
+  // Closing the prompt puts keyboard focus back on the group's first usable button.
+  const bulkGroupRef = useRef(null);
+  const bulkWasOpenRef = useRef(false);
+  useEffect(() => {
+    if (bulkWasOpenRef.current && !bulkReview) (bulkGroupRef.current?.querySelector("button:not(:disabled)") || bulkGroupRef.current)?.focus();
+    bulkWasOpenRef.current = Boolean(bulkReview);
+  }, [bulkReview]);
   const bulkCount = { reviewed: bulkTargets("reviewed").length, unreviewed: bulkTargets("unreviewed").length };
   const bulkReviewControl = semanticIncidentActive ? null : (
-    <div className="incident-bulk-review" role="group" aria-label="Mark all shown">
+    <div className="incident-bulk-review" role="group" aria-label="Mark all shown" ref={bulkGroupRef} tabIndex={-1}>
       {bulkReview ? <>
         <span>Mark {bulkCount[bulkReview]} shown as {bulkReview}?</span>
         <button key="confirm" type="button" className="primary" disabled={bulkBusy || !bulkCount[bulkReview]} onClick={() => void markAllShown(bulkReview)}>{bulkBusy ? "Saving…" : "Confirm"}</button>

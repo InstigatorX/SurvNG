@@ -70,14 +70,14 @@ def _with_image_versions(manager: Any, incidents: list[dict[str, Any]]) -> list[
     """Name the version of each card's picture so the browser can keep it.
 
     The public snapshot_path is only a marker, so the file comes from the
-    private cover_file a card carries, or from the stored observation or event
+    private _cover_file a card carries, or from the stored observation or event
     behind the cover. The version must be of the file the cover's URL serves.
     """
     storage_dir = getattr(manager, "storage_dir", None)
     media_storage = getattr(manager, "media_storage", None)
     for incident in incidents:
-        known = "cover_file" in incident
-        raw_path = str(incident.pop("cover_file", "") or "")
+        known = "_cover_file" in incident
+        raw_path = str(incident.pop("_cover_file", "") or "")
         if storage_dir is None or not incident.get("snapshot_path"):
             continue
         if not known:

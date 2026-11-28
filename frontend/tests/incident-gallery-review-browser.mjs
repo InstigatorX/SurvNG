@@ -42,6 +42,8 @@ function world(total) {
       return route.fulfill({ json: {} });
     }
     if (path.endsWith("/review")) {
+      if (state.reviewDelay) await new Promise((resolve) => setTimeout(resolve, state.reviewDelay));
+      if (state.failReviews) return route.fulfill({ status: 500, json: {} });
       const id = decodeURIComponent(path.split("/").at(-2));
       incidents.find((item) => item.id === id).review_verdict = route.request().postDataJSON().verdict;
       return route.fulfill({ json: {} });
@@ -59,7 +61,6 @@ function world(total) {
   };
   return state;
 }
-const shownIds = (page) => page.locator("#incident-results .live-activity-item .live-activity-select").evaluateAll((links) => links.map((link) => link.closest(".live-activity-item").dataset.incidentId || link.getAttribute("href") || ""));
 
 try {
   // Desktop.
@@ -83,11 +84,31 @@ try {
     await page.waitForTimeout(150);
   }
   assert.match(await status.textContent(), /for this day/);
-  const count = await tiles.count();
-  assert.ok(count === 200 || count === 197, `every unreviewed incident is shown (${count})`);
+  // Each incident has its own minute, so the labels tell them apart: all 197 still to review are there, once each.
+  const unmarked = await page.locator("#incident-results input[type=checkbox]:not(:checked)").evaluateAll((boxes) => boxes.map((box) => box.getAttribute("aria-label")));
+  assert.equal(unmarked.length, 197, "every unreviewed incident is shown");
+  assert.equal(new Set(unmarked).size, 197, "and none twice");
   assert.ok(desk.searches.some((search) => search.offset > 0 && search.offset % 60 !== 0), "later chunks start where the server's list now starts");
-  // Bulk marking sends only what still needs it.
   await list.evaluate((element) => { element.scrollTop = 0; });
+
+  // Two failed saves in a row leave the box as the server has it, not ticked.
+  desk.failReviews = true;
+  desk.reviewDelay = 300;
+  const box = tiles.nth(5).getByRole("checkbox");
+  await box.click();
+  await box.click();
+  await page.locator(".incident-gallery-error").waitFor();
+  await page.waitForTimeout(900);
+  assert.equal(await box.isChecked(), false, "a mark that was never saved is not shown as saved");
+  desk.failReviews = false;
+  desk.reviewDelay = 0;
+  await page.mouse.move(5, 5);
+
+  // Marking all shown leaves keyboard focus in the group when the prompt closes.
+  const bulk = page.getByRole("group", { name: "Mark all shown" });
+  await bulk.getByRole("button", { name: "Reviewed", exact: true }).click();
+  await bulk.getByRole("button", { name: "Cancel" }).click();
+  assert.ok(await bulk.evaluate((group) => group.contains(document.activeElement)), "focus returns to the group");
 
   // A filter switched there and back while the first answer is still on its way does not leave the list dimmed.
   desk.delay = 500;

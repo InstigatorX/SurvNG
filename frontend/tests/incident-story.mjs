@@ -122,6 +122,9 @@ assert.deepEqual(coverageChips({ episodes: [{ camera_id: "front-door", coverage:
 const waiting = { camera_id: "side-yard", coverage: { state: "incomplete", reason: "analysis pending", gaps: [] } };
 assert.deepEqual(coverageChips({ episodes: [waiting] }, cameraName), []);
 assert.deepEqual(coverageChips({ labels: ["person"], episodes: [waiting] }, cameraName), [{ tone: "warn", text: "Side Yard analysis pending" }]);
+// Motion with recorded analysis queued is waiting on it like anything else.
+assert.deepEqual(coverageChips({ episodes: [{ camera_id: "side-yard", coverage: { state: "incomplete", reason: "recorded analysis queued", gaps: [] } }] }, cameraName),
+  [{ tone: "warn", text: "Side Yard analysis pending" }]);
 assert.deepEqual(coverageChips({ labels: ["person"], episodes: [{ camera_id: "side-yard", coverage: { state: "incomplete", gaps: [],
   reason: "sampled detector frames; continuous coverage not established" } }] }, cameraName), []);
 

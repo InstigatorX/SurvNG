@@ -274,11 +274,11 @@ def test_search_names_the_version_of_each_cover_file(tmp_path):
     items = search()
     assert [item['snapshot_path'] for item in items] == ['', 'available', 'available']
     assert [item.get('image_version') for item in items] == [None, None, image_version(picture)]
-    assert all('cover_file' not in item for item in items)
+    assert all('_cover_file' not in item for item in items)
     # A People filter reads full incidents; they carry the same version and review mark.
     (person,) = search(person_id=7)
     assert person['id'] == reviewed and person['image_version'] == image_version(picture)
-    assert person['review_verdict'] == 'reviewed' and 'cover_file' not in person
+    assert person['review_verdict'] == 'reviewed' and '_cover_file' not in person
     before = items[2]['image_version']
     picture.write_bytes(b'second, longer')
     assert search()[2]['image_version'] != before
@@ -401,7 +401,8 @@ def test_complete_incident_reactivates_on_fresh_activity(tmp_path):
 def test_a_filter_value_may_contain_a_comma(tmp_path):
     from survng.app.event_store.scenes import filter_values
     assert filter_values('gate, door,,gate') == ['gate', 'door', 'gate, door,,gate']
-    assert filter_values('Driveway%2C left,Porch') == ['Driveway, left', 'Porch', 'Driveway%2C left,Porch']
+    assert filter_values('Driveway%2C left,Porch') == ['Driveway, left', 'Porch']
+    assert filter_values('50%252C off') == ['50%2C off', '50%252C off'] and filter_values('50%25 off,Porch') == ['50% off', 'Porch']
     assert filter_values('gate') == ['gate'] and filter_values('') == [] and filter_values(None) == []
     store = EventStore(tmp_path)
     add(store, 1000, [observation(1000, temporal_observations=2, zones=['Driveway, left'])])
@@ -414,3 +415,15 @@ def test_a_filter_value_may_contain_a_comma(tmp_path):
     summaries = [{'camera_id': 'gate', 'zones': ['Driveway, left']}, {'camera_id': 'gate', 'zones': ['Porch']}]
     assert len(_filter_incident_summaries(summaries, 'all', zone='Driveway, left')) == 1
     assert len(_filter_incident_summaries(summaries, 'all', zone='Driveway%2C left,Porch')) == 2
+
+
+def test_a_later_detection_does_not_hide_queued_recorded_analysis(tmp_path):
+    store = EventStore(tmp_path)
+    event = add(store, 1000, [observation(1000, temporal_observations=2)])
+    def reason():
+        return store.scene_incident(event_id=event['id'])['episodes'][0]['coverage']['reason']
+    assert reason().startswith('sampled detector frames')
+    store.enqueue_scene_tracking(event['id'], 995, 1030)
+    assert reason() == 'recorded analysis queued'
+    add(store, 1005, [observation(1005, temporal_observations=2)])
+    assert reason() == 'recorded analysis queued'
