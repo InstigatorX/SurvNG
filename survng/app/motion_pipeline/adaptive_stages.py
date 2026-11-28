@@ -213,10 +213,11 @@ _STATIONARY_REGION_EVIDENCE_REASONS = frozenset({
     "persistent_scene_motion",
 })
 # A box matches a region only by real overlap. IoU >= 0.3 still admits the
-# same blob re-detected with its box shifted by about a third of its size on
+# same blob re-detected with its box shifted by up to about 30% of its size on
 # both axes, but never a box that merely lies nearby, and never one more than
 # about 3.3 times larger or smaller than the region.
 _STATIONARY_REGION_MIN_IOU = 0.3
+_STATIONARY_REGION_LIMIT = 64
 # Only a comparably sized box moves the remembered geometry. A matching box
 # much larger or smaller still counts as evidence but cannot inflate or
 # shrink the region, so repeated large matches cannot make it catch unrelated
@@ -1442,27 +1443,41 @@ class AdaptiveMotionScoringStage:
         box: tuple[float, float, float, float],
         observed_at: float,
     ) -> None:
+        best: tuple[float, float, _StationaryRegion] | None = None
         for region in regions:
             iou, area_ratio = cls._stationary_region_overlap(box, region.box)
-            if iou >= _STATIONARY_REGION_MIN_IOU:
-                if area_ratio >= _STATIONARY_REGION_BLEND_MIN_AREA_RATIO:
-                    region.box = tuple(
-                        old * 0.75 + new * 0.25
-                        for old, new in zip(region.box, box)
-                    )
-                # Count each evaluation once, so several tracks or a replayed
-                # window cannot confirm a region within a single cycle.
-                if observed_at > region.last_seen:
-                    region.last_seen = observed_at
-                    region.hits += 1
-                return
+            if iou >= _STATIONARY_REGION_MIN_IOU and (best is None or iou > best[0]):
+                best = (iou, area_ratio, region)
+        if best is not None:
+            _iou, area_ratio, region = best
+            if area_ratio >= _STATIONARY_REGION_BLEND_MIN_AREA_RATIO:
+                region.box = tuple(
+                    old * 0.75 + new * 0.25
+                    for old, new in zip(region.box, box)
+                )
+            # Count each evaluation once, so several tracks or a replayed
+            # window cannot confirm a region within a single cycle.
+            if observed_at > region.last_seen:
+                region.last_seen = observed_at
+                region.hits += 1
+            return
         regions.append(_StationaryRegion(
             box=box,
             first_seen=observed_at,
             last_seen=observed_at,
         ))
-        if len(regions) > 64:
-            del regions[:len(regions) - 64]
+        excess = len(regions) - _STATIONARY_REGION_LIMIT
+        if excess > 0:
+            # Evict the oldest unconfirmed regions first, so a burst of
+            # one-off rejections cannot push out a confirmed region.
+            evicted = {
+                id(region)
+                for region in sorted(
+                    regions,
+                    key=lambda region: (region.confirmed, region.last_seen),
+                )[:excess]
+            }
+            regions[:] = [region for region in regions if id(region) not in evicted]
 
 
 class IlluminationChangeFilterStage:

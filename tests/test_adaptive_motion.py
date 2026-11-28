@@ -943,6 +943,53 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
             (0.5, 0.5, 0.56, 0.56), regions,
         ))
 
+    def test_stationary_region_needs_hits_over_minimum_age(self) -> None:
+        box = (0.4, 0.4, 0.5, 0.5)
+        burst = [_StationaryRegion(box=box, first_seen=100.0, last_seen=100.0)]
+        for observed_at in (101.0, 102.0, 103.0, 110.0):
+            AdaptiveMotionScoringStage._remember_stationary_region(burst, box, observed_at)
+        # Several tracks in one evaluation, or a replayed window, count once.
+        sparse = [_StationaryRegion(box=box, first_seen=100.0, last_seen=100.0)]
+        for _ in range(4):
+            AdaptiveMotionScoringStage._remember_stationary_region(sparse, box, 116.0)
+
+        self.assertEqual(burst[0].hits, 5)
+        self.assertFalse(burst[0].confirmed)
+        self.assertEqual(sparse[0].hits, 2)
+        self.assertFalse(sparse[0].confirmed)
+        AdaptiveMotionScoringStage._remember_stationary_region(sparse, box, 117.0)
+        self.assertTrue(sparse[0].confirmed)
+
+    def test_stationary_evidence_refreshes_the_best_matching_region(self) -> None:
+        loose = _StationaryRegion(
+            box=(0.4, 0.4, 0.5, 0.5), first_seen=100.0, last_seen=100.0,
+        )
+        exact = _StationaryRegion(
+            box=(0.42, 0.4, 0.52, 0.5), first_seen=90.0, last_seen=110.0, hits=3,
+        )
+        regions = [loose, exact]
+
+        AdaptiveMotionScoringStage._remember_stationary_region(
+            regions, (0.42, 0.4, 0.52, 0.5), 130.0,
+        )
+
+        self.assertEqual((loose.hits, loose.last_seen), (1, 100.0))
+        self.assertEqual((exact.hits, exact.last_seen), (4, 130.0))
+
+    def test_region_cap_evicts_unconfirmed_regions_first(self) -> None:
+        confirmed = _StationaryRegion(
+            box=(0.0, 0.0, 0.01, 0.01), first_seen=80.0, last_seen=100.0, hits=3,
+        )
+        regions = [confirmed]
+        for index in range(70):
+            x = 0.02 + index * 0.013
+            AdaptiveMotionScoringStage._remember_stationary_region(
+                regions, (x, 0.5, x + 0.01, 0.51), 101.0 + index * 0.1,
+            )
+
+        self.assertEqual(len(regions), 64)
+        self.assertIn(confirmed, regions)
+
     def test_jittered_stationary_blob_still_matches_after_track_id_reset(self) -> None:
         scorer = stationary_memory_scorer()
         try:
