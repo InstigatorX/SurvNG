@@ -1435,12 +1435,17 @@ class EventStoreSceneMixin:
         Deciding it reads and scores every event of the incident, which is most
         of the work of listing busy incidents, and the gallery lists the same
         incidents again on every refresh, filter change and scroll. The answer
-        depends only on the stored event rows, so it is kept under those rows
-        themselves: any change to an event is a different key.
+        depends only on the stored event rows, so it is kept under a digest of
+        those rows: any change to an event is a different key.
         """
         if not members:
             return None, {}
-        key = tuple(tuple(event) for event in members)
+        # A digest, not the rows: objects_json can run to kilobytes per event.
+        digest = hashlib.blake2b(digest_size=16)
+        for event in members:
+            digest.update(repr(tuple(event)).encode("utf-8", "surrogatepass"))
+            digest.update(b"\x00")
+        key = digest.digest()
         cache = getattr(self, "_card_cover_cache", None)
         if cache is None:
             cache = self._card_cover_cache = {}
@@ -1570,14 +1575,17 @@ class EventStoreSceneMixin:
                 snapshot_observation_id=cover["id"]
                 snapshot_url=f"/api/incidents/observations/{snapshot_observation_id}/snapshot"
                 snapshot_path="available"
+                cover_file=str(cover["snapshot_path"] or "")
                 snapshot_captured_at=_iso(cover["captured_epoch"])
                 cover_objects=_card_cover_objects(_json(selected["objects"]))
             elif representative is not None and representative["snapshot_path"]:
                 snapshot_path="available"
+                cover_file=str(representative["snapshot_path"])
                 snapshot_captured_at=captured_by.get(representative["id"])
                 cover_objects=_card_cover_objects(representative["objects_json"])
             else:
                 snapshot_path=""
+                cover_file=""
                 snapshot_captured_at=None
                 cover_objects=[]
             cover_event_id=int(representative["id"]) if representative is not None and snapshot_path else None
@@ -1601,6 +1609,9 @@ class EventStoreSceneMixin:
                 "snapshot_path":snapshot_path,
                 "snapshot_url":snapshot_url,
                 "snapshot_observation_id":snapshot_observation_id,
+                # Where the cover is stored. Private: the caller names the file's
+                # version from it and removes it before the card is sent.
+                "cover_file":cover_file,
                 **({"snapshot_captured_at":snapshot_captured_at} if snapshot_captured_at else {}),
                 "labels":labels,
                 "zones":sorted(zones_by.get(incident_id, ())),

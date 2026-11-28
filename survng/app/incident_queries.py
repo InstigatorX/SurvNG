@@ -67,17 +67,31 @@ def _with_speech(manager: Any, incidents: list[dict[str, Any]]) -> list[dict[str
 
 
 def _with_image_versions(manager: Any, incidents: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Name the version of each card's picture so the browser can keep it."""
+    """Name the version of each card's picture so the browser can keep it.
+
+    The public snapshot_path is only a marker, so the file comes from the
+    private cover_file a card carries, or from the stored observation or event
+    behind the cover. The version must be of the file the cover's URL serves.
+    """
     storage_dir = getattr(manager, "storage_dir", None)
-    if storage_dir is None:
-        return incidents
     media_storage = getattr(manager, "media_storage", None)
     for incident in incidents:
-        if not incident.get("snapshot_path"):
+        known = "cover_file" in incident
+        raw_path = str(incident.pop("cover_file", "") or "")
+        if storage_dir is None or not incident.get("snapshot_path"):
+            continue
+        if not known:
+            observation_id = incident.get("snapshot_observation_id")
+            source = (manager.events.scene_observation(str(observation_id)) if observation_id
+                      else manager.events.get(int(incident.get("representative_event_id") or 0)))
+            raw_path = str((source or {}).get("snapshot_path") or "")
+        if not raw_path:
             continue
         try:
-            incident["image_version"] = image_version(event_snapshot_path(storage_dir, incident, media_storage))
+            incident["image_version"] = image_version(
+                event_snapshot_path(storage_dir, {"snapshot_path": raw_path}, media_storage))
         except (OSError, ValueError):
+            # No readable file: the card goes without a version and its picture is revalidated.
             continue
     return incidents
 
@@ -379,7 +393,7 @@ class IncidentQueryService:
             ),
         }
         return {
-            "items": _with_speech(manager, [_incident_list_payload(item) for item in page]),
+            "items": _with_image_versions(manager, _with_speech(manager, [_incident_list_payload(item) for item in page])),
             "limit": bounded_limit,
             "offset": bounded_offset,
             "has_more": has_more,
@@ -470,7 +484,11 @@ class IncidentQueryService:
                 if len(batch)<100:
                     break
                 cursor += len(batch)
-            page_summaries = [manager.events.scene_incident(incident_id) for incident_id in selected]
+            # Full incidents do not carry the review mark that cards do.
+            page_summaries = [
+                {**incident, "review_verdict": manager.events.incident_review(incident["id"])["verdict"]}
+                for incident in (manager.events.scene_incident(incident_id) for incident_id in selected)
+            ]
         else:
             total = manager.events.count_scene_incidents(**filters)
             page_summaries = manager.events.list_scene_incident_cards(**filters,limit=bounded_limit,offset=bounded_offset)

@@ -250,22 +250,38 @@ def test_search_filters_by_review_state_and_marks_many_at_once(tmp_path):
         store.set_incident_reviews(ids[:1], 'maybe')
 
 
-def test_cards_name_the_version_of_their_picture(tmp_path):
+def test_search_names_the_version_of_each_cover_file(tmp_path):
     from survng.app.image_cache import image_version
-    from survng.app.incident_queries import _with_image_versions
     picture = tmp_path / 'snapshots' / 'cover.jpg'
     picture.parent.mkdir()
     picture.write_bytes(b'first')
-    manager = SimpleNamespace(storage_dir=tmp_path, media_storage=None)
-    cards = _with_image_versions(manager, [{'id': 'a', 'snapshot_path': 'snapshots/cover.jpg'}, {'id': 'b', 'snapshot_path': ''},
-                                           {'id': 'c', 'snapshot_path': 'snapshots/missing.jpg'}])
-    assert cards[0]['image_version'] == image_version(picture)
-    assert 'image_version' not in cards[1] and 'image_version' not in cards[2]
-    before = cards[0]['image_version']
+    store = EventStore(tmp_path)
+    def add_pictured(at, path):
+        return store.add_event('gate', 'motion', created_at=datetime.fromtimestamp(at, timezone.utc).isoformat(),
+                               objects_json=json.dumps([observation(at, temporal_observations=2)]), snapshot_path=path)
+    seen = add_pictured(1000, 'snapshots/cover.jpg')
+    add_pictured(2000, 'snapshots/missing.jpg')
+    add(store, 3000, [observation(3000, temporal_observations=2)])
+    reviewed = store.scene_incident(event_id=seen['id'])['id']
+    store.set_incident_review(reviewed, 'reviewed')
+    faces = [{'event_id': seen['id'], 'person_id': 7}]
+    manager = SimpleNamespace(events=store, storage_dir=tmp_path, media_storage=None,
+                              face_identity_observations=lambda ids: [face for face in faces if face['event_id'] in ids])
+    day = datetime.fromtimestamp(1000, timezone.utc).strftime('%Y-%m-%d')
+    def search(**extra):
+        return IncidentQueryService.search(manager, day=day, time_zone='UTC', event_type='all', limit=10, **extra)['items']
+    # The stored cards say only that a picture exists; the version is of the file itself.
+    items = search()
+    assert [item['snapshot_path'] for item in items] == ['', 'available', 'available']
+    assert [item.get('image_version') for item in items] == [None, None, image_version(picture)]
+    assert all('cover_file' not in item for item in items)
+    # A People filter reads full incidents; they carry the same version and review mark.
+    (person,) = search(person_id=7)
+    assert person['id'] == reviewed and person['image_version'] == image_version(picture)
+    assert person['review_verdict'] == 'reviewed' and 'cover_file' not in person
+    before = items[2]['image_version']
     picture.write_bytes(b'second, longer')
-    assert _with_image_versions(manager, [{'snapshot_path': 'snapshots/cover.jpg'}])[0]['image_version'] != before
-    # A manager without storage (as in unit tests) simply adds nothing.
-    assert _with_image_versions(SimpleNamespace(), [{'snapshot_path': 'x.jpg'}]) == [{'snapshot_path': 'x.jpg'}]
+    assert search()[2]['image_version'] != before
 
 
 def test_rare_filter_does_not_hydrate_unmatched_history(tmp_path):

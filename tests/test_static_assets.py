@@ -80,3 +80,4 @@ def test_unhashed_files_are_compressed_but_still_revalidated(tmp_path):
 def test_accept_encoding_is_read_with_its_qualities():
     assert _accepts_gzip("gzip") and _accepts_gzip("br, gzip;q=0.5") and _accepts_gzip("*")
     assert not _accepts_gzip("") and not _accepts_gzip("br") and not _accepts_gzip("gzip;q=0") and not _accepts_gzip("gzip;q=bad")
+    assert not _accepts_gzip("gzip;q=0, *") and not _accepts_gzip("gzip;q=2") and _accepts_gzip("*;q=0, gzip")

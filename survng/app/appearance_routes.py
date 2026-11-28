@@ -502,7 +502,10 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
             cached = active_manager.image_cache.get_or_create(
                 "events", identity, build
             )
-            return revalidated_image_response(cached, "image/jpeg", request, version=s, source=snapshot_path)
+            # An object crop is drawn from the event's annotations, which can change
+            # while the file does not; only a checked revision may pin one.
+            pinned = s if (not focus_enabled or v.isdecimal()) else ""
+            return revalidated_image_response(cached, "image/jpeg", request, version=pinned, source=snapshot_path)
 
         return with_manager(response)
 

@@ -21,9 +21,13 @@ _MAXIMUM_ENTRIES = 256
 
 
 def _accepts_gzip(value: str) -> bool:
+    """Whether Accept-Encoding allows gzip; an explicit gzip entry outranks "*"."""
+    explicit: float | None = None
+    wildcard: float | None = None
     for item in value.split(","):
         coding, _, parameters = item.strip().partition(";")
-        if coding.strip().lower() not in {"gzip", "*"}:
+        coding = coding.strip().lower()
+        if coding not in {"gzip", "*"}:
             continue
         quality = 1.0
         for parameter in parameters.split(";"):
@@ -33,9 +37,14 @@ def _accepts_gzip(value: str) -> bool:
                     quality = float(raw.strip())
                 except ValueError:
                     quality = 0.0
-        if quality > 0.0:
-            return True
-    return False
+                if not 0.0 <= quality <= 1.0:
+                    quality = 0.0
+        if coding == "gzip":
+            explicit = quality
+        else:
+            wildcard = quality
+    accepted = explicit if explicit is not None else wildcard
+    return accepted is not None and accepted > 0.0
 
 
 class InterfaceStaticFiles(StaticFiles):

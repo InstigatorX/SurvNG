@@ -115,6 +115,10 @@ def test_a_request_that_pins_the_file_version_may_be_kept_for_good(tmp_path):
     # Without the version, or with one that is no longer current, it is revalidated as before.
     assert routes["event_thumbnail"](7, v="1", width=160).headers["cache-control"] == "private, no-cache"
     assert routes["event_thumbnail"](7, v="1", s="0123456789abcdef", width=160).headers["cache-control"] == "private, no-cache"
+    # An object crop follows the annotations, so it is kept only under a checked revision.
+    assert routes["event_thumbnail"](7, v="1", s=pinned, width=160, object_focus=True).headers["cache-control"] == keep
+    assert routes["event_thumbnail"](7, v="available", s=pinned, width=160, object_focus=True).headers["cache-control"] == "private, no-cache"
+    assert routes["event_thumbnail"](7, s=pinned, width=160, object_focus=True).headers["cache-control"] == "private, no-cache"
     frame = np.full((120, 240, 3), 90, dtype=np.uint8)
     assert cv2.imwrite(str(source), frame)
     import os
