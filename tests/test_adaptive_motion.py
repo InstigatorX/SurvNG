@@ -25,6 +25,74 @@ def moving_subject_frames(count: int = 10) -> list[np.ndarray]:
     return frames
 
 
+# A short contained travel path that a scorer with no stationary memory
+# qualifies (motion progress ~0.35, robust displacement ~0.033 on the balanced
+# policy), but that a remembered stationary region at (0.44, 0.4) would reject.
+QUALIFIED_SHORT_TRAVEL_PATH = (
+    (0.40, 0.4), (0.42, 0.41), (0.45, 0.4), (0.43, 0.4), (0.445, 0.4), (0.44, 0.4),
+)
+
+
+def stationary_memory_scorer():
+    return MotionPipelineFactory(build_builtin_motion_registry()).create(
+        "stationary-memory",
+        [MotionStageConfig("scoring", "adaptive_motion_score")],
+        initial_artifacts={"tracked_objects", "processed_frame_history"},
+    )
+
+
+def stationary_memory_track(
+    track_id: int,
+    path: tuple[tuple[float, float], ...],
+    started_at: float,
+    *,
+    half_size: tuple[float, float] = (0.06, 0.08),
+) -> MotionTrack:
+    half_width, half_height = half_size
+    blobs = tuple(
+        MotionBlob(
+            box=(x - half_width, y - half_height, x + half_width, y + half_height),
+            centroid=(x, y),
+            area_pixels=900,
+            area_ratio=0.016,
+            fill_ratio=0.7,
+            edge_distance=0.2,
+        )
+        for x, y in path
+    )
+    return MotionTrack(
+        track_id=track_id,
+        box=blobs[-1].box,
+        path=path,
+        observations=blobs,
+        observation_frames=tuple(range(len(blobs))),
+        active_history=tuple(True for _ in blobs),
+        changed_pixels=(),
+        changed_ratios=(),
+        first_seen=started_at,
+        last_seen=started_at + (len(blobs) - 1) * 0.2,
+        consecutive_started_at=started_at,
+        consecutive_frames=len(blobs),
+        size_history=tuple(blob.area_ratio for blob in blobs),
+    )
+
+
+def score_stationary_memory_track(scorer, track: MotionTrack, captured_at: float) -> MotionContext:
+    return scorer.process(MotionContext(
+        camera_id="stationary-memory",
+        captured_at=captured_at,
+        original_frame=None,
+        configuration={
+            "sensitivity": "balanced",
+            "sample_fps": 5.0,
+            "stationary_object_tolerance": "balanced",
+        },
+        runtime=scorer.runtime,
+        processed_frame_history=(np.zeros((10, 10), dtype=np.uint8),),
+        tracked_objects=[track],
+    ))
+
+
 class AdaptiveMotionPipelineTest(unittest.TestCase):
     def setUp(self) -> None:
         self.pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
@@ -753,68 +821,86 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         self.assertEqual(result.scoring.features["stationary_object_tolerance"], "balanced")
 
     def test_stationary_region_memory_survives_motion_track_id_reset(self) -> None:
-        scorer = MotionPipelineFactory(build_builtin_motion_registry()).create(
-            "stationary-memory",
-            [MotionStageConfig("scoring", "adaptive_motion_score")],
-            initial_artifacts={"tracked_objects", "processed_frame_history"},
-        )
-
-        def motion_track(track_id: int, path: tuple[tuple[float, float], ...], started_at: float) -> MotionTrack:
-            blobs = tuple(
-                MotionBlob(
-                    box=(x - 0.06, y - 0.08, x + 0.06, y + 0.08),
-                    centroid=(x, y),
-                    area_pixels=900,
-                    area_ratio=0.016,
-                    fill_ratio=0.7,
-                    edge_distance=0.2,
-                )
-                for x, y in path
-            )
-            return MotionTrack(
-                track_id=track_id,
-                box=blobs[-1].box,
-                path=path,
-                observations=blobs,
-                observation_frames=tuple(range(len(blobs))),
-                active_history=tuple(True for _ in blobs),
-                changed_pixels=(),
-                changed_ratios=(),
-                first_seen=started_at,
-                last_seen=started_at + (len(blobs) - 1) * 0.2,
-                consecutive_started_at=started_at,
-                consecutive_frames=len(blobs),
-                size_history=tuple(blob.area_ratio for blob in blobs),
-            )
-
-        def score(track: MotionTrack, captured_at: float) -> MotionContext:
-            return scorer.process(MotionContext(
-                camera_id="stationary-memory",
-                captured_at=captured_at,
-                original_frame=None,
-                configuration={
-                    "sensitivity": "balanced",
-                    "sample_fps": 5.0,
-                    "stationary_object_tolerance": "balanced",
-                },
-                runtime=scorer.runtime,
-                processed_frame_history=(np.zeros((10, 10), dtype=np.uint8),),
-                tracked_objects=[track],
-            ))
-
+        scorer = stationary_memory_scorer()
         try:
-            first = score(motion_track(1, ((0.44, 0.4),) * 5, 100.0), 100.8)
-            second = score(
-                motion_track(2, ((0.40, 0.4), (0.46, 0.4), (0.44, 0.4)), 102.0),
-                102.4,
+            # A region suppresses only once direct stationary evidence has
+            # recurred across separate evaluations spanning a minimum age.
+            seeds = [
+                score_stationary_memory_track(
+                    scorer,
+                    stationary_memory_track(1, ((0.44, 0.4),) * 5, captured_at - 0.8),
+                    captured_at,
+                )
+                for captured_at in (100.8, 108.8, 116.8)
+            ]
+            second = score_stationary_memory_track(
+                scorer,
+                stationary_memory_track(
+                    2, ((0.40, 0.4), (0.46, 0.4), (0.44, 0.4)), 118.0,
+                ),
+                118.4,
             )
         finally:
             scorer.close()
 
-        self.assertEqual(first.scoring.reason, "stationary_foreground")
+        self.assertEqual(
+            [seed.scoring.reason for seed in seeds],
+            ["stationary_foreground"] * 3,
+        )
         self.assertFalse(second.scoring.accepted)
         self.assertEqual(second.scoring.reason, "stationary_region")
         self.assertGreaterEqual(second.scoring.features["stationary_region_count"], 1)
+
+    def test_single_stationary_observation_does_not_suppress_credible_motion(self) -> None:
+        scorer = stationary_memory_scorer()
+        try:
+            seed = score_stationary_memory_track(
+                scorer,
+                stationary_memory_track(1, ((0.44, 0.4),) * 5, 100.0),
+                100.8,
+            )
+            later = score_stationary_memory_track(
+                scorer,
+                stationary_memory_track(2, QUALIFIED_SHORT_TRAVEL_PATH, 102.0),
+                103.0,
+            )
+        finally:
+            scorer.close()
+
+        self.assertEqual(seed.scoring.reason, "stationary_foreground")
+        self.assertTrue(later.scoring.accepted)
+        self.assertEqual(later.scoring.reason, "qualified")
+        self.assertEqual(later.scoring.features["stationary_region_count"], 0)
+
+    def test_stationary_region_rejections_do_not_keep_region_alive(self) -> None:
+        scorer = stationary_memory_scorer()
+        try:
+            for captured_at in (100.8, 108.8, 116.8):
+                score_stationary_memory_track(
+                    scorer,
+                    stationary_memory_track(1, ((0.44, 0.4),) * 5, captured_at - 0.8),
+                    captured_at,
+                )
+            # Only region rejections follow the last direct evidence at
+            # 116.8 s, so the region must expire 120 s after that sighting.
+            results = [
+                score_stationary_memory_track(
+                    scorer,
+                    stationary_memory_track(
+                        index + 2, QUALIFIED_SHORT_TRAVEL_PATH, captured_at - 1.0,
+                    ),
+                    captured_at,
+                )
+                for index, captured_at in enumerate((200.0, 310.0, 420.0))
+            ]
+        finally:
+            scorer.close()
+
+        self.assertEqual(results[0].scoring.reason, "stationary_region")
+        self.assertEqual(
+            [result.scoring.reason for result in results[1:]],
+            ["qualified", "qualified"],
+        )
 
     def test_long_running_directional_motion_remains_credible(self) -> None:
         scorer = MotionPipelineFactory(build_builtin_motion_registry()).create(

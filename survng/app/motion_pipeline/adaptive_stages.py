@@ -197,12 +197,37 @@ class _IlluminationRuntime:
             )
 
 
+# A track is rejected as stationary foreground after only a couple of frames,
+# so one such evaluation is too weak to suppress later motion at that spot. A
+# remembered region suppresses only once direct evidence (stationary_foreground
+# or persistent_scene_motion) has recurred in at least three separate
+# evaluations spanning at least 15 s: longer than a person or vehicle pausing
+# briefly, and well inside the expiry. Rejections caused by the region itself
+# never refresh it, so it expires 120 s after the last direct evidence instead
+# of sustaining itself.
+_STATIONARY_REGION_MIN_HITS = 3
+_STATIONARY_REGION_MIN_EVIDENCE_SECONDS = 15.0
+_STATIONARY_REGION_EXPIRY_SECONDS = 120.0
+_STATIONARY_REGION_EVIDENCE_REASONS = frozenset({
+    "stationary_foreground",
+    "persistent_scene_motion",
+})
+
+
 @dataclass(slots=True)
 class _StationaryRegion:
     box: tuple[float, float, float, float]
     first_seen: float
     last_seen: float
     hits: int = 1
+
+    @property
+    def confirmed(self) -> bool:
+        return (
+            self.hits >= _STATIONARY_REGION_MIN_HITS
+            and self.last_seen - self.first_seen
+            >= _STATIONARY_REGION_MIN_EVIDENCE_SECONDS
+        )
 
 
 class AdaptiveEmaBackgroundStage:
@@ -1064,9 +1089,14 @@ class AdaptiveMotionScoringStage:
             score_state.stationary_regions = [
                 region
                 for region in score_state.stationary_regions
-                if context.captured_at - region.last_seen <= 120.0
+                if context.captured_at - region.last_seen
+                <= _STATIONARY_REGION_EXPIRY_SECONDS
             ]
-            stationary_regions = [replace(region) for region in score_state.stationary_regions]
+            stationary_regions = [
+                replace(region)
+                for region in score_state.stationary_regions
+                if region.confirmed
+            ]
             is_new_score = (
                 score_state.last_processed_at is None
                 or context.captured_at > score_state.last_processed_at
@@ -1164,7 +1194,7 @@ class AdaptiveMotionScoringStage:
             if is_new_score:
                 with score_state.lock:
                     for _candidate_score, candidate_track, _features, _accepted, candidate_reason in evaluations:
-                        if candidate_reason in {"stationary_foreground", "stationary_region", "persistent_scene_motion"}:
+                        if candidate_reason in _STATIONARY_REGION_EVIDENCE_REASONS:
                             self._remember_stationary_region(
                                 score_state.stationary_regions,
                                 candidate_track.box,
@@ -1231,6 +1261,10 @@ class AdaptiveMotionScoringStage:
             accepted = False
             score = min(score, threshold * 0.5)
             reason = "global_illumination_change"
+        with score_state.lock:
+            confirmed_region_count = sum(
+                1 for region in score_state.stationary_regions if region.confirmed
+            )
         scoring_features: dict[str, Any] = {
             **{key: round(value, 4) for key, value in features.items()},
             "stationary_object_tolerance": stationary_tolerance or "custom",
@@ -1239,7 +1273,7 @@ class AdaptiveMotionScoringStage:
             "stationary_containment_threshold": stationary_containment_ratio,
             "stationary_progress_threshold": stationary_progress_ratio,
             "stationary_max_displacement_threshold": stationary_max_displacement_ratio,
-            "stationary_region_count": len(score_state.stationary_regions),
+            "stationary_region_count": confirmed_region_count,
             "background_learning_rate": round(
                 max(context.debug.values.get("background_learning_rates", [0.0]), default=0.0),
                 5,
@@ -1403,8 +1437,11 @@ class AdaptiveMotionScoringStage:
                     old * 0.75 + new * 0.25
                     for old, new in zip(region.box, box)
                 )
-                region.last_seen = observed_at
-                region.hits += 1
+                # Count each evaluation once, so several tracks or a replayed
+                # window cannot confirm a region within a single cycle.
+                if observed_at > region.last_seen:
+                    region.last_seen = observed_at
+                    region.hits += 1
                 return
         regions.append(_StationaryRegion(
             box=box,
