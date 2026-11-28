@@ -779,7 +779,9 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
     function onKey(keyEvent) {
       if (keyEvent.defaultPrevented || tabletInspectorOpen) return;
       // Escape leaves the viewer for the gallery, the page's home.
-      if (keyEvent.key === "Escape" && !mobileView && !galleryExpanded && !selectedEvent) {
+      // Escape in a field, or one that closes something else, is not a request to leave.
+      const typing = keyEvent.target instanceof Element && keyEvent.target.closest("input, select, textarea, [contenteditable], [role='dialog'], [aria-modal='true']");
+      if (keyEvent.key === "Escape" && !typing && !mobileView && !galleryExpanded && !selectedEvent) {
         keyEvent.preventDefault();
         changeGallery(true);
         return;
@@ -992,7 +994,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
                   options={incidentObjectOptions.map((label) => ({ value: label, label: label.replaceAll("_", " "), icon: <IncidentObjectIcon label={label} size={15} /> }))} empty="No objects on this day." />
                 <section className="incident-filter-section incident-filter-confidence">
                   <h3 id="incident-confidence-heading">Confidence threshold</h3>
-                  <input type="range" min={0} max={95} step={5} value={confidenceApplies ? confidenceDraft : 0} disabled={!confidenceApplies} onChange={(event) => setConfidenceDraft(Number(event.target.value))} aria-labelledby="incident-confidence-heading" aria-valuetext={confidenceDraft > 0 ? `${confidenceDraft}% or higher` : "Any confidence"} style={{ "--fill": `${(confidenceApplies ? confidenceDraft : 0) / 95 * 100}%` }} />
+                  <input type="range" min={0} max={95} step={5} value={confidenceApplies ? confidenceDraft : 0} disabled={!confidenceApplies} onChange={(event) => setConfidenceDraft(Number(event.target.value))} aria-labelledby="incident-confidence-heading" aria-valuetext={confidenceApplies && confidenceDraft > 0 ? `${confidenceDraft}% or higher` : "Any confidence"} style={{ "--fill": `${(confidenceApplies ? confidenceDraft : 0) / 95 * 100}%` }} />
                   <div className="incident-filter-confidence-readout">
                     <span>{displayedIncidentTotal} {displayedIncidentTotal === 1 ? "result" : "results"}</span>
                     <output>{confidenceApplies && confidenceDraft > 0 ? `${confidenceDraft}%` : "Any"}</output>
@@ -1014,7 +1016,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
           <div className="incidents-desktop-workspace">
             <aside className={`incident-rail ${incidentDensity}`}>
               <div className="incident-rail-head">
-                <button ref={incidentGalleryToggleRef} type="button" className="incident-gallery-toggle" aria-expanded={galleryExpanded} aria-controls="incident-results" title={galleryExpanded ? "Open the incident viewer" : "Back to the gallery (Esc)"} onClick={() => changeGallery(!galleryExpanded)}>
+                <button ref={incidentGalleryToggleRef} type="button" className="incident-gallery-toggle" aria-controls="incident-results" title={galleryExpanded ? "Open the incident viewer" : "Back to the gallery (Esc)"} onClick={() => changeGallery(!galleryExpanded)}>
                   {galleryExpanded ? <PanelLeft size={15} /> : <LayoutGrid size={15} />}
                   {galleryExpanded ? "Open viewer" : "Gallery"}
                 </button>

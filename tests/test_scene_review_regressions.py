@@ -256,3 +256,21 @@ def test_complete_incident_reactivates_on_fresh_activity(tmp_path):
         [observation(now + 1, scene_track_key="reopen", temporal_observations=2)],
     )
     assert store.scene_incident(event_id=event["id"])["state"] == "active"
+
+
+def test_a_filter_value_may_contain_a_comma(tmp_path):
+    from survng.app.event_store.scenes import filter_values
+    assert filter_values('gate, door,,gate') == ['gate', 'door', 'gate, door,,gate']
+    assert filter_values('Driveway%2C left,Porch') == ['Driveway, left', 'Porch', 'Driveway%2C left,Porch']
+    assert filter_values('gate') == ['gate'] and filter_values('') == [] and filter_values(None) == []
+    store = EventStore(tmp_path)
+    add(store, 1000, [observation(1000, temporal_observations=2, zones=['Driveway, left'])])
+    add(store, 2000, [observation(2000, temporal_observations=2, zones=['Porch'])])
+    assert 'Driveway, left' in store.scene_incident_facets()['zones']
+    # Sent whole, as older callers do, and escaped beside another value, as the gallery does.
+    assert store.count_scene_incidents(zone='Driveway, left') == 1
+    assert store.count_scene_incidents(zone='Driveway%2C left') == 1
+    assert store.count_scene_incidents(zone='Driveway%2C left,Porch') == 2
+    summaries = [{'camera_id': 'gate', 'zones': ['Driveway, left']}, {'camera_id': 'gate', 'zones': ['Porch']}]
+    assert len(_filter_incident_summaries(summaries, 'all', zone='Driveway, left')) == 1
+    assert len(_filter_incident_summaries(summaries, 'all', zone='Driveway%2C left,Porch')) == 2

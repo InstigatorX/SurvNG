@@ -206,6 +206,11 @@ try {
   await pager.waitFor();
   await page.getByRole("button", { name: /^Filters/ }).click();
   await pane.waitFor();
+  // Escape while typing in a field does not leave the viewer.
+  await page.getByLabel("Describe incidents to find").focus();
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  assert.equal(await page.locator(".gallery-expanded").count(), 0, "Escape in the search field stays in the viewer");
   await page.getByRole("button", { name: /^Filters/ }).click();
   for (const pageNumber of [2, 3]) {
     await pager.getByRole("button", { name: "Next" }).click();

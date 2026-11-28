@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, Body
 from fastapi.responses import FileResponse
-from .event_store.scenes import SceneConflict
+from .event_store.scenes import SceneConflict, filter_values
 from .incident_utils import snapshot_media_type
 
 from .audit_ai import motion_audit_interpretation
@@ -84,13 +84,13 @@ def _filter_incident_summaries(
     zone: str = "",
 ) -> list[dict[str, Any]]:
     filtered = _filter_incidents_by_event_type(summaries, event_type)
-    cameras = {part.strip() for part in camera_id.split(",") if part.strip()}
+    cameras = set(filter_values(camera_id))
     if cameras:
         filtered = [item for item in filtered if cameras.intersection(item.get("camera_ids", [item.get("camera_id")]))]
-    wanted = {part.strip() for part in object_label.split(",") if part.strip()}
+    wanted = set(filter_values(object_label))
     if wanted:
         filtered = [item for item in filtered if wanted.intersection(item.get("labels", []))]
-    zones = {part.strip() for part in zone.split(",") if part.strip()}
+    zones = set(filter_values(zone))
     if zones:
         filtered = [item for item in filtered if zones.intersection(item.get("zones", []))]
     return filtered
