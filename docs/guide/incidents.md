@@ -36,8 +36,8 @@ and a review mark at its upper right.
   by everyone, and needs an administrator. An incident kept for later stays
   unchecked.
 - The gallery opens on **Unreviewed** incidents. A marked picture steps back and
-  leaves the list at the next refresh; switch the review filter to **Reviewed**
-  or **All** to see it again.
+  leaves the list at the next refresh; turn on **Reviewed** in the review filter
+  to see it again.
 - **Mark all shown** sets or clears the mark on every incident currently loaded
   in the gallery, after a confirmation. Scroll first to include more.
 - Select a picture to preview that incident in the same overlay the Live page
@@ -55,7 +55,7 @@ you scroll, and opens an incident's own page when you select a picture.
 Filters sit in a pane left of the gallery:
 
 - **Objects** or **Motion**
-- **Unreviewed**, **Reviewed** or **All**
+- **Unreviewed** and **Reviewed**. Turn both on to see every incident.
 - Search (describe what you are looking for). Matches follow the camera,
   object, zone, people, review and confidence filters.
 - Day

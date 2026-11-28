@@ -937,6 +937,13 @@
   bottom: 8px;
 }
 
+/* Over a picture the dot's hover state is a tint like the rest of the HUD, not a solid block. */
+.live-activity-item.with-hud .live-activity-trigger:hover,
+.live-activity-item.with-hud .live-activity-trigger:focus-visible {
+  border-radius: 8px;
+  background: rgba(3, 4, 5, .42);
+}
+
 .incident-hud-review {
   position: absolute;
   top: 4px;
@@ -1124,19 +1131,8 @@
   min-height: 44px;
 }
 
-/* Review filter: three choices in the same segmented control as Objects / Motion. */
-/* Its labels differ a lot in length, so each segment is as wide as its own
- * label needs and they share what is left. Three equal thirds cut "Unreviewed"
- * short. If a large text size or a wide font still does not fit, the last
- * segment moves to a second row; no label is ever clipped. */
-.incident-filter-pane .incident-filter-toggle.incident-filter-segments.three {
-  display: flex;
-  flex-wrap: wrap;
-}
-
-.incident-filter-pane .incident-filter-toggle.incident-filter-segments.three button {
-  flex: 1 1 auto;
-  min-width: max-content;
+/* Review filter: Unreviewed and Reviewed are separate toggles; both on shows everything. */
+.incident-filter-pane .incident-filter-toggle.incident-filter-segments[aria-label="Review filter"] button {
   padding-inline: 6px;
   font-size: var(--text-sm);
   white-space: nowrap;

@@ -1194,11 +1194,19 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       {dayComplete ? <button type="button" className="incident-earlier-day" onClick={openEarlierDay}>Earlier: {earlierDayLabel}</button> : null}
     </div>
   );
+  // Two toggles; both pressed shows everything. One always stays pressed:
+  // turning off the only pressed one switches to the other.
+  const toggleReviewFilter = (value) => setReviewFilter((current) => {
+    const other = value === "reviewed" ? "unreviewed" : "reviewed";
+    if (current === "all") return other;
+    return current === value ? other : "all";
+  });
   const reviewFilterControl = (
-    <div className="incident-filter-toggle compact incident-filter-segments three" role="group" aria-label="Review filter">
-      {[["unreviewed", "Unreviewed"], ["reviewed", "Reviewed"], ["all", "All"]].map(([value, label]) => (
-        <button key={value} type="button" className={reviewFilter === value ? "active" : ""} aria-pressed={reviewFilter === value} onClick={() => setReviewFilter(value)}>{label}</button>
-      ))}
+    <div className="incident-filter-toggle compact incident-filter-segments" role="group" aria-label="Review filter">
+      {[["unreviewed", "Unreviewed"], ["reviewed", "Reviewed"]].map(([value, label]) => {
+        const pressed = reviewFilter === value || reviewFilter === "all";
+        return <button key={value} type="button" className={pressed ? "active" : ""} aria-pressed={pressed} onClick={() => toggleReviewFilter(value)}>{label}</button>;
+      })}
     </div>
   );
   // Marking everything shown changes shared state for many incidents, so it asks first.

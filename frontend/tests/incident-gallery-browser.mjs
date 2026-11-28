@@ -173,17 +173,26 @@ try {
   assert.equal(bulkReviews[0].verdict, "reviewed");
   assert.equal(bulkReviews[0].incident_ids.length, INCIDENT_GALLERY_CHUNK);
   assert.equal(bulkReviews[0].incident_ids[0], "incident-0");
+  // Two toggles: pressing the second as well shows everything, with no review filter sent.
+  const pressed = () => reviewFilter.getByRole("button").evaluateAll((buttons) => buttons.map((button) => `${button.textContent}:${button.getAttribute("aria-pressed")}`));
+  assert.deepEqual(await pressed(), ["Unreviewed:true", "Reviewed:false"]);
   await reviewFilter.getByRole("button", { name: "Reviewed", exact: true }).click();
+  for (let waited = 0; reviewParams.at(-1) !== null && waited < 5000; waited += 100) await page.waitForTimeout(100);
+  assert.equal(reviewParams.at(-1), null, "both pressed sends no review filter");
+  assert.deepEqual(await pressed(), ["Unreviewed:true", "Reviewed:true"]);
+  await reviewFilter.getByRole("button", { name: "Unreviewed", exact: true }).click();
   for (let waited = 0; reviewParams.at(-1) !== "reviewed" && waited < 5000; waited += 100) await page.waitForTimeout(100);
   assert.equal(reviewParams.at(-1), "reviewed");
+  assert.deepEqual(await pressed(), ["Unreviewed:false", "Reviewed:true"]);
   await bulk.getByRole("button", { name: "Unreviewed", exact: true }).click();
   await bulk.getByRole("button", { name: "Confirm" }).click();
   await bulk.getByRole("button", { name: "Unreviewed", exact: true }).waitFor();
   assert.equal(bulkReviews.at(-1).verdict, null);
-  await reviewFilter.getByRole("button", { name: "All", exact: true }).click();
-  for (let waited = 0; reviewParams.at(-1) !== null && waited < 5000; waited += 100) await page.waitForTimeout(100);
-  assert.equal(reviewParams.at(-1), null, "All sends no review filter");
-  await reviewFilter.getByRole("button", { name: "Unreviewed", exact: true }).click();
+  // One toggle always stays pressed: turning off the only one switches to the other.
+  await reviewFilter.getByRole("button", { name: "Reviewed", exact: true }).click();
+  for (let waited = 0; reviewParams.at(-1) !== "unreviewed" && waited < 5000; waited += 100) await page.waitForTimeout(100);
+  assert.equal(reviewParams.at(-1), "unreviewed");
+  assert.deepEqual(await pressed(), ["Unreviewed:true", "Reviewed:false"]);
   await page.waitForTimeout(600);
   assert.equal(await page.getByLabel("Describe incidents to find").getAttribute("placeholder"), null);
   await page.mouse.move(5, 5);
@@ -388,7 +397,7 @@ try {
   await page.waitForFunction(() => document.querySelector(".incident-gallery-status").innerText.includes("All 2 matches"));
   assert.deepEqual(await tiles.evaluateAll((items) => items.map((item) => item.querySelector("time").textContent.length > 0)), [true, true]);
   assert.ok(searches.some((search) => search.limit === 100), "the list is asked which incidents pass the filters");
-  await reviewFilter.getByRole("button", { name: "All", exact: true }).click();
+  await reviewFilter.getByRole("button", { name: "Reviewed", exact: true }).click();
   await page.waitForFunction(() => document.querySelector(".incident-gallery-status").innerText.includes("All 3 matches"));
   assert.equal(await tiles.count(), 3);
   await page.getByRole("button", { name: "Reset semantic incident search" }).click();
