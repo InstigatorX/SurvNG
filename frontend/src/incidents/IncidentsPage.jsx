@@ -16,7 +16,7 @@ import {
 import { loadRelatedIncident } from "../relatedIncidents.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { incidentReplayTracking, incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
-import { incidentDetailQuery, incidentFocusStep, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryColumns, incidentGalleryWanted, INCIDENT_GALLERY_CHUNK, incidentFilterValues, toggleIncidentFilterValue, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
+import { incidentDetailQuery, incidentFocusStep, incidentReturnPath, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryColumns, incidentGalleryWanted, INCIDENT_GALLERY_CHUNK, incidentFilterValues, encodeIncidentFilterValue, toggleIncidentFilterValue, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
 import { APP_BASE_PATH, appUrl, incidentRecordingContext, fetch } from "../shared/api.js";
 import { INCIDENT_REFRESH_FALLBACK_MS } from "../shared/constants.js";
@@ -780,7 +780,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
       if (keyEvent.defaultPrevented || tabletInspectorOpen) return;
       // Escape leaves the viewer for the gallery, the page's home.
       // Escape in a field, or one that closes something else, is not a request to leave.
-      const typing = keyEvent.target instanceof Element && keyEvent.target.closest("input, select, textarea, [contenteditable], [role='dialog'], [aria-modal='true']");
+      const typing = keyEvent.target instanceof Element && keyEvent.target.closest("input:not([type='checkbox'], [type='radio'], [type='range'], [type='button']), select, textarea, [contenteditable], [role='dialog'], [aria-modal='true']");
       if (keyEvent.key === "Escape" && !typing && !mobileView && !galleryExpanded && !selectedEvent) {
         keyEvent.preventDefault();
         changeGallery(true);
@@ -1217,7 +1217,7 @@ export function IncidentsPage({ timeZone, canCorrectIncident = false, onRecordin
             </label>
             <label>
               <span>Zone</span>
-              <select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)} aria-label="Incident zone">
+              <select value={incidentFilterValues(incidentZoneFilter).length === 1 ? incidentFilterValues(incidentZoneFilter)[0] : "all"} onChange={(event) => setIncidentZoneFilter(event.target.value === "all" ? "all" : encodeIncidentFilterValue(event.target.value))} aria-label="Incident zone">
                 <option value="all">All zones</option>
                 {incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}
               </select>

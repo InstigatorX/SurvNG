@@ -69,13 +69,16 @@ JOIN_SUBJECT_EMBEDDINGS_SQL = "update appearance_embeddings set scene_object_id=
 def filter_values(value):
     """The values of a multi-value filter: comma separated, any of them matches.
 
-    A comma inside a value is written %2C. A value sent whole with a plain
-    comma in it (a zone named "Driveway, left" from an older caller) is kept
-    as a candidate too, so it still matches exactly.
+    Inside a value a comma is written %2C and a percent sign %25. A value sent
+    whole and unescaped by an older caller (a zone named "Driveway, left") is
+    kept as a candidate too, so it still matches exactly.
     """
     raw=str(value or "").strip()
-    parts=[part.strip().replace("%2C",",") for part in raw.split(",") if part.strip()]
-    if len(parts)>1:
+    pieces=[part.strip() for part in raw.split(",") if part.strip()]
+    parts=[part.replace("%2C",",").replace("%25","%") for part in pieces]
+    escaped="%2C" in raw or "%25" in raw
+    # Unescaped with a comma, or one value whose text only looks escaped.
+    if (len(parts)>1 and not escaped) or (len(parts)==1 and escaped):
         parts.append(raw)
     return list(dict.fromkeys(parts))
 
@@ -938,7 +941,12 @@ class EventStoreSceneMixin:
                     coverage["state"]="incomplete"
                     coverage["reason"]=job["last_error"] or "recorded analysis queued"
         elif candidates and not historical and not context_only:
-            coverage.update(analyzed_through=_iso(latest), reason="sampled detector frames; continuous coverage not established")
+            # Recorded analysis that is queued or running keeps its reason: a
+            # later detection does not mean the episode was only ever sampled.
+            waiting=conn.execute("select 1 from scene_analysis_jobs where episode_id=? and state!='complete'",(episode_id,)).fetchone()
+            coverage.update(analyzed_through=_iso(latest))
+            if not waiting:
+                coverage["reason"]="sampled detector frames; continuous coverage not established"
         coverage_changed = _json(coverage) != episode["coverage_json"]
         conn.execute("update scene_episodes set start_epoch=min(start_epoch,?),end_epoch=max(end_epoch,?), "
                      "last_activity_epoch=max(last_activity_epoch,?),coverage_json=? where id=?",

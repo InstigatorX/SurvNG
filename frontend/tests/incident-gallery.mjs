@@ -31,6 +31,9 @@ assert.equal(toggleIncidentFilterValue("car,person", "car"), "person");
 assert.equal(toggleIncidentFilterValue("Porch", "Driveway, left"), "Driveway%2C left,Porch");
 assert.deepEqual(incidentFilterValues("Driveway%2C left,Porch"), ["Driveway, left", "Porch"]);
 assert.equal(toggleIncidentFilterValue("Driveway%2C left,Porch", "Driveway, left"), "Porch");
+// A value that already contains the escape text survives the round trip.
+assert.equal(toggleIncidentFilterValue("all", "50%2C off"), "50%252C off");
+assert.deepEqual(incidentFilterValues("50%252C off"), ["50%2C off"]);
 assert.equal(toggleIncidentFilterValue("person", "person"), "all", "nothing checked means every object");
 
 assert.equal(toggleIncidentFilterValue("all", 7), "7", "person ids arrive as numbers");
